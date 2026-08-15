@@ -1,7 +1,6 @@
 # SQL schema methodology
 
-Apply these standards to future schema decisions unless a later requirement
-explicitly changes them.
+Apply these standards to future schema decisions unless explicitly changed.
 
 - Table names are always plural.
 - Every table starts with `id INTEGER PRIMARY KEY AUTOINCREMENT`.
@@ -20,6 +19,8 @@ explicitly changes them.
   fields match the authoritative lookup key.
 - Put intrinsic one-to-one identity on the owning root row. Add another table only
   when cardinality, lifecycle, reuse, or ownership is genuinely separate.
+- Preserve required canonical identity when adding an optional user-defined identity;
+  represent the latter with a separate nullable relationship rather than replacement.
 - Do not introduce redundant association tables or compatibility structure merely to
   avoid changing an earlier schema, especially in PROTO.
 - Lookup tables use their complete natural key: `SELECT id` first and `INSERT` only
@@ -43,8 +44,7 @@ explicitly changes them.
   and preserve enough bits for the domain's collision requirements.
 - Normalisation, derivation, insertion, and lookup share one authoritative pipeline.
   A matching derived integer identity is occupied; do not fall back to a text lookup.
-- Generated identities use bounded attempts. Exhaust the preferred representation,
-  move to the next approved representation, and fail explicitly rather than loop
-  forever.
+- Generated identities use bounded attempts, move to the next approved representation
+  when the preferred form is exhausted, and then fail explicitly.
 - In PROTO, a schema change resets the disposable database to empty. Without a schema
   change, existing contents are preserved.

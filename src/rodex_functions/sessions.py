@@ -39,6 +39,9 @@ RODEX_TMUX_SESSIONS_SESSION_UNIQUE_INDEX: Final = (
 )
 RODEX_TMUX_SESSIONS_ENDPOINT_UNIQUE_INDEX: Final = "rodex_tmux_sessions_endpoint_unique"
 RODEX_SESSIONS_COOL_NAMES_UNIQUE_INDEX: Final = "rodex_sessions_cool_names_id_unique"
+RODEX_SESSIONS_USER_DEFINED_COOL_NAMES_UNIQUE_INDEX: Final = (
+    "rodex_sessions_user_defined_cool_names_id_unique"
+)
 MAX_UUID_GENERATION_ATTEMPTS: Final = 8
 
 _HALF_BITS: Final = 64
@@ -55,7 +58,9 @@ CREATE TABLE IF NOT EXISTS {RODEX_SESSIONS_TABLE} (
     codex_session_uuid_int_1 BIGINT NOT NULL,
     codex_session_uuid_int_2 BIGINT NOT NULL,
     cool_names_id INTEGER NOT NULL,
-    FOREIGN KEY (cool_names_id) REFERENCES cool_names (id)
+    user_defined_cool_names_id INTEGER DEFAULT NULL,
+    FOREIGN KEY (cool_names_id) REFERENCES cool_names (id),
+    FOREIGN KEY (user_defined_cool_names_id) REFERENCES cool_names (id)
 )
 """
 _CREATE_UNIQUE_INDEX = f"""
@@ -70,6 +75,10 @@ ON {RODEX_SESSIONS_TABLE}
 _CREATE_SESSIONS_COOL_NAMES_UNIQUE_INDEX = f"""
 CREATE UNIQUE INDEX IF NOT EXISTS {RODEX_SESSIONS_COOL_NAMES_UNIQUE_INDEX}
 ON {RODEX_SESSIONS_TABLE} (cool_names_id)
+"""
+_CREATE_SESSIONS_USER_DEFINED_COOL_NAMES_UNIQUE_INDEX = f"""
+CREATE UNIQUE INDEX IF NOT EXISTS {RODEX_SESSIONS_USER_DEFINED_COOL_NAMES_UNIQUE_INDEX}
+ON {RODEX_SESSIONS_TABLE} (user_defined_cool_names_id)
 """
 _CREATE_USERS_TABLE = f"""
 CREATE TABLE IF NOT EXISTS {RODEX_SESSIONS_USERS_TABLE} (
@@ -201,6 +210,7 @@ def initialise_rodex_database(database_path: str | os.PathLike[str] | None = Non
         connection.execute(_CREATE_UNIQUE_INDEX)
         connection.execute(_CREATE_CODEX_UUID_UNIQUE_INDEX)
         connection.execute(_CREATE_SESSIONS_COOL_NAMES_UNIQUE_INDEX)
+        connection.execute(_CREATE_SESSIONS_USER_DEFINED_COOL_NAMES_UNIQUE_INDEX)
         _verify_sessions_unique_indexes(connection)
         connection.execute(_CREATE_USERS_TABLE)
         _verify_sessions_users_table(connection)
@@ -572,6 +582,7 @@ def _verify_sessions_table(connection: sqlite3.Connection) -> None:
         ("codex_session_uuid_int_1", "BIGINT", 1, 0),
         ("codex_session_uuid_int_2", "BIGINT", 1, 0),
         ("cool_names_id", "INTEGER", 1, 0),
+        ("user_defined_cool_names_id", "INTEGER", 0, 0),
     ]
     if observed != expected:
         raise RodexSessionError(f"{RODEX_SESSIONS_TABLE} schema mismatch: {observed!r}")
@@ -582,11 +593,22 @@ def _verify_sessions_table(connection: sqlite3.Connection) -> None:
     definition = " ".join(str(definition_row[0]).upper().split())
     if "ID INTEGER PRIMARY KEY AUTOINCREMENT" not in definition:
         raise RodexSessionError(f"{RODEX_SESSIONS_TABLE} id must use AUTOINCREMENT")
-    _verify_single_foreign_key(
-        connection,
-        RODEX_SESSIONS_TABLE,
+    if columns[-1][4] != "NULL":
+        raise RodexSessionError(
+            f"{RODEX_SESSIONS_TABLE}.user_defined_cool_names_id must default to NULL"
+        )
+    foreign_keys = connection.execute(
+        f"PRAGMA foreign_key_list({RODEX_SESSIONS_TABLE})"
+    ).fetchall()
+    observed_foreign_keys = {(row[2], row[3], row[4]) for row in foreign_keys}
+    expected_foreign_keys = {
         ("cool_names", "cool_names_id", "id"),
-    )
+        ("cool_names", "user_defined_cool_names_id", "id"),
+    }
+    if observed_foreign_keys != expected_foreign_keys:
+        raise RodexSessionError(
+            f"{RODEX_SESSIONS_TABLE} foreign keys mismatch: {observed_foreign_keys!r}"
+        )
 
 
 def _verify_sessions_unique_indexes(connection: sqlite3.Connection) -> None:
@@ -607,6 +629,12 @@ def _verify_sessions_unique_indexes(connection: sqlite3.Connection) -> None:
         RODEX_SESSIONS_TABLE,
         RODEX_SESSIONS_COOL_NAMES_UNIQUE_INDEX,
         ["cool_names_id"],
+    )
+    _verify_unique_index(
+        connection,
+        RODEX_SESSIONS_TABLE,
+        RODEX_SESSIONS_USER_DEFINED_COOL_NAMES_UNIQUE_INDEX,
+        ["user_defined_cool_names_id"],
     )
 
 

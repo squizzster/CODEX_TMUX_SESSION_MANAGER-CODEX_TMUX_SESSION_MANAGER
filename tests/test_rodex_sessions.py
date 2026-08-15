@@ -51,12 +51,14 @@ def test_rodex_sessions_table_has_the_complete_root_identity(tmp_path: Path) -> 
         ("codex_session_uuid_int_1", "BIGINT", 1, 0),
         ("codex_session_uuid_int_2", "BIGINT", 1, 0),
         ("cool_names_id", "INTEGER", 1, 0),
+        ("user_defined_cool_names_id", "INTEGER", 0, 0),
     ]
-    assert fetch_all(database, "PRAGMA foreign_key_list(rodex_sessions)")[0][2:5] == (
-        "cool_names",
-        "cool_names_id",
-        "id",
-    )
+    foreign_keys = fetch_all(database, "PRAGMA foreign_key_list(rodex_sessions)")
+    assert {(row[2], row[3], row[4]) for row in foreign_keys} == {
+        ("cool_names", "cool_names_id", "id"),
+        ("cool_names", "user_defined_cool_names_id", "id"),
+    }
+    assert columns[-1][4] == "NULL"
 
 
 def test_id_uses_sqlite_autoincrement(tmp_path: Path) -> None:
@@ -81,6 +83,7 @@ def test_uuid_halves_have_a_named_unique_index(tmp_path: Path) -> None:
         ("rodex_sessions_uuid_ints_unique", 1),
         ("rodex_sessions_codex_session_uuid_ints_unique", 1),
         ("rodex_sessions_cool_names_id_unique", 1),
+        ("rodex_sessions_user_defined_cool_names_id_unique", 1),
     }
     assert [row[2] for row in columns] == ["uuid_int_1", "uuid_int_2"]
 
@@ -112,7 +115,9 @@ def test_initialisation_rejects_an_id_without_autoincrement(tmp_path: Path) -> N
             "uuid_int_2 BIGINT NOT NULL, "
             "codex_session_uuid_int_1 BIGINT NOT NULL, "
             "codex_session_uuid_int_2 BIGINT NOT NULL, cool_names_id INTEGER NOT NULL, "
-            "FOREIGN KEY (cool_names_id) REFERENCES cool_names (id))"
+            "user_defined_cool_names_id INTEGER DEFAULT NULL, "
+            "FOREIGN KEY (cool_names_id) REFERENCES cool_names (id), "
+            "FOREIGN KEY (user_defined_cool_names_id) REFERENCES cool_names (id))"
         )
 
     with pytest.raises(RodexSessionError, match="AUTOINCREMENT"):
@@ -128,7 +133,9 @@ def test_initialisation_repairs_a_missing_unique_index(tmp_path: Path) -> None:
             "uuid_int_1 BIGINT NOT NULL, uuid_int_2 BIGINT NOT NULL, "
             "codex_session_uuid_int_1 BIGINT NOT NULL, "
             "codex_session_uuid_int_2 BIGINT NOT NULL, cool_names_id INTEGER NOT NULL, "
-            "FOREIGN KEY (cool_names_id) REFERENCES cool_names (id))"
+            "user_defined_cool_names_id INTEGER DEFAULT NULL, "
+            "FOREIGN KEY (cool_names_id) REFERENCES cool_names (id), "
+            "FOREIGN KEY (user_defined_cool_names_id) REFERENCES cool_names (id))"
         )
 
     initialise_rodex_database(database)

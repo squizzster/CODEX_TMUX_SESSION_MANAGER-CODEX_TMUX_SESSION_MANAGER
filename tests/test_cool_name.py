@@ -151,7 +151,36 @@ def test_session_creation_allocates_and_owns_one_cool_name(
 
     assert session.cool_name == "precise-schema"
     assert session.cool_names_id == 1
-    assert fetch_all(database, "SELECT cool_names_id FROM rodex_sessions") == [(1,)]
+    assert fetch_all(
+        database,
+        "SELECT cool_names_id, user_defined_cool_names_id FROM rodex_sessions",
+    ) == [(1, None)]
     assert fetch_all(database, "SELECT id, cool_name FROM cool_names") == [
         (1, "precise-schema")
     ]
+
+
+def test_user_defined_cool_name_field_is_nullable_unique_and_integer_linked(
+    tmp_path: Path,
+) -> None:
+    database = initialise_rodex_database(tmp_path / "rodex.sqlite3")
+
+    columns = fetch_all(database, "PRAGMA table_info(rodex_sessions)")
+    indexes = fetch_all(database, "PRAGMA index_list(rodex_sessions)")
+    index_columns = fetch_all(
+        database,
+        "PRAGMA index_info(rodex_sessions_user_defined_cool_names_id_unique)",
+    )
+
+    user_defined_column = next(
+        row for row in columns if row[1] == "user_defined_cool_names_id"
+    )
+    assert (user_defined_column[2], user_defined_column[3], user_defined_column[4]) == (
+        "INTEGER",
+        0,
+        "NULL",
+    )
+    assert ("rodex_sessions_user_defined_cool_names_id_unique", 1) in {
+        (row[1], row[2]) for row in indexes
+    }
+    assert [row[2] for row in index_columns] == ["user_defined_cool_names_id"]

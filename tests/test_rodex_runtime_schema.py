@@ -38,6 +38,7 @@ def test_codex_identity_is_stored_directly_on_the_root_session(
         ("codex_session_uuid_int_1", "BIGINT", 1, 0),
         ("codex_session_uuid_int_2", "BIGINT", 1, 0),
         ("cool_names_id", "INTEGER", 1, 0),
+        ("user_defined_cool_names_id", "INTEGER", 0, 0),
     ]
     assert [
         row[2]

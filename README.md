@@ -38,7 +38,9 @@ CREATE TABLE rodex_sessions (
     codex_session_uuid_int_1 BIGINT NOT NULL,
     codex_session_uuid_int_2 BIGINT NOT NULL,
     cool_names_id INTEGER NOT NULL,
-    FOREIGN KEY (cool_names_id) REFERENCES cool_names (id)
+    user_defined_cool_names_id INTEGER DEFAULT NULL,
+    FOREIGN KEY (cool_names_id) REFERENCES cool_names (id),
+    FOREIGN KEY (user_defined_cool_names_id) REFERENCES cool_names (id)
 );
 CREATE UNIQUE INDEX rodex_sessions_uuid_ints_unique
     ON rodex_sessions (uuid_int_1, uuid_int_2);
@@ -46,6 +48,8 @@ CREATE UNIQUE INDEX rodex_sessions_codex_session_uuid_ints_unique
     ON rodex_sessions (codex_session_uuid_int_1, codex_session_uuid_int_2);
 CREATE UNIQUE INDEX rodex_sessions_cool_names_id_unique
     ON rodex_sessions (cool_names_id);
+CREATE UNIQUE INDEX rodex_sessions_user_defined_cool_names_id_unique
+    ON rodex_sessions (user_defined_cool_names_id);
 ```
 
 POSIX users are normalized through a lookup table:
@@ -151,4 +155,6 @@ unindexed. Use `get_unique_new_cool_name` to allocate and
 
 Every Rodex creation allocates a cool name in the same transaction and stores its
 integer `cool_names_id` directly on `rodex_sessions`. The foreign key and unique index
-enforce one valid cool name per session and prevent reuse across sessions.
+enforce one valid permanent name per session and prevent reuse across sessions. The
+nullable `user_defined_cool_names_id` reserves a separate, uniquely indexed cool-name
+identity for a future user-defined descriptive name without replacing the original.

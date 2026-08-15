@@ -22,6 +22,16 @@ RODEX_SESSIONS_LOG_TABLE: Final = "rodex_sessions_log"
 RODEX_SESSIONS_LOG_SESSION_UNIQUE_INDEX: Final = (
     "rodex_sessions_log_rodex_sessions_id_unique"
 )
+RODEX_CODEX_SESSIONS_TABLE: Final = "rodex_codex_sessions"
+RODEX_CODEX_SESSIONS_SESSION_UNIQUE_INDEX: Final = (
+    "rodex_codex_sessions_rodex_sessions_id_unique"
+)
+RODEX_CODEX_SESSIONS_UUID_UNIQUE_INDEX: Final = "rodex_codex_sessions_uuid_ints_unique"
+RODEX_TMUX_SESSIONS_TABLE: Final = "rodex_tmux_sessions"
+RODEX_TMUX_SESSIONS_SESSION_UNIQUE_INDEX: Final = (
+    "rodex_tmux_sessions_rodex_sessions_id_unique"
+)
+RODEX_TMUX_SESSIONS_ENDPOINT_UNIQUE_INDEX: Final = "rodex_tmux_sessions_endpoint_unique"
 MAX_UUID_GENERATION_ATTEMPTS: Final = 8
 
 _HALF_BITS: Final = 64
@@ -67,6 +77,41 @@ CREATE TABLE IF NOT EXISTS {RODEX_SESSIONS_LOG_TABLE} (
 _CREATE_LOG_SESSION_UNIQUE_INDEX = f"""
 CREATE UNIQUE INDEX IF NOT EXISTS {RODEX_SESSIONS_LOG_SESSION_UNIQUE_INDEX}
 ON {RODEX_SESSIONS_LOG_TABLE} (rodex_sessions_id)
+"""
+_CREATE_CODEX_SESSIONS_TABLE = f"""
+CREATE TABLE IF NOT EXISTS {RODEX_CODEX_SESSIONS_TABLE} (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    rodex_sessions_id INTEGER NOT NULL,
+    codex_session_uuid_int_1 BIGINT NOT NULL,
+    codex_session_uuid_int_2 BIGINT NOT NULL,
+    FOREIGN KEY (rodex_sessions_id) REFERENCES {RODEX_SESSIONS_TABLE} (id)
+)
+"""
+_CREATE_CODEX_SESSIONS_SESSION_UNIQUE_INDEX = f"""
+CREATE UNIQUE INDEX IF NOT EXISTS {RODEX_CODEX_SESSIONS_SESSION_UNIQUE_INDEX}
+ON {RODEX_CODEX_SESSIONS_TABLE} (rodex_sessions_id)
+"""
+_CREATE_CODEX_SESSIONS_UUID_UNIQUE_INDEX = f"""
+CREATE UNIQUE INDEX IF NOT EXISTS {RODEX_CODEX_SESSIONS_UUID_UNIQUE_INDEX}
+ON {RODEX_CODEX_SESSIONS_TABLE}
+    (codex_session_uuid_int_1, codex_session_uuid_int_2)
+"""
+_CREATE_TMUX_SESSIONS_TABLE = f"""
+CREATE TABLE IF NOT EXISTS {RODEX_TMUX_SESSIONS_TABLE} (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    rodex_sessions_id INTEGER NOT NULL,
+    tmux_server_socket_path TEXT NOT NULL,
+    tmux_session_name TEXT NOT NULL,
+    FOREIGN KEY (rodex_sessions_id) REFERENCES {RODEX_SESSIONS_TABLE} (id)
+)
+"""
+_CREATE_TMUX_SESSIONS_SESSION_UNIQUE_INDEX = f"""
+CREATE UNIQUE INDEX IF NOT EXISTS {RODEX_TMUX_SESSIONS_SESSION_UNIQUE_INDEX}
+ON {RODEX_TMUX_SESSIONS_TABLE} (rodex_sessions_id)
+"""
+_CREATE_TMUX_SESSIONS_ENDPOINT_UNIQUE_INDEX = f"""
+CREATE UNIQUE INDEX IF NOT EXISTS {RODEX_TMUX_SESSIONS_ENDPOINT_UNIQUE_INDEX}
+ON {RODEX_TMUX_SESSIONS_TABLE} (tmux_server_socket_path, tmux_session_name)
 """
 
 
@@ -126,6 +171,25 @@ class RodexSessionLog:
     last_accessed_at_utc: str
 
 
+@dataclass(frozen=True, slots=True)
+class RodexCodexSession:
+    """The Codex thread linked one-to-one with a Rodex session."""
+
+    id: int
+    rodex_sessions_id: int
+    codex_session_uuid: uuid.UUID
+
+
+@dataclass(frozen=True, slots=True)
+class RodexTmuxSession:
+    """The tmux endpoint linked one-to-one with a Rodex session."""
+
+    id: int
+    rodex_sessions_id: int
+    tmux_server_socket_path: str
+    tmux_session_name: str
+
+
 def default_rodex_database_path() -> Path:
     """Resolve the runtime database path for the current Rodex workspace."""
     configured = os.environ.get("RODEX_DATABASE_PATH")
@@ -150,6 +214,16 @@ def initialise_rodex_database(database_path: str | os.PathLike[str] | None = Non
         _verify_sessions_log_table(connection)
         connection.execute(_CREATE_LOG_SESSION_UNIQUE_INDEX)
         _verify_sessions_log_unique_index(connection)
+        connection.execute(_CREATE_CODEX_SESSIONS_TABLE)
+        _verify_codex_sessions_table(connection)
+        connection.execute(_CREATE_CODEX_SESSIONS_SESSION_UNIQUE_INDEX)
+        connection.execute(_CREATE_CODEX_SESSIONS_UUID_UNIQUE_INDEX)
+        _verify_codex_sessions_unique_indexes(connection)
+        connection.execute(_CREATE_TMUX_SESSIONS_TABLE)
+        _verify_tmux_sessions_table(connection)
+        connection.execute(_CREATE_TMUX_SESSIONS_SESSION_UNIQUE_INDEX)
+        connection.execute(_CREATE_TMUX_SESSIONS_ENDPOINT_UNIQUE_INDEX)
+        _verify_tmux_sessions_unique_indexes(connection)
     return path
 
 
@@ -157,13 +231,19 @@ def create_a_rodex_session(
     database_path: str | os.PathLike[str] | None = None,
     *,
     user_identity: RodexSessionsUserIdentity | None = None,
+    codex_session_uuid: uuid.UUID | str | None = None,
+    tmux_server_socket_path: str | os.PathLike[str] | None = None,
+    tmux_session_name: str | None = None,
 ) -> RodexSession:
-    """Atomically persist a secure session, its user lookup, and its log row."""
+    """Atomically persist a session and any live Codex/tmux linkage."""
     path = initialise_rodex_database(database_path)
     identity = (
         current_rodex_sessions_user_identity()
         if user_identity is None
         else _validate_user_identity(user_identity)
+    )
+    runtime_link = _normalise_runtime_link(
+        codex_session_uuid, tmux_server_socket_path, tmux_session_name
     )
     created_at_utc = _utc_now_timestamp()
     with open_rodex_transaction(path) as connection:
@@ -195,6 +275,23 @@ def create_a_rodex_session(
                     created_at_utc,
                 ),
             )
+            if runtime_link is not None:
+                linked_codex_uuid, socket_path, session_name = runtime_link
+                codex_uuid_int_1, codex_uuid_int_2 = split_a_rodex_uuid_into_signed_bigints(
+                    linked_codex_uuid
+                )
+                connection.execute(
+                    f"INSERT INTO {RODEX_CODEX_SESSIONS_TABLE} "
+                    "(rodex_sessions_id, codex_session_uuid_int_1, "
+                    "codex_session_uuid_int_2) VALUES (?, ?, ?)",
+                    (session.id, codex_uuid_int_1, codex_uuid_int_2),
+                )
+                connection.execute(
+                    f"INSERT INTO {RODEX_TMUX_SESSIONS_TABLE} "
+                    "(rodex_sessions_id, tmux_server_socket_path, tmux_session_name) "
+                    "VALUES (?, ?, ?)",
+                    (session.id, socket_path, session_name),
+                )
             return session
     raise RodexSessionUUIDCollisionError(
         "could not allocate a unique Rodex UUID after "
@@ -335,6 +432,70 @@ def record_a_rodex_session_access(
     return _session_log_from_row(row)
 
 
+def lookup_rodex_codex_session(
+    session_id: int,
+    database_path: str | os.PathLike[str] | None = None,
+) -> RodexCodexSession | None:
+    """Return the Codex thread linked to one Rodex session."""
+    _validate_session_id(session_id)
+    path = initialise_rodex_database(database_path)
+    with open_rodex_transaction(path) as connection:
+        row = connection.execute(
+            f"SELECT id, rodex_sessions_id, codex_session_uuid_int_1, "
+            f"codex_session_uuid_int_2 FROM {RODEX_CODEX_SESSIONS_TABLE} "
+            "WHERE rodex_sessions_id = ?",
+            (session_id,),
+        ).fetchone()
+    if row is None:
+        return None
+    return RodexCodexSession(
+        id=int(row[0]),
+        rodex_sessions_id=int(row[1]),
+        codex_session_uuid=join_signed_bigints_into_a_rodex_uuid(int(row[2]), int(row[3])),
+    )
+
+
+def lookup_rodex_tmux_session(
+    session_id: int,
+    database_path: str | os.PathLike[str] | None = None,
+) -> RodexTmuxSession | None:
+    """Return the tmux endpoint linked to one Rodex session."""
+    _validate_session_id(session_id)
+    path = initialise_rodex_database(database_path)
+    with open_rodex_transaction(path) as connection:
+        row = connection.execute(
+            f"SELECT id, rodex_sessions_id, tmux_server_socket_path, "
+            f"tmux_session_name FROM {RODEX_TMUX_SESSIONS_TABLE} "
+            "WHERE rodex_sessions_id = ?",
+            (session_id,),
+        ).fetchone()
+    if row is None:
+        return None
+    return RodexTmuxSession(
+        id=int(row[0]),
+        rodex_sessions_id=int(row[1]),
+        tmux_server_socket_path=str(row[2]),
+        tmux_session_name=str(row[3]),
+    )
+
+
+def lookup_rodex_session_id_from_a_codex_uuid(
+    codex_session_uuid: uuid.UUID | str,
+    database_path: str | os.PathLike[str] | None = None,
+) -> int | None:
+    """Return the Rodex id linked to a Codex thread UUID."""
+    uuid_int_1, uuid_int_2 = split_a_rodex_uuid_into_signed_bigints(codex_session_uuid)
+    path = initialise_rodex_database(database_path)
+    with open_rodex_transaction(path) as connection:
+        row = connection.execute(
+            f"SELECT rodex_sessions_id FROM {RODEX_CODEX_SESSIONS_TABLE} "
+            "WHERE codex_session_uuid_int_1 = ? "
+            "AND codex_session_uuid_int_2 = ?",
+            (uuid_int_1, uuid_int_2),
+        ).fetchone()
+    return None if row is None else int(row[0])
+
+
 def split_a_rodex_uuid_into_signed_bigints(
     rodex_uuid: uuid.UUID | str,
 ) -> tuple[int, int]:
@@ -360,6 +521,28 @@ def _normalise_database_path(
         if database_path is None
         else Path(database_path).expanduser().resolve()
     )
+
+
+def _normalise_runtime_link(
+    codex_session_uuid: uuid.UUID | str | None,
+    tmux_server_socket_path: str | os.PathLike[str] | None,
+    tmux_session_name: str | None,
+) -> tuple[uuid.UUID, str, str] | None:
+    values = (codex_session_uuid, tmux_server_socket_path, tmux_session_name)
+    if all(value is None for value in values):
+        return None
+    if any(value is None for value in values):
+        raise ValueError(
+            "codex_session_uuid, tmux_server_socket_path, and tmux_session_name "
+            "must be provided together"
+        )
+    parsed_uuid = _parse_rodex_uuid(codex_session_uuid)
+    socket_path = os.fspath(tmux_server_socket_path)
+    if not socket_path.strip():
+        raise ValueError("tmux_server_socket_path must be non-empty")
+    if not isinstance(tmux_session_name, str) or not tmux_session_name.strip():
+        raise ValueError("tmux_session_name must be a non-empty string")
+    return parsed_uuid, socket_path, tmux_session_name.strip()
 
 
 def _verify_sealed_table(connection: sqlite3.Connection) -> None:
@@ -498,6 +681,118 @@ def _verify_sessions_log_unique_index(connection: sqlite3.Connection) -> None:
             "Rodex sessions log unique index is missing: "
             f"{RODEX_SESSIONS_LOG_SESSION_UNIQUE_INDEX}"
         )
+
+
+def _verify_codex_sessions_table(connection: sqlite3.Connection) -> None:
+    _verify_table_columns(
+        connection,
+        RODEX_CODEX_SESSIONS_TABLE,
+        [
+            ("id", "INTEGER", 0, 1),
+            ("rodex_sessions_id", "INTEGER", 1, 0),
+            ("codex_session_uuid_int_1", "BIGINT", 1, 0),
+            ("codex_session_uuid_int_2", "BIGINT", 1, 0),
+        ],
+    )
+    _verify_single_foreign_key(
+        connection,
+        RODEX_CODEX_SESSIONS_TABLE,
+        (RODEX_SESSIONS_TABLE, "rodex_sessions_id", "id"),
+    )
+
+
+def _verify_codex_sessions_unique_indexes(connection: sqlite3.Connection) -> None:
+    _verify_unique_index(
+        connection,
+        RODEX_CODEX_SESSIONS_TABLE,
+        RODEX_CODEX_SESSIONS_SESSION_UNIQUE_INDEX,
+        ["rodex_sessions_id"],
+    )
+    _verify_unique_index(
+        connection,
+        RODEX_CODEX_SESSIONS_TABLE,
+        RODEX_CODEX_SESSIONS_UUID_UNIQUE_INDEX,
+        ["codex_session_uuid_int_1", "codex_session_uuid_int_2"],
+    )
+
+
+def _verify_tmux_sessions_table(connection: sqlite3.Connection) -> None:
+    _verify_table_columns(
+        connection,
+        RODEX_TMUX_SESSIONS_TABLE,
+        [
+            ("id", "INTEGER", 0, 1),
+            ("rodex_sessions_id", "INTEGER", 1, 0),
+            ("tmux_server_socket_path", "TEXT", 1, 0),
+            ("tmux_session_name", "TEXT", 1, 0),
+        ],
+    )
+    _verify_single_foreign_key(
+        connection,
+        RODEX_TMUX_SESSIONS_TABLE,
+        (RODEX_SESSIONS_TABLE, "rodex_sessions_id", "id"),
+    )
+
+
+def _verify_tmux_sessions_unique_indexes(connection: sqlite3.Connection) -> None:
+    _verify_unique_index(
+        connection,
+        RODEX_TMUX_SESSIONS_TABLE,
+        RODEX_TMUX_SESSIONS_SESSION_UNIQUE_INDEX,
+        ["rodex_sessions_id"],
+    )
+    _verify_unique_index(
+        connection,
+        RODEX_TMUX_SESSIONS_TABLE,
+        RODEX_TMUX_SESSIONS_ENDPOINT_UNIQUE_INDEX,
+        ["tmux_server_socket_path", "tmux_session_name"],
+    )
+
+
+def _verify_table_columns(
+    connection: sqlite3.Connection,
+    table_name: str,
+    expected: list[tuple[str, str, int, int]],
+) -> None:
+    columns = connection.execute(f"PRAGMA table_info({table_name})").fetchall()
+    observed = [(row[1], row[2].upper(), row[3], row[5]) for row in columns]
+    if observed != expected:
+        raise RodexSessionError(f"{table_name} schema mismatch: {observed!r}")
+    definition_row = connection.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
+        (table_name,),
+    ).fetchone()
+    definition = " ".join(str(definition_row[0]).upper().split())
+    if "ID INTEGER PRIMARY KEY AUTOINCREMENT" not in definition:
+        raise RodexSessionError(f"{table_name} id must use AUTOINCREMENT")
+
+
+def _verify_single_foreign_key(
+    connection: sqlite3.Connection,
+    table_name: str,
+    expected: tuple[str, str, str],
+) -> None:
+    foreign_keys = connection.execute(f"PRAGMA foreign_key_list({table_name})").fetchall()
+    observed = {(row[2], row[3], row[4]) for row in foreign_keys}
+    if observed != {expected}:
+        raise RodexSessionError(f"{table_name} foreign keys mismatch: {observed!r}")
+
+
+def _verify_unique_index(
+    connection: sqlite3.Connection,
+    table_name: str,
+    index_name: str,
+    expected_columns: list[str],
+) -> None:
+    indexes = connection.execute(f"PRAGMA index_list({table_name})").fetchall()
+    matching = [row for row in indexes if row[1] == index_name]
+    columns = connection.execute(f"PRAGMA index_info({index_name})").fetchall()
+    if (
+        len(matching) != 1
+        or matching[0][2] != 1
+        or [row[2] for row in columns] != expected_columns
+    ):
+        raise RodexSessionError(f"unique index is missing: {index_name}")
 
 
 def _lookup_or_insert_rodex_sessions_user_id(

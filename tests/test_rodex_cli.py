@@ -1,101 +1,126 @@
 from __future__ import annotations
 
 import os
-import sqlite3
-import subprocess
+import uuid
 from pathlib import Path
 
 import pytest
 
 from rodex.cli import RodexLaunchError, run
-from rodex_functions import lookup_id_from_a_rodex_uuid
+from rodex.runtime import LiveRodexRuntime
+from rodex_functions import (
+    lookup_rodex_codex_session,
+    lookup_rodex_tmux_session,
+)
+
+CODEX_UUID = uuid.UUID("01a00654-f2bc-7a30-834a-a5f886a65f82")
 
 
-def test_run_allocates_session_and_forwards_arguments_and_identity(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+class StubLauncher:
+    def __init__(self, tmp_path: Path) -> None:
+        self.runtime = LiveRodexRuntime(
+            tmux_server_socket_path=tmp_path / "tmux.sock",
+            tmux_session_name="rodex-example",
+            app_server_socket_path=tmp_path / "app.sock",
+            app_server_log_path=tmp_path / "app.log",
+        )
+        self.started: list[tuple[Path, list[str]]] = []
+        self.attached: list[LiveRodexRuntime] = []
+        self.stopped: list[tuple[LiveRodexRuntime, bool]] = []
+
+    def start(
+        self, workspace: Path, arguments: list[str]
+    ) -> tuple[LiveRodexRuntime, uuid.UUID]:
+        self.started.append((workspace, arguments))
+        return self.runtime, CODEX_UUID
+
+    def attach(self, runtime: LiveRodexRuntime) -> None:
+        self.attached.append(runtime)
+
+    def stop(self, runtime: LiveRodexRuntime, *, check: bool = True) -> None:
+        self.stopped.append((runtime, check))
+
+
+def available_prerequisite(command: str) -> str:
+    return f"/usr/bin/{command}"
+
+
+def test_run_links_real_codex_and_tmux_identities_before_attach(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     database = tmp_path / "rodex.sqlite3"
-    monkeypatch.setattr("rodex.cli.shutil.which", lambda command: "/usr/bin/codex")
-    observed: dict[str, object] = {}
+    launcher = StubLauncher(tmp_path)
+    monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
 
-    def executor(executable: str, arguments: list[str], environment: object) -> None:
-        observed.update(executable=executable, arguments=arguments, environment=environment)
+    assert (
+        run(
+            ["--model", "example"],
+            database_path=database,
+            launcher=launcher,  # type: ignore[arg-type]
+        )
+        == 0
+    )
 
-    assert run(["--model", "example"], database_path=database, executor=executor) == 0
+    assert launcher.started == [(Path.cwd(), ["--model", "example"])]
+    assert launcher.attached == [launcher.runtime]
+    codex_link = lookup_rodex_codex_session(1, database)
+    tmux_link = lookup_rodex_tmux_session(1, database)
+    assert codex_link is not None
+    assert codex_link.codex_session_uuid == CODEX_UUID
+    assert tmux_link is not None
+    assert tmux_link.tmux_server_socket_path == str(
+        launcher.runtime.tmux_server_socket_path
+    )
+    assert tmux_link.tmux_session_name == "rodex-example"
+    output = capsys.readouterr().out
+    assert f"-> Codex {CODEX_UUID}" in output
 
-    environment = observed["environment"]
-    assert isinstance(environment, dict)
-    assert observed["executable"] == "/usr/bin/codex"
-    assert observed["arguments"] == ["codex", "--model", "example"]
-    assert environment["RODEX_SESSION_ID"] == "1"
-    assert lookup_id_from_a_rodex_uuid(environment["RODEX_SESSION_UUID"], database) == 1
-    assert "Rodex session" in capsys.readouterr().out
 
-
-def test_run_does_not_create_a_session_when_codex_is_missing(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize(
+    ("missing", "message"),
+    [("codex", "Codex executable"), ("tmux", "tmux executable")],
+)
+def test_run_does_not_create_a_session_when_a_prerequisite_is_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    missing: str,
+    message: str,
 ) -> None:
     database = tmp_path / "rodex.sqlite3"
-    monkeypatch.setattr("rodex.cli.shutil.which", lambda command: None)
+    monkeypatch.setattr(
+        "rodex.cli.shutil.which",
+        lambda command: None if command == missing else f"/usr/bin/{command}",
+    )
 
-    with pytest.raises(RodexLaunchError, match="not found"):
+    with pytest.raises(RodexLaunchError, match=message):
         run([], database_path=database)
 
     assert not database.exists()
 
 
-def test_run_honours_configured_codex_binary(
+def test_database_failure_stops_the_unregistered_runtime(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("RODEX_CODEX_BINARY", "codex-test-double")
+    launcher = StubLauncher(tmp_path)
+    monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
     monkeypatch.setattr(
-        "rodex.cli.shutil.which",
-        lambda command: (
-            "/tmp/codex-test-double" if command == "codex-test-double" else None
-        ),
-    )
-    observed: list[object] = []
-
-    run(
-        ["hello"],
-        database_path=tmp_path / "db.sqlite3",
-        executor=lambda *arguments: observed.extend(arguments),
+        "rodex.cli.create_a_rodex_session",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("database failed")),
     )
 
-    assert observed[0] == "/tmp/codex-test-double"
-    assert observed[1] == ["codex-test-double", "hello"]
+    with pytest.raises(RuntimeError, match="database failed"):
+        run([], database_path=tmp_path / "db.sqlite3", launcher=launcher)  # type: ignore[arg-type]
+
+    assert launcher.stopped == [(launcher.runtime, False)]
+    assert launcher.attached == []
 
 
-def test_project_root_launcher_is_executable_and_runs_end_to_end(tmp_path: Path) -> None:
+def test_project_root_launcher_is_executable_and_uses_the_project_environment() -> None:
     project_root = Path(__file__).parents[1]
     launcher = project_root / "rodex"
-    fake_bin = tmp_path / "bin"
-    fake_bin.mkdir()
-    fake_codex = fake_bin / "codex"
-    fake_codex.write_text(
-        "#!/bin/sh\nprintf '%s\\n' \"$RODEX_SESSION_ID|$RODEX_SESSION_UUID|$*\"\n",
-        encoding="utf-8",
-    )
-    fake_codex.chmod(0o755)
-    database = tmp_path / "launcher.sqlite3"
-    environment = os.environ.copy()
-    environment["PATH"] = f"{fake_bin}:{environment['PATH']}"
-    environment["RODEX_DATABASE_PATH"] = str(database)
 
-    result = subprocess.run(
-        [launcher, "first prompt"],
-        cwd=project_root,
-        env=environment,
-        text=True,
-        capture_output=True,
-        check=True,
-    )
-
-    output_lines = result.stdout.splitlines()
-    child_identity = output_lines[-1].split("|")
     assert os.access(launcher, os.X_OK)
-    assert child_identity[0] == "1"
-    assert child_identity[2] == "first prompt"
-    assert lookup_id_from_a_rodex_uuid(child_identity[1], database) == 1
-    with sqlite3.connect(database) as connection:
-        assert connection.execute("SELECT COUNT(*) FROM rodex_sessions").fetchone() == (1,)
+    contents = launcher.read_text(encoding="utf-8")
+    assert 'uv run --project "$RODEX_PROJECT_DIR" rodex "$@"' in contents

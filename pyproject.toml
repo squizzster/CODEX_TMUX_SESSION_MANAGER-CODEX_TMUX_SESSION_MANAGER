@@ -10,7 +10,9 @@ requires-python = ">=3.12"
 classifiers = [
     "Operating System :: POSIX",
 ]
-dependencies = []
+dependencies = [
+    "websockets>=15,<18",
+]
 
 [project.scripts]
 ctsm = "codex_tmux_session_manager:main"

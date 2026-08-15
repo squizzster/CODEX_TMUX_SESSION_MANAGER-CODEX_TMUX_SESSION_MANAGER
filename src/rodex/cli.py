@@ -1,11 +1,11 @@
-"""Allocate a Rodex identity and then hand the terminal to Codex."""
+"""Launch a normal Codex TUI with Rodex identity and tmux durability."""
 
 from __future__ import annotations
 
 import os
 import shutil
 import sys
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Sequence
 from pathlib import Path
 
 from rodex_functions import (
@@ -14,45 +14,60 @@ from rodex_functions import (
     default_rodex_database_path,
 )
 
-ProcessExecutor = Callable[[str, list[str], Mapping[str, str]], object]
+from .runtime import RodexRuntimeError, RodexRuntimeLauncher
 
 
 class RodexLaunchError(RuntimeError):
-    """Rodex could not launch its underlying Codex process."""
+    """Rodex could not launch its Codex/tmux runtime."""
 
 
 def run(
     argv: Sequence[str] | None = None,
     *,
     database_path: str | os.PathLike[str] | None = None,
-    executor: ProcessExecutor = os.execvpe,
+    launcher: RodexRuntimeLauncher | None = None,
 ) -> int:
-    """Create a registered session and replace Rodex with the Codex CLI."""
+    """Create, register, and attach to one tmux-hosted Codex session."""
     arguments = list(sys.argv[1:] if argv is None else argv)
-    configured_binary = os.environ.get("RODEX_CODEX_BINARY", "codex")
-    codex_binary = shutil.which(configured_binary)
+    configured_codex = os.environ.get("RODEX_CODEX_BINARY", "codex")
+    configured_tmux = os.environ.get("RODEX_TMUX_BINARY", "tmux")
+    codex_binary = shutil.which(configured_codex)
+    tmux_binary = shutil.which(configured_tmux)
     if codex_binary is None:
-        raise RodexLaunchError(f"Codex executable was not found: {configured_binary}")
+        raise RodexLaunchError(f"Codex executable was not found: {configured_codex}")
+    if tmux_binary is None:
+        raise RodexLaunchError(f"tmux executable was not found: {configured_tmux}")
 
     resolved_database = (
         Path(database_path).expanduser().resolve()
         if database_path is not None
         else default_rodex_database_path()
     )
-    session = create_a_rodex_session(resolved_database)
-    environment = os.environ.copy()
-    environment["RODEX_SESSION_ID"] = str(session.id)
-    environment["RODEX_SESSION_UUID"] = str(session.rodex_uuid)
-    environment["RODEX_DATABASE_PATH"] = str(resolved_database)
+    runtime_launcher = launcher or RodexRuntimeLauncher(codex_binary, tmux_binary)
+    live_runtime, codex_session_uuid = runtime_launcher.start(Path.cwd(), arguments)
+    try:
+        session = create_a_rodex_session(
+            resolved_database,
+            codex_session_uuid=codex_session_uuid,
+            tmux_server_socket_path=live_runtime.tmux_server_socket_path,
+            tmux_session_name=live_runtime.tmux_session_name,
+        )
+    except BaseException:
+        runtime_launcher.stop(live_runtime, check=False)
+        raise
 
-    print(f"Rodex session {session.rodex_uuid} (id {session.id})", flush=True)
-    executor(codex_binary, [configured_binary, *arguments], environment)
+    print(
+        f"Rodex {session.rodex_uuid} -> Codex {codex_session_uuid} "
+        f"({live_runtime.tmux_session_name})",
+        flush=True,
+    )
+    runtime_launcher.attach(live_runtime)
     return 0
 
 
 def main() -> None:
     try:
         raise SystemExit(run())
-    except (RodexLaunchError, RodexSessionError, OSError) as error:
+    except (RodexLaunchError, RodexRuntimeError, RodexSessionError, OSError) as error:
         print(f"rodex: {error}", file=sys.stderr)
         raise SystemExit(127) from error

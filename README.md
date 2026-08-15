@@ -1,6 +1,6 @@
 # Rodex - whenever you type `codex` try instead `rodex`
 
-Rodex makes Codex CLI sessions durable and memorable by running them inside tmux.
+Rodex makes Running Codex CLI sessions durable and memorable by running them inside tmux.
 Start normally with `./rodex`, detach when needed, and return later using a generated
 name such as `automatic-beluga`.
 
@@ -15,6 +15,7 @@ name such as `automatic-beluga`.
 - Reattaches a live session or transparently resumes its saved Codex session.
 - Supports an optional user-defined display name without losing the generated name.
 - Shows the Rodex name and protocol-observed tool-call count in the tmux status line.
+- Sends work to, waits for, or follows a running session from another shell.
 
 Rodex does not replace the Codex CLI. It wraps its normal interface with local session
 identity, tmux lifecycle management, and a transparent protocol proxy.
@@ -44,13 +45,24 @@ At the `›` prompt, use Codex normally. Detach without ending the session with
 | Command | Behaviour |
 |---|---|
 | `./rodex` | Create and attach to a new Rodex/Codex session. |
+| `./rodex --create project_1234` | Create a session with a preferred display name. |
+| `./rodex --detach` | Create without attaching and print compact identity JSON. |
 | `./rodex automatic-beluga` | Attach if live; otherwise resume its Codex session. |
 | `./rodex running` | List this POSIX user's running Rodex sessions. |
 | `./rodex alias automatic-beluga edgar-work` | Assign a preferred display name. |
 | `./rodex alias -f automatic-beluga new-name` | Replace an existing display name. |
+| `./rodex send edgar-work "Run the tests"` | Start or steer work in a running session. |
+| `./rodex wait edgar-work` | Wait until the running session is idle. |
+| `./rodex tail edgar-work` | Follow structured live protocol events as JSON lines. |
 
-`running` and `alias` also accept `--running` and `--alias`. Names use 1–80 ASCII
-letters, digits, underscores, or hyphens and begin with a letter or digit.
+Create also accepts `-c`, `--c`, or `-create`. The bare control commands accept
+`--running`, `--alias`, `--send`, `--wait`, and `--tail`. Stop `tail` with `Ctrl-C`;
+the Rodex session keeps running. Names use 1–80 ASCII letters, digits, underscores,
+or hyphens and begin with a letter or digit.
+
+A single argument keeps the natural Codex-style flow: if it matches an existing Rodex
+name, Rodex opens that session; otherwise the argument is passed to the new Codex TUI.
+Use `--create NAME` when the argument must become the session's display name.
 
 ## Local data
 
@@ -59,8 +71,8 @@ launched. Set `RODEX_DATABASE_PATH` to select another database. Short-lived Unix
 sockets and app-server logs use the current user's runtime directory or `/tmp`.
 
 The current Rodex registry stores identities, ownership, timestamps, names, and tmux
-endpoints. It does not persist conversation content. Codex remains responsible for its
-own session history.
+endpoints. Live protocol sockets are advertised only by the running tmux session. Rodex
+does not persist conversation content; Codex remains responsible for its own history.
 
 ## Documentation
 

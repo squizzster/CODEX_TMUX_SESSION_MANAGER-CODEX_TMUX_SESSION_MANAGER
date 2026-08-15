@@ -13,19 +13,18 @@ never presented or stored as another domain's identity.
 ## Basic launch pipeline
 
 1. `./rodex` validates the `codex` and `tmux` executables.
-2. tmux starts a small supervisor directly; Rodex does not type commands with
-   `send-keys`.
+2. tmux starts a small supervisor directly; Rodex never types with `send-keys`.
 3. The supervisor starts one private Codex app-server and a transparent Rodex
    WebSocket proxy on short Unix sockets, then connects the normal TUI through it.
 4. Rodex asks that private app-server for its one loaded Codex session UUID.
-5. One SQLite transaction creates the Rodex identity, permanent cool name, user/log
-   rows, and tmux match.
+5. One SQLite transaction creates the Rodex identity, name, user/log, and tmux rows.
 6. tmux is renamed to the cool name and displays `Rodex: <cool-name>` in its status.
 7. Rodex attaches to the ordinary Codex prompt; arguments and slash commands work.
 
-The proxy forwards protocol frames unchanged in both directions. It counts unique
-tool-like `item/started` notifications and publishes `Tools: <count>` through a tmux
-user option. The count covers the current live runtime and resets when it is resumed.
+The proxy forwards protocol frames unchanged in both directions, counts unique tool
+starts, and fans structured TUI events to bounded live subscribers. tmux user options
+advertise the live proxy/event sockets and observed Codex UUID; none are new SQLite
+identities. Tool counts cover the current runtime and reset when it is resumed.
 
 ## Named reattachment
 
@@ -36,6 +35,7 @@ user option. The count covers the current live runtime and resets when it is res
 - Both routes preserve all Rodex/Codex identity and update `last_accessed_at_utc`.
 - `./rodex running` (`--running`) lists the current POSIX user's live runtimes.
 - `./rodex alias SESSION NAME` sets its portable preferred name; `-f` replaces it.
+- `send`, `wait`, and `tail` verify the stored and live Codex UUID before acting.
 
 ## Lifecycle
 

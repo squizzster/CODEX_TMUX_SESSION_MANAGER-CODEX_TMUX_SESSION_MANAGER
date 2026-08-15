@@ -10,17 +10,20 @@ user terminal
     │
     ▼
 Rodex CLI ───────────────► SQLite registry
-    │
+    │                         ▲
+    │                         │ durable identity
     ▼
 private tmux server
-    │
+    │  └── advertises live control sockets and Codex UUID
     ▼
-session host ──► Codex TUI ──► Rodex protocol proxy ──► Codex app-server
+session host ──► Codex TUI ──► protocol proxy ──► Codex app-server
+                                │
+                                └──► live event tap ──► tail/wait/send clients
 ```
 
 The TUI remains the normal Codex interface. The proxy forwards WebSocket frames in
-both directions and currently derives only a runtime tool-call count. It does not
-screen-scrape or persist conversation content.
+both directions, derives a runtime tool-call count, and fans out selected structured
+events. It does not screen-scrape or persist conversation content.
 
 ## Component boundaries
 
@@ -29,7 +32,8 @@ screen-scrape or persist conversation content.
 | `rodex.cli` | Adapt commands, choose create/attach/resume, and present results. |
 | `rodex.runtime` | Own tmux, app-server discovery, attachment, and supervision. |
 | `rodex.session_host` | Keep one app-server, proxy, and foreground TUI together. |
-| `rodex.protocol_proxy` | Forward protocol traffic and derive live counters. |
+| `rodex.control` | Verify and control one exact loaded Codex thread. |
+| `rodex.protocol_proxy` | Forward traffic and fan out bounded live event streams. |
 | `rodex_functions` | Own session identity, ownership, naming, and state transitions. |
 | `rodex_sql` | Provide transactional SQLite initialization and access. |
 | `cool_name` | Allocate and resolve collision-resistant session names. |
@@ -73,6 +77,23 @@ a permanent alternative lookup. Detailed future schema rules live in
 
 `running` follows the same ownership and live-endpoint rules. Alias changes use the
 same naming pipeline and compensate a tmux rename if the database transition fails.
+
+## Live control
+
+The running tmux session advertises its proxy socket, event socket, and observed Codex
+UUID as user options. This operational metadata disappears with the runtime and does
+not add another durable identity or SQLite relationship.
+
+`send`, `wait`, and `tail` resolve the requested cool name to the existing integer
+session ID, enforce POSIX ownership, locate the exact live tmux endpoint, and compare
+the advertised Codex UUID with the UUID stored on `rodex_sessions`. The control client
+then verifies that the private app-server has that exact thread loaded.
+
+`send` starts an idle turn or steers the observed active turn. `wait` confirms live
+thread state before accepting a completion signal, so a queued event from an older turn
+cannot finish a newer wait. `tail` emits useful lifecycle events as compact JSON lines
+while omitting high-volume token deltas. Subscriber queues are bounded so a slow
+observer cannot block the interactive TUI.
 
 ## Integrity boundaries
 

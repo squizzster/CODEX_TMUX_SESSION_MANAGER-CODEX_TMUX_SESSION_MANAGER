@@ -13,6 +13,7 @@ from rodex.runtime import (
     LiveTmuxSession,
     RodexRuntimeError,
     RodexRuntimeLauncher,
+    run_session_host,
 )
 
 
@@ -140,6 +141,7 @@ def test_attach_uses_live_stdio_and_escapes_an_existing_tmux_client(
         "rodex-one",
         tmp_path / "app.sock",
         tmp_path / "app.log",
+        tmp_path / "proxy.sock",
     )
 
     launcher.attach(live)
@@ -193,9 +195,10 @@ def test_rename_and_status_configuration_use_the_real_tmux_session_name(
             "-t",
             "automatic-beluga",
             "status-left",
-            "#[fg=green,bold] Rodex: #S #[default]",
+            "#[fg=green,bold] Rodex: #S #[fg=cyan,bold]| Tools: "
+            "#{@rodex_tool_calls} #[default]",
         ],
-        ["set-option", "-t", "automatic-beluga", "status-left-length", "48"],
+        ["set-option", "-t", "automatic-beluga", "status-left-length", "68"],
     ]
 
 
@@ -234,3 +237,82 @@ def test_configured_runtime_path_must_fit_a_unix_socket(
     launcher = RodexRuntimeLauncher("codex", "tmux")
     with pytest.raises(RodexRuntimeError, match="too long"):
         launcher.start(tmp_path, [])
+
+
+def test_session_host_connects_the_tui_through_the_protocol_proxy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app_socket = tmp_path / "app.sock"
+    proxy_socket = tmp_path / "proxy.sock"
+    tmux_socket = tmp_path / "tmux.sock"
+    tui_commands: list[list[str]] = []
+    status_updates: list[int] = []
+    proxy_lifecycle: list[str] = []
+
+    class FakeProcess:
+        returncode: int | None = None
+
+        def poll(self) -> int | None:
+            return self.returncode
+
+        def terminate(self) -> None:
+            self.returncode = 0
+
+        def wait(self, timeout: int) -> int:
+            return 0
+
+    class FakeStatus:
+        def __init__(self, *args: object) -> None:
+            assert args == ("/usr/bin/tmux", tmux_socket, "%4")
+
+        def update(self, count: int) -> None:
+            status_updates.append(count)
+
+    class FakeProxy:
+        def __init__(self, *args: object) -> None:
+            assert args[:2] == (proxy_socket, app_socket)
+
+        def start(self) -> None:
+            proxy_lifecycle.append("start")
+
+        def close(self) -> None:
+            proxy_lifecycle.append("close")
+
+    def run_tui(command: list[str], **options: object) -> subprocess.CompletedProcess[str]:
+        tui_commands.append(command)
+        assert options == {"check": False}
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setenv("TMUX_PANE", "%4")
+    monkeypatch.setattr(
+        runtime_module.subprocess, "Popen", lambda *args, **kwargs: FakeProcess()
+    )
+    monkeypatch.setattr(runtime_module.subprocess, "run", run_tui)
+    monkeypatch.setattr(runtime_module, "_wait_for_app_server_socket", lambda *args: None)
+    monkeypatch.setattr(runtime_module, "TmuxToolCallStatus", FakeStatus)
+    monkeypatch.setattr(runtime_module, "CodexProtocolProxy", FakeProxy)
+
+    assert (
+        run_session_host(
+            "/usr/bin/codex",
+            app_socket,
+            tmp_path / "app.log",
+            proxy_socket,
+            "/usr/bin/tmux",
+            tmux_socket,
+            ["resume", "codex-uuid"],
+        )
+        == 0
+    )
+
+    assert status_updates == [0]
+    assert proxy_lifecycle == ["start", "close"]
+    assert tui_commands == [
+        [
+            "/usr/bin/codex",
+            "--remote",
+            f"unix://{proxy_socket}",
+            "resume",
+            "codex-uuid",
+        ]
+    ]

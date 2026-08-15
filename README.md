@@ -7,6 +7,8 @@ Codex app-server supplies the real Codex session UUID; Rodex allocates its own d
 UUID and records the exact Rodex ↔ Codex ↔ tmux match before attaching the terminal.
 Arguments are forwarded to Codex unless one bare argument resolves an existing cool
 name, in which case Rodex attaches the live runtime or resumes its saved Codex session.
+The TUI communicates through Rodex's transparent protocol proxy; the tmux status line
+shows a live count of protocol-observed tool calls for the current runtime.
 
 ## Try it
 

@@ -26,6 +26,7 @@ class StubLauncher:
             tmux_session_name="rodex-example",
             app_server_socket_path=tmp_path / "app.sock",
             app_server_log_path=tmp_path / "app.log",
+            protocol_proxy_socket_path=tmp_path / "proxy.sock",
         )
         self.started: list[tuple[Path, list[str]]] = []
         self.renamed: list[tuple[LiveTmuxSession, str]] = []

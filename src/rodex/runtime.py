@@ -19,6 +19,8 @@ from typing import Any, Final
 from websockets.exceptions import ConnectionClosed, InvalidHandshake
 from websockets.sync.client import unix_connect
 
+from .protocol_proxy import CodexProtocolProxy, TmuxToolCallStatus, ToolCallCounter
+
 SUN_PATH_MAX_BYTES: Final = 107
 DEFAULT_STARTUP_TIMEOUT_SECONDS: Final = 15.0
 _POLL_INTERVAL_SECONDS: Final = 0.05
@@ -45,6 +47,7 @@ class LiveRodexRuntime(LiveTmuxSession):
 
     app_server_socket_path: Path
     app_server_log_path: Path
+    protocol_proxy_socket_path: Path
 
 
 class RodexRuntimeLauncher:
@@ -86,9 +89,11 @@ class RodexRuntimeLauncher:
             tmux_session_name=f"rodex-{token}",
             app_server_socket_path=runtime_root / f"app-{token}.sock",
             app_server_log_path=runtime_root / f"app-{token}.log",
+            protocol_proxy_socket_path=runtime_root / f"proxy-{token}.sock",
         )
         _require_short_unix_socket_path(runtime.tmux_server_socket_path)
         _require_short_unix_socket_path(runtime.app_server_socket_path)
+        _require_short_unix_socket_path(runtime.protocol_proxy_socket_path)
 
         host_command = shlex.join(
             [
@@ -101,6 +106,12 @@ class RodexRuntimeLauncher:
                 str(runtime.app_server_socket_path),
                 "--app-server-log",
                 str(runtime.app_server_log_path),
+                "--protocol-proxy-socket",
+                str(runtime.protocol_proxy_socket_path),
+                "--tmux-binary",
+                self._tmux_binary,
+                "--tmux-server-socket",
+                str(runtime.tmux_server_socket_path),
                 "--",
                 *codex_arguments,
             ]
@@ -145,7 +156,8 @@ class RodexRuntimeLauncher:
             "-t",
             runtime.tmux_session_name,
             "status-left",
-            "#[fg=green,bold] Rodex: #S #[default]",
+            "#[fg=green,bold] Rodex: #S #[fg=cyan,bold]| Tools: "
+            "#{@rodex_tool_calls} #[default]",
         )
         self._tmux(
             runtime,
@@ -153,7 +165,7 @@ class RodexRuntimeLauncher:
             "-t",
             runtime.tmux_session_name,
             "status-left-length",
-            "48",
+            "68",
         )
 
     def attach(self, runtime: LiveTmuxSession) -> None:
@@ -306,12 +318,17 @@ def run_session_host(
     codex_binary: str,
     app_server_socket_path: Path,
     app_server_log_path: Path,
+    protocol_proxy_socket_path: Path,
+    tmux_binary: str,
+    tmux_server_socket_path: Path,
     codex_arguments: Sequence[str],
 ) -> int:
-    """Supervise app-server while the foreground Codex TUI owns the tmux pane."""
+    """Supervise the app-server, protocol proxy, and foreground Codex TUI."""
     app_server_socket_path.unlink(missing_ok=True)
+    protocol_proxy_socket_path.unlink(missing_ok=True)
     app_server_log_path.parent.mkdir(parents=True, exist_ok=True)
     app_server: subprocess.Popen[bytes] | None = None
+    protocol_proxy: CodexProtocolProxy | None = None
 
     def stop_on_signal(signum: int, _frame: object) -> None:
         raise SystemExit(128 + signum)
@@ -334,11 +351,24 @@ def run_session_host(
                 stderr=subprocess.STDOUT,
             )
             _wait_for_app_server_socket(app_server, app_server_socket_path)
+            tmux_pane_target = os.environ.get("TMUX_PANE", "")
+            tool_call_status = TmuxToolCallStatus(
+                tmux_binary,
+                tmux_server_socket_path,
+                tmux_pane_target,
+            )
+            tool_call_status.update(0)
+            protocol_proxy = CodexProtocolProxy(
+                protocol_proxy_socket_path,
+                app_server_socket_path,
+                ToolCallCounter(tool_call_status.update),
+            )
+            protocol_proxy.start()
             completed = subprocess.run(
                 [
                     codex_binary,
                     "--remote",
-                    f"unix://{app_server_socket_path}",
+                    f"unix://{protocol_proxy_socket_path}",
                     *codex_arguments,
                 ],
                 check=False,
@@ -347,16 +377,21 @@ def run_session_host(
     finally:
         for signum, handler in previous_handlers.items():
             signal.signal(signum, handler)
-        if app_server is not None and app_server.poll() is None:
-            app_server.terminate()
-            try:
-                app_server.wait(timeout=3)
-            except subprocess.TimeoutExpired:
-                app_server.kill()
-                app_server.wait(timeout=3)
-        app_server_socket_path.unlink(missing_ok=True)
-        if app_server_log_path.exists() and app_server_log_path.stat().st_size == 0:
-            app_server_log_path.unlink()
+        try:
+            if protocol_proxy is not None:
+                protocol_proxy.close()
+        finally:
+            if app_server is not None and app_server.poll() is None:
+                app_server.terminate()
+                try:
+                    app_server.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    app_server.kill()
+                    app_server.wait(timeout=3)
+            app_server_socket_path.unlink(missing_ok=True)
+            protocol_proxy_socket_path.unlink(missing_ok=True)
+            if app_server_log_path.exists() and app_server_log_path.stat().st_size == 0:
+                app_server_log_path.unlink()
 
 
 def _receive_response(websocket: Any, request_id: int) -> dict[str, Any]:

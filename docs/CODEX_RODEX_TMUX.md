@@ -15,13 +15,17 @@ never presented or stored as another domain's identity.
 1. `./rodex` validates the `codex` and `tmux` executables.
 2. tmux starts a small supervisor directly; Rodex does not type commands with
    `send-keys`.
-3. The supervisor starts one private Codex app-server on a short Unix socket and then
-   starts the normal TUI with `codex --remote unix://...`.
+3. The supervisor starts one private Codex app-server and a transparent Rodex
+   WebSocket proxy on short Unix sockets, then connects the normal TUI through it.
 4. Rodex asks that private app-server for its one loaded Codex session UUID.
 5. One SQLite transaction creates the Rodex identity, permanent cool name, user/log
    rows, and tmux match.
 6. tmux is renamed to the cool name and displays `Rodex: <cool-name>` in its status.
 7. Rodex attaches to the ordinary Codex prompt; arguments and slash commands work.
+
+The proxy forwards protocol frames unchanged in both directions. It counts unique
+tool-like `item/started` notifications and publishes `Tools: <count>` through a tmux
+user option. The count covers the current live runtime and resets when it is resumed.
 
 ## Named reattachment
 

@@ -14,6 +14,9 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--codex-binary", required=True)
     parser.add_argument("--app-server-socket", required=True, type=Path)
     parser.add_argument("--app-server-log", required=True, type=Path)
+    parser.add_argument("--protocol-proxy-socket", required=True, type=Path)
+    parser.add_argument("--tmux-binary", required=True)
+    parser.add_argument("--tmux-server-socket", required=True, type=Path)
     parser.add_argument("codex_arguments", nargs=argparse.REMAINDER)
     return parser
 
@@ -27,6 +30,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         args.codex_binary,
         args.app_server_socket,
         args.app_server_log,
+        args.protocol_proxy_socket,
+        args.tmux_binary,
+        args.tmux_server_socket,
         codex_arguments,
     )
 

@@ -11,6 +11,7 @@ classifiers = [
     "Operating System :: POSIX",
 ]
 dependencies = [
+    "coolname>=5.0.0",
     "websockets>=15,<18",
 ]
 

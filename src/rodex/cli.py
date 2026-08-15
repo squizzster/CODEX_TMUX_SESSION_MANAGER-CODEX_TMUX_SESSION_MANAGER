@@ -49,7 +49,7 @@ _TAIL_COMMANDS = frozenset({"tail", "--tail"})
 _WAIT_COMMANDS = frozenset({"wait", "--wait"})
 _FORCE_FLAGS = frozenset({"-f", "--f", "-force", "--force"})
 _CREATE_FLAGS = frozenset({"-c", "--c", "-create", "--create"})
-_DETACH_FLAG = "--detach"
+_DETACH_FLAGS = frozenset({"-d", "--d", "-detach", "--detach"})
 
 
 def run(
@@ -241,18 +241,18 @@ def _open_named_session(
 def _parse_launch_arguments(
     arguments: list[str],
 ) -> tuple[list[str], str | None, bool]:
-    detach_count = arguments.count(_DETACH_FLAG)
-    if detach_count > 1:
-        raise RodexLaunchError("--detach may be supplied only once")
-    remaining = [argument for argument in arguments if argument != _DETACH_FLAG]
+    detach_arguments = [argument for argument in arguments if argument in _DETACH_FLAGS]
+    if len(detach_arguments) > 1:
+        raise RodexLaunchError("a detach flag may be supplied only once")
+    remaining = [argument for argument in arguments if argument not in _DETACH_FLAGS]
     create_positions = [
         index for index, argument in enumerate(remaining) if argument in _CREATE_FLAGS
     ]
     if not create_positions:
-        return remaining, None, detach_count == 1
+        return remaining, None, bool(detach_arguments)
     if len(create_positions) != 1 or len(remaining) != 2 or create_positions[0] != 0:
         raise RodexLaunchError("usage: rodex [--detach] --create SESSION_NAME")
-    return [], remaining[1], detach_count == 1
+    return [], remaining[1], bool(detach_arguments)
 
 
 def _print_existing_detached_runtime(
@@ -276,7 +276,7 @@ def _print_detached_runtime(
                 "rodex_session_uuid": str(rodex_uuid),
                 "codex_session_uuid": str(codex_uuid),
             },
-            separators=(",", ":"),
+            indent=2,
         ),
         flush=True,
     )

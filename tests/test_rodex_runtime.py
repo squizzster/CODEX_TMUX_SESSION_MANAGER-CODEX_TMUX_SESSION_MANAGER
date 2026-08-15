@@ -127,8 +127,34 @@ def test_start_directly_hosts_codex_in_tmux_and_returns_its_uuid(
     ]
     host_command = new_session[-1]
     assert "/venv/bin/python -m rodex.session_host" in host_command
+    assert f"--protocol-event-socket {tmp_path / 'events-0123456789abcdef.sock'}" in (
+        host_command
+    )
     assert "--model example" in host_command
     assert "send-keys" not in host_command
+    assert [command[3:] for command in runner.calls[-3:]] == [
+        [
+            "set-option",
+            "-t",
+            "=rodex-0123456789abcdef:",
+            "@rodex_protocol_proxy_socket_path",
+            str(tmp_path / "proxy-0123456789abcdef.sock"),
+        ],
+        [
+            "set-option",
+            "-t",
+            "=rodex-0123456789abcdef:",
+            "@rodex_protocol_event_socket_path",
+            str(tmp_path / "events-0123456789abcdef.sock"),
+        ],
+        [
+            "set-option",
+            "-t",
+            "=rodex-0123456789abcdef:",
+            "@rodex_codex_session_uuid",
+            codex_uuid,
+        ],
+    ]
 
 
 def test_attach_uses_live_stdio_and_escapes_an_existing_tmux_client(
@@ -143,6 +169,7 @@ def test_attach_uses_live_stdio_and_escapes_an_existing_tmux_client(
         tmp_path / "app.sock",
         tmp_path / "app.log",
         tmp_path / "proxy.sock",
+        tmp_path / "events.sock",
     )
 
     launcher.attach(live)
@@ -208,8 +235,16 @@ def test_real_tmux_survives_rename_and_status_configuration(tmp_path: Path) -> N
     if tmux_binary is None:
         pytest.skip("tmux is not installed")
     socket_path = tmp_path / "tmux.sock"
-    original = LiveTmuxSession(socket_path, "rodex-integration-token")
+    original = LiveRodexRuntime(
+        socket_path,
+        "rodex-integration-token",
+        tmp_path / "app.sock",
+        tmp_path / "app.log",
+        tmp_path / "proxy.sock",
+        tmp_path / "events.sock",
+    )
     launcher = RodexRuntimeLauncher("codex", tmux_binary)
+    codex_uuid = uuid.UUID("01a00654-f2bc-7a30-834a-a5f886a65f82")
 
     subprocess.run(
         [
@@ -227,10 +262,15 @@ def test_real_tmux_survives_rename_and_status_configuration(tmp_path: Path) -> N
         capture_output=True,
     )
     try:
+        launcher.publish_runtime_control(original, codex_uuid)
         renamed = launcher.rename(original, "automatic-beluga")
         launcher.configure_identity_status(renamed)
 
         assert launcher.session_exists(renamed)
+        discovered = launcher.discover_runtime_control(renamed)
+        assert discovered.protocol_proxy_socket_path == tmp_path / "proxy.sock"
+        assert discovered.protocol_event_socket_path == tmp_path / "events.sock"
+        assert discovered.codex_session_uuid == codex_uuid
         shown_status = subprocess.run(
             [
                 tmux_binary,
@@ -298,6 +338,7 @@ def test_session_host_connects_the_tui_through_the_protocol_proxy(
 ) -> None:
     app_socket = tmp_path / "app.sock"
     proxy_socket = tmp_path / "proxy.sock"
+    event_socket = tmp_path / "events.sock"
     tmux_socket = tmp_path / "tmux.sock"
     tui_commands: list[list[str]] = []
     status_updates: list[int] = []
@@ -332,6 +373,19 @@ def test_session_host_connects_the_tui_through_the_protocol_proxy(
         def close(self) -> None:
             proxy_lifecycle.append("close")
 
+    class FakeEventTap:
+        def __init__(self, path: Path) -> None:
+            assert path == event_socket
+
+        def start(self) -> None:
+            proxy_lifecycle.append("event-start")
+
+        def publish(self, _message: str | bytes) -> None:
+            return None
+
+        def close(self) -> None:
+            proxy_lifecycle.append("event-close")
+
     def run_tui(command: list[str], **options: object) -> subprocess.CompletedProcess[str]:
         tui_commands.append(command)
         assert options == {"check": False}
@@ -344,6 +398,7 @@ def test_session_host_connects_the_tui_through_the_protocol_proxy(
     monkeypatch.setattr(runtime_module.subprocess, "run", run_tui)
     monkeypatch.setattr(runtime_module, "_wait_for_app_server_socket", lambda *args: None)
     monkeypatch.setattr(runtime_module, "TmuxToolCallStatus", FakeStatus)
+    monkeypatch.setattr(runtime_module, "CodexProtocolEventTap", FakeEventTap)
     monkeypatch.setattr(runtime_module, "CodexProtocolProxy", FakeProxy)
 
     assert (
@@ -352,6 +407,7 @@ def test_session_host_connects_the_tui_through_the_protocol_proxy(
             app_socket,
             tmp_path / "app.log",
             proxy_socket,
+            event_socket,
             "/usr/bin/tmux",
             tmux_socket,
             ["resume", "codex-uuid"],
@@ -360,7 +416,7 @@ def test_session_host_connects_the_tui_through_the_protocol_proxy(
     )
 
     assert status_updates == [0]
-    assert proxy_lifecycle == ["start", "close"]
+    assert proxy_lifecycle == ["event-start", "start", "close", "event-close"]
     assert tui_commands == [
         [
             "/usr/bin/codex",

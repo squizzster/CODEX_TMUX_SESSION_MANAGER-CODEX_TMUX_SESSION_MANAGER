@@ -26,7 +26,14 @@ cool name. Open a session by name; Rodex attaches it if live or resumes it if en
 
 ```bash
 ./rodex automatic-beluga
+./rodex alias automatic-beluga edgar-work
+./rodex running
 ```
+
+`alias` and `running` also work as `--alias` and `--running`. A session owns at most
+one user-defined alias; replace it explicitly with `-f`, `--f`, `-force`, or `--force`.
+The command words are reserved, case-insensitively, from automatic and user-defined
+names. `running` reports only live sessions owned by the current POSIX user.
 
 The default database is `.rodex/rodex.sqlite3` beneath the launch directory. Set
 `RODEX_DATABASE_PATH` to use a different path. Runtime databases are ignored by Git.
@@ -168,4 +175,4 @@ Every Rodex creation allocates a cool name in the same transaction and stores it
 integer `cool_names_id` directly on `rodex_sessions`. The foreign key and unique index
 enforce one valid permanent name per session and prevent reuse across sessions. The
 nullable `user_defined_cool_names_id` reserves a separate, uniquely indexed cool-name
-identity for a future user-defined descriptive name without replacing the original.
+identity for the optional user-defined descriptive name without replacing the original.

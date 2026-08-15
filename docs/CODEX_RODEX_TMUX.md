@@ -34,6 +34,8 @@ user option. The count covers the current live runtime and resets when it is res
 - If it has ended, Rodex starts a fresh tmux/app-server and asks Codex to resume the
   stored Codex UUID; the observed UUID must match before the endpoint is replaced.
 - Both routes preserve all Rodex/Codex identity and update `last_accessed_at_utc`.
+- `./rodex running` (`--running`) lists the current POSIX user's live runtimes.
+- `./rodex alias SESSION NAME` (`--alias`) assigns one alias; use `-f` to replace it.
 
 ## Lifecycle
 

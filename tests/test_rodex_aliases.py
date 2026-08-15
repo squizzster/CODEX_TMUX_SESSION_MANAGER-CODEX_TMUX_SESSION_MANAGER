@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from cool_name import ReservedCoolNameError
+from cool_name import CoolNameError, ReservedCoolNameError
 from rodex_functions import (
     RodexSessionError,
     RodexSessionsUserIdentity,
@@ -102,6 +102,26 @@ def test_reserved_aliases_are_rejected_without_consuming_an_id(
     with pytest.raises(ReservedCoolNameError, match="reserved"):
         assign_a_user_defined_cool_name(
             "black-sawfly", reserved_name, database, user_identity=DNA
+        )
+
+    assert _cool_names(database) == [(1, "black-sawfly")]
+
+
+@pytest.mark.parametrize(
+    "invalid_name",
+    ["", "two words", "tmux:window", "has.period", "x" * 81],
+)
+def test_aliases_must_be_portable_tmux_session_names_without_consuming_an_id(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    invalid_name: str,
+) -> None:
+    database = tmp_path / "rodex.sqlite3"
+    _create_session(database, monkeypatch, cool_name="black-sawfly", codex_int=1)
+
+    with pytest.raises(CoolNameError, match=r"cool_name|Rodex names"):
+        assign_a_user_defined_cool_name(
+            "black-sawfly", invalid_name, database, user_identity=DNA
         )
 
     assert _cool_names(database) == [(1, "black-sawfly")]

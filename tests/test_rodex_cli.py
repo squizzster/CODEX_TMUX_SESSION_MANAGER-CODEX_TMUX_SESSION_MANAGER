@@ -1,21 +1,27 @@
 from __future__ import annotations
 
 import os
+import sqlite3
 import sys
 import uuid
 from dataclasses import replace
 from pathlib import Path
+from threading import Event, Lock, Thread, current_thread
 
 import pytest
 
-from rodex.cli import RodexLaunchError, main, run
-from rodex.runtime import LiveRodexRuntime, LiveTmuxSession
+from rodex.cli import RodexExecutableNotFoundError, RodexLaunchError, main, run
+from rodex.runtime import LiveRodexRuntime, LiveTmuxSession, RodexRuntimeError
 from rodex_functions import (
+    RodexSessionError,
     RodexSessionsUserIdentity,
     assign_a_user_defined_cool_name,
     create_a_rodex_session,
     lookup_codex_uuid_from_a_rodex_session_id,
+    lookup_rodex_session_id_from_a_cool_name,
+    lookup_rodex_session_names,
     lookup_rodex_tmux_session,
+    open_a_user_defined_cool_name_assignment,
 )
 
 CODEX_UUID = uuid.UUID("01a00654-f2bc-7a30-834a-a5f886a65f82")
@@ -322,8 +328,75 @@ def test_alias_replacement_without_force_is_reported_on_stderr(
     with pytest.raises(SystemExit) as raised:
         main()
 
-    assert raised.value.code == 127
+    assert raised.value.code == 1
     assert "use -f or --force" in capsys.readouterr().err
+
+
+def test_empty_alias_is_a_concise_stderr_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    database = tmp_path / "rodex.sqlite3"
+    monkeypatch.setattr(
+        "cool_name.functions.coolname.generate_slug", lambda _word_count: "safe-name"
+    )
+    monkeypatch.setattr(
+        "rodex_functions.sessions.current_rodex_sessions_user_identity", lambda: DNA
+    )
+    monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
+    create_a_rodex_session(
+        database,
+        codex_session_uuid=CODEX_UUID,
+        user_identity=DNA,
+        tmux_server_socket_path=tmp_path / "tmux.sock",
+        tmux_session_name="safe-name",
+    )
+    monkeypatch.setenv("RODEX_DATABASE_PATH", str(database))
+    monkeypatch.setattr(sys, "argv", ["rodex", "alias", "safe-name", ""])
+
+    with pytest.raises(SystemExit) as raised:
+        main()
+
+    assert raised.value.code == 1
+    error_output = capsys.readouterr().err
+    assert error_output.startswith("rodex: ")
+    assert "non-empty" in error_output
+    assert "Traceback" not in error_output
+
+
+def test_sqlite_operational_error_is_a_concise_stderr_error(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(
+        "rodex.cli.run",
+        lambda: (_ for _ in ()).throw(sqlite3.OperationalError("database unavailable")),
+    )
+
+    with pytest.raises(SystemExit) as raised:
+        main()
+
+    assert raised.value.code == 1
+    assert capsys.readouterr().err == "rodex: database unavailable\n"
+
+
+def test_missing_executable_retains_command_not_found_exit_status(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(
+        "rodex.cli.run",
+        lambda: (_ for _ in ()).throw(
+            RodexExecutableNotFoundError("tmux executable was not found: tmux")
+        ),
+    )
+
+    with pytest.raises(SystemExit) as raised:
+        main()
+
+    assert raised.value.code == 127
+    assert "tmux executable" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize("command", ["running", "--running"])
@@ -377,6 +450,298 @@ def test_running_commands_show_only_the_current_users_live_sessions(
     assert f"work -> Codex {CODEX_UUID}" in output
     assert "black-sawfly" not in output
     assert "silver-otter" not in output
+
+
+def test_new_launch_cleans_up_the_renamed_runtime_when_persistence_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database = tmp_path / "rodex.sqlite3"
+    launcher = StubLauncher(tmp_path)
+    monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
+    monkeypatch.setattr(
+        "cool_name.functions.coolname.generate_slug", lambda _word_count: "safe-name"
+    )
+    monkeypatch.setattr(
+        "rodex.cli.update_rodex_tmux_session_name",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("persist failed")),
+    )
+
+    with pytest.raises(RuntimeError, match="persist failed"):
+        run([], database_path=database, launcher=launcher)  # type: ignore[arg-type]
+
+    assert launcher.renamed == [(launcher.runtime, "safe-name")]
+    assert launcher.stopped == [
+        (replace(launcher.runtime, tmux_session_name="safe-name"), False)
+    ]
+    assert launcher.attached == []
+
+
+def test_live_reattach_restores_the_recorded_name_when_persistence_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database = tmp_path / "rodex.sqlite3"
+    monkeypatch.setattr(
+        "cool_name.functions.coolname.generate_slug", lambda _word_count: "safe-name"
+    )
+    create_a_rodex_session(
+        database,
+        codex_session_uuid=CODEX_UUID,
+        user_identity=DNA,
+        tmux_server_socket_path=tmp_path / "tmux.sock",
+        tmux_session_name="rodex-token",
+    )
+    launcher = StubLauncher(tmp_path)
+    monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
+    monkeypatch.setattr(
+        "rodex.cli.update_rodex_tmux_session_name",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("persist failed")),
+    )
+
+    with pytest.raises(RuntimeError, match="persist failed"):
+        run(["safe-name"], database_path=database, launcher=launcher)  # type: ignore[arg-type]
+
+    assert [name for _, name in launcher.renamed] == ["safe-name", "rodex-token"]
+    tmux_link = lookup_rodex_tmux_session(1, database)
+    assert tmux_link is not None
+    assert tmux_link.tmux_session_name == "rodex-token"
+    assert launcher.attached == []
+
+
+def test_alias_rename_failure_preserves_the_previous_name_everywhere(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database = tmp_path / "rodex.sqlite3"
+    monkeypatch.setattr(
+        "cool_name.functions.coolname.generate_slug", lambda _word_count: "safe-name"
+    )
+    monkeypatch.setattr(
+        "rodex_functions.sessions.current_rodex_sessions_user_identity", lambda: DNA
+    )
+    monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
+    create_a_rodex_session(
+        database,
+        codex_session_uuid=CODEX_UUID,
+        user_identity=DNA,
+        tmux_server_socket_path=tmp_path / "tmux.sock",
+        tmux_session_name="safe-name",
+    )
+    launcher = StubLauncher(tmp_path)
+    assert (
+        run(
+            ["alias", "safe-name", "first"],
+            database_path=database,
+            launcher=launcher,  # type: ignore[arg-type]
+        )
+        == 0
+    )
+
+    def fail_rename(*args: object, **kwargs: object) -> LiveTmuxSession:
+        raise RodexRuntimeError("rename failed")
+
+    monkeypatch.setattr(launcher, "rename", fail_rename)
+    with pytest.raises(RodexRuntimeError, match="rename failed"):
+        run(
+            ["alias", "--force", "safe-name", "replacement"],
+            database_path=database,
+            launcher=launcher,  # type: ignore[arg-type]
+        )
+
+    names = lookup_rodex_session_names(1, database)
+    assert names is not None
+    assert names.display_name == "first"
+    assert lookup_rodex_session_id_from_a_cool_name("replacement", database) is None
+    tmux_link = lookup_rodex_tmux_session(1, database)
+    assert tmux_link is not None
+    assert tmux_link.tmux_session_name == "first"
+
+
+def test_alias_database_failure_renames_tmux_back_and_leaves_no_alias(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database = tmp_path / "rodex.sqlite3"
+    monkeypatch.setattr(
+        "cool_name.functions.coolname.generate_slug", lambda _word_count: "safe-name"
+    )
+    monkeypatch.setattr(
+        "rodex_functions.sessions.current_rodex_sessions_user_identity", lambda: DNA
+    )
+    monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
+    create_a_rodex_session(
+        database,
+        codex_session_uuid=CODEX_UUID,
+        user_identity=DNA,
+        tmux_server_socket_path=tmp_path / "tmux.sock",
+        tmux_session_name="safe-name",
+    )
+    launcher = StubLauncher(tmp_path)
+    monkeypatch.setattr(
+        "rodex_functions.sessions.reserve_specific_cool_name",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            sqlite3.OperationalError("database failed")
+        ),
+    )
+
+    with pytest.raises(sqlite3.OperationalError, match="database failed"):
+        run(
+            ["alias", "safe-name", "work"],
+            database_path=database,
+            launcher=launcher,  # type: ignore[arg-type]
+        )
+
+    assert [name for _, name in launcher.renamed] == ["work", "safe-name"]
+    names = lookup_rodex_session_names(1, database)
+    assert names is not None
+    assert names.user_defined_cool_name is None
+    assert lookup_rodex_session_id_from_a_cool_name("work", database) is None
+    tmux_link = lookup_rodex_tmux_session(1, database)
+    assert tmux_link is not None
+    assert tmux_link.tmux_session_name == "safe-name"
+
+
+def test_concurrent_alias_commands_serialize_across_tmux_and_database(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database = tmp_path / "rodex.sqlite3"
+    monkeypatch.setattr(
+        "cool_name.functions.coolname.generate_slug", lambda _word_count: "safe-name"
+    )
+    monkeypatch.setattr(
+        "rodex_functions.sessions.current_rodex_sessions_user_identity", lambda: DNA
+    )
+    monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
+    create_a_rodex_session(
+        database,
+        codex_session_uuid=CODEX_UUID,
+        user_identity=DNA,
+        tmux_server_socket_path=tmp_path / "tmux.sock",
+        tmux_session_name="safe-name",
+    )
+    state_lock = Lock()
+    live_name = ["safe-name"]
+    first_rename_started = Event()
+    allow_first_commit = Event()
+    second_attempt_started = Event()
+    second_finished = Event()
+
+    class ConcurrentAliasLauncher:
+        def __init__(self, *, pause_after_rename: bool) -> None:
+            self.pause_after_rename = pause_after_rename
+
+        def session_exists(self, runtime: LiveTmuxSession) -> bool:
+            with state_lock:
+                return runtime.tmux_session_name == live_name[0]
+
+        def rename(
+            self, runtime: LiveTmuxSession, tmux_session_name: str
+        ) -> LiveTmuxSession:
+            with state_lock:
+                assert runtime.tmux_session_name == live_name[0]
+                live_name[0] = tmux_session_name
+            if self.pause_after_rename:
+                first_rename_started.set()
+                assert allow_first_commit.wait(5)
+            return replace(runtime, tmux_session_name=tmux_session_name)
+
+        def configure_identity_status(self, runtime: LiveTmuxSession) -> None:
+            return None
+
+    first_errors: list[BaseException] = []
+    second_errors: list[BaseException] = []
+
+    def assign_name(
+        name: str,
+        launcher: ConcurrentAliasLauncher,
+        errors: list[BaseException],
+        finished: Event | None = None,
+    ) -> None:
+        try:
+            run(
+                ["alias", "safe-name", name],
+                database_path=database,
+                launcher=launcher,  # type: ignore[arg-type]
+            )
+        except BaseException as error:
+            errors.append(error)
+        finally:
+            if finished is not None:
+                finished.set()
+
+    first_thread = Thread(
+        target=assign_name,
+        args=("first", ConcurrentAliasLauncher(pause_after_rename=True), first_errors),
+    )
+    second_thread = Thread(
+        target=assign_name,
+        args=(
+            "second",
+            ConcurrentAliasLauncher(pause_after_rename=False),
+            second_errors,
+            second_finished,
+        ),
+    )
+
+    def observe_assignment_attempt(*args: object, **kwargs: object):  # type: ignore[no-untyped-def]
+        if current_thread() is second_thread:
+            second_attempt_started.set()
+        return open_a_user_defined_cool_name_assignment(*args, **kwargs)
+
+    monkeypatch.setattr(
+        "rodex.cli.open_a_user_defined_cool_name_assignment",
+        observe_assignment_attempt,
+    )
+    first_thread.start()
+    assert first_rename_started.wait(5)
+    second_thread.start()
+    assert second_attempt_started.wait(5)
+    try:
+        second_was_serialized = not second_finished.wait(0.25)
+    finally:
+        allow_first_commit.set()
+    assert second_was_serialized
+    first_thread.join(5)
+    second_thread.join(5)
+
+    assert not first_thread.is_alive()
+    assert not second_thread.is_alive()
+    assert first_errors == []
+    assert len(second_errors) == 1
+    assert isinstance(second_errors[0], RodexSessionError)
+    assert "use -f or --force" in str(second_errors[0])
+    names = lookup_rodex_session_names(1, database)
+    assert names is not None
+    assert names.display_name == "first"
+    tmux_link = lookup_rodex_tmux_session(1, database)
+    assert tmux_link is not None
+    assert tmux_link.tmux_session_name == "first"
+    assert live_name == ["first"]
+
+
+def test_named_open_rejects_a_session_owned_by_another_posix_user(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database = tmp_path / "rodex.sqlite3"
+    monkeypatch.setattr(
+        "cool_name.functions.coolname.generate_slug", lambda _word_count: "other-work"
+    )
+    create_a_rodex_session(
+        database,
+        codex_session_uuid=CODEX_UUID,
+        user_identity=RodexSessionsUserIdentity(2001, 2002, "other"),
+        tmux_server_socket_path=tmp_path / "other.sock",
+        tmux_session_name="other-work",
+    )
+    monkeypatch.setattr(
+        "rodex_functions.sessions.current_rodex_sessions_user_identity", lambda: DNA
+    )
+    monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
+    launcher = StubLauncher(tmp_path)
+
+    with pytest.raises(RodexSessionError, match="not owned"):
+        run(["other-work"], database_path=database, launcher=launcher)  # type: ignore[arg-type]
+
+    assert launcher.started == []
+    assert launcher.existing_checks == []
+    assert launcher.attached == []
 
 
 def test_resume_stops_new_runtime_if_codex_reports_a_different_session(

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -22,6 +23,7 @@ COOL_NAMES_TABLE: Final = "cool_names"
 COOL_NAMES_MD5_INTS_UNIQUE_INDEX: Final = "cool_names_md5_ints_unique"
 ATTEMPTS_PER_WORD_COUNT: Final = 5
 RODEX_RESERVED_WORDS: Final = frozenset({"alias", "running"})
+_SAFE_RODEX_DISPLAY_NAME: Final = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$")
 
 _HALF_BITS: Final = 64
 _HALF_MODULUS: Final = 1 << _HALF_BITS
@@ -96,8 +98,9 @@ def allocate_unique_cool_name(
     generate_name = coolname.generate_slug if name_generator is None else name_generator
     for word_count in (2, 3):
         for _ in range(ATTEMPTS_PER_WORD_COUNT):
-            cool_name = _normalise_cool_name(generate_name(word_count))
-            if is_reserved_rodex_name(cool_name):
+            try:
+                cool_name = normalise_rodex_display_name(generate_name(word_count))
+            except CoolNameError:
                 continue
             md5_int_1, md5_int_2 = _cool_name_md5_signed_ints(cool_name)
             lookup_values = {
@@ -142,11 +145,7 @@ def reserve_specific_cool_name(
     if not connection.in_transaction:
         raise CoolNameError("cool-name allocation requires an active transaction")
     create_and_verify_cool_names_schema(connection)
-    normalised_name = _normalise_cool_name(cool_name)
-    if is_reserved_rodex_name(normalised_name):
-        raise ReservedCoolNameError(f"Rodex name is reserved: {normalised_name}")
-    if normalised_name.startswith("-"):
-        raise CoolNameError("Rodex names cannot start with '-'")
+    normalised_name = normalise_rodex_display_name(cool_name)
     md5_int_1, md5_int_2 = _cool_name_md5_signed_ints(normalised_name)
     existing_id = _lookup_cool_name_id_from_md5_ints(connection, md5_int_1, md5_int_2)
     if existing_id is not None:
@@ -185,6 +184,22 @@ def lookup_cool_name(
 def is_reserved_rodex_name(cool_name: str) -> bool:
     """Return whether a complete name is reserved for a Rodex command."""
     return _normalise_cool_name(cool_name).casefold() in RODEX_RESERVED_WORDS
+
+
+def normalise_rodex_display_name(cool_name: str) -> str:
+    """Validate the portable subset used for user-facing tmux session names."""
+    try:
+        normalised_name = _normalise_cool_name(cool_name)
+    except (TypeError, ValueError) as error:
+        raise CoolNameError(str(error)) from error
+    if not _SAFE_RODEX_DISPLAY_NAME.fullmatch(normalised_name):
+        raise CoolNameError(
+            "Rodex names must be 1-80 ASCII letters, digits, underscores, or "
+            "hyphens and must start with a letter or digit"
+        )
+    if is_reserved_rodex_name(normalised_name):
+        raise ReservedCoolNameError(f"Rodex name is reserved: {normalised_name}")
+    return normalised_name
 
 
 def create_and_verify_cool_names_schema(connection: sqlite3.Connection) -> None:

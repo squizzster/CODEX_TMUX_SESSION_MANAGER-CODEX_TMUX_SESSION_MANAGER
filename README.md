@@ -22,7 +22,8 @@ uv sync
 
 At the `›` prompt, Codex commands such as `/status` work normally. Detach without
 stopping Codex with `Ctrl-b d`. The tmux status line prominently shows the permanent
-cool name. Open a session by name; Rodex attaches it if live or resumes it if ended:
+generated name, or the preferred user-defined name when present. Open a session by
+either name; Rodex attaches it if live or resumes it if ended:
 
 ```bash
 ./rodex automatic-beluga
@@ -33,8 +34,10 @@ cool name. Open a session by name; Rodex attaches it if live or resumes it if en
 `alias` and `running` also work as `--alias` and `--running`. A session owns at most
 one user-defined name; replace it explicitly with `-f`, `--f`, `-force`, or `--force`.
 When present, that name is used in tmux, status, reattachment, and command output.
-The command words are reserved, case-insensitively, from automatic and user-defined
+The command words are reserved, case-insensitively, from generated and user-defined
 names. `running` reports only live sessions owned by the current POSIX user.
+Names use 1-80 ASCII letters, digits, underscores, or hyphens and must begin with an
+ASCII letter or digit. Named attach and resume are restricted to the owning POSIX user.
 
 The default database is `.rodex/rodex.sqlite3` beneath the launch directory. Set
 `RODEX_DATABASE_PATH` to use a different path. Runtime databases are ignored by Git.

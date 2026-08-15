@@ -146,7 +146,7 @@ def test_attach_uses_live_stdio_and_escapes_an_existing_tmux_client(
 
     launcher.attach(live)
 
-    assert runner.calls[-1][-3:] == ["attach-session", "-t", "rodex-one"]
+    assert runner.calls[-1][-3:] == ["attach-session", "-t", "=rodex-one"]
     assert "capture_output" not in runner.options[-1]
     environment = runner.options[-1]["env"]
     assert isinstance(environment, dict)
@@ -166,7 +166,7 @@ def test_session_exists_checks_the_exact_recorded_tmux_endpoint(tmp_path: Path) 
         str(tmp_path / "tmux.sock"),
         "has-session",
         "-t",
-        "automatic-beluga",
+        "=automatic-beluga",
     ]
     assert runner.options[-1]["check"] is False
 
@@ -185,20 +185,20 @@ def test_rename_and_status_configuration_use_the_real_tmux_session_name(
     assert runner.calls[0][-4:] == [
         "rename-session",
         "-t",
-        "rodex-token",
+        "=rodex-token",
         "automatic-beluga",
     ]
     assert [command[3:] for command in runner.calls[1:]] == [
-        ["set-option", "-t", "automatic-beluga", "status", "on"],
+        ["set-option", "-t", "=automatic-beluga", "status", "on"],
         [
             "set-option",
             "-t",
-            "automatic-beluga",
+            "=automatic-beluga",
             "status-left",
             "#[fg=green,bold] Rodex: #S #[fg=cyan,bold]| Tools: "
             "#{@rodex_tool_calls} #[default]",
         ],
-        ["set-option", "-t", "automatic-beluga", "status-left-length", "68"],
+        ["set-option", "-t", "=automatic-beluga", "status-left-length", "68"],
     ]
 
 
@@ -224,7 +224,7 @@ def test_more_than_one_loaded_codex_thread_aborts_the_exact_tmux_session(
     assert runner.calls[-1][-3:] == [
         "kill-session",
         "-t",
-        "rodex-0123456789abcdef",
+        "=rodex-0123456789abcdef",
     ]
 
 

@@ -50,6 +50,11 @@ class LiveRodexRuntime(LiveTmuxSession):
     protocol_proxy_socket_path: Path
 
 
+def _exact_tmux_session_target(session_name: str) -> str:
+    """Disable tmux prefix/glob matching for a recorded session identity."""
+    return f"={session_name}"
+
+
 class RodexRuntimeLauncher:
     """Start one private app-server/TUI pair and attach the user's terminal."""
 
@@ -142,19 +147,20 @@ class RodexRuntimeLauncher:
             runtime,
             "rename-session",
             "-t",
-            runtime.tmux_session_name,
+            _exact_tmux_session_target(runtime.tmux_session_name),
             session_name,
         )
         return replace(runtime, tmux_session_name=session_name)
 
     def configure_identity_status(self, runtime: LiveTmuxSession) -> None:
         """Show the Rodex cool name prominently in the tmux status line."""
-        self._tmux(runtime, "set-option", "-t", runtime.tmux_session_name, "status", "on")
+        target = _exact_tmux_session_target(runtime.tmux_session_name)
+        self._tmux(runtime, "set-option", "-t", target, "status", "on")
         self._tmux(
             runtime,
             "set-option",
             "-t",
-            runtime.tmux_session_name,
+            target,
             "status-left",
             "#[fg=green,bold] Rodex: #S #[fg=cyan,bold]| Tools: "
             "#{@rodex_tool_calls} #[default]",
@@ -163,7 +169,7 @@ class RodexRuntimeLauncher:
             runtime,
             "set-option",
             "-t",
-            runtime.tmux_session_name,
+            target,
             "status-left-length",
             "68",
         )
@@ -176,7 +182,7 @@ class RodexRuntimeLauncher:
             runtime,
             "attach-session",
             "-t",
-            runtime.tmux_session_name,
+            _exact_tmux_session_target(runtime.tmux_session_name),
             interactive=True,
             environment=environment,
         )
@@ -187,7 +193,7 @@ class RodexRuntimeLauncher:
             runtime,
             "has-session",
             "-t",
-            runtime.tmux_session_name,
+            _exact_tmux_session_target(runtime.tmux_session_name),
             check=False,
         )
         return result.returncode == 0
@@ -198,7 +204,7 @@ class RodexRuntimeLauncher:
             runtime,
             "kill-session",
             "-t",
-            runtime.tmux_session_name,
+            _exact_tmux_session_target(runtime.tmux_session_name),
             check=check,
         )
 

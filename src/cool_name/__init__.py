@@ -12,6 +12,7 @@ from .functions import (
     initialise_cool_names_database,
     is_reserved_rodex_name,
     lookup_cool_name,
+    normalise_rodex_display_name,
     reserve_specific_cool_name,
 )
 
@@ -27,5 +28,6 @@ __all__ = [
     "initialise_cool_names_database",
     "is_reserved_rodex_name",
     "lookup_cool_name",
+    "normalise_rodex_display_name",
     "reserve_specific_cool_name",
 ]

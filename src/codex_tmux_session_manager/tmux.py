@@ -38,6 +38,10 @@ def tmux_session_name(name: str) -> str:
     return f"{SESSION_PREFIX}{name}"
 
 
+def _exact_tmux_target(name: str) -> str:
+    return f"={name}"
+
+
 class TmuxSessions:
     """Create and control Codex processes hosted by tmux."""
 
@@ -78,34 +82,41 @@ class TmuxSessions:
             raise SessionError(f"session already exists: {name}")
 
         self._tmux("new-session", "-d", "-s", target, "-c", str(workspace))
+        exact_target = _exact_tmux_target(target)
         command = ["codex"]
         if prompt:
             command.append(prompt)
         try:
-            self._tmux("send-keys", "-t", target, "-l", shlex.join(command))
-            self._tmux("send-keys", "-t", target, "Enter")
+            self._tmux("send-keys", "-t", exact_target, "-l", shlex.join(command))
+            self._tmux("send-keys", "-t", exact_target, "Enter")
         except SessionError:
-            self._tmux("kill-session", "-t", target, check=False)
+            self._tmux("kill-session", "-t", exact_target, check=False)
             raise
 
     def attach(self, name: str) -> None:
         target = tmux_session_name(name)
+        exact_target = _exact_tmux_target(target)
         if not self.exists(name):
             raise SessionError(f"session does not exist: {name}")
         if os.environ.get("TMUX"):
-            self._tmux("switch-client", "-t", target, interactive=True)
+            self._tmux("switch-client", "-t", exact_target, interactive=True)
         else:
-            self._tmux("attach-session", "-t", target, interactive=True)
+            self._tmux("attach-session", "-t", exact_target, interactive=True)
 
     def stop(self, name: str) -> None:
         target = tmux_session_name(name)
         if not self.exists(name):
             raise SessionError(f"session does not exist: {name}")
-        self._tmux("kill-session", "-t", target)
+        self._tmux("kill-session", "-t", _exact_tmux_target(target))
 
     def exists(self, name: str) -> bool:
         target = tmux_session_name(name)
-        return self._tmux("has-session", "-t", target, check=False).returncode == 0
+        return (
+            self._tmux(
+                "has-session", "-t", _exact_tmux_target(target), check=False
+            ).returncode
+            == 0
+        )
 
     def _tmux(
         self, *arguments: str, check: bool = True, interactive: bool = False

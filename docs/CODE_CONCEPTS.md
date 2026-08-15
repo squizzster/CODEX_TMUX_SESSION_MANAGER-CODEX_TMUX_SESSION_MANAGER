@@ -20,6 +20,8 @@ Convenience belongs at the boundary; identity and state remain exact underneath 
 - The effective name remains consistent across tmux, status, and user communication.
 - Persisted runtime information is evidence of a link, not proof that a task is live.
 - Live-state answers verify the real runtime and remain scoped to the current POSIX user.
+- Attach and resume enforce that same owner boundary before touching a live runtime.
+- External runtime identities use exact matching rather than prefix or glob semantics.
 - Transparent protocol mediation is preferred to terminal scraping for machine signals.
 
 ## Change
@@ -29,6 +31,7 @@ Convenience belongs at the boundary; identity and state remain exact underneath 
 - Ownership, uniqueness, and availability are checked inside the mutating transaction.
 - Optional replacement is refused by default and requires an explicit force signal.
 - Failure cleanup targets only resources created by the failed operation.
+- Cross-system transitions compensate external changes when durable commit fails.
 - CLI code adapts arguments and output; domain libraries own rules and state transitions.
 - Errors name the failed contract and the next valid action; commands fail on stderr.
 

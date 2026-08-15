@@ -1,0 +1,22 @@
+[project]
+name = "codex-tmux-session-manager"
+version = "0.1.0"
+description = "Keep named Codex CLI sessions alive and navigable with tmux"
+readme = "README.md"
+authors = [
+    { name = "Mark", email = "squizzster@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = []
+
+[project.scripts]
+ctsm = "codex_tmux_session_manager:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.4.2",
+]
+
+[build-system]
+requires = ["uv_build>=0.12.1,<0.13.0"]
+build-backend = "uv_build"

@@ -21,6 +21,7 @@ from rodex_sql import (
 COOL_NAMES_TABLE: Final = "cool_names"
 COOL_NAMES_MD5_INTS_UNIQUE_INDEX: Final = "cool_names_md5_ints_unique"
 ATTEMPTS_PER_WORD_COUNT: Final = 5
+RODEX_RESERVED_WORDS: Final = frozenset({"alias", "running"})
 
 _HALF_BITS: Final = 64
 _HALF_MODULUS: Final = 1 << _HALF_BITS
@@ -48,6 +49,10 @@ class CoolNameError(RuntimeError):
 
 class CoolNameGenerationError(CoolNameError):
     """All configured cool-name candidates already exist."""
+
+
+class ReservedCoolNameError(CoolNameError):
+    """A requested cool name conflicts with Rodex command vocabulary."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,6 +97,8 @@ def allocate_unique_cool_name(
     for word_count in (2, 3):
         for _ in range(ATTEMPTS_PER_WORD_COUNT):
             cool_name = _normalise_cool_name(generate_name(word_count))
+            if is_reserved_rodex_name(cool_name):
+                continue
             md5_int_1, md5_int_2 = _cool_name_md5_signed_ints(cool_name)
             lookup_values = {
                 "cool_name_md5_int_1": md5_int_1,
@@ -124,14 +131,60 @@ def get_unique_id_from_cool_name(
     path = normalise_rodex_database_path(database_path)
     with open_rodex_transaction(path) as connection:
         create_and_verify_cool_names_schema(connection)
-        return select_lookup_id(
-            connection,
-            COOL_NAMES_TABLE,
-            {
-                "cool_name_md5_int_1": md5_int_1,
-                "cool_name_md5_int_2": md5_int_2,
-            },
-        )
+        return _lookup_cool_name_id_from_md5_ints(connection, md5_int_1, md5_int_2)
+
+
+def reserve_specific_cool_name(
+    connection: sqlite3.Connection,
+    cool_name: str,
+) -> CoolName:
+    """Select an exact available name first, inserting only when absent."""
+    if not connection.in_transaction:
+        raise CoolNameError("cool-name allocation requires an active transaction")
+    create_and_verify_cool_names_schema(connection)
+    normalised_name = _normalise_cool_name(cool_name)
+    if is_reserved_rodex_name(normalised_name):
+        raise ReservedCoolNameError(f"Rodex name is reserved: {normalised_name}")
+    if normalised_name.startswith("-"):
+        raise CoolNameError("Rodex names cannot start with '-'")
+    md5_int_1, md5_int_2 = _cool_name_md5_signed_ints(normalised_name)
+    existing_id = _lookup_cool_name_id_from_md5_ints(connection, md5_int_1, md5_int_2)
+    if existing_id is not None:
+        row = connection.execute(
+            f"SELECT cool_name FROM {COOL_NAMES_TABLE} WHERE id = ?",
+            (existing_id,),
+        ).fetchone()
+        if row is None or str(row[0]) != normalised_name:
+            raise CoolNameError("derived cool-name identity is already occupied")
+        return CoolName(id=existing_id, cool_name=normalised_name)
+    cursor = connection.execute(
+        f"INSERT INTO {COOL_NAMES_TABLE} "
+        "(cool_name_md5_int_1, cool_name_md5_int_2, cool_name) VALUES (?, ?, ?)",
+        (md5_int_1, md5_int_2, normalised_name),
+    )
+    if cursor.lastrowid is None:
+        raise CoolNameError("SQLite did not return a cool-name id")
+    return CoolName(id=cursor.lastrowid, cool_name=normalised_name)
+
+
+def lookup_cool_name(
+    connection: sqlite3.Connection,
+    cool_name: str,
+) -> CoolName | None:
+    """Resolve one name through its integer MD5 identity in an active transaction."""
+    if not connection.in_transaction:
+        raise CoolNameError("cool-name lookup requires an active transaction")
+    normalised_name = _normalise_cool_name(cool_name)
+    md5_int_1, md5_int_2 = _cool_name_md5_signed_ints(normalised_name)
+    cool_names_id = _lookup_cool_name_id_from_md5_ints(connection, md5_int_1, md5_int_2)
+    if cool_names_id is None:
+        return None
+    return CoolName(id=cool_names_id, cool_name=normalised_name)
+
+
+def is_reserved_rodex_name(cool_name: str) -> bool:
+    """Return whether a complete name is reserved for a Rodex command."""
+    return _normalise_cool_name(cool_name).casefold() in RODEX_RESERVED_WORDS
 
 
 def create_and_verify_cool_names_schema(connection: sqlite3.Connection) -> None:
@@ -149,6 +202,21 @@ def _cool_name_md5_signed_ints(cool_name: str) -> tuple[int, int]:
     high_unsigned = int.from_bytes(digest[:8], byteorder="big")
     low_unsigned = int.from_bytes(digest[8:], byteorder="big")
     return _unsigned_half_to_signed(high_unsigned), _unsigned_half_to_signed(low_unsigned)
+
+
+def _lookup_cool_name_id_from_md5_ints(
+    connection: sqlite3.Connection,
+    md5_int_1: int,
+    md5_int_2: int,
+) -> int | None:
+    return select_lookup_id(
+        connection,
+        COOL_NAMES_TABLE,
+        {
+            "cool_name_md5_int_1": md5_int_1,
+            "cool_name_md5_int_2": md5_int_2,
+        },
+    )
 
 
 def _unsigned_half_to_signed(value: int) -> int:

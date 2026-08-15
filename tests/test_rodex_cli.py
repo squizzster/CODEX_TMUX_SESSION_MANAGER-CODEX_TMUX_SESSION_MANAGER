@@ -1,22 +1,25 @@
 from __future__ import annotations
 
 import os
+import sys
 import uuid
 from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
-from rodex.cli import RodexLaunchError, run
+from rodex.cli import RodexLaunchError, main, run
 from rodex.runtime import LiveRodexRuntime, LiveTmuxSession
 from rodex_functions import (
     RodexSessionsUserIdentity,
+    assign_a_user_defined_cool_name,
     create_a_rodex_session,
     lookup_codex_uuid_from_a_rodex_session_id,
     lookup_rodex_tmux_session,
 )
 
 CODEX_UUID = uuid.UUID("01a00654-f2bc-7a30-834a-a5f886a65f82")
+DNA = RodexSessionsUserIdentity(1009, 1010, "dna")
 
 
 class StubLauncher:
@@ -192,6 +195,188 @@ def test_ended_cool_name_argument_transparently_resumes_its_codex_session(
     assert f"Resumed Rodex automatic-beluga -> Codex {CODEX_UUID}" in (
         capsys.readouterr().out
     )
+
+
+@pytest.mark.parametrize("lookup_name", ["black-sawfly", "work"])
+def test_either_name_route_displays_the_user_defined_name(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    lookup_name: str,
+) -> None:
+    database = tmp_path / "rodex.sqlite3"
+    monkeypatch.setattr(
+        "cool_name.functions.coolname.generate_slug",
+        lambda _word_count: "black-sawfly",
+    )
+    create_a_rodex_session(
+        database,
+        codex_session_uuid=CODEX_UUID,
+        user_identity=DNA,
+        tmux_server_socket_path=tmp_path / "tmux.sock",
+        tmux_session_name="black-sawfly",
+    )
+    assign_a_user_defined_cool_name("black-sawfly", "work", database, user_identity=DNA)
+    launcher = StubLauncher(tmp_path)
+    monkeypatch.setattr(
+        "rodex.cli.shutil.which",
+        lambda command: None if command == "codex" else available_prerequisite(command),
+    )
+
+    assert run([lookup_name], database_path=database, launcher=launcher) == 0  # type: ignore[arg-type]
+
+    assert launcher.renamed == [
+        (LiveTmuxSession(tmp_path / "tmux.sock", "black-sawfly"), "work")
+    ]
+    assert launcher.configured == [LiveTmuxSession(tmp_path / "tmux.sock", "work")]
+    tmux_link = lookup_rodex_tmux_session(1, database)
+    assert tmux_link is not None
+    assert tmux_link.tmux_session_name == "work"
+    assert "Reattaching Rodex work" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("command", ["alias", "--alias"])
+@pytest.mark.parametrize("force_flag", ["-f", "--f", "-force", "--force"])
+def test_alias_commands_accept_every_force_spelling_without_starting_codex(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    command: str,
+    force_flag: str,
+) -> None:
+    database = tmp_path / "rodex.sqlite3"
+    monkeypatch.setattr(
+        "cool_name.functions.coolname.generate_slug",
+        lambda _word_count: "black-sawfly",
+    )
+    monkeypatch.setattr(
+        "rodex_functions.sessions.current_rodex_sessions_user_identity", lambda: DNA
+    )
+    monkeypatch.setattr(
+        "rodex.cli.shutil.which",
+        lambda name: None if name == "codex" else available_prerequisite(name),
+    )
+    create_a_rodex_session(
+        database,
+        codex_session_uuid=CODEX_UUID,
+        user_identity=DNA,
+        tmux_server_socket_path=tmp_path / "tmux.sock",
+        tmux_session_name="black-sawfly",
+    )
+    launcher = StubLauncher(tmp_path)
+
+    assert (
+        run(
+            [command, "black-sawfly", "first"],
+            database_path=database,
+            launcher=launcher,  # type: ignore[arg-type]
+        )
+        == 0
+    )
+    assert (
+        run(
+            [command, force_flag, "black-sawfly", "replacement"],
+            database_path=database,
+            launcher=launcher,  # type: ignore[arg-type]
+        )
+        == 0
+    )
+
+    assert launcher.started == []
+    assert [name for _, name in launcher.renamed] == ["first", "replacement"]
+    assert launcher.configured[-1].tmux_session_name == "replacement"
+    tmux_link = lookup_rodex_tmux_session(1, database)
+    assert tmux_link is not None
+    assert tmux_link.tmux_session_name == "replacement"
+    assert "Rodex name: replacement" in capsys.readouterr().out
+
+
+def test_alias_replacement_without_force_is_reported_on_stderr(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    database = tmp_path / "rodex.sqlite3"
+    monkeypatch.setattr(
+        "cool_name.functions.coolname.generate_slug",
+        lambda _word_count: "black-sawfly",
+    )
+    monkeypatch.setattr(
+        "rodex_functions.sessions.current_rodex_sessions_user_identity", lambda: DNA
+    )
+    monkeypatch.setattr(
+        "rodex.cli.shutil.which",
+        lambda name: None if name == "codex" else available_prerequisite(name),
+    )
+    create_a_rodex_session(
+        database,
+        codex_session_uuid=CODEX_UUID,
+        user_identity=DNA,
+        tmux_server_socket_path=tmp_path / "tmux.sock",
+        tmux_session_name="black-sawfly",
+    )
+    assign_a_user_defined_cool_name("black-sawfly", "first", database, user_identity=DNA)
+    monkeypatch.setenv("RODEX_DATABASE_PATH", str(database))
+    monkeypatch.setattr(sys, "argv", ["rodex", "alias", "black-sawfly", "replacement"])
+
+    with pytest.raises(SystemExit) as raised:
+        main()
+
+    assert raised.value.code == 127
+    assert "use -f or --force" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("command", ["running", "--running"])
+def test_running_commands_show_only_the_current_users_live_sessions(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    command: str,
+) -> None:
+    database = tmp_path / "rodex.sqlite3"
+    monkeypatch.setattr(
+        "cool_name.functions.coolname.generate_slug",
+        lambda _word_count: "black-sawfly",
+    )
+    create_a_rodex_session(
+        database,
+        codex_session_uuid=CODEX_UUID,
+        user_identity=DNA,
+        tmux_server_socket_path=tmp_path / "dna.sock",
+        tmux_session_name="black-sawfly",
+    )
+    monkeypatch.setattr(
+        "cool_name.functions.coolname.generate_slug",
+        lambda _word_count: "silver-otter",
+    )
+    create_a_rodex_session(
+        database,
+        codex_session_uuid=uuid.UUID(int=CODEX_UUID.int + 1),
+        user_identity=RodexSessionsUserIdentity(2001, 2002, "other"),
+        tmux_server_socket_path=tmp_path / "other.sock",
+        tmux_session_name="silver-otter",
+    )
+    assign_a_user_defined_cool_name("black-sawfly", "work", database, user_identity=DNA)
+    monkeypatch.setattr(
+        "rodex_functions.sessions.current_rodex_sessions_user_identity", lambda: DNA
+    )
+    monkeypatch.setattr(
+        "rodex.cli.shutil.which",
+        lambda name: None if name == "codex" else available_prerequisite(name),
+    )
+    launcher = StubLauncher(tmp_path)
+
+    assert run([command], database_path=database, launcher=launcher) == 0  # type: ignore[arg-type]
+
+    assert launcher.started == []
+    assert launcher.existing_checks == [
+        LiveTmuxSession(tmp_path / "dna.sock", "black-sawfly")
+    ]
+    output = capsys.readouterr().out
+    assert "Running Rodex sessions: 1" in output
+    assert f"work -> Codex {CODEX_UUID}" in output
+    assert "black-sawfly" not in output
+    assert "silver-otter" not in output
 
 
 def test_resume_stops_new_runtime_if_codex_reports_a_different_session(

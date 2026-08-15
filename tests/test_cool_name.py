@@ -8,10 +8,12 @@ from pathlib import Path
 import pytest
 
 from cool_name import (
+    RODEX_RESERVED_WORDS,
     CoolNameGenerationError,
     get_unique_id_from_cool_name,
     get_unique_new_cool_name,
     initialise_cool_names_database,
+    is_reserved_rodex_name,
 )
 from rodex_functions import create_a_rodex_session, initialise_rodex_database
 
@@ -115,6 +117,29 @@ def test_ten_blocked_names_fail_after_exactly_five_attempts_at_each_size(
     assert requested_word_counts == [2, 2, 2, 2, 2, 3, 3, 3, 3, 3]
     assert fetch_all(database, "SELECT id, cool_name FROM cool_names") == [
         (1, "blocked-name")
+    ]
+
+
+def test_reserved_names_are_case_insensitive_and_automatic_allocation_skips_them(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "rodex.sqlite3"
+    requested_word_counts: list[int] = []
+
+    def generate_name(word_count: int) -> str:
+        requested_word_counts.append(word_count)
+        return "RUNNING" if word_count == 2 else "fresh-three-name"
+
+    assert frozenset({"alias", "running"}) == RODEX_RESERVED_WORDS
+    assert is_reserved_rodex_name("Alias")
+    assert is_reserved_rodex_name("RUNNING")
+    assert not is_reserved_rodex_name("running-fox")
+    assert get_unique_new_cool_name(database, name_generator=generate_name) == (
+        "fresh-three-name"
+    )
+    assert requested_word_counts == [2, 2, 2, 2, 2, 3]
+    assert fetch_all(database, "SELECT id, cool_name FROM cool_names") == [
+        (1, "fresh-three-name")
     ]
 
 

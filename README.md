@@ -1,4 +1,4 @@
-# Rodex
+# Rodex - whenever you type `codex` try instead `rodex`
 
 Rodex makes Codex CLI sessions durable and memorable by running them inside tmux.
 Start normally with `./rodex`, detach when needed, and return later using a generated

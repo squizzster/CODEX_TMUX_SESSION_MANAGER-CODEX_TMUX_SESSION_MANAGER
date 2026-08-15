@@ -116,7 +116,7 @@ def _open_named_session(
     names = lookup_rodex_session_names(session_id, database_path)
     if names is None:
         raise RodexLaunchError(f"Rodex session disappeared: {cool_name}")
-    permanent_cool_name = names.cool_name
+    display_name = names.display_name
     tmux_link = lookup_rodex_tmux_session(session_id, database_path)
     if tmux_link is None:
         raise RodexLaunchError(f"Rodex session has no tmux endpoint: {cool_name}")
@@ -128,13 +128,13 @@ def _open_named_session(
         active_tmux = _prepare_tmux_identity(
             launcher,
             recorded_tmux,
-            permanent_cool_name,
+            display_name,
             session_id,
             database_path,
         )
         record_a_rodex_session_access(session_id, database_path)
         print(
-            f"Reattaching Rodex {permanent_cool_name} ({active_tmux.tmux_session_name})",
+            f"Reattaching Rodex {display_name} ({active_tmux.tmux_session_name})",
             flush=True,
         )
         launcher.attach(active_tmux)
@@ -162,7 +162,7 @@ def _open_named_session(
         active_tmux = _prepare_tmux_identity(
             launcher,
             active_tmux,
-            permanent_cool_name,
+            display_name,
             session_id,
             database_path,
             persist_name=False,
@@ -178,7 +178,7 @@ def _open_named_session(
         raise
 
     print(
-        f"Resumed Rodex {permanent_cool_name} -> Codex {codex_session_uuid} "
+        f"Resumed Rodex {display_name} -> Codex {codex_session_uuid} "
         f"({active_tmux.tmux_session_name})",
         flush=True,
     )
@@ -208,10 +208,21 @@ def _run_reserved_command(
         names = assign_a_user_defined_cool_name(
             operands[0], operands[1], database_path, force=force
         )
-        print(
-            f"Rodex {names.cool_name} alias: {names.user_defined_cool_name}",
-            flush=True,
-        )
+        tmux_link = lookup_rodex_tmux_session(names.rodex_sessions_id, database_path)
+        if tmux_link is not None:
+            recorded_tmux = LiveTmuxSession(
+                tmux_server_socket_path=Path(tmux_link.tmux_server_socket_path),
+                tmux_session_name=tmux_link.tmux_session_name,
+            )
+            if launcher.session_exists(recorded_tmux):
+                _prepare_tmux_identity(
+                    launcher,
+                    recorded_tmux,
+                    names.display_name,
+                    names.rodex_sessions_id,
+                    database_path,
+                )
+        print(f"Rodex name: {names.display_name}", flush=True)
         return True
     return False
 
@@ -249,13 +260,8 @@ def _print_running_sessions(
         return
     print(f"Running Rodex sessions: {len(running)}", flush=True)
     for runtime in running:
-        alias = (
-            ""
-            if runtime.user_defined_cool_name is None
-            else f" [{runtime.user_defined_cool_name}]"
-        )
         print(
-            f"{runtime.cool_name}{alias} -> Codex {runtime.codex_session_uuid}",
+            f"{runtime.display_name} -> Codex {runtime.codex_session_uuid}",
             flush=True,
         )
 

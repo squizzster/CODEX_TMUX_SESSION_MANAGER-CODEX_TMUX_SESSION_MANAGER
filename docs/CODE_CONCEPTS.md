@@ -7,8 +7,8 @@ Convenience belongs at the boundary; identity and state remain exact underneath 
 
 - Rodex, Codex, tmux, users, and names are separate domains with explicit links.
 - Never present, store, or pass one domain's identity as another domain's identity.
-- A permanent generated name is the canonical operational identity for a session.
-- A user-defined name is an optional lookup alias, never a replacement for the anchor.
+- A permanent generated name is the immutable storage anchor for a session.
+- A user-defined name, when present, is its preferred outward identity everywhere.
 - User-facing names resolve once to an integer session identity; later work uses that id.
 - Names should reveal domain, purpose, and direction without requiring distant context.
 
@@ -17,7 +17,7 @@ Convenience belongs at the boundary; identity and state remain exact underneath 
 - Equivalent intent enters one authoritative domain pipeline regardless of CLI spelling.
 - Common actions may use bare words; their `--` forms must behave identically.
 - Command vocabulary is centralized and excluded from every name-allocation route.
-- Stable names remain canonical in tmux, status, logs, and operational communication.
+- The effective name remains consistent across tmux, status, and user communication.
 - Persisted runtime information is evidence of a link, not proof that a task is live.
 - Live-state answers verify the real runtime and remain scoped to the current POSIX user.
 - Transparent protocol mediation is preferred to terminal scraping for machine signals.

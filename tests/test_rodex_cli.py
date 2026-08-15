@@ -197,10 +197,12 @@ def test_ended_cool_name_argument_transparently_resumes_its_codex_session(
     )
 
 
-def test_opening_by_alias_keeps_the_permanent_name_on_tmux(
+@pytest.mark.parametrize("lookup_name", ["black-sawfly", "work"])
+def test_either_name_route_displays_the_user_defined_name(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
+    lookup_name: str,
 ) -> None:
     database = tmp_path / "rodex.sqlite3"
     monkeypatch.setattr(
@@ -221,11 +223,16 @@ def test_opening_by_alias_keeps_the_permanent_name_on_tmux(
         lambda command: None if command == "codex" else available_prerequisite(command),
     )
 
-    assert run(["work"], database_path=database, launcher=launcher) == 0  # type: ignore[arg-type]
+    assert run([lookup_name], database_path=database, launcher=launcher) == 0  # type: ignore[arg-type]
 
-    assert launcher.renamed == []
-    assert launcher.configured == [LiveTmuxSession(tmp_path / "tmux.sock", "black-sawfly")]
-    assert "Reattaching Rodex black-sawfly" in capsys.readouterr().out
+    assert launcher.renamed == [
+        (LiveTmuxSession(tmp_path / "tmux.sock", "black-sawfly"), "work")
+    ]
+    assert launcher.configured == [LiveTmuxSession(tmp_path / "tmux.sock", "work")]
+    tmux_link = lookup_rodex_tmux_session(1, database)
+    assert tmux_link is not None
+    assert tmux_link.tmux_session_name == "work"
+    assert "Reattaching Rodex work" in capsys.readouterr().out
 
 
 @pytest.mark.parametrize("command", ["alias", "--alias"])
@@ -276,7 +283,12 @@ def test_alias_commands_accept_every_force_spelling_without_starting_codex(
     )
 
     assert launcher.started == []
-    assert "Rodex black-sawfly alias: replacement" in capsys.readouterr().out
+    assert [name for _, name in launcher.renamed] == ["first", "replacement"]
+    assert launcher.configured[-1].tmux_session_name == "replacement"
+    tmux_link = lookup_rodex_tmux_session(1, database)
+    assert tmux_link is not None
+    assert tmux_link.tmux_session_name == "replacement"
+    assert "Rodex name: replacement" in capsys.readouterr().out
 
 
 def test_alias_replacement_without_force_is_reported_on_stderr(
@@ -362,7 +374,8 @@ def test_running_commands_show_only_the_current_users_live_sessions(
     ]
     output = capsys.readouterr().out
     assert "Running Rodex sessions: 1" in output
-    assert f"black-sawfly [work] -> Codex {CODEX_UUID}" in output
+    assert f"work -> Codex {CODEX_UUID}" in output
+    assert "black-sawfly" not in output
     assert "silver-otter" not in output
 
 

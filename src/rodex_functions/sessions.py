@@ -205,6 +205,11 @@ class RodexSessionNames:
     cool_name: str
     user_defined_cool_name: str | None
 
+    @property
+    def display_name(self) -> str:
+        """Return the user-defined name when present, otherwise the generated name."""
+        return self.user_defined_cool_name or self.cool_name
+
 
 @dataclass(frozen=True, slots=True)
 class RodexSessionRuntime:
@@ -216,6 +221,11 @@ class RodexSessionRuntime:
     codex_session_uuid: uuid.UUID
     tmux_server_socket_path: str
     tmux_session_name: str
+
+    @property
+    def display_name(self) -> str:
+        """Return the effective user-facing name for this runtime."""
+        return self.user_defined_cool_name or self.cool_name
 
 
 def default_rodex_database_path() -> Path:

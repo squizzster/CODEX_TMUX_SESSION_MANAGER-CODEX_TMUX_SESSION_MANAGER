@@ -31,7 +31,8 @@ cool name. Open a session by name; Rodex attaches it if live or resumes it if en
 ```
 
 `alias` and `running` also work as `--alias` and `--running`. A session owns at most
-one user-defined alias; replace it explicitly with `-f`, `--f`, `-force`, or `--force`.
+one user-defined name; replace it explicitly with `-f`, `--f`, `-force`, or `--force`.
+When present, that name is used in tmux, status, reattachment, and command output.
 The command words are reserved, case-insensitively, from automatic and user-defined
 names. `running` reports only live sessions owned by the current POSIX user.
 
@@ -175,4 +176,4 @@ Every Rodex creation allocates a cool name in the same transaction and stores it
 integer `cool_names_id` directly on `rodex_sessions`. The foreign key and unique index
 enforce one valid permanent name per session and prevent reuse across sessions. The
 nullable `user_defined_cool_names_id` reserves a separate, uniquely indexed cool-name
-identity for the optional user-defined descriptive name without replacing the original.
+identity for the preferred user-defined name while retaining the generated storage anchor.

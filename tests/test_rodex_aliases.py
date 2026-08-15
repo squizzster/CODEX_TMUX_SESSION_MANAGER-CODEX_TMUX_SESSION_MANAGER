@@ -80,6 +80,7 @@ def test_alias_is_one_owned_integer_identity_and_force_replaces_it(
 
     assert replaced.user_defined_cool_name == "replacement"
     assert lookup_rodex_session_id_from_a_cool_name("user_defined_field", database) is None
+    assert lookup_rodex_session_id_from_a_cool_name("black-sawfly", database) == session_id
     assert lookup_rodex_session_id_from_a_cool_name("replacement", database) == session_id
     assert lookup_rodex_session_names(session_id, database) == replaced
     assert _cool_names(database) == [
@@ -154,4 +155,5 @@ def test_runtime_listing_is_filtered_by_the_complete_posix_user_lookup(
     assert runtimes[0].rodex_sessions_id == session_id
     assert runtimes[0].cool_name == "black-sawfly"
     assert runtimes[0].user_defined_cool_name == "work"
+    assert runtimes[0].display_name == "work"
     assert runtimes[0].codex_session_uuid == uuid.UUID(int=1)

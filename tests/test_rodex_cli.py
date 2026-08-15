@@ -263,7 +263,7 @@ def test_run_links_real_codex_and_tmux_identities_before_attach(
     assert "Rodex automatic-beluga" in output
 
 
-@pytest.mark.parametrize("create_flag", ["-c", "--c", "-create", "--create"])
+@pytest.mark.parametrize("create_flag", ["--c", "-create", "--create"])
 def test_explicit_create_assigns_the_requested_display_name(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -295,6 +295,117 @@ def test_explicit_create_assigns_the_requested_display_name(
     tmux_link = lookup_rodex_tmux_session(1, database)
     assert tmux_link is not None
     assert tmux_link.tmux_session_name == "project_1234"
+
+
+@pytest.mark.parametrize("create_flag", ["--c", "-create", "--create"])
+def test_explicit_create_forwards_ordinary_codex_options(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    create_flag: str,
+) -> None:
+    database = tmp_path / "rodex.sqlite3"
+    launcher = StubLauncher(tmp_path)
+    monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
+    monkeypatch.setattr(
+        "cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga"
+    )
+
+    assert (
+        run(
+            [create_flag, "project_1234", "--model", "gpt-5.6-luna"],
+            database_path=database,
+            launcher=launcher,  # type: ignore[arg-type]
+        )
+        == 0
+    )
+
+    assert launcher.started == [
+        (Path.cwd(), ["--model", "gpt-5.6-luna"]),
+    ]
+    names = lookup_rodex_session_names(1, database)
+    assert names is not None
+    assert names.display_name == "project_1234"
+
+
+def test_codex_short_config_wins_over_rodex_create(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database = tmp_path / "rodex.sqlite3"
+    launcher = StubLauncher(tmp_path)
+    monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
+    monkeypatch.setattr(
+        "cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga"
+    )
+
+    assert (
+        run(
+            ["-c", 'model="gpt-5.6-luna"'],
+            database_path=database,
+            launcher=launcher,  # type: ignore[arg-type]
+        )
+        == 0
+    )
+
+    assert launcher.started == [(Path.cwd(), ["-c", 'model="gpt-5.6-luna"'])]
+    names = lookup_rodex_session_names(1, database)
+    assert names is not None
+    assert names.user_defined_cool_name is None
+
+
+@pytest.mark.parametrize(
+    "codex_argument",
+    ["--create", "--c", "-create", "-d", "--d", "-detach", "--detach"],
+)
+def test_codex_end_of_options_preserves_rodex_looking_arguments(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    codex_argument: str,
+) -> None:
+    database = tmp_path / "rodex.sqlite3"
+    launcher = StubLauncher(tmp_path)
+    monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
+    monkeypatch.setattr(
+        "cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga"
+    )
+
+    assert (
+        run(
+            ["exec", "--", codex_argument],
+            database_path=database,
+            launcher=launcher,  # type: ignore[arg-type]
+        )
+        == 0
+    )
+
+    assert launcher.started == [(Path.cwd(), ["exec", "--", codex_argument])]
+    assert launcher.attached == launcher.configured
+
+
+def test_explicit_create_can_forward_codex_arguments_after_end_of_options(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database = tmp_path / "rodex.sqlite3"
+    launcher = StubLauncher(tmp_path)
+    monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
+    monkeypatch.setattr(
+        "cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga"
+    )
+
+    assert (
+        run(
+            ["--create", "project_1234", "--", "--create"],
+            database_path=database,
+            launcher=launcher,  # type: ignore[arg-type]
+        )
+        == 0
+    )
+
+    assert launcher.started == [(Path.cwd(), ["--", "--create"])]
+    names = lookup_rodex_session_names(1, database)
+    assert names is not None
+    assert names.display_name == "project_1234"
 
 
 @pytest.mark.parametrize("detach_flag", ["-d", "--d", "-detach", "--detach"])

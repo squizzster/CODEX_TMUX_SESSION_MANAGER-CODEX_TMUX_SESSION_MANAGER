@@ -131,10 +131,50 @@ def test_reserved_names_are_case_insensitive_and_automatic_allocation_skips_them
         return "RUNNING" if word_count == 2 else "fresh-three-name"
 
     assert (
-        frozenset({"alias", "create", "detach", "running", "send", "tail", "wait"})
+        frozenset(
+            {
+                "a",
+                "alias",
+                "app-server",
+                "apply",
+                "archive",
+                "cloud",
+                "completion",
+                "create",
+                "debug",
+                "delete",
+                "detach",
+                "doctor",
+                "e",
+                "exec",
+                "exec-server",
+                "execpolicy",
+                "features",
+                "fork",
+                "help",
+                "login",
+                "logout",
+                "mcp",
+                "mcp-server",
+                "plugin",
+                "remote-control",
+                "responses-api-proxy",
+                "resume",
+                "review",
+                "running",
+                "sandbox",
+                "send",
+                "stdio-to-uds",
+                "tail",
+                "unarchive",
+                "update",
+                "wait",
+            }
+        )
         == RODEX_RESERVED_WORDS
     )
     assert is_reserved_rodex_name("Alias")
+    assert is_reserved_rodex_name("EXEC")
     assert is_reserved_rodex_name("RUNNING")
     assert not is_reserved_rodex_name("running-fox")
     assert get_unique_new_cool_name(database, name_generator=generate_name) == (
@@ -143,6 +183,24 @@ def test_reserved_names_are_case_insensitive_and_automatic_allocation_skips_them
     assert requested_word_counts == [2, 2, 2, 2, 2, 3]
     assert fetch_all(database, "SELECT id, cool_name FROM cool_names") == [
         (1, "fresh-three-name")
+    ]
+
+
+@pytest.mark.parametrize("reserved_name", sorted(RODEX_RESERVED_WORDS))
+def test_automatic_allocation_skips_every_reserved_name_without_consuming_an_id(
+    tmp_path: Path,
+    reserved_name: str,
+) -> None:
+    database = tmp_path / "rodex.sqlite3"
+    candidates = iter([reserved_name.upper(), "safe-generated-name"])
+
+    allocated = get_unique_new_cool_name(
+        database, name_generator=lambda _word_count: next(candidates)
+    )
+
+    assert allocated == "safe-generated-name"
+    assert fetch_all(database, "SELECT id, cool_name FROM cool_names") == [
+        (1, "safe-generated-name")
     ]
 
 

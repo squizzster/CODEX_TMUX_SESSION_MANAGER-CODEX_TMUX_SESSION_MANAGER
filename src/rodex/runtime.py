@@ -19,11 +19,20 @@ from typing import Any, Final
 from websockets.exceptions import ConnectionClosed, InvalidHandshake
 from websockets.sync.client import unix_connect
 
-from .protocol_proxy import CodexProtocolProxy, TmuxToolCallStatus, ToolCallCounter
+from .control import LiveRodexControl
+from .protocol_proxy import (
+    CodexProtocolEventTap,
+    CodexProtocolProxy,
+    TmuxToolCallStatus,
+    ToolCallCounter,
+)
 
 SUN_PATH_MAX_BYTES: Final = 107
 DEFAULT_STARTUP_TIMEOUT_SECONDS: Final = 15.0
 _POLL_INTERVAL_SECONDS: Final = 0.05
+_PROXY_SOCKET_OPTION: Final = "@rodex_protocol_proxy_socket_path"
+_EVENT_SOCKET_OPTION: Final = "@rodex_protocol_event_socket_path"
+_CODEX_UUID_OPTION: Final = "@rodex_codex_session_uuid"
 
 Runner = Callable[..., subprocess.CompletedProcess[str]]
 Connector = Callable[..., Any]
@@ -48,6 +57,7 @@ class LiveRodexRuntime(LiveTmuxSession):
     app_server_socket_path: Path
     app_server_log_path: Path
     protocol_proxy_socket_path: Path
+    protocol_event_socket_path: Path
 
 
 def _exact_tmux_session_target(session_name: str) -> str:
@@ -100,10 +110,12 @@ class RodexRuntimeLauncher:
             app_server_socket_path=runtime_root / f"app-{token}.sock",
             app_server_log_path=runtime_root / f"app-{token}.log",
             protocol_proxy_socket_path=runtime_root / f"proxy-{token}.sock",
+            protocol_event_socket_path=runtime_root / f"events-{token}.sock",
         )
         _require_short_unix_socket_path(runtime.tmux_server_socket_path)
         _require_short_unix_socket_path(runtime.app_server_socket_path)
         _require_short_unix_socket_path(runtime.protocol_proxy_socket_path)
+        _require_short_unix_socket_path(runtime.protocol_event_socket_path)
 
         host_command = shlex.join(
             [
@@ -118,6 +130,8 @@ class RodexRuntimeLauncher:
                 str(runtime.app_server_log_path),
                 "--protocol-proxy-socket",
                 str(runtime.protocol_proxy_socket_path),
+                "--protocol-event-socket",
+                str(runtime.protocol_event_socket_path),
                 "--tmux-binary",
                 self._tmux_binary,
                 "--tmux-server-socket",
@@ -138,10 +152,37 @@ class RodexRuntimeLauncher:
         )
         try:
             codex_uuid = self._wait_for_single_codex_uuid(runtime)
+            self.publish_runtime_control(runtime, codex_uuid)
         except BaseException:
             self.stop(runtime, check=False)
             raise
         return runtime, codex_uuid
+
+    def publish_runtime_control(
+        self, runtime: LiveRodexRuntime, codex_session_uuid: uuid.UUID
+    ) -> None:
+        """Advertise live-only control metadata inside the owning tmux session."""
+        target = _exact_tmux_pane_target(runtime.tmux_session_name)
+        for option_name, value in (
+            (_PROXY_SOCKET_OPTION, str(runtime.protocol_proxy_socket_path)),
+            (_EVENT_SOCKET_OPTION, str(runtime.protocol_event_socket_path)),
+            (_CODEX_UUID_OPTION, str(codex_session_uuid)),
+        ):
+            self._tmux(runtime, "set-option", "-t", target, option_name, value)
+
+    def discover_runtime_control(self, runtime: LiveTmuxSession) -> LiveRodexControl:
+        """Read the current control endpoints from one exact live tmux session."""
+        target = _exact_tmux_pane_target(runtime.tmux_session_name)
+        proxy_path = self._read_tmux_option(runtime, target, _PROXY_SOCKET_OPTION)
+        event_path = self._read_tmux_option(runtime, target, _EVENT_SOCKET_OPTION)
+        codex_uuid_text = self._read_tmux_option(runtime, target, _CODEX_UUID_OPTION)
+        try:
+            codex_uuid = uuid.UUID(codex_uuid_text)
+        except ValueError as error:
+            raise RodexRuntimeError(
+                "live tmux session advertised an invalid Codex UUID"
+            ) from error
+        return LiveRodexControl(Path(proxy_path), Path(event_path), codex_uuid)
 
     def rename(self, runtime: LiveTmuxSession, tmux_session_name: str) -> LiveTmuxSession:
         """Rename one exact tmux session and return its updated address."""
@@ -309,6 +350,25 @@ class RodexRuntimeLauncher:
             detail = (error.stderr or error.stdout or "tmux command failed").strip()
             raise RodexRuntimeError(detail) from error
 
+    def _read_tmux_option(
+        self,
+        runtime: LiveTmuxSession,
+        target: str,
+        option_name: str,
+    ) -> str:
+        result = self._tmux(
+            runtime,
+            "show-options",
+            "-v",
+            "-t",
+            target,
+            option_name,
+        )
+        value = result.stdout.strip()
+        if not value:
+            raise RodexRuntimeError(f"live tmux session does not advertise {option_name}")
+        return value
+
 
 def default_runtime_root() -> Path:
     """Return a short, private Linux runtime directory shared by Rodex sessions."""
@@ -330,6 +390,7 @@ def run_session_host(
     app_server_socket_path: Path,
     app_server_log_path: Path,
     protocol_proxy_socket_path: Path,
+    protocol_event_socket_path: Path,
     tmux_binary: str,
     tmux_server_socket_path: Path,
     codex_arguments: Sequence[str],
@@ -337,9 +398,11 @@ def run_session_host(
     """Supervise the app-server, protocol proxy, and foreground Codex TUI."""
     app_server_socket_path.unlink(missing_ok=True)
     protocol_proxy_socket_path.unlink(missing_ok=True)
+    protocol_event_socket_path.unlink(missing_ok=True)
     app_server_log_path.parent.mkdir(parents=True, exist_ok=True)
     app_server: subprocess.Popen[bytes] | None = None
     protocol_proxy: CodexProtocolProxy | None = None
+    protocol_event_tap: CodexProtocolEventTap | None = None
 
     def stop_on_signal(signum: int, _frame: object) -> None:
         raise SystemExit(128 + signum)
@@ -369,10 +432,13 @@ def run_session_host(
                 tmux_pane_target,
             )
             tool_call_status.update(0)
+            protocol_event_tap = CodexProtocolEventTap(protocol_event_socket_path)
+            protocol_event_tap.start()
             protocol_proxy = CodexProtocolProxy(
                 protocol_proxy_socket_path,
                 app_server_socket_path,
                 ToolCallCounter(tool_call_status.update),
+                protocol_event_tap.publish,
             )
             protocol_proxy.start()
             completed = subprocess.run(
@@ -392,17 +458,22 @@ def run_session_host(
             if protocol_proxy is not None:
                 protocol_proxy.close()
         finally:
-            if app_server is not None and app_server.poll() is None:
-                app_server.terminate()
-                try:
-                    app_server.wait(timeout=3)
-                except subprocess.TimeoutExpired:
-                    app_server.kill()
-                    app_server.wait(timeout=3)
-            app_server_socket_path.unlink(missing_ok=True)
-            protocol_proxy_socket_path.unlink(missing_ok=True)
-            if app_server_log_path.exists() and app_server_log_path.stat().st_size == 0:
-                app_server_log_path.unlink()
+            try:
+                if protocol_event_tap is not None:
+                    protocol_event_tap.close()
+            finally:
+                if app_server is not None and app_server.poll() is None:
+                    app_server.terminate()
+                    try:
+                        app_server.wait(timeout=3)
+                    except subprocess.TimeoutExpired:
+                        app_server.kill()
+                        app_server.wait(timeout=3)
+                app_server_socket_path.unlink(missing_ok=True)
+                protocol_proxy_socket_path.unlink(missing_ok=True)
+                protocol_event_socket_path.unlink(missing_ok=True)
+                if app_server_log_path.exists() and app_server_log_path.stat().st_size == 0:
+                    app_server_log_path.unlink()
 
 
 def _receive_response(websocket: Any, request_id: int) -> dict[str, Any]:

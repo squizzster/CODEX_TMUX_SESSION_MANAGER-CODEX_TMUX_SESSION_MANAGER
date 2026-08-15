@@ -22,7 +22,9 @@ from rodex_sql import (
 COOL_NAMES_TABLE: Final = "cool_names"
 COOL_NAMES_MD5_INTS_UNIQUE_INDEX: Final = "cool_names_md5_ints_unique"
 ATTEMPTS_PER_WORD_COUNT: Final = 5
-RODEX_RESERVED_WORDS: Final = frozenset({"alias", "running"})
+RODEX_RESERVED_WORDS: Final = frozenset(
+    {"alias", "create", "detach", "running", "send", "tail", "wait"}
+)
 _SAFE_RODEX_DISPLAY_NAME: Final = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$")
 
 _HALF_BITS: Final = 64

@@ -130,7 +130,10 @@ def test_reserved_names_are_case_insensitive_and_automatic_allocation_skips_them
         requested_word_counts.append(word_count)
         return "RUNNING" if word_count == 2 else "fresh-three-name"
 
-    assert frozenset({"alias", "running"}) == RODEX_RESERVED_WORDS
+    assert (
+        frozenset({"alias", "create", "detach", "running", "send", "tail", "wait"})
+        == RODEX_RESERVED_WORDS
+    )
     assert is_reserved_rodex_name("Alias")
     assert is_reserved_rodex_name("RUNNING")
     assert not is_reserved_rodex_name("running-fox")

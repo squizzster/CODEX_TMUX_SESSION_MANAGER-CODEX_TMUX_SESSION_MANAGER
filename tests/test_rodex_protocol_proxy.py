@@ -10,7 +10,9 @@ from websockets.sync.client import unix_connect
 from websockets.sync.server import unix_serve
 
 from rodex.protocol_proxy import (
+    EVENT_STREAM_READY_MESSAGE,
     TOOL_CALL_ITEM_TYPES,
+    CodexProtocolEventTap,
     CodexProtocolProxy,
     TmuxToolCallStatus,
     ToolCallCounter,
@@ -104,10 +106,12 @@ def test_proxy_forwards_both_directions_and_counts_server_tool_items(
     upstream_thread = Thread(target=upstream.serve_forever, daemon=True)
     upstream_thread.start()
     counts: list[int] = []
+    observed_events: list[str | bytes] = []
     proxy = CodexProtocolProxy(
         proxy_socket,
         app_socket,
         ToolCallCounter(counts.append),
+        observed_events.append,
     )
     try:
         proxy.start()
@@ -123,4 +127,65 @@ def test_proxy_forwards_both_directions_and_counts_server_tool_items(
 
     assert received_by_server == [client_message]
     assert counts == [1]
+    assert observed_events == [server_message]
     assert not proxy_socket.exists()
+
+
+def test_event_tap_streams_runtime_events_and_removes_its_socket(tmp_path: Path) -> None:
+    event_socket = tmp_path / "events.sock"
+    tap = CodexProtocolEventTap(event_socket)
+    message = item_started("collabAgentToolCall", "collab-1")
+
+    try:
+        tap.start()
+        with unix_connect(
+            str(event_socket), uri="ws://localhost/events", compression=None
+        ) as subscriber:
+            assert subscriber.recv(timeout=1) == EVENT_STREAM_READY_MESSAGE
+            tap.publish(message)
+            assert subscriber.recv(timeout=1) == message
+    finally:
+        tap.close()
+
+    assert not event_socket.exists()
+
+
+def test_event_tap_ready_signal_reports_the_current_active_turn(tmp_path: Path) -> None:
+    event_socket = tmp_path / "events.sock"
+    tap = CodexProtocolEventTap(event_socket)
+    started = json.dumps(
+        {
+            "method": "turn/started",
+            "params": {
+                "threadId": "thread-1",
+                "turn": {"id": "turn-1", "status": "inProgress"},
+            },
+        }
+    )
+    completed = json.dumps(
+        {
+            "method": "turn/completed",
+            "params": {
+                "threadId": "thread-1",
+                "turn": {"id": "turn-1", "status": "completed"},
+            },
+        }
+    )
+
+    try:
+        tap.start()
+        tap.publish(started)
+        with unix_connect(
+            str(event_socket), uri="ws://localhost/events", compression=None
+        ) as subscriber:
+            assert json.loads(subscriber.recv(timeout=1)) == {
+                "method": "rodex/event-stream/ready",
+                "params": {"activeTurns": {"thread-1": "turn-1"}},
+            }
+        tap.publish(completed)
+        with unix_connect(
+            str(event_socket), uri="ws://localhost/events", compression=None
+        ) as subscriber:
+            assert subscriber.recv(timeout=1) == EVENT_STREAM_READY_MESSAGE
+    finally:
+        tap.close()

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+import uuid
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -19,6 +20,8 @@ from rodex_functions import (
 
 ALICE = RodexSessionsUserIdentity(uid=1001, gid=1002, user_name="alice")
 BOB = RodexSessionsUserIdentity(uid=2001, gid=2002, user_name="bob")
+CODEX_UUID_1 = uuid.UUID(int=(1 << 120) + 1)
+CODEX_UUID_2 = uuid.UUID(int=(1 << 120) + 2)
 
 
 def fetch_all(database: Path, query: str) -> list[tuple[object, ...]]:
@@ -102,7 +105,9 @@ def test_creating_a_session_also_creates_its_one_log_row(
     timestamp = "2026-08-15T12:34:56.123456Z"
     monkeypatch.setattr(session_module, "_utc_now_timestamp", lambda: timestamp)
 
-    session = create_a_rodex_session(database, user_identity=ALICE)
+    session = create_a_rodex_session(
+        database, codex_session_uuid=CODEX_UUID_1, user_identity=ALICE
+    )
 
     assert fetch_all(
         database,
@@ -123,7 +128,7 @@ def test_session_user_defaults_to_the_posix_operating_system_identity(
         lambda uid: type("PasswordEntry", (), {"pw_name": "dna"})(),
     )
 
-    session = create_a_rodex_session(database)
+    session = create_a_rodex_session(database, codex_session_uuid=CODEX_UUID_1)
 
     log = lookup_rodex_session_log(session.id, database)
     assert log is not None
@@ -137,6 +142,7 @@ def test_user_name_must_not_be_empty(tmp_path: Path, invalid_user: str) -> None:
     with pytest.raises(ValueError, match="non-empty string"):
         create_a_rodex_session(
             tmp_path / "rodex.sqlite3",
+            codex_session_uuid=CODEX_UUID_1,
             user_identity=RodexSessionsUserIdentity(1, 1, invalid_user),
         )
 
@@ -144,8 +150,12 @@ def test_user_name_must_not_be_empty(tmp_path: Path, invalid_user: str) -> None:
 def test_log_ids_auto_increment_independently_from_session_ids(tmp_path: Path) -> None:
     database = tmp_path / "rodex.sqlite3"
 
-    first = create_a_rodex_session(database, user_identity=ALICE)
-    second = create_a_rodex_session(database, user_identity=BOB)
+    first = create_a_rodex_session(
+        database, codex_session_uuid=CODEX_UUID_1, user_identity=ALICE
+    )
+    second = create_a_rodex_session(
+        database, codex_session_uuid=CODEX_UUID_2, user_identity=BOB
+    )
 
     assert fetch_all(
         database,
@@ -159,7 +169,9 @@ def test_log_ids_auto_increment_independently_from_session_ids(tmp_path: Path) -
 
 def test_unique_index_rejects_a_second_log_for_the_same_session(tmp_path: Path) -> None:
     database = tmp_path / "rodex.sqlite3"
-    session = create_a_rodex_session(database, user_identity=ALICE)
+    session = create_a_rodex_session(
+        database, codex_session_uuid=CODEX_UUID_1, user_identity=ALICE
+    )
 
     with (
         sqlite3.connect(database) as connection,
@@ -188,7 +200,9 @@ def test_foreign_key_rejects_a_log_for_an_unknown_session(tmp_path: Path) -> Non
 
 def test_lookup_returns_the_log_for_a_session(tmp_path: Path) -> None:
     database = tmp_path / "rodex.sqlite3"
-    session = create_a_rodex_session(database, user_identity=ALICE)
+    session = create_a_rodex_session(
+        database, codex_session_uuid=CODEX_UUID_1, user_identity=ALICE
+    )
 
     log = lookup_rodex_session_log(session.id, database)
 
@@ -210,7 +224,9 @@ def test_record_access_changes_only_the_last_access_timestamp(
     database = tmp_path / "rodex.sqlite3"
     created = "2026-08-15T10:00:00.000000Z"
     monkeypatch.setattr(session_module, "_utc_now_timestamp", lambda: created)
-    session = create_a_rodex_session(database, user_identity=ALICE)
+    session = create_a_rodex_session(
+        database, codex_session_uuid=CODEX_UUID_1, user_identity=ALICE
+    )
     accessed = datetime(2026, 8, 15, 11, 30, tzinfo=UTC)
 
     updated = record_a_rodex_session_access(session.id, database, accessed_at_utc=accessed)
@@ -222,7 +238,7 @@ def test_record_access_changes_only_the_last_access_timestamp(
 
 def test_access_timestamp_is_converted_to_utc(tmp_path: Path) -> None:
     database = tmp_path / "rodex.sqlite3"
-    session = create_a_rodex_session(database)
+    session = create_a_rodex_session(database, codex_session_uuid=CODEX_UUID_1)
     plus_two = timezone(timedelta(hours=2))
 
     updated = record_a_rodex_session_access(
@@ -236,7 +252,7 @@ def test_access_timestamp_is_converted_to_utc(tmp_path: Path) -> None:
 
 def test_access_rejects_a_naive_datetime(tmp_path: Path) -> None:
     database = tmp_path / "rodex.sqlite3"
-    session = create_a_rodex_session(database)
+    session = create_a_rodex_session(database, codex_session_uuid=CODEX_UUID_1)
 
     with pytest.raises(ValueError, match="timezone-aware"):
         record_a_rodex_session_access(

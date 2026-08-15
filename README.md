@@ -28,16 +28,24 @@ empty. When the schema does not change, preserve its contents.
 
 ## Session tables
 
-`rodex_sessions` remains sealed at three columns:
+`rodex_sessions` owns the complete one-to-one Rodex, Codex, and cool-name identity:
 
 ```sql
 CREATE TABLE rodex_sessions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     uuid_int_1 BIGINT NOT NULL,
-    uuid_int_2 BIGINT NOT NULL
+    uuid_int_2 BIGINT NOT NULL,
+    codex_session_uuid_int_1 BIGINT NOT NULL,
+    codex_session_uuid_int_2 BIGINT NOT NULL,
+    cool_names_id INTEGER NOT NULL,
+    FOREIGN KEY (cool_names_id) REFERENCES cool_names (id)
 );
 CREATE UNIQUE INDEX rodex_sessions_uuid_ints_unique
     ON rodex_sessions (uuid_int_1, uuid_int_2);
+CREATE UNIQUE INDEX rodex_sessions_codex_session_uuid_ints_unique
+    ON rodex_sessions (codex_session_uuid_int_1, codex_session_uuid_int_2);
+CREATE UNIQUE INDEX rodex_sessions_cool_names_id_unique
+    ON rodex_sessions (cool_names_id);
 ```
 
 POSIX users are normalized through a lookup table:
@@ -69,19 +77,6 @@ CREATE UNIQUE INDEX rodex_sessions_log_rodex_sessions_id_unique
     ON rodex_sessions_log (rodex_sessions_id);
 ```
 
-Codex and Rodex UUIDs are never interchangeable. Their one-to-one match has its own
-table:
-
-```sql
-CREATE TABLE rodex_codex_sessions (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    rodex_sessions_id INTEGER NOT NULL,
-    codex_session_uuid_int_1 BIGINT NOT NULL,
-    codex_session_uuid_int_2 BIGINT NOT NULL,
-    FOREIGN KEY (rodex_sessions_id) REFERENCES rodex_sessions (id)
-);
-```
-
 The tmux endpoint is a separate one-to-one match:
 
 ```sql
@@ -94,9 +89,8 @@ CREATE TABLE rodex_tmux_sessions (
 );
 ```
 
-Named unique indexes enforce one Codex UUID and one tmux endpoint per Rodex session,
-unique Codex UUID halves, and unique `(tmux_server_socket_path, tmux_session_name)`
-endpoints.
+Named unique indexes enforce unique Rodex UUIDs, Codex UUIDs, cool names, and tmux
+`(tmux_server_socket_path, tmux_session_name)` endpoints.
 
 Connecting fields follow `<table_name>_<lookup_field>`, hence `rodex_sessions_id`
 and `rodex_sessions_users_id`. Every table uses its own `id INTEGER PRIMARY KEY
@@ -127,7 +121,7 @@ Public helpers include:
 - `lookup_or_create_rodex_sessions_user`
 - `lookup_rodex_sessions_user`
 - `lookup_rodex_session_log`
-- `lookup_rodex_codex_session`
+- `lookup_codex_uuid_from_a_rodex_session_id`
 - `lookup_rodex_tmux_session`
 - `lookup_rodex_session_id_from_a_codex_uuid`
 - `record_a_rodex_session_access`
@@ -146,3 +140,15 @@ uv build
 
 The prototype coverage floor is deliberately modest at 70% so rapid iteration stays
 cheap; current coverage may be higher where tests already provide useful evidence.
+
+## Cool names
+
+The `cool_name` library allocates a two-word `coolname` slug, tries five integer-MD5
+lookups, then tries five three-word slugs before failing. `cool_names` stores the full
+MD5 as the uniquely indexed `cool_name_md5_int_1/2`; its `cool_name` text is deliberately
+unindexed. Use `get_unique_new_cool_name` to allocate and
+`get_unique_id_from_cool_name` to resolve the internal integer id.
+
+Every Rodex creation allocates a cool name in the same transaction and stores its
+integer `cool_names_id` directly on `rodex_sessions`. The foreign key and unique index
+enforce one valid cool name per session and prevent reuse across sessions.

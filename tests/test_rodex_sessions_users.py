@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import pwd
 import sqlite3
+import uuid
 from pathlib import Path
 
 import pytest
@@ -18,6 +19,9 @@ from rodex_functions import (
     lookup_rodex_session_log,
     lookup_rodex_sessions_user,
 )
+
+CODEX_UUID_1 = uuid.UUID(int=(1 << 120) + 1)
+CODEX_UUID_2 = uuid.UUID(int=(1 << 120) + 2)
 
 
 def fetch_all(database: Path, query: str) -> list[tuple[object, ...]]:
@@ -119,8 +123,12 @@ def test_new_session_log_references_the_normalized_user_lookup(tmp_path: Path) -
     database = tmp_path / "rodex.sqlite3"
     identity = RodexSessionsUserIdentity(1009, 1010, "dna")
 
-    first = create_a_rodex_session(database, user_identity=identity)
-    second = create_a_rodex_session(database, user_identity=identity)
+    first = create_a_rodex_session(
+        database, codex_session_uuid=CODEX_UUID_1, user_identity=identity
+    )
+    second = create_a_rodex_session(
+        database, codex_session_uuid=CODEX_UUID_2, user_identity=identity
+    )
 
     first_log = lookup_rodex_session_log(first.id, database)
     second_log = lookup_rodex_session_log(second.id, database)
@@ -150,7 +158,11 @@ def test_invalid_posix_user_identity_is_rejected(
     tmp_path: Path, identity: RodexSessionsUserIdentity
 ) -> None:
     with pytest.raises(ValueError):
-        create_a_rodex_session(tmp_path / "rodex.sqlite3", user_identity=identity)
+        create_a_rodex_session(
+            tmp_path / "rodex.sqlite3",
+            codex_session_uuid=CODEX_UUID_1,
+            user_identity=identity,
+        )
 
 
 def test_user_session_and_log_insertions_are_one_transaction(tmp_path: Path) -> None:
@@ -164,6 +176,7 @@ def test_user_session_and_log_insertions_are_one_transaction(tmp_path: Path) -> 
     with pytest.raises(sqlite3.IntegrityError, match="forced log failure"):
         create_a_rodex_session(
             database,
+            codex_session_uuid=CODEX_UUID_1,
             user_identity=RodexSessionsUserIdentity(1009, 1010, "dna"),
         )
 

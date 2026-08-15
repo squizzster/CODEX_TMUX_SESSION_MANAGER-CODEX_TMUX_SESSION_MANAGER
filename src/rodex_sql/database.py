@@ -17,6 +17,23 @@ class RodexSQLError(RuntimeError):
     """A Rodex SQL operation violated its transaction or lookup contract."""
 
 
+def default_rodex_database_path() -> Path:
+    """Resolve the runtime database path for the current Rodex workspace."""
+    configured = os.environ.get("RODEX_DATABASE_PATH")
+    if configured:
+        return Path(configured).expanduser().resolve()
+    return (Path.cwd() / ".rodex" / "rodex.sqlite3").resolve()
+
+
+def normalise_rodex_database_path(
+    database_path: str | os.PathLike[str] | None,
+) -> Path:
+    """Resolve an explicit path or the shared Rodex runtime default."""
+    if database_path is None:
+        return default_rodex_database_path()
+    return Path(database_path).expanduser().resolve()
+
+
 @contextmanager
 def open_rodex_transaction(
     database_path: str | os.PathLike[str],

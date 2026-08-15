@@ -9,7 +9,7 @@ import pytest
 from rodex.cli import RodexLaunchError, run
 from rodex.runtime import LiveRodexRuntime
 from rodex_functions import (
-    lookup_rodex_codex_session,
+    lookup_codex_uuid_from_a_rodex_session_id,
     lookup_rodex_tmux_session,
 )
 
@@ -65,10 +65,8 @@ def test_run_links_real_codex_and_tmux_identities_before_attach(
 
     assert launcher.started == [(Path.cwd(), ["--model", "example"])]
     assert launcher.attached == [launcher.runtime]
-    codex_link = lookup_rodex_codex_session(1, database)
     tmux_link = lookup_rodex_tmux_session(1, database)
-    assert codex_link is not None
-    assert codex_link.codex_session_uuid == CODEX_UUID
+    assert lookup_codex_uuid_from_a_rodex_session_id(1, database) == CODEX_UUID
     assert tmux_link is not None
     assert tmux_link.tmux_server_socket_path == str(
         launcher.runtime.tmux_server_socket_path

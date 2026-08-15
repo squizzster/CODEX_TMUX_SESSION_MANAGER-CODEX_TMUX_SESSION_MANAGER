@@ -57,7 +57,7 @@ def run(
         raise
 
     print(
-        f"Rodex {session.rodex_uuid} -> Codex {codex_session_uuid} "
+        f"Rodex {session.cool_name} [{session.rodex_uuid}] -> Codex {codex_session_uuid} "
         f"({live_runtime.tmux_session_name})",
         flush=True,
     )

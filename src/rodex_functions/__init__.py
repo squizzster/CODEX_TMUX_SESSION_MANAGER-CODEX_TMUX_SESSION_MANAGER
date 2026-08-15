@@ -1,7 +1,6 @@
 """Stable public helpers for Rodex session identity."""
 
 from .sessions import (
-    RodexCodexSession,
     RodexSession,
     RodexSessionError,
     RodexSessionLog,
@@ -13,21 +12,22 @@ from .sessions import (
     current_rodex_sessions_user_identity,
     default_rodex_database_path,
     initialise_rodex_database,
+    join_signed_bigints_into_a_codex_uuid,
     join_signed_bigints_into_a_rodex_uuid,
+    lookup_codex_uuid_from_a_rodex_session_id,
     lookup_id_from_a_rodex_uuid,
     lookup_or_create_rodex_sessions_user,
-    lookup_rodex_codex_session,
     lookup_rodex_session_id_from_a_codex_uuid,
     lookup_rodex_session_log,
     lookup_rodex_sessions_user,
     lookup_rodex_tmux_session,
     lookup_rodex_uuid_from_an_id,
     record_a_rodex_session_access,
+    split_a_codex_uuid_into_signed_bigints,
     split_a_rodex_uuid_into_signed_bigints,
 )
 
 __all__ = [
-    "RodexCodexSession",
     "RodexSession",
     "RodexSessionError",
     "RodexSessionLog",
@@ -39,15 +39,17 @@ __all__ = [
     "current_rodex_sessions_user_identity",
     "default_rodex_database_path",
     "initialise_rodex_database",
+    "join_signed_bigints_into_a_codex_uuid",
     "join_signed_bigints_into_a_rodex_uuid",
+    "lookup_codex_uuid_from_a_rodex_session_id",
     "lookup_id_from_a_rodex_uuid",
     "lookup_or_create_rodex_sessions_user",
-    "lookup_rodex_codex_session",
     "lookup_rodex_session_id_from_a_codex_uuid",
     "lookup_rodex_session_log",
     "lookup_rodex_sessions_user",
     "lookup_rodex_tmux_session",
     "lookup_rodex_uuid_from_an_id",
     "record_a_rodex_session_access",
+    "split_a_codex_uuid_into_signed_bigints",
     "split_a_rodex_uuid_into_signed_bigints",
 ]

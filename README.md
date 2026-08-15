@@ -1,161 +1,75 @@
-# Rodex session manager
+# Rodex
 
-Development mode: **PROTO**
+Rodex makes Codex CLI sessions durable and memorable by running them inside tmux.
+Start normally with `./rodex`, detach when needed, and return later using a generated
+name such as `automatic-beluga`.
 
-The project-root `./rodex` command opens the ordinary Codex TUI inside tmux. A private
-Codex app-server supplies the real Codex session UUID; Rodex allocates its own distinct
-UUID and records the exact Rodex ↔ Codex ↔ tmux match before attaching the terminal.
-Arguments are forwarded to Codex unless one bare argument resolves an existing cool
-name, in which case Rodex attaches the live runtime or resumes its saved Codex session.
-The TUI communicates through Rodex's transparent protocol proxy; the tmux status line
-shows a live count of protocol-observed tool calls for the current runtime.
+> **Development status: PROTO.** Rodex is a Linux/POSIX prototype under active
+> development. Breaking changes and disposable database resets are expected.
 
-## Try it
+## What Rodex does
 
-Requires Linux or a compatible POSIX system, Python 3.12+, `uv`, and the `codex`
-CLI. Windows is explicitly unsupported.
+- Opens the ordinary interactive Codex TUI inside a private tmux runtime.
+- Keeps Rodex and Codex session identities distinct and linked.
+- Assigns every session a permanent, unique two-word name.
+- Reattaches a live session or transparently resumes its saved Codex session.
+- Supports an optional user-defined display name without losing the generated name.
+- Shows the Rodex name and protocol-observed tool-call count in the tmux status line.
+
+Rodex does not replace the Codex CLI. It wraps its normal interface with local session
+identity, tmux lifecycle management, and a transparent protocol proxy.
+
+## Requirements
+
+- Linux or a compatible POSIX system; Windows is not supported.
+- Python 3.12 or newer.
+- [`uv`](https://docs.astral.sh/uv/).
+- `tmux` available on `PATH`.
+- An installed and authenticated `codex` CLI.
+
+## Quick start
 
 ```bash
+git clone https://github.com/squizzster/CODEX_TMUX_SESSION_MANAGER-CODEX_TMUX_SESSION_MANAGER.git rodex
+cd rodex
 uv sync
 ./rodex
 ```
 
-At the `›` prompt, Codex commands such as `/status` work normally. Detach without
-stopping Codex with `Ctrl-b d`. The tmux status line prominently shows the permanent
-generated name, or the preferred user-defined name when present. Open a session by
-either name; Rodex attaches it if live or resumes it if ended:
+At the `›` prompt, use Codex normally. Detach without ending the session with
+`Ctrl-b d`.
 
-```bash
-./rodex automatic-beluga
-./rodex alias automatic-beluga edgar-work
-./rodex running
-```
+## Common commands
 
-`alias` and `running` also work as `--alias` and `--running`. A session owns at most
-one user-defined name; replace it explicitly with `-f`, `--f`, `-force`, or `--force`.
-When present, that name is used in tmux, status, reattachment, and command output.
-The command words are reserved, case-insensitively, from generated and user-defined
-names. `running` reports only live sessions owned by the current POSIX user.
-Names use 1-80 ASCII letters, digits, underscores, or hyphens and must begin with an
-ASCII letter or digit. Named attach and resume are restricted to the owning POSIX user.
+| Command | Behaviour |
+|---|---|
+| `./rodex` | Create and attach to a new Rodex/Codex session. |
+| `./rodex automatic-beluga` | Attach if live; otherwise resume its Codex session. |
+| `./rodex running` | List this POSIX user's running Rodex sessions. |
+| `./rodex alias automatic-beluga edgar-work` | Assign a preferred display name. |
+| `./rodex alias -f automatic-beluga new-name` | Replace an existing display name. |
 
-The default database is `.rodex/rodex.sqlite3` beneath the launch directory. Set
-`RODEX_DATABASE_PATH` to use a different path. Runtime databases are ignored by Git.
+`running` and `alias` also accept `--running` and `--alias`. Names use 1–80 ASCII
+letters, digits, underscores, or hyphens and begin with a letter or digit.
 
-Prototype database rule: when the schema changes, delete and recreate the database
-empty. When the schema does not change, preserve its contents.
+## Local data
 
-## Session tables
+The default registry is `.rodex/rodex.sqlite3` beneath the directory where Rodex is
+launched. Set `RODEX_DATABASE_PATH` to select another database. Short-lived Unix
+sockets and app-server logs use the current user's runtime directory or `/tmp`.
 
-`rodex_sessions` owns the complete one-to-one Rodex, Codex, and cool-name identity:
+The current Rodex registry stores identities, ownership, timestamps, names, and tmux
+endpoints. It does not persist conversation content. Codex remains responsible for its
+own session history.
 
-```sql
-CREATE TABLE rodex_sessions (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    uuid_int_1 BIGINT NOT NULL,
-    uuid_int_2 BIGINT NOT NULL,
-    codex_session_uuid_int_1 BIGINT NOT NULL,
-    codex_session_uuid_int_2 BIGINT NOT NULL,
-    cool_names_id INTEGER NOT NULL,
-    user_defined_cool_names_id INTEGER DEFAULT NULL,
-    FOREIGN KEY (cool_names_id) REFERENCES cool_names (id),
-    FOREIGN KEY (user_defined_cool_names_id) REFERENCES cool_names (id)
-);
-CREATE UNIQUE INDEX rodex_sessions_uuid_ints_unique
-    ON rodex_sessions (uuid_int_1, uuid_int_2);
-CREATE UNIQUE INDEX rodex_sessions_codex_session_uuid_ints_unique
-    ON rodex_sessions (codex_session_uuid_int_1, codex_session_uuid_int_2);
-CREATE UNIQUE INDEX rodex_sessions_cool_names_id_unique
-    ON rodex_sessions (cool_names_id);
-CREATE UNIQUE INDEX rodex_sessions_user_defined_cool_names_id_unique
-    ON rodex_sessions (user_defined_cool_names_id);
-```
+## Documentation
 
-POSIX users are normalized through a lookup table:
+- [Architecture](docs/ARCHITECTURE.md)
+- [Codex, Rodex, and tmux boundaries](docs/CODEX_RODEX_TMUX.md)
+- [Code concepts](docs/CODE_CONCEPTS.md)
+- [SQL schema methodology](docs/SQL_SCHEMA.md)
 
-```sql
-CREATE TABLE rodex_sessions_users (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    uid INTEGER NOT NULL,
-    gid INTEGER NOT NULL,
-    user_name TEXT NOT NULL
-);
-CREATE UNIQUE INDEX rodex_sessions_users_uid_gid_user_name_unique
-    ON rodex_sessions_users (uid, gid, user_name);
-```
-
-Each newly created session receives one provenance and access row:
-
-```sql
-CREATE TABLE rodex_sessions_log (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    rodex_sessions_id INTEGER NOT NULL,
-    created_at_utc TEXT NOT NULL,
-    rodex_sessions_users_id INTEGER NOT NULL,
-    last_accessed_at_utc TEXT NOT NULL,
-    FOREIGN KEY (rodex_sessions_id) REFERENCES rodex_sessions (id),
-    FOREIGN KEY (rodex_sessions_users_id) REFERENCES rodex_sessions_users (id)
-);
-CREATE UNIQUE INDEX rodex_sessions_log_rodex_sessions_id_unique
-    ON rodex_sessions_log (rodex_sessions_id);
-```
-
-The tmux endpoint is a separate one-to-one match:
-
-```sql
-CREATE TABLE rodex_tmux_sessions (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    rodex_sessions_id INTEGER NOT NULL,
-    tmux_server_socket_path TEXT NOT NULL,
-    tmux_session_name TEXT NOT NULL,
-    FOREIGN KEY (rodex_sessions_id) REFERENCES rodex_sessions (id)
-);
-```
-
-Named unique indexes enforce unique Rodex UUIDs, Codex UUIDs, cool names, and tmux
-`(tmux_server_socket_path, tmux_session_name)` endpoints.
-
-Connecting fields follow `<table_name>_<lookup_field>`, hence `rodex_sessions_id`
-and `rodex_sessions_users_id`. Every table uses its own `id INTEGER PRIMARY KEY
-AUTOINCREMENT`; SQLite provides the primary-key uniqueness, while named unique
-indexes enforce natural lookup keys and one log row per session.
-
-Lookup-table writes use the shared `rodex_sql` transaction library. They always run
-`SELECT id` against the complete natural key before considering an insert. Existing
-rows are reused without consuming an AUTOINCREMENT value. `BEGIN IMMEDIATE` serializes
-the select/insert decision, and errors roll back the complete unit of work. Session,
-user lookup, session log, Codex match, and tmux match are one transaction for a live
-launch.
-
-UTC timestamps use fixed, microsecond-precision ISO-8601 text such as
-`2026-08-15T12:34:56.123456Z`. This representation is unambiguous, readable, and
-sorts chronologically as text. The user lookup defaults to the effective POSIX UID,
-GID, and password-database user name.
-
-Rodex generates a secure 128-bit UUID. SQLite integers are signed 64-bit values, so
-each UUID half is stored in signed two's-complement form. The `rodex_functions` API
-reverses that storage mapping without losing any UUID bits.
-
-Public helpers include:
-
-- `create_a_rodex_session`
-- `lookup_id_from_a_rodex_uuid`
-- `lookup_rodex_uuid_from_an_id`
-- `lookup_or_create_rodex_sessions_user`
-- `lookup_rodex_sessions_user`
-- `lookup_rodex_session_log`
-- `lookup_codex_uuid_from_a_rodex_session_id`
-- `lookup_rodex_tmux_session`
-- `lookup_rodex_session_id_from_a_cool_name`
-- `lookup_rodex_session_id_from_a_codex_uuid`
-- `record_a_rodex_session_access`
-- `record_a_rodex_session_runtime_resume`
-- `update_rodex_tmux_session_name`
-- `initialise_rodex_database`
-
-The earlier `ctsm` tmux experiment remains available while the two paths converge.
-
-## Checks
+## Development
 
 ```bash
 uv run ruff format --check .
@@ -164,19 +78,5 @@ uv run pytest --cov --cov-report=term-missing
 uv build
 ```
 
-The prototype coverage floor is deliberately modest at 70% so rapid iteration stays
-cheap; current coverage may be higher where tests already provide useful evidence.
-
-## Cool names
-
-The `cool_name` library allocates a two-word `coolname` slug, tries five integer-MD5
-lookups, then tries five three-word slugs before failing. `cool_names` stores the full
-MD5 as the uniquely indexed `cool_name_md5_int_1/2`; its `cool_name` text is deliberately
-unindexed. Use `get_unique_new_cool_name` to allocate and
-`get_unique_id_from_cool_name` to resolve the internal integer id.
-
-Every Rodex creation allocates a cool name in the same transaction and stores its
-integer `cool_names_id` directly on `rodex_sessions`. The foreign key and unique index
-enforce one valid permanent name per session and prevent reuse across sessions. The
-nullable `user_defined_cool_names_id` reserves a separate, uniquely indexed cool-name
-identity for the preferred user-defined name while retaining the generated storage anchor.
+The prototype coverage floor is 70%. Tests include real-tmux boundary coverage for
+the critical rename and status-configuration lifecycle.

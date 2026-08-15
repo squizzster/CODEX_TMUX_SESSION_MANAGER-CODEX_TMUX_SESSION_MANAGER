@@ -38,10 +38,10 @@ def test_start_creates_session_in_workspace_and_launches_codex(tmp_path: Path) -
     sessions.start("alpha", tmp_path, "inspect this repo")
 
     assert runner.calls == [
-        ["tmux", "has-session", "-t", "codex-alpha"],
+        ["tmux", "has-session", "-t", "=codex-alpha"],
         ["tmux", "new-session", "-d", "-s", "codex-alpha", "-c", str(tmp_path)],
-        ["tmux", "send-keys", "-t", "codex-alpha", "-l", "codex 'inspect this repo'"],
-        ["tmux", "send-keys", "-t", "codex-alpha", "Enter"],
+        ["tmux", "send-keys", "-t", "=codex-alpha", "-l", "codex 'inspect this repo'"],
+        ["tmux", "send-keys", "-t", "=codex-alpha", "Enter"],
     ]
 
 
@@ -51,7 +51,7 @@ def test_attach_uses_the_live_terminal(monkeypatch: pytest.MonkeyPatch) -> None:
 
     TmuxSessions(runner).attach("alpha")
 
-    assert runner.calls[-1] == ["tmux", "attach-session", "-t", "codex-alpha"]
+    assert runner.calls[-1] == ["tmux", "attach-session", "-t", "=codex-alpha"]
     assert "capture_output" not in runner.options[-1]
 
 
@@ -63,7 +63,7 @@ def test_attach_switches_clients_when_already_inside_tmux(
 
     TmuxSessions(runner).attach("alpha")
 
-    assert runner.calls[-1] == ["tmux", "switch-client", "-t", "codex-alpha"]
+    assert runner.calls[-1] == ["tmux", "switch-client", "-t", "=codex-alpha"]
 
 
 def test_attach_rejects_a_missing_session(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -79,7 +79,7 @@ def test_stop_kills_an_existing_session() -> None:
 
     TmuxSessions(runner).stop("alpha")
 
-    assert runner.calls[-1] == ["tmux", "kill-session", "-t", "codex-alpha"]
+    assert runner.calls[-1] == ["tmux", "kill-session", "-t", "=codex-alpha"]
 
 
 def test_stop_rejects_a_missing_session() -> None:
@@ -123,7 +123,14 @@ def test_start_without_a_prompt_launches_plain_codex(tmp_path: Path) -> None:
 
     TmuxSessions(runner).start("alpha", tmp_path)
 
-    assert runner.calls[-2] == ["tmux", "send-keys", "-t", "codex-alpha", "-l", "codex"]
+    assert runner.calls[-2] == [
+        "tmux",
+        "send-keys",
+        "-t",
+        "=codex-alpha",
+        "-l",
+        "codex",
+    ]
 
 
 def test_tmux_missing_from_path_becomes_a_session_error() -> None:

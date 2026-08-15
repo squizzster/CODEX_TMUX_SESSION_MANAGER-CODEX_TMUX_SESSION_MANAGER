@@ -7,6 +7,8 @@ import pwd
 import secrets
 import sqlite3
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -16,6 +18,7 @@ from cool_name.functions import (
     allocate_unique_cool_name,
     create_and_verify_cool_names_schema,
     lookup_cool_name,
+    normalise_rodex_display_name,
     reserve_specific_cool_name,
 )
 from rodex_sql import default_rodex_database_path as _default_rodex_database_path
@@ -226,6 +229,15 @@ class RodexSessionRuntime:
     def display_name(self) -> str:
         """Return the effective user-facing name for this runtime."""
         return self.user_defined_cool_name or self.cool_name
+
+
+@dataclass(slots=True)
+class RodexUserDefinedCoolNameAssignment:
+    """One serialized database/tmux name transition prepared for the CLI."""
+
+    names: RodexSessionNames
+    tmux_session: RodexTmuxSession | None
+    renamed_tmux_session_name: str | None = None
 
 
 def default_rodex_database_path() -> Path:
@@ -565,20 +577,7 @@ def lookup_rodex_tmux_session(
     _validate_session_id(session_id)
     path = initialise_rodex_database(database_path)
     with open_rodex_transaction(path) as connection:
-        row = connection.execute(
-            f"SELECT id, rodex_sessions_id, tmux_server_socket_path, "
-            f"tmux_session_name FROM {RODEX_TMUX_SESSIONS_TABLE} "
-            "WHERE rodex_sessions_id = ?",
-            (session_id,),
-        ).fetchone()
-    if row is None:
-        return None
-    return RodexTmuxSession(
-        id=int(row[0]),
-        rodex_sessions_id=int(row[1]),
-        tmux_server_socket_path=str(row[2]),
-        tmux_session_name=str(row[3]),
-    )
+        return _select_rodex_tmux_session(connection, session_id)
 
 
 def lookup_rodex_session_id_from_a_cool_name(
@@ -602,6 +601,32 @@ def lookup_rodex_session_id_from_a_cool_name(
     return None if not rows else int(rows[0][0])
 
 
+def lookup_owned_rodex_session_id_from_a_cool_name(
+    cool_name: str,
+    database_path: str | os.PathLike[str] | None = None,
+    *,
+    user_identity: RodexSessionsUserIdentity | None = None,
+) -> int | None:
+    """Resolve a name only when its session belongs to the selected POSIX user."""
+    identity = _resolve_user_identity(user_identity)
+    path = initialise_rodex_database(database_path)
+    with open_rodex_transaction(path) as connection:
+        allocated_name = lookup_cool_name(connection, cool_name)
+        if allocated_name is None:
+            return None
+        rows = _select_sessions_and_owners_by_cool_names_id(connection, allocated_name.id)
+        if not rows:
+            return None
+        if len(rows) > 1:
+            raise RodexSessionError(f"cool name resolves to multiple sessions: {cool_name}")
+        user_id = _lookup_rodex_sessions_user_id(connection, identity)
+        if user_id is None or int(rows[0][5]) != user_id:
+            raise RodexSessionError(
+                f"Rodex session is not owned by the current user: {cool_name}"
+            )
+        return int(rows[0][0])
+
+
 def lookup_rodex_session_names(
     session_id: int,
     database_path: str | os.PathLike[str] | None = None,
@@ -621,87 +646,99 @@ def assign_a_user_defined_cool_name(
     *,
     force: bool = False,
     user_identity: RodexSessionsUserIdentity | None = None,
+    renamed_tmux_session_name: str | None = None,
 ) -> RodexSessionNames:
-    """Atomically assign the current user's one optional session alias."""
+    """Atomically assign one name and an already-renamed live tmux endpoint."""
     if not isinstance(force, bool):
         raise TypeError("force must be a boolean")
-    identity = (
-        current_rodex_sessions_user_identity()
-        if user_identity is None
-        else _validate_user_identity(user_identity)
+    identity = _resolve_user_identity(user_identity)
+    persisted_tmux_name = (
+        None
+        if renamed_tmux_session_name is None
+        else _normalise_tmux_session_name(renamed_tmux_session_name)
     )
     path = initialise_rodex_database(database_path)
     with open_rodex_transaction(path) as connection:
-        requested_session_name = lookup_cool_name(connection, session_cool_name)
-        if requested_session_name is None:
-            raise RodexSessionError(f"Rodex session does not exist: {session_cool_name}")
-        session_rows = connection.execute(
-            f"SELECT sessions.id, sessions.cool_names_id, "
-            "sessions.user_defined_cool_names_id, permanent.cool_name, "
-            "user_defined.cool_name, log.rodex_sessions_users_id "
-            f"FROM {RODEX_SESSIONS_TABLE} AS sessions "
-            f"JOIN cool_names AS permanent ON permanent.id = sessions.cool_names_id "
-            f"LEFT JOIN cool_names AS user_defined "
-            "ON user_defined.id = sessions.user_defined_cool_names_id "
-            f"JOIN {RODEX_SESSIONS_LOG_TABLE} AS log "
-            "ON log.rodex_sessions_id = sessions.id "
-            "WHERE sessions.cool_names_id = ? "
-            "OR sessions.user_defined_cool_names_id = ? ORDER BY sessions.id LIMIT 2",
-            (requested_session_name.id, requested_session_name.id),
-        ).fetchall()
-        if not session_rows:
-            raise RodexSessionError(f"Rodex session does not exist: {session_cool_name}")
-        if len(session_rows) > 1:
-            raise RodexSessionError(
-                f"cool name resolves to multiple sessions: {session_cool_name}"
-            )
-        session_row = session_rows[0]
-        user_id = select_lookup_id(
+        return _apply_user_defined_cool_name_assignment(
             connection,
-            RODEX_SESSIONS_USERS_TABLE,
-            {"uid": identity.uid, "gid": identity.gid, "user_name": identity.user_name},
+            session_cool_name,
+            user_defined_cool_name,
+            identity,
+            force=force,
+            mutate=True,
+            renamed_tmux_session_name=persisted_tmux_name,
         )
-        if user_id is None or int(session_row[5]) != user_id:
-            raise RodexSessionError(
-                f"Rodex session is not owned by the current user: {session_cool_name}"
-            )
 
-        allocated_alias = reserve_specific_cool_name(connection, user_defined_cool_name)
-        existing_alias_id = None if session_row[2] is None else int(session_row[2])
-        if existing_alias_id == allocated_alias.id:
-            return RodexSessionNames(
-                rodex_sessions_id=int(session_row[0]),
-                cool_name=str(session_row[3]),
-                user_defined_cool_name=allocated_alias.cool_name,
-            )
-        if existing_alias_id is not None and not force:
-            raise RodexSessionError(
-                f"Rodex session already has user-defined name {session_row[4]!r}; "
-                "use -f or --force to replace it"
-            )
 
-        owners = connection.execute(
-            f"SELECT id FROM {RODEX_SESSIONS_TABLE} "
-            "WHERE cool_names_id = ? OR user_defined_cool_names_id = ? "
-            "ORDER BY id LIMIT 2",
-            (allocated_alias.id, allocated_alias.id),
-        ).fetchall()
-        if any(int(owner[0]) != int(session_row[0]) for owner in owners):
-            raise RodexSessionError(
-                f"Rodex name already belongs to another session: "
-                f"{allocated_alias.cool_name}"
-            )
-        cursor = connection.execute(
-            f"UPDATE {RODEX_SESSIONS_TABLE} SET user_defined_cool_names_id = ? "
-            "WHERE id = ?",
-            (allocated_alias.id, int(session_row[0])),
+def validate_a_user_defined_cool_name_assignment(
+    session_cool_name: str,
+    user_defined_cool_name: str,
+    database_path: str | os.PathLike[str] | None = None,
+    *,
+    force: bool = False,
+    user_identity: RodexSessionsUserIdentity | None = None,
+) -> RodexSessionNames:
+    """Validate an assignment without inserting or updating any lookup row."""
+    if not isinstance(force, bool):
+        raise TypeError("force must be a boolean")
+    identity = _resolve_user_identity(user_identity)
+    path = initialise_rodex_database(database_path)
+    with open_rodex_transaction(path) as connection:
+        return _apply_user_defined_cool_name_assignment(
+            connection,
+            session_cool_name,
+            user_defined_cool_name,
+            identity,
+            force=force,
+            mutate=False,
+            renamed_tmux_session_name=None,
         )
-        if cursor.rowcount != 1:
-            raise RodexSessionError(f"Rodex session disappeared: {int(session_row[0])}")
-        return RodexSessionNames(
-            rodex_sessions_id=int(session_row[0]),
-            cool_name=str(session_row[3]),
-            user_defined_cool_name=allocated_alias.cool_name,
+
+
+@contextmanager
+def open_a_user_defined_cool_name_assignment(
+    session_cool_name: str,
+    user_defined_cool_name: str,
+    database_path: str | os.PathLike[str] | None = None,
+    *,
+    force: bool = False,
+    user_identity: RodexSessionsUserIdentity | None = None,
+) -> Iterator[RodexUserDefinedCoolNameAssignment]:
+    """Serialize validation, a caller's live rename, and the durable assignment."""
+    if not isinstance(force, bool):
+        raise TypeError("force must be a boolean")
+    identity = _resolve_user_identity(user_identity)
+    path = initialise_rodex_database(database_path)
+    with open_rodex_transaction(path) as connection:
+        planned_names = _apply_user_defined_cool_name_assignment(
+            connection,
+            session_cool_name,
+            user_defined_cool_name,
+            identity,
+            force=force,
+            mutate=False,
+            renamed_tmux_session_name=None,
+        )
+        transition = RodexUserDefinedCoolNameAssignment(
+            names=planned_names,
+            tmux_session=_select_rodex_tmux_session(
+                connection, planned_names.rodex_sessions_id
+            ),
+        )
+        yield transition
+        persisted_tmux_name = (
+            None
+            if transition.renamed_tmux_session_name is None
+            else _normalise_tmux_session_name(transition.renamed_tmux_session_name)
+        )
+        transition.names = _apply_user_defined_cool_name_assignment(
+            connection,
+            session_cool_name,
+            user_defined_cool_name,
+            identity,
+            force=force,
+            mutate=True,
+            renamed_tmux_session_name=persisted_tmux_name,
         )
 
 
@@ -1124,6 +1161,134 @@ def _lookup_or_insert_rodex_sessions_user_id(
     )
 
 
+def _apply_user_defined_cool_name_assignment(
+    connection: sqlite3.Connection,
+    session_cool_name: str,
+    user_defined_cool_name: str,
+    identity: RodexSessionsUserIdentity,
+    *,
+    force: bool,
+    mutate: bool,
+    renamed_tmux_session_name: str | None,
+) -> RodexSessionNames:
+    normalised_alias = normalise_rodex_display_name(user_defined_cool_name)
+    requested_session_name = lookup_cool_name(connection, session_cool_name)
+    if requested_session_name is None:
+        raise RodexSessionError(f"Rodex session does not exist: {session_cool_name}")
+    session_rows = _select_sessions_and_owners_by_cool_names_id(
+        connection, requested_session_name.id
+    )
+    if not session_rows:
+        raise RodexSessionError(f"Rodex session does not exist: {session_cool_name}")
+    if len(session_rows) > 1:
+        raise RodexSessionError(
+            f"cool name resolves to multiple sessions: {session_cool_name}"
+        )
+    session_row = session_rows[0]
+    user_id = _lookup_rodex_sessions_user_id(connection, identity)
+    if user_id is None or int(session_row[5]) != user_id:
+        raise RodexSessionError(
+            f"Rodex session is not owned by the current user: {session_cool_name}"
+        )
+
+    existing_alias_id = None if session_row[2] is None else int(session_row[2])
+    candidate_alias = lookup_cool_name(connection, normalised_alias)
+    if candidate_alias is None or existing_alias_id != candidate_alias.id:
+        if existing_alias_id is not None and not force:
+            raise RodexSessionError(
+                f"Rodex session already has user-defined name {session_row[4]!r}; "
+                "use -f or --force to replace it"
+            )
+        if candidate_alias is not None:
+            owners = _select_session_ids_by_cool_names_id(connection, candidate_alias.id)
+            if any(int(owner[0]) != int(session_row[0]) for owner in owners):
+                raise RodexSessionError(
+                    f"Rodex name already belongs to another session: {normalised_alias}"
+                )
+
+    planned_names = RodexSessionNames(
+        rodex_sessions_id=int(session_row[0]),
+        cool_name=str(session_row[3]),
+        user_defined_cool_name=normalised_alias,
+    )
+    if not mutate:
+        return planned_names
+
+    allocated_alias = reserve_specific_cool_name(connection, normalised_alias)
+    owners = _select_session_ids_by_cool_names_id(connection, allocated_alias.id)
+    if any(int(owner[0]) != int(session_row[0]) for owner in owners):
+        raise RodexSessionError(
+            f"Rodex name already belongs to another session: {normalised_alias}"
+        )
+    cursor = connection.execute(
+        f"UPDATE {RODEX_SESSIONS_TABLE} SET user_defined_cool_names_id = ? WHERE id = ?",
+        (allocated_alias.id, int(session_row[0])),
+    )
+    if cursor.rowcount != 1:
+        raise RodexSessionError(f"Rodex session disappeared: {int(session_row[0])}")
+    if renamed_tmux_session_name is not None:
+        tmux_cursor = connection.execute(
+            f"UPDATE {RODEX_TMUX_SESSIONS_TABLE} SET tmux_session_name = ? "
+            "WHERE rodex_sessions_id = ?",
+            (renamed_tmux_session_name, int(session_row[0])),
+        )
+        if tmux_cursor.rowcount != 1:
+            raise RodexSessionError(
+                f"Rodex tmux session does not exist: {int(session_row[0])}"
+            )
+    return planned_names
+
+
+def _select_sessions_and_owners_by_cool_names_id(
+    connection: sqlite3.Connection, cool_names_id: int
+) -> list[tuple[object, ...]]:
+    return connection.execute(
+        f"SELECT sessions.id, sessions.cool_names_id, "
+        "sessions.user_defined_cool_names_id, permanent.cool_name, "
+        "user_defined.cool_name, log.rodex_sessions_users_id "
+        f"FROM {RODEX_SESSIONS_TABLE} AS sessions "
+        "JOIN cool_names AS permanent ON permanent.id = sessions.cool_names_id "
+        "LEFT JOIN cool_names AS user_defined "
+        "ON user_defined.id = sessions.user_defined_cool_names_id "
+        f"JOIN {RODEX_SESSIONS_LOG_TABLE} AS log "
+        "ON log.rodex_sessions_id = sessions.id "
+        "WHERE sessions.cool_names_id = ? "
+        "OR sessions.user_defined_cool_names_id = ? ORDER BY sessions.id LIMIT 2",
+        (cool_names_id, cool_names_id),
+    ).fetchall()
+
+
+def _select_session_ids_by_cool_names_id(
+    connection: sqlite3.Connection, cool_names_id: int
+) -> list[tuple[object, ...]]:
+    return connection.execute(
+        f"SELECT id FROM {RODEX_SESSIONS_TABLE} "
+        "WHERE cool_names_id = ? OR user_defined_cool_names_id = ? "
+        "ORDER BY id LIMIT 2",
+        (cool_names_id, cool_names_id),
+    ).fetchall()
+
+
+def _lookup_rodex_sessions_user_id(
+    connection: sqlite3.Connection, identity: RodexSessionsUserIdentity
+) -> int | None:
+    return select_lookup_id(
+        connection,
+        RODEX_SESSIONS_USERS_TABLE,
+        {"uid": identity.uid, "gid": identity.gid, "user_name": identity.user_name},
+    )
+
+
+def _resolve_user_identity(
+    user_identity: RodexSessionsUserIdentity | None,
+) -> RodexSessionsUserIdentity:
+    return (
+        current_rodex_sessions_user_identity()
+        if user_identity is None
+        else _validate_user_identity(user_identity)
+    )
+
+
 def _select_rodex_session_names(
     connection: sqlite3.Connection, session_id: int
 ) -> tuple[object, ...] | None:
@@ -1136,6 +1301,24 @@ def _select_rodex_session_names(
         "WHERE sessions.id = ?",
         (session_id,),
     ).fetchone()
+
+
+def _select_rodex_tmux_session(
+    connection: sqlite3.Connection, session_id: int
+) -> RodexTmuxSession | None:
+    row = connection.execute(
+        f"SELECT id, rodex_sessions_id, tmux_server_socket_path, tmux_session_name "
+        f"FROM {RODEX_TMUX_SESSIONS_TABLE} WHERE rodex_sessions_id = ?",
+        (session_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    return RodexTmuxSession(
+        id=int(row[0]),
+        rodex_sessions_id=int(row[1]),
+        tmux_server_socket_path=str(row[2]),
+        tmux_session_name=str(row[3]),
+    )
 
 
 def _session_names_from_row(row: tuple[object, ...]) -> RodexSessionNames:

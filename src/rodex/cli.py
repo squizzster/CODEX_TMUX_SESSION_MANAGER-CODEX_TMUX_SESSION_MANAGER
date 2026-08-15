@@ -48,7 +48,7 @@ _SEND_COMMANDS = frozenset({"send", "--send"})
 _TAIL_COMMANDS = frozenset({"tail", "--tail"})
 _WAIT_COMMANDS = frozenset({"wait", "--wait"})
 _FORCE_FLAGS = frozenset({"-f", "--f", "-force", "--force"})
-_CREATE_FLAGS = frozenset({"-c", "--c", "-create", "--create"})
+_CREATE_FLAGS = frozenset({"--c", "-create", "--create"})
 _DETACH_FLAGS = frozenset({"-d", "--d", "-detach", "--detach"})
 
 
@@ -247,18 +247,36 @@ def _open_named_session(
 def _parse_launch_arguments(
     arguments: list[str],
 ) -> tuple[list[str], str | None, bool]:
-    detach_arguments = [argument for argument in arguments if argument in _DETACH_FLAGS]
+    try:
+        boundary = arguments.index("--")
+    except ValueError:
+        rodex_arguments = arguments
+        codex_arguments: list[str] = []
+    else:
+        rodex_arguments = arguments[:boundary]
+        codex_arguments = arguments[boundary:]
+
+    detach_arguments = [
+        argument for argument in rodex_arguments if argument in _DETACH_FLAGS
+    ]
     if len(detach_arguments) > 1:
         raise RodexLaunchError("a detach flag may be supplied only once")
-    remaining = [argument for argument in arguments if argument not in _DETACH_FLAGS]
+    remaining = [argument for argument in rodex_arguments if argument not in _DETACH_FLAGS]
     create_positions = [
         index for index, argument in enumerate(remaining) if argument in _CREATE_FLAGS
     ]
     if not create_positions:
-        return remaining, None, bool(detach_arguments)
-    if len(create_positions) != 1 or len(remaining) != 2 or create_positions[0] != 0:
+        return [*remaining, *codex_arguments], None, bool(detach_arguments)
+    if len(create_positions) != 1 or create_positions[0] + 1 >= len(remaining):
         raise RodexLaunchError("usage: rodex [--detach] --create SESSION_NAME")
-    return [], remaining[1], bool(detach_arguments)
+    create_position = create_positions[0]
+    requested_name = remaining[create_position + 1]
+    forwarded_arguments = [
+        *remaining[:create_position],
+        *remaining[create_position + 2 :],
+        *codex_arguments,
+    ]
+    return forwarded_arguments, requested_name, bool(detach_arguments)
 
 
 def _print_existing_detached_runtime(

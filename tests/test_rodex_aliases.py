@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from cool_name import CoolNameError, ReservedCoolNameError
+from cool_name import RODEX_RESERVED_WORDS, CoolNameError, ReservedCoolNameError
 from rodex_functions import (
     RodexSessionError,
     RodexSessionsUserIdentity,
@@ -92,7 +92,7 @@ def test_alias_is_one_owned_integer_identity_and_force_replaces_it(
 
 @pytest.mark.parametrize(
     "reserved_name",
-    ["running", "RUNNING", "alias", "Alias", "send", "tail", "wait"],
+    [*sorted(RODEX_RESERVED_WORDS), "Alias", "EXEC", "RUNNING"],
 )
 def test_reserved_aliases_are_rejected_without_consuming_an_id(
     tmp_path: Path,

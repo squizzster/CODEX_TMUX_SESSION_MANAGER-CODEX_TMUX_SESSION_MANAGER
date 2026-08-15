@@ -55,11 +55,13 @@ At the `›` prompt, use Codex normally. Detach without ending the session with
 | `./rodex wait edgar-work` | Wait until the running session is idle. |
 | `./rodex tail edgar-work` | Follow structured live protocol events as JSON lines. |
 
-Create also accepts `-c`, `--c`, or `-create`; detach accepts `-d`, `--d`, `-detach`,
-or `--detach`. The bare control commands accept `--running`, `--alias`, `--send`,
+Create also accepts `--c` or `-create`; `-c` remains Codex's `--config` option. Detach
+accepts `-d`, `--d`, `-detach`, or `--detach`. The bare control commands accept
+`--running`, `--alias`, `--send`,
 `--wait`, and `--tail`. Stop `tail` with `Ctrl-C`; the Rodex session keeps running.
 Names use 1–80 ASCII letters, digits, underscores, or hyphens and begin with a letter
-or digit.
+or digit. Rodex control words and Codex top-level commands/aliases are reserved
+case-insensitively; this vocabulary may grow with supported Codex versions.
 
 A single argument keeps the natural Codex-style flow: if it matches an existing Rodex
 name, Rodex opens that session; otherwise the argument is passed to the new Codex TUI.

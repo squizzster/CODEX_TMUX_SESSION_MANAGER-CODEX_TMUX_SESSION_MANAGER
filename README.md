@@ -8,7 +8,8 @@ ordinary `codex` process, forwarding its command-line arguments.
 
 ## Try it
 
-Requires Linux, Python 3.12+, `uv`, and the `codex` CLI.
+Requires Linux or a compatible POSIX system, Python 3.12+, `uv`, and the `codex`
+CLI. Windows is explicitly unsupported.
 
 ```bash
 uv sync
@@ -35,6 +36,19 @@ CREATE UNIQUE INDEX rodex_sessions_uuid_ints_unique
     ON rodex_sessions (uuid_int_1, uuid_int_2);
 ```
 
+POSIX users are normalized through a lookup table:
+
+```sql
+CREATE TABLE rodex_sessions_users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    uid INTEGER NOT NULL,
+    gid INTEGER NOT NULL,
+    user_name TEXT NOT NULL
+);
+CREATE UNIQUE INDEX rodex_sessions_users_uid_gid_user_name_unique
+    ON rodex_sessions_users (uid, gid, user_name);
+```
+
 Each newly created session receives one provenance and access row:
 
 ```sql
@@ -42,23 +56,30 @@ CREATE TABLE rodex_sessions_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     rodex_sessions_id INTEGER NOT NULL,
     created_at_utc TEXT NOT NULL,
-    created_by_user TEXT NOT NULL,
+    rodex_sessions_users_id INTEGER NOT NULL,
     last_accessed_at_utc TEXT NOT NULL,
-    FOREIGN KEY (rodex_sessions_id) REFERENCES rodex_sessions (id)
+    FOREIGN KEY (rodex_sessions_id) REFERENCES rodex_sessions (id),
+    FOREIGN KEY (rodex_sessions_users_id) REFERENCES rodex_sessions_users (id)
 );
 CREATE UNIQUE INDEX rodex_sessions_log_rodex_sessions_id_unique
     ON rodex_sessions_log (rodex_sessions_id);
 ```
 
-Connecting fields follow `<table_name>_<lookup_field>`, hence
-`rodex_sessions_id`. Both tables use their own `id INTEGER PRIMARY KEY
-AUTOINCREMENT`; SQLite provides the primary-key uniqueness, while the named unique
-index enforces one log row per session.
+Connecting fields follow `<table_name>_<lookup_field>`, hence `rodex_sessions_id`
+and `rodex_sessions_users_id`. Every table uses its own `id INTEGER PRIMARY KEY
+AUTOINCREMENT`; SQLite provides the primary-key uniqueness, while named unique
+indexes enforce natural lookup keys and one log row per session.
+
+Lookup-table writes use the shared `rodex_sql` transaction library. They always run
+`SELECT id` against the complete natural key before considering an insert. Existing
+rows are reused without consuming an AUTOINCREMENT value. `BEGIN IMMEDIATE` serializes
+the select/insert decision, and errors roll back the complete unit of work. Session,
+user lookup, and session-log creation are one transaction.
 
 UTC timestamps use fixed, microsecond-precision ISO-8601 text such as
 `2026-08-15T12:34:56.123456Z`. This representation is unambiguous, readable, and
-sorts chronologically as text. `created_by_user` defaults to the operating-system
-user.
+sorts chronologically as text. The user lookup defaults to the effective POSIX UID,
+GID, and password-database user name.
 
 Rodex generates a secure 128-bit UUID. SQLite integers are signed 64-bit values, so
 each UUID half is stored in signed two's-complement form. The `rodex_functions` API
@@ -69,6 +90,8 @@ Public helpers include:
 - `create_a_rodex_session`
 - `lookup_id_from_a_rodex_uuid`
 - `lookup_rodex_uuid_from_an_id`
+- `lookup_or_create_rodex_sessions_user`
+- `lookup_rodex_sessions_user`
 - `lookup_rodex_session_log`
 - `record_a_rodex_session_access`
 - `initialise_rodex_database`

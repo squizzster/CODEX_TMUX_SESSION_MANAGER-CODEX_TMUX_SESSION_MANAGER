@@ -9,11 +9,16 @@ import pytest
 import rodex_functions.sessions as session_module
 from rodex_functions import (
     RodexSessionError,
+    RodexSessionsUserIdentity,
     create_a_rodex_session,
     initialise_rodex_database,
     lookup_rodex_session_log,
+    lookup_rodex_sessions_user,
     record_a_rodex_session_access,
 )
+
+ALICE = RodexSessionsUserIdentity(uid=1001, gid=1002, user_name="alice")
+BOB = RodexSessionsUserIdentity(uid=2001, gid=2002, user_name="bob")
 
 
 def fetch_all(database: Path, query: str) -> list[tuple[object, ...]]:
@@ -42,7 +47,7 @@ def test_sessions_log_has_the_requested_columns_and_types(tmp_path: Path) -> Non
         ("id", "INTEGER", 0, 1),
         ("rodex_sessions_id", "INTEGER", 1, 0),
         ("created_at_utc", "TEXT", 1, 0),
-        ("created_by_user", "TEXT", 1, 0),
+        ("rodex_sessions_users_id", "INTEGER", 1, 0),
         ("last_accessed_at_utc", "TEXT", 1, 0),
     ]
 
@@ -67,9 +72,10 @@ def test_sessions_log_connecting_field_follows_table_name_lookup_field_rule(
 
     foreign_keys = fetch_all(database, "PRAGMA foreign_key_list(rodex_sessions_log)")
 
-    assert [(row[2], row[3], row[4]) for row in foreign_keys] == [
-        ("rodex_sessions", "rodex_sessions_id", "id")
-    ]
+    assert {(row[2], row[3], row[4]) for row in foreign_keys} == {
+        ("rodex_sessions", "rodex_sessions_id", "id"),
+        ("rodex_sessions_users", "rodex_sessions_users_id", "id"),
+    }
 
 
 def test_sessions_log_has_named_unique_index_on_rodex_sessions_id(
@@ -96,37 +102,50 @@ def test_creating_a_session_also_creates_its_one_log_row(
     timestamp = "2026-08-15T12:34:56.123456Z"
     monkeypatch.setattr(session_module, "_utc_now_timestamp", lambda: timestamp)
 
-    session = create_a_rodex_session(database, created_by_user="alice")
+    session = create_a_rodex_session(database, user_identity=ALICE)
 
     assert fetch_all(
         database,
-        "SELECT id, rodex_sessions_id, created_at_utc, created_by_user, "
+        "SELECT id, rodex_sessions_id, created_at_utc, rodex_sessions_users_id, "
         "last_accessed_at_utc FROM rodex_sessions_log",
-    ) == [(1, session.id, timestamp, "alice", timestamp)]
+    ) == [(1, session.id, timestamp, 1, timestamp)]
 
 
-def test_created_by_user_defaults_to_the_operating_system_user(
+def test_session_user_defaults_to_the_posix_operating_system_identity(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     database = tmp_path / "rodex.sqlite3"
-    monkeypatch.setattr(session_module.getpass, "getuser", lambda: "os-user")
+    monkeypatch.setattr(session_module.os, "getuid", lambda: 1009)
+    monkeypatch.setattr(session_module.os, "getgid", lambda: 1010)
+    monkeypatch.setattr(
+        session_module.pwd,
+        "getpwuid",
+        lambda uid: type("PasswordEntry", (), {"pw_name": "dna"})(),
+    )
 
     session = create_a_rodex_session(database)
 
-    assert lookup_rodex_session_log(session.id, database).created_by_user == "os-user"  # type: ignore[union-attr]
+    log = lookup_rodex_session_log(session.id, database)
+    assert log is not None
+    assert lookup_rodex_sessions_user(log.rodex_sessions_users_id, database) == (
+        session_module.RodexSessionsUser(id=1, uid=1009, gid=1010, user_name="dna")
+    )
 
 
 @pytest.mark.parametrize("invalid_user", ["", "   "])
-def test_created_by_user_must_not_be_empty(tmp_path: Path, invalid_user: str) -> None:
+def test_user_name_must_not_be_empty(tmp_path: Path, invalid_user: str) -> None:
     with pytest.raises(ValueError, match="non-empty string"):
-        create_a_rodex_session(tmp_path / "rodex.sqlite3", created_by_user=invalid_user)
+        create_a_rodex_session(
+            tmp_path / "rodex.sqlite3",
+            user_identity=RodexSessionsUserIdentity(1, 1, invalid_user),
+        )
 
 
 def test_log_ids_auto_increment_independently_from_session_ids(tmp_path: Path) -> None:
     database = tmp_path / "rodex.sqlite3"
 
-    first = create_a_rodex_session(database, created_by_user="alice")
-    second = create_a_rodex_session(database, created_by_user="bob")
+    first = create_a_rodex_session(database, user_identity=ALICE)
+    second = create_a_rodex_session(database, user_identity=BOB)
 
     assert fetch_all(
         database,
@@ -140,7 +159,7 @@ def test_log_ids_auto_increment_independently_from_session_ids(tmp_path: Path) -
 
 def test_unique_index_rejects_a_second_log_for_the_same_session(tmp_path: Path) -> None:
     database = tmp_path / "rodex.sqlite3"
-    session = create_a_rodex_session(database, created_by_user="alice")
+    session = create_a_rodex_session(database, user_identity=ALICE)
 
     with (
         sqlite3.connect(database) as connection,
@@ -148,9 +167,9 @@ def test_unique_index_rejects_a_second_log_for_the_same_session(tmp_path: Path) 
     ):
         connection.execute(
             "INSERT INTO rodex_sessions_log "
-            "(rodex_sessions_id, created_at_utc, created_by_user, "
+            "(rodex_sessions_id, created_at_utc, rodex_sessions_users_id, "
             "last_accessed_at_utc) VALUES (?, ?, ?, ?)",
-            (session.id, "now", "alice", "now"),
+            (session.id, "now", 1, "now"),
         )
 
 
@@ -162,21 +181,21 @@ def test_foreign_key_rejects_a_log_for_an_unknown_session(tmp_path: Path) -> Non
         with pytest.raises(sqlite3.IntegrityError, match="FOREIGN KEY constraint failed"):
             connection.execute(
                 "INSERT INTO rodex_sessions_log "
-                "(rodex_sessions_id, created_at_utc, created_by_user, "
-                "last_accessed_at_utc) VALUES (999, 'now', 'alice', 'now')"
+                "(rodex_sessions_id, created_at_utc, rodex_sessions_users_id, "
+                "last_accessed_at_utc) VALUES (999, 'now', 999, 'now')"
             )
 
 
 def test_lookup_returns_the_log_for_a_session(tmp_path: Path) -> None:
     database = tmp_path / "rodex.sqlite3"
-    session = create_a_rodex_session(database, created_by_user="alice")
+    session = create_a_rodex_session(database, user_identity=ALICE)
 
     log = lookup_rodex_session_log(session.id, database)
 
     assert log is not None
     assert log.id == 1
     assert log.rodex_sessions_id == session.id
-    assert log.created_by_user == "alice"
+    assert log.rodex_sessions_users_id == 1
 
 
 def test_lookup_returns_none_when_a_session_has_no_log(tmp_path: Path) -> None:
@@ -191,13 +210,13 @@ def test_record_access_changes_only_the_last_access_timestamp(
     database = tmp_path / "rodex.sqlite3"
     created = "2026-08-15T10:00:00.000000Z"
     monkeypatch.setattr(session_module, "_utc_now_timestamp", lambda: created)
-    session = create_a_rodex_session(database, created_by_user="alice")
+    session = create_a_rodex_session(database, user_identity=ALICE)
     accessed = datetime(2026, 8, 15, 11, 30, tzinfo=UTC)
 
     updated = record_a_rodex_session_access(session.id, database, accessed_at_utc=accessed)
 
     assert updated.created_at_utc == created
-    assert updated.created_by_user == "alice"
+    assert updated.rodex_sessions_users_id == 1
     assert updated.last_accessed_at_utc == "2026-08-15T11:30:00.000000Z"
 
 

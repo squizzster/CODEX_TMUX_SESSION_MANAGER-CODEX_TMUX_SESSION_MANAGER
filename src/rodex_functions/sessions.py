@@ -456,6 +456,57 @@ def record_a_rodex_session_access(
     return _session_log_from_row(row)
 
 
+def record_a_rodex_session_runtime_resume(
+    session_id: int,
+    tmux_server_socket_path: str | os.PathLike[str],
+    tmux_session_name: str,
+    database_path: str | os.PathLike[str] | None = None,
+    *,
+    accessed_at_utc: datetime | None = None,
+) -> RodexTmuxSession:
+    """Atomically replace a resumed session's tmux endpoint and access time."""
+    _validate_session_id(session_id)
+    tmux_link = _normalise_tmux_link(
+        tmux_server_socket_path,
+        tmux_session_name,
+    )
+    if tmux_link is None:  # Both arguments are required by this public contract.
+        raise ValueError("a resumed session requires a tmux endpoint")
+    socket_path, session_name = tmux_link
+    timestamp = _normalise_utc_datetime(accessed_at_utc)
+    path = initialise_rodex_database(database_path)
+    with open_rodex_transaction(path) as connection:
+        tmux_cursor = connection.execute(
+            f"UPDATE {RODEX_TMUX_SESSIONS_TABLE} "
+            "SET tmux_server_socket_path = ?, tmux_session_name = ? "
+            "WHERE rodex_sessions_id = ?",
+            (socket_path, session_name, session_id),
+        )
+        if tmux_cursor.rowcount != 1:
+            raise RodexSessionError(f"Rodex tmux session does not exist: {session_id}")
+        log_cursor = connection.execute(
+            f"UPDATE {RODEX_SESSIONS_LOG_TABLE} SET last_accessed_at_utc = ? "
+            "WHERE rodex_sessions_id = ?",
+            (timestamp, session_id),
+        )
+        if log_cursor.rowcount != 1:
+            raise RodexSessionError(f"Rodex session log does not exist: {session_id}")
+        row = connection.execute(
+            f"SELECT id, rodex_sessions_id, tmux_server_socket_path, "
+            f"tmux_session_name FROM {RODEX_TMUX_SESSIONS_TABLE} "
+            "WHERE rodex_sessions_id = ?",
+            (session_id,),
+        ).fetchone()
+    if row is None:
+        raise RodexSessionError(f"Rodex tmux session disappeared: {session_id}")
+    return RodexTmuxSession(
+        id=int(row[0]),
+        rodex_sessions_id=int(row[1]),
+        tmux_server_socket_path=str(row[2]),
+        tmux_session_name=str(row[3]),
+    )
+
+
 def lookup_codex_uuid_from_a_rodex_session_id(
     session_id: int,
     database_path: str | os.PathLike[str] | None = None,

@@ -151,6 +151,24 @@ def test_attach_uses_live_stdio_and_escapes_an_existing_tmux_client(
     assert "TMUX" not in environment
 
 
+def test_session_exists_checks_the_exact_recorded_tmux_endpoint(tmp_path: Path) -> None:
+    runner = RuntimeRunner(tmp_path)
+    launcher = RodexRuntimeLauncher("codex", "tmux", runner=runner)
+    live = LiveTmuxSession(tmp_path / "tmux.sock", "automatic-beluga")
+
+    assert launcher.session_exists(live)
+
+    assert runner.calls[-1] == [
+        "tmux",
+        "-S",
+        str(tmp_path / "tmux.sock"),
+        "has-session",
+        "-t",
+        "automatic-beluga",
+    ]
+    assert runner.options[-1]["check"] is False
+
+
 def test_rename_and_status_configuration_use_the_real_tmux_session_name(
     tmp_path: Path,
 ) -> None:

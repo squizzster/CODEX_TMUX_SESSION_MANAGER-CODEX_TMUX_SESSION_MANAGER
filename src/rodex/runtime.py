@@ -169,6 +169,17 @@ class RodexRuntimeLauncher:
             environment=environment,
         )
 
+    def session_exists(self, runtime: LiveTmuxSession) -> bool:
+        """Return whether the exact recorded tmux session is still running."""
+        result = self._tmux(
+            runtime,
+            "has-session",
+            "-t",
+            runtime.tmux_session_name,
+            check=False,
+        )
+        return result.returncode == 0
+
     def stop(self, runtime: LiveTmuxSession, *, check: bool = True) -> None:
         """Stop exactly one tmux session, allowing its supervisor to clean up."""
         self._tmux(
@@ -183,7 +194,7 @@ class RodexRuntimeLauncher:
         deadline = self._monotonic() + self._startup_timeout_seconds
         last_error: BaseException | None = None
         while self._monotonic() < deadline:
-            if not self._session_exists(runtime):
+            if not self.session_exists(runtime):
                 detail = _read_runtime_error_detail(runtime.app_server_log_path)
                 suffix = f": {detail}" if detail else ""
                 raise RodexRuntimeError(
@@ -247,16 +258,6 @@ class RodexRuntimeLauncher:
         if not isinstance(data, list) or not all(isinstance(item, str) for item in data):
             raise RodexRuntimeError("app-server returned an invalid loaded-thread result")
         return data
-
-    def _session_exists(self, runtime: LiveRodexRuntime) -> bool:
-        result = self._tmux(
-            runtime,
-            "has-session",
-            "-t",
-            runtime.tmux_session_name,
-            check=False,
-        )
-        return result.returncode == 0
 
     def _tmux(
         self,

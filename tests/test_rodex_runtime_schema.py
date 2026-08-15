@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 import uuid
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -13,7 +14,9 @@ from rodex_functions import (
     initialise_rodex_database,
     lookup_codex_uuid_from_a_rodex_session_id,
     lookup_rodex_session_id_from_a_codex_uuid,
+    lookup_rodex_session_log,
     lookup_rodex_tmux_session,
+    record_a_rodex_session_runtime_resume,
 )
 
 CODEX_UUID = uuid.UUID("01a00654-f2bc-7a30-834a-a5f886a65f82")
@@ -142,3 +145,59 @@ def test_runtime_matchmaking_rows_rollback_with_the_session(tmp_path: Path) -> N
         "cool_names",
     ):
         assert fetch_all(database, f"SELECT COUNT(*) FROM {table}") == [(0,)]
+
+
+def test_runtime_resume_replaces_endpoint_and_access_time_in_one_transaction(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "rodex.sqlite3"
+    session = create_a_rodex_session(
+        database,
+        codex_session_uuid=CODEX_UUID,
+        tmux_server_socket_path="/tmp/rodex/old.sock",
+        tmux_session_name="automatic-beluga",
+    )
+
+    updated = record_a_rodex_session_runtime_resume(
+        session.id,
+        "/tmp/rodex/new.sock",
+        "automatic-beluga",
+        database,
+        accessed_at_utc=datetime(2026, 8, 15, 18, 30, tzinfo=UTC),
+    )
+
+    assert updated.id == 1
+    assert updated.tmux_server_socket_path == "/tmp/rodex/new.sock"
+    log = lookup_rodex_session_log(session.id, database)
+    assert log is not None
+    assert log.last_accessed_at_utc == "2026-08-15T18:30:00.000000Z"
+
+
+def test_runtime_resume_rolls_back_endpoint_when_access_log_update_fails(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "rodex.sqlite3"
+    session = create_a_rodex_session(
+        database,
+        codex_session_uuid=CODEX_UUID,
+        tmux_server_socket_path="/tmp/rodex/old.sock",
+        tmux_session_name="automatic-beluga",
+    )
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "CREATE TRIGGER force_log_update_failure BEFORE UPDATE "
+            "ON rodex_sessions_log BEGIN "
+            "SELECT RAISE(ABORT, 'forced log update failure'); END"
+        )
+
+    with pytest.raises(sqlite3.IntegrityError, match="forced log update failure"):
+        record_a_rodex_session_runtime_resume(
+            session.id,
+            "/tmp/rodex/new.sock",
+            "automatic-beluga",
+            database,
+        )
+
+    tmux_link = lookup_rodex_tmux_session(session.id, database)
+    assert tmux_link is not None
+    assert tmux_link.tmux_server_socket_path == "/tmp/rodex/old.sock"

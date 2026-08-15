@@ -12,9 +12,11 @@ from rodex_functions import (
     RodexSessionError,
     create_a_rodex_session,
     default_rodex_database_path,
+    lookup_codex_uuid_from_a_rodex_session_id,
     lookup_rodex_session_id_from_a_cool_name,
     lookup_rodex_tmux_session,
     record_a_rodex_session_access,
+    record_a_rodex_session_runtime_resume,
     update_rodex_tmux_session_name,
 )
 
@@ -48,7 +50,12 @@ def run(
     runtime_launcher = launcher or RodexRuntimeLauncher(
         codex_binary or configured_codex, tmux_binary
     )
-    if _reattach_named_session(arguments, resolved_database, runtime_launcher):
+    if _open_named_session(
+        arguments,
+        resolved_database,
+        runtime_launcher,
+        codex_available=codex_binary is not None,
+    ):
         return 0
     if codex_binary is None:
         raise RodexLaunchError(f"Codex executable was not found: {configured_codex}")
@@ -82,10 +89,12 @@ def run(
     return 0
 
 
-def _reattach_named_session(
+def _open_named_session(
     arguments: list[str],
     database_path: Path,
     launcher: RodexRuntimeLauncher,
+    *,
+    codex_available: bool,
 ) -> bool:
     if len(arguments) != 1 or arguments[0].startswith("-"):
         return False
@@ -96,18 +105,68 @@ def _reattach_named_session(
     tmux_link = lookup_rodex_tmux_session(session_id, database_path)
     if tmux_link is None:
         raise RodexLaunchError(f"Rodex session has no tmux endpoint: {cool_name}")
-    active_tmux = _prepare_tmux_identity(
-        launcher,
-        LiveTmuxSession(
-            tmux_server_socket_path=Path(tmux_link.tmux_server_socket_path),
-            tmux_session_name=tmux_link.tmux_session_name,
-        ),
-        cool_name,
-        session_id,
-        database_path,
+    recorded_tmux = LiveTmuxSession(
+        tmux_server_socket_path=Path(tmux_link.tmux_server_socket_path),
+        tmux_session_name=tmux_link.tmux_session_name,
     )
-    record_a_rodex_session_access(session_id, database_path)
-    print(f"Reattaching Rodex {cool_name} ({active_tmux.tmux_session_name})", flush=True)
+    if launcher.session_exists(recorded_tmux):
+        active_tmux = _prepare_tmux_identity(
+            launcher,
+            recorded_tmux,
+            cool_name,
+            session_id,
+            database_path,
+        )
+        record_a_rodex_session_access(session_id, database_path)
+        print(
+            f"Reattaching Rodex {cool_name} ({active_tmux.tmux_session_name})",
+            flush=True,
+        )
+        launcher.attach(active_tmux)
+        return True
+
+    if not codex_available:
+        configured_codex = os.environ.get("RODEX_CODEX_BINARY", "codex")
+        raise RodexLaunchError(f"Codex executable was not found: {configured_codex}")
+    codex_session_uuid = lookup_codex_uuid_from_a_rodex_session_id(
+        session_id, database_path
+    )
+    if codex_session_uuid is None:
+        raise RodexLaunchError(f"Rodex session has no Codex identity: {cool_name}")
+
+    resumed_runtime, observed_codex_uuid = launcher.start(
+        Path.cwd(), ["resume", str(codex_session_uuid)]
+    )
+    active_tmux: LiveTmuxSession = resumed_runtime
+    try:
+        if observed_codex_uuid != codex_session_uuid:
+            raise RodexLaunchError(
+                "Codex resumed an unexpected session: "
+                f"expected {codex_session_uuid}, observed {observed_codex_uuid}"
+            )
+        active_tmux = _prepare_tmux_identity(
+            launcher,
+            active_tmux,
+            cool_name,
+            session_id,
+            database_path,
+            persist_name=False,
+        )
+        record_a_rodex_session_runtime_resume(
+            session_id,
+            active_tmux.tmux_server_socket_path,
+            active_tmux.tmux_session_name,
+            database_path,
+        )
+    except BaseException:
+        launcher.stop(active_tmux, check=False)
+        raise
+
+    print(
+        f"Resumed Rodex {cool_name} -> Codex {codex_session_uuid} "
+        f"({active_tmux.tmux_session_name})",
+        flush=True,
+    )
     launcher.attach(active_tmux)
     return True
 
@@ -118,10 +177,13 @@ def _prepare_tmux_identity(
     cool_name: str,
     session_id: int,
     database_path: Path,
+    *,
+    persist_name: bool = True,
 ) -> LiveTmuxSession:
     if active_tmux.tmux_session_name != cool_name:
         active_tmux = launcher.rename(active_tmux, cool_name)
-        update_rodex_tmux_session_name(session_id, cool_name, database_path)
+        if persist_name:
+            update_rodex_tmux_session_name(session_id, cool_name, database_path)
     launcher.configure_identity_status(active_tmux)
     return active_tmux
 

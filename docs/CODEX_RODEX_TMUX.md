@@ -26,14 +26,16 @@ never presented or stored as another domain's identity.
 ## Named reattachment
 
 - `./rodex <cool-name>` resolves the name through its integer identity.
-- The stored socket and tmux name identify the exact existing session.
-- An older token-named session is renamed to its cool name before attachment.
-- Reattachment updates `last_accessed_at_utc`; it does not start another Codex.
+- If its stored tmux endpoint is live, Rodex attaches to it directly.
+- If it has ended, Rodex starts a fresh tmux/app-server and asks Codex to resume the
+  stored Codex UUID; the observed UUID must match before the endpoint is replaced.
+- Both routes preserve all Rodex/Codex identity and update `last_accessed_at_utc`.
 
 ## Lifecycle
 
 - `Ctrl-b d` detaches while Codex, its app-server, and tmux continue running.
-- Exiting the Codex TUI ends its supervisor and private app-server.
+- Exiting the Codex TUI ends its supervisor and private app-server; its cool name can
+  transparently resume the saved Codex session later.
 - A failure before SQL registration stops the exact new tmux session and leaves no
   partial database row.
 - The runtime uses `$XDG_RUNTIME_DIR` when suitable, otherwise `/tmp/rodex-<uid>`.

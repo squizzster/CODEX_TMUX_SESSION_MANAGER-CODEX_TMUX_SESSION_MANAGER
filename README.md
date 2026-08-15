@@ -6,7 +6,7 @@ The project-root `./rodex` command opens the ordinary Codex TUI inside tmux. A p
 Codex app-server supplies the real Codex session UUID; Rodex allocates its own distinct
 UUID and records the exact Rodex ↔ Codex ↔ tmux match before attaching the terminal.
 Arguments are forwarded to Codex unless one bare argument resolves an existing cool
-name, in which case Rodex reattaches that session.
+name, in which case Rodex attaches the live runtime or resumes its saved Codex session.
 
 ## Try it
 
@@ -20,7 +20,7 @@ uv sync
 
 At the `›` prompt, Codex commands such as `/status` work normally. Detach without
 stopping Codex with `Ctrl-b d`. The tmux status line prominently shows the permanent
-cool name. Reattach a detached session by name:
+cool name. Open a session by name; Rodex attaches it if live or resumes it if ended:
 
 ```bash
 ./rodex automatic-beluga
@@ -136,6 +136,7 @@ Public helpers include:
 - `lookup_rodex_session_id_from_a_cool_name`
 - `lookup_rodex_session_id_from_a_codex_uuid`
 - `record_a_rodex_session_access`
+- `record_a_rodex_session_runtime_resume`
 - `update_rodex_tmux_session_name`
 - `initialise_rodex_database`
 

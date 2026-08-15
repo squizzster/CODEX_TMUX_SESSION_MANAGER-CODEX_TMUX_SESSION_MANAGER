@@ -1,7 +1,7 @@
 [project]
 name = "codex-tmux-session-manager"
-version = "0.1.0"
-description = "Keep named Codex CLI sessions alive and navigable with tmux"
+version = "0.2.0"
+description = "Manage durable Rodex identities and Codex CLI sessions"
 readme = "README.md"
 authors = [
     { name = "Mark", email = "squizzster@gmail.com" }
@@ -11,11 +11,33 @@ dependencies = []
 
 [project.scripts]
 ctsm = "codex_tmux_session_manager:main"
+rodex = "rodex:main"
 
 [dependency-groups]
 dev = [
     "pytest>=8.4.2",
+    "pytest-cov>=7.0.0",
+    "ruff>=0.12.0",
 ]
+
+[tool.pytest.ini_options]
+addopts = "--strict-markers --strict-config"
+testpaths = ["tests"]
+
+[tool.coverage.run]
+branch = true
+source = ["codex_tmux_session_manager", "rodex", "rodex_functions"]
+
+[tool.coverage.report]
+fail_under = 70
+show_missing = true
+
+[tool.ruff]
+line-length = 92
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
 
 [build-system]
 requires = ["uv_build>=0.12.1,<0.13.0"]

@@ -5,8 +5,8 @@ from __future__ import annotations
 import argparse
 import shutil
 import sys
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Sequence
 
 from .tmux import SessionError, TmuxSessions
 
@@ -48,7 +48,9 @@ def run(argv: Sequence[str] | None = None, sessions: TmuxSessions | None = None)
         if args.command == "doctor":
             statuses = prerequisite_status()
             for command, path in statuses:
-                print(f"{command:<5} {'ok' if path else 'missing':<7} {path or ''}".rstrip())
+                print(
+                    f"{command:<5} {'ok' if path else 'missing':<7} {path or ''}".rstrip()
+                )
             return 0 if all(path for _, path in statuses) else 1
 
         if args.command == "list":

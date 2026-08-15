@@ -18,6 +18,9 @@ uv sync
 The default database is `.rodex/rodex.sqlite3` beneath the launch directory. Set
 `RODEX_DATABASE_PATH` to use a different path. Runtime databases are ignored by Git.
 
+Prototype database rule: when the schema changes, delete and recreate the database
+empty. When the schema does not change, preserve its contents.
+
 ## Session tables
 
 `rodex_sessions` remains sealed at three columns:

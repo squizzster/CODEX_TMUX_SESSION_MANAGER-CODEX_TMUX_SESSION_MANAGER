@@ -1,6 +1,6 @@
 # SQL schema methodology
 
-Apply these authoritative standards to future schema decisions; modify them only after an agent proposal and explicit user agreement.
+Apply these standards to future schema decisions. These authorative standards may be modified only by an agent-suggestion followed by a user-agreement.
 
 - Table names are always plural.
 - Every table starts with `id INTEGER PRIMARY KEY AUTOINCREMENT`.

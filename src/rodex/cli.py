@@ -204,9 +204,15 @@ def _open_named_session(
     if codex_session_uuid is None:
         raise RodexLaunchError(f"Rodex session has no Codex identity: {cool_name}")
 
-    resumed_runtime, observed_codex_uuid = launcher.start(
-        Path.cwd(), ["resume", str(codex_session_uuid)]
-    )
+    try:
+        resumed_runtime, observed_codex_uuid = launcher.start(
+            Path.cwd(), ["resume", str(codex_session_uuid)]
+        )
+    except RodexRuntimeError as error:
+        raise RodexLaunchError(
+            f"Rodex session {display_name!r} is recorded but not running; "
+            f"Codex session {codex_session_uuid} could not be resumed: {error}"
+        ) from error
     active_tmux: LiveTmuxSession = resumed_runtime
     try:
         if observed_codex_uuid != codex_session_uuid:

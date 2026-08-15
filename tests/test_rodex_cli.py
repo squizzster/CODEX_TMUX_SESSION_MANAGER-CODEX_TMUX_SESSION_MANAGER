@@ -50,6 +50,7 @@ class StubLauncher:
         self.existing_checks: list[LiveTmuxSession] = []
         self.live = True
         self.observed_codex_uuid = CODEX_UUID
+        self.start_error: RodexRuntimeError | None = None
         self.control = LiveRodexControl(
             tmp_path / "proxy.sock", tmp_path / "events.sock", CODEX_UUID
         )
@@ -59,6 +60,8 @@ class StubLauncher:
         self, workspace: Path, arguments: list[str]
     ) -> tuple[LiveRodexRuntime, uuid.UUID]:
         self.started.append((workspace, arguments))
+        if self.start_error is not None:
+            raise self.start_error
         return self.runtime, self.observed_codex_uuid
 
     def session_exists(self, runtime: LiveTmuxSession) -> bool:
@@ -491,6 +494,38 @@ def test_ended_cool_name_argument_transparently_resumes_its_codex_session(
     assert f"Resumed Rodex automatic-beluga -> Codex {CODEX_UUID}" in (
         capsys.readouterr().out
     )
+
+
+def test_failed_resume_reports_the_recorded_rodex_and_codex_context(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database = tmp_path / "rodex.sqlite3"
+    monkeypatch.setattr(
+        "cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga"
+    )
+    monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
+    create_a_rodex_session(
+        database,
+        codex_session_uuid=CODEX_UUID,
+        user_identity=DNA,
+        tmux_server_socket_path=tmp_path / "stale.sock",
+        tmux_session_name="automatic-beluga",
+    )
+    launcher = StubLauncher(tmp_path)
+    launcher.live = False
+    launcher.start_error = RodexRuntimeError("Codex session history is unavailable")
+
+    with pytest.raises(RodexLaunchError) as raised:
+        run(
+            ["automatic-beluga"],
+            database_path=database,
+            launcher=launcher,  # type: ignore[arg-type]
+        )
+
+    message = str(raised.value)
+    assert "Rodex session 'automatic-beluga' is recorded but not running" in message
+    assert f"Codex session {CODEX_UUID} could not be resumed" in message
+    assert "Codex session history is unavailable" in message
 
 
 @pytest.mark.parametrize("lookup_name", ["black-sawfly", "work"])

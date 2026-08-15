@@ -46,7 +46,7 @@ At the `›` prompt, use Codex normally. Detach without ending the session with
 |---|---|
 | `./rodex` | Create and attach to a new Rodex/Codex session. |
 | `./rodex --create project_1234` | Create a session with a preferred display name. |
-| `./rodex --detach` | Create without attaching and print compact identity JSON. |
+| `./rodex -d` | Create without attaching and print expanded identity JSON. |
 | `./rodex automatic-beluga` | Attach if live; otherwise resume its Codex session. |
 | `./rodex running` | List this POSIX user's running Rodex sessions. |
 | `./rodex alias automatic-beluga edgar-work` | Assign a preferred display name. |
@@ -55,10 +55,11 @@ At the `›` prompt, use Codex normally. Detach without ending the session with
 | `./rodex wait edgar-work` | Wait until the running session is idle. |
 | `./rodex tail edgar-work` | Follow structured live protocol events as JSON lines. |
 
-Create also accepts `-c`, `--c`, or `-create`. The bare control commands accept
-`--running`, `--alias`, `--send`, `--wait`, and `--tail`. Stop `tail` with `Ctrl-C`;
-the Rodex session keeps running. Names use 1–80 ASCII letters, digits, underscores,
-or hyphens and begin with a letter or digit.
+Create also accepts `-c`, `--c`, or `-create`; detach accepts `-d`, `--d`, `-detach`,
+or `--detach`. The bare control commands accept `--running`, `--alias`, `--send`,
+`--wait`, and `--tail`. Stop `tail` with `Ctrl-C`; the Rodex session keeps running.
+Names use 1–80 ASCII letters, digits, underscores, or hyphens and begin with a letter
+or digit.
 
 A single argument keeps the natural Codex-style flow: if it matches an existing Rodex
 name, Rodex opens that session; otherwise the argument is passed to the new Codex TUI.

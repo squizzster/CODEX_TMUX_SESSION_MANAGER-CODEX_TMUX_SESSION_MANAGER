@@ -50,6 +50,7 @@ class StubLauncher:
         self.existing_checks: list[LiveTmuxSession] = []
         self.live = True
         self.observed_codex_uuid = CODEX_UUID
+        self.start_error: RodexRuntimeError | None = None
         self.control = LiveRodexControl(
             tmp_path / "proxy.sock", tmp_path / "events.sock", CODEX_UUID
         )
@@ -59,6 +60,8 @@ class StubLauncher:
         self, workspace: Path, arguments: list[str]
     ) -> tuple[LiveRodexRuntime, uuid.UUID]:
         self.started.append((workspace, arguments))
+        if self.start_error is not None:
+            raise self.start_error
         return self.runtime, self.observed_codex_uuid
 
     def session_exists(self, runtime: LiveTmuxSession) -> bool:
@@ -294,10 +297,12 @@ def test_explicit_create_assigns_the_requested_display_name(
     assert tmux_link.tmux_session_name == "project_1234"
 
 
+@pytest.mark.parametrize("detach_flag", ["-d", "--d", "-detach", "--detach"])
 def test_detach_starts_without_attaching_and_prints_compact_json(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
+    detach_flag: str,
 ) -> None:
     database = tmp_path / "rodex.sqlite3"
     launcher = StubLauncher(tmp_path)
@@ -308,7 +313,7 @@ def test_detach_starts_without_attaching_and_prints_compact_json(
 
     assert (
         run(
-            ["--detach"],
+            [detach_flag],
             database_path=database,
             launcher=launcher,  # type: ignore[arg-type]
         )
@@ -317,19 +322,23 @@ def test_detach_starts_without_attaching_and_prints_compact_json(
 
     assert launcher.started == [(Path.cwd(), [])]
     assert launcher.attached == []
-    payload = json.loads(capsys.readouterr().out)
+    output = capsys.readouterr().out
+    payload = json.loads(output)
     assert payload == {
         "status": "running",
         "rodex_session_name": "automatic-beluga",
         "rodex_session_uuid": str(lookup_rodex_uuid_from_an_id(1, database)),
         "codex_session_uuid": str(CODEX_UUID),
     }
+    assert output == f"{json.dumps(payload, indent=2)}\n"
 
 
+@pytest.mark.parametrize("detach_flag", ["-d", "--d", "-detach", "--detach"])
 def test_explicit_create_and_detach_compose(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
+    detach_flag: str,
 ) -> None:
     database = tmp_path / "rodex.sqlite3"
     launcher = StubLauncher(tmp_path)
@@ -340,7 +349,7 @@ def test_explicit_create_and_detach_compose(
 
     assert (
         run(
-            ["--detach", "--create", "project_1234"],
+            ["--create", "project_1234", detach_flag],
             database_path=database,
             launcher=launcher,  # type: ignore[arg-type]
         )
@@ -349,6 +358,51 @@ def test_explicit_create_and_detach_compose(
 
     assert launcher.attached == []
     assert json.loads(capsys.readouterr().out)["rodex_session_name"] == "project_1234"
+
+
+@pytest.mark.parametrize("detach_flag", ["-d", "--d", "-detach", "--detach"])
+def test_detach_existing_name_resolves_without_attaching(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    detach_flag: str,
+) -> None:
+    database = tmp_path / "rodex.sqlite3"
+    monkeypatch.setattr(
+        "cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga"
+    )
+    monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
+    create_controlled_session(database, tmp_path)
+    launcher = StubLauncher(tmp_path)
+
+    assert (
+        run(
+            [detach_flag, "automatic-beluga"],
+            database_path=database,
+            launcher=launcher,  # type: ignore[arg-type]
+        )
+        == 0
+    )
+
+    assert launcher.started == []
+    assert launcher.attached == []
+    assert json.loads(capsys.readouterr().out)["rodex_session_name"] == ("automatic-beluga")
+
+
+def test_multiple_detach_spellings_are_rejected_before_codex_starts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    launcher = StubLauncher(tmp_path)
+    monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
+
+    with pytest.raises(RodexLaunchError, match="detach flag may be supplied only once"):
+        run(
+            ["-d", "--detach"],
+            database_path=tmp_path / "rodex.sqlite3",
+            launcher=launcher,  # type: ignore[arg-type]
+        )
+
+    assert launcher.started == []
 
 
 def test_live_cool_name_argument_renames_configures_and_reattaches_without_starting_codex(
@@ -440,6 +494,38 @@ def test_ended_cool_name_argument_transparently_resumes_its_codex_session(
     assert f"Resumed Rodex automatic-beluga -> Codex {CODEX_UUID}" in (
         capsys.readouterr().out
     )
+
+
+def test_failed_resume_reports_the_recorded_rodex_and_codex_context(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database = tmp_path / "rodex.sqlite3"
+    monkeypatch.setattr(
+        "cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga"
+    )
+    monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
+    create_a_rodex_session(
+        database,
+        codex_session_uuid=CODEX_UUID,
+        user_identity=DNA,
+        tmux_server_socket_path=tmp_path / "stale.sock",
+        tmux_session_name="automatic-beluga",
+    )
+    launcher = StubLauncher(tmp_path)
+    launcher.live = False
+    launcher.start_error = RodexRuntimeError("Codex session history is unavailable")
+
+    with pytest.raises(RodexLaunchError) as raised:
+        run(
+            ["automatic-beluga"],
+            database_path=database,
+            launcher=launcher,  # type: ignore[arg-type]
+        )
+
+    message = str(raised.value)
+    assert "Rodex session 'automatic-beluga' is recorded but not running" in message
+    assert f"Codex session {CODEX_UUID} could not be resumed" in message
+    assert "Codex session history is unavailable" in message
 
 
 @pytest.mark.parametrize("lookup_name", ["black-sawfly", "work"])

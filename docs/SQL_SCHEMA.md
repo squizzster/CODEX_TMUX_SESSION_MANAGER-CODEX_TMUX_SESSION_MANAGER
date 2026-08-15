@@ -8,11 +8,16 @@ explicitly changes them.
 - A connecting field is named `<referenced_table>_<lookup_field>`; a link to another
   table's primary key therefore ends in `<plural_table>_id`.
 - Foreign-key fields use `INTEGER` and reference the target table's `id`.
+- Required values use `NOT NULL`. Nullability represents a genuine domain state, never
+  implementation convenience.
+- Enforce identity, cardinality, and referential integrity with database constraints,
+  not application assumptions alone.
 - Lookups use `INTEGER` fields. Stored `TEXT` may be payload, but is not indexed or
   searched when integer identity fields exist.
 - Index fields used for lookup, joins, or enforced uniqueness. Do not index payload
   without an observed query that needs it.
-- Every natural key and one-to-one relationship has a clearly named unique index.
+- Every natural key and one-to-one relationship has a named unique index whose ordered
+  fields match the authoritative lookup key.
 - Put intrinsic one-to-one identity on the owning root row. Add another table only
   when cardinality, lifecycle, reuse, or ownership is genuinely separate.
 - Do not introduce redundant association tables or compatibility structure merely to
@@ -41,7 +46,5 @@ explicitly changes them.
 - Generated identities use bounded attempts. Exhaust the preferred representation,
   move to the next approved representation, and fail explicitly rather than loop
   forever.
-- Let domain cardinality and ownership determine structure. Never compromise that
-  structure for implementation convenience or assumed backward compatibility.
 - In PROTO, a schema change resets the disposable database to empty. Without a schema
   change, existing contents are preserved.

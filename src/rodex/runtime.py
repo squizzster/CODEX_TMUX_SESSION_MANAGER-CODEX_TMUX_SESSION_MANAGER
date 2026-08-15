@@ -55,6 +55,11 @@ def _exact_tmux_session_target(session_name: str) -> str:
     return f"={session_name}"
 
 
+def _exact_tmux_pane_target(session_name: str) -> str:
+    """Address a session exactly through commands whose target is a pane."""
+    return f"={session_name}:"
+
+
 class RodexRuntimeLauncher:
     """Start one private app-server/TUI pair and attach the user's terminal."""
 
@@ -154,7 +159,7 @@ class RodexRuntimeLauncher:
 
     def configure_identity_status(self, runtime: LiveTmuxSession) -> None:
         """Show the Rodex cool name prominently in the tmux status line."""
-        target = _exact_tmux_session_target(runtime.tmux_session_name)
+        target = _exact_tmux_pane_target(runtime.tmux_session_name)
         self._tmux(runtime, "set-option", "-t", target, "status", "on")
         self._tmux(
             runtime,

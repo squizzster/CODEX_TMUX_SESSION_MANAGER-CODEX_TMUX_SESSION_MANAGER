@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 import uuid
 from pathlib import Path
@@ -189,17 +190,70 @@ def test_rename_and_status_configuration_use_the_real_tmux_session_name(
         "automatic-beluga",
     ]
     assert [command[3:] for command in runner.calls[1:]] == [
-        ["set-option", "-t", "=automatic-beluga", "status", "on"],
+        ["set-option", "-t", "=automatic-beluga:", "status", "on"],
         [
             "set-option",
             "-t",
-            "=automatic-beluga",
+            "=automatic-beluga:",
             "status-left",
             "#[fg=green,bold] Rodex: #S #[fg=cyan,bold]| Tools: "
             "#{@rodex_tool_calls} #[default]",
         ],
-        ["set-option", "-t", "=automatic-beluga", "status-left-length", "68"],
+        ["set-option", "-t", "=automatic-beluga:", "status-left-length", "68"],
     ]
+
+
+def test_real_tmux_survives_rename_and_status_configuration(tmp_path: Path) -> None:
+    tmux_binary = shutil.which("tmux")
+    if tmux_binary is None:
+        pytest.skip("tmux is not installed")
+    socket_path = tmp_path / "tmux.sock"
+    original = LiveTmuxSession(socket_path, "rodex-integration-token")
+    launcher = RodexRuntimeLauncher("codex", tmux_binary)
+
+    subprocess.run(
+        [
+            tmux_binary,
+            "-S",
+            str(socket_path),
+            "new-session",
+            "-d",
+            "-s",
+            original.tmux_session_name,
+            "sleep 30",
+        ],
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+    try:
+        renamed = launcher.rename(original, "automatic-beluga")
+        launcher.configure_identity_status(renamed)
+
+        assert launcher.session_exists(renamed)
+        shown_status = subprocess.run(
+            [
+                tmux_binary,
+                "-S",
+                str(socket_path),
+                "show-options",
+                "-v",
+                "-t",
+                "=automatic-beluga:",
+                "status-left",
+            ],
+            check=True,
+            text=True,
+            capture_output=True,
+        )
+        assert "Rodex: #S" in shown_status.stdout
+    finally:
+        subprocess.run(
+            [tmux_binary, "-S", str(socket_path), "kill-server"],
+            check=False,
+            text=True,
+            capture_output=True,
+        )
 
 
 def test_more_than_one_loaded_codex_thread_aborts_the_exact_tmux_session(

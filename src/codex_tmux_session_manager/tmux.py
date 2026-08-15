@@ -6,9 +6,9 @@ import os
 import re
 import shlex
 import subprocess
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Sequence
 
 SESSION_PREFIX = "codex-"
 _SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,49}$")
@@ -71,7 +71,9 @@ class TmuxSessions:
         target = tmux_session_name(name)
         workspace = cwd.expanduser().resolve()
         if not workspace.is_dir():
-            raise SessionError(f"workspace does not exist or is not a directory: {workspace}")
+            raise SessionError(
+                f"workspace does not exist or is not a directory: {workspace}"
+            )
         if self.exists(name):
             raise SessionError(f"session already exists: {name}")
 

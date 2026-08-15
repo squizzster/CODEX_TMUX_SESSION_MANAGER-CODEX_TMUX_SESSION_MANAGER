@@ -1,0 +1,5 @@
+#!/bin/sh
+set -eu
+
+RODEX_PROJECT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+exec uv run --project "$RODEX_PROJECT_DIR" rodex "$@"

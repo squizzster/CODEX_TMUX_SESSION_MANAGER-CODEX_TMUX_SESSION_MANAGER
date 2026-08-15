@@ -11,3 +11,5 @@ wheels/
 /.tmp.*
 .coverage
 .pytest_cache/
+/.rodex/
+.ruff_cache/

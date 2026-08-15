@@ -12,7 +12,7 @@ import sys
 import time
 import uuid
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Final
 
@@ -32,11 +32,17 @@ class RodexRuntimeError(RuntimeError):
 
 
 @dataclass(frozen=True, slots=True)
-class LiveRodexRuntime:
-    """Addresses for one running Codex TUI hosted by tmux."""
+class LiveTmuxSession:
+    """The exact address of one running tmux session."""
 
     tmux_server_socket_path: Path
     tmux_session_name: str
+
+
+@dataclass(frozen=True, slots=True)
+class LiveRodexRuntime(LiveTmuxSession):
+    """Addresses for one running Codex TUI hosted by tmux."""
+
     app_server_socket_path: Path
     app_server_log_path: Path
 
@@ -116,7 +122,41 @@ class RodexRuntimeLauncher:
             raise
         return runtime, codex_uuid
 
-    def attach(self, runtime: LiveRodexRuntime) -> None:
+    def rename(self, runtime: LiveTmuxSession, tmux_session_name: str) -> LiveTmuxSession:
+        """Rename one exact tmux session and return its updated address."""
+        session_name = tmux_session_name.strip()
+        if not session_name:
+            raise ValueError("tmux_session_name must be non-empty")
+        self._tmux(
+            runtime,
+            "rename-session",
+            "-t",
+            runtime.tmux_session_name,
+            session_name,
+        )
+        return replace(runtime, tmux_session_name=session_name)
+
+    def configure_identity_status(self, runtime: LiveTmuxSession) -> None:
+        """Show the Rodex cool name prominently in the tmux status line."""
+        self._tmux(runtime, "set-option", "-t", runtime.tmux_session_name, "status", "on")
+        self._tmux(
+            runtime,
+            "set-option",
+            "-t",
+            runtime.tmux_session_name,
+            "status-left",
+            "#[fg=green,bold] Rodex: #S #[default]",
+        )
+        self._tmux(
+            runtime,
+            "set-option",
+            "-t",
+            runtime.tmux_session_name,
+            "status-left-length",
+            "48",
+        )
+
+    def attach(self, runtime: LiveTmuxSession) -> None:
         """Attach the calling terminal to the live Rodex tmux session."""
         environment = os.environ.copy()
         environment.pop("TMUX", None)
@@ -129,7 +169,7 @@ class RodexRuntimeLauncher:
             environment=environment,
         )
 
-    def stop(self, runtime: LiveRodexRuntime, *, check: bool = True) -> None:
+    def stop(self, runtime: LiveTmuxSession, *, check: bool = True) -> None:
         """Stop exactly one tmux session, allowing its supervisor to clean up."""
         self._tmux(
             runtime,
@@ -220,7 +260,7 @@ class RodexRuntimeLauncher:
 
     def _tmux(
         self,
-        runtime: LiveRodexRuntime,
+        runtime: LiveTmuxSession,
         *arguments: str,
         check: bool = True,
         interactive: bool = False,

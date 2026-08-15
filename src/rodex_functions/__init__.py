@@ -18,6 +18,7 @@ from .sessions import (
     lookup_id_from_a_rodex_uuid,
     lookup_or_create_rodex_sessions_user,
     lookup_rodex_session_id_from_a_codex_uuid,
+    lookup_rodex_session_id_from_a_cool_name,
     lookup_rodex_session_log,
     lookup_rodex_sessions_user,
     lookup_rodex_tmux_session,
@@ -25,6 +26,7 @@ from .sessions import (
     record_a_rodex_session_access,
     split_a_codex_uuid_into_signed_bigints,
     split_a_rodex_uuid_into_signed_bigints,
+    update_rodex_tmux_session_name,
 )
 
 __all__ = [
@@ -45,6 +47,7 @@ __all__ = [
     "lookup_id_from_a_rodex_uuid",
     "lookup_or_create_rodex_sessions_user",
     "lookup_rodex_session_id_from_a_codex_uuid",
+    "lookup_rodex_session_id_from_a_cool_name",
     "lookup_rodex_session_log",
     "lookup_rodex_sessions_user",
     "lookup_rodex_tmux_session",
@@ -52,4 +55,5 @@ __all__ = [
     "record_a_rodex_session_access",
     "split_a_codex_uuid_into_signed_bigints",
     "split_a_rodex_uuid_into_signed_bigints",
+    "update_rodex_tmux_session_name",
 ]

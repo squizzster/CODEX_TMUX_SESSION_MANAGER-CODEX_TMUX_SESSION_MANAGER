@@ -8,7 +8,12 @@ from pathlib import Path
 import pytest
 
 import rodex.runtime as runtime_module
-from rodex.runtime import LiveRodexRuntime, RodexRuntimeError, RodexRuntimeLauncher
+from rodex.runtime import (
+    LiveRodexRuntime,
+    LiveTmuxSession,
+    RodexRuntimeError,
+    RodexRuntimeLauncher,
+)
 
 
 class FakeWebSocket:
@@ -144,6 +149,36 @@ def test_attach_uses_live_stdio_and_escapes_an_existing_tmux_client(
     environment = runner.options[-1]["env"]
     assert isinstance(environment, dict)
     assert "TMUX" not in environment
+
+
+def test_rename_and_status_configuration_use_the_real_tmux_session_name(
+    tmp_path: Path,
+) -> None:
+    runner = RuntimeRunner(tmp_path)
+    launcher = RodexRuntimeLauncher("codex", "tmux", runner=runner)
+    original = LiveTmuxSession(tmp_path / "tmux.sock", "rodex-token")
+
+    renamed = launcher.rename(original, "automatic-beluga")
+    launcher.configure_identity_status(renamed)
+
+    assert renamed == LiveTmuxSession(tmp_path / "tmux.sock", "automatic-beluga")
+    assert runner.calls[0][-4:] == [
+        "rename-session",
+        "-t",
+        "rodex-token",
+        "automatic-beluga",
+    ]
+    assert [command[3:] for command in runner.calls[1:]] == [
+        ["set-option", "-t", "automatic-beluga", "status", "on"],
+        [
+            "set-option",
+            "-t",
+            "automatic-beluga",
+            "status-left",
+            "#[fg=green,bold] Rodex: #S #[default]",
+        ],
+        ["set-option", "-t", "automatic-beluga", "status-left-length", "48"],
+    ]
 
 
 def test_more_than_one_loaded_codex_thread_aborts_the_exact_tmux_session(

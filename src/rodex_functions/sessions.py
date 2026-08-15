@@ -15,6 +15,7 @@ from typing import Final
 from cool_name.functions import (
     allocate_unique_cool_name,
     create_and_verify_cool_names_schema,
+    get_unique_id_from_cool_name,
 )
 from rodex_sql import default_rodex_database_path as _default_rodex_database_path
 from rodex_sql import (
@@ -497,6 +498,60 @@ def lookup_rodex_tmux_session(
     )
 
 
+def lookup_rodex_session_id_from_a_cool_name(
+    cool_name: str,
+    database_path: str | os.PathLike[str] | None = None,
+) -> int | None:
+    """Resolve a permanent or user-defined cool name through integer identities."""
+    path = initialise_rodex_database(database_path)
+    cool_names_id = get_unique_id_from_cool_name(cool_name, path)
+    if cool_names_id is None:
+        return None
+    with open_rodex_transaction(path) as connection:
+        rows = connection.execute(
+            f"SELECT id FROM {RODEX_SESSIONS_TABLE} "
+            "WHERE cool_names_id = ? OR user_defined_cool_names_id = ? "
+            "ORDER BY id LIMIT 2",
+            (cool_names_id, cool_names_id),
+        ).fetchall()
+    if len(rows) > 1:
+        raise RodexSessionError(f"cool name resolves to multiple sessions: {cool_name}")
+    return None if not rows else int(rows[0][0])
+
+
+def update_rodex_tmux_session_name(
+    session_id: int,
+    tmux_session_name: str,
+    database_path: str | os.PathLike[str] | None = None,
+) -> RodexTmuxSession:
+    """Record a renamed tmux endpoint for one Rodex session."""
+    _validate_session_id(session_id)
+    session_name = _normalise_tmux_session_name(tmux_session_name)
+    path = initialise_rodex_database(database_path)
+    with open_rodex_transaction(path) as connection:
+        cursor = connection.execute(
+            f"UPDATE {RODEX_TMUX_SESSIONS_TABLE} SET tmux_session_name = ? "
+            "WHERE rodex_sessions_id = ?",
+            (session_name, session_id),
+        )
+        if cursor.rowcount != 1:
+            raise RodexSessionError(f"Rodex tmux session does not exist: {session_id}")
+        row = connection.execute(
+            f"SELECT id, rodex_sessions_id, tmux_server_socket_path, "
+            f"tmux_session_name FROM {RODEX_TMUX_SESSIONS_TABLE} "
+            "WHERE rodex_sessions_id = ?",
+            (session_id,),
+        ).fetchone()
+    if row is None:
+        raise RodexSessionError(f"Rodex tmux session disappeared: {session_id}")
+    return RodexTmuxSession(
+        id=int(row[0]),
+        rodex_sessions_id=int(row[1]),
+        tmux_server_socket_path=str(row[2]),
+        tmux_session_name=str(row[3]),
+    )
+
+
 def lookup_rodex_session_id_from_a_codex_uuid(
     codex_session_uuid: uuid.UUID | str,
     database_path: str | os.PathLike[str] | None = None,
@@ -567,9 +622,13 @@ def _normalise_tmux_link(
     socket_path = os.fspath(tmux_server_socket_path)
     if not socket_path.strip():
         raise ValueError("tmux_server_socket_path must be non-empty")
-    if not isinstance(tmux_session_name, str) or not tmux_session_name.strip():
+    return socket_path, _normalise_tmux_session_name(tmux_session_name)
+
+
+def _normalise_tmux_session_name(value: str) -> str:
+    if not isinstance(value, str) or not value.strip():
         raise ValueError("tmux_session_name must be a non-empty string")
-    return socket_path, tmux_session_name.strip()
+    return value.strip()
 
 
 def _verify_sessions_table(connection: sqlite3.Connection) -> None:

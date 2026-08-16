@@ -72,9 +72,15 @@ Use `--create NAME` when the argument must become the session's display name.
 
 ## Local data
 
-The default registry is `.rodex/rodex.sqlite3` beneath the directory where Rodex is
-launched. Set `RODEX_DATABASE_PATH` to select another database. Short-lived Unix
-sockets and app-server logs use the current user's runtime directory or `/tmp`.
+The durable per-user registry defaults to
+`$XDG_STATE_HOME/rodex/rodex.sqlite3`, or
+`~/.local/state/rodex/rodex.sqlite3` when `XDG_STATE_HOME` is unset. Set
+`RODEX_DATABASE_PATH` to select another database.
+
+Short-lived Unix sockets and app-server logs use `$XDG_RUNTIME_DIR/rodex`, normally
+`/run/user/<uid>/rodex`. When `XDG_RUNTIME_DIR` is unset or that socket path would be
+too long, Rodex uses the private fallback `/tmp/rodex-<uid>`. Set `RODEX_RUNTIME_DIR`
+to override it.
 
 The current Rodex registry stores identities, ownership, timestamps, names, and tmux
 endpoints. Live protocol sockets are advertised only by the running tmux session. Rodex

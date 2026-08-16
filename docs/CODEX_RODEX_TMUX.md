@@ -44,7 +44,8 @@ identities. Tool counts cover the current runtime and reset when it is resumed.
   transparently resume the saved Codex session later.
 - A failure before SQL registration stops the exact new tmux session and leaves no
   partial database row.
-- The runtime uses `$XDG_RUNTIME_DIR` when suitable, otherwise `/tmp/rodex-<uid>`.
-  Unix sockets stay there because long project paths can exceed Linux socket limits.
+- The runtime uses `$XDG_RUNTIME_DIR/rodex` when suitable—normally
+  `/run/user/<uid>/rodex`—otherwise `/tmp/rodex-<uid>`. Unix sockets stay there because
+  long project paths can exceed Linux socket limits.
 
 Exact tmux targets and compensated name transitions preserve the recorded endpoint.

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+import stat
 import uuid
 from pathlib import Path
 
@@ -37,6 +38,8 @@ def test_initialise_creates_database_parent_directories(tmp_path: Path) -> None:
 
     assert initialise_rodex_database(database) == database
     assert database.is_file()
+    assert stat.S_IMODE(database.parent.stat().st_mode) == 0o700
+    assert stat.S_IMODE(database.stat().st_mode) == 0o600
 
 
 def test_rodex_sessions_table_has_the_complete_root_identity(tmp_path: Path) -> None:
@@ -323,13 +326,27 @@ def test_lookup_uuid_rejects_invalid_internal_ids(tmp_path: Path, bad_id: object
         lookup_rodex_uuid_from_an_id(bad_id, tmp_path / "db.sqlite3")  # type: ignore[arg-type]
 
 
-def test_default_database_path_uses_current_workspace(
+def test_default_database_path_uses_xdg_state_home(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.delenv("RODEX_DATABASE_PATH", raising=False)
-    monkeypatch.chdir(tmp_path)
+    state_home = tmp_path / "state"
+    monkeypatch.setenv("XDG_STATE_HOME", str(state_home))
 
-    assert default_rodex_database_path() == tmp_path / ".rodex" / "rodex.sqlite3"
+    assert default_rodex_database_path() == state_home / "rodex" / "rodex.sqlite3"
+
+
+def test_default_database_path_uses_home_state_directory_without_xdg_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("RODEX_DATABASE_PATH", raising=False)
+    monkeypatch.delenv("XDG_STATE_HOME", raising=False)
+    home = tmp_path / "home"
+    monkeypatch.setattr(Path, "home", lambda: home)
+
+    assert default_rodex_database_path() == (
+        home / ".local" / "state" / "rodex" / "rodex.sqlite3"
+    )
 
 
 def test_default_database_path_honours_environment_override(

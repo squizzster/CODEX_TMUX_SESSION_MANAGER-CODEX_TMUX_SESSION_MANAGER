@@ -18,17 +18,24 @@ class RodexSQLError(RuntimeError):
 
 
 def default_rodex_database_path() -> Path:
-    """Resolve the runtime database path for the current Rodex workspace."""
+    """Resolve the durable database path for the current POSIX user."""
     configured = os.environ.get("RODEX_DATABASE_PATH")
     if configured:
         return Path(configured).expanduser().resolve()
-    return (Path.cwd() / ".rodex" / "rodex.sqlite3").resolve()
+
+    configured_state_home = os.environ.get("XDG_STATE_HOME")
+    state_home = (
+        Path(configured_state_home).expanduser()
+        if configured_state_home
+        else Path.home() / ".local" / "state"
+    )
+    return (state_home / "rodex" / "rodex.sqlite3").resolve()
 
 
 def normalise_rodex_database_path(
     database_path: str | os.PathLike[str] | None,
 ) -> Path:
-    """Resolve an explicit path or the shared Rodex runtime default."""
+    """Resolve an explicit path or the current user's durable default."""
     if database_path is None:
         return default_rodex_database_path()
     return Path(database_path).expanduser().resolve()
@@ -40,8 +47,11 @@ def open_rodex_transaction(
 ) -> Iterator[sqlite3.Connection]:
     """Open one immediate transaction with foreign-key enforcement enabled."""
     path = Path(database_path).expanduser().resolve()
-    path.parent.mkdir(parents=True, exist_ok=True)
+    database_exists = path.exists()
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     connection = sqlite3.connect(path, timeout=10, isolation_level=None)
+    if not database_exists:
+        path.chmod(0o600)
     try:
         connection.execute("PRAGMA foreign_keys = ON")
         connection.execute("BEGIN IMMEDIATE")

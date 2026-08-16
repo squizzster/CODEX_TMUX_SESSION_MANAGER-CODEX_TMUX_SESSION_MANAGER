@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import shutil
 import socket
 import subprocess
@@ -15,6 +16,7 @@ import pytest
 
 import rodex.runtime as runtime_module
 from rodex.runtime import (
+    RODEX_TMUX_HISTORY_LIMIT_LINES,
     LiveRodexRuntime,
     LiveTmuxSession,
     RodexCodexSessionNotFoundError,
@@ -131,6 +133,24 @@ def test_start_directly_hosts_codex_in_tmux_and_returns_its_uuid(
         "-S",
         str(tmp_path / "tmux.sock"),
     ]
+    assert new_session[3:13] == [
+        "set-option",
+        "-g",
+        "history-limit",
+        str(RODEX_TMUX_HISTORY_LIMIT_LINES),
+        ";",
+        "set-option",
+        "-g",
+        "mouse",
+        "on",
+        ";",
+    ]
+    assert new_session[13:17] == [
+        "new-session",
+        "-d",
+        "-s",
+        "rodex-0123456789abcdef",
+    ]
     host_command = new_session[-1]
     assert "/venv/bin/python -m rodex.session_host" in host_command
     assert f"--protocol-event-socket {tmp_path / 'events-0123456789abcdef.sock'}" in (
@@ -232,7 +252,8 @@ def test_exact_resume_rejects_a_different_loaded_uuid_before_publishing_control(
         f"requested {requested_uuid}, observed {observed_uuid}"
     )
     tmux_operations = [command[3] for command in runner.calls]
-    assert tmux_operations == ["new-session", "has-session", "kill-session"]
+    assert tmux_operations == ["set-option", "has-session", "kill-session"]
+    assert "new-session" in runner.calls[0]
 
 
 def test_attach_uses_live_stdio_and_escapes_an_existing_tmux_client(
@@ -297,7 +318,14 @@ def test_rename_and_status_configuration_use_the_real_tmux_session_name(
         "automatic-beluga",
     ]
     status_commands = [command[3:] for command in runner.calls[1:]]
-    assert status_commands[:9] == [
+    assert status_commands[0] == [
+        "set-option",
+        "-t",
+        "=automatic-beluga:",
+        "mouse",
+        "on",
+    ]
+    assert status_commands[1:10] == [
         [
             "set-option",
             "-u",
@@ -337,9 +365,9 @@ def test_rename_and_status_configuration_use_the_real_tmux_session_name(
         ],
         ["set-option", "-t", "=automatic-beluga:", "status-right-length", "64"],
     ]
-    assert len(status_commands) == 14
+    assert len(status_commands) == 15
     for event, hook_command in zip(
-        ("attached", "detached"), status_commands[9:11], strict=True
+        ("attached", "detached"), status_commands[10:12], strict=True
     ):
         assert hook_command[:4] == [
             "set-hook",
@@ -351,8 +379,8 @@ def test_rename_and_status_configuration_use_the_real_tmux_session_name(
         assert "/venv/bin/python -m rodex.status_animation" in hook_command[4]
         assert f"--event {event}" in hook_command[4]
         assert hook_command[4].endswith(">/dev/null 2>&1'")
-    assert status_commands[11] == ["pipe-pane", "-t", "=automatic-beluga:"]
-    assert status_commands[12:14] == [
+    assert status_commands[12] == ["pipe-pane", "-t", "=automatic-beluga:"]
+    assert status_commands[13:15] == [
         ["unbind-key", "-n", "Enter"],
         ["unbind-key", "-n", "Tab"],
     ]
@@ -372,7 +400,14 @@ def test_tmux_slash_switch_reinstalls_retained_bindings(
     launcher.configure_identity_status(runtime)
 
     status_commands = [command[3:] for command in runner.calls]
-    completion_pipe = status_commands[11]
+    assert status_commands[0] == [
+        "set-option",
+        "-t",
+        "=automatic-beluga:",
+        "mouse",
+        "on",
+    ]
+    completion_pipe = status_commands[12]
     assert completion_pipe[:4] == [
         "pipe-pane",
         "-O",
@@ -380,10 +415,95 @@ def test_tmux_slash_switch_reinstalls_retained_bindings(
         "=automatic-beluga:",
     ]
     assert "/venv/bin/python -m rodex.tmux_completion_observer" in completion_pipe[4]
-    for key, input_binding in zip(("Enter", "Tab"), status_commands[12:14], strict=True):
+    for key, input_binding in zip(("Enter", "Tab"), status_commands[13:15], strict=True):
         assert input_binding[:3] == ["bind-key", "-n", key]
         assert "/venv/bin/python -m rodex.tmux_input_proxy" in input_binding[3]
         assert f"--key {key}" in input_binding[3]
+
+
+def test_real_tmux_session_preserves_scrollback_and_enables_wheel_copy_mode(
+    tmp_path: Path,
+) -> None:
+    tmux_binary = shutil.which("tmux")
+    if tmux_binary is None:
+        pytest.skip("tmux is not installed")
+    socket_path = tmp_path / "tmux.sock"
+    runtime = LiveTmuxSession(socket_path, "rodex-scrollback")
+    output_script = tmp_path / "emit-scrollback.sh"
+    output_script.write_text(
+        "#!/bin/sh\nseq 1 300\nsleep 30\n",
+        encoding="utf-8",
+    )
+    output_script.chmod(0o755)
+    launcher = RodexRuntimeLauncher("codex", tmux_binary)
+
+    launcher._start_tmux_session(
+        runtime,
+        tmp_path,
+        shlex.join([str(output_script)]),
+    )
+    try:
+        deadline = time.monotonic() + 2
+        history_size = 0
+        while time.monotonic() < deadline:
+            pane_state = subprocess.run(
+                [
+                    tmux_binary,
+                    "-S",
+                    str(socket_path),
+                    "display-message",
+                    "-p",
+                    "-t",
+                    "=rodex-scrollback:",
+                    "-F",
+                    "#{history_size} #{history_limit} #{mouse}",
+                ],
+                check=True,
+                text=True,
+                capture_output=True,
+            ).stdout.split()
+            history_size = int(pane_state[0])
+            if history_size >= 278:
+                break
+            time.sleep(0.01)
+
+        assert history_size >= 278
+        assert pane_state[1:] == [str(RODEX_TMUX_HISTORY_LIMIT_LINES), "1"]
+        captured = subprocess.run(
+            [
+                tmux_binary,
+                "-S",
+                str(socket_path),
+                "capture-pane",
+                "-p",
+                "-S",
+                "-",
+                "-t",
+                "=rodex-scrollback:",
+            ],
+            check=True,
+            text=True,
+            capture_output=True,
+        ).stdout.splitlines()
+        assert captured[0] == "1"
+        assert "300" in captured
+        wheel_binding = subprocess.run(
+            [
+                tmux_binary,
+                "-S",
+                str(socket_path),
+                "list-keys",
+                "-T",
+                "root",
+                "WheelUpPane",
+            ],
+            check=True,
+            text=True,
+            capture_output=True,
+        ).stdout
+        assert "copy-mode -e" in wheel_binding
+    finally:
+        launcher.stop(runtime, check=False)
 
 
 def test_real_tmux_survives_rename_and_status_configuration(tmp_path: Path) -> None:
@@ -486,6 +606,7 @@ def test_real_tmux_survives_rename_and_status_configuration(tmp_path: Path) -> N
         launcher.configure_identity_status(renamed)
 
         assert launcher.session_exists(renamed)
+        assert session_option("mouse") == "on"
         assert tmux_format("#{pane_pipe}") == "0"
         tab_binding = subprocess.run(
             [
@@ -917,6 +1038,7 @@ def test_session_host_connects_the_tui_through_the_protocol_proxy(
     assert tui_commands == [
         [
             "/usr/bin/codex",
+            "--no-alt-screen",
             "--remote",
             f"unix://{proxy_socket}",
             *codex_arguments,

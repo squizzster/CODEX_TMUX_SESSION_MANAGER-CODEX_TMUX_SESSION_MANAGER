@@ -35,14 +35,16 @@ session host ──► Codex TUI ──► protocol proxy ──► Codex app-se
                                 └──► live event tap ──► tail/wait/send clients
 ```
 
-The TUI remains the normal Codex interface. The tmux status derives its private/shared state directly from the number of clients attached to that exact session. The proxy forwards WebSocket frames in both directions, derives a runtime tool-call count, and fans out selected structured events. It does not screen-scrape or persist conversation content.
+The TUI remains the normal Codex interface and runs inline so rendered output enters tmux's 50,000-line pane history. tmux owns mouse/copy-mode scrollback and derives the
+status privacy state from clients attached to that exact session. The proxy forwards
+WebSocket frames, counts tools, and fans structured events; it never buffers the screen.
 
 ## Component boundaries
 
 | Component | Responsibility |
 |---|---|
 | `rodex.cli` | Pass through to Codex or route exact underscore commands and stored names. |
-| `rodex.runtime` | Own tmux, app-server discovery, attachment, and supervision. |
+| `rodex.runtime` | Own tmux scrollback, app-server discovery, attachment, and supervision. |
 | `rodex.status_animation` | Render cancellable, one-shot sharing transitions. |
 | `rodex.session_host` | Keep one app-server, proxy, foreground TUI, and its runtime paths together. |
 | `rodex.control` | Verify and control one exact loaded Codex thread. |
@@ -74,8 +76,9 @@ a permanent alternative lookup. Detailed future schema rules live in
 
 ### New session (bare `rodex`, `_create`, or `_detach`)
 
-1. Start a detached tmux session containing the Rodex session host.
-2. Start one private Codex app-server and connect the TUI through the proxy.
+1. Set the shared tmux server's 50,000-line history and mouse defaults before creating the detached session and its first pane.
+2. Start one private Codex app-server and connect an inline (`--no-alt-screen`) TUI
+   through the proxy so rendered conversation rows enter tmux history.
 3. Refresh every required live pathname immediately and hourly until the host exits.
 4. Observe the single real Codex UUID from that app-server.
 5. Transactionally create the Rodex UUID, name, user/log, and tmux link.

@@ -16,6 +16,7 @@ when needed, and return later using a generated name such as `automatic-beluga`.
 - Recovers an empty, unsaved Codex session under the same Rodex identity.
 - Supports an optional user-defined display name without losing the generated name.
 - Shows the Rodex name, tool-call count, and live private/shared state in the tmux bar.
+- Preserves 50,000 lines of conversation scrollback with mouse and keyboard access.
 - Animates shared arrival and final departure for five seconds without blocking the TUI.
 - Keeps the in-TUI `/rodex` command implementation available but disabled for now.
 - Sends work to, waits for, or follows a running session from another shell.
@@ -45,7 +46,8 @@ uv sync
 ```
 
 At the `›` prompt, use Codex normally. Detach without ending the session with
-`Ctrl-b d`.
+`Ctrl-b d`. Scroll with the mouse wheel, or enter tmux copy mode with `Ctrl-b [` and
+leave it with `q`.
 
 To expose this checkout as the system-wide `rodex` command, follow the
 [installation guide](INSTALL.md).
@@ -122,4 +124,4 @@ uv build
 ```
 
 The prototype coverage floor is 70%. Tests include real-tmux boundary coverage for
-the critical rename and status-configuration lifecycle.
+scrollback retention, mouse copy mode, rename, and status configuration.

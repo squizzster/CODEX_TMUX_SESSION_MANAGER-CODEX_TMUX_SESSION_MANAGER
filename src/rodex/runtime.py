@@ -37,6 +37,7 @@ from .tmux_status import (
 SUN_PATH_MAX_BYTES: Final = 107
 DEFAULT_STARTUP_TIMEOUT_SECONDS: Final = 15.0
 RUNTIME_PATH_KEEPALIVE_INTERVAL_SECONDS: Final = 60.0 * 60.0
+RODEX_TMUX_HISTORY_LIMIT_LINES: Final = 50_000
 _TUI_SUPERVISION_INTERVAL_SECONDS: Final = 1.0
 _POLL_INTERVAL_SECONDS: Final = 0.05
 _PROXY_SOCKET_OPTION: Final = "@rodex_protocol_proxy_socket_path"
@@ -312,16 +313,7 @@ class RodexRuntimeLauncher:
                 *codex_arguments,
             ]
         )
-        self._tmux(
-            runtime,
-            "new-session",
-            "-d",
-            "-s",
-            runtime.tmux_session_name,
-            "-c",
-            str(resolved_workspace),
-            host_command,
-        )
+        self._start_tmux_session(runtime, resolved_workspace, host_command)
         try:
             requested_codex_uuid = _requested_exact_codex_resume(codex_arguments)
             codex_uuid = self._wait_for_single_codex_uuid(
@@ -380,8 +372,9 @@ class RodexRuntimeLauncher:
         return replace(runtime, tmux_session_name=session_name)
 
     def configure_identity_status(self, runtime: LiveTmuxSession) -> None:
-        """Show Rodex identity and live attachment privacy in the status line."""
+        """Configure Rodex-owned interaction and status for one live session."""
         target = _exact_tmux_pane_target(runtime.tmux_session_name)
+        self._tmux(runtime, "set-option", "-t", target, "mouse", "on")
         for transient_option in (
             STATUS_ANIMATION_TOKEN_OPTION,
             COMPLETION_TOKEN_OPTION,
@@ -475,6 +468,34 @@ class RodexRuntimeLauncher:
             self._tmux(runtime, "pipe-pane", "-t", target)
             for key in ("Enter", "Tab"):
                 self._tmux(runtime, "unbind-key", "-n", key)
+
+    def _start_tmux_session(
+        self,
+        runtime: LiveTmuxSession,
+        workspace: Path,
+        host_command: str,
+    ) -> None:
+        """Set scrollback defaults before tmux allocates the session's first pane."""
+        self._tmux(
+            runtime,
+            "set-option",
+            "-g",
+            "history-limit",
+            str(RODEX_TMUX_HISTORY_LIMIT_LINES),
+            ";",
+            "set-option",
+            "-g",
+            "mouse",
+            "on",
+            ";",
+            "new-session",
+            "-d",
+            "-s",
+            runtime.tmux_session_name,
+            "-c",
+            str(workspace),
+            host_command,
+        )
 
     def attach(self, runtime: LiveTmuxSession) -> None:
         """Attach the calling terminal to the live Rodex tmux session."""
@@ -731,6 +752,7 @@ def run_session_host(
                 raise
             tui_command = [
                 codex_binary,
+                "--no-alt-screen",
                 "--remote",
                 f"unix://{protocol_proxy_socket_path}",
                 *codex_arguments,

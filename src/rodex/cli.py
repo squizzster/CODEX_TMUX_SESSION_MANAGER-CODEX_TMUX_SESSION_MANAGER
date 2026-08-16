@@ -34,6 +34,8 @@ from rodex_functions import (
     read_rodex_session_turn_statistics,
     record_a_rodex_session_access,
     record_a_rodex_session_runtime_resume,
+    session_statistics_as_dict,
+    turn_statistics_as_dict,
     update_rodex_tmux_session_name,
 )
 from rodex_sql import RodexSQLError
@@ -635,7 +637,7 @@ def _run_statistics_command(arguments: list[str], database_path: Path) -> bool:
             f"Rodex session has no analytics snapshot yet: {session_name}"
         )
     if turn_id is None:
-        payload["statistics"] = snapshot.aggregate_statistics
+        payload["statistics"] = session_statistics_as_dict(snapshot.projection)
     else:
         turn = view.turn
         if turn is None:
@@ -650,7 +652,7 @@ def _run_statistics_command(arguments: list[str], database_path: Path) -> bool:
             "outcome": turn.outcome,
             "included_statistics_revision": turn.included_statistics_revision,
         }
-        payload["statistics"] = turn.turn_statistics
+        payload["statistics"] = turn_statistics_as_dict(turn.projection)
     if as_json:
         print(json.dumps(payload, indent=2, sort_keys=True), flush=True)
     else:

@@ -5,10 +5,12 @@ import os
 import subprocess
 import uuid
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from test_statistics_projection import _snapshot as analyzer_snapshot
 
 from rodex.analytics import (
     ANALYTICS_RESTART_DELAY_SECONDS,
@@ -23,6 +25,7 @@ from rodex.analytics import (
 from rodex_functions import (
     create_a_rodex_session,
     list_rodex_session_statistics_sources,
+    parse_session_statistics_snapshot,
     read_rodex_session_statistics,
     read_rodex_session_turn_statistics,
     record_a_rodex_session_runtime_resume,
@@ -47,15 +50,14 @@ class FakeAnalyticsAdapter:
         self.analyses.append((contents, user_id))
         if self.on_analyze is not None:
             self.on_analyze()
+        base = parse_session_statistics_snapshot(analyzer_snapshot())
         return AnalyticsCalculation(
-            aggregate_statistics={
-                "event_count": len(paths),
-                "source_count": len(paths),
-                "must_have_basic_stats": {"turns": {"started": len(paths)}},
-                "recommended_insight_stats": {},
-                "audit": {"privacy": "aggregate-only"},
-                "protocol_id": "temporary-must-not-persist",
-            },
+            statistics_projection=replace(
+                base,
+                analyzer_event_count=len(paths),
+                analyzer_source_count=len(paths),
+                history_records_count=len(paths),
+            ),
             coverage_state=self.coverage_state,
         )
 
@@ -199,8 +201,7 @@ def test_worker_backfills_verified_rollout_and_projects_only_aggregates(
     assert view.statistics.statistics_revision == 1
     assert view.worker is not None
     assert view.worker.worker_state == "up_to_date"
-    assert view.statistics.aggregate_statistics["audit"] == {"privacy": "aggregate-only"}
-    assert "protocol_id" not in view.statistics.aggregate_statistics
+    assert view.statistics.projection.audit_privacy
     assert b'"type":"session_meta"' not in config.rodex_database_path.read_bytes()
 
 
@@ -326,11 +327,59 @@ def test_analyzer_failure_preserves_last_good_aggregate_and_increments_health(
     view = read_rodex_session_statistics(1, config.rodex_database_path)
     assert view.statistics is not None
     assert view.statistics.statistics_revision == 1
-    assert view.statistics.aggregate_statistics["audit"] == {"privacy": "aggregate-only"}
+    assert view.statistics.projection.audit_privacy
     assert view.worker is not None
     assert view.worker.worker_state == "degraded"
     assert view.worker.consecutive_failures == 1
     assert view.worker.next_retry_at_utc is not None
+
+
+def test_analyzer_schema_drift_degrades_without_replacing_relational_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path)
+    rollout = _rollout(config.codex_sessions_root, CODEX_UUID)
+    _create(config)
+    first_worker = AnalyticsRolloutWorker(
+        config, adapter_factory=lambda: FakeAnalyticsAdapter()
+    )
+    assert first_worker.poll_once() == "up_to_date"
+    before = read_rodex_session_statistics(1, config.rodex_database_path).statistics
+    assert before is not None
+    with rollout.open("a", encoding="utf-8") as output:
+        output.write('{"timestamp":"2026-08-16T12:00:03Z","type":"future"}\n')
+
+    class DriftedLibrary:
+        def create_new_codex_protocol_id(self, _user_id: str) -> object:
+            return SimpleNamespace(status="ok", value="temporary")
+
+        def load_file(self, _protocol_id: str, _path: Path) -> object:
+            return SimpleNamespace(status="ok", value=True)
+
+        def get_stats(
+            self, _protocol_id: str, *, include_turn_statistics: bool = False
+        ) -> object:
+            assert include_turn_statistics
+            snapshot = analyzer_snapshot()
+            snapshot["recommended_insight_stats"].pop("hands_on_turn_count")
+            return SimpleNamespace(status="ok", value=snapshot)
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(
+        "rodex.analytics.importlib.import_module",
+        lambda _name: SimpleNamespace(CodexProtocolLibrary=DriftedLibrary),
+    )
+    state = AnalyticsRolloutWorker(
+        config, adapter_factory=CodexProtocolAnalyticsAdapter
+    ).poll_once()
+    after = read_rodex_session_statistics(1, config.rodex_database_path)
+
+    assert state == "degraded"
+    assert after.statistics == before
+    assert after.worker is not None and after.worker.worker_state == "degraded"
+    assert after.worker.diagnostic_code == "analytics_error"
 
 
 def test_source_change_during_analysis_does_not_publish(tmp_path: Path) -> None:
@@ -498,13 +547,13 @@ def test_real_adapter_uses_existing_in_memory_analyzer_api(tmp_path: Path) -> No
     calculation = CodexProtocolAnalyticsAdapter().analyze_rollouts([rollout], "test-user")
 
     assert calculation.coverage_state == "complete"
-    assert calculation.aggregate_statistics["source_count"] == 1
-    assert "protocol_id" not in calculation.aggregate_statistics
-    assert "user_id" not in calculation.aggregate_statistics
-    assert "revision" not in calculation.aggregate_statistics
-    assert len(calculation.turn_statistics) == 1
-    assert calculation.turn_statistics[0].codex_session_uuid == CODEX_UUID
-    assert calculation.turn_statistics[0].codex_turn_id == "turn-test"
+    assert calculation.statistics_projection.analyzer_source_count == 1
+    assert len(calculation.statistics_projection.turn_statistics) == 1
+    assert (
+        calculation.statistics_projection.turn_statistics[0].codex_session_uuid
+        == CODEX_UUID
+    )
+    assert calculation.statistics_projection.turn_statistics[0].codex_turn_id == "turn-test"
 
 
 def test_real_worker_publishes_exact_turn_projection_into_rodex_sql(
@@ -518,7 +567,7 @@ def test_real_worker_publishes_exact_turn_projection_into_rodex_sql(
 
     exact = read_rodex_session_turn_statistics(1, "turn-test", config.rodex_database_path)
     assert exact.statistics is not None
-    assert exact.statistics.statistics_projection_schema_version == "rodex-statistics-v2"
+    assert exact.statistics.statistics_projection_schema_version == "rodex-statistics-v3"
     assert exact.worker is not None
     assert exact.worker.worker_state == "up_to_date"
     assert exact.turn is not None
@@ -561,15 +610,10 @@ def test_adapter_maps_partial_values_but_rejects_fatal_or_valueless_results(
             self, _protocol_id: str, *, include_turn_statistics: bool = False
         ) -> object:
             assert include_turn_statistics
+            snapshot = analyzer_snapshot()
             return SimpleNamespace(
                 status="ok",
-                value={
-                    "event_count": 1,
-                    "source_count": 1,
-                    "must_have_basic_stats": {},
-                    "turn_statistics": [],
-                    "protocol_id": "must-be-dropped",
-                },
+                value=snapshot,
             )
 
         def close(self) -> object:
@@ -591,5 +635,5 @@ def test_adapter_maps_partial_values_but_rejects_fatal_or_valueless_results(
             [tmp_path / "source.jsonl"], "test-user"
         )
         assert calculation.coverage_state == expected_coverage
-        assert "protocol_id" not in calculation.aggregate_statistics
+        assert calculation.statistics_projection.analyzer_source_count == 1
     assert closed == [True]

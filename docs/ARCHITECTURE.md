@@ -7,8 +7,6 @@ ownership of the result. Keep this file within 150 lines and 10,240 bytes.
 
 # Rodex architecture
 
-Apply these standards to future schema decisions. These authorative standards may be modified only by an agent-suggestion followed by a user-agree
-
 Rodex is a local match-maker between three separate identities: a Rodex session, the
 real Codex session it represents, and the tmux runtime currently hosting it.
 
@@ -61,7 +59,7 @@ Separate one-to-one or lookup tables hold:
 - the exact tmux socket and session name;
 - POSIX user identity and access timestamps;
 - generated and optional user-defined cool names.
-- latest derived statistics and independently updated worker health;
+- latest session and exact-turn statistics plus independently updated worker health;
 - every Codex rollout source retained in the Rodex identity's history.
 
 A user-defined name becomes the display name; the generated name remains a permanent
@@ -109,14 +107,15 @@ unchanged. Its observer uses output only as a redraw wakeup; both remain tested 
 
 The worker waits for SQL registration, authenticates each lineage rollout against its
 Codex UUID, and copies a private final-newline-complete prefix. A fresh in-memory
-`CodexProtocolLibrary` analyzes those immutable copies. Rodex persists only a fixed
-aggregate projection, exact prefix provenance, and separate worker health—never raw
-events or analyzer storage. Source SHA-256 and stat/ctime caching detect rewrites.
+`CodexProtocolLibrary` analyzes those immutable copies in one chronological pass. Rodex
+persists a fixed session projection, `(Codex source, turn_id)` projections, exact prefix
+provenance, and separate worker health—never raw events or analyzer storage. Source
+SHA-256 and stat/ctime caching detect rewrites.
 
-Snapshot, source inclusion, and healthy state publish atomically behind current-Codex
-UUID and prior-revision fences. Failures update health without replacing the last good
-snapshot and cannot affect TUI behavior or exit status. `_stats` and `_stats-status`
-enforce ownership but read SQLite without requiring Codex or tmux.
+Session projection, complete turn set, source inclusion, and healthy state publish
+atomically behind current-Codex UUID and prior-revision fences. Failures preserve the
+last good revision and cannot affect TUI behavior or exit status. `_stats`, its exact
+`--turn` lookup, and `_stats-status` read SQLite without requiring Codex or tmux.
 
 ## Live control
 
@@ -137,7 +136,7 @@ slow observer blocking the TUI.
 - SQLite relationships, natural keys, and cardinality are enforced by constraints.
 - Related database changes use `BEGIN IMMEDIATE` and commit as one unit.
 - Multi-table statistics reads use one deferred transaction for a consistent view.
-- Analytics paths are low-priority, short-transaction, aggregate-only, and fail-open.
+- Analytics paths are low-priority, short-transaction, derived-only, and fail-open.
 - External tmux changes use exact targets and compensating transitions where needed.
 - A live session host keeps its runtime paths fresh and fails closed if that guarantee
   cannot be maintained.

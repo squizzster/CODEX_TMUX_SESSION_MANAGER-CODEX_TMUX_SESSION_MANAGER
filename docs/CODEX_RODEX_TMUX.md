@@ -67,15 +67,17 @@ Codex UUID retained in that Rodex lineage, and authenticates each rollout's inte
 The worker creates a fresh in-memory `CodexProtocolLibrary`, loads the authenticated
 copies, calculates statistics, then closes it. The analyzer owns calculation only;
 Rodex owns watching, scheduling, source provenance, retries, health, and persistence.
-One transaction publishes a Rodex-owned monotonic revision, the aggregate whitelist,
-and its exact source descriptors. Codex-UUID and prior-revision fences reject stale
-workers. Health failures commit separately and never overwrite the last good snapshot.
+One transaction publishes a Rodex-owned monotonic revision, the session projection,
+the complete `(Codex source, turn_id)` projection set, and exact source descriptors.
+Codex-UUID and prior-revision fences reject stale workers. Health failures commit
+separately and never overwrite the last good snapshot.
 
 Analytics is fail-open: import, parsing, calculation, process, or database failure
-cannot change the Codex TUI's behavior or exit status. `_stats NAME [--json]` and
-`_stats-status NAME` enforce normal ownership but query SQLite without requiring a live
-Codex or tmux process. A runtime started before this feature must end and resume before
-it has an analytics sidecar.
+cannot change the Codex TUI's behavior or exit status. `_stats NAME [--json]`, `_stats
+NAME --turn TURN_ID [--source CODEX_UUID] [--json]`, and `_stats-status NAME` enforce
+normal ownership but query SQLite without requiring live Codex, tmux, or analyzer
+processes. A runtime started before this feature must end and resume before it has an
+analytics sidecar.
 
 ## Named reattachment
 

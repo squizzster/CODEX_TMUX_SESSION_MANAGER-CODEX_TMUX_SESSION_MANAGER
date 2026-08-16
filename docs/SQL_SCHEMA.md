@@ -59,9 +59,15 @@ Apply these standards to future schema decisions. These authorative standards ma
   lineage. A Codex UUID is globally unique to one lineage. Nullable rollout provenance
   represents a registered source not yet authenticated; included provenance carries an
   absolute canonical path, complete-prefix byte count, mtime, SHA-256, and revision.
+- `rodex_sessions_statistics_turns` stores one privacy-filtered projection per exact
+  `(Codex source, turn_id)` in the current revision. Four signed 64-bit SHA-256 pieces
+  provide indexed lookup while retained text verifies exact identity. Deferred foreign
+  keys bind every turn to both the included source revision and session snapshot.
 - `rodex_sessions_statistics_workers` is independent one-to-one health. Its bounded
   diagnostic code cannot contain free-form errors or paths. Failure never fabricates or
   overwrites a statistics snapshot.
-- Publishing a snapshot, aggregate whitelist, exact included sources, and healthy state
-  is one UUID- and prior-revision-fenced transaction. Health-only failure publication
-  uses the UUID fence but does not mutate last-good statistics or source analysis.
+- Publishing a session projection, complete turn set, exact included sources, and
+  healthy state is one UUID- and prior-revision-fenced transaction. Revision
+  mark-and-sweep updates existing turn identities and removes obsolete turns without a
+  variable-length SQL key list. Health-only failure publication uses the UUID fence but
+  does not mutate last-good statistics, turns, or source analysis.

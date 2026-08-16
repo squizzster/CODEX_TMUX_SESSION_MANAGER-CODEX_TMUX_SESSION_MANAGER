@@ -14,7 +14,12 @@ import pytest
 
 from rodex.cli import RodexExecutableNotFoundError, RodexLaunchError, main, run
 from rodex.control import LiveRodexControl, PromptDispatch
-from rodex.runtime import LiveRodexRuntime, LiveTmuxSession, RodexRuntimeError
+from rodex.runtime import (
+    LiveRodexRuntime,
+    LiveTmuxSession,
+    RodexCodexSessionNotFoundError,
+    RodexRuntimeError,
+)
 from rodex_functions import (
     RodexSessionError,
     RodexSessionsUserIdentity,
@@ -624,7 +629,10 @@ def test_failed_resume_reports_the_recorded_rodex_and_codex_context(
     )
     launcher = StubLauncher(tmp_path)
     launcher.live = False
-    launcher.start_error = RodexRuntimeError("Codex session history is unavailable")
+    launcher.start_error = RodexCodexSessionNotFoundError(
+        f"Codex has no saved session for exact identity {CODEX_UUID}"
+    )
+    recorded_tmux = lookup_rodex_tmux_session(1, database)
 
     with pytest.raises(RodexLaunchError) as raised:
         run(
@@ -636,7 +644,14 @@ def test_failed_resume_reports_the_recorded_rodex_and_codex_context(
     message = str(raised.value)
     assert "Rodex session 'automatic-beluga' is recorded but not running" in message
     assert f"Codex session {CODEX_UUID} could not be resumed" in message
-    assert "Codex session history is unavailable" in message
+    assert f"Codex has no saved session for exact identity {CODEX_UUID}" in message
+    assert lookup_codex_uuid_from_a_rodex_session_id(1, database) == CODEX_UUID
+    assert lookup_rodex_tmux_session(1, database) == recorded_tmux
+    assert launcher.started == [(Path.cwd(), ["resume", str(CODEX_UUID)])]
+    assert launcher.renamed == []
+    assert launcher.configured == []
+    assert launcher.attached == []
+    assert launcher.stopped == []
 
 
 @pytest.mark.parametrize("lookup_name", ["black-sawfly", "work"])
@@ -1207,9 +1222,13 @@ def test_resume_stops_new_runtime_if_codex_reports_a_different_session(
         )
 
     assert launcher.stopped == [(launcher.runtime, False)]
+    assert lookup_codex_uuid_from_a_rodex_session_id(1, database) == CODEX_UUID
     tmux_link = lookup_rodex_tmux_session(1, database)
     assert tmux_link is not None
     assert tmux_link.tmux_server_socket_path == str(tmp_path / "stale.sock")
+    assert launcher.renamed == []
+    assert launcher.configured == []
+    assert launcher.attached == []
 
 
 @pytest.mark.parametrize(

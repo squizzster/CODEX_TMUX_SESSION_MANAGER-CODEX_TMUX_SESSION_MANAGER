@@ -92,6 +92,12 @@ tmux ownership token; an older animator stops without restoring over a newer one
 owner finally removes the complete temporary `status-format` and style overrides, then
 redraws every attached client against the ordinary Rodex status.
 
+The tmux root key table routes Enter through `rodex.tmux_input_proxy`. The proxy reads
+only the active cursor line, consumes the exact `/rodex` namespace, and forwards Enter
+unchanged for every other prompt. This boundary is intentionally before the Codex TUI:
+unknown slash commands are rejected locally and never reach the WebSocket protocol
+proxy.
+
 ## Live control
 
 The running tmux session advertises its proxy socket, event socket, and observed Codex

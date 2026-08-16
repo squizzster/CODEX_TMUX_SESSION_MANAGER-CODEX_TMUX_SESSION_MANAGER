@@ -108,10 +108,11 @@ unchanged. Its observer uses output only as a redraw wakeup; both remain tested 
 The worker waits for SQL registration, authenticates each lineage rollout against its
 Codex UUID, and copies a private final-newline-complete prefix. A fresh in-memory
 `CodexProtocolLibrary` analyzes those immutable copies in one chronological pass. Rodex
-persists a fixed session projection, `(Codex source, turn_id)` projections, exact prefix
-provenance, and separate worker health—never raw events or analyzer storage. Source
-SHA-256 and stat/ctime caching detect rewrites.
-
+persists fixed metrics as typed session and turn columns; distributions, named counts,
+and ordered limits as relational child rows; exact prefix provenance; and separate worker
+health. It stores neither raw events, analyzer storage, nor statistics JSON blobs. Source
+SHA-256 and stat/ctime caching detect rewrites. CLI JSON is deterministically rebuilt
+from an indexed, transactionally consistent SQL view.
 Session projection, complete turn set, source inclusion, and healthy state publish
 atomically behind current-Codex UUID and prior-revision fences. Failures preserve the
 last good revision and cannot affect TUI behavior or exit status. `_stats`, its exact

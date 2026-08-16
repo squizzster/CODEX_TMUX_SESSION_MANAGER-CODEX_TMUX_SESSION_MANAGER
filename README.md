@@ -112,10 +112,12 @@ sockets persistent; refreshes stop when the owning session ends.
 The Rodex registry also stores authenticated rollout provenance, independent analytics
 worker health, and the latest successful derived statistics snapshot. Each session host
 runs a low-priority, fail-open sidecar that analyzes complete JSONL record prefixes in a
-fresh in-memory analyzer. Rodex persists a fixed session projection and keyed per-turn
-projections—never copied prompts, responses, commands, tool output, or raw events. Canonical rollout
-paths and SHA-256 digests are sensitive local metadata, so the database remains private
-to its POSIX user. Codex remains responsible for raw history.
+fresh in-memory analyzer. Rodex persists typed session/turn columns plus normalized
+distribution and named-count rows, so metrics remain directly queryable and JSON output
+can be rebuilt deterministically. It never stores copied prompts, responses, commands,
+tool output, raw events, or redundant statistics JSON. Canonical rollout paths and
+SHA-256 digests are sensitive local metadata, so the database remains private to its
+POSIX user. Codex remains responsible for raw history.
 
 ## Documentation
 

@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import os
 import pwd
 import secrets
 import sqlite3
 import uuid
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -30,6 +29,14 @@ from rodex_sql import (
     open_rodex_transaction,
     select_lookup_id,
     select_or_insert_lookup_id,
+)
+
+from .statistics_projection import (
+    SessionStatisticsProjection,
+    StatisticsDistribution,
+    StatisticsNamedCount,
+    TurnStatisticsProjection,
+    validate_session_statistics_projection,
 )
 
 RODEX_SESSIONS_TABLE: Final = "rodex_sessions"
@@ -53,6 +60,24 @@ RODEX_SESSIONS_STATISTICS_SESSION_UNIQUE_INDEX: Final = (
 RODEX_SESSIONS_STATISTICS_SESSION_REVISION_UNIQUE_INDEX: Final = (
     "rodex_sessions_statistics_session_revision_unique"
 )
+RODEX_SESSIONS_STATISTICS_DISTRIBUTIONS_TABLE: Final = (
+    "rodex_sessions_statistics_distributions"
+)
+RODEX_SESSIONS_STATISTICS_DISTRIBUTIONS_UNIQUE_INDEX: Final = (
+    "rodex_sessions_statistics_distributions_kind_unique"
+)
+RODEX_SESSIONS_STATISTICS_NAMED_COUNTS_TABLE: Final = (
+    "rodex_sessions_statistics_named_counts"
+)
+RODEX_SESSIONS_STATISTICS_NAMED_COUNTS_UNIQUE_INDEX: Final = (
+    "rodex_sessions_statistics_named_counts_key_unique"
+)
+RODEX_SESSIONS_STATISTICS_AUDIT_LIMITS_TABLE: Final = (
+    "rodex_sessions_statistics_audit_limits"
+)
+RODEX_SESSIONS_STATISTICS_AUDIT_LIMITS_UNIQUE_INDEX: Final = (
+    "rodex_sessions_statistics_audit_limits_ordinal_unique"
+)
 RODEX_SESSIONS_STATISTICS_SOURCES_TABLE: Final = "rodex_sessions_statistics_sources"
 RODEX_SESSIONS_STATISTICS_SOURCES_UNIQUE_INDEX: Final = (
     "rodex_sessions_statistics_sources_codex_uuid_unique"
@@ -70,6 +95,18 @@ RODEX_SESSIONS_STATISTICS_TURNS_SOURCE_TURN_UNIQUE_INDEX: Final = (
 RODEX_SESSIONS_STATISTICS_TURNS_SESSION_TURN_INDEX: Final = (
     "rodex_sessions_statistics_turns_session_turn"
 )
+RODEX_SESSIONS_STATISTICS_TURNS_SESSION_ID_REVISION_UNIQUE_INDEX: Final = (
+    "rodex_sessions_statistics_turns_session_id_revision_unique"
+)
+RODEX_SESSIONS_STATISTICS_TURN_NAMED_COUNTS_TABLE: Final = (
+    "rodex_sessions_statistics_turn_named_counts"
+)
+RODEX_SESSIONS_STATISTICS_TURN_NAMED_COUNTS_UNIQUE_INDEX: Final = (
+    "rodex_sessions_statistics_turn_named_counts_key_unique"
+)
+RODEX_SESSIONS_STATISTICS_TURN_NAMED_COUNTS_SESSION_KIND_INDEX: Final = (
+    "rodex_sessions_statistics_turn_named_counts_session_kind"
+)
 RODEX_SESSIONS_STATISTICS_WORKERS_TABLE: Final = "rodex_sessions_statistics_workers"
 RODEX_SESSIONS_STATISTICS_WORKERS_SESSION_UNIQUE_INDEX: Final = (
     "rodex_sessions_statistics_workers_rodex_sessions_id_unique"
@@ -79,23 +116,126 @@ RODEX_SESSIONS_USER_DEFINED_COOL_NAMES_UNIQUE_INDEX: Final = (
     "rodex_sessions_user_defined_cool_names_id_unique"
 )
 MAX_UUID_GENERATION_ATTEMPTS: Final = 8
-STATISTICS_AGGREGATE_FIELDS: Final = frozenset(
-    {
-        "event_count",
-        "source_count",
-        "selected_stats",
-        "must_have_basic_stats",
-        "recommended_insight_stats",
-        "audit",
-    }
-)
 STATISTICS_COVERAGE_STATES: Final = frozenset({"complete", "gapped"})
 STATISTICS_TURN_OUTCOMES: Final = frozenset({"open", "completed", "aborted"})
-STATISTICS_TURN_FIELDS: Final = frozenset(
-    {"must_have_basic_stats", "recommended_insight_stats"}
-)
 STATISTICS_WORKER_STATES: Final = frozenset(
     {"starting", "catching_up", "up_to_date", "degraded", "stopped"}
+)
+_SESSION_PROJECTION_SCALAR_COLUMNS: Final = (
+    "analyzer_event_count",
+    "analyzer_source_count",
+    "history_sessions_count",
+    "history_records_count",
+    "history_malformed_records_count",
+    "turns_started_count",
+    "turns_completed_count",
+    "turns_aborted_count",
+    "turns_open_count",
+    "input_tokens",
+    "cached_input_tokens",
+    "cache_write_input_tokens",
+    "output_tokens",
+    "reasoning_output_tokens",
+    "total_tokens",
+    "context_observation_count",
+    "context_latest_session_median_percent",
+    "context_high_water_percent",
+    "commands_executed_count",
+    "model_tool_requests_count",
+    "model_tool_outputs_paired_count",
+    "file_change_operations_count",
+    "file_change_distinct_paths_count",
+    "file_change_occurrences_count",
+    "web_operations_count",
+    "web_queries_count",
+    "web_result_records_count",
+    "web_distinct_result_or_action_urls_count",
+    "collaboration_operations_count",
+    "collaboration_agents_started_count",
+    "compactions_count",
+    "distinct_workspaces_count",
+    "typical_turns_count",
+    "hands_on_turn_count",
+    "hands_on_turn_rate_percent",
+    "turns_with_nonzero_command_count",
+    "turns_subsequently_completed_count",
+    "completed_after_nonzero_command_percent",
+    "command_zero_exit_rate_percent",
+    "exact_command_repeat_rate_percent",
+    "repeated_command_execution_count",
+    "cached_input_share_percent",
+    "reasoning_output_share_percent",
+    "edited_turns_count",
+    "verified_after_edit_count",
+    "edit_then_verify_percent",
+    "web_turns_count",
+    "web_later_command_or_file_work_count",
+    "web_follow_through_percent",
+    "file_revisit_rate_percent",
+    "revisited_distinct_path_count",
+    "busiest_workspace_turn_share_percent",
+    "workspace_tagged_turn_count",
+    "turns_in_busiest_workspace_count",
+    "turns_with_local_hour_count",
+    "busiest_local_hour",
+    "turns_in_busiest_local_hour_count",
+    "goal_updates_count",
+    "audit_privacy",
+    "audit_percentile_method",
+    "audit_token_method",
+    "audit_token_snapshots_count",
+    "audit_repeated_token_snapshots_count",
+    "audit_token_epochs_count",
+    "audit_duplicate_operations_ignored_count",
+    "audit_duplicate_terminals_ignored_count",
+    "audit_terminal_events_without_start_ignored_count",
+    "audit_new_event_type_warnings_count",
+)
+_TURN_PROJECTION_SCALAR_COLUMNS: Final = (
+    "duration_ms",
+    "time_to_first_token_ms",
+    "input_tokens",
+    "cached_input_tokens",
+    "cache_write_input_tokens",
+    "output_tokens",
+    "reasoning_output_tokens",
+    "total_tokens",
+    "context_observation_count",
+    "context_high_water_percent",
+    "commands_executed_count",
+    "model_tool_requests_count",
+    "model_tool_outputs_paired_count",
+    "file_change_operations_count",
+    "file_change_distinct_paths_count",
+    "file_change_occurrences_count",
+    "web_operations_count",
+    "web_queries_count",
+    "web_result_records_count",
+    "web_distinct_result_or_action_urls_count",
+    "collaboration_operations_count",
+    "collaboration_agents_started_count",
+    "compactions_count",
+    "workspace_digest",
+    "model",
+    "local_start_hour",
+    "hands_on",
+    "completed_after_nonzero_command",
+    "cached_input_share_percent",
+    "reasoning_output_share_percent",
+    "edited_then_verified",
+    "web_research_followed_by_command_or_file_work",
+    "goal_updates_count",
+)
+_TURN_DATABASE_SCALAR_COLUMNS: Final = (
+    *_TURN_PROJECTION_SCALAR_COLUMNS[:11],
+    "command_duration_observation_count",
+    "command_duration_total_ms",
+    "command_duration_median_ms",
+    "command_duration_p75_ms",
+    "command_duration_p90_ms",
+    "command_duration_p95_ms",
+    "command_duration_maximum_ms",
+    *_TURN_PROJECTION_SCALAR_COLUMNS[11:],
 )
 
 _HALF_BITS: Final = 64
@@ -186,10 +326,161 @@ CREATE TABLE IF NOT EXISTS {RODEX_SESSIONS_STATISTICS_TABLE} (
     statistics_projection_schema_version TEXT NOT NULL,
     calculated_at_utc TEXT NOT NULL,
     coverage_state TEXT NOT NULL CHECK (coverage_state IN ('complete', 'gapped')),
-    aggregate_statistics_json TEXT NOT NULL CHECK (
-        json_valid(aggregate_statistics_json) = 1
-        AND json_type(aggregate_statistics_json) = 'object'
+    analyzer_event_count INTEGER NOT NULL CHECK (analyzer_event_count >= 0),
+    analyzer_source_count INTEGER NOT NULL CHECK (analyzer_source_count >= 0),
+    history_sessions_count INTEGER NOT NULL CHECK (history_sessions_count >= 0),
+    history_records_count INTEGER NOT NULL CHECK (history_records_count >= 0),
+    history_malformed_records_count INTEGER NOT NULL CHECK (
+        history_malformed_records_count >= 0
     ),
+    turns_started_count INTEGER NOT NULL CHECK (turns_started_count >= 0),
+    turns_completed_count INTEGER NOT NULL CHECK (turns_completed_count >= 0),
+    turns_aborted_count INTEGER NOT NULL CHECK (turns_aborted_count >= 0),
+    turns_open_count INTEGER NOT NULL CHECK (turns_open_count >= 0),
+    input_tokens INTEGER NOT NULL CHECK (input_tokens >= 0),
+    cached_input_tokens INTEGER NOT NULL CHECK (cached_input_tokens >= 0),
+    cache_write_input_tokens INTEGER NOT NULL CHECK (cache_write_input_tokens >= 0),
+    output_tokens INTEGER NOT NULL CHECK (output_tokens >= 0),
+    reasoning_output_tokens INTEGER NOT NULL CHECK (reasoning_output_tokens >= 0),
+    total_tokens INTEGER NOT NULL CHECK (total_tokens >= 0),
+    context_observation_count INTEGER NOT NULL CHECK (context_observation_count >= 0),
+    context_latest_session_median_percent REAL DEFAULT NULL CHECK (
+        context_latest_session_median_percent IS NULL
+        OR context_latest_session_median_percent BETWEEN 0 AND 100
+    ),
+    context_high_water_percent REAL NOT NULL CHECK (
+        context_high_water_percent BETWEEN 0 AND 100
+    ),
+    commands_executed_count INTEGER NOT NULL CHECK (commands_executed_count >= 0),
+    model_tool_requests_count INTEGER NOT NULL CHECK (model_tool_requests_count >= 0),
+    model_tool_outputs_paired_count INTEGER NOT NULL CHECK (
+        model_tool_outputs_paired_count >= 0
+        AND model_tool_outputs_paired_count <= model_tool_requests_count
+    ),
+    file_change_operations_count INTEGER NOT NULL CHECK (
+        file_change_operations_count >= 0
+    ),
+    file_change_distinct_paths_count INTEGER NOT NULL CHECK (
+        file_change_distinct_paths_count >= 0
+    ),
+    file_change_occurrences_count INTEGER NOT NULL CHECK (
+        file_change_occurrences_count >= 0
+    ),
+    web_operations_count INTEGER NOT NULL CHECK (web_operations_count >= 0),
+    web_queries_count INTEGER NOT NULL CHECK (web_queries_count >= 0),
+    web_result_records_count INTEGER NOT NULL CHECK (web_result_records_count >= 0),
+    web_distinct_result_or_action_urls_count INTEGER NOT NULL CHECK (
+        web_distinct_result_or_action_urls_count >= 0
+    ),
+    collaboration_operations_count INTEGER NOT NULL CHECK (
+        collaboration_operations_count >= 0
+    ),
+    collaboration_agents_started_count INTEGER NOT NULL CHECK (
+        collaboration_agents_started_count >= 0
+    ),
+    compactions_count INTEGER NOT NULL CHECK (compactions_count >= 0),
+    distinct_workspaces_count INTEGER NOT NULL CHECK (distinct_workspaces_count >= 0),
+    typical_turns_count INTEGER NOT NULL CHECK (typical_turns_count >= 0),
+    hands_on_turn_count INTEGER NOT NULL CHECK (
+        hands_on_turn_count >= 0 AND hands_on_turn_count <= turns_started_count
+    ),
+    hands_on_turn_rate_percent REAL DEFAULT NULL CHECK (
+        hands_on_turn_rate_percent IS NULL OR hands_on_turn_rate_percent BETWEEN 0 AND 100
+    ),
+    turns_with_nonzero_command_count INTEGER NOT NULL CHECK (
+        turns_with_nonzero_command_count >= 0
+    ),
+    turns_subsequently_completed_count INTEGER NOT NULL CHECK (
+        turns_subsequently_completed_count >= 0
+        AND turns_subsequently_completed_count <= turns_with_nonzero_command_count
+    ),
+    completed_after_nonzero_command_percent REAL DEFAULT NULL CHECK (
+        completed_after_nonzero_command_percent IS NULL
+        OR completed_after_nonzero_command_percent BETWEEN 0 AND 100
+    ),
+    command_zero_exit_rate_percent REAL DEFAULT NULL CHECK (
+        command_zero_exit_rate_percent IS NULL
+        OR command_zero_exit_rate_percent BETWEEN 0 AND 100
+    ),
+    exact_command_repeat_rate_percent REAL DEFAULT NULL CHECK (
+        exact_command_repeat_rate_percent IS NULL
+        OR exact_command_repeat_rate_percent BETWEEN 0 AND 100
+    ),
+    repeated_command_execution_count INTEGER NOT NULL CHECK (
+        repeated_command_execution_count >= 0
+        AND repeated_command_execution_count <= commands_executed_count
+    ),
+    cached_input_share_percent REAL DEFAULT NULL CHECK (
+        cached_input_share_percent IS NULL OR cached_input_share_percent BETWEEN 0 AND 100
+    ),
+    reasoning_output_share_percent REAL DEFAULT NULL CHECK (
+        reasoning_output_share_percent IS NULL
+        OR reasoning_output_share_percent BETWEEN 0 AND 100
+    ),
+    edited_turns_count INTEGER NOT NULL CHECK (edited_turns_count >= 0),
+    verified_after_edit_count INTEGER NOT NULL CHECK (
+        verified_after_edit_count >= 0 AND verified_after_edit_count <= edited_turns_count
+    ),
+    edit_then_verify_percent REAL DEFAULT NULL CHECK (
+        edit_then_verify_percent IS NULL OR edit_then_verify_percent BETWEEN 0 AND 100
+    ),
+    web_turns_count INTEGER NOT NULL CHECK (web_turns_count >= 0),
+    web_later_command_or_file_work_count INTEGER NOT NULL CHECK (
+        web_later_command_or_file_work_count >= 0
+        AND web_later_command_or_file_work_count <= web_turns_count
+    ),
+    web_follow_through_percent REAL DEFAULT NULL CHECK (
+        web_follow_through_percent IS NULL OR web_follow_through_percent BETWEEN 0 AND 100
+    ),
+    file_revisit_rate_percent REAL DEFAULT NULL CHECK (
+        file_revisit_rate_percent IS NULL OR file_revisit_rate_percent BETWEEN 0 AND 100
+    ),
+    revisited_distinct_path_count INTEGER NOT NULL CHECK (
+        revisited_distinct_path_count >= 0
+        AND revisited_distinct_path_count <= file_change_distinct_paths_count
+    ),
+    busiest_workspace_turn_share_percent REAL DEFAULT NULL CHECK (
+        busiest_workspace_turn_share_percent IS NULL
+        OR busiest_workspace_turn_share_percent BETWEEN 0 AND 100
+    ),
+    workspace_tagged_turn_count INTEGER NOT NULL CHECK (workspace_tagged_turn_count >= 0),
+    turns_in_busiest_workspace_count INTEGER NOT NULL CHECK (
+        turns_in_busiest_workspace_count >= 0
+        AND turns_in_busiest_workspace_count <= workspace_tagged_turn_count
+    ),
+    turns_with_local_hour_count INTEGER NOT NULL CHECK (turns_with_local_hour_count >= 0),
+    busiest_local_hour INTEGER DEFAULT NULL CHECK (
+        busiest_local_hour IS NULL OR busiest_local_hour BETWEEN 0 AND 23
+    ),
+    turns_in_busiest_local_hour_count INTEGER NOT NULL CHECK (
+        turns_in_busiest_local_hour_count >= 0
+        AND turns_in_busiest_local_hour_count <= turns_with_local_hour_count
+    ),
+    goal_updates_count INTEGER NOT NULL CHECK (goal_updates_count >= 0),
+    audit_privacy TEXT NOT NULL CHECK (length(audit_privacy) > 0),
+    audit_percentile_method TEXT NOT NULL CHECK (length(audit_percentile_method) > 0),
+    audit_token_method TEXT NOT NULL CHECK (length(audit_token_method) > 0),
+    audit_token_snapshots_count INTEGER NOT NULL CHECK (audit_token_snapshots_count >= 0),
+    audit_repeated_token_snapshots_count INTEGER NOT NULL CHECK (
+        audit_repeated_token_snapshots_count >= 0
+    ),
+    audit_token_epochs_count INTEGER NOT NULL CHECK (audit_token_epochs_count >= 0),
+    audit_duplicate_operations_ignored_count INTEGER NOT NULL CHECK (
+        audit_duplicate_operations_ignored_count >= 0
+    ),
+    audit_duplicate_terminals_ignored_count INTEGER NOT NULL CHECK (
+        audit_duplicate_terminals_ignored_count >= 0
+    ),
+    audit_terminal_events_without_start_ignored_count INTEGER NOT NULL CHECK (
+        audit_terminal_events_without_start_ignored_count >= 0
+    ),
+    audit_new_event_type_warnings_count INTEGER NOT NULL CHECK (
+        audit_new_event_type_warnings_count >= 0
+    ),
+    CHECK (
+        turns_started_count = turns_completed_count + turns_aborted_count + turns_open_count
+    ),
+    CHECK (cached_input_tokens <= input_tokens),
     FOREIGN KEY (rodex_sessions_id) REFERENCES {RODEX_SESSIONS_TABLE} (id)
 )
 """
@@ -201,6 +492,91 @@ _CREATE_STATISTICS_SESSION_REVISION_UNIQUE_INDEX = f"""
 CREATE UNIQUE INDEX IF NOT EXISTS
     {RODEX_SESSIONS_STATISTICS_SESSION_REVISION_UNIQUE_INDEX}
 ON {RODEX_SESSIONS_STATISTICS_TABLE} (rodex_sessions_id, statistics_revision)
+"""
+_CREATE_STATISTICS_DISTRIBUTIONS_TABLE = f"""
+CREATE TABLE IF NOT EXISTS {RODEX_SESSIONS_STATISTICS_DISTRIBUTIONS_TABLE} (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    rodex_sessions_id INTEGER NOT NULL,
+    included_statistics_revision INTEGER NOT NULL CHECK (
+        included_statistics_revision >= 1
+    ),
+    distribution_kind TEXT NOT NULL CHECK (distribution_kind IN (
+        'completed_turn_duration_ms', 'time_to_first_token_ms',
+        'per_turn_total_tokens', 'command_duration_ms', 'commands_per_turn',
+        'tool_requests_per_turn', 'files_per_turn'
+    )),
+    observation_count INTEGER NOT NULL CHECK (observation_count >= 0),
+    total INTEGER NOT NULL CHECK (total >= 0),
+    median REAL DEFAULT NULL CHECK (median IS NULL OR median >= 0),
+    p75 INTEGER DEFAULT NULL CHECK (p75 IS NULL OR p75 >= 0),
+    p90 INTEGER DEFAULT NULL CHECK (p90 IS NULL OR p90 >= 0),
+    p95 INTEGER DEFAULT NULL CHECK (p95 IS NULL OR p95 >= 0),
+    maximum INTEGER DEFAULT NULL CHECK (maximum IS NULL OR maximum >= 0),
+    CHECK (
+        (observation_count = 0 AND total = 0 AND median IS NULL AND p75 IS NULL
+            AND p90 IS NULL AND p95 IS NULL AND maximum IS NULL)
+        OR
+        (observation_count > 0 AND median IS NOT NULL AND p75 IS NOT NULL
+            AND p90 IS NOT NULL AND p95 IS NOT NULL AND maximum IS NOT NULL
+            AND p75 <= p90 AND p90 <= p95 AND p95 <= maximum)
+    ),
+    FOREIGN KEY (rodex_sessions_id, included_statistics_revision)
+        REFERENCES {RODEX_SESSIONS_STATISTICS_TABLE}
+            (rodex_sessions_id, statistics_revision)
+        DEFERRABLE INITIALLY DEFERRED
+)
+"""
+_CREATE_STATISTICS_DISTRIBUTIONS_UNIQUE_INDEX = f"""
+CREATE UNIQUE INDEX IF NOT EXISTS
+    {RODEX_SESSIONS_STATISTICS_DISTRIBUTIONS_UNIQUE_INDEX}
+ON {RODEX_SESSIONS_STATISTICS_DISTRIBUTIONS_TABLE}
+    (rodex_sessions_id, distribution_kind)
+"""
+_CREATE_STATISTICS_NAMED_COUNTS_TABLE = f"""
+CREATE TABLE IF NOT EXISTS {RODEX_SESSIONS_STATISTICS_NAMED_COUNTS_TABLE} (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    rodex_sessions_id INTEGER NOT NULL,
+    included_statistics_revision INTEGER NOT NULL CHECK (
+        included_statistics_revision >= 1
+    ),
+    count_kind TEXT NOT NULL CHECK (count_kind IN (
+        'command_exit_status', 'command_family', 'model_tool', 'file_change_type',
+        'web_action', 'collaboration_tool', 'model', 'goal_status'
+    )),
+    count_name TEXT NOT NULL CHECK (length(count_name) > 0),
+    occurrence_count INTEGER NOT NULL CHECK (occurrence_count > 0),
+    FOREIGN KEY (rodex_sessions_id, included_statistics_revision)
+        REFERENCES {RODEX_SESSIONS_STATISTICS_TABLE}
+            (rodex_sessions_id, statistics_revision)
+        DEFERRABLE INITIALLY DEFERRED
+)
+"""
+_CREATE_STATISTICS_NAMED_COUNTS_UNIQUE_INDEX = f"""
+CREATE UNIQUE INDEX IF NOT EXISTS
+    {RODEX_SESSIONS_STATISTICS_NAMED_COUNTS_UNIQUE_INDEX}
+ON {RODEX_SESSIONS_STATISTICS_NAMED_COUNTS_TABLE}
+    (rodex_sessions_id, count_kind, count_name)
+"""
+_CREATE_STATISTICS_AUDIT_LIMITS_TABLE = f"""
+CREATE TABLE IF NOT EXISTS {RODEX_SESSIONS_STATISTICS_AUDIT_LIMITS_TABLE} (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    rodex_sessions_id INTEGER NOT NULL,
+    included_statistics_revision INTEGER NOT NULL CHECK (
+        included_statistics_revision >= 1
+    ),
+    limit_ordinal INTEGER NOT NULL CHECK (limit_ordinal >= 0),
+    limitation TEXT NOT NULL CHECK (length(limitation) > 0),
+    FOREIGN KEY (rodex_sessions_id, included_statistics_revision)
+        REFERENCES {RODEX_SESSIONS_STATISTICS_TABLE}
+            (rodex_sessions_id, statistics_revision)
+        DEFERRABLE INITIALLY DEFERRED
+)
+"""
+_CREATE_STATISTICS_AUDIT_LIMITS_UNIQUE_INDEX = f"""
+CREATE UNIQUE INDEX IF NOT EXISTS
+    {RODEX_SESSIONS_STATISTICS_AUDIT_LIMITS_UNIQUE_INDEX}
+ON {RODEX_SESSIONS_STATISTICS_AUDIT_LIMITS_TABLE}
+    (rodex_sessions_id, limit_ordinal)
 """
 _CREATE_STATISTICS_SOURCES_TABLE = f"""
 CREATE TABLE IF NOT EXISTS {RODEX_SESSIONS_STATISTICS_SOURCES_TABLE} (
@@ -273,12 +649,106 @@ CREATE TABLE IF NOT EXISTS {RODEX_SESSIONS_STATISTICS_TURNS_TABLE} (
     started_at_utc TEXT DEFAULT NULL,
     terminal_at_utc TEXT DEFAULT NULL,
     outcome TEXT NOT NULL CHECK (outcome IN ('open', 'completed', 'aborted')),
-    turn_statistics_json TEXT NOT NULL CHECK (
-        json_valid(turn_statistics_json) = 1
-        AND json_type(turn_statistics_json) = 'object'
+    duration_ms INTEGER DEFAULT NULL CHECK (duration_ms IS NULL OR duration_ms >= 0),
+    time_to_first_token_ms INTEGER DEFAULT NULL CHECK (
+        time_to_first_token_ms IS NULL OR time_to_first_token_ms >= 0
     ),
+    input_tokens INTEGER NOT NULL CHECK (input_tokens >= 0),
+    cached_input_tokens INTEGER NOT NULL CHECK (
+        cached_input_tokens >= 0 AND cached_input_tokens <= input_tokens
+    ),
+    cache_write_input_tokens INTEGER NOT NULL CHECK (cache_write_input_tokens >= 0),
+    output_tokens INTEGER NOT NULL CHECK (output_tokens >= 0),
+    reasoning_output_tokens INTEGER NOT NULL CHECK (reasoning_output_tokens >= 0),
+    total_tokens INTEGER NOT NULL CHECK (total_tokens >= 0),
+    context_observation_count INTEGER NOT NULL CHECK (context_observation_count >= 0),
+    context_high_water_percent REAL NOT NULL CHECK (
+        context_high_water_percent BETWEEN 0 AND 100
+    ),
+    commands_executed_count INTEGER NOT NULL CHECK (commands_executed_count >= 0),
+    command_duration_observation_count INTEGER NOT NULL CHECK (
+        command_duration_observation_count >= 0
+    ),
+    command_duration_total_ms INTEGER NOT NULL CHECK (command_duration_total_ms >= 0),
+    command_duration_median_ms REAL DEFAULT NULL CHECK (
+        command_duration_median_ms IS NULL OR command_duration_median_ms >= 0
+    ),
+    command_duration_p75_ms INTEGER DEFAULT NULL CHECK (
+        command_duration_p75_ms IS NULL OR command_duration_p75_ms >= 0
+    ),
+    command_duration_p90_ms INTEGER DEFAULT NULL CHECK (
+        command_duration_p90_ms IS NULL OR command_duration_p90_ms >= 0
+    ),
+    command_duration_p95_ms INTEGER DEFAULT NULL CHECK (
+        command_duration_p95_ms IS NULL OR command_duration_p95_ms >= 0
+    ),
+    command_duration_maximum_ms INTEGER DEFAULT NULL CHECK (
+        command_duration_maximum_ms IS NULL OR command_duration_maximum_ms >= 0
+    ),
+    model_tool_requests_count INTEGER NOT NULL CHECK (model_tool_requests_count >= 0),
+    model_tool_outputs_paired_count INTEGER NOT NULL CHECK (
+        model_tool_outputs_paired_count >= 0
+        AND model_tool_outputs_paired_count <= model_tool_requests_count
+    ),
+    file_change_operations_count INTEGER NOT NULL CHECK (
+        file_change_operations_count >= 0
+    ),
+    file_change_distinct_paths_count INTEGER NOT NULL CHECK (
+        file_change_distinct_paths_count >= 0
+    ),
+    file_change_occurrences_count INTEGER NOT NULL CHECK (
+        file_change_occurrences_count >= 0
+    ),
+    web_operations_count INTEGER NOT NULL CHECK (web_operations_count >= 0),
+    web_queries_count INTEGER NOT NULL CHECK (web_queries_count >= 0),
+    web_result_records_count INTEGER NOT NULL CHECK (web_result_records_count >= 0),
+    web_distinct_result_or_action_urls_count INTEGER NOT NULL CHECK (
+        web_distinct_result_or_action_urls_count >= 0
+    ),
+    collaboration_operations_count INTEGER NOT NULL CHECK (
+        collaboration_operations_count >= 0
+    ),
+    collaboration_agents_started_count INTEGER NOT NULL CHECK (
+        collaboration_agents_started_count >= 0
+    ),
+    compactions_count INTEGER NOT NULL CHECK (compactions_count >= 0),
+    workspace_digest TEXT DEFAULT NULL,
+    model TEXT DEFAULT NULL,
+    local_start_hour INTEGER DEFAULT NULL CHECK (
+        local_start_hour IS NULL OR local_start_hour BETWEEN 0 AND 23
+    ),
+    hands_on INTEGER NOT NULL CHECK (hands_on IN (0, 1)),
+    completed_after_nonzero_command INTEGER NOT NULL CHECK (
+        completed_after_nonzero_command IN (0, 1)
+    ),
+    cached_input_share_percent REAL DEFAULT NULL CHECK (
+        cached_input_share_percent IS NULL OR cached_input_share_percent BETWEEN 0 AND 100
+    ),
+    reasoning_output_share_percent REAL DEFAULT NULL CHECK (
+        reasoning_output_share_percent IS NULL
+        OR reasoning_output_share_percent BETWEEN 0 AND 100
+    ),
+    edited_then_verified INTEGER NOT NULL CHECK (edited_then_verified IN (0, 1)),
+    web_research_followed_by_command_or_file_work INTEGER NOT NULL CHECK (
+        web_research_followed_by_command_or_file_work IN (0, 1)
+    ),
+    goal_updates_count INTEGER NOT NULL CHECK (goal_updates_count >= 0),
+    CHECK (outcome != 'open' OR terminal_at_utc IS NULL),
     CHECK (
-        outcome != 'open' OR terminal_at_utc IS NULL
+        (command_duration_observation_count = 0 AND command_duration_total_ms = 0
+            AND command_duration_median_ms IS NULL AND command_duration_p75_ms IS NULL
+            AND command_duration_p90_ms IS NULL AND command_duration_p95_ms IS NULL
+            AND command_duration_maximum_ms IS NULL)
+        OR
+        (command_duration_observation_count > 0
+            AND command_duration_median_ms IS NOT NULL
+            AND command_duration_p75_ms IS NOT NULL
+            AND command_duration_p90_ms IS NOT NULL
+            AND command_duration_p95_ms IS NOT NULL
+            AND command_duration_maximum_ms IS NOT NULL
+            AND command_duration_p75_ms <= command_duration_p90_ms
+            AND command_duration_p90_ms <= command_duration_p95_ms
+            AND command_duration_p95_ms <= command_duration_maximum_ms)
     ),
     FOREIGN KEY (rodex_sessions_id, rodex_sessions_statistics_sources_id,
         included_statistics_revision)
@@ -311,6 +781,45 @@ ON {RODEX_SESSIONS_STATISTICS_TURNS_TABLE} (
     codex_turn_id_sha256_int_3,
     codex_turn_id_sha256_int_4
 )
+"""
+_CREATE_STATISTICS_TURNS_SESSION_ID_REVISION_UNIQUE_INDEX = f"""
+CREATE UNIQUE INDEX IF NOT EXISTS
+    {RODEX_SESSIONS_STATISTICS_TURNS_SESSION_ID_REVISION_UNIQUE_INDEX}
+ON {RODEX_SESSIONS_STATISTICS_TURNS_TABLE}
+    (rodex_sessions_id, id, included_statistics_revision)
+"""
+_CREATE_STATISTICS_TURN_NAMED_COUNTS_TABLE = f"""
+CREATE TABLE IF NOT EXISTS {RODEX_SESSIONS_STATISTICS_TURN_NAMED_COUNTS_TABLE} (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    rodex_sessions_id INTEGER NOT NULL,
+    rodex_sessions_statistics_turns_id INTEGER NOT NULL,
+    included_statistics_revision INTEGER NOT NULL CHECK (
+        included_statistics_revision >= 1
+    ),
+    count_kind TEXT NOT NULL CHECK (count_kind IN (
+        'command_exit_status', 'command_family', 'model_tool', 'file_change_type',
+        'web_action', 'collaboration_tool', 'goal_status'
+    )),
+    count_name TEXT NOT NULL CHECK (length(count_name) > 0),
+    occurrence_count INTEGER NOT NULL CHECK (occurrence_count > 0),
+    FOREIGN KEY (rodex_sessions_id, rodex_sessions_statistics_turns_id,
+        included_statistics_revision)
+        REFERENCES {RODEX_SESSIONS_STATISTICS_TURNS_TABLE}
+            (rodex_sessions_id, id, included_statistics_revision)
+        DEFERRABLE INITIALLY DEFERRED
+)
+"""
+_CREATE_STATISTICS_TURN_NAMED_COUNTS_UNIQUE_INDEX = f"""
+CREATE UNIQUE INDEX IF NOT EXISTS
+    {RODEX_SESSIONS_STATISTICS_TURN_NAMED_COUNTS_UNIQUE_INDEX}
+ON {RODEX_SESSIONS_STATISTICS_TURN_NAMED_COUNTS_TABLE}
+    (rodex_sessions_statistics_turns_id, count_kind, count_name)
+"""
+_CREATE_STATISTICS_TURN_NAMED_COUNTS_SESSION_KIND_INDEX = f"""
+CREATE INDEX IF NOT EXISTS
+    {RODEX_SESSIONS_STATISTICS_TURN_NAMED_COUNTS_SESSION_KIND_INDEX}
+ON {RODEX_SESSIONS_STATISTICS_TURN_NAMED_COUNTS_TABLE}
+    (rodex_sessions_id, count_kind, count_name)
 """
 _CREATE_STATISTICS_WORKERS_TABLE = f"""
 CREATE TABLE IF NOT EXISTS {RODEX_SESSIONS_STATISTICS_WORKERS_TABLE} (
@@ -422,7 +931,7 @@ class RodexTmuxSession:
 
 @dataclass(frozen=True, slots=True)
 class RodexSessionStatistics:
-    """Latest aggregate-only analyzer projection for one Rodex session."""
+    """Latest fully relational analyzer projection for one Rodex session."""
 
     id: int
     rodex_sessions_id: int
@@ -430,7 +939,7 @@ class RodexSessionStatistics:
     statistics_projection_schema_version: str
     calculated_at_utc: str
     coverage_state: str
-    aggregate_statistics: dict[str, object]
+    projection: SessionStatisticsProjection
 
 
 @dataclass(frozen=True, slots=True)
@@ -462,31 +971,34 @@ class RodexSessionStatisticsSourceObservation:
 
 
 @dataclass(frozen=True, slots=True)
-class RodexSessionTurnStatisticsObservation:
-    """One analyzer turn projection tied to its authoritative Codex source."""
-
-    codex_session_uuid: uuid.UUID
-    codex_turn_id: str
-    started_at_utc: str | None
-    terminal_at_utc: str | None
-    outcome: str
-    turn_statistics: Mapping[str, object]
-
-
-@dataclass(frozen=True, slots=True)
 class RodexSessionTurnStatistics:
     """Latest persisted statistics projection for one exact Codex turn."""
 
     id: int
     rodex_sessions_id: int
     rodex_sessions_statistics_sources_id: int
-    codex_session_uuid: uuid.UUID
-    codex_turn_id: str
     included_statistics_revision: int
-    started_at_utc: str | None
-    terminal_at_utc: str | None
-    outcome: str
-    turn_statistics: dict[str, object]
+    projection: TurnStatisticsProjection
+
+    @property
+    def codex_session_uuid(self) -> uuid.UUID:
+        return self.projection.codex_session_uuid
+
+    @property
+    def codex_turn_id(self) -> str:
+        return self.projection.codex_turn_id
+
+    @property
+    def started_at_utc(self) -> str | None:
+        return self.projection.started_at_utc
+
+    @property
+    def terminal_at_utc(self) -> str | None:
+        return self.projection.terminal_at_utc
+
+    @property
+    def outcome(self) -> str:
+        return self.projection.outcome
 
 
 @dataclass(frozen=True, slots=True)
@@ -607,6 +1119,33 @@ def initialise_rodex_database(database_path: str | os.PathLike[str] | None = Non
             RODEX_SESSIONS_STATISTICS_SESSION_REVISION_UNIQUE_INDEX,
             ["rodex_sessions_id", "statistics_revision"],
         )
+        connection.execute(_CREATE_STATISTICS_DISTRIBUTIONS_TABLE)
+        _verify_statistics_distributions_table(connection)
+        connection.execute(_CREATE_STATISTICS_DISTRIBUTIONS_UNIQUE_INDEX)
+        _verify_unique_index(
+            connection,
+            RODEX_SESSIONS_STATISTICS_DISTRIBUTIONS_TABLE,
+            RODEX_SESSIONS_STATISTICS_DISTRIBUTIONS_UNIQUE_INDEX,
+            ["rodex_sessions_id", "distribution_kind"],
+        )
+        connection.execute(_CREATE_STATISTICS_NAMED_COUNTS_TABLE)
+        _verify_statistics_named_counts_table(connection)
+        connection.execute(_CREATE_STATISTICS_NAMED_COUNTS_UNIQUE_INDEX)
+        _verify_unique_index(
+            connection,
+            RODEX_SESSIONS_STATISTICS_NAMED_COUNTS_TABLE,
+            RODEX_SESSIONS_STATISTICS_NAMED_COUNTS_UNIQUE_INDEX,
+            ["rodex_sessions_id", "count_kind", "count_name"],
+        )
+        connection.execute(_CREATE_STATISTICS_AUDIT_LIMITS_TABLE)
+        _verify_statistics_audit_limits_table(connection)
+        connection.execute(_CREATE_STATISTICS_AUDIT_LIMITS_UNIQUE_INDEX)
+        _verify_unique_index(
+            connection,
+            RODEX_SESSIONS_STATISTICS_AUDIT_LIMITS_TABLE,
+            RODEX_SESSIONS_STATISTICS_AUDIT_LIMITS_UNIQUE_INDEX,
+            ["rodex_sessions_id", "limit_ordinal"],
+        )
         connection.execute(_CREATE_STATISTICS_SOURCES_TABLE)
         _verify_statistics_sources_table(connection)
         connection.execute(_CREATE_STATISTICS_SOURCES_UNIQUE_INDEX)
@@ -658,6 +1197,30 @@ def initialise_rodex_database(database_path: str | os.PathLike[str] | None = Non
                 "codex_turn_id_sha256_int_3",
                 "codex_turn_id_sha256_int_4",
             ],
+            unique=False,
+        )
+        connection.execute(_CREATE_STATISTICS_TURNS_SESSION_ID_REVISION_UNIQUE_INDEX)
+        _verify_unique_index(
+            connection,
+            RODEX_SESSIONS_STATISTICS_TURNS_TABLE,
+            RODEX_SESSIONS_STATISTICS_TURNS_SESSION_ID_REVISION_UNIQUE_INDEX,
+            ["rodex_sessions_id", "id", "included_statistics_revision"],
+        )
+        connection.execute(_CREATE_STATISTICS_TURN_NAMED_COUNTS_TABLE)
+        _verify_statistics_turn_named_counts_table(connection)
+        connection.execute(_CREATE_STATISTICS_TURN_NAMED_COUNTS_UNIQUE_INDEX)
+        _verify_unique_index(
+            connection,
+            RODEX_SESSIONS_STATISTICS_TURN_NAMED_COUNTS_TABLE,
+            RODEX_SESSIONS_STATISTICS_TURN_NAMED_COUNTS_UNIQUE_INDEX,
+            ["rodex_sessions_statistics_turns_id", "count_kind", "count_name"],
+        )
+        connection.execute(_CREATE_STATISTICS_TURN_NAMED_COUNTS_SESSION_KIND_INDEX)
+        _verify_index(
+            connection,
+            RODEX_SESSIONS_STATISTICS_TURN_NAMED_COUNTS_TABLE,
+            RODEX_SESSIONS_STATISTICS_TURN_NAMED_COUNTS_SESSION_KIND_INDEX,
+            ["rodex_sessions_id", "count_kind", "count_name"],
             unique=False,
         )
         _register_missing_statistics_sources(connection)
@@ -1047,9 +1610,8 @@ def publish_rodex_session_statistics(
     statistics_projection_schema_version: str,
     calculated_at_utc: str,
     coverage_state: str,
-    aggregate_statistics: Mapping[str, object],
+    statistics_projection: SessionStatisticsProjection,
     analyzed_sources: Sequence[RodexSessionStatisticsSourceObservation],
-    turn_statistics: Sequence[RodexSessionTurnStatisticsObservation],
 ) -> RodexSessionStatistics:
     """Atomically publish one fenced session projection, turns, and sources."""
     _validate_session_id(session_id)
@@ -1064,11 +1626,15 @@ def publish_rodex_session_statistics(
     coverage = _normalise_required_text(coverage_state, "coverage_state")
     if coverage not in STATISTICS_COVERAGE_STATES:
         raise ValueError(f"unsupported statistics coverage state: {coverage}")
-    aggregate_json = _statistics_aggregate_json(aggregate_statistics)
+    statistics_projection = validate_session_statistics_projection(statistics_projection)
     observations = tuple(_validate_source_observation(item) for item in analyzed_sources)
     if len({item.codex_session_uuid for item in observations}) != len(observations):
         raise ValueError("analyzed_sources contains a duplicate Codex UUID")
-    turns = tuple(_validate_turn_observation(item) for item in turn_statistics)
+    if statistics_projection.analyzer_source_count != len(observations):
+        raise ValueError(
+            "analyzer source count must equal authenticated source observations"
+        )
+    turns = statistics_projection.turn_statistics
     turn_keys = {(item.codex_session_uuid, item.codex_turn_id) for item in turns}
     if len(turn_keys) != len(turns):
         raise ValueError("turn_statistics contains a duplicate source and turn ID")
@@ -1113,6 +1679,10 @@ def publish_rodex_session_statistics(
             raise RodexSessionStatisticsConflictError(
                 "statistics include an unregistered Codex source"
             )
+        if observed != registered:
+            raise RodexSessionStatisticsConflictError(
+                "statistics omit a registered Codex lineage source"
+            )
         turn_sources = {
             split_a_codex_uuid_into_signed_bigints(item.codex_session_uuid)
             for item in turns
@@ -1128,25 +1698,87 @@ def publish_rodex_session_statistics(
             "WHERE rodex_sessions_id = ?",
             (session_id,),
         )
+        scalar_columns_sql = ", ".join(_SESSION_PROJECTION_SCALAR_COLUMNS)
+        scalar_placeholders = ", ".join("?" for _ in _SESSION_PROJECTION_SCALAR_COLUMNS)
+        scalar_updates = ", ".join(
+            f"{column} = excluded.{column}" for column in _SESSION_PROJECTION_SCALAR_COLUMNS
+        )
         connection.execute(
             f"INSERT INTO {RODEX_SESSIONS_STATISTICS_TABLE} "
             "(rodex_sessions_id, statistics_revision, "
             "statistics_projection_schema_version, calculated_at_utc, "
-            "coverage_state, aggregate_statistics_json) VALUES (?, ?, ?, ?, ?, ?) "
+            f"coverage_state, {scalar_columns_sql}) "
+            f"VALUES (?, ?, ?, ?, ?, {scalar_placeholders}) "
             "ON CONFLICT(rodex_sessions_id) DO UPDATE SET "
             "statistics_revision = excluded.statistics_revision, "
             "statistics_projection_schema_version = "
             "excluded.statistics_projection_schema_version, "
             "calculated_at_utc = excluded.calculated_at_utc, "
             "coverage_state = excluded.coverage_state, "
-            "aggregate_statistics_json = excluded.aggregate_statistics_json",
+            f"{scalar_updates}",
             (
                 session_id,
                 new_revision,
                 schema_version,
                 calculated,
                 coverage,
-                aggregate_json,
+                *(
+                    getattr(statistics_projection, column)
+                    for column in _SESSION_PROJECTION_SCALAR_COLUMNS
+                ),
+            ),
+        )
+        for table in (
+            RODEX_SESSIONS_STATISTICS_DISTRIBUTIONS_TABLE,
+            RODEX_SESSIONS_STATISTICS_NAMED_COUNTS_TABLE,
+            RODEX_SESSIONS_STATISTICS_AUDIT_LIMITS_TABLE,
+        ):
+            connection.execute(
+                f"DELETE FROM {table} WHERE rodex_sessions_id = ?", (session_id,)
+            )
+        connection.executemany(
+            f"INSERT INTO {RODEX_SESSIONS_STATISTICS_DISTRIBUTIONS_TABLE} "
+            "(rodex_sessions_id, included_statistics_revision, distribution_kind, "
+            "observation_count, total, median, p75, p90, p95, maximum) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                (
+                    session_id,
+                    new_revision,
+                    item.distribution_kind,
+                    item.observation_count,
+                    item.total,
+                    item.median,
+                    item.p75,
+                    item.p90,
+                    item.p95,
+                    item.maximum,
+                )
+                for item in statistics_projection.distributions
+            ),
+        )
+        connection.executemany(
+            f"INSERT INTO {RODEX_SESSIONS_STATISTICS_NAMED_COUNTS_TABLE} "
+            "(rodex_sessions_id, included_statistics_revision, count_kind, "
+            "count_name, occurrence_count) VALUES (?, ?, ?, ?, ?)",
+            (
+                (
+                    session_id,
+                    new_revision,
+                    item.count_kind,
+                    item.count_name,
+                    item.occurrence_count,
+                )
+                for item in statistics_projection.named_counts
+            ),
+        )
+        connection.executemany(
+            f"INSERT INTO {RODEX_SESSIONS_STATISTICS_AUDIT_LIMITS_TABLE} "
+            "(rodex_sessions_id, included_statistics_revision, limit_ordinal, "
+            "limitation) VALUES (?, ?, ?, ?)",
+            (
+                (session_id, new_revision, ordinal, limitation)
+                for ordinal, limitation in enumerate(statistics_projection.audit_limits)
             ),
         )
         for item in observations:
@@ -1172,6 +1804,16 @@ def publish_rodex_session_statistics(
                 raise RodexSessionStatisticsConflictError(
                     "registered statistics source changed during publication"
                 )
+        connection.execute(
+            f"DELETE FROM {RODEX_SESSIONS_STATISTICS_TURN_NAMED_COUNTS_TABLE} "
+            "WHERE rodex_sessions_id = ?",
+            (session_id,),
+        )
+        turn_scalar_columns_sql = ", ".join(_TURN_DATABASE_SCALAR_COLUMNS)
+        turn_scalar_placeholders = ", ".join("?" for _ in _TURN_DATABASE_SCALAR_COLUMNS)
+        turn_scalar_updates = ", ".join(
+            f"{column} = excluded.{column}" for column in _TURN_DATABASE_SCALAR_COLUMNS
+        )
         for item in turns:
             source_halves = split_a_codex_uuid_into_signed_bigints(item.codex_session_uuid)
             source_id = source_ids[source_halves]
@@ -1196,8 +1838,9 @@ def publish_rodex_session_statistics(
                 "codex_turn_id_sha256_int_1, codex_turn_id_sha256_int_2, "
                 "codex_turn_id_sha256_int_3, codex_turn_id_sha256_int_4, "
                 "codex_turn_id, included_statistics_revision, started_at_utc, "
-                "terminal_at_utc, outcome, turn_statistics_json) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                f"terminal_at_utc, outcome, {turn_scalar_columns_sql}) "
+                f"VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
+                f"{turn_scalar_placeholders}) "
                 "ON CONFLICT(rodex_sessions_statistics_sources_id, "
                 "codex_turn_id_sha256_int_1, codex_turn_id_sha256_int_2, "
                 "codex_turn_id_sha256_int_3, codex_turn_id_sha256_int_4) "
@@ -1206,7 +1849,7 @@ def publish_rodex_session_statistics(
                 "started_at_utc = excluded.started_at_utc, "
                 "terminal_at_utc = excluded.terminal_at_utc, "
                 "outcome = excluded.outcome, "
-                "turn_statistics_json = excluded.turn_statistics_json "
+                f"{turn_scalar_updates} "
                 "RETURNING id",
                 (
                     session_id,
@@ -1217,11 +1860,29 @@ def publish_rodex_session_statistics(
                     item.started_at_utc,
                     item.terminal_at_utc,
                     item.outcome,
-                    _statistics_turn_json(item.turn_statistics),
+                    *_turn_database_scalar_values(item),
                 ),
             ).fetchone()
             if row is None:
                 raise RodexSessionError("turn statistics upsert returned no identity")
+            turn_row_id = int(row[0])
+            connection.executemany(
+                f"INSERT INTO {RODEX_SESSIONS_STATISTICS_TURN_NAMED_COUNTS_TABLE} "
+                "(rodex_sessions_id, rodex_sessions_statistics_turns_id, "
+                "included_statistics_revision, count_kind, count_name, "
+                "occurrence_count) VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    (
+                        session_id,
+                        turn_row_id,
+                        new_revision,
+                        count.count_kind,
+                        count.count_name,
+                        count.occurrence_count,
+                    )
+                    for count in item.named_counts
+                ),
+            )
         connection.execute(
             f"DELETE FROM {RODEX_SESSIONS_STATISTICS_TURNS_TABLE} "
             "WHERE rodex_sessions_id = ? AND included_statistics_revision != ?",
@@ -1236,10 +1897,10 @@ def publish_rodex_session_statistics(
             consecutive_failures=0,
             next_retry_at_utc=None,
         )
-        row = _select_statistics(connection, session_id)
-    if row is None:
+    published = lookup_rodex_session_statistics(session_id, path)
+    if published is None:
         raise RodexSessionError(f"Rodex statistics disappeared: {session_id}")
-    return _session_statistics_from_row(row)
+    return published
 
 
 def record_rodex_session_statistics_worker_health(
@@ -1330,11 +1991,21 @@ def read_rodex_session_statistics(
     path = initialise_rodex_database(database_path)
     with open_rodex_read_transaction(path) as connection:
         statistics_row = _select_statistics(connection, session_id)
+        distribution_rows = _select_statistics_distributions(connection, session_id)
+        named_count_rows = _select_statistics_named_counts(connection, session_id)
+        audit_limit_rows = _select_statistics_audit_limits(connection, session_id)
         worker_row = _select_statistics_worker(connection, session_id)
         source_rows = _select_statistics_sources(connection, session_id)
     return RodexSessionStatisticsView(
         statistics=(
-            None if statistics_row is None else _session_statistics_from_row(statistics_row)
+            None
+            if statistics_row is None
+            else _session_statistics_from_rows(
+                statistics_row,
+                distribution_rows,
+                named_count_rows,
+                audit_limit_rows,
+            )
         ),
         worker=(None if worker_row is None else _statistics_worker_from_row(worker_row)),
         sources=tuple(_statistics_source_from_row(row) for row in source_rows),
@@ -1360,15 +2031,21 @@ def read_rodex_session_turn_statistics(
     path = initialise_rodex_database(database_path)
     with open_rodex_read_transaction(path) as connection:
         statistics_row = _select_statistics(connection, session_id)
+        distribution_rows = _select_statistics_distributions(connection, session_id)
+        named_count_rows = _select_statistics_named_counts(connection, session_id)
+        audit_limit_rows = _select_statistics_audit_limits(connection, session_id)
         worker_row = _select_statistics_worker(connection, session_id)
         source_rows = _select_statistics_sources(connection, session_id)
+        turn_scalar_columns = ", ".join(
+            f"turns.{column}" for column in _TURN_DATABASE_SCALAR_COLUMNS
+        )
         query = (
             f"SELECT turns.id, turns.rodex_sessions_id, "
             "turns.rodex_sessions_statistics_sources_id, "
             "sources.codex_session_uuid_int_1, "
             "sources.codex_session_uuid_int_2, turns.codex_turn_id, "
             "turns.included_statistics_revision, turns.started_at_utc, "
-            "turns.terminal_at_utc, turns.outcome, turns.turn_statistics_json "
+            f"turns.terminal_at_utc, turns.outcome, {turn_scalar_columns} "
             f"FROM {RODEX_SESSIONS_STATISTICS_TURNS_TABLE} AS turns "
             f"JOIN {RODEX_SESSIONS_STATISTICS_SOURCES_TABLE} AS sources "
             "ON sources.id = turns.rodex_sessions_statistics_sources_id "
@@ -1387,17 +2064,33 @@ def read_rodex_session_turn_statistics(
             )
             parameters += source_halves
         turn_rows = connection.execute(query + " ORDER BY turns.id", parameters).fetchall()
+        turn_named_count_rows = (
+            []
+            if len(turn_rows) != 1
+            else _select_turn_statistics_named_counts(connection, int(turn_rows[0][0]))
+        )
     if len(turn_rows) > 1:
         raise RodexSessionTurnStatisticsAmbiguousError(
             "turn ID exists in multiple Codex sources; qualify it with a session UUID"
         )
     return RodexSessionTurnStatisticsView(
         statistics=(
-            None if statistics_row is None else _session_statistics_from_row(statistics_row)
+            None
+            if statistics_row is None
+            else _session_statistics_from_rows(
+                statistics_row,
+                distribution_rows,
+                named_count_rows,
+                audit_limit_rows,
+            )
         ),
         worker=(None if worker_row is None else _statistics_worker_from_row(worker_row)),
         sources=tuple(_statistics_source_from_row(row) for row in source_rows),
-        turn=(None if not turn_rows else _turn_statistics_from_row(turn_rows[0])),
+        turn=(
+            None
+            if not turn_rows
+            else _turn_statistics_from_rows(turn_rows[0], turn_named_count_rows)
+        ),
     )
 
 
@@ -1964,7 +2657,79 @@ def _verify_statistics_table(connection: sqlite3.Connection) -> None:
             ("statistics_projection_schema_version", "TEXT", 1, 0),
             ("calculated_at_utc", "TEXT", 1, 0),
             ("coverage_state", "TEXT", 1, 0),
-            ("aggregate_statistics_json", "TEXT", 1, 0),
+            ("analyzer_event_count", "INTEGER", 1, 0),
+            ("analyzer_source_count", "INTEGER", 1, 0),
+            ("history_sessions_count", "INTEGER", 1, 0),
+            ("history_records_count", "INTEGER", 1, 0),
+            ("history_malformed_records_count", "INTEGER", 1, 0),
+            ("turns_started_count", "INTEGER", 1, 0),
+            ("turns_completed_count", "INTEGER", 1, 0),
+            ("turns_aborted_count", "INTEGER", 1, 0),
+            ("turns_open_count", "INTEGER", 1, 0),
+            ("input_tokens", "INTEGER", 1, 0),
+            ("cached_input_tokens", "INTEGER", 1, 0),
+            ("cache_write_input_tokens", "INTEGER", 1, 0),
+            ("output_tokens", "INTEGER", 1, 0),
+            ("reasoning_output_tokens", "INTEGER", 1, 0),
+            ("total_tokens", "INTEGER", 1, 0),
+            ("context_observation_count", "INTEGER", 1, 0),
+            ("context_latest_session_median_percent", "REAL", 0, 0),
+            ("context_high_water_percent", "REAL", 1, 0),
+            ("commands_executed_count", "INTEGER", 1, 0),
+            ("model_tool_requests_count", "INTEGER", 1, 0),
+            ("model_tool_outputs_paired_count", "INTEGER", 1, 0),
+            ("file_change_operations_count", "INTEGER", 1, 0),
+            ("file_change_distinct_paths_count", "INTEGER", 1, 0),
+            ("file_change_occurrences_count", "INTEGER", 1, 0),
+            ("web_operations_count", "INTEGER", 1, 0),
+            ("web_queries_count", "INTEGER", 1, 0),
+            ("web_result_records_count", "INTEGER", 1, 0),
+            ("web_distinct_result_or_action_urls_count", "INTEGER", 1, 0),
+            ("collaboration_operations_count", "INTEGER", 1, 0),
+            ("collaboration_agents_started_count", "INTEGER", 1, 0),
+            ("compactions_count", "INTEGER", 1, 0),
+            ("distinct_workspaces_count", "INTEGER", 1, 0),
+            ("typical_turns_count", "INTEGER", 1, 0),
+            ("hands_on_turn_count", "INTEGER", 1, 0),
+            ("hands_on_turn_rate_percent", "REAL", 0, 0),
+            ("turns_with_nonzero_command_count", "INTEGER", 1, 0),
+            ("turns_subsequently_completed_count", "INTEGER", 1, 0),
+            ("completed_after_nonzero_command_percent", "REAL", 0, 0),
+            ("command_zero_exit_rate_percent", "REAL", 0, 0),
+            ("exact_command_repeat_rate_percent", "REAL", 0, 0),
+            ("repeated_command_execution_count", "INTEGER", 1, 0),
+            ("cached_input_share_percent", "REAL", 0, 0),
+            ("reasoning_output_share_percent", "REAL", 0, 0),
+            ("edited_turns_count", "INTEGER", 1, 0),
+            ("verified_after_edit_count", "INTEGER", 1, 0),
+            ("edit_then_verify_percent", "REAL", 0, 0),
+            ("web_turns_count", "INTEGER", 1, 0),
+            ("web_later_command_or_file_work_count", "INTEGER", 1, 0),
+            ("web_follow_through_percent", "REAL", 0, 0),
+            ("file_revisit_rate_percent", "REAL", 0, 0),
+            ("revisited_distinct_path_count", "INTEGER", 1, 0),
+            ("busiest_workspace_turn_share_percent", "REAL", 0, 0),
+            ("workspace_tagged_turn_count", "INTEGER", 1, 0),
+            ("turns_in_busiest_workspace_count", "INTEGER", 1, 0),
+            ("turns_with_local_hour_count", "INTEGER", 1, 0),
+            ("busiest_local_hour", "INTEGER", 0, 0),
+            ("turns_in_busiest_local_hour_count", "INTEGER", 1, 0),
+            ("goal_updates_count", "INTEGER", 1, 0),
+            ("audit_privacy", "TEXT", 1, 0),
+            ("audit_percentile_method", "TEXT", 1, 0),
+            ("audit_token_method", "TEXT", 1, 0),
+            ("audit_token_snapshots_count", "INTEGER", 1, 0),
+            ("audit_repeated_token_snapshots_count", "INTEGER", 1, 0),
+            ("audit_token_epochs_count", "INTEGER", 1, 0),
+            ("audit_duplicate_operations_ignored_count", "INTEGER", 1, 0),
+            ("audit_duplicate_terminals_ignored_count", "INTEGER", 1, 0),
+            (
+                "audit_terminal_events_without_start_ignored_count",
+                "INTEGER",
+                1,
+                0,
+            ),
+            ("audit_new_event_type_warnings_count", "INTEGER", 1, 0),
         ],
     )
     _verify_single_foreign_key(
@@ -1978,9 +2743,92 @@ def _verify_statistics_table(connection: sqlite3.Connection) -> None:
         (
             "CHECK (STATISTICS_REVISION >= 1)",
             "CHECK (COVERAGE_STATE IN ('COMPLETE', 'GAPPED'))",
-            "JSON_VALID(AGGREGATE_STATISTICS_JSON) = 1",
-            "JSON_TYPE(AGGREGATE_STATISTICS_JSON) = 'OBJECT'",
+            "TURNS_STARTED_COUNT = TURNS_COMPLETED_COUNT + TURNS_ABORTED_COUNT "
+            "+ TURNS_OPEN_COUNT",
+            "CHECK (CACHED_INPUT_TOKENS <= INPUT_TOKENS)",
         ),
+    )
+
+
+def _verify_statistics_distributions_table(connection: sqlite3.Connection) -> None:
+    _verify_table_columns(
+        connection,
+        RODEX_SESSIONS_STATISTICS_DISTRIBUTIONS_TABLE,
+        [
+            ("id", "INTEGER", 0, 1),
+            ("rodex_sessions_id", "INTEGER", 1, 0),
+            ("included_statistics_revision", "INTEGER", 1, 0),
+            ("distribution_kind", "TEXT", 1, 0),
+            ("observation_count", "INTEGER", 1, 0),
+            ("total", "INTEGER", 1, 0),
+            ("median", "REAL", 0, 0),
+            ("p75", "INTEGER", 0, 0),
+            ("p90", "INTEGER", 0, 0),
+            ("p95", "INTEGER", 0, 0),
+            ("maximum", "INTEGER", 0, 0),
+        ],
+    )
+    _verify_statistics_revision_foreign_key(
+        connection, RODEX_SESSIONS_STATISTICS_DISTRIBUTIONS_TABLE
+    )
+
+
+def _verify_statistics_named_counts_table(connection: sqlite3.Connection) -> None:
+    _verify_table_columns(
+        connection,
+        RODEX_SESSIONS_STATISTICS_NAMED_COUNTS_TABLE,
+        [
+            ("id", "INTEGER", 0, 1),
+            ("rodex_sessions_id", "INTEGER", 1, 0),
+            ("included_statistics_revision", "INTEGER", 1, 0),
+            ("count_kind", "TEXT", 1, 0),
+            ("count_name", "TEXT", 1, 0),
+            ("occurrence_count", "INTEGER", 1, 0),
+        ],
+    )
+    _verify_statistics_revision_foreign_key(
+        connection, RODEX_SESSIONS_STATISTICS_NAMED_COUNTS_TABLE
+    )
+
+
+def _verify_statistics_audit_limits_table(connection: sqlite3.Connection) -> None:
+    _verify_table_columns(
+        connection,
+        RODEX_SESSIONS_STATISTICS_AUDIT_LIMITS_TABLE,
+        [
+            ("id", "INTEGER", 0, 1),
+            ("rodex_sessions_id", "INTEGER", 1, 0),
+            ("included_statistics_revision", "INTEGER", 1, 0),
+            ("limit_ordinal", "INTEGER", 1, 0),
+            ("limitation", "TEXT", 1, 0),
+        ],
+    )
+    _verify_statistics_revision_foreign_key(
+        connection, RODEX_SESSIONS_STATISTICS_AUDIT_LIMITS_TABLE
+    )
+
+
+def _verify_statistics_revision_foreign_key(
+    connection: sqlite3.Connection, table_name: str
+) -> None:
+    foreign_keys = connection.execute(f"PRAGMA foreign_key_list({table_name})").fetchall()
+    observed = {(row[2], row[3], row[4]) for row in foreign_keys}
+    expected = {
+        (
+            RODEX_SESSIONS_STATISTICS_TABLE,
+            "rodex_sessions_id",
+            "rodex_sessions_id",
+        ),
+        (
+            RODEX_SESSIONS_STATISTICS_TABLE,
+            "included_statistics_revision",
+            "statistics_revision",
+        ),
+    }
+    if observed != expected:
+        raise RodexSessionError(f"{table_name} foreign keys mismatch: {observed!r}")
+    _verify_table_definition_contains(
+        connection, table_name, ("DEFERRABLE INITIALLY DEFERRED",)
     )
 
 
@@ -2054,7 +2902,51 @@ def _verify_statistics_turns_table(connection: sqlite3.Connection) -> None:
             ("started_at_utc", "TEXT", 0, 0),
             ("terminal_at_utc", "TEXT", 0, 0),
             ("outcome", "TEXT", 1, 0),
-            ("turn_statistics_json", "TEXT", 1, 0),
+            ("duration_ms", "INTEGER", 0, 0),
+            ("time_to_first_token_ms", "INTEGER", 0, 0),
+            ("input_tokens", "INTEGER", 1, 0),
+            ("cached_input_tokens", "INTEGER", 1, 0),
+            ("cache_write_input_tokens", "INTEGER", 1, 0),
+            ("output_tokens", "INTEGER", 1, 0),
+            ("reasoning_output_tokens", "INTEGER", 1, 0),
+            ("total_tokens", "INTEGER", 1, 0),
+            ("context_observation_count", "INTEGER", 1, 0),
+            ("context_high_water_percent", "REAL", 1, 0),
+            ("commands_executed_count", "INTEGER", 1, 0),
+            ("command_duration_observation_count", "INTEGER", 1, 0),
+            ("command_duration_total_ms", "INTEGER", 1, 0),
+            ("command_duration_median_ms", "REAL", 0, 0),
+            ("command_duration_p75_ms", "INTEGER", 0, 0),
+            ("command_duration_p90_ms", "INTEGER", 0, 0),
+            ("command_duration_p95_ms", "INTEGER", 0, 0),
+            ("command_duration_maximum_ms", "INTEGER", 0, 0),
+            ("model_tool_requests_count", "INTEGER", 1, 0),
+            ("model_tool_outputs_paired_count", "INTEGER", 1, 0),
+            ("file_change_operations_count", "INTEGER", 1, 0),
+            ("file_change_distinct_paths_count", "INTEGER", 1, 0),
+            ("file_change_occurrences_count", "INTEGER", 1, 0),
+            ("web_operations_count", "INTEGER", 1, 0),
+            ("web_queries_count", "INTEGER", 1, 0),
+            ("web_result_records_count", "INTEGER", 1, 0),
+            ("web_distinct_result_or_action_urls_count", "INTEGER", 1, 0),
+            ("collaboration_operations_count", "INTEGER", 1, 0),
+            ("collaboration_agents_started_count", "INTEGER", 1, 0),
+            ("compactions_count", "INTEGER", 1, 0),
+            ("workspace_digest", "TEXT", 0, 0),
+            ("model", "TEXT", 0, 0),
+            ("local_start_hour", "INTEGER", 0, 0),
+            ("hands_on", "INTEGER", 1, 0),
+            ("completed_after_nonzero_command", "INTEGER", 1, 0),
+            ("cached_input_share_percent", "REAL", 0, 0),
+            ("reasoning_output_share_percent", "REAL", 0, 0),
+            ("edited_then_verified", "INTEGER", 1, 0),
+            (
+                "web_research_followed_by_command_or_file_work",
+                "INTEGER",
+                1,
+                0,
+            ),
+            ("goal_updates_count", "INTEGER", 1, 0),
         ],
     )
     foreign_keys = connection.execute(
@@ -2100,11 +2992,55 @@ def _verify_statistics_turns_table(connection: sqlite3.Connection) -> None:
             "CHECK ( INCLUDED_STATISTICS_REVISION >= 1 )",
             "OUTCOME IN ('OPEN', 'COMPLETED', 'ABORTED')",
             "OUTCOME != 'OPEN' OR TERMINAL_AT_UTC IS NULL",
-            "JSON_VALID(TURN_STATISTICS_JSON) = 1",
-            "JSON_TYPE(TURN_STATISTICS_JSON) = 'OBJECT'",
+            "HANDS_ON IN (0, 1)",
+            "EDITED_THEN_VERIFIED IN (0, 1)",
             "DEFERRABLE INITIALLY DEFERRED",
         ),
     )
+
+
+def _verify_statistics_turn_named_counts_table(
+    connection: sqlite3.Connection,
+) -> None:
+    _verify_table_columns(
+        connection,
+        RODEX_SESSIONS_STATISTICS_TURN_NAMED_COUNTS_TABLE,
+        [
+            ("id", "INTEGER", 0, 1),
+            ("rodex_sessions_id", "INTEGER", 1, 0),
+            ("rodex_sessions_statistics_turns_id", "INTEGER", 1, 0),
+            ("included_statistics_revision", "INTEGER", 1, 0),
+            ("count_kind", "TEXT", 1, 0),
+            ("count_name", "TEXT", 1, 0),
+            ("occurrence_count", "INTEGER", 1, 0),
+        ],
+    )
+    foreign_keys = connection.execute(
+        f"PRAGMA foreign_key_list({RODEX_SESSIONS_STATISTICS_TURN_NAMED_COUNTS_TABLE})"
+    ).fetchall()
+    observed = {(row[2], row[3], row[4]) for row in foreign_keys}
+    expected = {
+        (
+            RODEX_SESSIONS_STATISTICS_TURNS_TABLE,
+            "rodex_sessions_id",
+            "rodex_sessions_id",
+        ),
+        (
+            RODEX_SESSIONS_STATISTICS_TURNS_TABLE,
+            "rodex_sessions_statistics_turns_id",
+            "id",
+        ),
+        (
+            RODEX_SESSIONS_STATISTICS_TURNS_TABLE,
+            "included_statistics_revision",
+            "included_statistics_revision",
+        ),
+    }
+    if observed != expected:
+        raise RodexSessionError(
+            f"{RODEX_SESSIONS_STATISTICS_TURN_NAMED_COUNTS_TABLE} foreign keys "
+            f"mismatch: {observed!r}"
+        )
 
 
 def _verify_statistics_workers_table(connection: sqlite3.Connection) -> None:
@@ -2281,46 +3217,21 @@ def _register_statistics_source(
         )
 
 
-def _statistics_aggregate_json(aggregate_statistics: Mapping[str, object]) -> str:
-    if not isinstance(aggregate_statistics, Mapping):
-        raise TypeError("aggregate_statistics must be a mapping")
-    aggregate = {
-        key: value
-        for key, value in aggregate_statistics.items()
-        if key in STATISTICS_AGGREGATE_FIELDS
-    }
-    try:
-        return json.dumps(
-            aggregate,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-            allow_nan=False,
-        )
-    except (TypeError, ValueError) as error:
-        raise ValueError(
-            "aggregate_statistics must be a JSON-compatible mapping"
-        ) from error
-
-
-def _statistics_turn_json(turn_statistics: Mapping[str, object]) -> str:
-    if not isinstance(turn_statistics, Mapping):
-        raise TypeError("turn_statistics must be a mapping")
-    projection = {
-        key: value
-        for key, value in turn_statistics.items()
-        if key in STATISTICS_TURN_FIELDS
-    }
-    try:
-        return json.dumps(
-            projection,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-            allow_nan=False,
-        )
-    except (TypeError, ValueError) as error:
-        raise ValueError("turn_statistics must be a JSON-compatible mapping") from error
+def _turn_database_scalar_values(
+    projection: TurnStatisticsProjection,
+) -> tuple[object, ...]:
+    command_duration = projection.command_duration
+    return (
+        *(getattr(projection, name) for name in _TURN_PROJECTION_SCALAR_COLUMNS[:11]),
+        command_duration.observation_count,
+        command_duration.total,
+        command_duration.median,
+        command_duration.p75,
+        command_duration.p90,
+        command_duration.p95,
+        command_duration.maximum,
+        *(getattr(projection, name) for name in _TURN_PROJECTION_SCALAR_COLUMNS[11:]),
+    )
 
 
 def _turn_id_sha256_signed_bigints(turn_id: str) -> tuple[int, int, int, int]:
@@ -2331,40 +3242,6 @@ def _turn_id_sha256_signed_bigints(turn_id: str) -> tuple[int, int, int, int]:
         for offset in range(0, 32, 8)
     )
     return pieces[0], pieces[1], pieces[2], pieces[3]
-
-
-def _validate_turn_observation(
-    observation: RodexSessionTurnStatisticsObservation,
-) -> RodexSessionTurnStatisticsObservation:
-    if not isinstance(observation, RodexSessionTurnStatisticsObservation):
-        raise TypeError(
-            "turn_statistics must contain RodexSessionTurnStatisticsObservation values"
-        )
-    codex_uuid = _parse_uuid(observation.codex_session_uuid, "codex_session_uuid")
-    turn_id = _normalise_required_text(observation.codex_turn_id, "codex_turn_id")
-    started_at = (
-        None
-        if observation.started_at_utc is None
-        else _normalise_utc_timestamp_text(observation.started_at_utc)
-    )
-    outcome = _normalise_required_text(observation.outcome, "outcome")
-    if outcome not in STATISTICS_TURN_OUTCOMES:
-        raise ValueError(f"unsupported turn outcome: {outcome}")
-    terminal_at = (
-        None
-        if observation.terminal_at_utc is None
-        else _normalise_utc_timestamp_text(observation.terminal_at_utc)
-    )
-    if outcome == "open" and terminal_at is not None:
-        raise ValueError("open turns cannot have a terminal timestamp")
-    return RodexSessionTurnStatisticsObservation(
-        codex_session_uuid=codex_uuid,
-        codex_turn_id=turn_id,
-        started_at_utc=started_at,
-        terminal_at_utc=terminal_at,
-        outcome=outcome,
-        turn_statistics=json.loads(_statistics_turn_json(observation.turn_statistics)),
-    )
 
 
 def _validate_source_observation(
@@ -2404,13 +3281,59 @@ def _validate_source_observation(
 def _select_statistics(
     connection: sqlite3.Connection, session_id: int
 ) -> tuple[object, ...] | None:
+    scalar_columns = ", ".join(_SESSION_PROJECTION_SCALAR_COLUMNS)
     return connection.execute(
         f"SELECT id, rodex_sessions_id, statistics_revision, "
         "statistics_projection_schema_version, calculated_at_utc, coverage_state, "
-        f"aggregate_statistics_json FROM {RODEX_SESSIONS_STATISTICS_TABLE} "
+        f"{scalar_columns} FROM {RODEX_SESSIONS_STATISTICS_TABLE} "
         "WHERE rodex_sessions_id = ?",
         (session_id,),
     ).fetchone()
+
+
+def _select_statistics_distributions(
+    connection: sqlite3.Connection, session_id: int
+) -> list[tuple[object, ...]]:
+    return connection.execute(
+        f"SELECT distribution_kind, observation_count, total, median, p75, p90, "
+        f"p95, maximum FROM {RODEX_SESSIONS_STATISTICS_DISTRIBUTIONS_TABLE} "
+        "WHERE rodex_sessions_id = ? ORDER BY distribution_kind",
+        (session_id,),
+    ).fetchall()
+
+
+def _select_statistics_named_counts(
+    connection: sqlite3.Connection, session_id: int
+) -> list[tuple[object, ...]]:
+    return connection.execute(
+        f"SELECT count_kind, count_name, occurrence_count "
+        f"FROM {RODEX_SESSIONS_STATISTICS_NAMED_COUNTS_TABLE} "
+        "WHERE rodex_sessions_id = ? ORDER BY count_kind, count_name",
+        (session_id,),
+    ).fetchall()
+
+
+def _select_statistics_audit_limits(
+    connection: sqlite3.Connection, session_id: int
+) -> list[tuple[object, ...]]:
+    return connection.execute(
+        f"SELECT limit_ordinal, limitation "
+        f"FROM {RODEX_SESSIONS_STATISTICS_AUDIT_LIMITS_TABLE} "
+        "WHERE rodex_sessions_id = ? ORDER BY limit_ordinal",
+        (session_id,),
+    ).fetchall()
+
+
+def _select_turn_statistics_named_counts(
+    connection: sqlite3.Connection, turn_row_id: int
+) -> list[tuple[object, ...]]:
+    return connection.execute(
+        f"SELECT count_kind, count_name, occurrence_count "
+        f"FROM {RODEX_SESSIONS_STATISTICS_TURN_NAMED_COUNTS_TABLE} "
+        "WHERE rodex_sessions_statistics_turns_id = ? "
+        "ORDER BY count_kind, count_name",
+        (turn_row_id,),
+    ).fetchall()
 
 
 def _select_statistics_worker(
@@ -2648,10 +3571,38 @@ def _session_names_from_row(row: tuple[object, ...]) -> RodexSessionNames:
     )
 
 
-def _session_statistics_from_row(row: tuple[object, ...]) -> RodexSessionStatistics:
-    aggregate = json.loads(str(row[6]))
-    if not isinstance(aggregate, dict):
-        raise RodexSessionError("stored aggregate statistics must be a JSON object")
+def _session_statistics_from_rows(
+    row: tuple[object, ...],
+    distribution_rows: Sequence[tuple[object, ...]],
+    named_count_rows: Sequence[tuple[object, ...]],
+    audit_limit_rows: Sequence[tuple[object, ...]],
+) -> RodexSessionStatistics:
+    scalar_values = dict(zip(_SESSION_PROJECTION_SCALAR_COLUMNS, row[6:], strict=True))
+    distributions = tuple(
+        StatisticsDistribution(
+            distribution_kind=str(item[0]),
+            observation_count=int(item[1]),
+            total=int(item[2]),
+            median=None if item[3] is None else float(item[3]),
+            p75=None if item[4] is None else int(item[4]),
+            p90=None if item[5] is None else int(item[5]),
+            p95=None if item[6] is None else int(item[6]),
+            maximum=None if item[7] is None else int(item[7]),
+        )
+        for item in distribution_rows
+    )
+    named_counts = _named_counts_from_rows(named_count_rows)
+    expected_ordinals = tuple(range(len(audit_limit_rows)))
+    actual_ordinals = tuple(int(item[0]) for item in audit_limit_rows)
+    if actual_ordinals != expected_ordinals:
+        raise RodexSessionError("stored statistics audit limits are not contiguous")
+    projection = SessionStatisticsProjection(
+        **scalar_values,
+        distributions=distributions,
+        named_counts=named_counts,
+        audit_limits=tuple(str(item[1]) for item in audit_limit_rows),
+        turn_statistics=(),
+    )
     return RodexSessionStatistics(
         id=int(row[0]),
         rodex_sessions_id=int(row[1]),
@@ -2659,7 +3610,7 @@ def _session_statistics_from_row(row: tuple[object, ...]) -> RodexSessionStatist
         statistics_projection_schema_version=str(row[3]),
         calculated_at_utc=str(row[4]),
         coverage_state=str(row[5]),
-        aggregate_statistics=aggregate,
+        projection=projection,
     )
 
 
@@ -2680,21 +3631,46 @@ def _statistics_source_from_row(
     )
 
 
-def _turn_statistics_from_row(row: tuple[object, ...]) -> RodexSessionTurnStatistics:
-    projection = json.loads(str(row[10]))
-    if not isinstance(projection, dict):
-        raise RodexSessionError("stored turn statistics must be a JSON object")
+def _turn_statistics_from_rows(
+    row: tuple[object, ...],
+    named_count_rows: Sequence[tuple[object, ...]],
+) -> RodexSessionTurnStatistics:
+    values = dict(zip(_TURN_DATABASE_SCALAR_COLUMNS, row[10:], strict=True))
+    for key in (
+        "hands_on",
+        "completed_after_nonzero_command",
+        "edited_then_verified",
+        "web_research_followed_by_command_or_file_work",
+    ):
+        values[key] = bool(values[key])
+    projection = TurnStatisticsProjection(
+        codex_session_uuid=join_signed_bigints_into_a_codex_uuid(int(row[3]), int(row[4])),
+        codex_turn_id=str(row[5]),
+        started_at_utc=None if row[7] is None else str(row[7]),
+        terminal_at_utc=None if row[8] is None else str(row[8]),
+        outcome=str(row[9]),
+        **values,
+        named_counts=_named_counts_from_rows(named_count_rows),
+    )
     return RodexSessionTurnStatistics(
         id=int(row[0]),
         rodex_sessions_id=int(row[1]),
         rodex_sessions_statistics_sources_id=int(row[2]),
-        codex_session_uuid=join_signed_bigints_into_a_codex_uuid(int(row[3]), int(row[4])),
-        codex_turn_id=str(row[5]),
         included_statistics_revision=int(row[6]),
-        started_at_utc=None if row[7] is None else str(row[7]),
-        terminal_at_utc=None if row[8] is None else str(row[8]),
-        outcome=str(row[9]),
-        turn_statistics=projection,
+        projection=projection,
+    )
+
+
+def _named_counts_from_rows(
+    rows: Sequence[tuple[object, ...]],
+) -> tuple[StatisticsNamedCount, ...]:
+    return tuple(
+        StatisticsNamedCount(
+            count_kind=str(row[0]),
+            count_name=str(row[1]),
+            occurrence_count=int(row[2]),
+        )
+        for row in rows
     )
 
 

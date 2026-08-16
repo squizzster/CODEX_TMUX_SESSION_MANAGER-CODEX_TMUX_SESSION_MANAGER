@@ -72,6 +72,12 @@ the complete `(Codex source, turn_id)` projection set, and exact source descript
 Codex-UUID and prior-revision fences reject stale workers. Health failures commit
 separately and never overwrite the last good snapshot.
 
+Fixed statistics are typed scalar columns. The genuinely repeating values are normalized
+as seven distribution rows, bounded category/name/count rows, and ordered audit-limit
+rows at session or turn scope. No JSON statistics document is persisted: `_stats --json`
+reconstructs the analyzer shape deterministically from indexed SQL rows. This keeps every
+base count directly available to `SUM`, `GROUP BY`, filtering, and joins.
+
 Analytics is fail-open: import, parsing, calculation, process, or database failure
 cannot change the Codex TUI's behavior or exit status. `_stats NAME [--json]`, `_stats
 NAME --turn TURN_ID [--source CODEX_UUID] [--json]`, and `_stats-status NAME` enforce

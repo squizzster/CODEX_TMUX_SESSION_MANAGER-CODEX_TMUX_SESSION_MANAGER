@@ -36,6 +36,13 @@ _POLL_INTERVAL_SECONDS: Final = 0.05
 _PROXY_SOCKET_OPTION: Final = "@rodex_protocol_proxy_socket_path"
 _EVENT_SOCKET_OPTION: Final = "@rodex_protocol_event_socket_path"
 _CODEX_UUID_OPTION: Final = "@rodex_codex_session_uuid"
+_SHARING_STATUS_FORMAT: Final = (
+    "#{?session_many_attached,"
+    "#[fg=yellow]#[bold] [Shared with #{e|-:#{session_attached},1} "
+    "#{?#{==:#{session_attached},2},other,others}] #[default],"
+    "#[fg=green]#[bold] [Private session] #[default]}"
+    " | %H:%M %d-%b-%y"
+)
 
 Runner = Callable[..., subprocess.CompletedProcess[str]]
 Connector = Callable[..., Any]
@@ -274,7 +281,7 @@ class RodexRuntimeLauncher:
         return replace(runtime, tmux_session_name=session_name)
 
     def configure_identity_status(self, runtime: LiveTmuxSession) -> None:
-        """Show the Rodex cool name prominently in the tmux status line."""
+        """Show Rodex identity and live attachment privacy in the status line."""
         target = _exact_tmux_pane_target(runtime.tmux_session_name)
         self._tmux(runtime, "set-option", "-t", target, "status", "on")
         self._tmux(
@@ -293,6 +300,22 @@ class RodexRuntimeLauncher:
             target,
             "status-left-length",
             "68",
+        )
+        self._tmux(
+            runtime,
+            "set-option",
+            "-t",
+            target,
+            "status-right",
+            _SHARING_STATUS_FORMAT,
+        )
+        self._tmux(
+            runtime,
+            "set-option",
+            "-t",
+            target,
+            "status-right-length",
+            "64",
         )
 
     def attach(self, runtime: LiveTmuxSession) -> None:

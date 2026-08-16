@@ -78,7 +78,8 @@ Inside a Rodex-hosted TUI, `/rodex`, `/rodex help`, `/rodex hi`, `/rodex identit
 and `/rodex detach` are handled locally. Other input—including Codex's own slash
 commands—passes through unchanged. Because Codex CLI does not expose third-party
 top-level slash-command registration, Rodex shows its completion as a transient tmux
-ribbon: type `/ro`, `/rod`, or `/rode`, then press Tab to complete `/rodex`.
+status-bar ribbon that never takes focus from the composer: type `/ro`, `/rod`, or
+`/rode`, then press Tab to complete `/rodex`.
 
 ## Local data
 

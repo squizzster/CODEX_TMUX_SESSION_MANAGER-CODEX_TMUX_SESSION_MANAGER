@@ -10,11 +10,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
+from .tmux_status import COMPLETION_TOKEN_OPTION, RODEX_STATUS_LEFT_FORMAT
+
 _RODEX_COMMAND: Final = "/rodex"
 _PROMPT_PREFIX: Final = "\N{SINGLE RIGHT-POINTING ANGLE QUOTATION MARK} "
 _MESSAGE_DURATION_MILLISECONDS: Final = "5000"
 _COMPLETABLE_PREFIXES: Final = frozenset({"/ro", "/rod", "/rode"})
-COMPLETION_TOKEN_OPTION: Final = "@rodex_completion_token"
 
 Runner = Callable[..., subprocess.CompletedProcess[str]]
 
@@ -203,6 +204,7 @@ def _dispatch_rodex_input_command(
     tmux: Callable[..., subprocess.CompletedProcess[str]],
 ) -> int:
     tmux("set-option", "-u", "-t", pane_id, COMPLETION_TOKEN_OPTION)
+    tmux("set-option", "-t", pane_id, "status-left", RODEX_STATUS_LEFT_FORMAT)
     arguments = command.arguments
     if command.parse_error:
         message = "Rodex: command contains an unmatched quote"

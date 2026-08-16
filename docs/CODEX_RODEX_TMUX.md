@@ -31,7 +31,8 @@ Codex handles slash commands before app-server traffic, so `/rodex` uses a separ
 tmux input proxy. Its Enter and Tab bindings examine only the active prompt line,
 handle or complete the exact Rodex namespace locally, and pass every other key directly
 to Codex. An asynchronous pane-output observer adds a transient Rodex completion ribbon
-without altering Codex's terminal rendering.
+through the passive tmux status format, without changing composer focus or altering
+Codex's terminal rendering.
 
 ## Named reattachment
 

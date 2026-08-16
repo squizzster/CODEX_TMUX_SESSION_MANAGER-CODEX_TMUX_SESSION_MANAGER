@@ -10,6 +10,7 @@ from rodex.tmux_completion_observer import (
     completion_message,
     output_may_affect_completion,
 )
+from rodex.tmux_status import RODEX_STATUS_LEFT_FORMAT
 
 PROMPT = "\N{SINGLE RIGHT-POINTING ANGLE QUOTATION MARK} "
 
@@ -51,7 +52,7 @@ class RecordingRunner:
                 stdout=f"{self.completion_token}\n" if self.completion_token else "",
                 stderr="",
             )
-        if "set-option" in command:
+        if "set-option" in command and "@rodex_completion_token" in command:
             if "-u" in command:
                 self.completion_token = ""
             else:
@@ -97,10 +98,12 @@ def test_observer_displays_completion_for_the_target_pane(tmp_path: Path) -> Non
     assert observer.completion_visible
     assert runner.commands[1][-2:] == ["-S", "17"]
     assert runner.commands[2][-2] == "@rodex_completion_token"
-    display = runner.commands[3]
-    assert display[-1] == "Rodex completion: /rodex  [Tab to complete]"
-    assert display[display.index("-d") + 1] == "5000"
-    assert "-c" not in display
+    status_update = runner.commands[3]
+    assert status_update[-3:-1] == ["%4", "status-left"]
+    assert "Rodex completion: /rodex  [Tab to complete]" in status_update[-1]
+    assert not any(
+        "display-message" in command and "-p" not in command for command in runner.commands
+    )
 
 
 def test_observer_clears_ribbon_when_prompt_leaves_prefix(tmp_path: Path) -> None:
@@ -118,10 +121,11 @@ def test_observer_clears_ribbon_when_prompt_leaves_prefix(tmp_path: Path) -> Non
     observer.inspect_redraw()
 
     assert not observer.completion_visible
-    clears = [command for command in runner.commands if "display-message" in command][1:]
-    assert len(clears) == 1
-    assert all(command[-1] == "" for command in clears)
-    assert all(command[command.index("-d") + 1] == "1" for command in clears)
+    assert runner.completion_token == ""
+    assert runner.commands[-1][-3:] == ["%4", "status-left", RODEX_STATUS_LEFT_FORMAT]
+    assert not any(
+        "display-message" in command and "-p" not in command for command in runner.commands
+    )
 
 
 def test_stale_observer_does_not_clear_a_newer_message_owner(tmp_path: Path) -> None:
@@ -142,9 +146,7 @@ def test_stale_observer_does_not_clear_a_newer_message_owner(tmp_path: Path) -> 
 
     assert not observer.completion_visible
     assert runner.completion_token == "newer-message-owner"
-    assert not any(
-        "display-message" in command and command[-1] == "" for command in runner.commands
-    )
+    assert not any("status-left" in command for command in runner.commands)
 
 
 def test_observer_yields_to_a_future_native_prefix_match(tmp_path: Path) -> None:

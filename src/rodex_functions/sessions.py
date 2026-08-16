@@ -241,7 +241,7 @@ class RodexUserDefinedCoolNameAssignment:
 
 
 def default_rodex_database_path() -> Path:
-    """Resolve the shared runtime database path for compatibility."""
+    """Resolve the current user's durable database path for compatibility."""
     return _default_rodex_database_path()
 
 

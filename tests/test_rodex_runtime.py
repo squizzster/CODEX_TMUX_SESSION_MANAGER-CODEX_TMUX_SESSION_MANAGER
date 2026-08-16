@@ -207,7 +207,9 @@ def test_rename_and_status_configuration_use_the_real_tmux_session_name(
     tmp_path: Path,
 ) -> None:
     runner = RuntimeRunner(tmp_path)
-    launcher = RodexRuntimeLauncher("codex", "tmux", runner=runner)
+    launcher = RodexRuntimeLauncher(
+        "codex", "tmux", runner=runner, python_executable="/venv/bin/python"
+    )
     original = LiveTmuxSession(tmp_path / "tmux.sock", "rodex-token")
 
     renamed = launcher.rename(original, "automatic-beluga")
@@ -220,7 +222,17 @@ def test_rename_and_status_configuration_use_the_real_tmux_session_name(
         "=rodex-token",
         "automatic-beluga",
     ]
-    assert [command[3:] for command in runner.calls[1:]] == [
+    status_commands = [command[3:] for command in runner.calls[1:]]
+    assert status_commands[:8] == [
+        [
+            "set-option",
+            "-u",
+            "-t",
+            "=automatic-beluga:",
+            "@rodex_status_animation_token",
+        ],
+        ["set-option", "-u", "-t", "=automatic-beluga:", "status-format"],
+        ["set-option", "-u", "-t", "=automatic-beluga:", "status-style"],
         ["set-option", "-t", "=automatic-beluga:", "status", "on"],
         [
             "set-option",
@@ -244,6 +256,20 @@ def test_rename_and_status_configuration_use_the_real_tmux_session_name(
         ],
         ["set-option", "-t", "=automatic-beluga:", "status-right-length", "64"],
     ]
+    assert len(status_commands) == 10
+    for event, hook_command in zip(
+        ("attached", "detached"), status_commands[8:], strict=True
+    ):
+        assert hook_command[:4] == [
+            "set-hook",
+            "-t",
+            "=automatic-beluga:",
+            f"client-{event}",
+        ]
+        assert hook_command[4].startswith("run-shell -b ")
+        assert "/venv/bin/python -m rodex.status_animation" in hook_command[4]
+        assert f"--event {event}" in hook_command[4]
+        assert hook_command[4].endswith(">/dev/null 2>&1'")
 
 
 def test_real_tmux_survives_rename_and_status_configuration(tmp_path: Path) -> None:
@@ -288,6 +314,42 @@ def test_real_tmux_survives_rename_and_status_configuration(tmp_path: Path) -> N
                 return
             time.sleep(0.01)
         pytest.fail(f"tmux did not report {expected} attached clients")
+
+    def session_option(option_name: str, *, inherited: bool = False) -> str:
+        command = [
+            tmux_binary,
+            "-S",
+            str(socket_path),
+            "show-options",
+        ]
+        if inherited:
+            command.append("-A")
+        command.extend(("-v", "-t", "=automatic-beluga:", option_name))
+        return subprocess.run(
+            command,
+            check=True,
+            text=True,
+            capture_output=True,
+        ).stdout.strip()
+
+    def wait_for_session_option(option_name: str, *, populated: bool) -> str:
+        deadline = time.monotonic() + 7
+        while time.monotonic() < deadline:
+            value = session_option(option_name)
+            if bool(value) is populated:
+                return value
+            time.sleep(0.01)
+        expected = "populated" if populated else "unset"
+        pytest.fail(f"tmux option {option_name} did not become {expected}")
+
+    def wait_for_session_option_text(option_name: str, expected_text: str) -> str:
+        deadline = time.monotonic() + 7
+        while time.monotonic() < deadline:
+            value = session_option(option_name)
+            if expected_text in value:
+                return value
+            time.sleep(0.01)
+        pytest.fail(f"tmux option {option_name} did not contain {expected_text!r}")
 
     subprocess.run(
         [
@@ -377,6 +439,29 @@ def test_real_tmux_survives_rename_and_status_configuration(tmp_path: Path) -> N
 
         rendered_status = tmux_format("#{E:status-right}")
         assert "%H" not in rendered_status
+        animated_status = wait_for_session_option_text(
+            "status-format[0]", "SHARED WITH 2 OTHERS"
+        )
+        assert "#[align=centre]" in animated_status
+        wait_for_session_option("status-format[0]", populated=False)
+        assert session_option("status-style") == ""
+        assert "#{status-left-style}" in session_option("status-format[0]", inherited=True)
+
+        departed_while_shared = control_clients.pop()
+        departed_while_shared.communicate("detach-client\n", timeout=2)
+        wait_for_attached_clients(2)
+        final_departure = control_clients.pop()
+        final_departure.communicate("detach-client\n", timeout=2)
+        wait_for_attached_clients(1)
+
+        private_animation = wait_for_session_option_text(
+            "status-format[0]", "PRIVATE SESSION"
+        )
+        assert "#[align=centre]" in private_animation
+        wait_for_session_option("status-format[0]", populated=False)
+        assert session_option("status-style") == ""
+        assert "Rodex: automatic-beluga" in tmux_format("#{T:status-left}")
+        assert "[Private session]" in tmux_format("#{E:status-right}")
     finally:
         subprocess.run(
             [tmux_binary, "-S", str(socket_path), "kill-server"],

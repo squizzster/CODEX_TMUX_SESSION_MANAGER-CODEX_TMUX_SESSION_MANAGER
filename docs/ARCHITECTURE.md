@@ -33,6 +33,7 @@ content.
 |---|---|
 | `rodex.cli` | Adapt commands, choose create/attach/resume, and present results. |
 | `rodex.runtime` | Own tmux, app-server discovery, attachment, and supervision. |
+| `rodex.status_animation` | Render cancellable, one-shot sharing transitions. |
 | `rodex.session_host` | Keep one app-server, proxy, foreground TUI, and its runtime paths together. |
 | `rodex.control` | Verify and control one exact loaded Codex thread. |
 | `rodex.protocol_proxy` | Forward traffic and fan out bounded live event streams. |
@@ -81,6 +82,13 @@ a permanent alternative lookup. Detailed future schema rules live in
 `running` and its `sessions` aliases follow the same ownership and live-endpoint rules.
 Alias changes use the same naming pipeline and compensate a tmux rename if the database
 transition fails.
+
+tmux session hooks launch sharing animations with background `run-shell`. The animator
+uses scheduled callbacks in its own short-lived process, so attaching, detaching, tmux,
+and the Codex TUI do not wait for its five-second sequence. Each transition replaces a
+tmux ownership token; an older animator stops without restoring over a newer one. The
+owner finally removes the complete temporary `status-format` and style overrides, then
+redraws every attached client against the ordinary Rodex status.
 
 ## Live control
 

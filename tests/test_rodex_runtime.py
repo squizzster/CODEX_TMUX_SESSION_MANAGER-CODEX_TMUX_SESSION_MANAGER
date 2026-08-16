@@ -143,7 +143,7 @@ def test_start_directly_hosts_codex_in_tmux_and_returns_its_uuid(
         "set-option",
         "-g",
         "mouse",
-        "on",
+        "off",
         ";",
     ]
     assert new_session[13:17] == [
@@ -327,7 +327,7 @@ def test_rename_and_status_configuration_use_the_real_tmux_session_name(
         "-t",
         "=automatic-beluga:",
         "mouse",
-        "on",
+        "off",
     ]
     assert status_commands[1:10] == [
         [
@@ -409,7 +409,7 @@ def test_tmux_slash_switch_reinstalls_retained_bindings(
         "-t",
         "=automatic-beluga:",
         "mouse",
-        "on",
+        "off",
     ]
     completion_pipe = status_commands[12]
     assert completion_pipe[:4] == [
@@ -425,7 +425,40 @@ def test_tmux_slash_switch_reinstalls_retained_bindings(
         assert f"--key {key}" in input_binding[3]
 
 
-def test_real_tmux_session_preserves_scrollback_and_enables_wheel_copy_mode(
+def test_tmux_mouse_switch_enables_new_and_reconfigured_sessions(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(runtime_module, "RODEX_TMUX_MOUSE_ENABLED", True)
+    runner = RuntimeRunner(tmp_path)
+    launcher = RodexRuntimeLauncher("codex", "tmux", runner=runner)
+    runtime = LiveTmuxSession(tmp_path / "tmux.sock", "automatic-beluga")
+
+    launcher._start_tmux_session(runtime, tmp_path, "sleep 30")
+    launcher.configure_identity_status(runtime)
+
+    assert runner.calls[0][3:13] == [
+        "set-option",
+        "-g",
+        "history-limit",
+        str(RODEX_TMUX_HISTORY_LIMIT_LINES),
+        ";",
+        "set-option",
+        "-g",
+        "mouse",
+        "on",
+        ";",
+    ]
+    assert runner.calls[1][3:] == [
+        "set-option",
+        "-t",
+        "=automatic-beluga:",
+        "mouse",
+        "on",
+    ]
+
+
+def test_real_tmux_session_preserves_scrollback_with_mouse_disabled(
     tmp_path: Path,
 ) -> None:
     tmux_binary = shutil.which("tmux")
@@ -472,7 +505,7 @@ def test_real_tmux_session_preserves_scrollback_and_enables_wheel_copy_mode(
             time.sleep(0.01)
 
         assert history_size >= 278
-        assert pane_state[1:] == [str(RODEX_TMUX_HISTORY_LIMIT_LINES), "1"]
+        assert pane_state[1:] == [str(RODEX_TMUX_HISTORY_LIMIT_LINES), "0"]
         captured = subprocess.run(
             [
                 tmux_binary,
@@ -491,21 +524,6 @@ def test_real_tmux_session_preserves_scrollback_and_enables_wheel_copy_mode(
         ).stdout.splitlines()
         assert captured[0] == "1"
         assert "300" in captured
-        wheel_binding = subprocess.run(
-            [
-                tmux_binary,
-                "-S",
-                str(socket_path),
-                "list-keys",
-                "-T",
-                "root",
-                "WheelUpPane",
-            ],
-            check=True,
-            text=True,
-            capture_output=True,
-        ).stdout
-        assert "copy-mode -e" in wheel_binding
     finally:
         launcher.stop(runtime, check=False)
 
@@ -610,7 +628,7 @@ def test_real_tmux_survives_rename_and_status_configuration(tmp_path: Path) -> N
         launcher.configure_identity_status(renamed)
 
         assert launcher.session_exists(renamed)
-        assert session_option("mouse") == "on"
+        assert session_option("mouse") == "off"
         assert tmux_format("#{pane_pipe}") == "0"
         tab_binding = subprocess.run(
             [

@@ -184,6 +184,31 @@ def _status_animation_hook_command(
     return f"run-shell -b {shlex.quote(quiet_background_command)}"
 
 
+def _tmux_input_proxy_binding_command(
+    python_executable: str,
+    tmux_binary: str,
+    runtime: LiveTmuxSession,
+) -> str:
+    proxy_command = shlex.join(
+        (
+            python_executable,
+            "-m",
+            "rodex.tmux_input_proxy",
+            "--tmux-binary",
+            tmux_binary,
+            "--tmux-server-socket",
+            str(runtime.tmux_server_socket_path),
+            "--pane-id",
+            "#{pane_id}",
+            "--session-name",
+            "#{session_name}",
+            "--client-name",
+            "#{client_name}",
+        )
+    )
+    return f"run-shell {shlex.quote(proxy_command)}"
+
+
 class RodexRuntimeLauncher:
     """Start one private app-server/TUI pair and attach the user's terminal."""
 
@@ -385,6 +410,17 @@ class RodexRuntimeLauncher:
                     event,
                 ),
             )
+        self._tmux(
+            runtime,
+            "bind-key",
+            "-n",
+            "Enter",
+            _tmux_input_proxy_binding_command(
+                self._python_executable,
+                self._tmux_binary,
+                runtime,
+            ),
+        )
 
     def attach(self, runtime: LiveTmuxSession) -> None:
         """Attach the calling terminal to the live Rodex tmux session."""

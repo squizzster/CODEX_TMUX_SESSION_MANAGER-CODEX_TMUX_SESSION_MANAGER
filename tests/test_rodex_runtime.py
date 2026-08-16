@@ -330,9 +330,9 @@ def test_rename_and_status_configuration_use_the_real_tmux_session_name(
         ],
         ["set-option", "-t", "=automatic-beluga:", "status-right-length", "64"],
     ]
-    assert len(status_commands) == 10
+    assert len(status_commands) == 11
     for event, hook_command in zip(
-        ("attached", "detached"), status_commands[8:], strict=True
+        ("attached", "detached"), status_commands[8:10], strict=True
     ):
         assert hook_command[:4] == [
             "set-hook",
@@ -344,6 +344,12 @@ def test_rename_and_status_configuration_use_the_real_tmux_session_name(
         assert "/venv/bin/python -m rodex.status_animation" in hook_command[4]
         assert f"--event {event}" in hook_command[4]
         assert hook_command[4].endswith(">/dev/null 2>&1'")
+    input_binding = status_commands[10]
+    assert input_binding[:3] == ["bind-key", "-n", "Enter"]
+    assert input_binding[3].startswith("run-shell ")
+    assert "/venv/bin/python -m rodex.tmux_input_proxy" in input_binding[3]
+    assert "--pane-id" in input_binding[3]
+    assert "--client-name" in input_binding[3]
 
 
 def test_real_tmux_survives_rename_and_status_configuration(tmp_path: Path) -> None:

@@ -27,6 +27,10 @@ starts, and fans structured TUI events to bounded live subscribers. tmux user op
 advertise the live proxy/event sockets and observed Codex UUID; none are new SQLite
 identities. Tool counts cover the current runtime and reset when it is resumed.
 
+Codex handles slash commands before app-server traffic, so `/rodex` uses a separate
+tmux input proxy. Its Enter binding examines only the active prompt line, handles the
+exact Rodex namespace locally, and passes every other Enter directly to Codex.
+
 ## Named reattachment
 
 - `./rodex <cool-name>` resolves the name through its integer identity.

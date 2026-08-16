@@ -17,6 +17,7 @@ name such as `automatic-beluga`.
 - Supports an optional user-defined display name without losing the generated name.
 - Shows the Rodex name, tool-call count, and live private/shared state in the tmux bar.
 - Animates shared arrival and final departure for five seconds without blocking the TUI.
+- Intercepts `/rodex` commands before the Codex TUI rejects them.
 - Sends work to, waits for, or follows a running session from another shell.
 
 Rodex does not replace the Codex CLI. It wraps its normal interface with local session
@@ -59,6 +60,7 @@ To expose this checkout as the system-wide `rodex` command, follow the
 | `./rodex send edgar-work "Run the tests"` | Start or steer work in a running session. |
 | `./rodex wait edgar-work` | Wait until the running session is idle. |
 | `./rodex tail edgar-work` | Follow structured live protocol events as JSON lines. |
+| `/rodex hi` inside the TUI | Run a Rodex-local command without sending it to Codex. |
 
 Create also accepts `--c` or `-create`; `-c` remains Codex's `--config` option. Detach
 accepts `-d`, `--d`, `-detach`, or `--detach`. The bare control commands accept
@@ -71,6 +73,10 @@ case-insensitively; this vocabulary may grow with supported Codex versions.
 A single argument keeps the natural Codex-style flow: if it matches an existing Rodex
 name, Rodex opens that session; otherwise the argument is passed to the new Codex TUI.
 Use `--create NAME` when the argument must become the session's display name.
+
+Inside a Rodex-hosted TUI, `/rodex`, `/rodex help`, `/rodex hi`, `/rodex identity`,
+and `/rodex detach` are handled locally. Other input—including Codex's own slash
+commands—passes through unchanged.
 
 ## Local data
 

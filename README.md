@@ -1,9 +1,8 @@
 # Rodex - whenever you type `codex` try instead `rodex`
 
-Rodex passes ordinary invocations straight to Codex and gives its own commands an
-underscore namespace. Create a durable tmux-hosted session with `./rodex _create`,
-detach when needed, and return later using a generated name such as
-`automatic-beluga`.
+Rodex creates a durable tmux-hosted Codex session when invoked with no arguments and
+gives its own commands an underscore namespace. Start normally with `./rodex`, detach
+when needed, and return later using a generated name such as `automatic-beluga`.
 
 > **Development status: PROTO.** Rodex is a Linux/POSIX prototype under active
 > development. Breaking changes and disposable database resets are expected.
@@ -21,16 +20,19 @@ detach when needed, and return later using a generated name such as
 - Keeps the in-TUI `/rodex` command implementation available but disabled for now.
 - Sends work to, waits for, or follows a running session from another shell.
 
-Rodex does not replace or reinterpret the Codex CLI. Unless an exact underscore Rodex
-command or an existing Rodex session name is supplied, it replaces itself with Codex
-and preserves the original arguments, terminal streams, signals, and exit status.
+Rodex does not replace or reinterpret nonempty Codex CLI invocations. With no
+arguments it creates and attaches to a managed session. Exact underscore Rodex
+commands stay local, an existing Rodex name opens that session, and every other
+nonempty invocation replaces itself with Codex while preserving arguments, terminal
+streams, signals, and exit status.
 
 ## Requirements
 
 - Linux or a compatible POSIX system; Windows is not supported.
 - Python 3.12 or newer.
 - [`uv`](https://docs.astral.sh/uv/).
-- `tmux` available on `PATH` for underscore commands and stored Rodex sessions.
+- `tmux` available on `PATH` for managed launches, underscore commands, and stored
+  Rodex sessions.
 - An installed and authenticated `codex` CLI.
 
 ## Quick start
@@ -39,7 +41,7 @@ and preserves the original arguments, terminal streams, signals, and exit status
 git clone https://github.com/squizzster/CODEX_TMUX_SESSION_MANAGER-CODEX_TMUX_SESSION_MANAGER.git rodex
 cd rodex
 uv sync
-./rodex _create
+./rodex
 ```
 
 At the `›` prompt, use Codex normally. Detach without ending the session with
@@ -53,7 +55,7 @@ To expose this checkout as the system-wide `rodex` command, follow the
 | Command | Behaviour |
 |---|---|
 | `./rodex _help` | Show Rodex's own command help without starting Codex or tmux. |
-| `./rodex` | Pass through to the ordinary Codex TUI. |
+| `./rodex` | Create and attach to a new Rodex/Codex tmux session. |
 | `./rodex _create` | Create and attach to a new Rodex/Codex session. |
 | `./rodex _create project_1234` | Create a session with a preferred display name. |
 | `./rodex _detach` | Create without attaching and print expanded identity JSON. |
@@ -72,10 +74,11 @@ ASCII letters, digits, underscores, or hyphens and begin with a letter or digit.
 existing reserved-name vocabulary remains case-insensitive and includes Codex
 top-level commands and aliases.
 
-A single bare argument is the sole exception to the underscore command namespace: if
-it matches an existing Rodex name, Rodex opens that session. Otherwise it—and every
-other non-Rodex invocation—is passed unchanged to Codex. An existing Rodex name wins
-even if a later Codex release introduces a command with the same spelling.
+No arguments is the default managed-create route and is equivalent to `_create`. A
+single argument is the other exception to ordinary Codex passthrough: if it matches an
+existing Rodex name, Rodex opens that session. Otherwise it—and every other non-Rodex
+invocation—is passed unchanged to Codex. An existing Rodex name wins even if a later
+Codex release introduces a command with the same spelling.
 
 The in-TUI `/rodex` command and its completion ribbon are temporarily disabled through
 `RODEX_TMUX_SLASH_ENABLED` in `rodex.runtime`. The implementation remains in the

@@ -12,7 +12,8 @@ never presented or stored as another domain's identity.
 
 ## Basic launch pipeline
 
-1. `./rodex _create` validates the `codex` and `tmux` executables.
+1. Bare `./rodex` (or explicit `./rodex _create`) validates the `codex` and `tmux`
+   executables.
 2. tmux starts a small supervisor directly; Rodex never types with `send-keys`.
 3. The supervisor starts one private Codex app-server and a transparent Rodex
    WebSocket proxy on short Unix sockets, then connects the normal TUI through it.
@@ -23,10 +24,11 @@ never presented or stored as another domain's identity.
 7. Rodex attaches to the ordinary Codex prompt; forwarded arguments and slash commands
    work.
 
-Every invocation outside the exact underscore Rodex command namespace is handed to
-Codex unchanged, with one exception: a single bare existing Rodex name follows the
-reattachment pipeline below. Direct passthrough uses process replacement so Codex
-retains native stdin, stdout, stderr, signals, and exit status.
+The empty invocation is the default managed-create command. Every nonempty invocation
+outside the exact underscore Rodex command namespace is handed to Codex unchanged,
+with one exception: a single existing Rodex name follows the reattachment pipeline
+below. Direct passthrough uses process replacement so Codex retains native stdin,
+stdout, stderr, signals, and exit status.
 
 `./rodex _help` prints the Rodex command namespace locally. It does not resolve Codex,
 tmux, or the session database.
@@ -50,6 +52,8 @@ Enter/Tab bindings and pane pipe, so all input currently passes directly to Code
   Codex runtime and atomically relinks its new UUID to the existing Rodex identity.
   Other resume failures and UUID mismatches remain hard failures.
 - Both routes preserve the Rodex identity and update `last_accessed_at_utc`.
+- `_detach <cool-name>` follows the same attach, resume, or recovery decision without
+  attaching the caller and prints the active identities as JSON.
 - `./rodex _running` lists the current POSIX user's live runtimes.
 - `./rodex _alias SESSION NAME` sets its portable preferred name; `--force` replaces
   it.

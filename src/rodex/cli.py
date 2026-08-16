@@ -74,12 +74,13 @@ _RODEX_COMMANDS: Final = frozenset(
 )
 
 _HELP_TEXT: Final = """\
-usage: rodex COMMAND [ARGUMENTS]
+usage: rodex [COMMAND [ARGUMENTS]]
 
 Rodex commands:
+  (no command)                       Create and attach to a managed session.
   _help                              Show this help and exit.
   _create [NAME] [-- CODEX_ARGS...]  Create and attach to a managed session.
-  _detach [CODEX_ARGS...]            Create a managed session without attaching.
+  _detach [SESSION|CODEX_ARGS...]    Create, resume, or recover without attaching.
   _running                           List running Rodex sessions.
   _alias [--force] SESSION NAME      Assign a preferred session name.
   _send SESSION PROMPT               Send work to a running session.
@@ -114,6 +115,8 @@ def run(
             raise RodexLaunchError("usage: rodex _help")
         print(_HELP_TEXT, end="")
         return 0
+    if not arguments:
+        arguments = [_CREATE_COMMAND]
 
     configured_codex = os.environ.get("RODEX_CODEX_BINARY", "codex")
     resolved_database = (

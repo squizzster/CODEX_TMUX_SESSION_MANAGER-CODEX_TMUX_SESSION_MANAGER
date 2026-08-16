@@ -5,6 +5,10 @@ import shutil
 import subprocess
 from pathlib import Path
 
+import pytest
+
+LAUNCHERS = ["rodex", "usr/local/bin/rodex"]
+
 
 def test_usr_local_bin_shim_runs_rodex_from_the_project_after_copy(
     tmp_path: Path,
@@ -31,7 +35,7 @@ def test_usr_local_bin_shim_runs_rodex_from_the_project_after_copy(
     environment["RODEX_TEST_CAPTURE"] = str(capture_path)
 
     subprocess.run(
-        [installed_shim, "running", "--json"],
+        [installed_shim, "_running"],
         check=True,
         env=environment,
     )
@@ -41,9 +45,96 @@ def test_usr_local_bin_shim_runs_rodex_from_the_project_after_copy(
         "--project",
         str(project_root.resolve()),
         "rodex",
-        "running",
-        "--json",
+        "_running",
     ]
+
+
+@pytest.mark.parametrize("launcher_relative", LAUNCHERS)
+def test_launchers_route_bare_rodex_to_managed_tmux_before_database_access(
+    tmp_path: Path,
+    launcher_relative: str,
+) -> None:
+    project_root = Path(__file__).parents[1]
+    launcher = project_root / launcher_relative
+    database = tmp_path / "rodex.sqlite3"
+    environment = os.environ.copy()
+    environment["RODEX_PROJECT_DIR"] = str(project_root)
+    environment["RODEX_DATABASE_PATH"] = str(database)
+    environment["RODEX_CODEX_BINARY"] = "/bin/true"
+    environment["RODEX_TMUX_BINARY"] = "rodex-test-missing-tmux"
+
+    result = subprocess.run(
+        [launcher],
+        check=False,
+        env=environment,
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 127
+    assert result.stdout == ""
+    assert "tmux executable was not found: rodex-test-missing-tmux" in result.stderr
+    assert not database.exists()
+
+
+@pytest.mark.parametrize("launcher_relative", LAUNCHERS)
+def test_launchers_preserve_nonempty_codex_passthrough_without_tmux(
+    tmp_path: Path,
+    launcher_relative: str,
+) -> None:
+    project_root = Path(__file__).parents[1]
+    launcher = project_root / launcher_relative
+    database = tmp_path / "rodex.sqlite3"
+    fake_codex = tmp_path / "codex-probe"
+    fake_codex.write_text('#!/bin/sh\nprintf "%s\\n" "$@"\n', encoding="utf-8")
+    fake_codex.chmod(0o755)
+    environment = os.environ.copy()
+    environment["RODEX_PROJECT_DIR"] = str(project_root)
+    environment["RODEX_DATABASE_PATH"] = str(database)
+    environment["RODEX_CODEX_BINARY"] = str(fake_codex)
+    environment["RODEX_TMUX_BINARY"] = "rodex-test-missing-tmux"
+
+    result = subprocess.run(
+        [launcher, "exec", "--json", "probe"],
+        check=False,
+        env=environment,
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 0
+    assert result.stdout.splitlines() == ["exec", "--json", "probe"]
+    assert result.stderr == ""
+    assert not database.exists()
+
+
+@pytest.mark.parametrize("launcher_relative", LAUNCHERS)
+def test_launchers_print_rodex_help_without_codex_tmux_or_database(
+    tmp_path: Path,
+    launcher_relative: str,
+) -> None:
+    project_root = Path(__file__).parents[1]
+    launcher = project_root / launcher_relative
+    database = tmp_path / "rodex.sqlite3"
+    environment = os.environ.copy()
+    environment["RODEX_PROJECT_DIR"] = str(project_root)
+    environment["RODEX_DATABASE_PATH"] = str(database)
+    environment["RODEX_CODEX_BINARY"] = "rodex-test-missing-codex"
+    environment["RODEX_TMUX_BINARY"] = "rodex-test-missing-tmux"
+
+    result = subprocess.run(
+        [launcher, "_help"],
+        check=False,
+        env=environment,
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 0
+    assert result.stdout.startswith("usage: rodex [COMMAND [ARGUMENTS]]\n")
+    assert "_create" in result.stdout
+    assert result.stderr == ""
+    assert not database.exists()
 
 
 def test_usr_local_bin_shim_reports_a_missing_project(tmp_path: Path) -> None:

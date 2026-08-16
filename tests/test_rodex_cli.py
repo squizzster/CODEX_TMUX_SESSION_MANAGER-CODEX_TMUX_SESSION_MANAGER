@@ -170,7 +170,7 @@ def test_help_prints_rodex_commands_without_codex_tmux_or_database(
 
     output = capsys.readouterr()
     assert output.err == ""
-    assert output.out.startswith("usage: rodex COMMAND [ARGUMENTS]\n")
+    assert output.out.startswith("usage: rodex [COMMAND [ARGUMENTS]]\n")
     assert "_help" in output.out
     assert "_create" in output.out
     assert "_running" in output.out
@@ -284,10 +284,12 @@ def test_tail_command_streams_json_events_for_the_verified_named_runtime(
     assert "following live Codex protocol events" in captured.err
 
 
-def test_run_links_real_codex_and_tmux_identities_before_attach(
+@pytest.mark.parametrize("arguments", [[], ["_create"]], ids=["bare", "explicit"])
+def test_default_and_explicit_create_link_identities_before_attach(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
+    arguments: list[str],
 ) -> None:
     database = tmp_path / "rodex.sqlite3"
     launcher = StubLauncher(tmp_path)
@@ -299,14 +301,14 @@ def test_run_links_real_codex_and_tmux_identities_before_attach(
 
     assert (
         run(
-            ["_create", "--model", "example"],
+            arguments,
             database_path=database,
             launcher=launcher,  # type: ignore[arg-type]
         )
         == 0
     )
 
-    assert launcher.started == [(Path.cwd(), ["--model", "example"])]
+    assert launcher.started == [(Path.cwd(), [])]
     assert launcher.renamed == [(launcher.runtime, "automatic-beluga")]
     assert launcher.configured[0].tmux_session_name == "automatic-beluga"
     assert launcher.attached == launcher.configured
@@ -325,7 +327,6 @@ def test_run_links_real_codex_and_tmux_identities_before_attach(
 @pytest.mark.parametrize(
     "arguments",
     [
-        [],
         ["--help"],
         ["-h"],
         ["--version"],
@@ -392,6 +393,67 @@ def test_non_rodex_invocations_delegate_unchanged_without_tmux_or_database(
 
     assert delegator.calls == [("/usr/bin/codex", arguments)]
     assert not database.exists()
+
+
+def test_bare_invocation_never_delegates_to_codex(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    launcher = StubLauncher(tmp_path)
+    delegator = RecordingCodexDelegator(returncode=23)
+    monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
+    monkeypatch.setattr(
+        "cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga"
+    )
+
+    assert (
+        run(
+            [],
+            database_path=tmp_path / "rodex.sqlite3",
+            launcher=launcher,  # type: ignore[arg-type]
+            codex_delegator=delegator,
+        )
+        == 0
+    )
+
+    assert delegator.calls == []
+    assert launcher.started == [(Path.cwd(), [])]
+    assert launcher.attached == launcher.configured
+
+
+def test_bare_invocation_is_observably_equivalent_to_explicit_create(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
+    monkeypatch.setattr(
+        "cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga"
+    )
+    observed: list[tuple[object, ...]] = []
+
+    for label, arguments in (("bare", []), ("explicit", ["_create"])):
+        case_root = tmp_path / label
+        launcher = StubLauncher(case_root)
+        database = case_root / "rodex.sqlite3"
+
+        assert run(arguments, database_path=database, launcher=launcher) == 0  # type: ignore[arg-type]
+
+        tmux_link = lookup_rodex_tmux_session(1, database)
+        names = lookup_rodex_session_names(1, database)
+        assert tmux_link is not None
+        assert names is not None
+        observed.append(
+            (
+                launcher.started,
+                [runtime.tmux_session_name for runtime in launcher.configured],
+                [runtime.tmux_session_name for runtime in launcher.attached],
+                names.display_name,
+                tmux_link.tmux_session_name,
+                lookup_codex_uuid_from_a_rodex_session_id(1, database),
+            )
+        )
+
+    assert observed[0] == observed[1]
 
 
 def test_create_command_forwards_interactive_codex_arguments_to_managed_runtime(
@@ -660,6 +722,101 @@ def test_detach_existing_name_resolves_without_attaching(
     assert launcher.started == []
     assert launcher.attached == []
     assert json.loads(capsys.readouterr().out)["rodex_session_name"] == ("automatic-beluga")
+
+
+def test_detach_ended_name_resumes_exact_codex_session_without_attaching(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    database = tmp_path / "rodex.sqlite3"
+    monkeypatch.setattr(
+        "cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga"
+    )
+    monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
+    session = create_a_rodex_session(
+        database,
+        codex_session_uuid=CODEX_UUID,
+        user_identity=DNA,
+        tmux_server_socket_path=tmp_path / "stale.sock",
+        tmux_session_name="automatic-beluga",
+    )
+    launcher = StubLauncher(tmp_path)
+    launcher.live = False
+
+    assert (
+        run(
+            ["_detach", "automatic-beluga"],
+            database_path=database,
+            launcher=launcher,  # type: ignore[arg-type]
+        )
+        == 0
+    )
+
+    output = json.loads(capsys.readouterr().out)
+    assert launcher.started == [(Path.cwd(), ["resume", str(CODEX_UUID)])]
+    assert launcher.renamed == [(launcher.runtime, "automatic-beluga")]
+    assert launcher.configured[0].tmux_session_name == "automatic-beluga"
+    assert launcher.attached == []
+    assert output == {
+        "status": "running",
+        "rodex_session_name": "automatic-beluga",
+        "rodex_session_uuid": str(session.rodex_uuid),
+        "codex_session_uuid": str(CODEX_UUID),
+    }
+
+
+def test_detach_unsaved_name_recovers_identity_without_attaching(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    database = tmp_path / "rodex.sqlite3"
+    monkeypatch.setattr(
+        "cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga"
+    )
+    monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
+    session = create_a_rodex_session(
+        database,
+        codex_session_uuid=CODEX_UUID,
+        user_identity=DNA,
+        tmux_server_socket_path=tmp_path / "stale.sock",
+        tmux_session_name="automatic-beluga",
+    )
+    launcher = StubLauncher(tmp_path)
+    launcher.live = False
+    launcher.start_error = RodexCodexSessionNotFoundError(
+        f"Codex has no saved session for exact identity {CODEX_UUID}"
+    )
+    launcher.observed_codex_uuid = REPLACEMENT_CODEX_UUID
+
+    assert (
+        run(
+            ["_detach", "automatic-beluga"],
+            database_path=database,
+            launcher=launcher,  # type: ignore[arg-type]
+        )
+        == 0
+    )
+
+    output = json.loads(capsys.readouterr().out)
+    assert launcher.started == [
+        (Path.cwd(), ["resume", str(CODEX_UUID)]),
+        (Path.cwd(), []),
+    ]
+    assert launcher.configured[0].tmux_session_name == "automatic-beluga"
+    assert launcher.attached == []
+    assert lookup_rodex_uuid_from_an_id(session.id, database) == session.rodex_uuid
+    assert (
+        lookup_codex_uuid_from_a_rodex_session_id(session.id, database)
+        == REPLACEMENT_CODEX_UUID
+    )
+    assert output == {
+        "status": "running",
+        "rodex_session_name": "automatic-beluga",
+        "rodex_session_uuid": str(session.rodex_uuid),
+        "codex_session_uuid": str(REPLACEMENT_CODEX_UUID),
+    }
 
 
 def test_unknown_underscore_command_passes_through_unchanged(
@@ -1197,8 +1354,9 @@ def test_running_commands_show_only_the_current_users_live_sessions(
     assert "silver-otter" not in output
 
 
+@pytest.mark.parametrize("arguments", [[], ["_create"]], ids=["bare", "explicit"])
 def test_new_launch_cleans_up_the_renamed_runtime_when_persistence_fails(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, arguments: list[str]
 ) -> None:
     database = tmp_path / "rodex.sqlite3"
     launcher = StubLauncher(tmp_path)
@@ -1212,7 +1370,7 @@ def test_new_launch_cleans_up_the_renamed_runtime_when_persistence_fails(
     )
 
     with pytest.raises(RuntimeError, match="persist failed"):
-        run(["_create"], database_path=database, launcher=launcher)  # type: ignore[arg-type]
+        run(arguments, database_path=database, launcher=launcher)  # type: ignore[arg-type]
 
     assert launcher.renamed == [(launcher.runtime, "safe-name")]
     assert launcher.stopped == [
@@ -1529,11 +1687,13 @@ def test_resume_stops_new_runtime_if_codex_reports_a_different_session(
     ("missing", "message"),
     [("codex", "Codex executable"), ("tmux", "tmux executable")],
 )
+@pytest.mark.parametrize("arguments", [[], ["_create"]], ids=["bare", "explicit"])
 def test_run_does_not_create_a_session_when_a_prerequisite_is_missing(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     missing: str,
     message: str,
+    arguments: list[str],
 ) -> None:
     database = tmp_path / "rodex.sqlite3"
     monkeypatch.setattr(
@@ -1542,13 +1702,14 @@ def test_run_does_not_create_a_session_when_a_prerequisite_is_missing(
     )
 
     with pytest.raises(RodexLaunchError, match=message):
-        run(["_create"], database_path=database)
+        run(arguments, database_path=database)
 
     assert not database.exists()
 
 
+@pytest.mark.parametrize("arguments", [[], ["_create"]], ids=["bare", "explicit"])
 def test_database_failure_stops_the_unregistered_runtime(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, arguments: list[str]
 ) -> None:
     launcher = StubLauncher(tmp_path)
     monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
@@ -1559,7 +1720,7 @@ def test_database_failure_stops_the_unregistered_runtime(
 
     with pytest.raises(RuntimeError, match="database failed"):
         run(
-            ["_create"],
+            arguments,
             database_path=tmp_path / "db.sqlite3",
             launcher=launcher,  # type: ignore[arg-type]
         )

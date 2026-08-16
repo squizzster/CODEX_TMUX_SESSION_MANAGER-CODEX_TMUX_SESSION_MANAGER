@@ -14,7 +14,8 @@ import uuid
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Final
+from threading import Event, Thread
+from typing import Any, BinaryIO, Final
 
 from websockets.exceptions import ConnectionClosed, InvalidHandshake
 from websockets.sync.client import unix_connect
@@ -29,6 +30,8 @@ from .protocol_proxy import (
 
 SUN_PATH_MAX_BYTES: Final = 107
 DEFAULT_STARTUP_TIMEOUT_SECONDS: Final = 15.0
+RUNTIME_PATH_KEEPALIVE_INTERVAL_SECONDS: Final = 60.0 * 60.0
+_TUI_SUPERVISION_INTERVAL_SECONDS: Final = 1.0
 _POLL_INTERVAL_SECONDS: Final = 0.05
 _PROXY_SOCKET_OPTION: Final = "@rodex_protocol_proxy_socket_path"
 _EVENT_SOCKET_OPTION: Final = "@rodex_protocol_event_socket_path"
@@ -40,6 +43,78 @@ Connector = Callable[..., Any]
 
 class RodexRuntimeError(RuntimeError):
     """A live tmux or Codex app-server operation failed."""
+
+
+class _RuntimePathKeepalive:
+    """Keep the pathnames required by one live Rodex runtime fresh."""
+
+    def __init__(
+        self,
+        paths: Sequence[Path],
+        *,
+        interval_seconds: float = RUNTIME_PATH_KEEPALIVE_INTERVAL_SECONDS,
+    ) -> None:
+        if interval_seconds <= 0:
+            raise ValueError("runtime path keepalive interval must be positive")
+        self._paths = tuple(dict.fromkeys(paths))
+        if not self._paths:
+            raise ValueError("runtime path keepalive requires at least one path")
+        self._interval_seconds = interval_seconds
+        self._stop = Event()
+        self._thread: Thread | None = None
+        self._failure: RodexRuntimeError | None = None
+        self._failure_reported = Event()
+
+    @property
+    def failure(self) -> RodexRuntimeError | None:
+        """Return the periodic refresh failure, if the worker stopped on one."""
+        return self._failure
+
+    def start(self) -> None:
+        """Refresh synchronously, then protect the paths until closed."""
+        if self._thread is not None:
+            raise RodexRuntimeError("runtime path keepalive is already running")
+        self._refresh()
+        self._thread = Thread(
+            target=self._run,
+            name="rodex-runtime-path-keepalive",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def close(self) -> None:
+        """Stop periodic refreshes before the owning runtime removes its paths."""
+        thread = self._thread
+        self._stop.set()
+        if thread is None:
+            return
+        thread.join(timeout=5)
+        if thread.is_alive():
+            raise RodexRuntimeError("runtime path keepalive did not stop")
+        self._thread = None
+
+    def wait_for_failure(self, timeout: float) -> RodexRuntimeError | None:
+        """Wait briefly for a periodic failure and return the stable result."""
+        self._failure_reported.wait(timeout)
+        return self._failure
+
+    def _run(self) -> None:
+        while not self._stop.wait(self._interval_seconds):
+            try:
+                self._refresh()
+            except RodexRuntimeError as error:
+                self._failure = error
+                self._failure_reported.set()
+                return
+
+    def _refresh(self) -> None:
+        for path in self._paths:
+            try:
+                os.utime(path, None, follow_symlinks=False)
+            except OSError as error:
+                raise RodexRuntimeError(
+                    f"could not refresh live runtime path {path}: {error}"
+                ) from error
 
 
 @dataclass(frozen=True, slots=True)
@@ -401,11 +476,15 @@ def run_session_host(
     protocol_event_socket_path.unlink(missing_ok=True)
     app_server_log_path.parent.mkdir(parents=True, exist_ok=True)
     app_server: subprocess.Popen[bytes] | None = None
+    tui: subprocess.Popen[bytes] | None = None
     protocol_proxy: CodexProtocolProxy | None = None
     protocol_event_tap: CodexProtocolEventTap | None = None
+    runtime_path_keepalive: _RuntimePathKeepalive | None = None
+    shutting_down = False
 
     def stop_on_signal(signum: int, _frame: object) -> None:
-        raise SystemExit(128 + signum)
+        if not shutting_down:
+            raise SystemExit(128 + signum)
 
     previous_handlers = {
         signum: signal.signal(signum, stop_on_signal)
@@ -441,39 +520,100 @@ def run_session_host(
                 protocol_event_tap.publish,
             )
             protocol_proxy.start()
-            completed = subprocess.run(
+
+            runtime_path_keepalive = _RuntimePathKeepalive(
+                (
+                    app_server_log_path.parent,
+                    tmux_server_socket_path,
+                    app_server_socket_path,
+                    app_server_log_path,
+                    protocol_proxy_socket_path,
+                    protocol_event_socket_path,
+                )
+            )
+            try:
+                runtime_path_keepalive.start()
+            except RodexRuntimeError as error:
+                _record_runtime_path_keepalive_failure(log, error)
+                raise
+            tui = subprocess.Popen(
                 [
                     codex_binary,
                     "--remote",
                     f"unix://{protocol_proxy_socket_path}",
                     *codex_arguments,
-                ],
-                check=False,
+                ]
             )
-            return completed.returncode
-    finally:
-        for signum, handler in previous_handlers.items():
-            signal.signal(signum, handler)
-        try:
-            if protocol_proxy is not None:
-                protocol_proxy.close()
-        finally:
+            while True:
+                failure = runtime_path_keepalive.failure
+                if failure is not None:
+                    _record_runtime_path_keepalive_failure(log, failure)
+                    raise failure
+                try:
+                    returncode = tui.wait(timeout=_TUI_SUPERVISION_INTERVAL_SECONDS)
+                except subprocess.TimeoutExpired:
+                    continue
+                break
             try:
-                if protocol_event_tap is not None:
-                    protocol_event_tap.close()
+                runtime_path_keepalive.close()
+            except RodexRuntimeError as error:
+                _record_runtime_path_keepalive_failure(log, error)
+                raise
+            failure = runtime_path_keepalive.failure
+            if failure is not None:
+                _record_runtime_path_keepalive_failure(log, failure)
+                raise failure
+            return returncode
+    finally:
+        shutting_down = True
+        try:
+            try:
+                if runtime_path_keepalive is not None:
+                    runtime_path_keepalive.close()
             finally:
-                if app_server is not None and app_server.poll() is None:
-                    app_server.terminate()
+                try:
+                    if tui is not None:
+                        _stop_child_process(tui)
+                finally:
                     try:
-                        app_server.wait(timeout=3)
-                    except subprocess.TimeoutExpired:
-                        app_server.kill()
-                        app_server.wait(timeout=3)
-                app_server_socket_path.unlink(missing_ok=True)
-                protocol_proxy_socket_path.unlink(missing_ok=True)
-                protocol_event_socket_path.unlink(missing_ok=True)
-                if app_server_log_path.exists() and app_server_log_path.stat().st_size == 0:
-                    app_server_log_path.unlink()
+                        if protocol_proxy is not None:
+                            protocol_proxy.close()
+                    finally:
+                        try:
+                            if protocol_event_tap is not None:
+                                protocol_event_tap.close()
+                        finally:
+                            if app_server is not None:
+                                _stop_child_process(app_server)
+                            app_server_socket_path.unlink(missing_ok=True)
+                            protocol_proxy_socket_path.unlink(missing_ok=True)
+                            protocol_event_socket_path.unlink(missing_ok=True)
+                            if (
+                                app_server_log_path.exists()
+                                and app_server_log_path.stat().st_size == 0
+                            ):
+                                app_server_log_path.unlink()
+        finally:
+            for signum, handler in previous_handlers.items():
+                signal.signal(signum, handler)
+
+
+def _record_runtime_path_keepalive_failure(log: BinaryIO, error: RodexRuntimeError) -> None:
+    """Persist why a detached runtime could no longer guarantee its paths."""
+    log.write(f"Rodex runtime path keepalive failed: {error}\n".encode())
+    log.flush()
+
+
+def _stop_child_process(process: subprocess.Popen[bytes]) -> None:
+    """Stop one exact child process, escalating only when it does not exit."""
+    if process.poll() is not None:
+        return
+    process.terminate()
+    try:
+        process.wait(timeout=3)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=3)
 
 
 def _receive_response(websocket: Any, request_id: int) -> dict[str, Any]:

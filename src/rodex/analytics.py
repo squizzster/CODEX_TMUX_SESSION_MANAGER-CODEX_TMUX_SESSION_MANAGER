@@ -25,6 +25,7 @@ from rodex_functions import (
     RodexSessionStatistics,
     RodexSessionStatisticsSource,
     RodexSessionStatisticsSourceObservation,
+    RodexSessionTurnStatisticsObservation,
     current_rodex_sessions_user_identity,
     lookup_codex_uuid_from_a_rodex_session_id,
     lookup_id_from_a_rodex_uuid,
@@ -35,7 +36,7 @@ from rodex_functions import (
 
 ANALYTICS_POLL_INTERVAL_SECONDS = 0.5
 ANALYTICS_RESTART_DELAY_SECONDS = 2.0
-STATISTICS_PROJECTION_SCHEMA_VERSION = "rodex-aggregate-v1"
+STATISTICS_PROJECTION_SCHEMA_VERSION = "rodex-statistics-v2"
 
 
 class RodexAnalyticsError(RuntimeError):
@@ -47,7 +48,9 @@ class _AnalyzerLibrary(Protocol):
 
     def load_file(self, protocol_id: str, path: Path) -> object: ...
 
-    def get_stats(self, protocol_id: str) -> object: ...
+    def get_stats(
+        self, protocol_id: str, *, include_turn_statistics: bool = False
+    ) -> object: ...
 
     def close(self) -> object: ...
 
@@ -81,10 +84,11 @@ class VerifiedRollout:
 
 @dataclass(frozen=True, slots=True)
 class AnalyticsCalculation:
-    """Usable aggregate output and whether analyzer diagnostics left gaps."""
+    """Usable session and turn projections from one analyzer calculation."""
 
     aggregate_statistics: dict[str, Any]
     coverage_state: str
+    turn_statistics: tuple[RodexSessionTurnStatisticsObservation, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -138,7 +142,7 @@ class CodexProtocolAnalyticsAdapter:
                 )
                 if getattr(loaded, "status", "ok") != "ok":
                     coverage_state = "gapped"
-            stats_result = library.get_stats(protocol_id)
+            stats_result = library.get_stats(protocol_id, include_turn_statistics=True)
             stats = _mapping_value(
                 _operation_value(
                     stats_result,
@@ -151,6 +155,7 @@ class CodexProtocolAnalyticsAdapter:
             return AnalyticsCalculation(
                 aggregate_statistics=_aggregate_projection(stats),
                 coverage_state=coverage_state,
+                turn_statistics=_turn_projections(stats),
             )
         finally:
             with suppress(Exception):
@@ -227,6 +232,7 @@ class AnalyticsRolloutWorker:
                     coverage_state=calculation.coverage_state,
                     aggregate_statistics=calculation.aggregate_statistics,
                     analyzed_sources=[item.observation for item in stable_copies],
+                    turn_statistics=calculation.turn_statistics,
                 )
                 self._source_authentication = {
                     item.observation.codex_session_uuid: authenticated
@@ -251,8 +257,12 @@ class AnalyticsRolloutWorker:
         poll_interval_seconds: float = ANALYTICS_POLL_INTERVAL_SECONDS,
     ) -> None:
         while not stop.is_set():
-            self.poll_once()
-            stop.wait(poll_interval_seconds)
+            state = self.poll_once()
+            stop.wait(
+                ANALYTICS_RESTART_DELAY_SECONDS
+                if state == "degraded"
+                else poll_interval_seconds
+            )
 
     def _copy_registered_sources(
         self,
@@ -290,7 +300,12 @@ class AnalyticsRolloutWorker:
         statistics: RodexSessionStatistics | None,
         sources: Sequence[RodexSessionStatisticsSource],
     ) -> bool:
-        if statistics is None or not sources:
+        if (
+            statistics is None
+            or statistics.statistics_projection_schema_version
+            != STATISTICS_PROJECTION_SCHEMA_VERSION
+            or not sources
+        ):
             return False
         revision = statistics.statistics_revision
         for source in sources:
@@ -689,6 +704,49 @@ def _aggregate_projection(snapshot: Mapping[str, Any]) -> dict[str, Any]:
         "audit",
     }
     return {key: value for key, value in snapshot.items() if key in allowed}
+
+
+def _turn_projections(
+    snapshot: Mapping[str, Any],
+) -> tuple[RodexSessionTurnStatisticsObservation, ...]:
+    raw_turns = snapshot.get("turn_statistics")
+    if not isinstance(raw_turns, (list, tuple)):
+        raise RodexAnalyticsError("analyzer returned no turn statistics collection")
+    projections: list[RodexSessionTurnStatisticsObservation] = []
+    for raw_turn in raw_turns:
+        turn = _mapping_value(raw_turn)
+        try:
+            session_uuid = uuid.UUID(str(turn["session_id"]))
+            turn_id = str(turn["turn_id"])
+            outcome = str(turn["outcome"])
+        except (KeyError, TypeError, ValueError) as error:
+            raise RodexAnalyticsError(
+                "analyzer returned an invalid turn identity"
+            ) from error
+        started_at = turn.get("started_at")
+        terminal_at = turn.get("terminal_at")
+        if started_at is not None and not isinstance(started_at, str):
+            raise RodexAnalyticsError("analyzer returned an invalid turn start time")
+        if terminal_at is not None and not isinstance(terminal_at, str):
+            raise RodexAnalyticsError("analyzer returned an invalid turn terminal time")
+        must_have = turn.get("must_have_basic_stats")
+        insights = turn.get("recommended_insight_stats")
+        if not isinstance(must_have, Mapping) or not isinstance(insights, Mapping):
+            raise RodexAnalyticsError("analyzer returned an invalid turn projection")
+        projections.append(
+            RodexSessionTurnStatisticsObservation(
+                codex_session_uuid=session_uuid,
+                codex_turn_id=turn_id,
+                started_at_utc=started_at,
+                terminal_at_utc=terminal_at,
+                outcome=outcome,
+                turn_statistics={
+                    "must_have_basic_stats": dict(must_have),
+                    "recommended_insight_stats": dict(insights),
+                },
+            )
+        )
+    return tuple(projections)
 
 
 def _current_analytics_user_id() -> str:

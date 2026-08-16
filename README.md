@@ -20,7 +20,7 @@ when needed, and return later using a generated name such as `automatic-beluga`.
 - Animates shared arrival and final departure for five seconds without blocking the TUI.
 - Keeps the in-TUI `/rodex` command implementation available but disabled for now.
 - Sends work to, waits for, or follows a running session from another shell.
-- Maintains queryable aggregate statistics from authenticated Codex rollout prefixes.
+- Maintains queryable session and exact-turn statistics from authenticated rollouts.
 
 Rodex does not replace or reinterpret nonempty Codex CLI invocations. With no
 arguments it creates and attaches to a managed session. Exact underscore Rodex
@@ -71,9 +71,12 @@ To expose this checkout as the system-wide `rodex` command, follow the
 | `./rodex _tail edgar-work` | Follow structured live protocol events as JSON lines. |
 | `./rodex _stats edgar-work` | Show the latest successful aggregate statistics. |
 | `./rodex _stats edgar-work --json` | Emit the snapshot and freshness metadata as JSON. |
+| `./rodex _stats edgar-work --turn TURN_ID` | Show one exact turn from the latest snapshot. |
+| `./rodex _stats edgar-work --turn TURN_ID --source CODEX_UUID --json` | Qualify a turn ID across resumed Codex sources. |
 | `./rodex _stats-status edgar-work` | Show source coverage and analytics worker health. |
 
-Rodex flags are `_alias --force` and `_stats NAME --json`. Arguments after `_create` or
+Rodex flags include `_alias --force` and `_stats NAME --turn ID --source UUID --json`.
+Arguments after `_create` or
 `_detach` are forwarded to the managed Codex TUI; use `--` when an explicit boundary
 improves clarity. Stop `_tail` with `Ctrl-C`; the Rodex session keeps running. Names use 1–80
 ASCII letters, digits, underscores, or hyphens and begin with a letter or digit. The
@@ -109,8 +112,8 @@ sockets persistent; refreshes stop when the owning session ends.
 The Rodex registry also stores authenticated rollout provenance, independent analytics
 worker health, and the latest successful derived statistics snapshot. Each session host
 runs a low-priority, fail-open sidecar that analyzes complete JSONL record prefixes in a
-fresh in-memory analyzer. Rodex persists only a fixed aggregate projection—never copied
-prompts, responses, commands, tool output, or raw protocol events. Canonical rollout
+fresh in-memory analyzer. Rodex persists a fixed session projection and keyed per-turn
+projections—never copied prompts, responses, commands, tool output, or raw events. Canonical rollout
 paths and SHA-256 digests are sensitive local metadata, so the database remains private
 to its POSIX user. Codex remains responsible for raw history.
 

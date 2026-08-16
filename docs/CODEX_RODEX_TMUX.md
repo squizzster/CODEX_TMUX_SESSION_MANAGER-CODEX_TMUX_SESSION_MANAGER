@@ -33,7 +33,10 @@ identities. Tool counts cover the current runtime and reset when it is resumed.
 - If its stored tmux endpoint is live, Rodex attaches to it directly.
 - If it has ended, Rodex starts a fresh tmux/app-server and asks Codex to resume the
   stored Codex UUID; the observed UUID must match before the endpoint is replaced.
-- Both routes preserve all Rodex/Codex identity and update `last_accessed_at_utc`.
+- If Codex explicitly reports that the UUID was never saved, Rodex starts an empty
+  Codex runtime and atomically relinks its new UUID to the existing Rodex identity.
+  Other resume failures and UUID mismatches remain hard failures.
+- Both routes preserve the Rodex identity and update `last_accessed_at_utc`.
 - `./rodex running` (`--running`, `sessions`, or `--sessions`) lists the current
   POSIX user's live runtimes.
 - `./rodex alias SESSION NAME` sets its portable preferred name; `-f` replaces it.
@@ -47,6 +50,8 @@ identities. Tool counts cover the current runtime and reset when it is resumed.
   one-shot process and restore the ordinary status bar without delaying the TUI.
 - Exiting the Codex TUI ends its supervisor and private app-server; its cool name can
   transparently resume the saved Codex session later.
+- A completely empty Codex TUI may not have saved history. Its cool name recovers by
+  starting empty again and replacing only the linked Codex UUID.
 - A failure before SQL registration stops the exact new tmux session and leaves no
   partial database row.
 - The runtime uses `$XDG_RUNTIME_DIR/rodex` when suitable—normally

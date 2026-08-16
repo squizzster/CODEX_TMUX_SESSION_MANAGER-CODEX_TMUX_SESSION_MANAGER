@@ -506,9 +506,10 @@ def record_a_rodex_session_runtime_resume(
     tmux_session_name: str,
     database_path: str | os.PathLike[str] | None = None,
     *,
+    codex_session_uuid: uuid.UUID | str | None = None,
     accessed_at_utc: datetime | None = None,
 ) -> RodexTmuxSession:
-    """Atomically replace a resumed session's tmux endpoint and access time."""
+    """Atomically activate a runtime, optionally replacing an unsaved Codex UUID."""
     _validate_session_id(session_id)
     tmux_link = _normalise_tmux_link(
         tmux_server_socket_path,
@@ -517,9 +518,23 @@ def record_a_rodex_session_runtime_resume(
     if tmux_link is None:  # Both arguments are required by this public contract.
         raise ValueError("a resumed session requires a tmux endpoint")
     socket_path, session_name = tmux_link
+    codex_uuid_halves = (
+        None
+        if codex_session_uuid is None
+        else split_a_codex_uuid_into_signed_bigints(codex_session_uuid)
+    )
     timestamp = _normalise_utc_datetime(accessed_at_utc)
     path = initialise_rodex_database(database_path)
     with open_rodex_transaction(path) as connection:
+        if codex_uuid_halves is not None:
+            codex_cursor = connection.execute(
+                f"UPDATE {RODEX_SESSIONS_TABLE} "
+                "SET codex_session_uuid_int_1 = ?, codex_session_uuid_int_2 = ? "
+                "WHERE id = ?",
+                (*codex_uuid_halves, session_id),
+            )
+            if codex_cursor.rowcount != 1:
+                raise RodexSessionError(f"Rodex session does not exist: {session_id}")
         tmux_cursor = connection.execute(
             f"UPDATE {RODEX_TMUX_SESSIONS_TABLE} "
             "SET tmux_server_socket_path = ?, tmux_session_name = ? "

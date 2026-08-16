@@ -1,0 +1,14 @@
+#!/bin/sh
+set -eu
+
+# This checkout is the default target when this shim is copied to /usr/local/bin.
+# Override it when the Rodex checkout lives elsewhere.
+RODEX_PROJECT_DIR=${RODEX_PROJECT_DIR:-/external_data/data/work_flow_dna/business_genome_classfication_system/CODEX_TMUX_SESSION_MANAGER}
+
+if [ ! -f "$RODEX_PROJECT_DIR/pyproject.toml" ]; then
+    printf 'rodex: project not found at %s\n' "$RODEX_PROJECT_DIR" >&2
+    printf 'rodex: set RODEX_PROJECT_DIR to the Rodex checkout\n' >&2
+    exit 1
+fi
+
+exec uv run --project "$RODEX_PROJECT_DIR" rodex "$@"

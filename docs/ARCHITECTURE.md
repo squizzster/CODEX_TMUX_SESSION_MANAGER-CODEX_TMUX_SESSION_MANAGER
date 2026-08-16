@@ -72,7 +72,7 @@ a permanent alternative lookup. Detailed future schema rules live in
 
 ## Authoritative lifecycle
 
-### New session (`_create` or `_detach`)
+### New session (bare `rodex`, `_create`, or `_detach`)
 
 1. Start a detached tmux session containing the Rodex session host.
 2. Start one private Codex app-server and connect the TUI through the proxy.

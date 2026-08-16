@@ -1751,3 +1751,27 @@ def test_project_root_launcher_is_executable_and_uses_the_project_environment() 
     assert os.access(launcher, os.X_OK)
     contents = launcher.read_text(encoding="utf-8")
     assert 'uv run --project "$RODEX_PROJECT_DIR" rodex "$@"' in contents
+
+
+def test_main_prints_actionable_multiline_resume_guidance(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(
+        "rodex.cli.run",
+        lambda: (_ for _ in ()).throw(
+            RodexSessionError(
+                "Codex session already belongs to Rodex sturdy-warthog.\n"
+                "Resume with: rodex sturdy-warthog"
+            )
+        ),
+    )
+
+    with pytest.raises(SystemExit) as raised:
+        main()
+
+    assert raised.value.code == 1
+    assert capsys.readouterr().err == (
+        "rodex: Codex session already belongs to Rodex sturdy-warthog.\n"
+        "Resume with: rodex sturdy-warthog\n"
+    )

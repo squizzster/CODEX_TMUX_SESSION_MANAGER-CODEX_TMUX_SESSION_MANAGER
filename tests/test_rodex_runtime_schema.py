@@ -112,11 +112,16 @@ def test_runtime_link_fields_are_all_required_together(tmp_path: Path) -> None:
 
 def test_codex_uuid_unique_index_rejects_a_second_rodex_owner(tmp_path: Path) -> None:
     database = tmp_path / "rodex.sqlite3"
-    create_a_rodex_session(database, codex_session_uuid=CODEX_UUID)
+    session = create_a_rodex_session(database, codex_session_uuid=CODEX_UUID)
 
-    with pytest.raises(RodexSessionError, match="already belongs"):
+    expected = (
+        f"Codex session already belongs to Rodex {session.cool_name}.\n"
+        f"Resume with: rodex {session.cool_name}"
+    )
+    with pytest.raises(RodexSessionError) as raised:
         create_a_rodex_session(database, codex_session_uuid=CODEX_UUID)
 
+    assert str(raised.value) == expected
     assert fetch_all(database, "SELECT COUNT(*) FROM rodex_sessions") == [(1,)]
     assert fetch_all(database, "SELECT COUNT(*) FROM cool_names") == [(1,)]
 

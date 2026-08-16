@@ -90,6 +90,28 @@ def test_alias_is_one_owned_integer_identity_and_force_replaces_it(
     ]
 
 
+def test_duplicate_codex_session_resume_guidance_prefers_the_user_defined_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database = tmp_path / "rodex.sqlite3"
+    _create_session(database, monkeypatch, cool_name="black-sawfly", codex_int=1)
+    assign_a_user_defined_cool_name(
+        "black-sawfly", "preferred-name", database, user_identity=DNA
+    )
+
+    with pytest.raises(RodexSessionError) as raised:
+        create_a_rodex_session(
+            database,
+            codex_session_uuid=uuid.UUID(int=1),
+            user_identity=DNA,
+        )
+
+    assert str(raised.value) == (
+        "Codex session already belongs to Rodex preferred-name.\n"
+        "Resume with: rodex preferred-name"
+    )
+
+
 @pytest.mark.parametrize(
     "reserved_name",
     [*sorted(RODEX_RESERVED_WORDS), "Alias", "EXEC", "RUNNING", "SESSIONS"],

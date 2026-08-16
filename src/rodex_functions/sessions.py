@@ -545,20 +545,22 @@ def create_a_rodex_session(
         rodex_sessions_users_id = _lookup_or_insert_rodex_sessions_user_id(
             connection, identity
         )
-        if (
-            select_lookup_id(
-                connection,
-                RODEX_SESSIONS_TABLE,
-                {
-                    "codex_session_uuid_int_1": codex_uuid_int_1,
-                    "codex_session_uuid_int_2": codex_uuid_int_2,
-                },
-            )
-            is not None
-        ):
+        existing_session_id = select_lookup_id(
+            connection,
+            RODEX_SESSIONS_TABLE,
+            {
+                "codex_session_uuid_int_1": codex_uuid_int_1,
+                "codex_session_uuid_int_2": codex_uuid_int_2,
+            },
+        )
+        if existing_session_id is not None:
+            names_row = _select_rodex_session_names(connection, existing_session_id)
+            if names_row is None:
+                raise RodexSessionError(f"Rodex session disappeared: {existing_session_id}")
+            display_name = _session_names_from_row(names_row).display_name
             raise RodexSessionError(
-                f"Codex session UUID already belongs to a Rodex session: "
-                f"{parsed_codex_session_uuid}"
+                f"Codex session already belongs to Rodex {display_name}.\n"
+                f"Resume with: rodex {display_name}"
             )
         allocated_name = allocate_unique_cool_name(connection)
         preallocated = (

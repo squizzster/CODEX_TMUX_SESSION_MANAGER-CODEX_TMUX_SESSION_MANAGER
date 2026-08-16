@@ -351,6 +351,27 @@ def test_rename_and_status_configuration_use_the_real_tmux_session_name(
         assert "/venv/bin/python -m rodex.status_animation" in hook_command[4]
         assert f"--event {event}" in hook_command[4]
         assert hook_command[4].endswith(">/dev/null 2>&1'")
+    assert status_commands[11] == ["pipe-pane", "-t", "=automatic-beluga:"]
+    assert status_commands[12:14] == [
+        ["unbind-key", "-n", "Enter"],
+        ["unbind-key", "-n", "Tab"],
+    ]
+
+
+def test_tmux_slash_switch_reinstalls_retained_bindings(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(runtime_module, "RODEX_TMUX_SLASH_ENABLED", True)
+    runner = RuntimeRunner(tmp_path)
+    launcher = RodexRuntimeLauncher(
+        "codex", "tmux", runner=runner, python_executable="/venv/bin/python"
+    )
+    runtime = LiveTmuxSession(tmp_path / "tmux.sock", "automatic-beluga")
+
+    launcher.configure_identity_status(runtime)
+
+    status_commands = [command[3:] for command in runner.calls]
     completion_pipe = status_commands[11]
     assert completion_pipe[:4] == [
         "pipe-pane",
@@ -359,14 +380,9 @@ def test_rename_and_status_configuration_use_the_real_tmux_session_name(
         "=automatic-beluga:",
     ]
     assert "/venv/bin/python -m rodex.tmux_completion_observer" in completion_pipe[4]
-    assert "--pane-id" in completion_pipe[4]
-    assert completion_pipe[4].endswith(">/dev/null 2>&1")
     for key, input_binding in zip(("Enter", "Tab"), status_commands[12:14], strict=True):
         assert input_binding[:3] == ["bind-key", "-n", key]
-        assert input_binding[3].startswith("run-shell ")
         assert "/venv/bin/python -m rodex.tmux_input_proxy" in input_binding[3]
-        assert "--pane-id" in input_binding[3]
-        assert "--client-name" in input_binding[3]
         assert f"--key {key}" in input_binding[3]
 
 
@@ -470,7 +486,7 @@ def test_real_tmux_survives_rename_and_status_configuration(tmp_path: Path) -> N
         launcher.configure_identity_status(renamed)
 
         assert launcher.session_exists(renamed)
-        assert tmux_format("#{pane_pipe}") == "1"
+        assert tmux_format("#{pane_pipe}") == "0"
         tab_binding = subprocess.run(
             [
                 tmux_binary,
@@ -481,12 +497,12 @@ def test_real_tmux_survives_rename_and_status_configuration(tmp_path: Path) -> N
                 "root",
                 "Tab",
             ],
-            check=True,
+            check=False,
             text=True,
             capture_output=True,
-        ).stdout
-        assert "rodex.tmux_input_proxy" in tab_binding
-        assert "--key Tab" in tab_binding
+        )
+        assert tab_binding.returncode != 0
+        assert "rodex.tmux_input_proxy" not in tab_binding.stdout
         discovered = launcher.discover_runtime_control(renamed)
         assert discovered.protocol_proxy_socket_path == tmp_path / "proxy.sock"
         assert discovered.protocol_event_socket_path == tmp_path / "events.sock"

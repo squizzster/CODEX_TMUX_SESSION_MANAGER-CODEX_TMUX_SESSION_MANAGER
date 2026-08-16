@@ -92,21 +92,17 @@ tmux ownership token; an older animator stops without restoring over a newer one
 owner finally removes the complete temporary `status-format` and style overrides, then
 redraws every attached client against the ordinary Rodex status.
 
-The tmux root key table routes Enter and Tab through `rodex.tmux_input_proxy`. The
-proxy reads only the active cursor line, consumes the exact `/rodex` namespace,
-completes its unambiguous prefixes on Tab, and forwards both keys unchanged for every
-other prompt. This boundary is intentionally before the Codex TUI: unknown slash
-commands are rejected locally and never reach the WebSocket protocol proxy.
+The `/rodex` input proxy and completion observer are retained but temporarily disabled
+by `RODEX_TMUX_SLASH_ENABLED` at the runtime configuration boundary. Status setup
+removes their pane pipe and tmux Enter/Tab bindings so input passes directly to the
+Codex TUI.
 
-Codex CLI has no third-party top-level slash-command registry. A persistent,
-asynchronous `pipe-pane -O` observer therefore treats TUI output only as a redraw
-wakeup, inspects the active cursor line, and shows an explicitly Rodex-owned transient
-completion ribbon by temporarily changing the passive `status-left` format. It never
-enters tmux message mode, rewrites Codex's ANSI output, or intercepts ordinary character
-keys, and uncertain screen state fails open. A matching command in Codex's live popup
-also wins automatically, avoiding a hardcoded collision after an upgrade. Rodex owns
-the private pane's single `pipe-pane` slot; command completion and dispatch operate on
-the shared pane for every attached client.
+When enabled, the proxy reads only the active cursor line, consumes the exact `/rodex`
+namespace, completes its unambiguous prefixes on Tab, and forwards both keys unchanged
+for every other prompt. Its asynchronous `pipe-pane -O` observer uses TUI output only
+as a redraw wakeup and shows an explicitly Rodex-owned transient completion ribbon in
+the passive status format. The implementation remains covered independently while it
+is inactive.
 
 ## Live control
 

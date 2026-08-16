@@ -16,6 +16,7 @@ from rodex.tmux_input_proxy import (
     proxy_enter_key,
     proxy_input_key,
 )
+from rodex.tmux_status import RODEX_STATUS_LEFT_FORMAT
 
 PROMPT = "\N{SINGLE RIGHT-POINTING ANGLE QUOTATION MARK} "
 
@@ -275,7 +276,12 @@ def test_rodex_hi_is_cleared_and_acknowledged_in_tmux(tmp_path: Path) -> None:
         "%4",
         "@rodex_completion_token",
     ]
-    assert runner.commands[4][-6:] == [
+    assert runner.commands[4][-3:] == [
+        "%4",
+        "status-left",
+        RODEX_STATUS_LEFT_FORMAT,
+    ]
+    assert runner.commands[5][-6:] == [
         "display-message",
         "-d",
         "5000",
@@ -319,14 +325,14 @@ def test_rodex_identity_reads_the_live_codex_uuid(tmp_path: Path) -> None:
         == 0
     )
 
-    assert runner.commands[4][-5:] == [
+    assert runner.commands[5][-5:] == [
         "show-options",
         "-v",
         "-t",
         "%4",
         "@rodex_codex_session_uuid",
     ]
-    assert runner.commands[5][-1] == (
+    assert runner.commands[6][-1] == (
         "Rodex: azure-crocodile -> Codex 01a00654-f2bc-7a30-834a-a5f886a65f82"
     )
 

@@ -28,7 +28,11 @@ from .protocol_proxy import (
     ToolCallCounter,
 )
 from .status_animation import STATUS_ANIMATION_TOKEN_OPTION
-from .tmux_input_proxy import COMPLETION_TOKEN_OPTION
+from .tmux_status import (
+    COMPLETION_TOKEN_OPTION,
+    RODEX_STATUS_LEFT_FORMAT,
+    RODEX_STATUS_LEFT_LENGTH,
+)
 
 SUN_PATH_MAX_BYTES: Final = 107
 DEFAULT_STARTUP_TIMEOUT_SECONDS: Final = 15.0
@@ -397,8 +401,7 @@ class RodexRuntimeLauncher:
             "-t",
             target,
             "status-left",
-            "#[fg=green,bold] Rodex: #S #[fg=cyan,bold]| Tools: "
-            "#{@rodex_tool_calls} #[default]",
+            RODEX_STATUS_LEFT_FORMAT,
         )
         self._tmux(
             runtime,
@@ -406,7 +409,7 @@ class RodexRuntimeLauncher:
             "-t",
             target,
             "status-left-length",
-            "68",
+            RODEX_STATUS_LEFT_LENGTH,
         )
         self._tmux(
             runtime,

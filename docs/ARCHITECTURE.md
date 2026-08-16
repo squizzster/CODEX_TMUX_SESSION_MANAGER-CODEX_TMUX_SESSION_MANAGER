@@ -101,12 +101,12 @@ commands are rejected locally and never reach the WebSocket protocol proxy.
 Codex CLI has no third-party top-level slash-command registry. A persistent,
 asynchronous `pipe-pane -O` observer therefore treats TUI output only as a redraw
 wakeup, inspects the active cursor line, and shows an explicitly Rodex-owned transient
-completion ribbon through tmux. It never rewrites Codex's ANSI output or intercepts
-ordinary character keys, and uncertain screen state fails open. A matching command in
-Codex's live popup also wins automatically, avoiding a hardcoded collision after an
-upgrade. Rodex owns the private pane's single `pipe-pane` slot. Under tmux 3.2 the
-pane-scoped status message is advisory and tmux chooses one attached client to display
-it; command completion and dispatch still operate on the shared pane for every client.
+completion ribbon by temporarily changing the passive `status-left` format. It never
+enters tmux message mode, rewrites Codex's ANSI output, or intercepts ordinary character
+keys, and uncertain screen state fails open. A matching command in Codex's live popup
+also wins automatically, avoiding a hardcoded collision after an upgrade. Rodex owns
+the private pane's single `pipe-pane` slot; command completion and dispatch operate on
+the shared pane for every attached client.
 
 ## Live control
 

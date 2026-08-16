@@ -13,9 +13,13 @@ from pathlib import Path
 from typing import Final
 
 from .tmux_input_proxy import (
-    COMPLETION_TOKEN_OPTION,
     extract_raw_prompt_text,
     native_popup_confirms_no_match,
+)
+from .tmux_status import (
+    COMPLETION_TOKEN_OPTION,
+    RODEX_STATUS_LEFT_FORMAT,
+    completion_status_left_format,
 )
 
 _COMPLETION_MESSAGES: Final = {
@@ -26,9 +30,8 @@ _COMPLETION_MESSAGES: Final = {
     "/rode": "Rodex completion: /rodex  [Tab to complete]",
     "/rodex": "Rodex command ready: /rodex  [Enter for help]",
 }
-_MESSAGE_DURATION_MILLISECONDS: Final = "5000"
-_CLEAR_DURATION_MILLISECONDS: Final = "1"
 _REDRAW_COALESCE_SECONDS: Final = 0.025
+_RIBBON_DURATION_SECONDS: Final = 5.0
 _NATIVE_COLLISION_PREFIXES: Final = frozenset({"/ro", "/rod", "/rode", "/rodex"})
 
 Runner = Callable[..., subprocess.CompletedProcess[str]]
@@ -107,13 +110,11 @@ class TmuxCompletionObserver:
             self._token = None
             return
         displayed = self._tmux(
-            "display-message",
-            "-N",
-            "-d",
-            _MESSAGE_DURATION_MILLISECONDS,
+            "set-option",
             "-t",
             self._pane_id,
-            message,
+            "status-left",
+            completion_status_left_format(message),
         )
         if displayed.returncode != 0:
             self._tmux("set-option", "-u", "-t", self._pane_id, COMPLETION_TOKEN_OPTION)
@@ -124,7 +125,7 @@ class TmuxCompletionObserver:
         self.completion_visible = True
 
     def clear(self) -> None:
-        """Remove a ribbon promptly and let tmux redraw the normal status."""
+        """Restore the normal status only while this observer owns the ribbon."""
         if not self.completion_visible:
             return
         token = self._token
@@ -141,13 +142,11 @@ class TmuxCompletionObserver:
             return
         self._tmux("set-option", "-u", "-t", self._pane_id, COMPLETION_TOKEN_OPTION)
         self._tmux(
-            "display-message",
-            "-N",
-            "-d",
-            _CLEAR_DURATION_MILLISECONDS,
+            "set-option",
             "-t",
             self._pane_id,
-            "",
+            "status-left",
+            RODEX_STATUS_LEFT_FORMAT,
         )
 
     def _tmux(self, *arguments: str) -> subprocess.CompletedProcess[str]:
@@ -172,6 +171,7 @@ class _AsyncPaneOutputWakeup:
         self._loop = loop
         self._input_fd = input_fd
         self._pending: asyncio.TimerHandle | None = None
+        self._expiry: asyncio.TimerHandle | None = None
 
     def start(self) -> None:
         os.set_blocking(self._input_fd, False)
@@ -186,6 +186,8 @@ class _AsyncPaneOutputWakeup:
             self._loop.remove_reader(self._input_fd)
             if self._pending is not None:
                 self._pending.cancel()
+            if self._expiry is not None:
+                self._expiry.cancel()
             self._observer.clear()
             self._loop.stop()
             return
@@ -203,7 +205,19 @@ class _AsyncPaneOutputWakeup:
 
     def _inspect_redraw(self) -> None:
         self._pending = None
+        if self._expiry is not None:
+            self._expiry.cancel()
+            self._expiry = None
         self._observer.inspect_redraw()
+        if self._observer.completion_visible:
+            self._expiry = self._loop.call_later(
+                _RIBBON_DURATION_SECONDS,
+                self._expire_completion,
+            )
+
+    def _expire_completion(self) -> None:
+        self._expiry = None
+        self._observer.clear()
 
 
 def observe_pane_output(observer: TmuxCompletionObserver, input_fd: int) -> None:

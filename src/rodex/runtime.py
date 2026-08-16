@@ -53,6 +53,10 @@ class RodexRuntimeError(RuntimeError):
     """A live tmux or Codex app-server operation failed."""
 
 
+class RodexCodexSessionNotFoundError(RodexRuntimeError):
+    """Codex explicitly reported that an exact requested identity is not saved."""
+
+
 class _RuntimePathKeepalive:
     """Keep the pathnames required by one live Rodex runtime fresh."""
 
@@ -261,7 +265,16 @@ class RodexRuntimeLauncher:
             host_command,
         )
         try:
-            codex_uuid = self._wait_for_single_codex_uuid(runtime)
+            requested_codex_uuid = _requested_exact_codex_resume(codex_arguments)
+            codex_uuid = self._wait_for_single_codex_uuid(
+                runtime,
+                requested_codex_uuid=requested_codex_uuid,
+            )
+            if requested_codex_uuid is not None and codex_uuid != requested_codex_uuid:
+                raise RodexRuntimeError(
+                    "Codex resumed an unexpected exact identity: "
+                    f"requested {requested_codex_uuid}, observed {codex_uuid}"
+                )
             self.publish_runtime_control(runtime, codex_uuid)
         except BaseException:
             self.stop(runtime, check=False)
@@ -407,12 +420,24 @@ class RodexRuntimeLauncher:
             check=check,
         )
 
-    def _wait_for_single_codex_uuid(self, runtime: LiveRodexRuntime) -> uuid.UUID:
+    def _wait_for_single_codex_uuid(
+        self,
+        runtime: LiveRodexRuntime,
+        *,
+        requested_codex_uuid: uuid.UUID | None = None,
+    ) -> uuid.UUID:
         deadline = self._monotonic() + self._startup_timeout_seconds
         last_error: BaseException | None = None
         while self._monotonic() < deadline:
             if not self.session_exists(runtime):
                 detail = _read_runtime_error_detail(runtime.app_server_log_path)
+                if requested_codex_uuid is not None and _codex_reports_missing_session(
+                    detail, requested_codex_uuid
+                ):
+                    raise RodexCodexSessionNotFoundError(
+                        "Codex has no saved session for exact identity "
+                        f"{requested_codex_uuid}"
+                    )
                 suffix = f": {detail}" if detail else ""
                 raise RodexRuntimeError(
                     f"Codex exited before its session was ready{suffix}"
@@ -614,14 +639,18 @@ def run_session_host(
             except RodexRuntimeError as error:
                 _record_runtime_path_keepalive_failure(log, error)
                 raise
-            tui = subprocess.Popen(
-                [
-                    codex_binary,
-                    "--remote",
-                    f"unix://{protocol_proxy_socket_path}",
-                    *codex_arguments,
-                ]
-            )
+            tui_command = [
+                codex_binary,
+                "--remote",
+                f"unix://{protocol_proxy_socket_path}",
+                *codex_arguments,
+            ]
+            tui_options: dict[str, object] = {}
+            if _requested_exact_codex_resume(codex_arguments) is not None:
+                # Startup happens before attach, so preserve exact-resume failures where
+                # the outer launcher can report them instead of losing the dead pane.
+                tui_options["stderr"] = log
+            tui = subprocess.Popen(tui_command, **tui_options)
             while True:
                 failure = runtime_path_keepalive.failure
                 if failure is not None:
@@ -749,3 +778,20 @@ def _read_runtime_error_detail(log_path: Path) -> str:
     except OSError:
         return ""
     return text[-1000:]
+
+
+def _requested_exact_codex_resume(
+    codex_arguments: Sequence[str],
+) -> uuid.UUID | None:
+    """Return the UUID only for the exact resume form Rodex itself launches."""
+    if len(codex_arguments) != 2 or codex_arguments[0] != "resume":
+        return None
+    try:
+        return uuid.UUID(codex_arguments[1])
+    except ValueError:
+        return None
+
+
+def _codex_reports_missing_session(detail: str, requested_uuid: uuid.UUID) -> bool:
+    """Recognise Codex's exact-ID failure without weakening identity matching."""
+    return f"No saved session found with ID {requested_uuid}" in detail

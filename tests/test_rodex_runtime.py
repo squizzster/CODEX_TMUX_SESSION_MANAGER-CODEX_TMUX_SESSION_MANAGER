@@ -9,6 +9,7 @@ import time
 import uuid
 from pathlib import Path
 from threading import Event, Lock
+from typing import BinaryIO, cast
 
 import pytest
 
@@ -16,6 +17,7 @@ import rodex.runtime as runtime_module
 from rodex.runtime import (
     LiveRodexRuntime,
     LiveTmuxSession,
+    RodexCodexSessionNotFoundError,
     RodexRuntimeError,
     RodexRuntimeLauncher,
     run_session_host,
@@ -159,6 +161,78 @@ def test_start_directly_hosts_codex_in_tmux_and_returns_its_uuid(
             codex_uuid,
         ],
     ]
+
+
+def test_exact_resume_fails_when_codex_reports_that_uuid_is_not_saved(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    codex_uuid = uuid.UUID("01a00654-f2bc-7a30-834a-a5f886a65f82")
+    monkeypatch.setenv("RODEX_RUNTIME_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        runtime_module.secrets, "token_hex", lambda size: "0123456789abcdef"
+    )
+    calls: list[list[str]] = []
+
+    def exited_resume_runner(
+        command: list[str], **_options: object
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        if "new-session" in command:
+            (tmp_path / "app-0123456789abcdef.log").write_text(
+                f"ERROR: No saved session found with ID {codex_uuid}. "
+                "Run `codex resume` without an ID to choose from existing sessions.\n"
+            )
+        return subprocess.CompletedProcess(
+            command,
+            1 if "has-session" in command else 0,
+            stdout="",
+            stderr="",
+        )
+
+    launcher = RodexRuntimeLauncher(
+        "/usr/bin/codex",
+        "/usr/bin/tmux",
+        runner=exited_resume_runner,
+        python_executable="/venv/bin/python",
+    )
+
+    with pytest.raises(RodexCodexSessionNotFoundError) as raised:
+        launcher.start(tmp_path, ["resume", str(codex_uuid)])
+
+    assert str(raised.value) == (
+        f"Codex has no saved session for exact identity {codex_uuid}"
+    )
+    assert any("kill-session" in command for command in calls)
+
+
+def test_exact_resume_rejects_a_different_loaded_uuid_before_publishing_control(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    requested_uuid = uuid.UUID("01a00654-f2bc-7a30-834a-a5f886a65f82")
+    observed_uuid = uuid.UUID(int=requested_uuid.int + 1)
+    monkeypatch.setenv("RODEX_RUNTIME_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        runtime_module.secrets, "token_hex", lambda size: "0123456789abcdef"
+    )
+    runner = RuntimeRunner(tmp_path)
+    connector = RecordingConnector([str(observed_uuid)])
+    launcher = RodexRuntimeLauncher(
+        "/usr/bin/codex",
+        "/usr/bin/tmux",
+        runner=runner,
+        connector=connector,
+        python_executable="/venv/bin/python",
+    )
+
+    with pytest.raises(RodexRuntimeError) as raised:
+        launcher.start(tmp_path, ["resume", str(requested_uuid)])
+
+    assert str(raised.value) == (
+        "Codex resumed an unexpected exact identity: "
+        f"requested {requested_uuid}, observed {observed_uuid}"
+    )
+    tmux_operations = [command[3] for command in runner.calls]
+    assert tmux_operations == ["new-session", "has-session", "kill-session"]
 
 
 def test_attach_uses_live_stdio_and_escapes_an_existing_tmux_client(
@@ -638,14 +712,25 @@ def test_runtime_path_keepalives_share_runtime_paths_independently(
     assert refresh_counts[tmux_socket] > refresh_counts[private_a]
 
 
+@pytest.mark.parametrize(
+    ("codex_arguments", "captures_stderr"),
+    [
+        (["resume", "01a00654-f2bc-7a30-834a-a5f886a65f82"], True),
+        (["--model", "example"], False),
+    ],
+)
 def test_session_host_connects_the_tui_through_the_protocol_proxy(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    codex_arguments: list[str],
+    captures_stderr: bool,
 ) -> None:
     app_socket = tmp_path / "app.sock"
     proxy_socket = tmp_path / "proxy.sock"
     event_socket = tmp_path / "events.sock"
     tmux_socket = tmp_path / "tmux.sock"
     tui_commands: list[list[str]] = []
+    tui_options: list[dict[str, object]] = []
     status_updates: list[int] = []
     proxy_lifecycle: list[str] = []
     protected_paths: tuple[Path, ...] | None = None
@@ -720,7 +805,7 @@ def test_session_host_connects_the_tui_through_the_protocol_proxy(
     def start_process(command: list[str], **options: object) -> FakeProcess:
         if "app-server" not in command:
             tui_commands.append(command)
-            assert options == {}
+            tui_options.append(options)
         return FakeProcess(command)
 
     monkeypatch.setenv("TMUX_PANE", "%4")
@@ -746,7 +831,7 @@ def test_session_host_connects_the_tui_through_the_protocol_proxy(
             event_socket,
             "/usr/bin/tmux",
             tmux_socket,
-            ["resume", "codex-uuid"],
+            codex_arguments,
         )
         == 0
     )
@@ -777,10 +862,16 @@ def test_session_host_connects_the_tui_through_the_protocol_proxy(
             "/usr/bin/codex",
             "--remote",
             f"unix://{proxy_socket}",
-            "resume",
-            "codex-uuid",
+            *codex_arguments,
         ]
     ]
+    assert len(tui_options) == 1
+    if captures_stderr:
+        captured_stderr = tui_options[0].get("stderr")
+        assert captured_stderr is not None
+        assert cast(BinaryIO, captured_stderr).name == str(tmp_path / "app.log")
+    else:
+        assert tui_options == [{}]
 
 
 def test_session_host_terminates_the_tui_when_runtime_keepalive_fails(

@@ -1,4 +1,18 @@
+# Agent instructions
+
+Agent instructions should generally be followed, retained, without modification when the architecture of this project is updated.
+
+The architecture standards should be applied as written as a general rule during development though like any project there are conditions where the architecture can be enhanced from its current standard to better meet the needs or indeed to be better designed than it is currently. Changes to architecture should be an agent-suggestion followed by a user-agreement.
+
+This document represents the key architectural decisions for the project, is expected to be agent updated, compact - always relevant. We're not a log of changes... we are a blue-print of where we are now said clearly in a highly compact manner suitable for another agent to ingest so we are very dense yet where needed be must be expressive, ASCII-system-flow diagrams are acceptable where useful, the important thing here is to ask the question what would I need to know if I was just freshly looking at this project in terms of the architecture - compact yet complete.
+
+When you are updating this document then consider spawning one independent sub-agent to review and write the update. Wait for its report, critically evaluate every suggestion yourself, and implement only the suggestions you judge sensible. You are in-charge, in-control, you own it.
+
+The maximum number of lines in this file is 150 lines maximum, if you need additional then you must re-consider how you may compact the architecture narratively, or consider which parts of the documention you will drop to make room for your changes. In all cases, 150 lines is the maximum. The maximum size of this file is 10 x 1024 bytes = 10,240 bytes maximum.
+
 # Rodex architecture
+
+Apply these standards to future schema decisions. These authorative standards may be modified only by an agent-suggestion followed by a user-agree
 
 Rodex is a local match-maker between three separate identities: a Rodex session, the
 real Codex session it represents, and the tmux runtime currently hosting it.
@@ -21,11 +35,7 @@ session host ──► Codex TUI ──► protocol proxy ──► Codex app-se
                                 └──► live event tap ──► tail/wait/send clients
 ```
 
-The TUI remains the normal Codex interface. The tmux status derives its private/shared
-state directly from the number of clients attached to that exact session. The proxy
-forwards WebSocket frames in both directions, derives a runtime tool-call count, and
-fans out selected structured events. It does not screen-scrape or persist conversation
-content.
+The TUI remains the normal Codex interface. The tmux status derives its private/shared state directly from the number of clients attached to that exact session. The proxy forwards WebSocket frames in both directions, derives a runtime tool-call count, and fans out selected structured events. It does not screen-scrape or persist conversation content.
 
 ## Component boundaries
 

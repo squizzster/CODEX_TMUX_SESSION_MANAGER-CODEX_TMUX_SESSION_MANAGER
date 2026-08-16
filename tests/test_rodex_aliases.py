@@ -64,7 +64,7 @@ def test_alias_is_one_owned_integer_identity_and_force_replaces_it(
     assert lookup_rodex_session_id_from_a_cool_name("user_defined_field", database) == (
         session_id
     )
-    with pytest.raises(RodexSessionError, match="use -f or --force"):
+    with pytest.raises(RodexSessionError, match="use --force"):
         assign_a_user_defined_cool_name(
             "black-sawfly", "replacement", database, user_identity=DNA
         )

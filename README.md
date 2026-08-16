@@ -1,8 +1,9 @@
 # Rodex - whenever you type `codex` try instead `rodex`
 
-Rodex makes Running Codex CLI sessions durable and memorable by running them inside tmux.
-Start normally with `./rodex`, detach when needed, and return later using a generated
-name such as `automatic-beluga`.
+Rodex passes ordinary invocations straight to Codex and gives its own commands an
+underscore namespace. Create a durable tmux-hosted session with `./rodex _create`,
+detach when needed, and return later using a generated name such as
+`automatic-beluga`.
 
 > **Development status: PROTO.** Rodex is a Linux/POSIX prototype under active
 > development. Breaking changes and disposable database resets are expected.
@@ -20,15 +21,16 @@ name such as `automatic-beluga`.
 - Keeps the in-TUI `/rodex` command implementation available but disabled for now.
 - Sends work to, waits for, or follows a running session from another shell.
 
-Rodex does not replace the Codex CLI. It wraps its normal interface with local session
-identity, tmux lifecycle management, and a transparent protocol proxy.
+Rodex does not replace or reinterpret the Codex CLI. Unless an exact underscore Rodex
+command or an existing Rodex session name is supplied, it replaces itself with Codex
+and preserves the original arguments, terminal streams, signals, and exit status.
 
 ## Requirements
 
 - Linux or a compatible POSIX system; Windows is not supported.
 - Python 3.12 or newer.
 - [`uv`](https://docs.astral.sh/uv/).
-- `tmux` available on `PATH`.
+- `tmux` available on `PATH` for underscore commands and stored Rodex sessions.
 - An installed and authenticated `codex` CLI.
 
 ## Quick start
@@ -37,7 +39,7 @@ identity, tmux lifecycle management, and a transparent protocol proxy.
 git clone https://github.com/squizzster/CODEX_TMUX_SESSION_MANAGER-CODEX_TMUX_SESSION_MANAGER.git rodex
 cd rodex
 uv sync
-./rodex
+./rodex _create
 ```
 
 At the `›` prompt, use Codex normally. Detach without ending the session with
@@ -50,28 +52,29 @@ To expose this checkout as the system-wide `rodex` command, follow the
 
 | Command | Behaviour |
 |---|---|
-| `./rodex` | Create and attach to a new Rodex/Codex session. |
-| `./rodex --create project_1234` | Create a session with a preferred display name. |
-| `./rodex -d` | Create without attaching and print expanded identity JSON. |
+| `./rodex` | Pass through to the ordinary Codex TUI. |
+| `./rodex _create` | Create and attach to a new Rodex/Codex session. |
+| `./rodex _create project_1234` | Create a session with a preferred display name. |
+| `./rodex _detach` | Create without attaching and print expanded identity JSON. |
 | `./rodex automatic-beluga` | Attach if live; otherwise resume or recover its Codex session. |
-| `./rodex running` | List this POSIX user's running Rodex sessions (`sessions` also works). |
-| `./rodex alias automatic-beluga edgar-work` | Assign a preferred display name. |
-| `./rodex alias -f automatic-beluga new-name` | Replace an existing display name. |
-| `./rodex send edgar-work "Run the tests"` | Start or steer work in a running session. |
-| `./rodex wait edgar-work` | Wait until the running session is idle. |
-| `./rodex tail edgar-work` | Follow structured live protocol events as JSON lines. |
+| `./rodex _running` | List this POSIX user's running Rodex sessions. |
+| `./rodex _alias automatic-beluga edgar-work` | Assign a preferred display name. |
+| `./rodex _alias --force automatic-beluga new-name` | Replace an existing display name. |
+| `./rodex _send edgar-work "Run the tests"` | Start or steer work in a running session. |
+| `./rodex _wait edgar-work` | Wait until the running session is idle. |
+| `./rodex _tail edgar-work` | Follow structured live protocol events as JSON lines. |
 
-Create also accepts `--c` or `-create`; `-c` remains Codex's `--config` option. Detach
-accepts `-d`, `--d`, `-detach`, or `--detach`. The bare control commands accept
-`--running`, `sessions`, `--sessions`, `--alias`, `--send`,
-`--wait`, and `--tail`. Stop `tail` with `Ctrl-C`; the Rodex session keeps running.
-Names use 1–80 ASCII letters, digits, underscores, or hyphens and begin with a letter
-or digit. Rodex control words and Codex top-level commands/aliases are reserved
-case-insensitively; this vocabulary may grow with supported Codex versions.
+Only `_alias` accepts a Rodex flag: `--force`. Arguments after `_create` or `_detach`
+are forwarded to the managed Codex TUI; use `--` when an explicit boundary improves
+clarity. Stop `_tail` with `Ctrl-C`; the Rodex session keeps running. Names use 1–80
+ASCII letters, digits, underscores, or hyphens and begin with a letter or digit. The
+existing reserved-name vocabulary remains case-insensitive and includes Codex
+top-level commands and aliases.
 
-A single argument keeps the natural Codex-style flow: if it matches an existing Rodex
-name, Rodex opens that session; otherwise the argument is passed to the new Codex TUI.
-Use `--create NAME` when the argument must become the session's display name.
+A single bare argument is the sole exception to the underscore command namespace: if
+it matches an existing Rodex name, Rodex opens that session. Otherwise it—and every
+other non-Rodex invocation—is passed unchanged to Codex. An existing Rodex name wins
+even if a later Codex release introduces a command with the same spelling.
 
 The in-TUI `/rodex` command and its completion ribbon are temporarily disabled through
 `RODEX_TMUX_SLASH_ENABLED` in `rodex.runtime`. The implementation remains in the

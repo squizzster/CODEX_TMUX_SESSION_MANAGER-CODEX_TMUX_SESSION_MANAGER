@@ -1212,7 +1212,7 @@ def _apply_user_defined_cool_name_assignment(
         if existing_alias_id is not None and not force:
             raise RodexSessionError(
                 f"Rodex session already has user-defined name {session_row[4]!r}; "
-                "use -f or --force to replace it"
+                "use --force to replace it"
             )
         if candidate_alias is not None:
             owners = _select_session_ids_by_cool_names_id(connection, candidate_alias.id)

@@ -12,7 +12,7 @@ never presented or stored as another domain's identity.
 
 ## Basic launch pipeline
 
-1. `./rodex` validates the `codex` and `tmux` executables.
+1. `./rodex _create` validates the `codex` and `tmux` executables.
 2. tmux starts a small supervisor directly; Rodex never types with `send-keys`.
 3. The supervisor starts one private Codex app-server and a transparent Rodex
    WebSocket proxy on short Unix sockets, then connects the normal TUI through it.
@@ -20,7 +20,13 @@ never presented or stored as another domain's identity.
 5. One SQLite transaction creates the Rodex identity, name, user/log, and tmux rows.
 6. tmux is renamed to the cool name and displays its Rodex identity, tool count, and
    live private/shared attachment state in its status bar.
-7. Rodex attaches to the ordinary Codex prompt; arguments and slash commands work.
+7. Rodex attaches to the ordinary Codex prompt; forwarded arguments and slash commands
+   work.
+
+Every invocation outside the exact underscore Rodex command namespace is handed to
+Codex unchanged, with one exception: a single bare existing Rodex name follows the
+reattachment pipeline below. Direct passthrough uses process replacement so Codex
+retains native stdin, stdout, stderr, signals, and exit status.
 
 The proxy forwards protocol frames unchanged in both directions, counts unique tool
 starts, and fans structured TUI events to bounded live subscribers. tmux user options
@@ -41,10 +47,10 @@ Enter/Tab bindings and pane pipe, so all input currently passes directly to Code
   Codex runtime and atomically relinks its new UUID to the existing Rodex identity.
   Other resume failures and UUID mismatches remain hard failures.
 - Both routes preserve the Rodex identity and update `last_accessed_at_utc`.
-- `./rodex running` (`--running`, `sessions`, or `--sessions`) lists the current
-  POSIX user's live runtimes.
-- `./rodex alias SESSION NAME` sets its portable preferred name; `-f` replaces it.
-- `send`, `wait`, and `tail` verify the stored and live Codex UUID before acting.
+- `./rodex _running` lists the current POSIX user's live runtimes.
+- `./rodex _alias SESSION NAME` sets its portable preferred name; `--force` replaces
+  it.
+- `_send`, `_wait`, and `_tail` verify the stored and live Codex UUID before acting.
 
 ## Lifecycle
 

@@ -8,10 +8,14 @@ import shutil
 import sqlite3
 import sys
 import uuid
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
+from typing import Final
 
-from cool_name import CoolNameError, normalise_rodex_display_name
+from cool_name import (
+    CoolNameError,
+    normalise_rodex_display_name,
+)
 from rodex_functions import (
     RodexSessionError,
     create_a_rodex_session,
@@ -47,14 +51,33 @@ class RodexExecutableNotFoundError(RodexLaunchError):
     """A required executable could not be resolved from PATH."""
 
 
-_RUNNING_COMMANDS = frozenset({"running", "--running", "sessions", "--sessions"})
-_ALIAS_COMMANDS = frozenset({"alias", "--alias"})
-_SEND_COMMANDS = frozenset({"send", "--send"})
-_TAIL_COMMANDS = frozenset({"tail", "--tail"})
-_WAIT_COMMANDS = frozenset({"wait", "--wait"})
-_FORCE_FLAGS = frozenset({"-f", "--f", "-force", "--force"})
-_CREATE_FLAGS = frozenset({"--c", "-create", "--create"})
-_DETACH_FLAGS = frozenset({"-d", "--d", "-detach", "--detach"})
+_RUNNING_COMMAND: Final = "_running"
+_ALIAS_COMMAND: Final = "_alias"
+_SEND_COMMAND: Final = "_send"
+_WAIT_COMMAND: Final = "_wait"
+_TAIL_COMMAND: Final = "_tail"
+_CREATE_COMMAND: Final = "_create"
+_DETACH_COMMAND: Final = "_detach"
+_FORCE_FLAG: Final = "--force"
+_RODEX_COMMANDS: Final = frozenset(
+    {
+        _RUNNING_COMMAND,
+        _ALIAS_COMMAND,
+        _SEND_COMMAND,
+        _WAIT_COMMAND,
+        _TAIL_COMMAND,
+        _CREATE_COMMAND,
+        _DETACH_COMMAND,
+    }
+)
+
+CodexDelegator = Callable[[str, Sequence[str]], int]
+
+
+def _exec_codex(codex_binary: str, arguments: Sequence[str]) -> int:
+    """Replace Rodex with a Codex command that does not belong in managed tmux."""
+    os.execv(codex_binary, [codex_binary, *arguments])
+    raise AssertionError("os.execv returned unexpectedly")
 
 
 def run(
@@ -63,10 +86,23 @@ def run(
     database_path: str | os.PathLike[str] | None = None,
     launcher: RodexRuntimeLauncher | None = None,
     control_client: CodexControlClient | None = None,
+    codex_delegator: CodexDelegator = _exec_codex,
 ) -> int:
-    """Create, register, and attach to one tmux-hosted Codex session."""
+    """Route explicit Rodex commands and pass every other invocation to Codex."""
     arguments = list(sys.argv[1:] if argv is None else argv)
     configured_codex = os.environ.get("RODEX_CODEX_BINARY", "codex")
+    resolved_database = (
+        Path(database_path).expanduser().resolve()
+        if database_path is not None
+        else default_rodex_database_path()
+    )
+    rodex_command = (
+        arguments[0] if arguments[:1] and arguments[0] in _RODEX_COMMANDS else None
+    )
+    possible_existing_name = _possible_existing_rodex_name(arguments, resolved_database)
+    if rodex_command is None and not possible_existing_name:
+        return _delegate_to_codex(configured_codex, arguments, codex_delegator)
+
     configured_tmux = os.environ.get("RODEX_TMUX_BINARY", "tmux")
     tmux_binary = shutil.which(configured_tmux)
     if tmux_binary is None:
@@ -74,11 +110,6 @@ def run(
             f"tmux executable was not found: {configured_tmux}"
         )
 
-    resolved_database = (
-        Path(database_path).expanduser().resolve()
-        if database_path is not None
-        else default_rodex_database_path()
-    )
     codex_binary = shutil.which(configured_codex)
     runtime_launcher = launcher or RodexRuntimeLauncher(
         codex_binary or configured_codex, tmux_binary
@@ -100,6 +131,8 @@ def run(
         detach=detach,
     ):
         return 0
+    if rodex_command not in {_CREATE_COMMAND, _DETACH_COMMAND}:
+        return _delegate_to_codex(configured_codex, arguments, codex_delegator)
     if codex_binary is None:
         raise RodexExecutableNotFoundError(
             f"Codex executable was not found: {configured_codex}"
@@ -270,36 +303,48 @@ def _open_named_session(
 def _parse_launch_arguments(
     arguments: list[str],
 ) -> tuple[list[str], str | None, bool]:
-    try:
-        boundary = arguments.index("--")
-    except ValueError:
-        rodex_arguments = arguments
-        codex_arguments: list[str] = []
-    else:
-        rodex_arguments = arguments[:boundary]
-        codex_arguments = arguments[boundary:]
+    command = arguments[0]
+    command_arguments = arguments[1:]
+    if command == _DETACH_COMMAND:
+        return _without_separator(command_arguments), None, True
+    if command != _CREATE_COMMAND:
+        return arguments, None, False
+    if not command_arguments or command_arguments[0].startswith("-"):
+        return _without_separator(command_arguments), None, False
+    requested_name = command_arguments[0]
+    return _without_separator(command_arguments[1:]), requested_name, False
 
-    detach_arguments = [
-        argument for argument in rodex_arguments if argument in _DETACH_FLAGS
-    ]
-    if len(detach_arguments) > 1:
-        raise RodexLaunchError("a detach flag may be supplied only once")
-    remaining = [argument for argument in rodex_arguments if argument not in _DETACH_FLAGS]
-    create_positions = [
-        index for index, argument in enumerate(remaining) if argument in _CREATE_FLAGS
-    ]
-    if not create_positions:
-        return [*remaining, *codex_arguments], None, bool(detach_arguments)
-    if len(create_positions) != 1 or create_positions[0] + 1 >= len(remaining):
-        raise RodexLaunchError("usage: rodex [--detach] --create SESSION_NAME")
-    create_position = create_positions[0]
-    requested_name = remaining[create_position + 1]
-    forwarded_arguments = [
-        *remaining[:create_position],
-        *remaining[create_position + 2 :],
-        *codex_arguments,
-    ]
-    return forwarded_arguments, requested_name, bool(detach_arguments)
+
+def _without_separator(arguments: list[str]) -> list[str]:
+    return arguments[1:] if arguments[:1] == ["--"] else arguments
+
+
+def _possible_existing_rodex_name(arguments: list[str], database_path: Path) -> bool:
+    """Recognize only the one bare-name exception to explicit Rodex commands."""
+    if len(arguments) != 1 or arguments[0].startswith(("-", "_")):
+        return False
+    if not database_path.exists():
+        return False
+    try:
+        return (
+            lookup_owned_rodex_session_id_from_a_cool_name(arguments[0], database_path)
+            is not None
+        )
+    except (CoolNameError, ValueError):
+        return False
+
+
+def _delegate_to_codex(
+    configured_codex: str,
+    arguments: Sequence[str],
+    codex_delegator: CodexDelegator,
+) -> int:
+    codex_binary = shutil.which(configured_codex)
+    if codex_binary is None:
+        raise RodexExecutableNotFoundError(
+            f"Codex executable was not found: {configured_codex}"
+        )
+    return codex_delegator(codex_binary, arguments)
 
 
 def _print_existing_detached_runtime(
@@ -338,14 +383,14 @@ def _run_reserved_command(
     if not arguments:
         return False
     command = arguments[0]
-    if command in _RUNNING_COMMANDS:
+    if command == _RUNNING_COMMAND:
         if len(arguments) != 1:
-            raise RodexLaunchError("usage: rodex running")
+            raise RodexLaunchError("usage: rodex _running")
         _print_running_sessions(database_path, launcher)
         return True
-    if command in _SEND_COMMANDS:
+    if command == _SEND_COMMAND:
         if len(arguments) < 3:
-            raise RodexLaunchError("usage: rodex send SESSION_NAME PROMPT")
+            raise RodexLaunchError("usage: rodex _send SESSION_NAME PROMPT")
         session_name = arguments[1]
         prompt = " ".join(arguments[2:])
         session_id, runtime, control = _resolve_live_control(
@@ -362,9 +407,9 @@ def _run_reserved_command(
             flush=True,
         )
         return True
-    if command in _WAIT_COMMANDS:
+    if command == _WAIT_COMMAND:
         if len(arguments) != 2:
-            raise RodexLaunchError("usage: rodex wait SESSION_NAME")
+            raise RodexLaunchError("usage: rodex _wait SESSION_NAME")
         session_id, runtime, control = _resolve_live_control(
             arguments[1], database_path, launcher
         )
@@ -375,9 +420,9 @@ def _run_reserved_command(
         record_a_rodex_session_access(session_id, database_path)
         print(f"Rodex {arguments[1]}: Codex turn complete", flush=True)
         return True
-    if command in _TAIL_COMMANDS:
+    if command == _TAIL_COMMAND:
         if len(arguments) != 2:
-            raise RodexLaunchError("usage: rodex tail SESSION_NAME")
+            raise RodexLaunchError("usage: rodex _tail SESSION_NAME")
         session_id, runtime, control = _resolve_live_control(
             arguments[1], database_path, launcher
         )
@@ -393,11 +438,11 @@ def _run_reserved_command(
             revalidate=lambda: _revalidate_live_control(launcher, runtime, control),
         )
         return True
-    if command in _ALIAS_COMMANDS:
+    if command == _ALIAS_COMMAND:
         force, operands = _parse_alias_arguments(arguments[1:])
         if len(operands) != 2:
             raise RodexLaunchError(
-                "usage: rodex alias [-f|--force] SESSION_NAME USER_DEFINED_NAME"
+                "usage: rodex _alias [--force] SESSION_NAME USER_DEFINED_NAME"
             )
         recorded_tmux: LiveTmuxSession | None = None
         active_tmux: LiveTmuxSession | None = None
@@ -479,7 +524,7 @@ def _parse_alias_arguments(arguments: list[str]) -> tuple[bool, list[str]]:
     force = False
     operands: list[str] = []
     for argument in arguments:
-        if argument in _FORCE_FLAGS:
+        if argument == _FORCE_FLAG:
             force = True
         elif argument.startswith("-"):
             raise RodexLaunchError(f"unknown alias option: {argument}")

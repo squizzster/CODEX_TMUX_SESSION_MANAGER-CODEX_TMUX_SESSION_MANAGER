@@ -130,6 +130,16 @@ class StubControlClient:
         write_event('{"method":"turn/started"}')
 
 
+class RecordingCodexDelegator:
+    def __init__(self, returncode: int = 0) -> None:
+        self.returncode = returncode
+        self.calls: list[tuple[str, list[str]]] = []
+
+    def __call__(self, codex_binary: str, arguments: list[str]) -> int:
+        self.calls.append((codex_binary, arguments))
+        return self.returncode
+
+
 def available_prerequisite(command: str) -> str:
     return f"/usr/bin/{command}"
 
@@ -144,7 +154,7 @@ def create_controlled_session(database: Path, tmp_path: Path) -> None:
     )
 
 
-@pytest.mark.parametrize("command", ["send", "--send"])
+@pytest.mark.parametrize("command", ["_send"])
 def test_send_command_targets_the_verified_named_runtime(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -178,7 +188,7 @@ def test_send_command_targets_the_verified_named_runtime(
     assert "started Codex turn turn-1" in capsys.readouterr().out
 
 
-@pytest.mark.parametrize("command", ["wait", "--wait"])
+@pytest.mark.parametrize("command", ["_wait"])
 def test_wait_command_waits_for_the_verified_named_runtime(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command: str
 ) -> None:
@@ -204,7 +214,7 @@ def test_wait_command_waits_for_the_verified_named_runtime(
     assert control.waited == [launcher.control]
 
 
-@pytest.mark.parametrize("command", ["tail", "--tail"])
+@pytest.mark.parametrize("command", ["_tail"])
 def test_tail_command_streams_json_events_for_the_verified_named_runtime(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -251,7 +261,7 @@ def test_run_links_real_codex_and_tmux_identities_before_attach(
 
     assert (
         run(
-            ["--model", "example"],
+            ["_create", "--model", "example"],
             database_path=database,
             launcher=launcher,  # type: ignore[arg-type]
         )
@@ -274,7 +284,104 @@ def test_run_links_real_codex_and_tmux_identities_before_attach(
     assert "Rodex automatic-beluga" in output
 
 
-@pytest.mark.parametrize("create_flag", ["--c", "-create", "--create"])
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        [],
+        ["--help"],
+        ["-h"],
+        ["--version"],
+        ["-V"],
+        ["exec"],
+        ["review"],
+        ["login"],
+        ["logout"],
+        ["mcp"],
+        ["plugin"],
+        ["mcp-server"],
+        ["app-server"],
+        ["remote-control"],
+        ["completion"],
+        ["update"],
+        ["doctor"],
+        ["sandbox"],
+        ["debug"],
+        ["apply"],
+        ["resume"],
+        ["archive"],
+        ["delete"],
+        ["unarchive"],
+        ["fork"],
+        ["cloud"],
+        ["exec-server"],
+        ["features"],
+        ["help"],
+        ["exec", "--json", "run tests"],
+        ["review", "--uncommitted"],
+        ["features", "list"],
+        ["mcp", "list"],
+        ["completion", "bash"],
+        ["doctor"],
+        ["resume", "--last"],
+        ["fork", "--last"],
+        ["--remote", "unix:///tmp/codex.sock"],
+        ["--remote=unix:///tmp/codex.sock"],
+        ["--future-codex-option"],
+        ["--model", "example"],
+        ["future-codex-command", "argument"],
+        ["--create", "project_1234"],
+        ["--detach"],
+        ["--force"],
+        ["running"],
+    ],
+)
+def test_non_rodex_invocations_delegate_unchanged_without_tmux_or_database(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    arguments: list[str],
+) -> None:
+    database = tmp_path / "rodex.sqlite3"
+    delegator = RecordingCodexDelegator(returncode=23)
+    monkeypatch.setattr(
+        "rodex.cli.shutil.which",
+        lambda command: "/usr/bin/codex" if command == "codex" else None,
+    )
+
+    assert (
+        run(arguments, database_path=database, codex_delegator=delegator)
+        == delegator.returncode
+    )
+
+    assert delegator.calls == [("/usr/bin/codex", arguments)]
+    assert not database.exists()
+
+
+def test_create_command_forwards_interactive_codex_arguments_to_managed_runtime(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    launcher = StubLauncher(tmp_path)
+    delegator = RecordingCodexDelegator()
+    monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
+    monkeypatch.setattr(
+        "cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga"
+    )
+
+    assert (
+        run(
+            ["_create", "--model", "review"],
+            database_path=tmp_path / "rodex.sqlite3",
+            launcher=launcher,  # type: ignore[arg-type]
+            codex_delegator=delegator,
+        )
+        == 0
+    )
+
+    assert launcher.started == [(Path.cwd(), ["--model", "review"])]
+    assert delegator.calls == []
+
+
+@pytest.mark.parametrize("create_flag", ["_create"])
 def test_explicit_create_assigns_the_requested_display_name(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -308,7 +415,7 @@ def test_explicit_create_assigns_the_requested_display_name(
     assert tmux_link.tmux_session_name == "project_1234"
 
 
-@pytest.mark.parametrize("create_flag", ["--c", "-create", "--create"])
+@pytest.mark.parametrize("create_flag", ["_create"])
 def test_explicit_create_forwards_ordinary_codex_options(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -338,30 +445,25 @@ def test_explicit_create_forwards_ordinary_codex_options(
     assert names.display_name == "project_1234"
 
 
-def test_codex_short_config_wins_over_rodex_create(
+def test_codex_short_config_passes_through_without_starting_rodex(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     database = tmp_path / "rodex.sqlite3"
-    launcher = StubLauncher(tmp_path)
+    delegator = RecordingCodexDelegator()
     monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
-    monkeypatch.setattr(
-        "cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga"
-    )
 
     assert (
         run(
             ["-c", 'model="gpt-5.6-luna"'],
             database_path=database,
-            launcher=launcher,  # type: ignore[arg-type]
+            codex_delegator=delegator,
         )
         == 0
     )
 
-    assert launcher.started == [(Path.cwd(), ["-c", 'model="gpt-5.6-luna"'])]
-    names = lookup_rodex_session_names(1, database)
-    assert names is not None
-    assert names.user_defined_cool_name is None
+    assert delegator.calls == [("/usr/bin/codex", ["-c", 'model="gpt-5.6-luna"'])]
+    assert not database.exists()
 
 
 @pytest.mark.parametrize(
@@ -374,23 +476,33 @@ def test_codex_end_of_options_preserves_rodex_looking_arguments(
     codex_argument: str,
 ) -> None:
     database = tmp_path / "rodex.sqlite3"
-    launcher = StubLauncher(tmp_path)
+    delegator = RecordingCodexDelegator()
     monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
-    monkeypatch.setattr(
-        "cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga"
-    )
 
     assert (
         run(
             ["exec", "--", codex_argument],
             database_path=database,
-            launcher=launcher,  # type: ignore[arg-type]
+            codex_delegator=delegator,
         )
         == 0
     )
 
-    assert launcher.started == [(Path.cwd(), ["exec", "--", codex_argument])]
-    assert launcher.attached == launcher.configured
+    assert delegator.calls == [("/usr/bin/codex", ["exec", "--", codex_argument])]
+    assert not database.exists()
+
+
+def test_rodex_launch_options_are_consumed_only_from_the_command_prefix(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    delegator = RecordingCodexDelegator()
+    monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
+    arguments = ["exec", "-d", "--create", "report"]
+
+    assert run(arguments, codex_delegator=delegator) == 0
+
+    assert delegator.calls == [("/usr/bin/codex", arguments)]
 
 
 def test_explicit_create_can_forward_codex_arguments_after_end_of_options(
@@ -406,20 +518,20 @@ def test_explicit_create_can_forward_codex_arguments_after_end_of_options(
 
     assert (
         run(
-            ["--create", "project_1234", "--", "--create"],
+            ["_create", "project_1234", "--", "--create"],
             database_path=database,
             launcher=launcher,  # type: ignore[arg-type]
         )
         == 0
     )
 
-    assert launcher.started == [(Path.cwd(), ["--", "--create"])]
+    assert launcher.started == [(Path.cwd(), ["--create"])]
     names = lookup_rodex_session_names(1, database)
     assert names is not None
     assert names.display_name == "project_1234"
 
 
-@pytest.mark.parametrize("detach_flag", ["-d", "--d", "-detach", "--detach"])
+@pytest.mark.parametrize("detach_flag", ["_detach"])
 def test_detach_starts_without_attaching_and_prints_compact_json(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -455,8 +567,8 @@ def test_detach_starts_without_attaching_and_prints_compact_json(
     assert output == f"{json.dumps(payload, indent=2)}\n"
 
 
-@pytest.mark.parametrize("detach_flag", ["-d", "--d", "-detach", "--detach"])
-def test_explicit_create_and_detach_compose(
+@pytest.mark.parametrize("detach_flag", ["_detach"])
+def test_detach_command_forwards_interactive_codex_arguments(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -471,7 +583,7 @@ def test_explicit_create_and_detach_compose(
 
     assert (
         run(
-            ["--create", "project_1234", detach_flag],
+            [detach_flag, "--model", "gpt-5.6-terra"],
             database_path=database,
             launcher=launcher,  # type: ignore[arg-type]
         )
@@ -479,10 +591,11 @@ def test_explicit_create_and_detach_compose(
     )
 
     assert launcher.attached == []
-    assert json.loads(capsys.readouterr().out)["rodex_session_name"] == "project_1234"
+    assert launcher.started == [(Path.cwd(), ["--model", "gpt-5.6-terra"])]
+    assert json.loads(capsys.readouterr().out)["rodex_session_name"] == ("automatic-beluga")
 
 
-@pytest.mark.parametrize("detach_flag", ["-d", "--d", "-detach", "--detach"])
+@pytest.mark.parametrize("detach_flag", ["_detach"])
 def test_detach_existing_name_resolves_without_attaching(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -511,20 +624,50 @@ def test_detach_existing_name_resolves_without_attaching(
     assert json.loads(capsys.readouterr().out)["rodex_session_name"] == ("automatic-beluga")
 
 
-def test_multiple_detach_spellings_are_rejected_before_codex_starts(
+def test_unknown_underscore_command_passes_through_unchanged(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    launcher = StubLauncher(tmp_path)
+    delegator = RecordingCodexDelegator()
     monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
+    arguments = ["_future-command", "argument"]
 
-    with pytest.raises(RodexLaunchError, match="detach flag may be supplied only once"):
+    assert run(arguments, codex_delegator=delegator) == 0
+
+    assert delegator.calls == [("/usr/bin/codex", arguments)]
+
+
+def test_existing_name_wins_over_a_possible_future_codex_command(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database = tmp_path / "rodex.sqlite3"
+    monkeypatch.setattr(
+        "cool_name.functions.coolname.generate_slug", lambda _count: "future-command"
+    )
+    monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
+    create_a_rodex_session(
+        database,
+        codex_session_uuid=CODEX_UUID,
+        user_identity=RodexSessionsUserIdentity(1009, 1010, "dna"),
+        tmux_server_socket_path=tmp_path / "tmux.sock",
+        tmux_session_name="rodex-token",
+    )
+    launcher = StubLauncher(tmp_path)
+    delegator = RecordingCodexDelegator()
+
+    assert (
         run(
-            ["-d", "--detach"],
-            database_path=tmp_path / "rodex.sqlite3",
+            ["future-command"],
+            database_path=database,
             launcher=launcher,  # type: ignore[arg-type]
+            codex_delegator=delegator,
         )
+        == 0
+    )
 
+    assert delegator.calls == []
     assert launcher.started == []
+    assert launcher.attached[0].tmux_session_name == "future-command"
 
 
 def test_live_cool_name_argument_renames_configures_and_reattaches_without_starting_codex(
@@ -788,9 +931,9 @@ def test_either_name_route_displays_the_user_defined_name(
     assert "Reattaching Rodex work" in capsys.readouterr().out
 
 
-@pytest.mark.parametrize("command", ["alias", "--alias"])
-@pytest.mark.parametrize("force_flag", ["-f", "--f", "-force", "--force"])
-def test_alias_commands_accept_every_force_spelling_without_starting_codex(
+@pytest.mark.parametrize("command", ["_alias"])
+@pytest.mark.parametrize("force_flag", ["--force"])
+def test_alias_command_accepts_force_without_starting_codex(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -870,13 +1013,30 @@ def test_alias_replacement_without_force_is_reported_on_stderr(
     )
     assign_a_user_defined_cool_name("black-sawfly", "first", database, user_identity=DNA)
     monkeypatch.setenv("RODEX_DATABASE_PATH", str(database))
-    monkeypatch.setattr(sys, "argv", ["rodex", "alias", "black-sawfly", "replacement"])
+    monkeypatch.setattr(sys, "argv", ["rodex", "_alias", "black-sawfly", "replacement"])
 
     with pytest.raises(SystemExit) as raised:
         main()
 
     assert raised.value.code == 1
-    assert "use -f or --force" in capsys.readouterr().err
+    assert "use --force" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("unsupported_force", ["-f", "--f", "-force"])
+def test_alias_rejects_removed_force_spellings(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    unsupported_force: str,
+) -> None:
+    launcher = StubLauncher(tmp_path)
+    monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
+
+    with pytest.raises(RodexLaunchError, match="unknown alias option"):
+        run(
+            ["_alias", unsupported_force, "session", "replacement"],
+            database_path=tmp_path / "rodex.sqlite3",
+            launcher=launcher,  # type: ignore[arg-type]
+        )
 
 
 def test_empty_alias_is_a_concise_stderr_error(
@@ -900,7 +1060,7 @@ def test_empty_alias_is_a_concise_stderr_error(
         tmux_session_name="safe-name",
     )
     monkeypatch.setenv("RODEX_DATABASE_PATH", str(database))
-    monkeypatch.setattr(sys, "argv", ["rodex", "alias", "safe-name", ""])
+    monkeypatch.setattr(sys, "argv", ["rodex", "_alias", "safe-name", ""])
 
     with pytest.raises(SystemExit) as raised:
         main()
@@ -946,7 +1106,7 @@ def test_missing_executable_retains_command_not_found_exit_status(
     assert "tmux executable" in capsys.readouterr().err
 
 
-@pytest.mark.parametrize("command", ["running", "--running", "sessions", "--sessions"])
+@pytest.mark.parametrize("command", ["_running"])
 def test_running_commands_show_only_the_current_users_live_sessions(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1014,7 +1174,7 @@ def test_new_launch_cleans_up_the_renamed_runtime_when_persistence_fails(
     )
 
     with pytest.raises(RuntimeError, match="persist failed"):
-        run([], database_path=database, launcher=launcher)  # type: ignore[arg-type]
+        run(["_create"], database_path=database, launcher=launcher)  # type: ignore[arg-type]
 
     assert launcher.renamed == [(launcher.runtime, "safe-name")]
     assert launcher.stopped == [
@@ -1075,7 +1235,7 @@ def test_alias_rename_failure_preserves_the_previous_name_everywhere(
     launcher = StubLauncher(tmp_path)
     assert (
         run(
-            ["alias", "safe-name", "first"],
+            ["_alias", "safe-name", "first"],
             database_path=database,
             launcher=launcher,  # type: ignore[arg-type]
         )
@@ -1088,7 +1248,7 @@ def test_alias_rename_failure_preserves_the_previous_name_everywhere(
     monkeypatch.setattr(launcher, "rename", fail_rename)
     with pytest.raises(RodexRuntimeError, match="rename failed"):
         run(
-            ["alias", "--force", "safe-name", "replacement"],
+            ["_alias", "--force", "safe-name", "replacement"],
             database_path=database,
             launcher=launcher,  # type: ignore[arg-type]
         )
@@ -1130,7 +1290,7 @@ def test_alias_database_failure_renames_tmux_back_and_leaves_no_alias(
 
     with pytest.raises(sqlite3.OperationalError, match="database failed"):
         run(
-            ["alias", "safe-name", "work"],
+            ["_alias", "safe-name", "work"],
             database_path=database,
             launcher=launcher,  # type: ignore[arg-type]
         )
@@ -1203,7 +1363,7 @@ def test_concurrent_alias_commands_serialize_across_tmux_and_database(
     ) -> None:
         try:
             run(
-                ["alias", "safe-name", name],
+                ["_alias", "safe-name", name],
                 database_path=database,
                 launcher=launcher,  # type: ignore[arg-type]
             )
@@ -1253,7 +1413,7 @@ def test_concurrent_alias_commands_serialize_across_tmux_and_database(
     assert first_errors == []
     assert len(second_errors) == 1
     assert isinstance(second_errors[0], RodexSessionError)
-    assert "use -f or --force" in str(second_errors[0])
+    assert "use --force" in str(second_errors[0])
     names = lookup_rodex_session_names(1, database)
     assert names is not None
     assert names.display_name == "first"
@@ -1344,7 +1504,7 @@ def test_run_does_not_create_a_session_when_a_prerequisite_is_missing(
     )
 
     with pytest.raises(RodexLaunchError, match=message):
-        run([], database_path=database)
+        run(["_create"], database_path=database)
 
     assert not database.exists()
 
@@ -1360,7 +1520,11 @@ def test_database_failure_stops_the_unregistered_runtime(
     )
 
     with pytest.raises(RuntimeError, match="database failed"):
-        run([], database_path=tmp_path / "db.sqlite3", launcher=launcher)  # type: ignore[arg-type]
+        run(
+            ["_create"],
+            database_path=tmp_path / "db.sqlite3",
+            launcher=launcher,  # type: ignore[arg-type]
+        )
 
     assert launcher.stopped == [(launcher.runtime, False)]
     assert launcher.attached == []

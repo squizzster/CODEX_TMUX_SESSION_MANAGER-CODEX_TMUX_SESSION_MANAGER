@@ -31,7 +31,7 @@ content.
 
 | Component | Responsibility |
 |---|---|
-| `rodex.cli` | Adapt commands, choose create/attach/resume, and present results. |
+| `rodex.cli` | Pass through to Codex or route exact underscore commands and stored names. |
 | `rodex.runtime` | Own tmux, app-server discovery, attachment, and supervision. |
 | `rodex.status_animation` | Render cancellable, one-shot sharing transitions. |
 | `rodex.session_host` | Keep one app-server, proxy, foreground TUI, and its runtime paths together. |
@@ -62,7 +62,7 @@ a permanent alternative lookup. Detailed future schema rules live in
 
 ## Authoritative lifecycle
 
-### New session
+### New session (`_create` or `_detach`)
 
 1. Start a detached tmux session containing the Rodex session host.
 2. Start one private Codex app-server and connect the TUI through the proxy.
@@ -81,9 +81,8 @@ a permanent alternative lookup. Detailed future schema rules live in
    relink the new Codex UUID; every other resume failure remains fatal.
 6. Replace the tmux endpoint before attaching.
 
-`running` and its `sessions` aliases follow the same ownership and live-endpoint rules.
-Alias changes use the same naming pipeline and compensate a tmux rename if the database
-transition fails.
+`_running` follows the same ownership and live-endpoint rules. `_alias` changes use the
+same naming pipeline and compensate a tmux rename if the database transition fails.
 
 tmux session hooks launch sharing animations with background `run-shell`. The animator
 uses scheduled callbacks in its own short-lived process, so attaching, detaching, tmux,

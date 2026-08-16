@@ -27,7 +27,7 @@ Verify the installation:
 
 ```bash
 command -v rodex
-rodex running
+rodex _running
 ```
 
 Rodex keeps its durable registry under `$XDG_STATE_HOME/rodex`, using
@@ -43,7 +43,7 @@ path before running Rodex:
 
 ```bash
 export RODEX_PROJECT_DIR=/absolute/path/to/rodex
-rodex running
+rodex _running
 ```
 
 Add that export to the shell's startup configuration when the override should persist.

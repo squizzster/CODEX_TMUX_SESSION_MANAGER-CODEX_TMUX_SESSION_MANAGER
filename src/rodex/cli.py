@@ -58,6 +58,7 @@ _WAIT_COMMAND: Final = "_wait"
 _TAIL_COMMAND: Final = "_tail"
 _CREATE_COMMAND: Final = "_create"
 _DETACH_COMMAND: Final = "_detach"
+_HELP_COMMAND: Final = "_help"
 _FORCE_FLAG: Final = "--force"
 _RODEX_COMMANDS: Final = frozenset(
     {
@@ -68,8 +69,26 @@ _RODEX_COMMANDS: Final = frozenset(
         _TAIL_COMMAND,
         _CREATE_COMMAND,
         _DETACH_COMMAND,
+        _HELP_COMMAND,
     }
 )
+
+_HELP_TEXT: Final = """\
+usage: rodex COMMAND [ARGUMENTS]
+
+Rodex commands:
+  _help                              Show this help and exit.
+  _create [NAME] [-- CODEX_ARGS...]  Create and attach to a managed session.
+  _detach [CODEX_ARGS...]            Create a managed session without attaching.
+  _running                           List running Rodex sessions.
+  _alias [--force] SESSION NAME      Assign a preferred session name.
+  _send SESSION PROMPT               Send work to a running session.
+  _wait SESSION                      Wait until a running session is idle.
+  _tail SESSION                      Follow live protocol events as JSON lines.
+
+Use a Rodex session name as the sole argument to attach, resume, or recover it.
+Every other invocation is passed unchanged to Codex.
+"""
 
 CodexDelegator = Callable[[str, Sequence[str]], int]
 
@@ -90,6 +109,12 @@ def run(
 ) -> int:
     """Route explicit Rodex commands and pass every other invocation to Codex."""
     arguments = list(sys.argv[1:] if argv is None else argv)
+    if arguments[:1] == [_HELP_COMMAND]:
+        if len(arguments) != 1:
+            raise RodexLaunchError("usage: rodex _help")
+        print(_HELP_TEXT, end="")
+        return 0
+
     configured_codex = os.environ.get("RODEX_CODEX_BINARY", "codex")
     resolved_database = (
         Path(database_path).expanduser().resolve()

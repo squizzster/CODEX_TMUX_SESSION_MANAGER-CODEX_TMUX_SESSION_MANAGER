@@ -154,6 +154,44 @@ def create_controlled_session(database: Path, tmp_path: Path) -> None:
     )
 
 
+def test_help_prints_rodex_commands_without_codex_tmux_or_database(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    database = tmp_path / "rodex.sqlite3"
+    delegator = RecordingCodexDelegator()
+    monkeypatch.setattr(
+        "rodex.cli.shutil.which",
+        lambda command: pytest.fail(f"unexpected prerequisite lookup: {command}"),
+    )
+
+    assert run(["_help"], database_path=database, codex_delegator=delegator) == 0
+
+    output = capsys.readouterr()
+    assert output.err == ""
+    assert output.out.startswith("usage: rodex COMMAND [ARGUMENTS]\n")
+    assert "_help" in output.out
+    assert "_create" in output.out
+    assert "_running" in output.out
+    assert "Every other invocation is passed unchanged to Codex." in output.out
+    assert delegator.calls == []
+    assert not database.exists()
+
+
+def test_help_rejects_arguments_without_checking_prerequisites(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "rodex.cli.shutil.which",
+        lambda command: pytest.fail(f"unexpected prerequisite lookup: {command}"),
+    )
+
+    with pytest.raises(RodexLaunchError, match=r"^usage: rodex _help$"):
+        run(["_help", "unexpected"], database_path=tmp_path / "rodex.sqlite3")
+
+
 @pytest.mark.parametrize("command", ["_send"])
 def test_send_command_targets_the_verified_named_runtime(
     tmp_path: Path,

@@ -52,6 +52,7 @@ To expose this checkout as the system-wide `rodex` command, follow the
 
 | Command | Behaviour |
 |---|---|
+| `./rodex _help` | Show Rodex's own command help without starting Codex or tmux. |
 | `./rodex` | Pass through to the ordinary Codex TUI. |
 | `./rodex _create` | Create and attach to a new Rodex/Codex session. |
 | `./rodex _create project_1234` | Create a session with a preferred display name. |

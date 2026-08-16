@@ -28,6 +28,9 @@ Codex unchanged, with one exception: a single bare existing Rodex name follows t
 reattachment pipeline below. Direct passthrough uses process replacement so Codex
 retains native stdin, stdout, stderr, signals, and exit status.
 
+`./rodex _help` prints the Rodex command namespace locally. It does not resolve Codex,
+tmux, or the session database.
+
 The proxy forwards protocol frames unchanged in both directions, counts unique tool
 starts, and fans structured TUI events to bounded live subscribers. tmux user options
 advertise the live proxy/event sockets and observed Codex UUID; none are new SQLite

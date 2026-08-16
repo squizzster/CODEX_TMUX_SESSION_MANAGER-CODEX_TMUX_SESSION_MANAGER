@@ -40,6 +40,16 @@ uv sync
 At the `›` prompt, use Codex normally. Detach without ending the session with
 `Ctrl-b d`.
 
+To expose this checkout as the system-wide `rodex` command on this host, install the
+provided shim:
+
+```bash
+sudo install -m 0755 usr/local/bin/rodex /usr/local/bin/rodex
+```
+
+The shim targets this checkout by default. If the project moves, set
+`RODEX_PROJECT_DIR` to its new absolute path.
+
 ## Common commands
 
 | Command | Behaviour |

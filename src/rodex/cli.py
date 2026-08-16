@@ -20,6 +20,7 @@ from rodex_functions import (
     RodexSessionError,
     create_a_rodex_session,
     default_rodex_database_path,
+    generate_an_unregistered_rodex_uuid_candidate,
     list_rodex_session_runtimes_for_a_user,
     lookup_codex_uuid_from_a_rodex_session_id,
     lookup_owned_rodex_session_id_from_a_cool_name,
@@ -28,6 +29,7 @@ from rodex_functions import (
     lookup_rodex_tmux_session,
     lookup_rodex_uuid_from_an_id,
     open_a_user_defined_cool_name_assignment,
+    read_rodex_session_statistics,
     record_a_rodex_session_access,
     record_a_rodex_session_runtime_resume,
     update_rodex_tmux_session_name,
@@ -59,6 +61,8 @@ _TAIL_COMMAND: Final = "_tail"
 _CREATE_COMMAND: Final = "_create"
 _DETACH_COMMAND: Final = "_detach"
 _HELP_COMMAND: Final = "_help"
+_STATS_COMMAND: Final = "_stats"
+_STATS_STATUS_COMMAND: Final = "_stats-status"
 _FORCE_FLAG: Final = "--force"
 _RODEX_COMMANDS: Final = frozenset(
     {
@@ -70,6 +74,8 @@ _RODEX_COMMANDS: Final = frozenset(
         _CREATE_COMMAND,
         _DETACH_COMMAND,
         _HELP_COMMAND,
+        _STATS_COMMAND,
+        _STATS_STATUS_COMMAND,
     }
 )
 
@@ -86,6 +92,8 @@ Rodex commands:
   _send SESSION PROMPT               Send work to a running session.
   _wait SESSION                      Wait until a running session is idle.
   _tail SESSION                      Follow live protocol events as JSON lines.
+  _stats SESSION [--json]            Show the latest persistent aggregate statistics.
+  _stats-status SESSION              Show analytics freshness and health.
 
 Use a Rodex session name as the sole argument to attach, resume, or recover it.
 Every other invocation is passed unchanged to Codex.
@@ -130,6 +138,8 @@ def run(
     possible_existing_name = _possible_existing_rodex_name(arguments, resolved_database)
     if rodex_command is None and not possible_existing_name:
         return _delegate_to_codex(configured_codex, arguments, codex_delegator)
+    if _run_statistics_command(arguments, resolved_database):
+        return 0
 
     configured_tmux = os.environ.get("RODEX_TMUX_BINARY", "tmux")
     tmux_binary = shutil.which(configured_tmux)
@@ -174,12 +184,19 @@ def run(
         ):
             raise RodexLaunchError(f"Rodex session name already exists: {requested_name}")
 
-    live_runtime, codex_session_uuid = runtime_launcher.start(Path.cwd(), codex_arguments)
+    planned_rodex_uuid = generate_an_unregistered_rodex_uuid_candidate(resolved_database)
+    live_runtime, codex_session_uuid = runtime_launcher.start(
+        Path.cwd(),
+        codex_arguments,
+        rodex_session_uuid=planned_rodex_uuid,
+        rodex_database_path=resolved_database,
+    )
     active_tmux: LiveTmuxSession = live_runtime
     try:
         session = create_a_rodex_session(
             resolved_database,
             codex_session_uuid=codex_session_uuid,
+            rodex_session_uuid=planned_rodex_uuid,
             tmux_server_socket_path=live_runtime.tmux_server_socket_path,
             tmux_session_name=live_runtime.tmux_session_name,
         )
@@ -269,15 +286,26 @@ def _open_named_session(
     )
     if codex_session_uuid is None:
         raise RodexLaunchError(f"Rodex session has no Codex identity: {cool_name}")
+    rodex_uuid = lookup_rodex_uuid_from_an_id(session_id, database_path)
+    if rodex_uuid is None:
+        raise RodexLaunchError(f"Rodex session has no Rodex identity: {cool_name}")
 
     replaced_unsaved_codex_identity = False
     try:
         resumed_runtime, observed_codex_uuid = launcher.start(
-            Path.cwd(), ["resume", str(codex_session_uuid)]
+            Path.cwd(),
+            ["resume", str(codex_session_uuid)],
+            rodex_session_uuid=rodex_uuid,
+            rodex_database_path=database_path,
         )
     except RodexCodexSessionNotFoundError:
         try:
-            resumed_runtime, observed_codex_uuid = launcher.start(Path.cwd(), [])
+            resumed_runtime, observed_codex_uuid = launcher.start(
+                Path.cwd(),
+                [],
+                rodex_session_uuid=rodex_uuid,
+                rodex_database_path=database_path,
+            )
         except RodexRuntimeError as error:
             raise RodexLaunchError(
                 f"Rodex session {display_name!r} is recorded but not running; "
@@ -505,6 +533,86 @@ def _run_reserved_command(
         print(f"Rodex name: {assignment.names.display_name}", flush=True)
         return True
     return False
+
+
+def _run_statistics_command(arguments: list[str], database_path: Path) -> bool:
+    """Serve persistent aggregate statistics without requiring Codex or tmux."""
+    if not arguments or arguments[0] not in {_STATS_COMMAND, _STATS_STATUS_COMMAND}:
+        return False
+    command = arguments[0]
+    if command == _STATS_STATUS_COMMAND:
+        if len(arguments) != 2:
+            raise RodexLaunchError("usage: rodex _stats-status SESSION_NAME")
+        session_name = arguments[1]
+        as_json = False
+    else:
+        if len(arguments) not in {2, 3} or (
+            len(arguments) == 3 and arguments[2] != "--json"
+        ):
+            raise RodexLaunchError("usage: rodex _stats SESSION_NAME [--json]")
+        session_name = arguments[1]
+        as_json = len(arguments) == 3
+    session_id = lookup_owned_rodex_session_id_from_a_cool_name(session_name, database_path)
+    if session_id is None:
+        raise RodexLaunchError(f"unknown Rodex session: {session_name}")
+    view = read_rodex_session_statistics(session_id, database_path)
+    snapshot = view.statistics
+    worker = view.worker
+    payload = {
+        "rodex_session_name": session_name,
+        "statistics_revision": (None if snapshot is None else snapshot.statistics_revision),
+        "statistics_projection_schema_version": (
+            None if snapshot is None else snapshot.statistics_projection_schema_version
+        ),
+        "calculated_at_utc": None if snapshot is None else snapshot.calculated_at_utc,
+        "coverage_state": None if snapshot is None else snapshot.coverage_state,
+        "worker_state": "not_started" if worker is None else worker.worker_state,
+        "diagnostic_code": None if worker is None else worker.diagnostic_code,
+        "last_attempted_at_utc": (None if worker is None else worker.last_attempted_at_utc),
+        "consecutive_failures": (0 if worker is None else worker.consecutive_failures),
+        "next_retry_at_utc": None if worker is None else worker.next_retry_at_utc,
+        "registered_source_count": len(view.sources),
+        "included_source_count": (
+            0
+            if snapshot is None
+            else sum(
+                source.included_statistics_revision == snapshot.statistics_revision
+                for source in view.sources
+            )
+        ),
+    }
+    if command == _STATS_STATUS_COMMAND:
+        print(json.dumps(payload, indent=2, sort_keys=True), flush=True)
+        return True
+    if snapshot is None:
+        raise RodexLaunchError(
+            f"Rodex session has no analytics snapshot yet: {session_name}"
+        )
+    payload["statistics"] = snapshot.aggregate_statistics
+    if as_json:
+        print(json.dumps(payload, indent=2, sort_keys=True), flush=True)
+    else:
+        _print_human_statistics(payload)
+    return True
+
+
+def _print_human_statistics(payload: dict[str, object]) -> None:
+    statistics = payload["statistics"]
+    if not isinstance(statistics, dict):
+        raise RodexLaunchError("stored analytics snapshot is invalid")
+    print(
+        f"Rodex {payload['rodex_session_name']} statistics "
+        f"(revision {payload['statistics_revision']}, "
+        f"{payload['worker_state']})",
+        flush=True,
+    )
+    for category in ("must_have_basic_stats", "recommended_insight_stats"):
+        values = statistics.get(category)
+        if isinstance(values, dict):
+            title = category.replace("_", " ").title()
+            print(f"{title}:", flush=True)
+            for name, value in values.items():
+                print(f"  {name}: {json.dumps(value, sort_keys=True)}", flush=True)
 
 
 def _resolve_live_control(

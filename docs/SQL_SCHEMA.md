@@ -25,8 +25,9 @@ Apply these standards to future schema decisions. These authorative standards ma
   avoid changing an earlier schema, especially in PROTO.
 - Lookup tables use their complete natural key: `SELECT id` first and `INSERT` only
   when no row exists. This avoids unnecessary AUTOINCREMENT gaps.
-- Related selects and writes run inside one `BEGIN IMMEDIATE` transaction. Any failure
-  rolls back the complete unit of work.
+- Related writes run inside one `BEGIN IMMEDIATE` transaction. Multi-table read views
+  use one deferred `BEGIN` transaction for a consistent snapshot without a write lock.
+  Any failure rolls back the complete unit of work.
 - SQLite foreign-key enforcement is enabled for every transaction.
 - Schema initialisation creates and verifies columns, types, nullability, primary-key
   form, and index shape in the same transaction; incompatible schemas are rejected.
@@ -46,5 +47,21 @@ Apply these standards to future schema decisions. These authorative standards ma
   A matching derived integer identity is occupied; do not fall back to a text lookup.
 - Generated identities use bounded attempts, move to the next approved representation
   when the preferred form is exhausted, and then fail explicitly.
-- In PROTO, a schema change resets the disposable database to empty. Without a schema
-  change, existing contents are preserved.
+- In PROTO, incompatible schema changes may reset a disposable database only after an
+  explicit decision. Additive, verified schema extensions preserve existing contents.
+
+## Current statistics projection
+
+- `rodex_sessions_statistics` is the latest successful aggregate snapshot, one row per
+  Rodex session. Rodex allocates its monotonic `statistics_revision`; temporary analyzer
+  identities and revisions are excluded.
+- `rodex_sessions_statistics_sources` retains every Codex UUID linked to the Rodex
+  lineage. A Codex UUID is globally unique to one lineage. Nullable rollout provenance
+  represents a registered source not yet authenticated; included provenance carries an
+  absolute canonical path, complete-prefix byte count, mtime, SHA-256, and revision.
+- `rodex_sessions_statistics_workers` is independent one-to-one health. Its bounded
+  diagnostic code cannot contain free-form errors or paths. Failure never fabricates or
+  overwrites a statistics snapshot.
+- Publishing a snapshot, aggregate whitelist, exact included sources, and healthy state
+  is one UUID- and prior-revision-fenced transaction. Health-only failure publication
+  uses the UUID fence but does not mutate last-good statistics or source analysis.

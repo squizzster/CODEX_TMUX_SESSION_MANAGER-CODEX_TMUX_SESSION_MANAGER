@@ -16,7 +16,8 @@ never presented or stored as another domain's identity.
    executables.
 2. tmux starts a small supervisor directly; Rodex never types with `send-keys`.
 3. The supervisor starts one private Codex app-server and a transparent Rodex
-   WebSocket proxy on short Unix sockets, then connects the normal TUI through it.
+   WebSocket proxy on short Unix sockets, then connects the inline Codex TUI through
+   it with `--no-alt-screen`.
 4. Rodex asks that private app-server for its one loaded Codex session UUID.
 5. One SQLite transaction creates the Rodex identity, name, user/log, and tmux rows.
 6. tmux is renamed to the cool name and displays its Rodex identity, tool count, and
@@ -33,6 +34,18 @@ stdout, stderr, signals, and exit status.
 `./rodex _help` prints the Rodex command namespace locally. It does not resolve Codex,
 tmux, or the session database.
 
+## Scrollback ownership
+
+Rodex configures tmux's global defaults before the first pane is created: each new
+pane inherits a 50,000-line history limit and mouse support. The managed Codex TUI runs
+without the alternate screen so rendered conversation rows reach that history. The
+mouse wheel uses tmux's standard `WheelUpPane` copy-mode binding; `Ctrl-b [` remains
+the keyboard route into copy mode and `q` exits it.
+
+tmux—not the terminal emulator or WebSocket proxy—owns managed-session scrollback.
+The proxy continues to forward protocol frames and selected live events without
+screen-scraping, reconstructing terminal rows, or persisting conversation content.
+
 The proxy forwards protocol frames unchanged in both directions, counts unique tool
 starts, and fans structured TUI events to bounded live subscribers. tmux user options
 advertise the live proxy/event sockets and observed Codex UUID; none are new SQLite
@@ -41,6 +54,27 @@ identities. Tool counts cover the current runtime and reset when it is resumed.
 The separate tmux input proxy and completion observer for `/rodex` are retained but
 temporarily disabled by `RODEX_TMUX_SLASH_ENABLED`. Runtime status setup removes their
 Enter/Tab bindings and pane pipe, so all input currently passes directly to Codex.
+
+## Persistent statistics
+
+Each session host supervises one low-priority analytics subprocess keyed by the Rodex
+UUID allocated for that launch. The worker waits for SQL registration, discovers every
+Codex UUID retained in that Rodex lineage, and authenticates each rollout's internal
+`session_meta` identity. It copies only the final newline-complete prefix to a private
+0600 temporary file and reauthenticates its SHA-256 before publishing.
+
+The worker creates a fresh in-memory `CodexProtocolLibrary`, loads the authenticated
+copies, calculates statistics, then closes it. The analyzer owns calculation only;
+Rodex owns watching, scheduling, source provenance, retries, health, and persistence.
+One transaction publishes a Rodex-owned monotonic revision, the aggregate whitelist,
+and its exact source descriptors. Codex-UUID and prior-revision fences reject stale
+workers. Health failures commit separately and never overwrite the last good snapshot.
+
+Analytics is fail-open: import, parsing, calculation, process, or database failure
+cannot change the Codex TUI's behavior or exit status. `_stats NAME [--json]` and
+`_stats-status NAME` enforce normal ownership but query SQLite without requiring a live
+Codex or tmux process. A runtime started before this feature must end and resume before
+it has an analytics sidecar.
 
 ## Named reattachment
 
@@ -71,6 +105,9 @@ Enter/Tab bindings and pane pipe, so all input currently passes directly to Code
   starting empty again and replacing only the linked Codex UUID.
 - A failure before SQL registration stops the exact new tmux session and leaves no
   partial database row.
+- Scrollback settings apply when a pane is created. A runtime started by an older
+  Rodex version must end and resume, or be replaced by a new session, to gain the
+  larger history and inline TUI rendering.
 - The runtime uses `$XDG_RUNTIME_DIR/rodex` when suitable—normally
   `/run/user/<uid>/rodex`—otherwise `/tmp/rodex-<uid>`. Unix sockets stay there because
   long project paths can exceed Linux socket limits.

@@ -49,6 +49,7 @@ class StubLauncher:
             protocol_event_socket_path=tmp_path / "events.sock",
         )
         self.started: list[tuple[Path, list[str]]] = []
+        self.analytics_identities: list[tuple[uuid.UUID | None, Path | None]] = []
         self.renamed: list[tuple[LiveTmuxSession, str]] = []
         self.configured: list[LiveTmuxSession] = []
         self.attached: list[LiveTmuxSession] = []
@@ -64,9 +65,15 @@ class StubLauncher:
         self.control_discoveries: list[LiveTmuxSession] = []
 
     def start(
-        self, workspace: Path, arguments: list[str]
+        self,
+        workspace: Path,
+        arguments: list[str],
+        *,
+        rodex_session_uuid: uuid.UUID | None = None,
+        rodex_database_path: Path | None = None,
     ) -> tuple[LiveRodexRuntime, uuid.UUID]:
         self.started.append((workspace, arguments))
+        self.analytics_identities.append((rodex_session_uuid, rodex_database_path))
         if self.start_errors:
             raise self.start_errors.pop(0)
         if self.start_error is not None:
@@ -309,6 +316,9 @@ def test_default_and_explicit_create_link_identities_before_attach(
     )
 
     assert launcher.started == [(Path.cwd(), [])]
+    planned_uuid, planned_database = launcher.analytics_identities[0]
+    assert planned_uuid == lookup_rodex_uuid_from_an_id(1, database)
+    assert planned_database == database
     assert launcher.renamed == [(launcher.runtime, "automatic-beluga")]
     assert launcher.configured[0].tmux_session_name == "automatic-beluga"
     assert launcher.attached == launcher.configured
@@ -755,6 +765,7 @@ def test_detach_ended_name_resumes_exact_codex_session_without_attaching(
 
     output = json.loads(capsys.readouterr().out)
     assert launcher.started == [(Path.cwd(), ["resume", str(CODEX_UUID)])]
+    assert launcher.analytics_identities == [(session.rodex_uuid, database)]
     assert launcher.renamed == [(launcher.runtime, "automatic-beluga")]
     assert launcher.configured[0].tmux_session_name == "automatic-beluga"
     assert launcher.attached == []
@@ -803,6 +814,10 @@ def test_detach_unsaved_name_recovers_identity_without_attaching(
     assert launcher.started == [
         (Path.cwd(), ["resume", str(CODEX_UUID)]),
         (Path.cwd(), []),
+    ]
+    assert launcher.analytics_identities == [
+        (session.rodex_uuid, database),
+        (session.rodex_uuid, database),
     ]
     assert launcher.configured[0].tmux_session_name == "automatic-beluga"
     assert launcher.attached == []

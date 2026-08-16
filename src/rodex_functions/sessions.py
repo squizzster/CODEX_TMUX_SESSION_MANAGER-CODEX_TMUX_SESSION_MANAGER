@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import pwd
@@ -59,6 +60,16 @@ RODEX_SESSIONS_STATISTICS_SOURCES_UNIQUE_INDEX: Final = (
 RODEX_SESSIONS_STATISTICS_SOURCES_SESSION_INDEX: Final = (
     "rodex_sessions_statistics_sources_session"
 )
+RODEX_SESSIONS_STATISTICS_SOURCES_SESSION_ID_REVISION_UNIQUE_INDEX: Final = (
+    "rodex_sessions_statistics_sources_session_id_revision_unique"
+)
+RODEX_SESSIONS_STATISTICS_TURNS_TABLE: Final = "rodex_sessions_statistics_turns"
+RODEX_SESSIONS_STATISTICS_TURNS_SOURCE_TURN_UNIQUE_INDEX: Final = (
+    "rodex_sessions_statistics_turns_source_turn_unique"
+)
+RODEX_SESSIONS_STATISTICS_TURNS_SESSION_TURN_INDEX: Final = (
+    "rodex_sessions_statistics_turns_session_turn"
+)
 RODEX_SESSIONS_STATISTICS_WORKERS_TABLE: Final = "rodex_sessions_statistics_workers"
 RODEX_SESSIONS_STATISTICS_WORKERS_SESSION_UNIQUE_INDEX: Final = (
     "rodex_sessions_statistics_workers_rodex_sessions_id_unique"
@@ -79,6 +90,10 @@ STATISTICS_AGGREGATE_FIELDS: Final = frozenset(
     }
 )
 STATISTICS_COVERAGE_STATES: Final = frozenset({"complete", "gapped"})
+STATISTICS_TURN_OUTCOMES: Final = frozenset({"open", "completed", "aborted"})
+STATISTICS_TURN_FIELDS: Final = frozenset(
+    {"must_have_basic_stats", "recommended_insight_stats"}
+)
 STATISTICS_WORKER_STATES: Final = frozenset(
     {"starting", "catching_up", "up_to_date", "degraded", "stopped"}
 )
@@ -236,6 +251,67 @@ _CREATE_STATISTICS_SOURCES_SESSION_INDEX = f"""
 CREATE INDEX IF NOT EXISTS {RODEX_SESSIONS_STATISTICS_SOURCES_SESSION_INDEX}
 ON {RODEX_SESSIONS_STATISTICS_SOURCES_TABLE} (rodex_sessions_id)
 """
+_CREATE_STATISTICS_SOURCES_SESSION_ID_REVISION_UNIQUE_INDEX = f"""
+CREATE UNIQUE INDEX IF NOT EXISTS
+    {RODEX_SESSIONS_STATISTICS_SOURCES_SESSION_ID_REVISION_UNIQUE_INDEX}
+ON {RODEX_SESSIONS_STATISTICS_SOURCES_TABLE}
+    (rodex_sessions_id, id, included_statistics_revision)
+"""
+_CREATE_STATISTICS_TURNS_TABLE = f"""
+CREATE TABLE IF NOT EXISTS {RODEX_SESSIONS_STATISTICS_TURNS_TABLE} (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    rodex_sessions_id INTEGER NOT NULL,
+    rodex_sessions_statistics_sources_id INTEGER NOT NULL,
+    codex_turn_id_sha256_int_1 BIGINT NOT NULL,
+    codex_turn_id_sha256_int_2 BIGINT NOT NULL,
+    codex_turn_id_sha256_int_3 BIGINT NOT NULL,
+    codex_turn_id_sha256_int_4 BIGINT NOT NULL,
+    codex_turn_id TEXT NOT NULL,
+    included_statistics_revision INTEGER NOT NULL CHECK (
+        included_statistics_revision >= 1
+    ),
+    started_at_utc TEXT DEFAULT NULL,
+    terminal_at_utc TEXT DEFAULT NULL,
+    outcome TEXT NOT NULL CHECK (outcome IN ('open', 'completed', 'aborted')),
+    turn_statistics_json TEXT NOT NULL CHECK (
+        json_valid(turn_statistics_json) = 1
+        AND json_type(turn_statistics_json) = 'object'
+    ),
+    CHECK (
+        outcome != 'open' OR terminal_at_utc IS NULL
+    ),
+    FOREIGN KEY (rodex_sessions_id, rodex_sessions_statistics_sources_id,
+        included_statistics_revision)
+        REFERENCES {RODEX_SESSIONS_STATISTICS_SOURCES_TABLE}
+            (rodex_sessions_id, id, included_statistics_revision)
+        DEFERRABLE INITIALLY DEFERRED,
+    FOREIGN KEY (rodex_sessions_id, included_statistics_revision)
+        REFERENCES {RODEX_SESSIONS_STATISTICS_TABLE}
+            (rodex_sessions_id, statistics_revision)
+        DEFERRABLE INITIALLY DEFERRED
+)
+"""
+_CREATE_STATISTICS_TURNS_SOURCE_TURN_UNIQUE_INDEX = f"""
+CREATE UNIQUE INDEX IF NOT EXISTS
+    {RODEX_SESSIONS_STATISTICS_TURNS_SOURCE_TURN_UNIQUE_INDEX}
+ON {RODEX_SESSIONS_STATISTICS_TURNS_TABLE} (
+    rodex_sessions_statistics_sources_id,
+    codex_turn_id_sha256_int_1,
+    codex_turn_id_sha256_int_2,
+    codex_turn_id_sha256_int_3,
+    codex_turn_id_sha256_int_4
+)
+"""
+_CREATE_STATISTICS_TURNS_SESSION_TURN_INDEX = f"""
+CREATE INDEX IF NOT EXISTS {RODEX_SESSIONS_STATISTICS_TURNS_SESSION_TURN_INDEX}
+ON {RODEX_SESSIONS_STATISTICS_TURNS_TABLE} (
+    rodex_sessions_id,
+    codex_turn_id_sha256_int_1,
+    codex_turn_id_sha256_int_2,
+    codex_turn_id_sha256_int_3,
+    codex_turn_id_sha256_int_4
+)
+"""
 _CREATE_STATISTICS_WORKERS_TABLE = f"""
 CREATE TABLE IF NOT EXISTS {RODEX_SESSIONS_STATISTICS_WORKERS_TABLE} (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -277,6 +353,10 @@ class RodexSessionUUIDCollisionError(RodexSessionError):
 
 class RodexSessionStatisticsConflictError(RodexSessionError):
     """A statistics publication lost its identity or revision fence."""
+
+
+class RodexSessionTurnStatisticsAmbiguousError(RodexSessionError):
+    """One unqualified turn ID exists in multiple Codex lineage sources."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -382,6 +462,34 @@ class RodexSessionStatisticsSourceObservation:
 
 
 @dataclass(frozen=True, slots=True)
+class RodexSessionTurnStatisticsObservation:
+    """One analyzer turn projection tied to its authoritative Codex source."""
+
+    codex_session_uuid: uuid.UUID
+    codex_turn_id: str
+    started_at_utc: str | None
+    terminal_at_utc: str | None
+    outcome: str
+    turn_statistics: Mapping[str, object]
+
+
+@dataclass(frozen=True, slots=True)
+class RodexSessionTurnStatistics:
+    """Latest persisted statistics projection for one exact Codex turn."""
+
+    id: int
+    rodex_sessions_id: int
+    rodex_sessions_statistics_sources_id: int
+    codex_session_uuid: uuid.UUID
+    codex_turn_id: str
+    included_statistics_revision: int
+    started_at_utc: str | None
+    terminal_at_utc: str | None
+    outcome: str
+    turn_statistics: dict[str, object]
+
+
+@dataclass(frozen=True, slots=True)
 class RodexSessionStatisticsWorker:
     """Independent health of one fail-open analytics worker."""
 
@@ -401,6 +509,16 @@ class RodexSessionStatisticsView:
     statistics: RodexSessionStatistics | None
     worker: RodexSessionStatisticsWorker | None
     sources: tuple[RodexSessionStatisticsSource, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class RodexSessionTurnStatisticsView:
+    """One transactionally consistent exact-turn and parent statistics read."""
+
+    statistics: RodexSessionStatistics | None
+    worker: RodexSessionStatisticsWorker | None
+    sources: tuple[RodexSessionStatisticsSource, ...]
+    turn: RodexSessionTurnStatistics | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -504,6 +622,42 @@ def initialise_rodex_database(database_path: str | os.PathLike[str] | None = Non
             RODEX_SESSIONS_STATISTICS_SOURCES_TABLE,
             RODEX_SESSIONS_STATISTICS_SOURCES_SESSION_INDEX,
             ["rodex_sessions_id"],
+            unique=False,
+        )
+        connection.execute(_CREATE_STATISTICS_SOURCES_SESSION_ID_REVISION_UNIQUE_INDEX)
+        _verify_unique_index(
+            connection,
+            RODEX_SESSIONS_STATISTICS_SOURCES_TABLE,
+            RODEX_SESSIONS_STATISTICS_SOURCES_SESSION_ID_REVISION_UNIQUE_INDEX,
+            ["rodex_sessions_id", "id", "included_statistics_revision"],
+        )
+        connection.execute(_CREATE_STATISTICS_TURNS_TABLE)
+        _verify_statistics_turns_table(connection)
+        connection.execute(_CREATE_STATISTICS_TURNS_SOURCE_TURN_UNIQUE_INDEX)
+        _verify_unique_index(
+            connection,
+            RODEX_SESSIONS_STATISTICS_TURNS_TABLE,
+            RODEX_SESSIONS_STATISTICS_TURNS_SOURCE_TURN_UNIQUE_INDEX,
+            [
+                "rodex_sessions_statistics_sources_id",
+                "codex_turn_id_sha256_int_1",
+                "codex_turn_id_sha256_int_2",
+                "codex_turn_id_sha256_int_3",
+                "codex_turn_id_sha256_int_4",
+            ],
+        )
+        connection.execute(_CREATE_STATISTICS_TURNS_SESSION_TURN_INDEX)
+        _verify_index(
+            connection,
+            RODEX_SESSIONS_STATISTICS_TURNS_TABLE,
+            RODEX_SESSIONS_STATISTICS_TURNS_SESSION_TURN_INDEX,
+            [
+                "rodex_sessions_id",
+                "codex_turn_id_sha256_int_1",
+                "codex_turn_id_sha256_int_2",
+                "codex_turn_id_sha256_int_3",
+                "codex_turn_id_sha256_int_4",
+            ],
             unique=False,
         )
         _register_missing_statistics_sources(connection)
@@ -895,8 +1049,9 @@ def publish_rodex_session_statistics(
     coverage_state: str,
     aggregate_statistics: Mapping[str, object],
     analyzed_sources: Sequence[RodexSessionStatisticsSourceObservation],
+    turn_statistics: Sequence[RodexSessionTurnStatisticsObservation],
 ) -> RodexSessionStatistics:
-    """Atomically publish one fenced aggregate and its exact analyzed sources."""
+    """Atomically publish one fenced session projection, turns, and sources."""
     _validate_session_id(session_id)
     expected_halves = split_a_codex_uuid_into_signed_bigints(expected_current_codex_uuid)
     if based_on_statistics_revision is not None:
@@ -913,6 +1068,10 @@ def publish_rodex_session_statistics(
     observations = tuple(_validate_source_observation(item) for item in analyzed_sources)
     if len({item.codex_session_uuid for item in observations}) != len(observations):
         raise ValueError("analyzed_sources contains a duplicate Codex UUID")
+    turns = tuple(_validate_turn_observation(item) for item in turn_statistics)
+    turn_keys = {(item.codex_session_uuid, item.codex_turn_id) for item in turns}
+    if len(turn_keys) != len(turns):
+        raise ValueError("turn_statistics contains a duplicate source and turn ID")
 
     path = initialise_rodex_database(database_path)
     with open_rodex_transaction(path) as connection:
@@ -939,12 +1098,13 @@ def publish_rodex_session_statistics(
             )
         new_revision = 1 if previous_revision is None else previous_revision + 1
         registered_rows = connection.execute(
-            f"SELECT codex_session_uuid_int_1, codex_session_uuid_int_2 "
+            f"SELECT id, codex_session_uuid_int_1, codex_session_uuid_int_2 "
             f"FROM {RODEX_SESSIONS_STATISTICS_SOURCES_TABLE} "
             "WHERE rodex_sessions_id = ?",
             (session_id,),
         ).fetchall()
-        registered = {(int(row[0]), int(row[1])) for row in registered_rows}
+        registered = {(int(row[1]), int(row[2])) for row in registered_rows}
+        source_ids = {(int(row[1]), int(row[2])): int(row[0]) for row in registered_rows}
         observed = {
             split_a_codex_uuid_into_signed_bigints(item.codex_session_uuid)
             for item in observations
@@ -952,6 +1112,14 @@ def publish_rodex_session_statistics(
         if not observed.issubset(registered):
             raise RodexSessionStatisticsConflictError(
                 "statistics include an unregistered Codex source"
+            )
+        turn_sources = {
+            split_a_codex_uuid_into_signed_bigints(item.codex_session_uuid)
+            for item in turns
+        }
+        if not turn_sources.issubset(observed):
+            raise RodexSessionStatisticsConflictError(
+                "turn statistics include a source outside the analyzed snapshot"
             )
 
         connection.execute(
@@ -1004,6 +1172,61 @@ def publish_rodex_session_statistics(
                 raise RodexSessionStatisticsConflictError(
                     "registered statistics source changed during publication"
                 )
+        for item in turns:
+            source_halves = split_a_codex_uuid_into_signed_bigints(item.codex_session_uuid)
+            source_id = source_ids[source_halves]
+            turn_hash = _turn_id_sha256_signed_bigints(item.codex_turn_id)
+            existing = connection.execute(
+                f"SELECT id, codex_turn_id FROM "
+                f"{RODEX_SESSIONS_STATISTICS_TURNS_TABLE} "
+                "WHERE rodex_sessions_statistics_sources_id = ? "
+                "AND codex_turn_id_sha256_int_1 = ? "
+                "AND codex_turn_id_sha256_int_2 = ? "
+                "AND codex_turn_id_sha256_int_3 = ? "
+                "AND codex_turn_id_sha256_int_4 = ?",
+                (source_id, *turn_hash),
+            ).fetchone()
+            if existing is not None and str(existing[1]) != item.codex_turn_id:
+                raise RodexSessionStatisticsConflictError(
+                    "turn ID digest collision during statistics publication"
+                )
+            row = connection.execute(
+                f"INSERT INTO {RODEX_SESSIONS_STATISTICS_TURNS_TABLE} "
+                "(rodex_sessions_id, rodex_sessions_statistics_sources_id, "
+                "codex_turn_id_sha256_int_1, codex_turn_id_sha256_int_2, "
+                "codex_turn_id_sha256_int_3, codex_turn_id_sha256_int_4, "
+                "codex_turn_id, included_statistics_revision, started_at_utc, "
+                "terminal_at_utc, outcome, turn_statistics_json) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(rodex_sessions_statistics_sources_id, "
+                "codex_turn_id_sha256_int_1, codex_turn_id_sha256_int_2, "
+                "codex_turn_id_sha256_int_3, codex_turn_id_sha256_int_4) "
+                "DO UPDATE SET included_statistics_revision = "
+                "excluded.included_statistics_revision, "
+                "started_at_utc = excluded.started_at_utc, "
+                "terminal_at_utc = excluded.terminal_at_utc, "
+                "outcome = excluded.outcome, "
+                "turn_statistics_json = excluded.turn_statistics_json "
+                "RETURNING id",
+                (
+                    session_id,
+                    source_id,
+                    *turn_hash,
+                    item.codex_turn_id,
+                    new_revision,
+                    item.started_at_utc,
+                    item.terminal_at_utc,
+                    item.outcome,
+                    _statistics_turn_json(item.turn_statistics),
+                ),
+            ).fetchone()
+            if row is None:
+                raise RodexSessionError("turn statistics upsert returned no identity")
+        connection.execute(
+            f"DELETE FROM {RODEX_SESSIONS_STATISTICS_TURNS_TABLE} "
+            "WHERE rodex_sessions_id = ? AND included_statistics_revision != ?",
+            (session_id, new_revision),
+        )
         _upsert_statistics_worker(
             connection,
             session_id,
@@ -1115,6 +1338,66 @@ def read_rodex_session_statistics(
         ),
         worker=(None if worker_row is None else _statistics_worker_from_row(worker_row)),
         sources=tuple(_statistics_source_from_row(row) for row in source_rows),
+    )
+
+
+def read_rodex_session_turn_statistics(
+    session_id: int,
+    codex_turn_id: str,
+    database_path: str | os.PathLike[str] | None = None,
+    *,
+    codex_session_uuid: uuid.UUID | str | None = None,
+) -> RodexSessionTurnStatisticsView:
+    """Read one exact turn and its parent freshness in one transaction."""
+    _validate_session_id(session_id)
+    turn_id = _normalise_required_text(codex_turn_id, "codex_turn_id")
+    turn_hash = _turn_id_sha256_signed_bigints(turn_id)
+    source_halves = (
+        None
+        if codex_session_uuid is None
+        else split_a_codex_uuid_into_signed_bigints(codex_session_uuid)
+    )
+    path = initialise_rodex_database(database_path)
+    with open_rodex_read_transaction(path) as connection:
+        statistics_row = _select_statistics(connection, session_id)
+        worker_row = _select_statistics_worker(connection, session_id)
+        source_rows = _select_statistics_sources(connection, session_id)
+        query = (
+            f"SELECT turns.id, turns.rodex_sessions_id, "
+            "turns.rodex_sessions_statistics_sources_id, "
+            "sources.codex_session_uuid_int_1, "
+            "sources.codex_session_uuid_int_2, turns.codex_turn_id, "
+            "turns.included_statistics_revision, turns.started_at_utc, "
+            "turns.terminal_at_utc, turns.outcome, turns.turn_statistics_json "
+            f"FROM {RODEX_SESSIONS_STATISTICS_TURNS_TABLE} AS turns "
+            f"JOIN {RODEX_SESSIONS_STATISTICS_SOURCES_TABLE} AS sources "
+            "ON sources.id = turns.rodex_sessions_statistics_sources_id "
+            "WHERE turns.rodex_sessions_id = ? "
+            "AND turns.codex_turn_id_sha256_int_1 = ? "
+            "AND turns.codex_turn_id_sha256_int_2 = ? "
+            "AND turns.codex_turn_id_sha256_int_3 = ? "
+            "AND turns.codex_turn_id_sha256_int_4 = ? "
+            "AND turns.codex_turn_id = ?"
+        )
+        parameters: tuple[object, ...] = (session_id, *turn_hash, turn_id)
+        if source_halves is not None:
+            query += (
+                " AND sources.codex_session_uuid_int_1 = ? "
+                "AND sources.codex_session_uuid_int_2 = ?"
+            )
+            parameters += source_halves
+        turn_rows = connection.execute(query + " ORDER BY turns.id", parameters).fetchall()
+    if len(turn_rows) > 1:
+        raise RodexSessionTurnStatisticsAmbiguousError(
+            "turn ID exists in multiple Codex sources; qualify it with a session UUID"
+        )
+    return RodexSessionTurnStatisticsView(
+        statistics=(
+            None if statistics_row is None else _session_statistics_from_row(statistics_row)
+        ),
+        worker=(None if worker_row is None else _statistics_worker_from_row(worker_row)),
+        sources=tuple(_statistics_source_from_row(row) for row in source_rows),
+        turn=(None if not turn_rows else _turn_statistics_from_row(turn_rows[0])),
     )
 
 
@@ -1754,6 +2037,76 @@ def _verify_statistics_sources_table(connection: sqlite3.Connection) -> None:
     )
 
 
+def _verify_statistics_turns_table(connection: sqlite3.Connection) -> None:
+    _verify_table_columns(
+        connection,
+        RODEX_SESSIONS_STATISTICS_TURNS_TABLE,
+        [
+            ("id", "INTEGER", 0, 1),
+            ("rodex_sessions_id", "INTEGER", 1, 0),
+            ("rodex_sessions_statistics_sources_id", "INTEGER", 1, 0),
+            ("codex_turn_id_sha256_int_1", "BIGINT", 1, 0),
+            ("codex_turn_id_sha256_int_2", "BIGINT", 1, 0),
+            ("codex_turn_id_sha256_int_3", "BIGINT", 1, 0),
+            ("codex_turn_id_sha256_int_4", "BIGINT", 1, 0),
+            ("codex_turn_id", "TEXT", 1, 0),
+            ("included_statistics_revision", "INTEGER", 1, 0),
+            ("started_at_utc", "TEXT", 0, 0),
+            ("terminal_at_utc", "TEXT", 0, 0),
+            ("outcome", "TEXT", 1, 0),
+            ("turn_statistics_json", "TEXT", 1, 0),
+        ],
+    )
+    foreign_keys = connection.execute(
+        f"PRAGMA foreign_key_list({RODEX_SESSIONS_STATISTICS_TURNS_TABLE})"
+    ).fetchall()
+    observed_foreign_keys = {(row[2], row[3], row[4]) for row in foreign_keys}
+    expected_foreign_keys = {
+        (
+            RODEX_SESSIONS_STATISTICS_SOURCES_TABLE,
+            "rodex_sessions_id",
+            "rodex_sessions_id",
+        ),
+        (
+            RODEX_SESSIONS_STATISTICS_SOURCES_TABLE,
+            "rodex_sessions_statistics_sources_id",
+            "id",
+        ),
+        (
+            RODEX_SESSIONS_STATISTICS_SOURCES_TABLE,
+            "included_statistics_revision",
+            "included_statistics_revision",
+        ),
+        (
+            RODEX_SESSIONS_STATISTICS_TABLE,
+            "rodex_sessions_id",
+            "rodex_sessions_id",
+        ),
+        (
+            RODEX_SESSIONS_STATISTICS_TABLE,
+            "included_statistics_revision",
+            "statistics_revision",
+        ),
+    }
+    if observed_foreign_keys != expected_foreign_keys:
+        raise RodexSessionError(
+            f"{RODEX_SESSIONS_STATISTICS_TURNS_TABLE} foreign keys mismatch: "
+            f"{observed_foreign_keys!r}"
+        )
+    _verify_table_definition_contains(
+        connection,
+        RODEX_SESSIONS_STATISTICS_TURNS_TABLE,
+        (
+            "CHECK ( INCLUDED_STATISTICS_REVISION >= 1 )",
+            "OUTCOME IN ('OPEN', 'COMPLETED', 'ABORTED')",
+            "OUTCOME != 'OPEN' OR TERMINAL_AT_UTC IS NULL",
+            "JSON_VALID(TURN_STATISTICS_JSON) = 1",
+            "JSON_TYPE(TURN_STATISTICS_JSON) = 'OBJECT'",
+            "DEFERRABLE INITIALLY DEFERRED",
+        ),
+    )
+
+
 def _verify_statistics_workers_table(connection: sqlite3.Connection) -> None:
     _verify_table_columns(
         connection,
@@ -1948,6 +2301,70 @@ def _statistics_aggregate_json(aggregate_statistics: Mapping[str, object]) -> st
         raise ValueError(
             "aggregate_statistics must be a JSON-compatible mapping"
         ) from error
+
+
+def _statistics_turn_json(turn_statistics: Mapping[str, object]) -> str:
+    if not isinstance(turn_statistics, Mapping):
+        raise TypeError("turn_statistics must be a mapping")
+    projection = {
+        key: value
+        for key, value in turn_statistics.items()
+        if key in STATISTICS_TURN_FIELDS
+    }
+    try:
+        return json.dumps(
+            projection,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+    except (TypeError, ValueError) as error:
+        raise ValueError("turn_statistics must be a JSON-compatible mapping") from error
+
+
+def _turn_id_sha256_signed_bigints(turn_id: str) -> tuple[int, int, int, int]:
+    normalized = _normalise_required_text(turn_id, "codex_turn_id")
+    digest = hashlib.sha256(normalized.encode("utf-8")).digest()
+    pieces = tuple(
+        int.from_bytes(digest[offset : offset + 8], "big", signed=True)
+        for offset in range(0, 32, 8)
+    )
+    return pieces[0], pieces[1], pieces[2], pieces[3]
+
+
+def _validate_turn_observation(
+    observation: RodexSessionTurnStatisticsObservation,
+) -> RodexSessionTurnStatisticsObservation:
+    if not isinstance(observation, RodexSessionTurnStatisticsObservation):
+        raise TypeError(
+            "turn_statistics must contain RodexSessionTurnStatisticsObservation values"
+        )
+    codex_uuid = _parse_uuid(observation.codex_session_uuid, "codex_session_uuid")
+    turn_id = _normalise_required_text(observation.codex_turn_id, "codex_turn_id")
+    started_at = (
+        None
+        if observation.started_at_utc is None
+        else _normalise_utc_timestamp_text(observation.started_at_utc)
+    )
+    outcome = _normalise_required_text(observation.outcome, "outcome")
+    if outcome not in STATISTICS_TURN_OUTCOMES:
+        raise ValueError(f"unsupported turn outcome: {outcome}")
+    terminal_at = (
+        None
+        if observation.terminal_at_utc is None
+        else _normalise_utc_timestamp_text(observation.terminal_at_utc)
+    )
+    if outcome == "open" and terminal_at is not None:
+        raise ValueError("open turns cannot have a terminal timestamp")
+    return RodexSessionTurnStatisticsObservation(
+        codex_session_uuid=codex_uuid,
+        codex_turn_id=turn_id,
+        started_at_utc=started_at,
+        terminal_at_utc=terminal_at,
+        outcome=outcome,
+        turn_statistics=json.loads(_statistics_turn_json(observation.turn_statistics)),
+    )
 
 
 def _validate_source_observation(
@@ -2260,6 +2677,24 @@ def _statistics_source_from_row(
         analyzed_prefix_sha256=None if row[8] is None else str(row[8]),
         verified_at_utc=None if row[9] is None else str(row[9]),
         included_statistics_revision=None if row[10] is None else int(row[10]),
+    )
+
+
+def _turn_statistics_from_row(row: tuple[object, ...]) -> RodexSessionTurnStatistics:
+    projection = json.loads(str(row[10]))
+    if not isinstance(projection, dict):
+        raise RodexSessionError("stored turn statistics must be a JSON object")
+    return RodexSessionTurnStatistics(
+        id=int(row[0]),
+        rodex_sessions_id=int(row[1]),
+        rodex_sessions_statistics_sources_id=int(row[2]),
+        codex_session_uuid=join_signed_bigints_into_a_codex_uuid(int(row[3]), int(row[4])),
+        codex_turn_id=str(row[5]),
+        included_statistics_revision=int(row[6]),
+        started_at_utc=None if row[7] is None else str(row[7]),
+        terminal_at_utc=None if row[8] is None else str(row[8]),
+        outcome=str(row[9]),
+        turn_statistics=projection,
     )
 
 

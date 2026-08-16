@@ -11,6 +11,7 @@ from types import SimpleNamespace
 import pytest
 
 from rodex.analytics import (
+    ANALYTICS_RESTART_DELAY_SECONDS,
     AnalyticsCalculation,
     AnalyticsRolloutWorker,
     AnalyticsSubprocessSupervisor,
@@ -23,6 +24,7 @@ from rodex_functions import (
     create_a_rodex_session,
     list_rodex_session_statistics_sources,
     read_rodex_session_statistics,
+    read_rodex_session_turn_statistics,
     record_a_rodex_session_runtime_resume,
 )
 
@@ -84,19 +86,42 @@ class FakeWorkerProcess:
         self.killed = True
 
 
+class RecordingStop:
+    def __init__(self) -> None:
+        self.stopped = False
+        self.waits: list[float] = []
+
+    def is_set(self) -> bool:
+        return self.stopped
+
+    def wait(self, timeout: float) -> bool:
+        self.waits.append(timeout)
+        self.stopped = True
+        return True
+
+
 def _rollout(root: Path, codex_uuid: uuid.UUID) -> Path:
     path = root / "2026" / "08" / "16" / f"rollout-example-{codex_uuid}.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
+    records = [
+        {
+            "timestamp": "2026-08-16T12:00:00Z",
+            "type": "session_meta",
+            "payload": {"id": str(codex_uuid)},
+        },
+        {
+            "timestamp": "2026-08-16T12:00:01Z",
+            "type": "event_msg",
+            "payload": {"type": "task_started", "turn_id": "turn-test"},
+        },
+        {
+            "timestamp": "2026-08-16T12:00:02Z",
+            "type": "event_msg",
+            "payload": {"type": "task_complete", "turn_id": "turn-test"},
+        },
+    ]
     path.write_text(
-        json.dumps(
-            {
-                "timestamp": "2026-08-16T12:00:00Z",
-                "type": "session_meta",
-                "payload": {"id": str(codex_uuid)},
-            }
-        )
-        + "\n",
-        encoding="utf-8",
+        "".join(json.dumps(record) + "\n" for record in records), encoding="utf-8"
     )
     return path
 
@@ -132,6 +157,24 @@ def test_worker_waits_for_unregistered_identity_without_opening_analyzer(
 
     assert state == "catching_up"
     assert adapters == []
+
+
+@pytest.mark.parametrize("state, expected_wait", [("up_to_date", 0.125), ("degraded", 2.0)])
+def test_worker_loop_wait_matches_persisted_retry_policy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    state: str,
+    expected_wait: float,
+) -> None:
+    worker = AnalyticsRolloutWorker(_config(tmp_path))
+    stop = RecordingStop()
+    monkeypatch.setattr(worker, "poll_once", lambda: state)
+
+    worker.run_until_stopped(stop, poll_interval_seconds=0.125)  # type: ignore[arg-type]
+
+    assert stop.waits == [expected_wait]
+    if state == "degraded":
+        assert expected_wait == ANALYTICS_RESTART_DELAY_SECONDS
 
 
 def test_worker_backfills_verified_rollout_and_projects_only_aggregates(
@@ -459,6 +502,29 @@ def test_real_adapter_uses_existing_in_memory_analyzer_api(tmp_path: Path) -> No
     assert "protocol_id" not in calculation.aggregate_statistics
     assert "user_id" not in calculation.aggregate_statistics
     assert "revision" not in calculation.aggregate_statistics
+    assert len(calculation.turn_statistics) == 1
+    assert calculation.turn_statistics[0].codex_session_uuid == CODEX_UUID
+    assert calculation.turn_statistics[0].codex_turn_id == "turn-test"
+
+
+def test_real_worker_publishes_exact_turn_projection_into_rodex_sql(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    _create(config)
+    _rollout(config.codex_sessions_root, CODEX_UUID)
+
+    assert AnalyticsRolloutWorker(config).poll_once() == "up_to_date"
+
+    exact = read_rodex_session_turn_statistics(1, "turn-test", config.rodex_database_path)
+    assert exact.statistics is not None
+    assert exact.statistics.statistics_projection_schema_version == "rodex-statistics-v2"
+    assert exact.worker is not None
+    assert exact.worker.worker_state == "up_to_date"
+    assert exact.turn is not None
+    assert exact.turn.codex_session_uuid == CODEX_UUID
+    assert exact.turn.included_statistics_revision == exact.statistics.statistics_revision
+    assert exact.turn.outcome == "completed"
 
 
 @pytest.mark.parametrize(
@@ -491,13 +557,17 @@ def test_adapter_maps_partial_values_but_rejects_fatal_or_valueless_results(
                 diagnostics=(),
             )
 
-        def get_stats(self, _protocol_id: str) -> object:
+        def get_stats(
+            self, _protocol_id: str, *, include_turn_statistics: bool = False
+        ) -> object:
+            assert include_turn_statistics
             return SimpleNamespace(
                 status="ok",
                 value={
                     "event_count": 1,
                     "source_count": 1,
                     "must_have_basic_stats": {},
+                    "turn_statistics": [],
                     "protocol_id": "must-be-dropped",
                 },
             )

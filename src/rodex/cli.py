@@ -18,6 +18,7 @@ from cool_name import (
 )
 from rodex_functions import (
     RodexSessionError,
+    RodexSessionTurnStatisticsAmbiguousError,
     create_a_rodex_session,
     default_rodex_database_path,
     generate_an_unregistered_rodex_uuid_candidate,
@@ -30,6 +31,7 @@ from rodex_functions import (
     lookup_rodex_uuid_from_an_id,
     open_a_user_defined_cool_name_assignment,
     read_rodex_session_statistics,
+    read_rodex_session_turn_statistics,
     record_a_rodex_session_access,
     record_a_rodex_session_runtime_resume,
     update_rodex_tmux_session_name,
@@ -92,7 +94,8 @@ Rodex commands:
   _send SESSION PROMPT               Send work to a running session.
   _wait SESSION                      Wait until a running session is idle.
   _tail SESSION                      Follow live protocol events as JSON lines.
-  _stats SESSION [--json]            Show the latest persistent aggregate statistics.
+  _stats SESSION [--turn ID] [--source UUID] [--json]
+                                     Show persistent session or exact-turn statistics.
   _stats-status SESSION              Show analytics freshness and health.
 
 Use a Rodex session name as the sole argument to attach, resume, or recover it.
@@ -536,7 +539,7 @@ def _run_reserved_command(
 
 
 def _run_statistics_command(arguments: list[str], database_path: Path) -> bool:
-    """Serve persistent aggregate statistics without requiring Codex or tmux."""
+    """Serve persistent statistics without requiring Codex, tmux, or analysis."""
     if not arguments or arguments[0] not in {_STATS_COMMAND, _STATS_STATUS_COMMAND}:
         return False
     command = arguments[0]
@@ -545,17 +548,60 @@ def _run_statistics_command(arguments: list[str], database_path: Path) -> bool:
             raise RodexLaunchError("usage: rodex _stats-status SESSION_NAME")
         session_name = arguments[1]
         as_json = False
+        turn_id = None
+        source_uuid = None
     else:
-        if len(arguments) not in {2, 3} or (
-            len(arguments) == 3 and arguments[2] != "--json"
-        ):
-            raise RodexLaunchError("usage: rodex _stats SESSION_NAME [--json]")
+        if len(arguments) < 2:
+            raise RodexLaunchError(
+                "usage: rodex _stats SESSION_NAME "
+                "[--turn TURN_ID] [--source CODEX_SESSION_UUID] [--json]"
+            )
         session_name = arguments[1]
-        as_json = len(arguments) == 3
+        as_json = False
+        turn_id: str | None = None
+        source_uuid: uuid.UUID | None = None
+        index = 2
+        while index < len(arguments):
+            option = arguments[index]
+            if option == "--json" and not as_json:
+                as_json = True
+                index += 1
+            elif option == "--turn" and turn_id is None and index + 1 < len(arguments):
+                turn_id = arguments[index + 1]
+                index += 2
+            elif (
+                option == "--source" and source_uuid is None and index + 1 < len(arguments)
+            ):
+                try:
+                    source_uuid = uuid.UUID(arguments[index + 1])
+                except ValueError as error:
+                    raise RodexLaunchError(
+                        "--source requires a valid Codex session UUID"
+                    ) from error
+                index += 2
+            else:
+                raise RodexLaunchError(
+                    "usage: rodex _stats SESSION_NAME "
+                    "[--turn TURN_ID] [--source CODEX_SESSION_UUID] [--json]"
+                )
+        if source_uuid is not None and turn_id is None:
+            raise RodexLaunchError("--source requires --turn")
     session_id = lookup_owned_rodex_session_id_from_a_cool_name(session_name, database_path)
     if session_id is None:
         raise RodexLaunchError(f"unknown Rodex session: {session_name}")
-    view = read_rodex_session_statistics(session_id, database_path)
+    try:
+        view = (
+            read_rodex_session_statistics(session_id, database_path)
+            if turn_id is None
+            else read_rodex_session_turn_statistics(
+                session_id,
+                turn_id,
+                database_path,
+                codex_session_uuid=source_uuid,
+            )
+        )
+    except RodexSessionTurnStatisticsAmbiguousError as error:
+        raise RodexLaunchError(str(error)) from error
     snapshot = view.statistics
     worker = view.worker
     payload = {
@@ -588,7 +634,23 @@ def _run_statistics_command(arguments: list[str], database_path: Path) -> bool:
         raise RodexLaunchError(
             f"Rodex session has no analytics snapshot yet: {session_name}"
         )
-    payload["statistics"] = snapshot.aggregate_statistics
+    if turn_id is None:
+        payload["statistics"] = snapshot.aggregate_statistics
+    else:
+        turn = view.turn
+        if turn is None:
+            raise RodexLaunchError(
+                f"turn is not present in the latest statistics snapshot: {turn_id}"
+            )
+        payload["turn"] = {
+            "codex_session_uuid": str(turn.codex_session_uuid),
+            "turn_id": turn.codex_turn_id,
+            "started_at_utc": turn.started_at_utc,
+            "terminal_at_utc": turn.terminal_at_utc,
+            "outcome": turn.outcome,
+            "included_statistics_revision": turn.included_statistics_revision,
+        }
+        payload["statistics"] = turn.turn_statistics
     if as_json:
         print(json.dumps(payload, indent=2, sort_keys=True), flush=True)
     else:
@@ -600,10 +662,13 @@ def _print_human_statistics(payload: dict[str, object]) -> None:
     statistics = payload["statistics"]
     if not isinstance(statistics, dict):
         raise RodexLaunchError("stored analytics snapshot is invalid")
+    turn = payload.get("turn")
+    subject = ""
+    if isinstance(turn, dict):
+        subject = f" turn {turn.get('turn_id')}"
     print(
-        f"Rodex {payload['rodex_session_name']} statistics "
-        f"(revision {payload['statistics_revision']}, "
-        f"{payload['worker_state']})",
+        f"Rodex {payload['rodex_session_name']}{subject} statistics "
+        f"(revision {payload['statistics_revision']}, {payload['worker_state']})",
         flush=True,
     )
     for category in ("must_have_basic_stats", "recommended_insight_stats"):

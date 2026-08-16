@@ -36,11 +36,12 @@ tmux, or the session database.
 
 ## Scrollback ownership
 
-Rodex configures tmux's global defaults before the first pane is created: each new
-pane inherits a 50,000-line history limit and mouse support. The managed Codex TUI runs
-without the alternate screen so rendered conversation rows reach that history. The
-mouse wheel uses tmux's standard `WheelUpPane` copy-mode binding; `Ctrl-b [` remains
-the keyboard route into copy mode and `q` exits it.
+Rodex configures tmux's global defaults before the first pane is created: each new pane
+inherits a 50,000-line history limit with mouse mode off. The managed Codex TUI runs
+without the alternate screen so rendered conversation rows reach that history.
+`Ctrl-b [` enters keyboard copy mode and `q` exits it. Keeping tmux mouse handling off
+leaves selection, scrolling, and context-menu behavior with the outer terminal; an
+attached user may opt in temporarily with `tmux set-option mouse on`.
 
 tmux—not the terminal emulator or WebSocket proxy—owns managed-session scrollback.
 The proxy continues to forward protocol frames and selected live events without

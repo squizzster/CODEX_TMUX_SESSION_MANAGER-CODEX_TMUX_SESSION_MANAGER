@@ -30,7 +30,7 @@ session host ─┬► Codex TUI ──► protocol proxy ──► Codex app-se
              └► analytics worker ──► in-memory analyzer ──► SQLite projections
 ```
 
-The TUI remains the normal Codex interface and runs inline so rendered output enters tmux's 50,000-line pane history. tmux owns mouse/copy-mode scrollback and derives the
+The TUI remains the normal Codex interface and runs inline so rendered output enters tmux's 50,000-line pane history. tmux owns keyboard copy-mode scrollback and derives the
 status privacy state from clients attached to that exact session. The proxy forwards
 WebSocket frames, counts tools, and fans structured events; it never buffers the screen.
 
@@ -72,7 +72,7 @@ lookup. Detailed rules live in [SQL_SCHEMA.md](SQL_SCHEMA.md), not duplicated he
 ### New session (bare `rodex`, `_create`, or `_detach`)
 
 1. Allocate an unregistered Rodex UUID candidate for the pending runtime.
-2. Set the shared tmux server's 50,000-line history and mouse defaults before creating the detached session and its first pane.
+2. Set the shared tmux server's 50,000-line history and mouse-off defaults before creating the detached session and its first pane.
 3. Start one private Codex app-server and connect an inline (`--no-alt-screen`) TUI
    through the proxy so rendered conversation rows enter tmux history.
 4. Refresh live paths and supervise analytics without blocking the TUI.

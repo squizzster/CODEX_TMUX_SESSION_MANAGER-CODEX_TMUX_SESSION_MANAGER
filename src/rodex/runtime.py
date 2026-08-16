@@ -43,6 +43,8 @@ SUN_PATH_MAX_BYTES: Final = 107
 DEFAULT_STARTUP_TIMEOUT_SECONDS: Final = 15.0
 RUNTIME_PATH_KEEPALIVE_INTERVAL_SECONDS: Final = 60.0 * 60.0
 RODEX_TMUX_HISTORY_LIMIT_LINES: Final = 50_000
+# One switch owns tmux mouse handling for both new and reconfigured sessions.
+RODEX_TMUX_MOUSE_ENABLED: Final = False
 _TUI_SUPERVISION_INTERVAL_SECONDS: Final = 1.0
 _POLL_INTERVAL_SECONDS: Final = 0.05
 _PROXY_SOCKET_OPTION: Final = "@rodex_protocol_proxy_socket_path"
@@ -168,6 +170,11 @@ def _exact_tmux_session_target(session_name: str) -> str:
 def _exact_tmux_pane_target(session_name: str) -> str:
     """Address a session exactly through commands whose target is a pane."""
     return f"={session_name}:"
+
+
+def _tmux_mouse_mode() -> str:
+    """Translate the single Rodex mouse switch into tmux option vocabulary."""
+    return "on" if RODEX_TMUX_MOUSE_ENABLED else "off"
 
 
 def _status_animation_hook_command(
@@ -397,7 +404,7 @@ class RodexRuntimeLauncher:
     def configure_identity_status(self, runtime: LiveTmuxSession) -> None:
         """Configure Rodex-owned interaction and status for one live session."""
         target = _exact_tmux_pane_target(runtime.tmux_session_name)
-        self._tmux(runtime, "set-option", "-t", target, "mouse", "on")
+        self._tmux(runtime, "set-option", "-t", target, "mouse", _tmux_mouse_mode())
         for transient_option in (
             STATUS_ANIMATION_TOKEN_OPTION,
             COMPLETION_TOKEN_OPTION,
@@ -509,7 +516,7 @@ class RodexRuntimeLauncher:
             "set-option",
             "-g",
             "mouse",
-            "on",
+            _tmux_mouse_mode(),
             ";",
             "new-session",
             "-d",

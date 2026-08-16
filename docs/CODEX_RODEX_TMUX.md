@@ -47,5 +47,9 @@ identities. Tool counts cover the current runtime and reset when it is resumed.
 - The runtime uses `$XDG_RUNTIME_DIR/rodex` when suitable—normally
   `/run/user/<uid>/rodex`—otherwise `/tmp/rodex-<uid>`. Unix sockets stay there because
   long project paths can exceed Linux socket limits.
+- While a session host is alive, it refreshes the runtime root, shared tmux socket, and
+  its private sockets and log hourly. A refresh failure ends that runtime rather than
+  leaving a detached session that cannot be addressed. Normal cleanup eligibility
+  resumes when the live hosts exit.
 
 Exact tmux targets and compensated name transitions preserve the recorded endpoint.

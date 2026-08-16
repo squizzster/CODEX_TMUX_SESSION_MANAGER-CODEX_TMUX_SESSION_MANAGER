@@ -82,6 +82,10 @@ Short-lived Unix sockets and app-server logs use `$XDG_RUNTIME_DIR/rodex`, norma
 too long, Rodex uses the private fallback `/tmp/rodex-<uid>`. Set `RODEX_RUNTIME_DIR`
 to override it.
 
+Each live session host refreshes every required runtime pathname hourly. This protects
+weeks-long detached sessions from age-based temporary-file cleanup without making dead
+sockets persistent; refreshes stop when the owning session ends.
+
 The current Rodex registry stores identities, ownership, timestamps, names, and tmux
 endpoints. Live protocol sockets are advertised only by the running tmux session. Rodex
 does not persist conversation content; Codex remains responsible for its own history.

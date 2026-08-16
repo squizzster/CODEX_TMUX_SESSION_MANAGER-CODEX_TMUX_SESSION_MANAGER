@@ -31,7 +31,7 @@ events. It does not screen-scrape or persist conversation content.
 |---|---|
 | `rodex.cli` | Adapt commands, choose create/attach/resume, and present results. |
 | `rodex.runtime` | Own tmux, app-server discovery, attachment, and supervision. |
-| `rodex.session_host` | Keep one app-server, proxy, and foreground TUI together. |
+| `rodex.session_host` | Keep one app-server, proxy, foreground TUI, and its runtime paths together. |
 | `rodex.control` | Verify and control one exact loaded Codex thread. |
 | `rodex.protocol_proxy` | Forward traffic and fan out bounded live event streams. |
 | `rodex_functions` | Own session identity, ownership, naming, and state transitions. |
@@ -63,9 +63,10 @@ a permanent alternative lookup. Detailed future schema rules live in
 
 1. Start a detached tmux session containing the Rodex session host.
 2. Start one private Codex app-server and connect the TUI through the proxy.
-3. Observe the single real Codex UUID from that app-server.
-4. Transactionally create the Rodex UUID, name, user/log, and tmux link.
-5. Rename tmux to the display name, configure status, and attach the terminal.
+3. Refresh every required live pathname immediately and hourly until the host exits.
+4. Observe the single real Codex UUID from that app-server.
+5. Transactionally create the Rodex UUID, name, user/log, and tmux link.
+6. Rename tmux to the display name, configure status, and attach the terminal.
 
 ### Existing name
 
@@ -101,6 +102,8 @@ observer cannot block the interactive TUI.
 - SQLite relationships, natural keys, and cardinality are enforced by constraints.
 - Related database changes use `BEGIN IMMEDIATE` and commit as one unit.
 - External tmux changes use exact targets and compensating transitions where needed.
+- A live session host keeps its runtime paths fresh and fails closed if that guarantee
+  cannot be maintained.
 - Session commands use tmux's `=name`; target-pane commands use `=name:`.
 - Failure cleanup targets only the runtime created by the failed operation.
 

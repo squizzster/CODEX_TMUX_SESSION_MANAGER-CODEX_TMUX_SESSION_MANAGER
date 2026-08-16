@@ -65,6 +65,26 @@ def open_rodex_transaction(
         connection.close()
 
 
+@contextmanager
+def open_rodex_read_transaction(
+    database_path: str | os.PathLike[str],
+) -> Iterator[sqlite3.Connection]:
+    """Open one deferred, transactionally consistent read without a write lock."""
+    path = Path(database_path).expanduser().resolve()
+    connection = sqlite3.connect(path, timeout=10, isolation_level=None)
+    try:
+        connection.execute("PRAGMA foreign_keys = ON")
+        connection.execute("BEGIN")
+        yield connection
+    except BaseException:
+        connection.rollback()
+        raise
+    else:
+        connection.commit()
+    finally:
+        connection.close()
+
+
 def select_lookup_id(
     connection: sqlite3.Connection,
     table_name: str,

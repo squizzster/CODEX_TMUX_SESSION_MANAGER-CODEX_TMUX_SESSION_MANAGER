@@ -3,10 +3,16 @@ revision = 3
 requires-python = ">=3.12"
 
 [[package]]
+name = "codex-protocol-log-analyzer"
+version = "0.2.0"
+source = { git = "https://github.com/squizzster/CODEX_PROTOCOL_LOG_ANALYZER-CODEX_PROTOCOL_LOG_ANALYZER.git?rev=dd2e7167eda2d9db24f11910b81c103078b680b5#dd2e7167eda2d9db24f11910b81c103078b680b5" }
+
+[[package]]
 name = "codex-tmux-session-manager"
 version = "0.4.0"
 source = { editable = "." }
 dependencies = [
+    { name = "codex-protocol-log-analyzer" },
     { name = "coolname" },
     { name = "websockets" },
 ]
@@ -20,6 +26,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "codex-protocol-log-analyzer", git = "https://github.com/squizzster/CODEX_PROTOCOL_LOG_ANALYZER-CODEX_PROTOCOL_LOG_ANALYZER.git?rev=dd2e7167eda2d9db24f11910b81c103078b680b5" },
     { name = "coolname", specifier = ">=5.0.0" },
     { name = "websockets", specifier = ">=15,<18" },
 ]

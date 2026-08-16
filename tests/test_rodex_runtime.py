@@ -15,6 +15,7 @@ from typing import BinaryIO, cast
 import pytest
 
 import rodex.runtime as runtime_module
+from rodex.analytics import AnalyticsWorkerConfig
 from rodex.runtime import (
     RODEX_TMUX_HISTORY_LIMIT_LINES,
     LiveRodexRuntime,
@@ -157,6 +158,9 @@ def test_start_directly_hosts_codex_in_tmux_and_returns_its_uuid(
         host_command
     )
     assert "--model example" in host_command
+    assert "--rodex-session-uuid" not in host_command
+    assert "--rodex-database" not in host_command
+    assert "--codex-sessions-root" not in host_command
     assert "send-keys" not in host_command
     assert [command[3:] for command in runner.calls[-3:]] == [
         [
@@ -980,6 +984,17 @@ def test_session_host_connects_the_tui_through_the_protocol_proxy(
                 proxy_lifecycle.append("keepalive-close")
                 self.closed = True
 
+    class FailingAnalyticsSupervisor:
+        def __init__(self, config: AnalyticsWorkerConfig) -> None:
+            assert config.rodex_database_path == tmp_path / "rodex.sqlite3"
+
+        def poll(self) -> None:
+            proxy_lifecycle.append("analytics-poll-failed")
+            raise OSError("analytics unavailable")
+
+        def close(self) -> None:
+            raise AssertionError("failed analytics supervisor was released")
+
     def start_process(command: list[str], **options: object) -> FakeProcess:
         if "app-server" not in command:
             tui_commands.append(command)
@@ -1010,6 +1025,12 @@ def test_session_host_connects_the_tui_through_the_protocol_proxy(
             "/usr/bin/tmux",
             tmux_socket,
             codex_arguments,
+            analytics_config=AnalyticsWorkerConfig(
+                rodex_database_path=tmp_path / "rodex.sqlite3",
+                codex_sessions_root=tmp_path / "sessions",
+                rodex_uuid=uuid.UUID(int=1),
+            ),
+            analytics_supervisor_factory=FailingAnalyticsSupervisor,
         )
         == 0
     )
@@ -1021,6 +1042,7 @@ def test_session_host_connects_the_tui_through_the_protocol_proxy(
         "event-start",
         "start",
         "keepalive-start",
+        "analytics-poll-failed",
         "keepalive-close",
         "close",
         "event-close",

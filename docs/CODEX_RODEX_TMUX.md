@@ -55,6 +55,27 @@ The separate tmux input proxy and completion observer for `/rodex` are retained 
 temporarily disabled by `RODEX_TMUX_SLASH_ENABLED`. Runtime status setup removes their
 Enter/Tab bindings and pane pipe, so all input currently passes directly to Codex.
 
+## Persistent statistics
+
+Each session host supervises one low-priority analytics subprocess keyed by the Rodex
+UUID allocated for that launch. The worker waits for SQL registration, discovers every
+Codex UUID retained in that Rodex lineage, and authenticates each rollout's internal
+`session_meta` identity. It copies only the final newline-complete prefix to a private
+0600 temporary file and reauthenticates its SHA-256 before publishing.
+
+The worker creates a fresh in-memory `CodexProtocolLibrary`, loads the authenticated
+copies, calculates statistics, then closes it. The analyzer owns calculation only;
+Rodex owns watching, scheduling, source provenance, retries, health, and persistence.
+One transaction publishes a Rodex-owned monotonic revision, the aggregate whitelist,
+and its exact source descriptors. Codex-UUID and prior-revision fences reject stale
+workers. Health failures commit separately and never overwrite the last good snapshot.
+
+Analytics is fail-open: import, parsing, calculation, process, or database failure
+cannot change the Codex TUI's behavior or exit status. `_stats NAME [--json]` and
+`_stats-status NAME` enforce normal ownership but query SQLite without requiring a live
+Codex or tmux process. A runtime started before this feature must end and resume before
+it has an analytics sidecar.
+
 ## Named reattachment
 
 - `./rodex <cool-name>` resolves the name through its integer identity.

@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import json
 import os
 import pwd
 import secrets
 import sqlite3
 import uuid
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -24,6 +25,7 @@ from cool_name.functions import (
 from rodex_sql import default_rodex_database_path as _default_rodex_database_path
 from rodex_sql import (
     normalise_rodex_database_path,
+    open_rodex_read_transaction,
     open_rodex_transaction,
     select_lookup_id,
     select_or_insert_lookup_id,
@@ -43,11 +45,43 @@ RODEX_TMUX_SESSIONS_SESSION_UNIQUE_INDEX: Final = (
     "rodex_tmux_sessions_rodex_sessions_id_unique"
 )
 RODEX_TMUX_SESSIONS_ENDPOINT_UNIQUE_INDEX: Final = "rodex_tmux_sessions_endpoint_unique"
+RODEX_SESSIONS_STATISTICS_TABLE: Final = "rodex_sessions_statistics"
+RODEX_SESSIONS_STATISTICS_SESSION_UNIQUE_INDEX: Final = (
+    "rodex_sessions_statistics_rodex_sessions_id_unique"
+)
+RODEX_SESSIONS_STATISTICS_SESSION_REVISION_UNIQUE_INDEX: Final = (
+    "rodex_sessions_statistics_session_revision_unique"
+)
+RODEX_SESSIONS_STATISTICS_SOURCES_TABLE: Final = "rodex_sessions_statistics_sources"
+RODEX_SESSIONS_STATISTICS_SOURCES_UNIQUE_INDEX: Final = (
+    "rodex_sessions_statistics_sources_codex_uuid_unique"
+)
+RODEX_SESSIONS_STATISTICS_SOURCES_SESSION_INDEX: Final = (
+    "rodex_sessions_statistics_sources_session"
+)
+RODEX_SESSIONS_STATISTICS_WORKERS_TABLE: Final = "rodex_sessions_statistics_workers"
+RODEX_SESSIONS_STATISTICS_WORKERS_SESSION_UNIQUE_INDEX: Final = (
+    "rodex_sessions_statistics_workers_rodex_sessions_id_unique"
+)
 RODEX_SESSIONS_COOL_NAMES_UNIQUE_INDEX: Final = "rodex_sessions_cool_names_id_unique"
 RODEX_SESSIONS_USER_DEFINED_COOL_NAMES_UNIQUE_INDEX: Final = (
     "rodex_sessions_user_defined_cool_names_id_unique"
 )
 MAX_UUID_GENERATION_ATTEMPTS: Final = 8
+STATISTICS_AGGREGATE_FIELDS: Final = frozenset(
+    {
+        "event_count",
+        "source_count",
+        "selected_stats",
+        "must_have_basic_stats",
+        "recommended_insight_stats",
+        "audit",
+    }
+)
+STATISTICS_COVERAGE_STATES: Final = frozenset({"complete", "gapped"})
+STATISTICS_WORKER_STATES: Final = frozenset(
+    {"starting", "catching_up", "up_to_date", "degraded", "stopped"}
+)
 
 _HALF_BITS: Final = 64
 _HALF_MODULUS: Final = 1 << _HALF_BITS
@@ -129,6 +163,108 @@ _CREATE_TMUX_SESSIONS_ENDPOINT_UNIQUE_INDEX = f"""
 CREATE UNIQUE INDEX IF NOT EXISTS {RODEX_TMUX_SESSIONS_ENDPOINT_UNIQUE_INDEX}
 ON {RODEX_TMUX_SESSIONS_TABLE} (tmux_server_socket_path, tmux_session_name)
 """
+_CREATE_STATISTICS_TABLE = f"""
+CREATE TABLE IF NOT EXISTS {RODEX_SESSIONS_STATISTICS_TABLE} (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    rodex_sessions_id INTEGER NOT NULL,
+    statistics_revision INTEGER NOT NULL CHECK (statistics_revision >= 1),
+    statistics_projection_schema_version TEXT NOT NULL,
+    calculated_at_utc TEXT NOT NULL,
+    coverage_state TEXT NOT NULL CHECK (coverage_state IN ('complete', 'gapped')),
+    aggregate_statistics_json TEXT NOT NULL CHECK (
+        json_valid(aggregate_statistics_json) = 1
+        AND json_type(aggregate_statistics_json) = 'object'
+    ),
+    FOREIGN KEY (rodex_sessions_id) REFERENCES {RODEX_SESSIONS_TABLE} (id)
+)
+"""
+_CREATE_STATISTICS_SESSION_UNIQUE_INDEX = f"""
+CREATE UNIQUE INDEX IF NOT EXISTS {RODEX_SESSIONS_STATISTICS_SESSION_UNIQUE_INDEX}
+ON {RODEX_SESSIONS_STATISTICS_TABLE} (rodex_sessions_id)
+"""
+_CREATE_STATISTICS_SESSION_REVISION_UNIQUE_INDEX = f"""
+CREATE UNIQUE INDEX IF NOT EXISTS
+    {RODEX_SESSIONS_STATISTICS_SESSION_REVISION_UNIQUE_INDEX}
+ON {RODEX_SESSIONS_STATISTICS_TABLE} (rodex_sessions_id, statistics_revision)
+"""
+_CREATE_STATISTICS_SOURCES_TABLE = f"""
+CREATE TABLE IF NOT EXISTS {RODEX_SESSIONS_STATISTICS_SOURCES_TABLE} (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    rodex_sessions_id INTEGER NOT NULL,
+    codex_session_uuid_int_1 BIGINT NOT NULL,
+    codex_session_uuid_int_2 BIGINT NOT NULL,
+    first_linked_at_utc TEXT NOT NULL,
+    rollout_file_path TEXT DEFAULT NULL,
+    analyzed_size_bytes INTEGER DEFAULT NULL CHECK (
+        analyzed_size_bytes IS NULL OR analyzed_size_bytes >= 0
+    ),
+    analyzed_mtime_ns INTEGER DEFAULT NULL CHECK (
+        analyzed_mtime_ns IS NULL OR analyzed_mtime_ns >= 0
+    ),
+    analyzed_prefix_sha256 TEXT DEFAULT NULL CHECK (
+        analyzed_prefix_sha256 IS NULL OR length(analyzed_prefix_sha256) = 64
+    ),
+    verified_at_utc TEXT DEFAULT NULL,
+    included_statistics_revision INTEGER DEFAULT NULL CHECK (
+        included_statistics_revision IS NULL OR included_statistics_revision >= 1
+    ),
+    CHECK (
+        included_statistics_revision IS NULL OR rollout_file_path IS NOT NULL
+    ),
+    CHECK (
+        (rollout_file_path IS NULL AND analyzed_size_bytes IS NULL
+            AND analyzed_mtime_ns IS NULL AND analyzed_prefix_sha256 IS NULL
+            AND verified_at_utc IS NULL)
+        OR
+        (rollout_file_path IS NOT NULL AND analyzed_size_bytes IS NOT NULL
+            AND analyzed_mtime_ns IS NOT NULL AND analyzed_prefix_sha256 IS NOT NULL
+            AND verified_at_utc IS NOT NULL)
+    ),
+    FOREIGN KEY (rodex_sessions_id) REFERENCES {RODEX_SESSIONS_TABLE} (id),
+    FOREIGN KEY (rodex_sessions_id, included_statistics_revision)
+        REFERENCES {RODEX_SESSIONS_STATISTICS_TABLE}
+            (rodex_sessions_id, statistics_revision)
+        DEFERRABLE INITIALLY DEFERRED
+)
+"""
+_CREATE_STATISTICS_SOURCES_UNIQUE_INDEX = f"""
+CREATE UNIQUE INDEX IF NOT EXISTS {RODEX_SESSIONS_STATISTICS_SOURCES_UNIQUE_INDEX}
+ON {RODEX_SESSIONS_STATISTICS_SOURCES_TABLE}
+    (codex_session_uuid_int_1, codex_session_uuid_int_2)
+"""
+_CREATE_STATISTICS_SOURCES_SESSION_INDEX = f"""
+CREATE INDEX IF NOT EXISTS {RODEX_SESSIONS_STATISTICS_SOURCES_SESSION_INDEX}
+ON {RODEX_SESSIONS_STATISTICS_SOURCES_TABLE} (rodex_sessions_id)
+"""
+_CREATE_STATISTICS_WORKERS_TABLE = f"""
+CREATE TABLE IF NOT EXISTS {RODEX_SESSIONS_STATISTICS_WORKERS_TABLE} (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    rodex_sessions_id INTEGER NOT NULL,
+    worker_state TEXT NOT NULL CHECK (
+        worker_state IN ('starting', 'catching_up', 'up_to_date', 'degraded', 'stopped')
+    ),
+    diagnostic_code TEXT DEFAULT NULL,
+    last_attempted_at_utc TEXT NOT NULL,
+    consecutive_failures INTEGER NOT NULL CHECK (consecutive_failures >= 0),
+    next_retry_at_utc TEXT DEFAULT NULL,
+    CHECK (
+        worker_state != 'up_to_date'
+        OR (diagnostic_code IS NULL AND consecutive_failures = 0
+            AND next_retry_at_utc IS NULL)
+    ),
+    CHECK (
+        diagnostic_code IS NULL
+        OR (length(diagnostic_code) BETWEEN 1 AND 64
+            AND diagnostic_code NOT GLOB '*[^a-z0-9_]*')
+    ),
+    FOREIGN KEY (rodex_sessions_id) REFERENCES {RODEX_SESSIONS_TABLE} (id)
+)
+"""
+_CREATE_STATISTICS_WORKERS_SESSION_UNIQUE_INDEX = f"""
+CREATE UNIQUE INDEX IF NOT EXISTS
+    {RODEX_SESSIONS_STATISTICS_WORKERS_SESSION_UNIQUE_INDEX}
+ON {RODEX_SESSIONS_STATISTICS_WORKERS_TABLE} (rodex_sessions_id)
+"""
 
 
 class RodexSessionError(RuntimeError):
@@ -137,6 +273,10 @@ class RodexSessionError(RuntimeError):
 
 class RodexSessionUUIDCollisionError(RodexSessionError):
     """Repeated secure UUID candidates collided with existing sessions."""
+
+
+class RodexSessionStatisticsConflictError(RodexSessionError):
+    """A statistics publication lost its identity or revision fence."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -198,6 +338,69 @@ class RodexTmuxSession:
     rodex_sessions_id: int
     tmux_server_socket_path: str
     tmux_session_name: str
+
+
+@dataclass(frozen=True, slots=True)
+class RodexSessionStatistics:
+    """Latest aggregate-only analyzer projection for one Rodex session."""
+
+    id: int
+    rodex_sessions_id: int
+    statistics_revision: int
+    statistics_projection_schema_version: str
+    calculated_at_utc: str
+    coverage_state: str
+    aggregate_statistics: dict[str, object]
+
+
+@dataclass(frozen=True, slots=True)
+class RodexSessionStatisticsSource:
+    """One Codex lineage source and its latest analyzed prefix provenance."""
+
+    id: int
+    rodex_sessions_id: int
+    codex_session_uuid: uuid.UUID
+    first_linked_at_utc: str
+    rollout_file_path: str | None
+    analyzed_size_bytes: int | None
+    analyzed_mtime_ns: int | None
+    analyzed_prefix_sha256: str | None
+    verified_at_utc: str | None
+    included_statistics_revision: int | None
+
+
+@dataclass(frozen=True, slots=True)
+class RodexSessionStatisticsSourceObservation:
+    """Exact bytes and filesystem state used for one aggregate calculation."""
+
+    codex_session_uuid: uuid.UUID
+    rollout_file_path: Path
+    analyzed_size_bytes: int
+    analyzed_mtime_ns: int
+    analyzed_prefix_sha256: str
+    verified_at_utc: str
+
+
+@dataclass(frozen=True, slots=True)
+class RodexSessionStatisticsWorker:
+    """Independent health of one fail-open analytics worker."""
+
+    id: int
+    rodex_sessions_id: int
+    worker_state: str
+    diagnostic_code: str | None
+    last_attempted_at_utc: str
+    consecutive_failures: int
+    next_retry_at_utc: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class RodexSessionStatisticsView:
+    """One transactionally consistent statistics, health, and provenance read."""
+
+    statistics: RodexSessionStatistics | None
+    worker: RodexSessionStatisticsWorker | None
+    sources: tuple[RodexSessionStatisticsSource, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -270,6 +473,49 @@ def initialise_rodex_database(database_path: str | os.PathLike[str] | None = Non
         connection.execute(_CREATE_TMUX_SESSIONS_SESSION_UNIQUE_INDEX)
         connection.execute(_CREATE_TMUX_SESSIONS_ENDPOINT_UNIQUE_INDEX)
         _verify_tmux_sessions_unique_indexes(connection)
+        connection.execute(_CREATE_STATISTICS_TABLE)
+        _verify_statistics_table(connection)
+        connection.execute(_CREATE_STATISTICS_SESSION_UNIQUE_INDEX)
+        _verify_unique_index(
+            connection,
+            RODEX_SESSIONS_STATISTICS_TABLE,
+            RODEX_SESSIONS_STATISTICS_SESSION_UNIQUE_INDEX,
+            ["rodex_sessions_id"],
+        )
+        connection.execute(_CREATE_STATISTICS_SESSION_REVISION_UNIQUE_INDEX)
+        _verify_unique_index(
+            connection,
+            RODEX_SESSIONS_STATISTICS_TABLE,
+            RODEX_SESSIONS_STATISTICS_SESSION_REVISION_UNIQUE_INDEX,
+            ["rodex_sessions_id", "statistics_revision"],
+        )
+        connection.execute(_CREATE_STATISTICS_SOURCES_TABLE)
+        _verify_statistics_sources_table(connection)
+        connection.execute(_CREATE_STATISTICS_SOURCES_UNIQUE_INDEX)
+        _verify_unique_index(
+            connection,
+            RODEX_SESSIONS_STATISTICS_SOURCES_TABLE,
+            RODEX_SESSIONS_STATISTICS_SOURCES_UNIQUE_INDEX,
+            ["codex_session_uuid_int_1", "codex_session_uuid_int_2"],
+        )
+        connection.execute(_CREATE_STATISTICS_SOURCES_SESSION_INDEX)
+        _verify_index(
+            connection,
+            RODEX_SESSIONS_STATISTICS_SOURCES_TABLE,
+            RODEX_SESSIONS_STATISTICS_SOURCES_SESSION_INDEX,
+            ["rodex_sessions_id"],
+            unique=False,
+        )
+        _register_missing_statistics_sources(connection)
+        connection.execute(_CREATE_STATISTICS_WORKERS_TABLE)
+        _verify_statistics_workers_table(connection)
+        connection.execute(_CREATE_STATISTICS_WORKERS_SESSION_UNIQUE_INDEX)
+        _verify_unique_index(
+            connection,
+            RODEX_SESSIONS_STATISTICS_WORKERS_TABLE,
+            RODEX_SESSIONS_STATISTICS_WORKERS_SESSION_UNIQUE_INDEX,
+            ["rodex_sessions_id"],
+        )
     return path
 
 
@@ -277,6 +523,7 @@ def create_a_rodex_session(
     database_path: str | os.PathLike[str] | None = None,
     *,
     codex_session_uuid: uuid.UUID | str,
+    rodex_session_uuid: uuid.UUID | str | None = None,
     user_identity: RodexSessionsUserIdentity | None = None,
     tmux_server_socket_path: str | os.PathLike[str] | None = None,
     tmux_session_name: str | None = None,
@@ -314,8 +561,20 @@ def create_a_rodex_session(
                 f"{parsed_codex_session_uuid}"
             )
         allocated_name = allocate_unique_cool_name(connection)
-        for _ in range(MAX_UUID_GENERATION_ATTEMPTS):
-            rodex_uuid = uuid.UUID(int=secrets.randbits(128))
+        preallocated = (
+            None
+            if rodex_session_uuid is None
+            else _parse_uuid(rodex_session_uuid, "rodex_session_uuid")
+        )
+        candidates = (
+            (preallocated,)
+            if preallocated is not None
+            else (
+                uuid.UUID(int=secrets.randbits(128))
+                for _ in range(MAX_UUID_GENERATION_ATTEMPTS)
+            )
+        )
+        for rodex_uuid in candidates:
             uuid_int_1, uuid_int_2 = split_a_rodex_uuid_into_signed_bigints(rodex_uuid)
             try:
                 cursor = connection.execute(
@@ -330,7 +589,11 @@ def create_a_rodex_session(
                         allocated_name.id,
                     ),
                 )
-            except sqlite3.IntegrityError:
+            except sqlite3.IntegrityError as error:
+                if preallocated is not None:
+                    raise RodexSessionUUIDCollisionError(
+                        f"preallocated Rodex UUID is already occupied: {preallocated}"
+                    ) from error
                 continue
             if cursor.lastrowid is None:
                 raise RodexSessionError("SQLite did not return a Rodex session id")
@@ -352,6 +615,12 @@ def create_a_rodex_session(
                     created_at_utc,
                 ),
             )
+            _register_statistics_source(
+                connection,
+                session.id,
+                parsed_codex_session_uuid,
+                created_at_utc,
+            )
             if tmux_link is not None:
                 socket_path, session_name = tmux_link
                 connection.execute(
@@ -365,6 +634,28 @@ def create_a_rodex_session(
             "could not allocate a unique Rodex UUID after "
             f"{MAX_UUID_GENERATION_ATTEMPTS} attempts"
         )
+
+
+def generate_an_unregistered_rodex_uuid_candidate(
+    database_path: str | os.PathLike[str] | None = None,
+) -> uuid.UUID:
+    """Generate an unused but deliberately unreserved UUID for a pending launch."""
+    path = initialise_rodex_database(database_path)
+    with open_rodex_transaction(path) as connection:
+        for _ in range(MAX_UUID_GENERATION_ATTEMPTS):
+            candidate = uuid.UUID(int=secrets.randbits(128))
+            uuid_int_1, uuid_int_2 = split_a_rodex_uuid_into_signed_bigints(candidate)
+            row = connection.execute(
+                f"SELECT 1 FROM {RODEX_SESSIONS_TABLE} "
+                "WHERE uuid_int_1 = ? AND uuid_int_2 = ?",
+                (uuid_int_1, uuid_int_2),
+            ).fetchone()
+            if row is None:
+                return candidate
+    raise RodexSessionUUIDCollisionError(
+        "could not generate an unused Rodex UUID candidate after "
+        f"{MAX_UUID_GENERATION_ATTEMPTS} attempts"
+    )
 
 
 def current_rodex_sessions_user_identity() -> RodexSessionsUserIdentity:
@@ -527,6 +818,7 @@ def record_a_rodex_session_runtime_resume(
     path = initialise_rodex_database(database_path)
     with open_rodex_transaction(path) as connection:
         if codex_uuid_halves is not None:
+            parsed_codex_uuid = _parse_uuid(codex_session_uuid, "codex_session_uuid")
             codex_cursor = connection.execute(
                 f"UPDATE {RODEX_SESSIONS_TABLE} "
                 "SET codex_session_uuid_int_1 = ?, codex_session_uuid_int_2 = ? "
@@ -535,6 +827,12 @@ def record_a_rodex_session_runtime_resume(
             )
             if codex_cursor.rowcount != 1:
                 raise RodexSessionError(f"Rodex session does not exist: {session_id}")
+            _register_statistics_source(
+                connection,
+                session_id,
+                parsed_codex_uuid,
+                timestamp,
+            )
         tmux_cursor = connection.execute(
             f"UPDATE {RODEX_TMUX_SESSIONS_TABLE} "
             "SET tmux_server_socket_path = ?, tmux_session_name = ? "
@@ -582,6 +880,256 @@ def lookup_codex_uuid_from_a_rodex_session_id(
     if row is None:
         return None
     return join_signed_bigints_into_a_codex_uuid(int(row[0]), int(row[1]))
+
+
+def publish_rodex_session_statistics(
+    session_id: int,
+    database_path: str | os.PathLike[str] | None = None,
+    *,
+    expected_current_codex_uuid: uuid.UUID | str,
+    based_on_statistics_revision: int | None,
+    statistics_projection_schema_version: str,
+    calculated_at_utc: str,
+    coverage_state: str,
+    aggregate_statistics: Mapping[str, object],
+    analyzed_sources: Sequence[RodexSessionStatisticsSourceObservation],
+) -> RodexSessionStatistics:
+    """Atomically publish one fenced aggregate and its exact analyzed sources."""
+    _validate_session_id(session_id)
+    expected_halves = split_a_codex_uuid_into_signed_bigints(expected_current_codex_uuid)
+    if based_on_statistics_revision is not None:
+        _validate_positive_id(based_on_statistics_revision, "based_on_statistics_revision")
+    schema_version = _normalise_required_text(
+        statistics_projection_schema_version,
+        "statistics_projection_schema_version",
+    )
+    calculated = _normalise_utc_timestamp_text(calculated_at_utc)
+    coverage = _normalise_required_text(coverage_state, "coverage_state")
+    if coverage not in STATISTICS_COVERAGE_STATES:
+        raise ValueError(f"unsupported statistics coverage state: {coverage}")
+    aggregate_json = _statistics_aggregate_json(aggregate_statistics)
+    observations = tuple(_validate_source_observation(item) for item in analyzed_sources)
+    if len({item.codex_session_uuid for item in observations}) != len(observations):
+        raise ValueError("analyzed_sources contains a duplicate Codex UUID")
+
+    path = initialise_rodex_database(database_path)
+    with open_rodex_transaction(path) as connection:
+        identity_row = connection.execute(
+            f"SELECT codex_session_uuid_int_1, codex_session_uuid_int_2 "
+            f"FROM {RODEX_SESSIONS_TABLE} WHERE id = ?",
+            (session_id,),
+        ).fetchone()
+        if identity_row is None:
+            raise RodexSessionError(f"Rodex session does not exist: {session_id}")
+        if (int(identity_row[0]), int(identity_row[1])) != expected_halves:
+            raise RodexSessionStatisticsConflictError(
+                "current Codex UUID changed during statistics calculation"
+            )
+        previous_row = connection.execute(
+            f"SELECT statistics_revision FROM {RODEX_SESSIONS_STATISTICS_TABLE} "
+            "WHERE rodex_sessions_id = ?",
+            (session_id,),
+        ).fetchone()
+        previous_revision = None if previous_row is None else int(previous_row[0])
+        if previous_revision != based_on_statistics_revision:
+            raise RodexSessionStatisticsConflictError(
+                "statistics revision changed during calculation"
+            )
+        new_revision = 1 if previous_revision is None else previous_revision + 1
+        registered_rows = connection.execute(
+            f"SELECT codex_session_uuid_int_1, codex_session_uuid_int_2 "
+            f"FROM {RODEX_SESSIONS_STATISTICS_SOURCES_TABLE} "
+            "WHERE rodex_sessions_id = ?",
+            (session_id,),
+        ).fetchall()
+        registered = {(int(row[0]), int(row[1])) for row in registered_rows}
+        observed = {
+            split_a_codex_uuid_into_signed_bigints(item.codex_session_uuid)
+            for item in observations
+        }
+        if not observed.issubset(registered):
+            raise RodexSessionStatisticsConflictError(
+                "statistics include an unregistered Codex source"
+            )
+
+        connection.execute(
+            f"UPDATE {RODEX_SESSIONS_STATISTICS_SOURCES_TABLE} "
+            "SET included_statistics_revision = NULL "
+            "WHERE rodex_sessions_id = ?",
+            (session_id,),
+        )
+        connection.execute(
+            f"INSERT INTO {RODEX_SESSIONS_STATISTICS_TABLE} "
+            "(rodex_sessions_id, statistics_revision, "
+            "statistics_projection_schema_version, calculated_at_utc, "
+            "coverage_state, aggregate_statistics_json) VALUES (?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(rodex_sessions_id) DO UPDATE SET "
+            "statistics_revision = excluded.statistics_revision, "
+            "statistics_projection_schema_version = "
+            "excluded.statistics_projection_schema_version, "
+            "calculated_at_utc = excluded.calculated_at_utc, "
+            "coverage_state = excluded.coverage_state, "
+            "aggregate_statistics_json = excluded.aggregate_statistics_json",
+            (
+                session_id,
+                new_revision,
+                schema_version,
+                calculated,
+                coverage,
+                aggregate_json,
+            ),
+        )
+        for item in observations:
+            cursor = connection.execute(
+                f"UPDATE {RODEX_SESSIONS_STATISTICS_SOURCES_TABLE} SET "
+                "rollout_file_path = ?, analyzed_size_bytes = ?, "
+                "analyzed_mtime_ns = ?, analyzed_prefix_sha256 = ?, "
+                "verified_at_utc = ?, included_statistics_revision = ? "
+                "WHERE rodex_sessions_id = ? AND codex_session_uuid_int_1 = ? "
+                "AND codex_session_uuid_int_2 = ?",
+                (
+                    str(item.rollout_file_path),
+                    item.analyzed_size_bytes,
+                    item.analyzed_mtime_ns,
+                    item.analyzed_prefix_sha256,
+                    item.verified_at_utc,
+                    new_revision,
+                    session_id,
+                    *split_a_codex_uuid_into_signed_bigints(item.codex_session_uuid),
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise RodexSessionStatisticsConflictError(
+                    "registered statistics source changed during publication"
+                )
+        _upsert_statistics_worker(
+            connection,
+            session_id,
+            worker_state="up_to_date",
+            diagnostic_code=None,
+            last_attempted_at_utc=calculated,
+            consecutive_failures=0,
+            next_retry_at_utc=None,
+        )
+        row = _select_statistics(connection, session_id)
+    if row is None:
+        raise RodexSessionError(f"Rodex statistics disappeared: {session_id}")
+    return _session_statistics_from_row(row)
+
+
+def record_rodex_session_statistics_worker_health(
+    session_id: int,
+    database_path: str | os.PathLike[str] | None = None,
+    *,
+    expected_current_codex_uuid: uuid.UUID | str,
+    worker_state: str,
+    diagnostic_code: str | None,
+    last_attempted_at_utc: str,
+    consecutive_failures: int,
+    next_retry_at_utc: str | None = None,
+) -> RodexSessionStatisticsWorker:
+    """Update only fail-open worker health, preserving all last-good statistics."""
+    _validate_session_id(session_id)
+    expected_halves = split_a_codex_uuid_into_signed_bigints(expected_current_codex_uuid)
+    state = _normalise_required_text(worker_state, "worker_state")
+    if state not in STATISTICS_WORKER_STATES:
+        raise ValueError(f"unsupported statistics worker state: {state}")
+    diagnostic = (
+        None
+        if diagnostic_code is None
+        else _normalise_required_text(diagnostic_code, "diagnostic_code")
+    )
+    if diagnostic is not None and (
+        len(diagnostic) > 64
+        or any(
+            character not in "abcdefghijklmnopqrstuvwxyz0123456789_"
+            for character in diagnostic
+        )
+    ):
+        raise ValueError(
+            "diagnostic_code must contain 1-64 lowercase ASCII letters, digits, "
+            "or underscores"
+        )
+    attempted = _normalise_utc_timestamp_text(last_attempted_at_utc)
+    if (
+        not isinstance(consecutive_failures, int)
+        or isinstance(consecutive_failures, bool)
+        or consecutive_failures < 0
+    ):
+        raise ValueError("consecutive_failures must be a non-negative integer")
+    next_retry = (
+        None
+        if next_retry_at_utc is None
+        else _normalise_utc_timestamp_text(next_retry_at_utc)
+    )
+    if state == "up_to_date" and (
+        diagnostic is not None or consecutive_failures != 0 or next_retry is not None
+    ):
+        raise ValueError(
+            "up_to_date worker health cannot include diagnostics, failures, or retry"
+        )
+    path = initialise_rodex_database(database_path)
+    with open_rodex_transaction(path) as connection:
+        identity_row = connection.execute(
+            f"SELECT codex_session_uuid_int_1, codex_session_uuid_int_2 "
+            f"FROM {RODEX_SESSIONS_TABLE} WHERE id = ?",
+            (session_id,),
+        ).fetchone()
+        if identity_row is None:
+            raise RodexSessionError(f"Rodex session does not exist: {session_id}")
+        if (int(identity_row[0]), int(identity_row[1])) != expected_halves:
+            raise RodexSessionStatisticsConflictError(
+                "current Codex UUID changed before worker health publication"
+            )
+        _upsert_statistics_worker(
+            connection,
+            session_id,
+            worker_state=state,
+            diagnostic_code=diagnostic,
+            last_attempted_at_utc=attempted,
+            consecutive_failures=consecutive_failures,
+            next_retry_at_utc=next_retry,
+        )
+        row = _select_statistics_worker(connection, session_id)
+    if row is None:
+        raise RodexSessionError(f"Rodex statistics worker disappeared: {session_id}")
+    return _statistics_worker_from_row(row)
+
+
+def read_rodex_session_statistics(
+    session_id: int,
+    database_path: str | os.PathLike[str] | None = None,
+) -> RodexSessionStatisticsView:
+    """Read last-good statistics, worker health, and sources in one transaction."""
+    _validate_session_id(session_id)
+    path = initialise_rodex_database(database_path)
+    with open_rodex_read_transaction(path) as connection:
+        statistics_row = _select_statistics(connection, session_id)
+        worker_row = _select_statistics_worker(connection, session_id)
+        source_rows = _select_statistics_sources(connection, session_id)
+    return RodexSessionStatisticsView(
+        statistics=(
+            None if statistics_row is None else _session_statistics_from_row(statistics_row)
+        ),
+        worker=(None if worker_row is None else _statistics_worker_from_row(worker_row)),
+        sources=tuple(_statistics_source_from_row(row) for row in source_rows),
+    )
+
+
+def lookup_rodex_session_statistics(
+    session_id: int,
+    database_path: str | os.PathLike[str] | None = None,
+) -> RodexSessionStatistics | None:
+    """Return the latest successful aggregate-only statistics projection."""
+    return read_rodex_session_statistics(session_id, database_path).statistics
+
+
+def list_rodex_session_statistics_sources(
+    session_id: int,
+    database_path: str | os.PathLike[str] | None = None,
+) -> tuple[RodexSessionStatisticsSource, ...]:
+    """List every Codex source registered to one Rodex statistics lineage."""
+    return read_rodex_session_statistics(session_id, database_path).sources
 
 
 def lookup_rodex_tmux_session(
@@ -1120,6 +1668,124 @@ def _verify_tmux_sessions_unique_indexes(connection: sqlite3.Connection) -> None
     )
 
 
+def _verify_statistics_table(connection: sqlite3.Connection) -> None:
+    _verify_table_columns(
+        connection,
+        RODEX_SESSIONS_STATISTICS_TABLE,
+        [
+            ("id", "INTEGER", 0, 1),
+            ("rodex_sessions_id", "INTEGER", 1, 0),
+            ("statistics_revision", "INTEGER", 1, 0),
+            ("statistics_projection_schema_version", "TEXT", 1, 0),
+            ("calculated_at_utc", "TEXT", 1, 0),
+            ("coverage_state", "TEXT", 1, 0),
+            ("aggregate_statistics_json", "TEXT", 1, 0),
+        ],
+    )
+    _verify_single_foreign_key(
+        connection,
+        RODEX_SESSIONS_STATISTICS_TABLE,
+        (RODEX_SESSIONS_TABLE, "rodex_sessions_id", "id"),
+    )
+    _verify_table_definition_contains(
+        connection,
+        RODEX_SESSIONS_STATISTICS_TABLE,
+        (
+            "CHECK (STATISTICS_REVISION >= 1)",
+            "CHECK (COVERAGE_STATE IN ('COMPLETE', 'GAPPED'))",
+            "JSON_VALID(AGGREGATE_STATISTICS_JSON) = 1",
+            "JSON_TYPE(AGGREGATE_STATISTICS_JSON) = 'OBJECT'",
+        ),
+    )
+
+
+def _verify_statistics_sources_table(connection: sqlite3.Connection) -> None:
+    _verify_table_columns(
+        connection,
+        RODEX_SESSIONS_STATISTICS_SOURCES_TABLE,
+        [
+            ("id", "INTEGER", 0, 1),
+            ("rodex_sessions_id", "INTEGER", 1, 0),
+            ("codex_session_uuid_int_1", "BIGINT", 1, 0),
+            ("codex_session_uuid_int_2", "BIGINT", 1, 0),
+            ("first_linked_at_utc", "TEXT", 1, 0),
+            ("rollout_file_path", "TEXT", 0, 0),
+            ("analyzed_size_bytes", "INTEGER", 0, 0),
+            ("analyzed_mtime_ns", "INTEGER", 0, 0),
+            ("analyzed_prefix_sha256", "TEXT", 0, 0),
+            ("verified_at_utc", "TEXT", 0, 0),
+            ("included_statistics_revision", "INTEGER", 0, 0),
+        ],
+    )
+    foreign_keys = connection.execute(
+        f"PRAGMA foreign_key_list({RODEX_SESSIONS_STATISTICS_SOURCES_TABLE})"
+    ).fetchall()
+    observed_foreign_keys = {(row[2], row[3], row[4]) for row in foreign_keys}
+    expected_foreign_keys = {
+        (RODEX_SESSIONS_TABLE, "rodex_sessions_id", "id"),
+        (
+            RODEX_SESSIONS_STATISTICS_TABLE,
+            "rodex_sessions_id",
+            "rodex_sessions_id",
+        ),
+        (
+            RODEX_SESSIONS_STATISTICS_TABLE,
+            "included_statistics_revision",
+            "statistics_revision",
+        ),
+    }
+    if observed_foreign_keys != expected_foreign_keys:
+        raise RodexSessionError(
+            f"{RODEX_SESSIONS_STATISTICS_SOURCES_TABLE} foreign keys mismatch: "
+            f"{observed_foreign_keys!r}"
+        )
+    _verify_table_definition_contains(
+        connection,
+        RODEX_SESSIONS_STATISTICS_SOURCES_TABLE,
+        (
+            "ANALYZED_SIZE_BYTES IS NULL OR ANALYZED_SIZE_BYTES >= 0",
+            "ANALYZED_MTIME_NS IS NULL OR ANALYZED_MTIME_NS >= 0",
+            "INCLUDED_STATISTICS_REVISION IS NULL OR INCLUDED_STATISTICS_REVISION >= 1",
+            "INCLUDED_STATISTICS_REVISION IS NULL OR ROLLOUT_FILE_PATH IS NOT NULL",
+            "DEFERRABLE INITIALLY DEFERRED",
+        ),
+    )
+
+
+def _verify_statistics_workers_table(connection: sqlite3.Connection) -> None:
+    _verify_table_columns(
+        connection,
+        RODEX_SESSIONS_STATISTICS_WORKERS_TABLE,
+        [
+            ("id", "INTEGER", 0, 1),
+            ("rodex_sessions_id", "INTEGER", 1, 0),
+            ("worker_state", "TEXT", 1, 0),
+            ("diagnostic_code", "TEXT", 0, 0),
+            ("last_attempted_at_utc", "TEXT", 1, 0),
+            ("consecutive_failures", "INTEGER", 1, 0),
+            ("next_retry_at_utc", "TEXT", 0, 0),
+        ],
+    )
+    _verify_single_foreign_key(
+        connection,
+        RODEX_SESSIONS_STATISTICS_WORKERS_TABLE,
+        (RODEX_SESSIONS_TABLE, "rodex_sessions_id", "id"),
+    )
+    _verify_table_definition_contains(
+        connection,
+        RODEX_SESSIONS_STATISTICS_WORKERS_TABLE,
+        (
+            "WORKER_STATE IN ('STARTING', 'CATCHING_UP', 'UP_TO_DATE', "
+            "'DEGRADED', 'STOPPED')",
+            "CHECK (CONSECUTIVE_FAILURES >= 0)",
+            "WORKER_STATE != 'UP_TO_DATE' OR (DIAGNOSTIC_CODE IS NULL AND "
+            "CONSECUTIVE_FAILURES = 0 AND NEXT_RETRY_AT_UTC IS NULL)",
+            "LENGTH(DIAGNOSTIC_CODE) BETWEEN 1 AND 64",
+            "DIAGNOSTIC_CODE NOT GLOB '*[^A-Z0-9_]*'",
+        ),
+    )
+
+
 def _verify_table_columns(
     connection: sqlite3.Connection,
     table_name: str,
@@ -1164,6 +1830,225 @@ def _verify_unique_index(
         or [row[2] for row in columns] != expected_columns
     ):
         raise RodexSessionError(f"unique index is missing: {index_name}")
+
+
+def _verify_index(
+    connection: sqlite3.Connection,
+    table_name: str,
+    index_name: str,
+    expected_columns: list[str],
+    *,
+    unique: bool,
+) -> None:
+    indexes = connection.execute(f"PRAGMA index_list({table_name})").fetchall()
+    matching = [row for row in indexes if row[1] == index_name]
+    columns = connection.execute(f"PRAGMA index_info({index_name})").fetchall()
+    if (
+        len(matching) != 1
+        or bool(matching[0][2]) is not unique
+        or [row[2] for row in columns] != expected_columns
+    ):
+        raise RodexSessionError(f"index is missing: {index_name}")
+
+
+def _verify_table_definition_contains(
+    connection: sqlite3.Connection,
+    table_name: str,
+    expected_fragments: Sequence[str],
+) -> None:
+    row = connection.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
+        (table_name,),
+    ).fetchone()
+    definition = " ".join(str(row[0]).upper().split())
+    missing = [fragment for fragment in expected_fragments if fragment not in definition]
+    if missing:
+        raise RodexSessionError(f"{table_name} constraints are missing: {missing!r}")
+
+
+def _register_missing_statistics_sources(connection: sqlite3.Connection) -> None:
+    """Adopt root Codex identities created before the additive source table existed."""
+    connection.execute(
+        f"INSERT INTO {RODEX_SESSIONS_STATISTICS_SOURCES_TABLE} "
+        "(rodex_sessions_id, codex_session_uuid_int_1, "
+        "codex_session_uuid_int_2, first_linked_at_utc) "
+        f"SELECT sessions.id, sessions.codex_session_uuid_int_1, "
+        "sessions.codex_session_uuid_int_2, log.created_at_utc "
+        f"FROM {RODEX_SESSIONS_TABLE} AS sessions "
+        f"JOIN {RODEX_SESSIONS_LOG_TABLE} AS log "
+        "ON log.rodex_sessions_id = sessions.id "
+        "WHERE NOT EXISTS ("
+        f"SELECT 1 FROM {RODEX_SESSIONS_STATISTICS_SOURCES_TABLE} AS registered "
+        "WHERE registered.codex_session_uuid_int_1 = "
+        "sessions.codex_session_uuid_int_1 "
+        "AND registered.codex_session_uuid_int_2 = "
+        "sessions.codex_session_uuid_int_2)"
+    )
+    mismatch = connection.execute(
+        f"SELECT sessions.id FROM {RODEX_SESSIONS_TABLE} AS sessions "
+        f"LEFT JOIN {RODEX_SESSIONS_STATISTICS_SOURCES_TABLE} AS sources "
+        "ON sources.codex_session_uuid_int_1 = sessions.codex_session_uuid_int_1 "
+        "AND sources.codex_session_uuid_int_2 = sessions.codex_session_uuid_int_2 "
+        "WHERE sources.id IS NULL OR sources.rodex_sessions_id != sessions.id "
+        "LIMIT 1"
+    ).fetchone()
+    if mismatch is not None:
+        raise RodexSessionError(
+            "a current Codex identity conflicts with an existing statistics lineage: "
+            f"Rodex session {int(mismatch[0])}"
+        )
+
+
+def _register_statistics_source(
+    connection: sqlite3.Connection,
+    session_id: int,
+    codex_session_uuid: uuid.UUID,
+    first_linked_at_utc: str,
+) -> None:
+    uuid_halves = split_a_codex_uuid_into_signed_bigints(codex_session_uuid)
+    row = connection.execute(
+        f"SELECT rodex_sessions_id FROM {RODEX_SESSIONS_STATISTICS_SOURCES_TABLE} "
+        "WHERE codex_session_uuid_int_1 = ? AND codex_session_uuid_int_2 = ?",
+        uuid_halves,
+    ).fetchone()
+    if row is None:
+        connection.execute(
+            f"INSERT INTO {RODEX_SESSIONS_STATISTICS_SOURCES_TABLE} "
+            "(rodex_sessions_id, codex_session_uuid_int_1, "
+            "codex_session_uuid_int_2, first_linked_at_utc) VALUES (?, ?, ?, ?)",
+            (session_id, *uuid_halves, first_linked_at_utc),
+        )
+        return
+    if int(row[0]) != session_id:
+        raise RodexSessionError(
+            "Codex history already belongs to another Rodex statistics lineage: "
+            f"{codex_session_uuid}"
+        )
+
+
+def _statistics_aggregate_json(aggregate_statistics: Mapping[str, object]) -> str:
+    if not isinstance(aggregate_statistics, Mapping):
+        raise TypeError("aggregate_statistics must be a mapping")
+    aggregate = {
+        key: value
+        for key, value in aggregate_statistics.items()
+        if key in STATISTICS_AGGREGATE_FIELDS
+    }
+    try:
+        return json.dumps(
+            aggregate,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+    except (TypeError, ValueError) as error:
+        raise ValueError(
+            "aggregate_statistics must be a JSON-compatible mapping"
+        ) from error
+
+
+def _validate_source_observation(
+    observation: RodexSessionStatisticsSourceObservation,
+) -> RodexSessionStatisticsSourceObservation:
+    if not isinstance(observation, RodexSessionStatisticsSourceObservation):
+        raise TypeError(
+            "analyzed_sources must contain RodexSessionStatisticsSourceObservation values"
+        )
+    codex_uuid = _parse_uuid(observation.codex_session_uuid, "codex_session_uuid")
+    source_path = observation.rollout_file_path.expanduser().resolve()
+    if not source_path.is_absolute():
+        raise ValueError("rollout_file_path must resolve to an absolute path")
+    for value, field_name in (
+        (observation.analyzed_size_bytes, "analyzed_size_bytes"),
+        (observation.analyzed_mtime_ns, "analyzed_mtime_ns"),
+    ):
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            raise ValueError(f"{field_name} must be a non-negative integer")
+    digest = _normalise_required_text(
+        observation.analyzed_prefix_sha256, "analyzed_prefix_sha256"
+    ).lower()
+    if len(digest) != 64 or any(
+        character not in "0123456789abcdef" for character in digest
+    ):
+        raise ValueError("analyzed_prefix_sha256 must be 64 lowercase hexadecimal digits")
+    return RodexSessionStatisticsSourceObservation(
+        codex_session_uuid=codex_uuid,
+        rollout_file_path=source_path,
+        analyzed_size_bytes=observation.analyzed_size_bytes,
+        analyzed_mtime_ns=observation.analyzed_mtime_ns,
+        analyzed_prefix_sha256=digest,
+        verified_at_utc=_normalise_utc_timestamp_text(observation.verified_at_utc),
+    )
+
+
+def _select_statistics(
+    connection: sqlite3.Connection, session_id: int
+) -> tuple[object, ...] | None:
+    return connection.execute(
+        f"SELECT id, rodex_sessions_id, statistics_revision, "
+        "statistics_projection_schema_version, calculated_at_utc, coverage_state, "
+        f"aggregate_statistics_json FROM {RODEX_SESSIONS_STATISTICS_TABLE} "
+        "WHERE rodex_sessions_id = ?",
+        (session_id,),
+    ).fetchone()
+
+
+def _select_statistics_worker(
+    connection: sqlite3.Connection, session_id: int
+) -> tuple[object, ...] | None:
+    return connection.execute(
+        f"SELECT id, rodex_sessions_id, worker_state, diagnostic_code, "
+        "last_attempted_at_utc, consecutive_failures, next_retry_at_utc "
+        f"FROM {RODEX_SESSIONS_STATISTICS_WORKERS_TABLE} "
+        "WHERE rodex_sessions_id = ?",
+        (session_id,),
+    ).fetchone()
+
+
+def _select_statistics_sources(
+    connection: sqlite3.Connection, session_id: int
+) -> list[tuple[object, ...]]:
+    return connection.execute(
+        f"SELECT id, rodex_sessions_id, codex_session_uuid_int_1, "
+        "codex_session_uuid_int_2, first_linked_at_utc, rollout_file_path, "
+        "analyzed_size_bytes, analyzed_mtime_ns, analyzed_prefix_sha256, "
+        "verified_at_utc, included_statistics_revision "
+        f"FROM {RODEX_SESSIONS_STATISTICS_SOURCES_TABLE} "
+        "WHERE rodex_sessions_id = ? ORDER BY id",
+        (session_id,),
+    ).fetchall()
+
+
+def _upsert_statistics_worker(
+    connection: sqlite3.Connection,
+    session_id: int,
+    *,
+    worker_state: str,
+    diagnostic_code: str | None,
+    last_attempted_at_utc: str,
+    consecutive_failures: int,
+    next_retry_at_utc: str | None,
+) -> None:
+    connection.execute(
+        f"INSERT INTO {RODEX_SESSIONS_STATISTICS_WORKERS_TABLE} "
+        "(rodex_sessions_id, worker_state, diagnostic_code, last_attempted_at_utc, "
+        "consecutive_failures, next_retry_at_utc) VALUES (?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT(rodex_sessions_id) DO UPDATE SET "
+        "worker_state = excluded.worker_state, "
+        "diagnostic_code = excluded.diagnostic_code, "
+        "last_attempted_at_utc = excluded.last_attempted_at_utc, "
+        "consecutive_failures = excluded.consecutive_failures, "
+        "next_retry_at_utc = excluded.next_retry_at_utc",
+        (
+            session_id,
+            worker_state,
+            diagnostic_code,
+            last_attempted_at_utc,
+            consecutive_failures,
+            next_retry_at_utc,
+        ),
+    )
 
 
 def _lookup_or_insert_rodex_sessions_user_id(
@@ -1344,6 +2229,52 @@ def _session_names_from_row(row: tuple[object, ...]) -> RodexSessionNames:
     )
 
 
+def _session_statistics_from_row(row: tuple[object, ...]) -> RodexSessionStatistics:
+    aggregate = json.loads(str(row[6]))
+    if not isinstance(aggregate, dict):
+        raise RodexSessionError("stored aggregate statistics must be a JSON object")
+    return RodexSessionStatistics(
+        id=int(row[0]),
+        rodex_sessions_id=int(row[1]),
+        statistics_revision=int(row[2]),
+        statistics_projection_schema_version=str(row[3]),
+        calculated_at_utc=str(row[4]),
+        coverage_state=str(row[5]),
+        aggregate_statistics=aggregate,
+    )
+
+
+def _statistics_source_from_row(
+    row: tuple[object, ...],
+) -> RodexSessionStatisticsSource:
+    return RodexSessionStatisticsSource(
+        id=int(row[0]),
+        rodex_sessions_id=int(row[1]),
+        codex_session_uuid=join_signed_bigints_into_a_codex_uuid(int(row[2]), int(row[3])),
+        first_linked_at_utc=str(row[4]),
+        rollout_file_path=None if row[5] is None else str(row[5]),
+        analyzed_size_bytes=None if row[6] is None else int(row[6]),
+        analyzed_mtime_ns=None if row[7] is None else int(row[7]),
+        analyzed_prefix_sha256=None if row[8] is None else str(row[8]),
+        verified_at_utc=None if row[9] is None else str(row[9]),
+        included_statistics_revision=None if row[10] is None else int(row[10]),
+    )
+
+
+def _statistics_worker_from_row(
+    row: tuple[object, ...],
+) -> RodexSessionStatisticsWorker:
+    return RodexSessionStatisticsWorker(
+        id=int(row[0]),
+        rodex_sessions_id=int(row[1]),
+        worker_state=str(row[2]),
+        diagnostic_code=None if row[3] is None else str(row[3]),
+        last_attempted_at_utc=str(row[4]),
+        consecutive_failures=int(row[5]),
+        next_retry_at_utc=None if row[6] is None else str(row[6]),
+    )
+
+
 def _validate_user_identity(
     identity: RodexSessionsUserIdentity,
 ) -> RodexSessionsUserIdentity:
@@ -1372,6 +2303,24 @@ def _validate_user_identity(
 
 def _utc_now_timestamp() -> str:
     return _normalise_utc_datetime(datetime.now(UTC))
+
+
+def _normalise_required_text(value: str, field_name: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{field_name} must be a non-empty string")
+    return value.strip()
+
+
+def _normalise_utc_timestamp_text(value: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("calculated_at_utc must be a non-empty UTC timestamp")
+    try:
+        instant = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise ValueError("calculated_at_utc must be a valid UTC timestamp") from error
+    if instant.tzinfo is None or instant.utcoffset() is None:
+        raise ValueError("calculated_at_utc must be timezone-aware")
+    return _normalise_utc_datetime(instant)
 
 
 def _normalise_utc_datetime(value: datetime | None) -> str:

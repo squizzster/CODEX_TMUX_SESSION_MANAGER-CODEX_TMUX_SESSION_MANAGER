@@ -20,6 +20,11 @@ from typing import Any, BinaryIO, Final
 from websockets.exceptions import ConnectionClosed, InvalidHandshake
 from websockets.sync.client import unix_connect
 
+from .analytics import (
+    AnalyticsSubprocessSupervisor,
+    AnalyticsWorkerConfig,
+    default_codex_sessions_root,
+)
 from .control import LiveRodexControl
 from .protocol_proxy import (
     CodexProtocolEventTap,
@@ -268,7 +273,12 @@ class RodexRuntimeLauncher:
         self._startup_timeout_seconds = startup_timeout_seconds
 
     def start(
-        self, workspace: Path, codex_arguments: Sequence[str]
+        self,
+        workspace: Path,
+        codex_arguments: Sequence[str],
+        *,
+        rodex_session_uuid: uuid.UUID | None = None,
+        rodex_database_path: Path | None = None,
     ) -> tuple[LiveRodexRuntime, uuid.UUID]:
         """Start tmux and return only after its single Codex UUID is observable."""
         resolved_workspace = workspace.expanduser().resolve()
@@ -290,29 +300,42 @@ class RodexRuntimeLauncher:
         _require_short_unix_socket_path(runtime.protocol_proxy_socket_path)
         _require_short_unix_socket_path(runtime.protocol_event_socket_path)
 
-        host_command = shlex.join(
-            [
-                self._python_executable,
-                "-m",
-                "rodex.session_host",
-                "--codex-binary",
-                self._codex_binary,
-                "--app-server-socket",
-                str(runtime.app_server_socket_path),
-                "--app-server-log",
-                str(runtime.app_server_log_path),
-                "--protocol-proxy-socket",
-                str(runtime.protocol_proxy_socket_path),
-                "--protocol-event-socket",
-                str(runtime.protocol_event_socket_path),
-                "--tmux-binary",
-                self._tmux_binary,
-                "--tmux-server-socket",
-                str(runtime.tmux_server_socket_path),
-                "--",
-                *codex_arguments,
-            ]
-        )
+        host_arguments = [
+            self._python_executable,
+            "-m",
+            "rodex.session_host",
+            "--codex-binary",
+            self._codex_binary,
+            "--app-server-socket",
+            str(runtime.app_server_socket_path),
+            "--app-server-log",
+            str(runtime.app_server_log_path),
+            "--protocol-proxy-socket",
+            str(runtime.protocol_proxy_socket_path),
+            "--protocol-event-socket",
+            str(runtime.protocol_event_socket_path),
+            "--tmux-binary",
+            self._tmux_binary,
+            "--tmux-server-socket",
+            str(runtime.tmux_server_socket_path),
+        ]
+        if rodex_session_uuid is not None:
+            if rodex_database_path is None:
+                raise RodexRuntimeError(
+                    "Rodex analytics identity requires an explicit database path"
+                )
+            analytics_rodex_database = rodex_database_path.expanduser().resolve()
+            host_arguments.extend(
+                [
+                    "--rodex-database",
+                    str(analytics_rodex_database),
+                    "--codex-sessions-root",
+                    str(default_codex_sessions_root()),
+                    "--rodex-session-uuid",
+                    str(rodex_session_uuid),
+                ]
+            )
+        host_command = shlex.join([*host_arguments, "--", *codex_arguments])
         self._start_tmux_session(runtime, resolved_workspace, host_command)
         try:
             requested_codex_uuid = _requested_exact_codex_resume(codex_arguments)
@@ -683,6 +706,11 @@ def run_session_host(
     tmux_binary: str,
     tmux_server_socket_path: Path,
     codex_arguments: Sequence[str],
+    *,
+    analytics_config: AnalyticsWorkerConfig | None = None,
+    analytics_supervisor_factory: Callable[
+        [AnalyticsWorkerConfig], AnalyticsSubprocessSupervisor
+    ] = AnalyticsSubprocessSupervisor,
 ) -> int:
     """Supervise the app-server, protocol proxy, and foreground Codex TUI."""
     app_server_socket_path.unlink(missing_ok=True)
@@ -694,6 +722,7 @@ def run_session_host(
     protocol_proxy: CodexProtocolProxy | None = None
     protocol_event_tap: CodexProtocolEventTap | None = None
     runtime_path_keepalive: _RuntimePathKeepalive | None = None
+    analytics_supervisor: AnalyticsSubprocessSupervisor | None = None
     shutting_down = False
 
     def stop_on_signal(signum: int, _frame: object) -> None:
@@ -750,6 +779,13 @@ def run_session_host(
             except RodexRuntimeError as error:
                 _record_runtime_path_keepalive_failure(log, error)
                 raise
+            if analytics_config is not None:
+                try:
+                    analytics_supervisor = analytics_supervisor_factory(analytics_config)
+                    analytics_supervisor.poll()
+                except Exception:
+                    # Persistent statistics are strictly off the interactive path.
+                    analytics_supervisor = None
             tui_command = [
                 codex_binary,
                 "--no-alt-screen",
@@ -764,6 +800,11 @@ def run_session_host(
                 tui_options["stderr"] = log
             tui = subprocess.Popen(tui_command, **tui_options)
             while True:
+                if analytics_supervisor is not None:
+                    try:
+                        analytics_supervisor.poll()
+                    except Exception:
+                        analytics_supervisor = None
                 failure = runtime_path_keepalive.failure
                 if failure is not None:
                     _record_runtime_path_keepalive_failure(log, failure)
@@ -787,8 +828,14 @@ def run_session_host(
         shutting_down = True
         try:
             try:
-                if runtime_path_keepalive is not None:
-                    runtime_path_keepalive.close()
+                try:
+                    if analytics_supervisor is not None:
+                        analytics_supervisor.close()
+                except Exception:
+                    pass
+                finally:
+                    if runtime_path_keepalive is not None:
+                        runtime_path_keepalive.close()
             finally:
                 try:
                     if tui is not None:

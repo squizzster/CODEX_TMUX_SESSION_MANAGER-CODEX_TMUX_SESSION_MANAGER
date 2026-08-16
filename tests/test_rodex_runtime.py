@@ -297,13 +297,20 @@ def test_rename_and_status_configuration_use_the_real_tmux_session_name(
         "automatic-beluga",
     ]
     status_commands = [command[3:] for command in runner.calls[1:]]
-    assert status_commands[:8] == [
+    assert status_commands[:9] == [
         [
             "set-option",
             "-u",
             "-t",
             "=automatic-beluga:",
             "@rodex_status_animation_token",
+        ],
+        [
+            "set-option",
+            "-u",
+            "-t",
+            "=automatic-beluga:",
+            "@rodex_completion_token",
         ],
         ["set-option", "-u", "-t", "=automatic-beluga:", "status-format"],
         ["set-option", "-u", "-t", "=automatic-beluga:", "status-style"],
@@ -330,9 +337,9 @@ def test_rename_and_status_configuration_use_the_real_tmux_session_name(
         ],
         ["set-option", "-t", "=automatic-beluga:", "status-right-length", "64"],
     ]
-    assert len(status_commands) == 11
+    assert len(status_commands) == 14
     for event, hook_command in zip(
-        ("attached", "detached"), status_commands[8:10], strict=True
+        ("attached", "detached"), status_commands[9:11], strict=True
     ):
         assert hook_command[:4] == [
             "set-hook",
@@ -344,12 +351,23 @@ def test_rename_and_status_configuration_use_the_real_tmux_session_name(
         assert "/venv/bin/python -m rodex.status_animation" in hook_command[4]
         assert f"--event {event}" in hook_command[4]
         assert hook_command[4].endswith(">/dev/null 2>&1'")
-    input_binding = status_commands[10]
-    assert input_binding[:3] == ["bind-key", "-n", "Enter"]
-    assert input_binding[3].startswith("run-shell ")
-    assert "/venv/bin/python -m rodex.tmux_input_proxy" in input_binding[3]
-    assert "--pane-id" in input_binding[3]
-    assert "--client-name" in input_binding[3]
+    completion_pipe = status_commands[11]
+    assert completion_pipe[:4] == [
+        "pipe-pane",
+        "-O",
+        "-t",
+        "=automatic-beluga:",
+    ]
+    assert "/venv/bin/python -m rodex.tmux_completion_observer" in completion_pipe[4]
+    assert "--pane-id" in completion_pipe[4]
+    assert completion_pipe[4].endswith(">/dev/null 2>&1")
+    for key, input_binding in zip(("Enter", "Tab"), status_commands[12:14], strict=True):
+        assert input_binding[:3] == ["bind-key", "-n", key]
+        assert input_binding[3].startswith("run-shell ")
+        assert "/venv/bin/python -m rodex.tmux_input_proxy" in input_binding[3]
+        assert "--pane-id" in input_binding[3]
+        assert "--client-name" in input_binding[3]
+        assert f"--key {key}" in input_binding[3]
 
 
 def test_real_tmux_survives_rename_and_status_configuration(tmp_path: Path) -> None:
@@ -452,6 +470,23 @@ def test_real_tmux_survives_rename_and_status_configuration(tmp_path: Path) -> N
         launcher.configure_identity_status(renamed)
 
         assert launcher.session_exists(renamed)
+        assert tmux_format("#{pane_pipe}") == "1"
+        tab_binding = subprocess.run(
+            [
+                tmux_binary,
+                "-S",
+                str(socket_path),
+                "list-keys",
+                "-T",
+                "root",
+                "Tab",
+            ],
+            check=True,
+            text=True,
+            capture_output=True,
+        ).stdout
+        assert "rodex.tmux_input_proxy" in tab_binding
+        assert "--key Tab" in tab_binding
         discovered = launcher.discover_runtime_control(renamed)
         assert discovered.protocol_proxy_socket_path == tmp_path / "proxy.sock"
         assert discovered.protocol_event_socket_path == tmp_path / "events.sock"

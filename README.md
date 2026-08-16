@@ -51,7 +51,7 @@ To expose this checkout as the system-wide `rodex` command, follow the
 | `./rodex --create project_1234` | Create a session with a preferred display name. |
 | `./rodex -d` | Create without attaching and print expanded identity JSON. |
 | `./rodex automatic-beluga` | Attach if live; otherwise resume its Codex session. |
-| `./rodex running` | List this POSIX user's running Rodex sessions. |
+| `./rodex running` | List this POSIX user's running Rodex sessions (`sessions` also works). |
 | `./rodex alias automatic-beluga edgar-work` | Assign a preferred display name. |
 | `./rodex alias -f automatic-beluga new-name` | Replace an existing display name. |
 | `./rodex send edgar-work "Run the tests"` | Start or steer work in a running session. |
@@ -60,7 +60,7 @@ To expose this checkout as the system-wide `rodex` command, follow the
 
 Create also accepts `--c` or `-create`; `-c` remains Codex's `--config` option. Detach
 accepts `-d`, `--d`, `-detach`, or `--detach`. The bare control commands accept
-`--running`, `--alias`, `--send`,
+`--running`, `sessions`, `--sessions`, `--alias`, `--send`,
 `--wait`, and `--tail`. Stop `tail` with `Ctrl-C`; the Rodex session keeps running.
 Names use 1–80 ASCII letters, digits, underscores, or hyphens and begin with a letter
 or digit. Rodex control words and Codex top-level commands/aliases are reserved

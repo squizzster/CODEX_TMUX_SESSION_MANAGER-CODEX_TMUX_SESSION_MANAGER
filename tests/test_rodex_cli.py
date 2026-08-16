@@ -835,7 +835,7 @@ def test_missing_executable_retains_command_not_found_exit_status(
     assert "tmux executable" in capsys.readouterr().err
 
 
-@pytest.mark.parametrize("command", ["running", "--running"])
+@pytest.mark.parametrize("command", ["running", "--running", "sessions", "--sessions"])
 def test_running_commands_show_only_the_current_users_live_sessions(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

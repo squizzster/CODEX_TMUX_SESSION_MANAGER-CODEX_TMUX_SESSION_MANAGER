@@ -164,6 +164,7 @@ def test_reserved_names_are_case_insensitive_and_automatic_allocation_skips_them
                 "running",
                 "sandbox",
                 "send",
+                "sessions",
                 "stdio-to-uds",
                 "tail",
                 "unarchive",
@@ -176,6 +177,7 @@ def test_reserved_names_are_case_insensitive_and_automatic_allocation_skips_them
     assert is_reserved_rodex_name("Alias")
     assert is_reserved_rodex_name("EXEC")
     assert is_reserved_rodex_name("RUNNING")
+    assert is_reserved_rodex_name("SESSIONS")
     assert not is_reserved_rodex_name("running-fox")
     assert get_unique_new_cool_name(database, name_generator=generate_name) == (
         "fresh-three-name"

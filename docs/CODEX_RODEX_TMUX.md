@@ -33,7 +33,8 @@ identities. Tool counts cover the current runtime and reset when it is resumed.
 - If it has ended, Rodex starts a fresh tmux/app-server and asks Codex to resume the
   stored Codex UUID; the observed UUID must match before the endpoint is replaced.
 - Both routes preserve all Rodex/Codex identity and update `last_accessed_at_utc`.
-- `./rodex running` (`--running`) lists the current POSIX user's live runtimes.
+- `./rodex running` (`--running`, `sessions`, or `--sessions`) lists the current
+  POSIX user's live runtimes.
 - `./rodex alias SESSION NAME` sets its portable preferred name; `-f` replaces it.
 - `send`, `wait`, and `tail` verify the stored and live Codex UUID before acting.
 

@@ -76,8 +76,9 @@ a permanent alternative lookup. Detailed future schema rules live in
 4. Otherwise ask Codex to resume the stored Codex UUID, verify the observed UUID, and
    replace the tmux endpoint before attaching.
 
-`running` follows the same ownership and live-endpoint rules. Alias changes use the
-same naming pipeline and compensate a tmux rename if the database transition fails.
+`running` and its `sessions` aliases follow the same ownership and live-endpoint rules.
+Alias changes use the same naming pipeline and compensate a tmux rename if the database
+transition fails.
 
 ## Live control
 

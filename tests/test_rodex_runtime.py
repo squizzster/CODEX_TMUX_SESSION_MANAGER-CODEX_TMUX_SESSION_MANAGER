@@ -5,6 +5,7 @@ import os
 import shutil
 import socket
 import subprocess
+import time
 import uuid
 from pathlib import Path
 from threading import Event, Lock
@@ -230,6 +231,18 @@ def test_rename_and_status_configuration_use_the_real_tmux_session_name(
             "#{@rodex_tool_calls} #[default]",
         ],
         ["set-option", "-t", "=automatic-beluga:", "status-left-length", "68"],
+        [
+            "set-option",
+            "-t",
+            "=automatic-beluga:",
+            "status-right",
+            "#{?session_many_attached,"
+            "#[fg=yellow]#[bold] [Shared with #{e|-:#{session_attached},1} "
+            "#{?#{==:#{session_attached},2},other,others}] #[default],"
+            "#[fg=green]#[bold] [Private session] #[default]}"
+            " | %H:%M %d-%b-%y",
+        ],
+        ["set-option", "-t", "=automatic-beluga:", "status-right-length", "64"],
     ]
 
 
@@ -248,6 +261,33 @@ def test_real_tmux_survives_rename_and_status_configuration(tmp_path: Path) -> N
     )
     launcher = RodexRuntimeLauncher("codex", tmux_binary)
     codex_uuid = uuid.UUID("01a00654-f2bc-7a30-834a-a5f886a65f82")
+    control_clients: list[subprocess.Popen[str]] = []
+
+    def tmux_format(format_string: str) -> str:
+        return subprocess.run(
+            [
+                tmux_binary,
+                "-S",
+                str(socket_path),
+                "display-message",
+                "-p",
+                "-t",
+                "=automatic-beluga:",
+                "-F",
+                format_string,
+            ],
+            check=True,
+            text=True,
+            capture_output=True,
+        ).stdout.strip()
+
+    def wait_for_attached_clients(expected: int) -> None:
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            if tmux_format("#{session_attached}") == str(expected):
+                return
+            time.sleep(0.01)
+        pytest.fail(f"tmux did not report {expected} attached clients")
 
     subprocess.run(
         [
@@ -290,6 +330,53 @@ def test_real_tmux_survives_rename_and_status_configuration(tmp_path: Path) -> N
             capture_output=True,
         )
         assert "Rodex: #S" in shown_status.stdout
+        shown_sharing_status = subprocess.run(
+            [
+                tmux_binary,
+                "-S",
+                str(socket_path),
+                "show-options",
+                "-v",
+                "-t",
+                "=automatic-beluga:",
+                "status-right",
+            ],
+            check=True,
+            text=True,
+            capture_output=True,
+        )
+        assert "[Shared with" in shown_sharing_status.stdout
+        assert "[Private session]" in shown_sharing_status.stdout
+        assert "session_attached" in shown_sharing_status.stdout
+        assert "[Private session]" in tmux_format("#{E:status-right}")
+
+        for expected, indicator in (
+            (1, "[Private session]"),
+            (2, "[Shared with 1 other]"),
+            (3, "[Shared with 2 others]"),
+        ):
+            control_clients.append(
+                subprocess.Popen(
+                    [
+                        tmux_binary,
+                        "-S",
+                        str(socket_path),
+                        "-C",
+                        "attach-session",
+                        "-t",
+                        "=automatic-beluga",
+                    ],
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                )
+            )
+            wait_for_attached_clients(expected)
+            assert indicator in tmux_format("#{E:status-right}")
+
+        rendered_status = tmux_format("#{E:status-right}")
+        assert "%H" not in rendered_status
     finally:
         subprocess.run(
             [tmux_binary, "-S", str(socket_path), "kill-server"],
@@ -297,6 +384,8 @@ def test_real_tmux_survives_rename_and_status_configuration(tmp_path: Path) -> N
             text=True,
             capture_output=True,
         )
+        for client in control_clients:
+            client.communicate(timeout=2)
 
 
 def test_more_than_one_loaded_codex_thread_aborts_the_exact_tmux_session(

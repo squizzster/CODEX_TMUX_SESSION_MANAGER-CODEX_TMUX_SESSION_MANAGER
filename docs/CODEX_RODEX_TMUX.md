@@ -18,7 +18,8 @@ never presented or stored as another domain's identity.
    WebSocket proxy on short Unix sockets, then connects the normal TUI through it.
 4. Rodex asks that private app-server for its one loaded Codex session UUID.
 5. One SQLite transaction creates the Rodex identity, name, user/log, and tmux rows.
-6. tmux is renamed to the cool name and displays `Rodex: <cool-name>` in its status.
+6. tmux is renamed to the cool name and displays its Rodex identity, tool count, and
+   live private/shared attachment state in its status bar.
 7. Rodex attaches to the ordinary Codex prompt; arguments and slash commands work.
 
 The proxy forwards protocol frames unchanged in both directions, counts unique tool

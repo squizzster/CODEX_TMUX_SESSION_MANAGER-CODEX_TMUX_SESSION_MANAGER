@@ -21,9 +21,11 @@ session host ──► Codex TUI ──► protocol proxy ──► Codex app-se
                                 └──► live event tap ──► tail/wait/send clients
 ```
 
-The TUI remains the normal Codex interface. The proxy forwards WebSocket frames in
-both directions, derives a runtime tool-call count, and fans out selected structured
-events. It does not screen-scrape or persist conversation content.
+The TUI remains the normal Codex interface. The tmux status derives its private/shared
+state directly from the number of clients attached to that exact session. The proxy
+forwards WebSocket frames in both directions, derives a runtime tool-call count, and
+fans out selected structured events. It does not screen-scrape or persist conversation
+content.
 
 ## Component boundaries
 

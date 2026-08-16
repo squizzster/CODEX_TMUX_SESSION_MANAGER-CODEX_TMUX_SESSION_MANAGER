@@ -28,6 +28,7 @@ from .protocol_proxy import (
     ToolCallCounter,
 )
 from .status_animation import STATUS_ANIMATION_TOKEN_OPTION
+from .tmux_input_proxy import COMPLETION_TOKEN_OPTION
 
 SUN_PATH_MAX_BYTES: Final = 107
 DEFAULT_STARTUP_TIMEOUT_SECONDS: Final = 15.0
@@ -188,7 +189,10 @@ def _tmux_input_proxy_binding_command(
     python_executable: str,
     tmux_binary: str,
     runtime: LiveTmuxSession,
+    key: str,
 ) -> str:
+    if key not in {"Enter", "Tab"}:
+        raise ValueError(f"unsupported Rodex input key: {key}")
     proxy_command = shlex.join(
         (
             python_executable,
@@ -204,9 +208,32 @@ def _tmux_input_proxy_binding_command(
             "#{session_name}",
             "--client-name",
             "#{client_name}",
+            "--key",
+            key,
         )
     )
     return f"run-shell {shlex.quote(proxy_command)}"
+
+
+def _tmux_completion_observer_command(
+    python_executable: str,
+    tmux_binary: str,
+    runtime: LiveTmuxSession,
+) -> str:
+    observer_command = shlex.join(
+        (
+            python_executable,
+            "-m",
+            "rodex.tmux_completion_observer",
+            "--tmux-binary",
+            tmux_binary,
+            "--tmux-server-socket",
+            str(runtime.tmux_server_socket_path),
+            "--pane-id",
+            "#{pane_id}",
+        )
+    )
+    return f"{observer_command} >/dev/null 2>&1"
 
 
 class RodexRuntimeLauncher:
@@ -351,6 +378,7 @@ class RodexRuntimeLauncher:
         target = _exact_tmux_pane_target(runtime.tmux_session_name)
         for transient_option in (
             STATUS_ANIMATION_TOKEN_OPTION,
+            COMPLETION_TOKEN_OPTION,
             "status-format",
             "status-style",
         ):
@@ -412,15 +440,29 @@ class RodexRuntimeLauncher:
             )
         self._tmux(
             runtime,
-            "bind-key",
-            "-n",
-            "Enter",
-            _tmux_input_proxy_binding_command(
+            "pipe-pane",
+            "-O",
+            "-t",
+            target,
+            _tmux_completion_observer_command(
                 self._python_executable,
                 self._tmux_binary,
                 runtime,
             ),
         )
+        for key in ("Enter", "Tab"):
+            self._tmux(
+                runtime,
+                "bind-key",
+                "-n",
+                key,
+                _tmux_input_proxy_binding_command(
+                    self._python_executable,
+                    self._tmux_binary,
+                    runtime,
+                    key,
+                ),
+            )
 
     def attach(self, runtime: LiveTmuxSession) -> None:
         """Attach the calling terminal to the live Rodex tmux session."""

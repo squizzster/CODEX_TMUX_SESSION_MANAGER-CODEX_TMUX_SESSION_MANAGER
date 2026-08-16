@@ -28,8 +28,10 @@ advertise the live proxy/event sockets and observed Codex UUID; none are new SQL
 identities. Tool counts cover the current runtime and reset when it is resumed.
 
 Codex handles slash commands before app-server traffic, so `/rodex` uses a separate
-tmux input proxy. Its Enter binding examines only the active prompt line, handles the
-exact Rodex namespace locally, and passes every other Enter directly to Codex.
+tmux input proxy. Its Enter and Tab bindings examine only the active prompt line,
+handle or complete the exact Rodex namespace locally, and pass every other key directly
+to Codex. An asynchronous pane-output observer adds a transient Rodex completion ribbon
+without altering Codex's terminal rendering.
 
 ## Named reattachment
 

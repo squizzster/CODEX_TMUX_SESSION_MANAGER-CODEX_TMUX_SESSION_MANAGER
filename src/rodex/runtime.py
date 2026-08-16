@@ -27,6 +27,7 @@ from .protocol_proxy import (
     TmuxToolCallStatus,
     ToolCallCounter,
 )
+from .status_animation import STATUS_ANIMATION_TOKEN_OPTION
 
 SUN_PATH_MAX_BYTES: Final = 107
 DEFAULT_STARTUP_TIMEOUT_SECONDS: Final = 15.0
@@ -150,6 +151,33 @@ def _exact_tmux_session_target(session_name: str) -> str:
 def _exact_tmux_pane_target(session_name: str) -> str:
     """Address a session exactly through commands whose target is a pane."""
     return f"={session_name}:"
+
+
+def _status_animation_hook_command(
+    python_executable: str,
+    tmux_binary: str,
+    runtime: LiveTmuxSession,
+    event: str,
+) -> str:
+    if event not in {"attached", "detached"}:
+        raise ValueError(f"unsupported status animation event: {event}")
+    animation_command = shlex.join(
+        (
+            python_executable,
+            "-m",
+            "rodex.status_animation",
+            "--tmux-binary",
+            tmux_binary,
+            "--tmux-server-socket",
+            str(runtime.tmux_server_socket_path),
+            "--tmux-session-name",
+            runtime.tmux_session_name,
+            "--event",
+            event,
+        )
+    )
+    quiet_background_command = f"{animation_command} >/dev/null 2>&1"
+    return f"run-shell -b {shlex.quote(quiet_background_command)}"
 
 
 class RodexRuntimeLauncher:
@@ -283,6 +311,19 @@ class RodexRuntimeLauncher:
     def configure_identity_status(self, runtime: LiveTmuxSession) -> None:
         """Show Rodex identity and live attachment privacy in the status line."""
         target = _exact_tmux_pane_target(runtime.tmux_session_name)
+        for transient_option in (
+            STATUS_ANIMATION_TOKEN_OPTION,
+            "status-format",
+            "status-style",
+        ):
+            self._tmux(
+                runtime,
+                "set-option",
+                "-u",
+                "-t",
+                target,
+                transient_option,
+            )
         self._tmux(runtime, "set-option", "-t", target, "status", "on")
         self._tmux(
             runtime,
@@ -317,6 +358,20 @@ class RodexRuntimeLauncher:
             "status-right-length",
             "64",
         )
+        for event in ("attached", "detached"):
+            self._tmux(
+                runtime,
+                "set-hook",
+                "-t",
+                target,
+                f"client-{event}",
+                _status_animation_hook_command(
+                    self._python_executable,
+                    self._tmux_binary,
+                    runtime,
+                    event,
+                ),
+            )
 
     def attach(self, runtime: LiveTmuxSession) -> None:
         """Attach the calling terminal to the live Rodex tmux session."""

@@ -15,6 +15,7 @@ name such as `automatic-beluga`.
 - Reattaches a live session or transparently resumes its saved Codex session.
 - Supports an optional user-defined display name without losing the generated name.
 - Shows the Rodex name, tool-call count, and live private/shared state in the tmux bar.
+- Animates shared arrival and final departure for five seconds without blocking the TUI.
 - Sends work to, waits for, or follows a running session from another shell.
 
 Rodex does not replace the Codex CLI. It wraps its normal interface with local session

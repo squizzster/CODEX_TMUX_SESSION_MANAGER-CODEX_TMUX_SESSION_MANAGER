@@ -42,6 +42,9 @@ identities. Tool counts cover the current runtime and reset when it is resumed.
 ## Lifecycle
 
 - `Ctrl-b d` detaches while Codex, its app-server, and tmux continue running.
+- A second attached client triggers a five-second shared-arrival animation. Returning
+  to one client triggers its private-session counterpart. Both run in a separate
+  one-shot process and restore the ordinary status bar without delaying the TUI.
 - Exiting the Codex TUI ends its supervisor and private app-server; its cool name can
   transparently resume the saved Codex session later.
 - A failure before SQL registration stops the exact new tmux session and leaves no

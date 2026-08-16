@@ -42,6 +42,8 @@ _POLL_INTERVAL_SECONDS: Final = 0.05
 _PROXY_SOCKET_OPTION: Final = "@rodex_protocol_proxy_socket_path"
 _EVENT_SOCKET_OPTION: Final = "@rodex_protocol_event_socket_path"
 _CODEX_UUID_OPTION: Final = "@rodex_codex_session_uuid"
+# One switch owns installation of the tmux `/rodex` bindings and completion pipe.
+RODEX_TMUX_SLASH_ENABLED: Final = False
 _SHARING_STATUS_FORMAT: Final = (
     "#{?session_many_attached,"
     "#[fg=yellow]#[bold] [Shared with #{e|-:#{session_attached},1} "
@@ -441,31 +443,38 @@ class RodexRuntimeLauncher:
                     event,
                 ),
             )
-        self._tmux(
-            runtime,
-            "pipe-pane",
-            "-O",
-            "-t",
-            target,
-            _tmux_completion_observer_command(
-                self._python_executable,
-                self._tmux_binary,
-                runtime,
-            ),
-        )
-        for key in ("Enter", "Tab"):
+        if RODEX_TMUX_SLASH_ENABLED:
             self._tmux(
                 runtime,
-                "bind-key",
-                "-n",
-                key,
-                _tmux_input_proxy_binding_command(
+                "pipe-pane",
+                "-O",
+                "-t",
+                target,
+                _tmux_completion_observer_command(
                     self._python_executable,
                     self._tmux_binary,
                     runtime,
-                    key,
                 ),
             )
+            for key in ("Enter", "Tab"):
+                self._tmux(
+                    runtime,
+                    "bind-key",
+                    "-n",
+                    key,
+                    _tmux_input_proxy_binding_command(
+                        self._python_executable,
+                        self._tmux_binary,
+                        runtime,
+                        key,
+                    ),
+                )
+        else:
+            # Keep the implementation available while ensuring sessions configured by
+            # an older Rodex release no longer intercept input or show completions.
+            self._tmux(runtime, "pipe-pane", "-t", target)
+            for key in ("Enter", "Tab"):
+                self._tmux(runtime, "unbind-key", "-n", key)
 
     def attach(self, runtime: LiveTmuxSession) -> None:
         """Attach the calling terminal to the live Rodex tmux session."""

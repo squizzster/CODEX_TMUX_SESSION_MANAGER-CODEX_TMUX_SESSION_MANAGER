@@ -27,12 +27,9 @@ starts, and fans structured TUI events to bounded live subscribers. tmux user op
 advertise the live proxy/event sockets and observed Codex UUID; none are new SQLite
 identities. Tool counts cover the current runtime and reset when it is resumed.
 
-Codex handles slash commands before app-server traffic, so `/rodex` uses a separate
-tmux input proxy. Its Enter and Tab bindings examine only the active prompt line,
-handle or complete the exact Rodex namespace locally, and pass every other key directly
-to Codex. An asynchronous pane-output observer adds a transient Rodex completion ribbon
-through the passive tmux status format, without changing composer focus or altering
-Codex's terminal rendering.
+The separate tmux input proxy and completion observer for `/rodex` are retained but
+temporarily disabled by `RODEX_TMUX_SLASH_ENABLED`. Runtime status setup removes their
+Enter/Tab bindings and pane pipe, so all input currently passes directly to Codex.
 
 ## Named reattachment
 

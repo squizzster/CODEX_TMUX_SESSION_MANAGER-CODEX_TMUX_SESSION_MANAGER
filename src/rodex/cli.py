@@ -31,7 +31,12 @@ from rodex_functions import (
 from rodex_sql import RodexSQLError
 
 from .control import CodexControlClient, LiveRodexControl, RodexControlError
-from .runtime import LiveTmuxSession, RodexRuntimeError, RodexRuntimeLauncher
+from .runtime import (
+    LiveTmuxSession,
+    RodexCodexSessionNotFoundError,
+    RodexRuntimeError,
+    RodexRuntimeLauncher,
+)
 
 
 class RodexLaunchError(RuntimeError):
@@ -204,10 +209,21 @@ def _open_named_session(
     if codex_session_uuid is None:
         raise RodexLaunchError(f"Rodex session has no Codex identity: {cool_name}")
 
+    replaced_unsaved_codex_identity = False
     try:
         resumed_runtime, observed_codex_uuid = launcher.start(
             Path.cwd(), ["resume", str(codex_session_uuid)]
         )
+    except RodexCodexSessionNotFoundError:
+        try:
+            resumed_runtime, observed_codex_uuid = launcher.start(Path.cwd(), [])
+        except RodexRuntimeError as error:
+            raise RodexLaunchError(
+                f"Rodex session {display_name!r} is recorded but not running; "
+                f"Codex session {codex_session_uuid} was not saved and a replacement "
+                f"Codex runtime could not be started: {error}"
+            ) from error
+        replaced_unsaved_codex_identity = True
     except RodexRuntimeError as error:
         raise RodexLaunchError(
             f"Rodex session {display_name!r} is recorded but not running; "
@@ -215,7 +231,10 @@ def _open_named_session(
         ) from error
     active_tmux: LiveTmuxSession = resumed_runtime
     try:
-        if observed_codex_uuid != codex_session_uuid:
+        if (
+            not replaced_unsaved_codex_identity
+            and observed_codex_uuid != codex_session_uuid
+        ):
             raise RodexLaunchError(
                 "Codex resumed an unexpected session: "
                 f"expected {codex_session_uuid}, observed {observed_codex_uuid}"
@@ -226,6 +245,9 @@ def _open_named_session(
             active_tmux.tmux_server_socket_path,
             active_tmux.tmux_session_name,
             database_path,
+            codex_session_uuid=(
+                observed_codex_uuid if replaced_unsaved_codex_identity else None
+            ),
         )
         launcher.configure_identity_status(active_tmux)
     except BaseException:
@@ -235,8 +257,9 @@ def _open_named_session(
     if detach:
         _print_existing_detached_runtime(session_id, display_name, database_path)
         return True
+    action = "Recovered" if replaced_unsaved_codex_identity else "Resumed"
     print(
-        f"Resumed Rodex {display_name} -> Codex {codex_session_uuid} "
+        f"{action} Rodex {display_name} -> Codex {observed_codex_uuid} "
         f"({active_tmux.tmux_session_name})",
         flush=True,
     )

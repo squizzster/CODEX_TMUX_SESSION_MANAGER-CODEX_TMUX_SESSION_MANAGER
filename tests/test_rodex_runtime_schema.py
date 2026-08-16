@@ -20,6 +20,7 @@ from rodex_functions import (
 )
 
 CODEX_UUID = uuid.UUID("01a00654-f2bc-7a30-834a-a5f886a65f82")
+REPLACEMENT_CODEX_UUID = uuid.UUID(int=CODEX_UUID.int + 1)
 
 
 def fetch_all(database: Path, query: str) -> list[tuple[object, ...]]:
@@ -173,6 +174,36 @@ def test_runtime_resume_replaces_endpoint_and_access_time_in_one_transaction(
     assert log.last_accessed_at_utc == "2026-08-15T18:30:00.000000Z"
 
 
+def test_runtime_recovery_atomically_relinks_the_codex_uuid_and_endpoint(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "rodex.sqlite3"
+    session = create_a_rodex_session(
+        database,
+        codex_session_uuid=CODEX_UUID,
+        tmux_server_socket_path="/tmp/rodex/old.sock",
+        tmux_session_name="automatic-beluga",
+    )
+
+    updated = record_a_rodex_session_runtime_resume(
+        session.id,
+        "/tmp/rodex/new.sock",
+        "automatic-beluga",
+        database,
+        codex_session_uuid=REPLACEMENT_CODEX_UUID,
+    )
+
+    assert updated.tmux_server_socket_path == "/tmp/rodex/new.sock"
+    assert lookup_codex_uuid_from_a_rodex_session_id(session.id, database) == (
+        REPLACEMENT_CODEX_UUID
+    )
+    assert lookup_rodex_session_id_from_a_codex_uuid(CODEX_UUID, database) is None
+    assert (
+        lookup_rodex_session_id_from_a_codex_uuid(REPLACEMENT_CODEX_UUID, database)
+        == session.id
+    )
+
+
 def test_runtime_resume_rolls_back_endpoint_when_access_log_update_fails(
     tmp_path: Path,
 ) -> None:
@@ -196,8 +227,10 @@ def test_runtime_resume_rolls_back_endpoint_when_access_log_update_fails(
             "/tmp/rodex/new.sock",
             "automatic-beluga",
             database,
+            codex_session_uuid=REPLACEMENT_CODEX_UUID,
         )
 
+    assert lookup_codex_uuid_from_a_rodex_session_id(session.id, database) == CODEX_UUID
     tmux_link = lookup_rodex_tmux_session(session.id, database)
     assert tmux_link is not None
     assert tmux_link.tmux_server_socket_path == "/tmp/rodex/old.sock"

@@ -13,6 +13,7 @@ name such as `automatic-beluga`.
 - Keeps Rodex and Codex session identities distinct and linked.
 - Assigns every session a permanent, unique two-word name.
 - Reattaches a live session or transparently resumes its saved Codex session.
+- Recovers an empty, unsaved Codex session under the same Rodex identity.
 - Supports an optional user-defined display name without losing the generated name.
 - Shows the Rodex name, tool-call count, and live private/shared state in the tmux bar.
 - Animates shared arrival and final departure for five seconds without blocking the TUI.
@@ -51,7 +52,7 @@ To expose this checkout as the system-wide `rodex` command, follow the
 | `./rodex` | Create and attach to a new Rodex/Codex session. |
 | `./rodex --create project_1234` | Create a session with a preferred display name. |
 | `./rodex -d` | Create without attaching and print expanded identity JSON. |
-| `./rodex automatic-beluga` | Attach if live; otherwise resume its Codex session. |
+| `./rodex automatic-beluga` | Attach if live; otherwise resume or recover its Codex session. |
 | `./rodex running` | List this POSIX user's running Rodex sessions (`sessions` also works). |
 | `./rodex alias automatic-beluga edgar-work` | Assign a preferred display name. |
 | `./rodex alias -f automatic-beluga new-name` | Replace an existing display name. |

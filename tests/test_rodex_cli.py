@@ -34,6 +34,7 @@ from rodex_functions import (
 )
 
 CODEX_UUID = uuid.UUID("01a00654-f2bc-7a30-834a-a5f886a65f82")
+REPLACEMENT_CODEX_UUID = uuid.UUID(int=CODEX_UUID.int + 1)
 DNA = RodexSessionsUserIdentity(1009, 1010, "dna")
 
 
@@ -56,6 +57,7 @@ class StubLauncher:
         self.live = True
         self.observed_codex_uuid = CODEX_UUID
         self.start_error: RodexRuntimeError | None = None
+        self.start_errors: list[RodexRuntimeError] = []
         self.control = LiveRodexControl(
             tmp_path / "proxy.sock", tmp_path / "events.sock", CODEX_UUID
         )
@@ -65,8 +67,12 @@ class StubLauncher:
         self, workspace: Path, arguments: list[str]
     ) -> tuple[LiveRodexRuntime, uuid.UUID]:
         self.started.append((workspace, arguments))
+        if self.start_errors:
+            raise self.start_errors.pop(0)
         if self.start_error is not None:
-            raise self.start_error
+            error = self.start_error
+            self.start_error = None
+            raise error
         return self.runtime, self.observed_codex_uuid
 
     def session_exists(self, runtime: LiveTmuxSession) -> bool:
@@ -612,7 +618,63 @@ def test_ended_cool_name_argument_transparently_resumes_its_codex_session(
     )
 
 
-def test_failed_resume_reports_the_recorded_rodex_and_codex_context(
+def test_unsaved_codex_session_starts_fresh_and_relinks_the_rodex_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    database = tmp_path / "rodex.sqlite3"
+    monkeypatch.setattr(
+        "cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga"
+    )
+    monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
+    session = create_a_rodex_session(
+        database,
+        codex_session_uuid=CODEX_UUID,
+        user_identity=DNA,
+        tmux_server_socket_path=tmp_path / "stale.sock",
+        tmux_session_name="automatic-beluga",
+    )
+    launcher = StubLauncher(tmp_path)
+    launcher.live = False
+    launcher.start_error = RodexCodexSessionNotFoundError(
+        f"Codex has no saved session for exact identity {CODEX_UUID}"
+    )
+    launcher.observed_codex_uuid = REPLACEMENT_CODEX_UUID
+
+    assert (
+        run(
+            ["automatic-beluga"],
+            database_path=database,
+            launcher=launcher,  # type: ignore[arg-type]
+        )
+        == 0
+    )
+
+    assert lookup_rodex_uuid_from_an_id(session.id, database) == session.rodex_uuid
+    assert (
+        lookup_codex_uuid_from_a_rodex_session_id(session.id, database)
+        == REPLACEMENT_CODEX_UUID
+    )
+    assert launcher.started == [
+        (Path.cwd(), ["resume", str(CODEX_UUID)]),
+        (Path.cwd(), []),
+    ]
+    assert launcher.renamed == [(launcher.runtime, "automatic-beluga")]
+    assert launcher.configured[0].tmux_session_name == "automatic-beluga"
+    assert launcher.attached == launcher.configured
+    assert launcher.stopped == []
+    tmux_link = lookup_rodex_tmux_session(session.id, database)
+    assert tmux_link is not None
+    assert tmux_link.tmux_server_socket_path == str(
+        launcher.runtime.tmux_server_socket_path
+    )
+    assert f"Recovered Rodex automatic-beluga -> Codex {REPLACEMENT_CODEX_UUID}" in (
+        capsys.readouterr().out
+    )
+
+
+def test_non_missing_history_resume_failure_does_not_start_a_replacement(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     database = tmp_path / "rodex.sqlite3"
@@ -629,29 +691,63 @@ def test_failed_resume_reports_the_recorded_rodex_and_codex_context(
     )
     launcher = StubLauncher(tmp_path)
     launcher.live = False
-    launcher.start_error = RodexCodexSessionNotFoundError(
-        f"Codex has no saved session for exact identity {CODEX_UUID}"
-    )
+    launcher.start_error = RodexRuntimeError("Codex transport failed")
     recorded_tmux = lookup_rodex_tmux_session(1, database)
 
-    with pytest.raises(RodexLaunchError) as raised:
+    with pytest.raises(RodexLaunchError, match="Codex transport failed"):
         run(
             ["automatic-beluga"],
             database_path=database,
             launcher=launcher,  # type: ignore[arg-type]
         )
 
-    message = str(raised.value)
-    assert "Rodex session 'automatic-beluga' is recorded but not running" in message
-    assert f"Codex session {CODEX_UUID} could not be resumed" in message
-    assert f"Codex has no saved session for exact identity {CODEX_UUID}" in message
     assert lookup_codex_uuid_from_a_rodex_session_id(1, database) == CODEX_UUID
     assert lookup_rodex_tmux_session(1, database) == recorded_tmux
     assert launcher.started == [(Path.cwd(), ["resume", str(CODEX_UUID)])]
+
+
+def test_unsaved_session_remains_linked_to_the_old_uuid_if_recovery_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database = tmp_path / "rodex.sqlite3"
+    monkeypatch.setattr(
+        "cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga"
+    )
+    monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
+    create_a_rodex_session(
+        database,
+        codex_session_uuid=CODEX_UUID,
+        user_identity=DNA,
+        tmux_server_socket_path=tmp_path / "stale.sock",
+        tmux_session_name="automatic-beluga",
+    )
+    launcher = StubLauncher(tmp_path)
+    launcher.live = False
+    launcher.start_errors = [
+        RodexCodexSessionNotFoundError(
+            f"Codex has no saved session for exact identity {CODEX_UUID}"
+        ),
+        RodexRuntimeError("fresh Codex startup failed"),
+    ]
+    recorded_tmux = lookup_rodex_tmux_session(1, database)
+
+    with pytest.raises(RodexLaunchError, match="replacement Codex runtime") as raised:
+        run(
+            ["automatic-beluga"],
+            database_path=database,
+            launcher=launcher,  # type: ignore[arg-type]
+        )
+
+    assert "fresh Codex startup failed" in str(raised.value)
+    assert lookup_codex_uuid_from_a_rodex_session_id(1, database) == CODEX_UUID
+    assert lookup_rodex_tmux_session(1, database) == recorded_tmux
+    assert launcher.started == [
+        (Path.cwd(), ["resume", str(CODEX_UUID)]),
+        (Path.cwd(), []),
+    ]
     assert launcher.renamed == []
     assert launcher.configured == []
     assert launcher.attached == []
-    assert launcher.stopped == []
 
 
 @pytest.mark.parametrize("lookup_name", ["black-sawfly", "work"])

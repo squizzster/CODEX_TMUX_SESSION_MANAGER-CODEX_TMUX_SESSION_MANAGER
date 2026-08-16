@@ -55,6 +55,7 @@ RODEX_RESERVED_WORDS: Final = frozenset(
         "running",
         "sandbox",
         "send",
+        "sessions",
         "stdio-to-uds",
         "tail",
         "unarchive",

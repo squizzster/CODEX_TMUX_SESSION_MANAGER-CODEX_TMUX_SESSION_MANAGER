@@ -92,7 +92,7 @@ def test_alias_is_one_owned_integer_identity_and_force_replaces_it(
 
 @pytest.mark.parametrize(
     "reserved_name",
-    [*sorted(RODEX_RESERVED_WORDS), "Alias", "EXEC", "RUNNING"],
+    [*sorted(RODEX_RESERVED_WORDS), "Alias", "EXEC", "RUNNING", "SESSIONS"],
 )
 def test_reserved_aliases_are_rejected_without_consuming_an_id(
     tmp_path: Path,

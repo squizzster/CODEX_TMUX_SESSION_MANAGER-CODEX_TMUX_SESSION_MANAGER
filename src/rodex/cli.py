@@ -42,7 +42,7 @@ class RodexExecutableNotFoundError(RodexLaunchError):
     """A required executable could not be resolved from PATH."""
 
 
-_RUNNING_COMMANDS = frozenset({"running", "--running"})
+_RUNNING_COMMANDS = frozenset({"running", "--running", "sessions", "--sessions"})
 _ALIAS_COMMANDS = frozenset({"alias", "--alias"})
 _SEND_COMMANDS = frozenset({"send", "--send"})
 _TAIL_COMMANDS = frozenset({"tail", "--tail"})

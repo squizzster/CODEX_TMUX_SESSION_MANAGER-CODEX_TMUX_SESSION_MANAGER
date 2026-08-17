@@ -35,6 +35,7 @@ from rodex.tmux_status import (
     STATUS_LEFT_CLAIM_PUBLISHER_OPTION,
     STATUS_LEFT_CLAIM_TOKEN_OPTION,
 )
+from rodex_registry import RodexSessionIdentifier
 
 
 class FakeWebSocket:
@@ -190,6 +191,40 @@ def test_start_directly_hosts_codex_in_tmux_and_returns_its_uuid(
             codex_uuid,
         ],
     ]
+
+
+def test_start_passes_the_exact_leading_zero_identifier_to_the_session_host(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    codex_uuid = "01a00654-f2bc-7a30-834a-a5f886a65f82"
+    rodex_session_identifier = RodexSessionIdentifier.parse("0000000000000001")
+    registry_uuid = uuid.UUID("06179a35-8126-4d53-9a42-e1042bfc1cb0")
+    monkeypatch.setenv("RODEX_RUNTIME_DIR", str(tmp_path))
+    monkeypatch.setenv("RODEX_CODEX_SESSIONS_ROOT", str(tmp_path / "sessions"))
+    monkeypatch.setattr(
+        runtime_module.secrets, "token_hex", lambda size: "0123456789abcdef"
+    )
+    runner = RuntimeRunner(tmp_path)
+    launcher = RodexRuntimeLauncher(
+        "/usr/bin/codex",
+        "/usr/bin/tmux",
+        runner=runner,
+        connector=RecordingConnector([codex_uuid]),
+        python_executable="/venv/bin/python",
+    )
+
+    launcher.start(
+        tmp_path,
+        [],
+        rodex_session_identifier=rodex_session_identifier,
+        rodex_registry_uuid=registry_uuid,
+        rodex_database_path=tmp_path / "rodex-v2.sqlite3",
+    )
+
+    host_command = runner.calls[0][-1]
+    assert "--rodex-session-identifier 0000000000000001" in host_command
+    assert f"--rodex-database {tmp_path / 'rodex-v2.sqlite3'}" in host_command
+    assert "--rodex-session-uuid" not in host_command
 
 
 def test_exact_resume_fails_when_codex_reports_that_uuid_is_not_saved(
@@ -1267,10 +1302,12 @@ def test_runtime_control_publishes_pending_then_registered_identity(
         tmp_path / "events.sock",
     )
     codex_uuid = uuid.uuid4()
-    rodex_uuid = uuid.uuid4()
+    rodex_session_identifier = RodexSessionIdentifier.parse("0123456789abcdef")
     registry_uuid = uuid.uuid4()
 
-    launcher.publish_runtime_control(runtime, codex_uuid, rodex_uuid, registry_uuid)
+    launcher.publish_runtime_control(
+        runtime, codex_uuid, rodex_session_identifier, registry_uuid
+    )
     launcher.confirm_runtime_registration(runtime)
 
     options = [command[3:] for command in runner.calls]
@@ -1279,8 +1316,8 @@ def test_runtime_control_publishes_pending_then_registered_identity(
             "set-option",
             "-t",
             "=rodex-token:",
-            "@rodex_session_uuid",
-            str(rodex_uuid),
+            "@rodex_session_identifier",
+            str(rodex_session_identifier),
         ],
         [
             "set-option",
@@ -1304,6 +1341,37 @@ def test_runtime_control_publishes_pending_then_registered_identity(
             "registered",
         ],
     ]
+
+
+@pytest.mark.parametrize(
+    "invalid_identifier",
+    ["0123456789abcde", "0123456789abcdeF", "01234567-89abcdef"],
+)
+def test_runtime_discovery_rejects_a_noncanonical_session_identifier_marker(
+    tmp_path: Path,
+    invalid_identifier: str,
+) -> None:
+    values = {
+        "@rodex_protocol_proxy_socket_path": str(tmp_path / "proxy.sock"),
+        "@rodex_protocol_event_socket_path": str(tmp_path / "events.sock"),
+        "@rodex_codex_session_uuid": "01a00654-f2bc-7a30-834a-a5f886a65f82",
+        "@rodex_session_identifier": invalid_identifier,
+        "@rodex_registry_uuid": "06179a35-8126-4d53-9a42-e1042bfc1cb0",
+        "@rodex_registration_state": "registered",
+    }
+
+    def read_option(
+        command: list[str], **_options: object
+    ) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            command, 0, stdout=f"{values.get(command[-1], '')}\n", stderr=""
+        )
+
+    launcher = RodexRuntimeLauncher("codex", "tmux", runner=read_option)
+    runtime = LiveTmuxSession(tmp_path / "tmux.sock", "automatic-beluga")
+
+    with pytest.raises(RodexRuntimeError, match="invalid Rodex session identifier"):
+        launcher.discover_runtime_control(runtime)
 
 
 def test_runtime_registration_check_uses_the_exact_pane_and_private_socket(
@@ -1565,7 +1633,7 @@ def test_session_host_connects_the_tui_through_the_protocol_proxy(
             analytics_config=AnalyticsWorkerConfig(
                 rodex_database_path=tmp_path / "rodex.sqlite3",
                 codex_sessions_root=tmp_path / "sessions",
-                rodex_uuid=uuid.UUID(int=1),
+                rodex_session_identifier=RodexSessionIdentifier(1),
             ),
             analytics_supervisor_factory=FailingAnalyticsSupervisor,
         )

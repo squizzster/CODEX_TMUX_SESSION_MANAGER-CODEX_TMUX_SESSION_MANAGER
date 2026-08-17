@@ -7,7 +7,7 @@ from dataclasses import FrozenInstanceError
 
 import pytest
 
-from rodex_functions.statistics_projection import (
+from rodex_registry.statistics_projection import (
     SessionStatisticsProjection,
     StatisticsDistribution,
     StatisticsNamedCount,

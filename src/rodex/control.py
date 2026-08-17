@@ -12,6 +12,8 @@ from typing import Any, Literal
 from websockets.exceptions import ConnectionClosed, InvalidHandshake
 from websockets.sync.client import unix_connect
 
+from rodex_registry.identity import RodexSessionIdentifier
+
 from .protocol_proxy import EVENT_STREAM_READY_METHOD
 from .version import RODEX_VERSION
 
@@ -31,7 +33,7 @@ class LiveRodexControl:
     protocol_proxy_socket_path: Path
     protocol_event_socket_path: Path
     codex_session_uuid: uuid.UUID
-    rodex_session_uuid: uuid.UUID | None = None
+    rodex_session_identifier: RodexSessionIdentifier | None = None
     rodex_registry_uuid: uuid.UUID | None = None
     registration_state: str | None = None
 

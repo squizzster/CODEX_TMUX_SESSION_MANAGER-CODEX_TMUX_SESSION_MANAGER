@@ -8,8 +8,8 @@ listener; control endpoints are Unix sockets below a private runtime root.
 ## Enforced boundaries
 
 - A live attach or control action requires the durable SQL row and matching advertised
-  Rodex UUID, Codex UUID, and `registered` state. Missing, legacy, duplicated, or
-  conflicting identity fails closed.
+  64-bit Rodex session identifier, Rodex registry UUID, Codex UUID, and `registered`
+  state. Missing, legacy, duplicated, or conflicting identity fails closed.
 - New runtimes begin `pending`, become usable after the SQL identity commits, and exit
   if confirmation never arrives. An exact committed/pending pair is recoverable.
 - Runtime roots are real, current-user-owned directories at mode `0700`, below either a
@@ -31,3 +31,7 @@ listener; control endpoints are Unix sockets below a private runtime root.
 Rodex does not auto-adopt or auto-delete an unregistered or unverifiable tmux session.
 `rodex _running` reports it for explicit diagnosis. This is deliberate: an orphan is
 less harmful than attaching to or destroying the wrong runtime.
+
+The 16-hex Rodex session identifier is an integrity discriminator, not a credential.
+Authorization comes from the current-uid filesystem boundary plus the exact durable and
+live identity tuple. Do not expose the identifier later as a bearer-authentication token.

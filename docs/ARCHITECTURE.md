@@ -21,7 +21,7 @@ Rodex CLI ───────────────► SQLite registry
     │                         │ durable identity
     ▼
 private tmux server
-    │  └── advertises live sockets, Rodex/Codex UUIDs, registration state
+    │  └── advertises live sockets, Rodex ID, registry/Codex UUIDs, registration state
     ▼
 session host ─┬► Codex TUI ──► protocol proxy ──► Codex app-server
              │                  └──► live event tap ──► tail/wait/send clients
@@ -43,39 +43,40 @@ WebSocket frames, counts tools, and fans structured events; it never buffers the
 | `rodex.analytics` | Authenticate rollout prefixes and supervise fail-open analysis. |
 | `rodex.control` | Verify and control one exact loaded Codex thread. |
 | `rodex.protocol_proxy` | Forward traffic and fan out bounded live event streams. |
-| `rodex_functions` | Own session identity, ownership, naming, and state transitions. |
+| `rodex_registry.identity` | Own the canonical 16-hex Rodex identifier and explicit UUID codecs. |
+| `rodex_registry.schema` | Create and exactly verify the complete SQLite schema and registry UUID. |
+| `rodex_registry.lifecycle` | Own session creation, ownership, naming, and runtime transitions. |
+| `rodex_registry.statistics` | Publish and read relational statistics behind identity fences. |
 | `rodex_sql` | Provide transactional SQLite initialization and access. |
 | `cool_name` | Allocate and resolve collision-resistant session names. |
 
 ## Identity and data model
 
-`rodex_sessions.id` links explicit Rodex/Codex UUID domains and the permanent generated
-name. UUIDs are stored losslessly as two signed 64-bit integers.
+`rodex_sessions.id` is the private relational key. The public Rodex session identity is
+a random unsigned 64-bit value with one canonical 16-character lowercase hexadecimal
+wire form. SQLite stores all of its bits in one signed `BIGINT` using a lossless
+two's-complement mapping. The Codex UUID remains on the owning row as two signed 64-bit
+integers. The full registry UUID remains a separate database-instance identity.
 
-Separate one-to-one or lookup tables hold:
-
-- the one durable registry UUID that distinguishes database instances;
-- the exact tmux socket and session name;
-- POSIX user identity and access timestamps;
-- generated and optional user-defined cool names.
-- latest session and exact-turn statistics plus independently updated worker health;
-- every Codex rollout source retained in the Rodex identity's history.
-
-A user-defined name becomes the display name; the generated name remains a permanent
-lookup. Detailed rules live in [SQL_SCHEMA.md](SQL_SCHEMA.md), not duplicated here.
+Separate tables hold the registry UUID, tmux endpoint, POSIX owner/log, permanent and
+optional display names, statistics/worker health, and retained Codex rollout lineage.
+A display alias never replaces the permanent generated name. Detailed rules live in
+[SQL_SCHEMA.md](SQL_SCHEMA.md).
 
 ## Authoritative lifecycle
 
 ### New session (bare `rodex`, `_create`, or `_detach`)
 
-1. Allocate an unregistered Rodex UUID candidate for the pending runtime.
+1. Allocate an unregistered 64-bit Rodex session identifier candidate for the pending
+   runtime.
 2. Set the shared tmux server's 50,000-line history before creating the detached
    session and its first pane; mouse configuration remains user-owned.
 3. Start one private Codex app-server and connect an inline (`--no-alt-screen`) TUI
    through the proxy so rendered conversation rows enter tmux history.
 4. Refresh live paths and supervise analytics without blocking the TUI.
 5. Observe the single real Codex UUID from that app-server.
-6. Advertise the exact Rodex/Codex UUID pair with `pending` registration state.
+6. Advertise the exact Rodex identifier, registry UUID, and Codex UUID with `pending`
+   registration state.
 7. Transactionally register the identities, initial analytics source, name, user/log,
    and tmux link, then mark the runtime `registered`.
 8. Rename tmux to the display name, configure status, and attach the terminal.
@@ -85,7 +86,8 @@ lookup. Detailed rules live in [SQL_SCHEMA.md](SQL_SCHEMA.md), not duplicated he
 1. Resolve either generated or user-defined name to `rodex_sessions.id`.
 2. Enforce ownership using the effective POSIX identity.
 3. Attach only when the exact stored tmux endpoint advertises the matching registered
-   Rodex and Codex identities. An exact pending pair completes interrupted registration.
+   Rodex session, registry, and Codex identities. An exact pending tuple completes
+   interrupted registration.
 4. Otherwise ask Codex to resume the stored Codex UUID and verify the observed UUID.
 5. If Codex explicitly says that UUID was never saved, start empty and atomically
    relink the new Codex UUID; every other resume failure remains fatal.
@@ -102,52 +104,27 @@ keeping its single tmux runtime alive. Persistent or mismatched writers still fa
 `_running` follows the same ownership and live-endpoint rules. `_alias` changes use the
 same naming pipeline and compensate a tmux rename if the database transition fails.
 
-tmux hooks launch sharing animations in a short-lived background process. Animation
-tokens stop an older process restoring over a newer one; the current process removes
-temporary full-line overrides and redraws attached clients without delaying the TUI.
-
-`TmuxStatusLeftPipeline` is the authoritative path for transient status-left messages.
-Completion hints and the shared `Ctrl-C` warning publish named, tokenized claims with
-stable priorities. Each claim-and-render and guarded restore is one tmux server command,
-so concurrent background publishers cannot leave claim metadata and visible text from
-different messages. The base format reads tmux's per-client `client_prefix` state and
-shows `CTRL-B MODE` exactly while the default prefix is awaiting its command key. It
-does not intercept input, start a process, use a timer, or replace a user root binding.
-
-The `/rodex` input proxy and completion observer are retained but temporarily disabled
-by `RODEX_TMUX_SLASH_ENABLED` at the runtime configuration boundary. Status setup
-removes their pane pipe and tmux Enter/Tab bindings so input passes directly to the
-Codex TUI. A publisher-aware `Ctrl-C` binding remains active: it forwards
-privately attached input unchanged, but requires same-client confirmation before a
-shared interrupt or exit. It does not replace a user-owned root binding. When the
-slash proxy is enabled, it consumes only exact `/rodex` input and otherwise forwards
-keys unchanged; both retained slash paths remain tested while inactive.
+Sharing animations and transient left-status claims run out of process but publish and
+restore atomically through `TmuxStatusLeftPipeline`. The base format reads per-client
+`client_prefix`, so `CTRL-B MODE` never intercepts a fast key sequence. The guarded
+shared `Ctrl-C` binding requires same-client confirmation; private input is unchanged.
+User-owned root bindings are preserved. `/rodex` input interception remains implemented,
+tested, and disabled at `RODEX_TMUX_SLASH_ENABLED`.
 
 ## Persistent analytics
 
-The worker waits for SQL registration, authenticates each lineage rollout against its
-Codex UUID, and copies a private final-newline-complete prefix. A fresh in-memory
-`CodexProtocolLibrary` analyzes those immutable copies in one chronological pass. Rodex
-persists fixed metrics as typed session and turn columns; distributions, named counts,
-and ordered limits as relational child rows; exact prefix provenance; and separate worker
-health. It stores neither raw events, analyzer storage, nor statistics JSON blobs. Source
-SHA-256 and stat/ctime caching detect rewrites. CLI JSON is deterministically rebuilt
-from an indexed, transactionally consistent SQL view.
-Session projection, complete turn set, source inclusion, and healthy state publish
-atomically behind current-Codex UUID and prior-revision fences. Failures preserve the
-last good revision and cannot affect TUI behavior or exit status. `_stats`, its exact
-`--turn` lookup, and `_stats-status` read SQLite without requiring Codex or tmux.
+The worker authenticates complete rollout prefixes and analyzes private copies in a
+fresh in-memory library. Typed session/turn columns, relational children, exact source
+provenance, and worker health replace raw events and JSON blobs. A complete projection
+publishes atomically behind Codex-UUID and prior-revision fences; failures preserve the
+last good view and cannot affect the TUI. Statistics reads need neither Codex nor tmux.
 
 ## Live control
 
-The running tmux session advertises proxy/event sockets, its Rodex/Codex UUID pair, and
-`pending` or `registered` state as ephemeral user options. SQL remains authoritative.
-Pending runtimes expire if registration is not confirmed; registered endpoints are
-never adopted, killed, or renamed without an exact durable identity match.
-
-`send`, `wait`, and `tail` resolve a name, enforce POSIX ownership, locate the exact
-live endpoint, compare stored and advertised Codex UUIDs, then verify that the private
-app-server has that exact thread loaded.
+tmux advertises live sockets, Rodex ID, registry/Codex UUIDs, and registration state;
+SQL remains authoritative. Pending runtimes expire, while registered endpoints are
+never adopted or changed without an exact durable match. Control commands enforce
+ownership, marker equality, and the exact thread loaded by the private app-server.
 
 ## Integrity boundaries
 

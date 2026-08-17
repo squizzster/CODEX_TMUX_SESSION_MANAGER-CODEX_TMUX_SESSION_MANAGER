@@ -22,7 +22,8 @@ from rodex.analytics import (
     RodexAnalyticsError,
     locate_verified_rollout,
 )
-from rodex_functions import (
+from rodex_registry import (
+    RodexSessionIdentifier,
     create_a_rodex_session,
     list_rodex_session_statistics_sources,
     parse_session_statistics_snapshot,
@@ -31,7 +32,7 @@ from rodex_functions import (
     record_a_rodex_session_runtime_resume,
 )
 
-RODEX_UUID = uuid.UUID("12345678-1234-5678-1234-567812345678")
+RODEX_SESSION_IDENTIFIER = RodexSessionIdentifier.parse("1234567890abcdef")
 CODEX_UUID = uuid.UUID("01a00654-f2bc-7a30-834a-a5f886a65f82")
 REPLACEMENT_CODEX_UUID = uuid.UUID(int=CODEX_UUID.int + 1)
 
@@ -132,14 +133,14 @@ def _config(tmp_path: Path) -> AnalyticsWorkerConfig:
     return AnalyticsWorkerConfig(
         rodex_database_path=tmp_path / "rodex.sqlite3",
         codex_sessions_root=tmp_path / "sessions",
-        rodex_uuid=RODEX_UUID,
+        rodex_session_identifier=RODEX_SESSION_IDENTIFIER,
     )
 
 
 def _create(config: AnalyticsWorkerConfig, codex_uuid: uuid.UUID = CODEX_UUID) -> None:
     create_a_rodex_session(
         config.rodex_database_path,
-        rodex_session_uuid=RODEX_UUID,
+        rodex_session_identifier=RODEX_SESSION_IDENTIFIER,
         codex_session_uuid=codex_uuid,
     )
 
@@ -159,6 +160,27 @@ def test_worker_waits_for_unregistered_identity_without_opening_analyzer(
 
     assert state == "catching_up"
     assert adapters == []
+
+
+def test_worker_with_the_wrong_identifier_cannot_publish_for_an_existing_session(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    _create(config)
+    wrong_config = replace(
+        config,
+        rodex_session_identifier=RodexSessionIdentifier(RODEX_SESSION_IDENTIFIER.value + 1),
+    )
+    adapters: list[FakeAnalyticsAdapter] = []
+
+    state = AnalyticsRolloutWorker(
+        wrong_config,
+        adapter_factory=lambda: adapters.append(FakeAnalyticsAdapter()) or adapters[-1],
+    ).poll_once()
+
+    assert state == "catching_up"
+    assert adapters == []
+    assert read_rodex_session_statistics(1, config.rodex_database_path).statistics is None
 
 
 @pytest.mark.parametrize("state, expected_wait", [("up_to_date", 0.125), ("degraded", 2.0)])
@@ -282,7 +304,7 @@ def test_replacement_retains_old_source_and_analyzes_full_history(
     replacement = _rollout(config.codex_sessions_root, REPLACEMENT_CODEX_UUID)
     create_a_rodex_session(
         config.rodex_database_path,
-        rodex_session_uuid=RODEX_UUID,
+        rodex_session_identifier=RODEX_SESSION_IDENTIFIER,
         codex_session_uuid=CODEX_UUID,
         tmux_server_socket_path=tmp_path / "tmux.sock",
         tmux_session_name="first",
@@ -409,7 +431,7 @@ def test_stale_worker_cannot_publish_snapshot_or_health_after_replacement(
     _rollout(config.codex_sessions_root, REPLACEMENT_CODEX_UUID)
     create_a_rodex_session(
         config.rodex_database_path,
-        rodex_session_uuid=RODEX_UUID,
+        rodex_session_identifier=RODEX_SESSION_IDENTIFIER,
         codex_session_uuid=CODEX_UUID,
         tmux_server_socket_path=tmp_path / "tmux.sock",
         tmux_session_name="first",

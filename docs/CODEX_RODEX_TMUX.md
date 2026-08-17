@@ -2,13 +2,15 @@
 
 Rodex is a match-maker and launcher. Each identity keeps its own meaning:
 
-- **Rodex session:** our secure UUID and internal `rodex_sessions.id`.
+- **Rodex session:** a random 64-bit identifier rendered as exactly 16 lowercase hex
+  characters, plus internal `rodex_sessions.id`.
 - **Codex session:** the real UUID allocated by Codex.
 - **tmux session:** the exact tmux server socket path plus tmux session name.
 
-Rodex and Codex UUIDs remain explicitly named on the owning session row. The tmux
-endpoint is a separate operational row joined by `rodex_sessions_id`. Identities are
-never presented or stored as another domain's identity.
+The database also has one full Rodex registry UUID. Rodex session identifiers, registry
+UUIDs, and Codex UUIDs remain explicitly named and typed. The tmux endpoint is a
+separate operational row joined by `rodex_sessions_id`. Identities are never presented
+or stored as another domain's identity.
 
 `rodex _context` is the single machine-readable self-identification pipeline. It uses
 the calling process's inherited `TMUX` and `TMUX_PANE` values only to address the live
@@ -69,10 +71,10 @@ Enter/Tab bindings and pane pipe, so all input currently passes directly to Code
 ## Persistent statistics
 
 Each session host supervises one low-priority analytics subprocess keyed by the Rodex
-UUID allocated for that launch. The worker waits for SQL registration, discovers every
-Codex UUID retained in that Rodex lineage, and authenticates each rollout's internal
-`session_meta` identity. It copies only the final newline-complete prefix to a private
-0600 temporary file and reauthenticates its SHA-256 before publishing.
+session identifier allocated for that launch. The worker waits for SQL registration,
+discovers every Codex UUID retained in that Rodex lineage, and authenticates each
+rollout's internal `session_meta` identity. It copies only the final newline-complete
+prefix to a private 0600 temporary file and reauthenticates its SHA-256 before publishing.
 
 The worker creates a fresh in-memory `CodexProtocolLibrary`, loads the authenticated
 copies, calculates statistics, then closes it. The analyzer owns calculation only;
@@ -98,8 +100,9 @@ analytics sidecar.
 ## Named reattachment
 
 - `./rodex <cool-name>` resolves the name through its integer identity.
-- If its stored tmux endpoint is live, Rodex first verifies its registered Rodex UUID
-  and Codex UUID. A missing or mismatched marker fails closed without attach or rename.
+- If its stored tmux endpoint is live, Rodex first verifies its registered Rodex session
+  identifier, registry UUID, and Codex UUID. A missing or mismatched marker fails closed
+  without attach or rename.
 - If an exact registered runtime was renamed outside Rodex, one unambiguous marker
   match repairs the endpoint; multiple matches are refused.
 - If it has ended, Rodex starts a fresh tmux/app-server and asks Codex to resume the

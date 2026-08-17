@@ -10,9 +10,9 @@ from pathlib import Path
 import pytest
 from test_statistics_projection import _snapshot as analyzer_snapshot
 
-import rodex_functions.sessions as sessions_module
+import rodex_registry.statistics as statistics_module
 from rodex.cli import RodexLaunchError, run
-from rodex_functions import (
+from rodex_registry import (
     RodexSessionError,
     RodexSessionStatisticsConflictError,
     RodexSessionStatisticsSourceObservation,
@@ -21,7 +21,7 @@ from rodex_functions import (
     StatisticsProjectionError,
     TurnStatisticsProjection,
     create_a_rodex_session,
-    generate_an_unregistered_rodex_uuid_candidate,
+    generate_an_unregistered_rodex_session_identifier_candidate,
     list_rodex_session_statistics_sources,
     parse_session_statistics_snapshot,
     publish_rodex_session_statistics,
@@ -283,7 +283,7 @@ def test_publication_failure_rolls_back_every_relational_fact(
     def fail_health(*_args: object, **_kwargs: object) -> None:
         raise RuntimeError("forced publication failure")
 
-    monkeypatch.setattr(sessions_module, "_upsert_statistics_worker", fail_health)
+    monkeypatch.setattr(statistics_module, "_upsert_statistics_worker", fail_health)
     with pytest.raises(RuntimeError, match="forced publication failure"):
         _publish(
             database,
@@ -378,7 +378,9 @@ def test_unanalyzed_source_and_digest_collision_are_atomic_conflicts(
     assert read_rodex_session_statistics(1, database).statistics is None
 
     monkeypatch.setattr(
-        sessions_module, "_turn_id_sha256_signed_bigints", lambda _value: (1, 2, 3, 4)
+        statistics_module,
+        "_turn_id_sha256_signed_bigints",
+        lambda _value: (1, 2, 3, 4),
     )
     with pytest.raises(RodexSessionStatisticsConflictError, match="digest collision"):
         _publish(
@@ -548,10 +550,10 @@ def test_historical_source_cannot_move_to_another_lineage(tmp_path: Path) -> Non
 
 def test_unregistered_uuid_candidate_becomes_persisted_identity(tmp_path: Path) -> None:
     database = tmp_path / "rodex.sqlite3"
-    candidate = generate_an_unregistered_rodex_uuid_candidate(database)
+    candidate = generate_an_unregistered_rodex_session_identifier_candidate(database)
     created = create_a_rodex_session(
         database,
-        rodex_session_uuid=candidate,
+        rodex_session_identifier=candidate,
         codex_session_uuid=CODEX_UUID,
     )
-    assert created.rodex_uuid == candidate
+    assert created.rodex_session_identifier == candidate

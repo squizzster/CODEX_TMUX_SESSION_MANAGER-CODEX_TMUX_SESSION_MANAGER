@@ -21,8 +21,9 @@ from rodex.runtime import (
     RodexCodexSessionNotFoundError,
     RodexRuntimeError,
 )
-from rodex_functions import (
+from rodex_registry import (
     RodexSessionError,
+    RodexSessionIdentifier,
     RodexSessionsUserIdentity,
     assign_a_user_defined_cool_name,
     create_a_rodex_session,
@@ -30,9 +31,9 @@ from rodex_functions import (
     lookup_rodex_registry_uuid,
     lookup_rodex_session_id_from_a_codex_uuid,
     lookup_rodex_session_id_from_a_cool_name,
+    lookup_rodex_session_identifier_from_an_id,
     lookup_rodex_session_names,
     lookup_rodex_tmux_session,
-    lookup_rodex_uuid_from_an_id,
     open_a_user_defined_cool_name_assignment,
 )
 from rodex_sql import RodexSQLError
@@ -53,7 +54,9 @@ class StubLauncher:
             protocol_event_socket_path=tmp_path / "events.sock",
         )
         self.started: list[tuple[Path, list[str]]] = []
-        self.analytics_identities: list[tuple[uuid.UUID | None, Path | None]] = []
+        self.analytics_identities: list[
+            tuple[RodexSessionIdentifier | None, Path | None]
+        ] = []
         self.registry_identities: list[uuid.UUID | None] = []
         self.renamed: list[tuple[LiveTmuxSession, str]] = []
         self.configured: list[LiveTmuxSession] = []
@@ -82,12 +85,12 @@ class StubLauncher:
         workspace: Path,
         arguments: list[str],
         *,
-        rodex_session_uuid: uuid.UUID | None = None,
+        rodex_session_identifier: RodexSessionIdentifier | None = None,
         rodex_registry_uuid: uuid.UUID | None = None,
         rodex_database_path: Path | None = None,
     ) -> tuple[LiveRodexRuntime, uuid.UUID]:
         self.started.append((workspace, arguments))
-        self.analytics_identities.append((rodex_session_uuid, rodex_database_path))
+        self.analytics_identities.append((rodex_session_identifier, rodex_database_path))
         self.registry_identities.append(rodex_registry_uuid)
         if self.start_errors:
             raise self.start_errors.pop(0)
@@ -117,7 +120,7 @@ class StubLauncher:
     def discover_runtime_control(self, runtime: LiveTmuxSession) -> LiveRodexControl:
         self.control_discoveries.append(runtime)
         if (
-            self.control.rodex_session_uuid is not None
+            self.control.rodex_session_identifier is not None
             and self.control.rodex_registry_uuid is not None
             and self.control.registration_state is not None
         ):
@@ -129,16 +132,18 @@ class StubLauncher:
                 )
                 if session_id is None:
                     continue
-                rodex_uuid = lookup_rodex_uuid_from_an_id(session_id, database)
+                rodex_session_identifier = lookup_rodex_session_identifier_from_an_id(
+                    session_id, database
+                )
             except (sqlite3.Error, ValueError):
                 continue
-            if rodex_uuid is not None:
+            if rodex_session_identifier is not None:
                 self.control = replace(
                     self.control,
-                    rodex_session_uuid=(
-                        rodex_uuid
-                        if self.control.rodex_session_uuid is None
-                        else self.control.rodex_session_uuid
+                    rodex_session_identifier=(
+                        rodex_session_identifier
+                        if self.control.rodex_session_identifier is None
+                        else self.control.rodex_session_identifier
                     ),
                     rodex_registry_uuid=lookup_rodex_registry_uuid(database),
                     registration_state=(
@@ -292,14 +297,14 @@ def test_context_reports_the_verified_current_rodex_session_as_json(
 
     assert run(arguments, database_path=database, launcher=launcher) == 0  # type: ignore[arg-type]
 
-    rodex_uuid = lookup_rodex_uuid_from_an_id(1, database)
-    assert rodex_uuid is not None
+    rodex_session_identifier = lookup_rodex_session_identifier_from_an_id(1, database)
+    assert rodex_session_identifier is not None
     assert json.loads(capsys.readouterr().out) == {
         "managed_by": "rodex",
         "rodex_session_name": "automatic-beluga",
         "rodex_permanent_name": "automatic-beluga",
         "rodex_user_defined_name": None,
-        "rodex_session_uuid": str(rodex_uuid),
+        "rodex_session_identifier": str(rodex_session_identifier),
         "rodex_registry_uuid": str(lookup_rodex_registry_uuid(database)),
         "rodex_database_path": str(database),
         "codex_session_uuid": str(CODEX_UUID),
@@ -326,12 +331,12 @@ def test_context_rejects_a_different_registry_before_printing_identity(
     database = tmp_path / "rodex.sqlite3"
     monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
     create_controlled_session(database, tmp_path)
-    rodex_uuid = lookup_rodex_uuid_from_an_id(1, database)
-    assert rodex_uuid is not None
+    rodex_session_identifier = lookup_rodex_session_identifier_from_an_id(1, database)
+    assert rodex_session_identifier is not None
     launcher = StubLauncher(tmp_path)
     launcher.control = replace(
         launcher.control,
-        rodex_session_uuid=rodex_uuid,
+        rodex_session_identifier=rodex_session_identifier,
         rodex_registry_uuid=uuid.uuid4(),
         registration_state="registered",
     )
@@ -398,7 +403,7 @@ def test_context_rejects_a_registered_session_owned_by_another_posix_user(
     database = tmp_path / "rodex.sqlite3"
     monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
     monkeypatch.setattr(
-        "rodex_functions.sessions.current_rodex_sessions_user_identity", lambda: DNA
+        "rodex_registry.lifecycle.current_rodex_sessions_user_identity", lambda: DNA
     )
     session = create_a_rodex_session(
         database,
@@ -410,7 +415,7 @@ def test_context_rejects_a_registered_session_owned_by_another_posix_user(
     launcher = StubLauncher(tmp_path)
     launcher.control = replace(
         launcher.control,
-        rodex_session_uuid=session.rodex_uuid,
+        rodex_session_identifier=session.rodex_session_identifier,
         rodex_registry_uuid=lookup_rodex_registry_uuid(database),
         registration_state="registered",
     )
@@ -478,12 +483,12 @@ def test_pending_runtime_with_exact_durable_identity_is_recovered(
     )
     monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
     create_controlled_session(database, tmp_path)
-    rodex_uuid = lookup_rodex_uuid_from_an_id(1, database)
-    assert rodex_uuid is not None
+    rodex_session_identifier = lookup_rodex_session_identifier_from_an_id(1, database)
+    assert rodex_session_identifier is not None
     launcher = StubLauncher(tmp_path)
     launcher.control = replace(
         launcher.control,
-        rodex_session_uuid=rodex_uuid,
+        rodex_session_identifier=rodex_session_identifier,
         registration_state="pending",
     )
 
@@ -508,7 +513,7 @@ def test_named_attach_rejects_a_wrong_live_rodex_identity_without_side_effects(
     launcher = StubLauncher(tmp_path)
     launcher.control = replace(
         launcher.control,
-        rodex_session_uuid=uuid.uuid4(),
+        rodex_session_identifier=RodexSessionIdentifier(0xFFFFFFFFFFFFFFFF),
         registration_state="registered",
     )
 
@@ -531,17 +536,84 @@ def test_named_attach_rejects_a_runtime_from_another_registry(
     )
     monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
     create_controlled_session(database, tmp_path)
-    rodex_uuid = lookup_rodex_uuid_from_an_id(1, database)
-    assert rodex_uuid is not None
+    rodex_session_identifier = lookup_rodex_session_identifier_from_an_id(1, database)
+    assert rodex_session_identifier is not None
     launcher = StubLauncher(tmp_path)
     launcher.control = replace(
         launcher.control,
-        rodex_session_uuid=rodex_uuid,
+        rodex_session_identifier=rodex_session_identifier,
         rodex_registry_uuid=uuid.uuid4(),
         registration_state="registered",
     )
 
     with pytest.raises(RodexLaunchError, match="registry identity"):
+        run(["automatic-beluga"], database_path=database, launcher=launcher)  # type: ignore[arg-type]
+
+    assert launcher.attached == []
+
+
+@pytest.mark.parametrize(
+    ("missing_field", "expected_diagnostic"),
+    [
+        ("registration_state", "not durably registered"),
+        ("rodex_session_identifier", "unexpected Rodex identity"),
+        ("rodex_registry_uuid", "unexpected Rodex registry identity"),
+    ],
+)
+def test_named_attach_fails_closed_when_a_runtime_identity_marker_is_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    missing_field: str,
+    expected_diagnostic: str,
+) -> None:
+    database = tmp_path / "rodex.sqlite3"
+    monkeypatch.setattr(
+        "cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga"
+    )
+    monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
+    create_controlled_session(database, tmp_path)
+    rodex_session_identifier = lookup_rodex_session_identifier_from_an_id(1, database)
+    assert rodex_session_identifier is not None
+    launcher = StubLauncher(tmp_path)
+    complete = replace(
+        launcher.control,
+        rodex_session_identifier=rodex_session_identifier,
+        rodex_registry_uuid=lookup_rodex_registry_uuid(database),
+        registration_state="registered",
+    )
+    launcher.control = replace(complete, **{missing_field: None})
+    launcher.discover_runtime_control = lambda _runtime: launcher.control  # type: ignore[method-assign]
+
+    with pytest.raises(RodexLaunchError, match=expected_diagnostic):
+        run(["automatic-beluga"], database_path=database, launcher=launcher)  # type: ignore[arg-type]
+
+    assert launcher.attached == []
+    assert launcher.renamed == []
+
+
+def test_named_attach_fails_closed_when_the_codex_identity_marker_is_wrong(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database = tmp_path / "rodex.sqlite3"
+    monkeypatch.setattr(
+        "cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga"
+    )
+    monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
+    create_controlled_session(database, tmp_path)
+    rodex_session_identifier = lookup_rodex_session_identifier_from_an_id(1, database)
+    assert rodex_session_identifier is not None
+    launcher = StubLauncher(tmp_path)
+    launcher.control = replace(
+        launcher.control,
+        codex_session_uuid=REPLACEMENT_CODEX_UUID,
+        rodex_session_identifier=rodex_session_identifier,
+        rodex_registry_uuid=lookup_rodex_registry_uuid(database),
+        registration_state="registered",
+    )
+    launcher.discover_runtime_control = lambda _runtime: launcher.control  # type: ignore[method-assign]
+
+    with pytest.raises(RodexLaunchError, match="unexpected Codex identity"):
         run(["automatic-beluga"], database_path=database, launcher=launcher)  # type: ignore[arg-type]
 
     assert launcher.attached == []
@@ -557,14 +629,14 @@ def test_named_attach_recovers_one_externally_renamed_exact_runtime(
     )
     monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
     create_controlled_session(database, tmp_path)
-    rodex_uuid = lookup_rodex_uuid_from_an_id(1, database)
-    assert rodex_uuid is not None
+    rodex_session_identifier = lookup_rodex_session_identifier_from_an_id(1, database)
+    assert rodex_session_identifier is not None
     launcher = StubLauncher(tmp_path)
     launcher.live = False
     launcher.session_names = ("renamed-outside-rodex",)
     launcher.control = replace(
         launcher.control,
-        rodex_session_uuid=rodex_uuid,
+        rodex_session_identifier=rodex_session_identifier,
         registration_state="registered",
     )
 
@@ -590,14 +662,14 @@ def test_named_attach_recovers_one_relocated_pending_runtime(
     )
     monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
     create_controlled_session(database, tmp_path)
-    rodex_uuid = lookup_rodex_uuid_from_an_id(1, database)
-    assert rodex_uuid is not None
+    rodex_session_identifier = lookup_rodex_session_identifier_from_an_id(1, database)
+    assert rodex_session_identifier is not None
     launcher = StubLauncher(tmp_path)
     launcher.live = False
     launcher.session_names = ("interrupted-resume",)
     launcher.control = replace(
         launcher.control,
-        rodex_session_uuid=rodex_uuid,
+        rodex_session_identifier=rodex_session_identifier,
         registration_state="pending",
     )
 
@@ -625,14 +697,14 @@ def test_named_attach_refuses_multiple_relocated_exact_runtimes(
     )
     monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
     create_controlled_session(database, tmp_path)
-    rodex_uuid = lookup_rodex_uuid_from_an_id(1, database)
-    assert rodex_uuid is not None
+    rodex_session_identifier = lookup_rodex_session_identifier_from_an_id(1, database)
+    assert rodex_session_identifier is not None
     launcher = StubLauncher(tmp_path)
     launcher.live = False
     launcher.session_names = ("first-copy", "second-copy")
     launcher.control = replace(
         launcher.control,
-        rodex_session_uuid=rodex_uuid,
+        rodex_session_identifier=rodex_session_identifier,
         registration_state="registered",
     )
 
@@ -813,8 +885,10 @@ def test_default_and_explicit_create_link_identities_before_attach(
     )
 
     assert launcher.started == [(Path.cwd(), [])]
-    planned_uuid, planned_database = launcher.analytics_identities[0]
-    assert planned_uuid == lookup_rodex_uuid_from_an_id(1, database)
+    planned_session_identifier, planned_database = launcher.analytics_identities[0]
+    assert planned_session_identifier == lookup_rodex_session_identifier_from_an_id(
+        1, database
+    )
     assert planned_database == database
     assert launcher.registry_identities == [lookup_rodex_registry_uuid(database)]
     assert launcher.renamed == [(launcher.runtime, "automatic-beluga")]
@@ -1169,9 +1243,12 @@ def test_detach_starts_without_attaching_and_prints_compact_json(
     assert payload == {
         "status": "running",
         "rodex_session_name": "automatic-beluga",
-        "rodex_session_uuid": str(lookup_rodex_uuid_from_an_id(1, database)),
+        "rodex_session_identifier": str(
+            lookup_rodex_session_identifier_from_an_id(1, database)
+        ),
         "codex_session_uuid": str(CODEX_UUID),
     }
+    assert "rodex_session_uuid" not in payload
     assert output == f"{json.dumps(payload, indent=2)}\n"
 
 
@@ -1263,14 +1340,14 @@ def test_detach_ended_name_resumes_exact_codex_session_without_attaching(
 
     output = json.loads(capsys.readouterr().out)
     assert launcher.started == [(Path.cwd(), ["resume", str(CODEX_UUID)])]
-    assert launcher.analytics_identities == [(session.rodex_uuid, database)]
+    assert launcher.analytics_identities == [(session.rodex_session_identifier, database)]
     assert launcher.renamed == [(launcher.runtime, "automatic-beluga")]
     assert launcher.configured[0].tmux_session_name == "automatic-beluga"
     assert launcher.attached == []
     assert output == {
         "status": "running",
         "rodex_session_name": "automatic-beluga",
-        "rodex_session_uuid": str(session.rodex_uuid),
+        "rodex_session_identifier": str(session.rodex_session_identifier),
         "codex_session_uuid": str(CODEX_UUID),
     }
 
@@ -1314,20 +1391,23 @@ def test_detach_unsaved_name_recovers_identity_without_attaching(
         (Path.cwd(), []),
     ]
     assert launcher.analytics_identities == [
-        (session.rodex_uuid, database),
-        (session.rodex_uuid, database),
+        (session.rodex_session_identifier, database),
+        (session.rodex_session_identifier, database),
     ]
     assert launcher.configured[0].tmux_session_name == "automatic-beluga"
     assert launcher.attached == []
-    assert lookup_rodex_uuid_from_an_id(session.id, database) == session.rodex_uuid
     assert (
-        lookup_codex_uuid_from_a_rodex_session_id(session.id, database)
+        lookup_rodex_session_identifier_from_an_id(session.rodex_sessions_id, database)
+        == session.rodex_session_identifier
+    )
+    assert (
+        lookup_codex_uuid_from_a_rodex_session_id(session.rodex_sessions_id, database)
         == REPLACEMENT_CODEX_UUID
     )
     assert output == {
         "status": "running",
         "rodex_session_name": "automatic-beluga",
-        "rodex_session_uuid": str(session.rodex_uuid),
+        "rodex_session_identifier": str(session.rodex_session_identifier),
         "codex_session_uuid": str(REPLACEMENT_CODEX_UUID),
     }
 
@@ -1478,7 +1558,7 @@ def test_concurrent_ended_session_opens_start_only_one_runtime(
         "cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga"
     )
     monkeypatch.setattr(
-        "rodex_functions.sessions.current_rodex_sessions_user_identity", lambda: DNA
+        "rodex_registry.lifecycle.current_rodex_sessions_user_identity", lambda: DNA
     )
     monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
     session = create_a_rodex_session(
@@ -1503,7 +1583,7 @@ def test_concurrent_ended_session_opens_start_only_one_runtime(
             self.first = first
             self.control = replace(
                 self.control,
-                rodex_session_uuid=session.rodex_uuid,
+                rodex_session_identifier=session.rodex_session_identifier,
                 rodex_registry_uuid=registry_uuid,
                 registration_state="registered",
             )
@@ -1640,9 +1720,12 @@ def test_unsaved_codex_session_starts_fresh_and_relinks_the_rodex_identity(
         == 0
     )
 
-    assert lookup_rodex_uuid_from_an_id(session.id, database) == session.rodex_uuid
     assert (
-        lookup_codex_uuid_from_a_rodex_session_id(session.id, database)
+        lookup_rodex_session_identifier_from_an_id(session.rodex_sessions_id, database)
+        == session.rodex_session_identifier
+    )
+    assert (
+        lookup_codex_uuid_from_a_rodex_session_id(session.rodex_sessions_id, database)
         == REPLACEMENT_CODEX_UUID
     )
     assert launcher.started == [
@@ -1653,7 +1736,7 @@ def test_unsaved_codex_session_starts_fresh_and_relinks_the_rodex_identity(
     assert launcher.configured[0].tmux_session_name == "automatic-beluga"
     assert launcher.attached == launcher.configured
     assert launcher.stopped == []
-    tmux_link = lookup_rodex_tmux_session(session.id, database)
+    tmux_link = lookup_rodex_tmux_session(session.rodex_sessions_id, database)
     assert tmux_link is not None
     assert tmux_link.tmux_server_socket_path == str(
         launcher.runtime.tmux_server_socket_path
@@ -1792,7 +1875,7 @@ def test_alias_command_accepts_force_without_starting_codex(
         lambda _word_count: "black-sawfly",
     )
     monkeypatch.setattr(
-        "rodex_functions.sessions.current_rodex_sessions_user_identity", lambda: DNA
+        "rodex_registry.lifecycle.current_rodex_sessions_user_identity", lambda: DNA
     )
     monkeypatch.setattr(
         "rodex.cli.shutil.which",
@@ -1834,9 +1917,12 @@ def test_alias_command_accepts_force_without_starting_codex(
     assert tmux_link is not None
     assert tmux_link.tmux_session_name == "replacement"
     assert [prompt for _live_control, prompt in control.sent] == [
-        f"RODEX_AUTO_INFO: Rodex session {session.rodex_uuid} is now named 'first'.",
         (
-            f"RODEX_AUTO_INFO: Rodex session {session.rodex_uuid} "
+            f"RODEX_AUTO_INFO: Rodex session {session.rodex_session_identifier} "
+            "is now named 'first'."
+        ),
+        (
+            f"RODEX_AUTO_INFO: Rodex session {session.rodex_session_identifier} "
             "is now named 'replacement'."
         ),
     ]
@@ -1965,7 +2051,7 @@ def test_alias_replacement_without_force_is_reported_on_stderr(
         lambda _word_count: "black-sawfly",
     )
     monkeypatch.setattr(
-        "rodex_functions.sessions.current_rodex_sessions_user_identity", lambda: DNA
+        "rodex_registry.lifecycle.current_rodex_sessions_user_identity", lambda: DNA
     )
     monkeypatch.setattr(
         "rodex.cli.shutil.which",
@@ -2016,7 +2102,7 @@ def test_empty_alias_is_a_concise_stderr_error(
         "cool_name.functions.coolname.generate_slug", lambda _word_count: "safe-name"
     )
     monkeypatch.setattr(
-        "rodex_functions.sessions.current_rodex_sessions_user_identity", lambda: DNA
+        "rodex_registry.lifecycle.current_rodex_sessions_user_identity", lambda: DNA
     )
     monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
     create_a_rodex_session(
@@ -2105,7 +2191,7 @@ def test_running_commands_show_only_the_current_users_live_sessions(
     )
     assign_a_user_defined_cool_name("black-sawfly", "work", database, user_identity=DNA)
     monkeypatch.setattr(
-        "rodex_functions.sessions.current_rodex_sessions_user_identity", lambda: DNA
+        "rodex_registry.lifecycle.current_rodex_sessions_user_identity", lambda: DNA
     )
     monkeypatch.setattr(
         "rodex.cli.shutil.which",
@@ -2190,7 +2276,7 @@ def test_alias_rename_failure_preserves_the_previous_name_everywhere(
         "cool_name.functions.coolname.generate_slug", lambda _word_count: "safe-name"
     )
     monkeypatch.setattr(
-        "rodex_functions.sessions.current_rodex_sessions_user_identity", lambda: DNA
+        "rodex_registry.lifecycle.current_rodex_sessions_user_identity", lambda: DNA
     )
     monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
     create_a_rodex_session(
@@ -2241,7 +2327,7 @@ def test_alias_database_failure_renames_tmux_back_and_leaves_no_alias(
         "cool_name.functions.coolname.generate_slug", lambda _word_count: "safe-name"
     )
     monkeypatch.setattr(
-        "rodex_functions.sessions.current_rodex_sessions_user_identity", lambda: DNA
+        "rodex_registry.lifecycle.current_rodex_sessions_user_identity", lambda: DNA
     )
     monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
     create_a_rodex_session(
@@ -2253,7 +2339,7 @@ def test_alias_database_failure_renames_tmux_back_and_leaves_no_alias(
     )
     launcher = StubLauncher(tmp_path)
     monkeypatch.setattr(
-        "rodex_functions.sessions.reserve_specific_cool_name",
+        "rodex_registry.lifecycle.reserve_specific_cool_name",
         lambda *args, **kwargs: (_ for _ in ()).throw(
             sqlite3.OperationalError("database failed")
         ),
@@ -2284,7 +2370,7 @@ def test_concurrent_alias_commands_serialize_across_tmux_and_database(
         "cool_name.functions.coolname.generate_slug", lambda _word_count: "safe-name"
     )
     monkeypatch.setattr(
-        "rodex_functions.sessions.current_rodex_sessions_user_identity", lambda: DNA
+        "rodex_registry.lifecycle.current_rodex_sessions_user_identity", lambda: DNA
     )
     monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
     session = create_a_rodex_session(
@@ -2329,7 +2415,7 @@ def test_concurrent_alias_commands_serialize_across_tmux_and_database(
                 tmp_path / "proxy.sock",
                 tmp_path / "events.sock",
                 CODEX_UUID,
-                session.rodex_uuid,
+                session.rodex_session_identifier,
                 registry_uuid,
                 "registered",
             )
@@ -2406,7 +2492,10 @@ def test_concurrent_alias_commands_serialize_across_tmux_and_database(
     assert tmux_link.tmux_session_name == "first"
     assert live_name == ["first"]
     assert [prompt for _live_control, prompt in control.sent] == [
-        f"RODEX_AUTO_INFO: Rodex session {session.rodex_uuid} is now named 'first'."
+        (
+            f"RODEX_AUTO_INFO: Rodex session {session.rodex_session_identifier} "
+            "is now named 'first'."
+        )
     ]
 
 
@@ -2425,7 +2514,7 @@ def test_named_open_rejects_a_session_owned_by_another_posix_user(
         tmux_session_name="other-work",
     )
     monkeypatch.setattr(
-        "rodex_functions.sessions.current_rodex_sessions_user_identity", lambda: DNA
+        "rodex_registry.lifecycle.current_rodex_sessions_user_identity", lambda: DNA
     )
     monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
     launcher = StubLauncher(tmp_path)

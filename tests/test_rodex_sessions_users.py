@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from rodex_functions import (
+from rodex_registry import (
     RodexSessionError,
     RodexSessionsUser,
     RodexSessionsUserIdentity,
@@ -113,7 +113,7 @@ def test_current_identity_comes_from_posix_uid_gid_and_password_database() -> No
 
 
 def test_windows_is_explicitly_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("rodex_functions.sessions.os.name", "nt")
+    monkeypatch.setattr("rodex_registry.lifecycle.os.name", "nt")
 
     with pytest.raises(RodexSessionError, match="POSIX"):
         current_rodex_sessions_user_identity()
@@ -130,8 +130,8 @@ def test_new_session_log_references_the_normalized_user_lookup(tmp_path: Path) -
         database, codex_session_uuid=CODEX_UUID_2, user_identity=identity
     )
 
-    first_log = lookup_rodex_session_log(first.id, database)
-    second_log = lookup_rodex_session_log(second.id, database)
+    first_log = lookup_rodex_session_log(first.rodex_sessions_id, database)
+    second_log = lookup_rodex_session_log(second.rodex_sessions_id, database)
     assert first_log is not None and second_log is not None
     assert first_log.rodex_sessions_users_id == 1
     assert second_log.rodex_sessions_users_id == 1

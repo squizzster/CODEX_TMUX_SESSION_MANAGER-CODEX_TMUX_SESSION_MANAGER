@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from cool_name import RODEX_RESERVED_WORDS, CoolNameError, ReservedCoolNameError
-from rodex_functions import (
+from rodex_registry import (
     RodexSessionError,
     RodexSessionsUserIdentity,
     assign_a_user_defined_cool_name,
@@ -45,7 +45,7 @@ def _create_session(
         user_identity=owner,
         tmux_server_socket_path=f"/tmp/{cool_name}.sock",
         tmux_session_name=cool_name,
-    ).id
+    ).rodex_sessions_id
 
 
 def test_alias_is_one_owned_integer_identity_and_force_replaces_it(

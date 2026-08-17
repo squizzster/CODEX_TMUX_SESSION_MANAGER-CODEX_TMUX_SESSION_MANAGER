@@ -22,7 +22,8 @@ from pathlib import Path
 from threading import Event
 from typing import Any, Protocol
 
-from rodex_functions import (
+from rodex_registry import (
+    RodexSessionIdentifier,
     RodexSessionStatistics,
     RodexSessionStatisticsSource,
     RodexSessionStatisticsSourceObservation,
@@ -30,7 +31,7 @@ from rodex_functions import (
     StatisticsProjectionError,
     current_rodex_sessions_user_identity,
     lookup_codex_uuid_from_a_rodex_session_id,
-    lookup_id_from_a_rodex_uuid,
+    lookup_id_from_a_rodex_session_identifier,
     parse_session_statistics_snapshot,
     publish_rodex_session_statistics,
     read_rodex_session_statistics,
@@ -73,7 +74,7 @@ class AnalyticsWorkerConfig:
 
     rodex_database_path: Path
     codex_sessions_root: Path
-    rodex_uuid: uuid.UUID
+    rodex_session_identifier: RodexSessionIdentifier
 
 
 @dataclass(frozen=True, slots=True)
@@ -190,8 +191,8 @@ class AnalyticsRolloutWorker:
         """Perform one reconciliation; no analytics failure is allowed to escape."""
         expected_codex_uuid: uuid.UUID | None = None
         try:
-            session_id = lookup_id_from_a_rodex_uuid(
-                self._config.rodex_uuid, self._config.rodex_database_path
+            session_id = lookup_id_from_a_rodex_session_identifier(
+                self._config.rodex_session_identifier, self._config.rodex_database_path
             )
             self._session_id = session_id
             if session_id is None:
@@ -477,8 +478,8 @@ def analytics_worker_command(
         str(config.rodex_database_path),
         "--codex-sessions-root",
         str(config.codex_sessions_root),
-        "--rodex-uuid",
-        str(config.rodex_uuid),
+        "--rodex-session-identifier",
+        str(config.rodex_session_identifier),
     ]
 
 
@@ -514,7 +515,11 @@ def analytics_worker_main(arguments: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m rodex.analytics_worker")
     parser.add_argument("--rodex-database", required=True, type=Path)
     parser.add_argument("--codex-sessions-root", required=True, type=Path)
-    parser.add_argument("--rodex-uuid", required=True, type=uuid.UUID)
+    parser.add_argument(
+        "--rodex-session-identifier",
+        required=True,
+        type=RodexSessionIdentifier.parse,
+    )
     options = parser.parse_args(arguments)
     _lower_process_priority()
     stop = Event()
@@ -528,7 +533,7 @@ def analytics_worker_main(arguments: list[str] | None = None) -> int:
         AnalyticsWorkerConfig(
             rodex_database_path=Path(os.path.abspath(options.rodex_database.expanduser())),
             codex_sessions_root=options.codex_sessions_root.expanduser().resolve(),
-            rodex_uuid=options.rodex_uuid,
+            rodex_session_identifier=options.rodex_session_identifier,
         )
     )
     try:
@@ -773,7 +778,9 @@ def _diagnostic_code(error: Exception) -> str:
 
 
 def _project_supervisor_health(config: AnalyticsWorkerConfig, code: str) -> None:
-    session_id = lookup_id_from_a_rodex_uuid(config.rodex_uuid, config.rodex_database_path)
+    session_id = lookup_id_from_a_rodex_session_identifier(
+        config.rodex_session_identifier, config.rodex_database_path
+    )
     if session_id is None:
         return
     try:

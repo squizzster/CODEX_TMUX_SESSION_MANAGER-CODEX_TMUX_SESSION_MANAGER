@@ -12,6 +12,7 @@ when needed, and return later using a generated name such as `automatic-beluga`.
 
 - Opens the ordinary interactive Codex TUI inside a private tmux runtime.
 - Keeps Rodex and Codex session identities distinct and linked.
+- Gives each Rodex session one exact 16-character lowercase hexadecimal identifier.
 - Assigns every session a permanent, unique two-word name.
 - Reattaches a live session or transparently resumes its saved Codex session.
 - Recovers an empty, unsaved Codex session under the same Rodex identity.
@@ -118,7 +119,7 @@ names, the complete tmux socket/session/window/pane address, and sharing state. 
 display name is read on every invocation, so an agent need not cache it.
 When `_alias` changes the effective name of a live session, Rodex sends one verified
 prompt to that session's Codex thread:
-`RODEX_AUTO_INFO: Rodex session <UUID> is now named '<name>'.` All attached tmux
+`RODEX_AUTO_INFO: Rodex session <16-hex-id> is now named '<name>'.` All attached tmux
 clients share that thread, so Rodex does not broadcast per client. Offline sessions
 and unchanged names produce no prompt. If delivery fails, Rodex reports the failure
 without rolling back the already committed name change.
@@ -144,9 +145,16 @@ codebase for later re-enablement; input currently passes directly to the Codex T
 ## Local data
 
 The durable per-user registry defaults to
-`$XDG_STATE_HOME/rodex/rodex.sqlite3`, or
-`~/.local/state/rodex/rodex.sqlite3` when `XDG_STATE_HOME` is unset. Set
+`$XDG_STATE_HOME/rodex/rodex-v2.sqlite3`, or
+`~/.local/state/rodex/rodex-v2.sqlite3` when `XDG_STATE_HOME` is unset. Set
 `RODEX_DATABASE_PATH` to select another database.
+
+Rodex session identifiers are random 64-bit values rendered only as 16 lowercase hex
+characters, including leading zeroes. They are compact integrity discriminators for
+agents and operators, not bearer secrets. SQLite enforces uniqueness and allocation
+tries at most ten independent candidates before failing explicitly. Codex session and
+Rodex registry identities remain their full UUIDs. The ALPHA v2 registry intentionally
+does not read the incompatible pre-v2 database.
 
 Short-lived Unix sockets and app-server logs use `$XDG_RUNTIME_DIR/rodex`, normally
 `/run/user/<uid>/rodex`. When `XDG_RUNTIME_DIR` is unset or that socket path would be

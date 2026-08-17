@@ -22,6 +22,8 @@ from typing import Any, BinaryIO, Final
 from websockets.exceptions import ConnectionClosed, InvalidHandshake
 from websockets.sync.client import unix_connect
 
+from rodex_registry.identity import RodexSessionIdentifier
+
 from .analytics import (
     AnalyticsSubprocessSupervisor,
     AnalyticsWorkerConfig,
@@ -56,7 +58,7 @@ _POLL_INTERVAL_SECONDS: Final = 0.05
 _PROXY_SOCKET_OPTION: Final = "@rodex_protocol_proxy_socket_path"
 _EVENT_SOCKET_OPTION: Final = "@rodex_protocol_event_socket_path"
 _CODEX_UUID_OPTION: Final = "@rodex_codex_session_uuid"
-_RODEX_UUID_OPTION: Final = "@rodex_session_uuid"
+_RODEX_SESSION_IDENTIFIER_OPTION: Final = "@rodex_session_identifier"
 _REGISTRY_UUID_OPTION: Final = "@rodex_registry_uuid"
 _REGISTRATION_STATE_OPTION: Final = "@rodex_registration_state"
 RODEX_REGISTRATION_PENDING: Final = "pending"
@@ -376,7 +378,7 @@ class RodexRuntimeLauncher:
         workspace: Path,
         codex_arguments: Sequence[str],
         *,
-        rodex_session_uuid: uuid.UUID | None = None,
+        rodex_session_identifier: RodexSessionIdentifier | None = None,
         rodex_registry_uuid: uuid.UUID | None = None,
         rodex_database_path: Path | None = None,
     ) -> tuple[LiveRodexRuntime, uuid.UUID]:
@@ -419,7 +421,7 @@ class RodexRuntimeLauncher:
             "--tmux-server-socket",
             str(runtime.tmux_server_socket_path),
         ]
-        if rodex_session_uuid is not None:
+        if rodex_session_identifier is not None:
             if rodex_database_path is None or rodex_registry_uuid is None:
                 raise RodexRuntimeError(
                     "Rodex runtime identity requires a registry UUID and database path"
@@ -433,8 +435,8 @@ class RodexRuntimeLauncher:
                     str(analytics_rodex_database),
                     "--codex-sessions-root",
                     str(default_codex_sessions_root()),
-                    "--rodex-session-uuid",
-                    str(rodex_session_uuid),
+                    "--rodex-session-identifier",
+                    str(rodex_session_identifier),
                 ]
             )
         host_command = shlex.join([*host_arguments, "--", *codex_arguments])
@@ -453,7 +455,7 @@ class RodexRuntimeLauncher:
             self.publish_runtime_control(
                 runtime,
                 codex_uuid,
-                rodex_session_uuid,
+                rodex_session_identifier,
                 rodex_registry_uuid,
             )
         except BaseException:
@@ -465,7 +467,7 @@ class RodexRuntimeLauncher:
         self,
         runtime: LiveRodexRuntime,
         codex_session_uuid: uuid.UUID,
-        rodex_session_uuid: uuid.UUID | None = None,
+        rodex_session_identifier: RodexSessionIdentifier | None = None,
         rodex_registry_uuid: uuid.UUID | None = None,
     ) -> None:
         """Advertise live-only control metadata inside the owning tmux session."""
@@ -475,12 +477,12 @@ class RodexRuntimeLauncher:
             (_EVENT_SOCKET_OPTION, str(runtime.protocol_event_socket_path)),
             (_CODEX_UUID_OPTION, str(codex_session_uuid)),
         ]
-        if rodex_session_uuid is not None:
+        if rodex_session_identifier is not None:
             if rodex_registry_uuid is None:
                 raise RodexRuntimeError("Rodex session identity requires a registry UUID")
             options.extend(
                 (
-                    (_RODEX_UUID_OPTION, str(rodex_session_uuid)),
+                    (_RODEX_SESSION_IDENTIFIER_OPTION, str(rodex_session_identifier)),
                     (_REGISTRY_UUID_OPTION, str(rodex_registry_uuid)),
                     (_REGISTRATION_STATE_OPTION, RODEX_REGISTRATION_PENDING),
                 )
@@ -505,8 +507,8 @@ class RodexRuntimeLauncher:
         proxy_path = self._read_tmux_option(runtime, target, _PROXY_SOCKET_OPTION)
         event_path = self._read_tmux_option(runtime, target, _EVENT_SOCKET_OPTION)
         codex_uuid_text = self._read_tmux_option(runtime, target, _CODEX_UUID_OPTION)
-        rodex_uuid_text = self._read_optional_tmux_option(
-            runtime, target, _RODEX_UUID_OPTION
+        rodex_identifier_text = self._read_optional_tmux_option(
+            runtime, target, _RODEX_SESSION_IDENTIFIER_OPTION
         )
         registry_uuid_text = self._read_optional_tmux_option(
             runtime, target, _REGISTRY_UUID_OPTION
@@ -521,10 +523,14 @@ class RodexRuntimeLauncher:
                 "live tmux session advertised an invalid Codex UUID"
             ) from error
         try:
-            rodex_uuid = None if rodex_uuid_text is None else uuid.UUID(rodex_uuid_text)
+            rodex_identifier = (
+                None
+                if rodex_identifier_text is None
+                else RodexSessionIdentifier.parse(rodex_identifier_text)
+            )
         except ValueError as error:
             raise RodexRuntimeError(
-                "live tmux session advertised an invalid Rodex UUID"
+                "live tmux session advertised an invalid Rodex session identifier"
             ) from error
         try:
             registry_uuid = (
@@ -538,7 +544,7 @@ class RodexRuntimeLauncher:
             Path(proxy_path),
             Path(event_path),
             codex_uuid,
-            rodex_uuid,
+            rodex_identifier,
             registry_uuid,
             registration_state,
         )

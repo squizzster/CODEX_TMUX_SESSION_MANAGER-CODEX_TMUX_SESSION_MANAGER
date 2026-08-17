@@ -34,7 +34,7 @@ testpaths = ["tests"]
 
 [tool.coverage.run]
 branch = true
-source = ["codex_tmux_session_manager", "cool_name", "rodex", "rodex_functions", "rodex_sql"]
+source = ["codex_tmux_session_manager", "cool_name", "rodex", "rodex_registry", "rodex_sql"]
 
 [tool.coverage.report]
 fail_under = 70
@@ -52,7 +52,7 @@ module-name = [
     "codex_tmux_session_manager",
     "cool_name",
     "rodex",
-    "rodex_functions",
+    "rodex_registry",
     "rodex_sql",
 ]
 

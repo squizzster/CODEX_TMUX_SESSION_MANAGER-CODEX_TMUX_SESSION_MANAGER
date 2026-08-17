@@ -33,7 +33,8 @@ Apply these standards to future schema decisions. These authorative standards ma
   form, and index shape in the same transaction; incompatible schemas are rejected.
 - UTC timestamps use fixed microsecond ISO-8601 `TEXT`, such as
   `2026-08-15T12:34:56.123456Z`.
-- Identity wider than SQLite's signed 64-bit integer is stored losslessly in ordered
+- Unsigned identity up to 64 bits is stored losslessly in one signed `BIGINT` through
+  an explicit two's-complement codec. Wider identity is stored losslessly in ordered
   signed `BIGINT` fields with one composite unique index.
 - Derived-identity field names state the source value, derivation, integer storage,
   and part order. Never truncate identity merely to fit one column.
@@ -45,8 +46,10 @@ Apply these standards to future schema decisions. These authorative standards ma
   and preserve enough bits for the domain's collision requirements.
 - Normalisation, derivation, insertion, and lookup share one authoritative pipeline.
   A matching derived integer identity is occupied; do not fall back to a text lookup.
-- Generated identities use bounded attempts, move to the next approved representation
-  when the preferred form is exhausted, and then fail explicitly.
+- Random Rodex identifiers use exactly 64 bits, one unique index, and ten bounded
+  candidates before failing explicitly. They never change representation or width.
+  Generated cool names try ten candidates at each approved word count before escalating
+  to the next word count, then fail explicitly.
 - In ALPHA, incompatible schema changes may reset a disposable database only after an
   explicit decision. Additive, verified schema extensions preserve existing contents.
 
@@ -54,6 +57,11 @@ Apply these standards to future schema decisions. These authorative standards ma
 
 - `rodex_registries` contains the database instance's one durable UUID row. Live tmux
   identity includes it so another registry cannot adopt the same session/Codex pair.
+- `rodex_sessions` contains one signed-BIGINT Rodex session identifier, the two signed
+  halves of the Codex UUID, and permanent/optional display-name links. The public Rodex
+  identifier is always serialized as a 16-character lowercase hex string, never a JSON
+  number. The ALPHA schema starts in `rodex-v2.sqlite3`; the incompatible earlier
+  database is deliberately outside this schema rather than migrated or interpreted.
 - `rodex_sessions_statistics` is the latest successful aggregate snapshot, one row per
   Rodex session. Every fixed aggregate and its available base count is a typed scalar
   column. Rodex allocates its monotonic `statistics_revision`; temporary analyzer

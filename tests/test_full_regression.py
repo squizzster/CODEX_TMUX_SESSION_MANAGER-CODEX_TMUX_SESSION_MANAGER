@@ -6,12 +6,12 @@ import sqlite3
 import uuid
 from pathlib import Path
 
-from rodex_functions import (
+from rodex_registry import (
     RodexSessionsUserIdentity,
     create_a_rodex_session,
-    lookup_id_from_a_rodex_uuid,
+    lookup_id_from_a_rodex_session_identifier,
+    lookup_rodex_session_identifier_from_an_id,
     lookup_rodex_session_log,
-    lookup_rodex_uuid_from_an_id,
 )
 
 
@@ -26,13 +26,19 @@ def test_full_rodex_database_regression(tmp_path: Path) -> None:
         database, codex_session_uuid=uuid.UUID(int=2), user_identity=user
     )
 
-    assert [first.id, second.id] == [1, 2]
-    assert first.rodex_uuid != second.rodex_uuid
-    assert lookup_id_from_a_rodex_uuid(first.rodex_uuid, database) == first.id
-    assert lookup_rodex_uuid_from_an_id(second.id, database) == second.rodex_uuid
+    assert [first.rodex_sessions_id, second.rodex_sessions_id] == [1, 2]
+    assert first.rodex_session_identifier != second.rodex_session_identifier
+    assert (
+        lookup_id_from_a_rodex_session_identifier(first.rodex_session_identifier, database)
+        == first.rodex_sessions_id
+    )
+    assert (
+        lookup_rodex_session_identifier_from_an_id(second.rodex_sessions_id, database)
+        == second.rodex_session_identifier
+    )
 
-    first_log = lookup_rodex_session_log(first.id, database)
-    second_log = lookup_rodex_session_log(second.id, database)
+    first_log = lookup_rodex_session_log(first.rodex_sessions_id, database)
+    second_log = lookup_rodex_session_log(second.rodex_sessions_id, database)
     assert first_log is not None and second_log is not None
     assert first_log.rodex_sessions_users_id == second_log.rodex_sessions_users_id == 1
 

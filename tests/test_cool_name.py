@@ -15,7 +15,7 @@ from cool_name import (
     initialise_cool_names_database,
     is_reserved_rodex_name,
 )
-from rodex_functions import create_a_rodex_session, initialise_rodex_database
+from rodex_registry import create_a_rodex_session, initialise_rodex_database
 
 
 def fetch_all(database: Path, query: str) -> list[tuple[object, ...]]:

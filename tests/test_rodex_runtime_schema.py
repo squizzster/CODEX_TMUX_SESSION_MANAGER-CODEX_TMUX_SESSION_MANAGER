@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from rodex_functions import (
+from rodex_registry import (
     RodexSessionError,
     RodexSessionsUserIdentity,
     create_a_rodex_session,
@@ -37,8 +37,7 @@ def test_codex_identity_is_stored_directly_on_the_root_session(
 
     assert [(row[1], row[2], row[3], row[5]) for row in columns] == [
         ("id", "INTEGER", 0, 1),
-        ("uuid_int_1", "BIGINT", 1, 0),
-        ("uuid_int_2", "BIGINT", 1, 0),
+        ("rodex_session_identifier_signed_bigint", "BIGINT", 1, 0),
         ("codex_session_uuid_int_1", "BIGINT", 1, 0),
         ("codex_session_uuid_int_2", "BIGINT", 1, 0),
         ("cool_names_id", "INTEGER", 1, 0),
@@ -91,13 +90,19 @@ def test_one_transaction_matches_rodex_codex_and_tmux_without_mixing_ids(
         tmux_session_name="rodex-example",
     )
 
-    assert session.rodex_uuid != CODEX_UUID
-    tmux_link = lookup_rodex_tmux_session(session.id, database)
+    assert session.rodex_session_identifier != CODEX_UUID
+    tmux_link = lookup_rodex_tmux_session(session.rodex_sessions_id, database)
     assert session.codex_session_uuid == CODEX_UUID
-    assert lookup_codex_uuid_from_a_rodex_session_id(session.id, database) == CODEX_UUID
-    assert lookup_rodex_session_id_from_a_codex_uuid(CODEX_UUID, database) == session.id
+    assert (
+        lookup_codex_uuid_from_a_rodex_session_id(session.rodex_sessions_id, database)
+        == CODEX_UUID
+    )
+    assert (
+        lookup_rodex_session_id_from_a_codex_uuid(CODEX_UUID, database)
+        == session.rodex_sessions_id
+    )
     assert tmux_link is not None
-    assert tmux_link.rodex_sessions_id == session.id
+    assert tmux_link.rodex_sessions_id == session.rodex_sessions_id
     assert tmux_link.tmux_session_name == "rodex-example"
 
 
@@ -165,7 +170,7 @@ def test_runtime_resume_replaces_endpoint_and_access_time_in_one_transaction(
     )
 
     updated = record_a_rodex_session_runtime_resume(
-        session.id,
+        session.rodex_sessions_id,
         "/tmp/rodex/new.sock",
         "automatic-beluga",
         database,
@@ -174,7 +179,7 @@ def test_runtime_resume_replaces_endpoint_and_access_time_in_one_transaction(
 
     assert updated.id == 1
     assert updated.tmux_server_socket_path == "/tmp/rodex/new.sock"
-    log = lookup_rodex_session_log(session.id, database)
+    log = lookup_rodex_session_log(session.rodex_sessions_id, database)
     assert log is not None
     assert log.last_accessed_at_utc == "2026-08-15T18:30:00.000000Z"
 
@@ -191,7 +196,7 @@ def test_runtime_recovery_atomically_relinks_the_codex_uuid_and_endpoint(
     )
 
     updated = record_a_rodex_session_runtime_resume(
-        session.id,
+        session.rodex_sessions_id,
         "/tmp/rodex/new.sock",
         "automatic-beluga",
         database,
@@ -199,13 +204,14 @@ def test_runtime_recovery_atomically_relinks_the_codex_uuid_and_endpoint(
     )
 
     assert updated.tmux_server_socket_path == "/tmp/rodex/new.sock"
-    assert lookup_codex_uuid_from_a_rodex_session_id(session.id, database) == (
-        REPLACEMENT_CODEX_UUID
+    assert (
+        lookup_codex_uuid_from_a_rodex_session_id(session.rodex_sessions_id, database)
+        == REPLACEMENT_CODEX_UUID
     )
     assert lookup_rodex_session_id_from_a_codex_uuid(CODEX_UUID, database) is None
     assert (
         lookup_rodex_session_id_from_a_codex_uuid(REPLACEMENT_CODEX_UUID, database)
-        == session.id
+        == session.rodex_sessions_id
     )
 
 
@@ -228,14 +234,17 @@ def test_runtime_resume_rolls_back_endpoint_when_access_log_update_fails(
 
     with pytest.raises(sqlite3.IntegrityError, match="forced log update failure"):
         record_a_rodex_session_runtime_resume(
-            session.id,
+            session.rodex_sessions_id,
             "/tmp/rodex/new.sock",
             "automatic-beluga",
             database,
             codex_session_uuid=REPLACEMENT_CODEX_UUID,
         )
 
-    assert lookup_codex_uuid_from_a_rodex_session_id(session.id, database) == CODEX_UUID
-    tmux_link = lookup_rodex_tmux_session(session.id, database)
+    assert (
+        lookup_codex_uuid_from_a_rodex_session_id(session.rodex_sessions_id, database)
+        == CODEX_UUID
+    )
+    tmux_link = lookup_rodex_tmux_session(session.rodex_sessions_id, database)
     assert tmux_link is not None
     assert tmux_link.tmux_server_socket_path == "/tmp/rodex/old.sock"

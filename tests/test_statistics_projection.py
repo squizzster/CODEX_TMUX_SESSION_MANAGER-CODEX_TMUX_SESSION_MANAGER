@@ -18,7 +18,7 @@ from rodex_registry.statistics_projection import (
     turn_statistics_as_dict,
 )
 
-CODEX_UUID = "01a00654-f2bc-7a30-834a-a5f886a65f82"
+CODEX_SESSION_ID = "01a00654-f2bc-7a30-834a-a5f886a65f82"
 
 
 def _distribution(*values: int) -> dict[str, int | float | None]:
@@ -47,7 +47,7 @@ def _distribution(*values: int) -> dict[str, int | float | None]:
 
 def _turn() -> dict[str, object]:
     return {
-        "session_id": CODEX_UUID,
+        "session_id": CODEX_SESSION_ID,
         "turn_id": "turn-a",
         "started_at": "2026-08-16T13:00:00+01:00",
         "terminal_at": "2026-08-16T13:00:01+01:00",
@@ -263,7 +263,7 @@ def test_complete_snapshot_becomes_typed_immutable_relational_values() -> None:
 
     turn = projection.turn_statistics[0]
     assert isinstance(turn, TurnStatisticsProjection)
-    assert turn.codex_session_uuid == uuid.UUID(CODEX_UUID)
+    assert turn.codex_session_id == uuid.UUID(CODEX_SESSION_ID)
     assert turn.started_at_utc == "2026-08-16T12:00:00.000000Z"
     assert turn.command_duration.median == 150.0
     with pytest.raises(FrozenInstanceError):

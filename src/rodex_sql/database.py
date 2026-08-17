@@ -30,7 +30,7 @@ def default_rodex_database_path() -> Path:
         if configured_state_home
         else Path.home() / ".local" / "state"
     )
-    return Path(os.path.abspath(state_home / "rodex" / "rodex-v2.sqlite3"))
+    return Path(os.path.abspath(state_home / "rodex" / "rodex-v3.sqlite3"))
 
 
 def normalise_rodex_database_path(

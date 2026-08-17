@@ -5,7 +5,6 @@ from __future__ import annotations
 import os
 import pwd
 import sqlite3
-import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -27,14 +26,15 @@ from rodex_sql import (
 
 from .errors import (
     RodexSessionError,
-    RodexSessionIdentifierCollisionError,
+    RodexSessionIdCollisionError,
 )
 from .identity import (
-    RodexSessionIdentifier,
-    join_signed_bigints_into_a_codex_session_uuid,
-    parse_codex_session_uuid,
-    parse_rodex_session_identifier,
-    split_codex_session_uuid_into_signed_bigints,
+    CodexSessionId,
+    RodexSessionId,
+    join_signed_bigints_into_a_codex_session_id,
+    parse_codex_session_id,
+    parse_rodex_session_id,
+    split_codex_session_id_into_signed_bigints,
 )
 from .schema import (
     RODEX_SESSIONS_LOG_TABLE,
@@ -57,8 +57,8 @@ class RodexSession:
     """The public identity allocated to one Rodex launch."""
 
     rodex_sessions_id: int
-    rodex_session_identifier: RodexSessionIdentifier
-    codex_session_uuid: uuid.UUID
+    rodex_session_id: RodexSessionId
+    codex_session_id: CodexSessionId
     cool_names_id: int
     cool_name: str
 
@@ -124,7 +124,7 @@ class RodexSessionRuntime:
     rodex_sessions_id: int
     cool_name: str
     user_defined_cool_name: str | None
-    codex_session_uuid: uuid.UUID
+    codex_session_id: CodexSessionId
     tmux_server_socket_path: str
     tmux_session_name: str
 
@@ -146,8 +146,8 @@ class RodexUserDefinedCoolNameAssignment:
 def create_a_rodex_session(
     database_path: str | os.PathLike[str] | None = None,
     *,
-    codex_session_uuid: uuid.UUID | str,
-    rodex_session_identifier: RodexSessionIdentifier | str | None = None,
+    codex_session_id: CodexSessionId | str,
+    rodex_session_id: RodexSessionId | str | None = None,
     user_identity: RodexSessionsUserIdentity | None = None,
     tmux_server_socket_path: str | os.PathLike[str] | None = None,
     tmux_session_name: str | None = None,
@@ -159,9 +159,9 @@ def create_a_rodex_session(
         if user_identity is None
         else _validate_user_identity(user_identity)
     )
-    parsed_codex_session_uuid = parse_codex_session_uuid(codex_session_uuid)
-    codex_uuid_int_1, codex_uuid_int_2 = split_codex_session_uuid_into_signed_bigints(
-        parsed_codex_session_uuid
+    parsed_codex_session_id = parse_codex_session_id(codex_session_id)
+    codex_session_id_signed_bigint_1, codex_session_id_signed_bigint_2 = (
+        split_codex_session_id_into_signed_bigints(parsed_codex_session_id)
     )
     tmux_link = _normalise_tmux_link(tmux_server_socket_path, tmux_session_name)
     created_at_utc = _utc_now_timestamp()
@@ -173,8 +173,8 @@ def create_a_rodex_session(
             connection,
             RODEX_SESSIONS_TABLE,
             {
-                "codex_session_uuid_int_1": codex_uuid_int_1,
-                "codex_session_uuid_int_2": codex_uuid_int_2,
+                "codex_session_id_signed_bigint_1": codex_session_id_signed_bigint_1,
+                "codex_session_id_signed_bigint_2": codex_session_id_signed_bigint_2,
             },
         )
         if existing_session_id is not None:
@@ -187,54 +187,52 @@ def create_a_rodex_session(
                 f"Resume with: rodex {display_name}"
             )
         allocated_name = allocate_unique_cool_name(connection)
-        preallocated_identifier = (
-            None
-            if rodex_session_identifier is None
-            else parse_rodex_session_identifier(rodex_session_identifier)
+        preallocated_session_id = (
+            None if rodex_session_id is None else parse_rodex_session_id(rodex_session_id)
         )
         candidates = (
-            (preallocated_identifier,)
-            if preallocated_identifier is not None
+            (preallocated_session_id,)
+            if preallocated_session_id is not None
             else (
-                RodexSessionIdentifier.generate()
+                RodexSessionId.generate()
                 for _attempt_number in index_re_try_attempt_numbers()
             )
         )
-        for rodex_session_identifier_candidate in candidates:
-            stored_identifier = rodex_session_identifier_candidate.as_signed_bigint()
+        for rodex_session_id_candidate in candidates:
+            stored_session_id = rodex_session_id_candidate.as_signed_bigint()
             try:
                 cursor = connection.execute(
                     f"INSERT INTO {RODEX_SESSIONS_TABLE} "
-                    "(rodex_session_identifier_signed_bigint, "
-                    "codex_session_uuid_int_1, codex_session_uuid_int_2, "
+                    "(rodex_session_id_signed_bigint, "
+                    "codex_session_id_signed_bigint_1, codex_session_id_signed_bigint_2, "
                     "cool_names_id) VALUES (?, ?, ?, ?)",
                     (
-                        stored_identifier,
-                        codex_uuid_int_1,
-                        codex_uuid_int_2,
+                        stored_session_id,
+                        codex_session_id_signed_bigint_1,
+                        codex_session_id_signed_bigint_2,
                         allocated_name.id,
                     ),
                 )
             except sqlite3.IntegrityError as error:
                 occupied = connection.execute(
                     f"SELECT 1 FROM {RODEX_SESSIONS_TABLE} "
-                    "WHERE rodex_session_identifier_signed_bigint = ?",
-                    (stored_identifier,),
+                    "WHERE rodex_session_id_signed_bigint = ?",
+                    (stored_session_id,),
                 ).fetchone()
                 if occupied is None:
                     raise
-                if preallocated_identifier is not None:
-                    raise RodexSessionIdentifierCollisionError(
-                        "preallocated Rodex session identifier is already occupied: "
-                        f"{preallocated_identifier}"
+                if preallocated_session_id is not None:
+                    raise RodexSessionIdCollisionError(
+                        "preallocated Rodex session ID is already occupied: "
+                        f"{preallocated_session_id}"
                     ) from error
                 continue
             if cursor.lastrowid is None:
                 raise RodexSessionError("SQLite did not return a Rodex session id")
             session = RodexSession(
                 rodex_sessions_id=cursor.lastrowid,
-                rodex_session_identifier=rodex_session_identifier_candidate,
-                codex_session_uuid=parsed_codex_session_uuid,
+                rodex_session_id=rodex_session_id_candidate,
+                codex_session_id=parsed_codex_session_id,
                 cool_names_id=allocated_name.id,
                 cool_name=allocated_name.cool_name,
             )
@@ -252,7 +250,7 @@ def create_a_rodex_session(
             register_codex_statistics_source_in_transaction(
                 connection,
                 session.rodex_sessions_id,
-                parsed_codex_session_uuid,
+                parsed_codex_session_id,
                 created_at_utc,
             )
             if tmux_link is not None:
@@ -264,29 +262,29 @@ def create_a_rodex_session(
                     (session.rodex_sessions_id, socket_path, session_name),
                 )
             return session
-        raise RodexSessionIdentifierCollisionError(
-            "could not allocate a unique Rodex session identifier after "
+        raise RodexSessionIdCollisionError(
+            "could not allocate a unique Rodex session ID after "
             f"{INDEX_RE_TRY_ATTEMPTS} attempts"
         )
 
 
-def generate_an_unregistered_rodex_session_identifier_candidate(
+def generate_an_unregistered_rodex_session_id_candidate(
     database_path: str | os.PathLike[str] | None = None,
-) -> RodexSessionIdentifier:
+) -> RodexSessionId:
     """Generate an unused but deliberately unreserved identity for a pending launch."""
     path = initialise_rodex_database(database_path)
     with open_rodex_transaction(path) as connection:
         for _attempt_number in index_re_try_attempt_numbers():
-            candidate = RodexSessionIdentifier.generate()
+            candidate = RodexSessionId.generate()
             row = connection.execute(
                 f"SELECT 1 FROM {RODEX_SESSIONS_TABLE} "
-                "WHERE rodex_session_identifier_signed_bigint = ?",
+                "WHERE rodex_session_id_signed_bigint = ?",
                 (candidate.as_signed_bigint(),),
             ).fetchone()
             if row is None:
                 return candidate
-    raise RodexSessionIdentifierCollisionError(
-        "could not generate an unused Rodex session identifier candidate after "
+    raise RodexSessionIdCollisionError(
+        "could not generate an unused Rodex session ID candidate after "
         f"{INDEX_RE_TRY_ATTEMPTS} attempts"
     )
 
@@ -345,38 +343,38 @@ def lookup_rodex_sessions_user(
     )
 
 
-def lookup_id_from_a_rodex_session_identifier(
-    rodex_session_identifier: RodexSessionIdentifier | str,
+def lookup_rodex_sessions_id_from_a_rodex_session_id(
+    rodex_session_id: RodexSessionId | str,
     database_path: str | os.PathLike[str] | None = None,
 ) -> int | None:
-    """Return the internal id for a Rodex session identifier, or ``None``."""
+    """Return the internal id for a Rodex session ID, or ``None``."""
     path = initialise_rodex_database(database_path)
-    identifier = parse_rodex_session_identifier(rodex_session_identifier)
+    parsed_session_id = parse_rodex_session_id(rodex_session_id)
     with open_rodex_transaction(path) as connection:
         row = connection.execute(
             f"SELECT id FROM {RODEX_SESSIONS_TABLE} "
-            "WHERE rodex_session_identifier_signed_bigint = ?",
-            (identifier.as_signed_bigint(),),
+            "WHERE rodex_session_id_signed_bigint = ?",
+            (parsed_session_id.as_signed_bigint(),),
         ).fetchone()
     return None if row is None else int(row[0])
 
 
-def lookup_rodex_session_identifier_from_an_id(
+def lookup_rodex_session_id_from_a_rodex_sessions_id(
     session_id: int,
     database_path: str | os.PathLike[str] | None = None,
-) -> RodexSessionIdentifier | None:
-    """Return the public Rodex identifier for an internal id, or ``None``."""
+) -> RodexSessionId | None:
+    """Return the public Rodex session ID for an internal ID, or ``None``."""
     _validate_positive_id(session_id, "session_id")
     path = initialise_rodex_database(database_path)
     with open_rodex_transaction(path) as connection:
         row = connection.execute(
-            f"SELECT rodex_session_identifier_signed_bigint "
+            f"SELECT rodex_session_id_signed_bigint "
             f"FROM {RODEX_SESSIONS_TABLE} WHERE id = ?",
             (session_id,),
         ).fetchone()
     if row is None:
         return None
-    return RodexSessionIdentifier.from_signed_bigint(int(row[0]))
+    return RodexSessionId.from_signed_bigint(int(row[0]))
 
 
 def lookup_rodex_session_log(
@@ -431,10 +429,10 @@ def record_a_rodex_session_runtime_resume(
     tmux_session_name: str,
     database_path: str | os.PathLike[str] | None = None,
     *,
-    codex_session_uuid: uuid.UUID | str | None = None,
+    codex_session_id: CodexSessionId | str | None = None,
     accessed_at_utc: datetime | None = None,
 ) -> RodexTmuxSession:
-    """Atomically activate a runtime, optionally replacing an unsaved Codex UUID."""
+    """Atomically activate a runtime, optionally replacing an unsaved Codex session ID."""
     _validate_session_id(session_id)
     tmux_link = _normalise_tmux_link(
         tmux_server_socket_path,
@@ -443,28 +441,29 @@ def record_a_rodex_session_runtime_resume(
     if tmux_link is None:  # Both arguments are required by this public contract.
         raise ValueError("a resumed session requires a tmux endpoint")
     socket_path, session_name = tmux_link
-    codex_uuid_halves = (
+    codex_session_id_halves = (
         None
-        if codex_session_uuid is None
-        else split_codex_session_uuid_into_signed_bigints(codex_session_uuid)
+        if codex_session_id is None
+        else split_codex_session_id_into_signed_bigints(codex_session_id)
     )
     timestamp = _normalise_utc_datetime(accessed_at_utc)
     path = initialise_rodex_database(database_path)
     with open_rodex_transaction(path) as connection:
-        if codex_uuid_halves is not None:
-            parsed_codex_uuid = parse_codex_session_uuid(codex_session_uuid)
+        if codex_session_id_halves is not None:
+            parsed_codex_session_id = parse_codex_session_id(codex_session_id)
             codex_cursor = connection.execute(
                 f"UPDATE {RODEX_SESSIONS_TABLE} "
-                "SET codex_session_uuid_int_1 = ?, codex_session_uuid_int_2 = ? "
+                "SET codex_session_id_signed_bigint_1 = ?, "
+                "codex_session_id_signed_bigint_2 = ? "
                 "WHERE id = ?",
-                (*codex_uuid_halves, session_id),
+                (*codex_session_id_halves, session_id),
             )
             if codex_cursor.rowcount != 1:
                 raise RodexSessionError(f"Rodex session does not exist: {session_id}")
             register_codex_statistics_source_in_transaction(
                 connection,
                 session_id,
-                parsed_codex_uuid,
+                parsed_codex_session_id,
                 timestamp,
             )
         tmux_cursor = connection.execute(
@@ -498,22 +497,22 @@ def record_a_rodex_session_runtime_resume(
     )
 
 
-def lookup_codex_uuid_from_a_rodex_session_id(
+def lookup_codex_session_id_from_a_rodex_sessions_id(
     session_id: int,
     database_path: str | os.PathLike[str] | None = None,
-) -> uuid.UUID | None:
-    """Return the Codex UUID stored on one Rodex session."""
+) -> CodexSessionId | None:
+    """Return the Codex session ID stored on one Rodex session."""
     _validate_session_id(session_id)
     path = initialise_rodex_database(database_path)
     with open_rodex_transaction(path) as connection:
         row = connection.execute(
-            f"SELECT codex_session_uuid_int_1, codex_session_uuid_int_2 "
+            f"SELECT codex_session_id_signed_bigint_1, codex_session_id_signed_bigint_2 "
             f"FROM {RODEX_SESSIONS_TABLE} WHERE id = ?",
             (session_id,),
         ).fetchone()
     if row is None:
         return None
-    return join_signed_bigints_into_a_codex_session_uuid(int(row[0]), int(row[1]))
+    return join_signed_bigints_into_a_codex_session_id(int(row[0]), int(row[1]))
 
 
 def lookup_rodex_tmux_session(
@@ -527,7 +526,7 @@ def lookup_rodex_tmux_session(
         return _select_rodex_tmux_session(connection, session_id)
 
 
-def lookup_rodex_session_id_from_a_cool_name(
+def lookup_rodex_sessions_id_from_a_cool_name(
     cool_name: str,
     database_path: str | os.PathLike[str] | None = None,
 ) -> int | None:
@@ -548,7 +547,7 @@ def lookup_rodex_session_id_from_a_cool_name(
     return None if not rows else int(rows[0][0])
 
 
-def lookup_owned_rodex_session_id_from_a_cool_name(
+def lookup_owned_rodex_sessions_id_from_a_cool_name(
     cool_name: str,
     database_path: str | os.PathLike[str] | None = None,
     *,
@@ -711,8 +710,8 @@ def list_rodex_session_runtimes_for_a_user(
             return []
         rows = connection.execute(
             f"SELECT sessions.id, permanent.cool_name, user_defined.cool_name, "
-            "sessions.codex_session_uuid_int_1, "
-            "sessions.codex_session_uuid_int_2, tmux.tmux_server_socket_path, "
+            "sessions.codex_session_id_signed_bigint_1, "
+            "sessions.codex_session_id_signed_bigint_2, tmux.tmux_server_socket_path, "
             "tmux.tmux_session_name "
             f"FROM {RODEX_SESSIONS_TABLE} AS sessions "
             f"JOIN {RODEX_SESSIONS_LOG_TABLE} AS log "
@@ -730,7 +729,7 @@ def list_rodex_session_runtimes_for_a_user(
             rodex_sessions_id=int(row[0]),
             cool_name=str(row[1]),
             user_defined_cool_name=None if row[2] is None else str(row[2]),
-            codex_session_uuid=join_signed_bigints_into_a_codex_session_uuid(
+            codex_session_id=join_signed_bigints_into_a_codex_session_id(
                 int(row[3]), int(row[4])
             ),
             tmux_server_socket_path=str(row[5]),
@@ -773,21 +772,21 @@ def update_rodex_tmux_session_name(
     )
 
 
-def lookup_rodex_session_id_from_a_codex_uuid(
-    codex_session_uuid: uuid.UUID | str,
+def lookup_rodex_sessions_id_from_a_codex_session_id(
+    codex_session_id: CodexSessionId | str,
     database_path: str | os.PathLike[str] | None = None,
 ) -> int | None:
-    """Return the Rodex id linked to a Codex thread UUID."""
-    uuid_int_1, uuid_int_2 = split_codex_session_uuid_into_signed_bigints(
-        codex_session_uuid
+    """Return the internal Rodex session ID linked to a Codex session ID."""
+    codex_session_id_part_1, codex_session_id_part_2 = (
+        split_codex_session_id_into_signed_bigints(codex_session_id)
     )
     path = initialise_rodex_database(database_path)
     with open_rodex_transaction(path) as connection:
         row = connection.execute(
             f"SELECT id FROM {RODEX_SESSIONS_TABLE} "
-            "WHERE codex_session_uuid_int_1 = ? "
-            "AND codex_session_uuid_int_2 = ?",
-            (uuid_int_1, uuid_int_2),
+            "WHERE codex_session_id_signed_bigint_1 = ? "
+            "AND codex_session_id_signed_bigint_2 = ?",
+            (codex_session_id_part_1, codex_session_id_part_2),
         ).fetchone()
     return None if row is None else int(row[0])
 

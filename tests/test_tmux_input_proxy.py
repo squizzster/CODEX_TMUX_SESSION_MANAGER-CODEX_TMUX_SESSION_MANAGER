@@ -340,7 +340,7 @@ def test_rodex_detach_targets_the_current_tmux_client(tmp_path: Path) -> None:
     assert runner.commands[-1][-3:] == ["detach-client", "-t", "client-9"]
 
 
-def test_rodex_identity_reads_the_live_codex_uuid(tmp_path: Path) -> None:
+def test_rodex_identity_reads_the_live_codex_session_id(tmp_path: Path) -> None:
     runner = RecordingRunner(f"{PROMPT}/rodex identity\n")
 
     assert (
@@ -358,14 +358,14 @@ def test_rodex_identity_reads_the_live_codex_uuid(tmp_path: Path) -> None:
     identity_query = next(
         command
         for command in runner.commands
-        if command[-1:] == ["@rodex_codex_session_uuid"]
+        if command[-1:] == ["@rodex_codex_session_id"]
     )
     assert identity_query[-5:] == [
         "show-options",
         "-v",
         "-t",
         "%4",
-        "@rodex_codex_session_uuid",
+        "@rodex_codex_session_id",
     ]
     identity_message = next(
         command[-1]

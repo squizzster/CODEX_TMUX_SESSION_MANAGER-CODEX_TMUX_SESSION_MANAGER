@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import os
 import sqlite3
-import uuid
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Final
@@ -18,22 +17,19 @@ from rodex_sql import (
 )
 
 from .errors import RodexSessionError
-from .identity import (
-    join_signed_bigints_into_a_rodex_registry_uuid,
-    split_rodex_registry_uuid_into_signed_bigints,
-)
+from .identity import RodexRegistryId
 
 RODEX_SESSIONS_TABLE: Final = "rodex_sessions"
 RODEX_REGISTRIES_TABLE: Final = "rodex_registries"
-RODEX_REGISTRIES_UUID_UNIQUE_INDEX: Final = "rodex_registries_uuid_ints_unique"
-RODEX_SESSION_IDENTIFIER_UNIQUE_INDEX: Final = "rodex_sessions_session_identifier_unique"
+RODEX_REGISTRIES_ID_UNIQUE_INDEX: Final = "rodex_registries_registry_id_unique"
+RODEX_SESSION_ID_UNIQUE_INDEX: Final = "rodex_sessions_session_id_unique"
 RODEX_SESSIONS_USERS_TABLE: Final = "rodex_sessions_users"
 RODEX_SESSIONS_USERS_UNIQUE_INDEX: Final = "rodex_sessions_users_uid_gid_user_name_unique"
 RODEX_SESSIONS_LOG_TABLE: Final = "rodex_sessions_log"
 RODEX_SESSIONS_LOG_SESSION_UNIQUE_INDEX: Final = (
     "rodex_sessions_log_rodex_sessions_id_unique"
 )
-RODEX_CODEX_UUID_UNIQUE_INDEX: Final = "rodex_sessions_codex_session_uuid_ints_unique"
+RODEX_CODEX_SESSION_ID_UNIQUE_INDEX: Final = "rodex_sessions_codex_session_id_unique"
 RODEX_TMUX_SESSIONS_TABLE: Final = "rodex_tmux_sessions"
 RODEX_TMUX_SESSIONS_SESSION_UNIQUE_INDEX: Final = (
     "rodex_tmux_sessions_rodex_sessions_id_unique"
@@ -66,7 +62,7 @@ RODEX_SESSIONS_STATISTICS_AUDIT_LIMITS_UNIQUE_INDEX: Final = (
 )
 RODEX_SESSIONS_STATISTICS_SOURCES_TABLE: Final = "rodex_sessions_statistics_sources"
 RODEX_SESSIONS_STATISTICS_SOURCES_UNIQUE_INDEX: Final = (
-    "rodex_sessions_statistics_sources_codex_uuid_unique"
+    "rodex_sessions_statistics_sources_codex_session_id_unique"
 )
 RODEX_SESSIONS_STATISTICS_SOURCES_SESSION_INDEX: Final = (
     "rodex_sessions_statistics_sources_session"
@@ -226,21 +222,20 @@ _TURN_DATABASE_SCALAR_COLUMNS: Final = (
 _CREATE_REGISTRIES_TABLE = f"""
 CREATE TABLE IF NOT EXISTS {RODEX_REGISTRIES_TABLE} (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    uuid_int_1 BIGINT NOT NULL,
-    uuid_int_2 BIGINT NOT NULL,
+    rodex_registry_id_signed_bigint BIGINT NOT NULL,
     CHECK (id = 1)
 )
 """
-_CREATE_REGISTRIES_UUID_UNIQUE_INDEX = f"""
-CREATE UNIQUE INDEX IF NOT EXISTS {RODEX_REGISTRIES_UUID_UNIQUE_INDEX}
-ON {RODEX_REGISTRIES_TABLE} (uuid_int_1, uuid_int_2)
+_CREATE_REGISTRIES_ID_UNIQUE_INDEX = f"""
+CREATE UNIQUE INDEX IF NOT EXISTS {RODEX_REGISTRIES_ID_UNIQUE_INDEX}
+ON {RODEX_REGISTRIES_TABLE} (rodex_registry_id_signed_bigint)
 """
 _CREATE_TABLE = f"""
 CREATE TABLE IF NOT EXISTS {RODEX_SESSIONS_TABLE} (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    rodex_session_identifier_signed_bigint BIGINT NOT NULL,
-    codex_session_uuid_int_1 BIGINT NOT NULL,
-    codex_session_uuid_int_2 BIGINT NOT NULL,
+    rodex_session_id_signed_bigint BIGINT NOT NULL,
+    codex_session_id_signed_bigint_1 BIGINT NOT NULL,
+    codex_session_id_signed_bigint_2 BIGINT NOT NULL,
     cool_names_id INTEGER NOT NULL,
     user_defined_cool_names_id INTEGER DEFAULT NULL,
     FOREIGN KEY (cool_names_id) REFERENCES cool_names (id),
@@ -248,13 +243,13 @@ CREATE TABLE IF NOT EXISTS {RODEX_SESSIONS_TABLE} (
 )
 """
 _CREATE_UNIQUE_INDEX = f"""
-CREATE UNIQUE INDEX IF NOT EXISTS {RODEX_SESSION_IDENTIFIER_UNIQUE_INDEX}
-ON {RODEX_SESSIONS_TABLE} (rodex_session_identifier_signed_bigint)
+CREATE UNIQUE INDEX IF NOT EXISTS {RODEX_SESSION_ID_UNIQUE_INDEX}
+ON {RODEX_SESSIONS_TABLE} (rodex_session_id_signed_bigint)
 """
-_CREATE_CODEX_UUID_UNIQUE_INDEX = f"""
-CREATE UNIQUE INDEX IF NOT EXISTS {RODEX_CODEX_UUID_UNIQUE_INDEX}
+_CREATE_CODEX_SESSION_ID_UNIQUE_INDEX = f"""
+CREATE UNIQUE INDEX IF NOT EXISTS {RODEX_CODEX_SESSION_ID_UNIQUE_INDEX}
 ON {RODEX_SESSIONS_TABLE}
-    (codex_session_uuid_int_1, codex_session_uuid_int_2)
+    (codex_session_id_signed_bigint_1, codex_session_id_signed_bigint_2)
 """
 _CREATE_SESSIONS_COOL_NAMES_UNIQUE_INDEX = f"""
 CREATE UNIQUE INDEX IF NOT EXISTS {RODEX_SESSIONS_COOL_NAMES_UNIQUE_INDEX}
@@ -572,8 +567,8 @@ _CREATE_STATISTICS_SOURCES_TABLE = f"""
 CREATE TABLE IF NOT EXISTS {RODEX_SESSIONS_STATISTICS_SOURCES_TABLE} (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     rodex_sessions_id INTEGER NOT NULL,
-    codex_session_uuid_int_1 BIGINT NOT NULL,
-    codex_session_uuid_int_2 BIGINT NOT NULL,
+    codex_session_id_signed_bigint_1 BIGINT NOT NULL,
+    codex_session_id_signed_bigint_2 BIGINT NOT NULL,
     first_linked_at_utc TEXT NOT NULL,
     rollout_file_path TEXT DEFAULT NULL,
     analyzed_size_bytes INTEGER DEFAULT NULL CHECK (
@@ -611,7 +606,7 @@ CREATE TABLE IF NOT EXISTS {RODEX_SESSIONS_STATISTICS_SOURCES_TABLE} (
 _CREATE_STATISTICS_SOURCES_UNIQUE_INDEX = f"""
 CREATE UNIQUE INDEX IF NOT EXISTS {RODEX_SESSIONS_STATISTICS_SOURCES_UNIQUE_INDEX}
 ON {RODEX_SESSIONS_STATISTICS_SOURCES_TABLE}
-    (codex_session_uuid_int_1, codex_session_uuid_int_2)
+    (codex_session_id_signed_bigint_1, codex_session_id_signed_bigint_2)
 """
 _CREATE_STATISTICS_SOURCES_SESSION_INDEX = f"""
 CREATE INDEX IF NOT EXISTS {RODEX_SESSIONS_STATISTICS_SOURCES_SESSION_INDEX}
@@ -843,7 +838,7 @@ ON {RODEX_SESSIONS_STATISTICS_WORKERS_TABLE} (rodex_sessions_id)
 
 
 def default_rodex_database_path() -> Path:
-    """Resolve the current user's ALPHA v2 durable database path."""
+    """Resolve the current user's durable Rodex database path."""
     return _default_rodex_database_path()
 
 
@@ -853,22 +848,22 @@ def initialise_rodex_database(database_path: str | os.PathLike[str] | None = Non
     with open_rodex_transaction(path) as connection:
         connection.execute(_CREATE_REGISTRIES_TABLE)
         _verify_registries_table(connection)
-        connection.execute(_CREATE_REGISTRIES_UUID_UNIQUE_INDEX)
+        connection.execute(_CREATE_REGISTRIES_ID_UNIQUE_INDEX)
         _verify_unique_index(
             connection,
             RODEX_REGISTRIES_TABLE,
-            RODEX_REGISTRIES_UUID_UNIQUE_INDEX,
-            ["uuid_int_1", "uuid_int_2"],
+            RODEX_REGISTRIES_ID_UNIQUE_INDEX,
+            ["rodex_registry_id_signed_bigint"],
         )
         registry_rows = connection.execute(
-            f"SELECT id, uuid_int_1, uuid_int_2 FROM {RODEX_REGISTRIES_TABLE}"
+            f"SELECT id, rodex_registry_id_signed_bigint FROM {RODEX_REGISTRIES_TABLE}"
         ).fetchall()
         if not registry_rows:
-            registry_halves = split_rodex_registry_uuid_into_signed_bigints(uuid.uuid4())
+            registry_id = RodexRegistryId.generate()
             connection.execute(
-                f"INSERT INTO {RODEX_REGISTRIES_TABLE} (uuid_int_1, uuid_int_2) "
-                "VALUES (?, ?)",
-                registry_halves,
+                f"INSERT INTO {RODEX_REGISTRIES_TABLE} "
+                "(rodex_registry_id_signed_bigint) VALUES (?)",
+                (registry_id.as_signed_bigint(),),
             )
         elif len(registry_rows) != 1 or registry_rows[0][0] != 1:
             raise RodexSessionError("Rodex registry must contain exactly its id=1 row")
@@ -876,7 +871,7 @@ def initialise_rodex_database(database_path: str | os.PathLike[str] | None = Non
         connection.execute(_CREATE_TABLE)
         _verify_sessions_table(connection)
         connection.execute(_CREATE_UNIQUE_INDEX)
-        connection.execute(_CREATE_CODEX_UUID_UNIQUE_INDEX)
+        connection.execute(_CREATE_CODEX_SESSION_ID_UNIQUE_INDEX)
         connection.execute(_CREATE_SESSIONS_COOL_NAMES_UNIQUE_INDEX)
         connection.execute(_CREATE_SESSIONS_USER_DEFINED_COOL_NAMES_UNIQUE_INDEX)
         _verify_sessions_unique_indexes(connection)
@@ -943,7 +938,7 @@ def initialise_rodex_database(database_path: str | os.PathLike[str] | None = Non
             connection,
             RODEX_SESSIONS_STATISTICS_SOURCES_TABLE,
             RODEX_SESSIONS_STATISTICS_SOURCES_UNIQUE_INDEX,
-            ["codex_session_uuid_int_1", "codex_session_uuid_int_2"],
+            ["codex_session_id_signed_bigint_1", "codex_session_id_signed_bigint_2"],
         )
         connection.execute(_CREATE_STATISTICS_SOURCES_SESSION_INDEX)
         _verify_index(
@@ -1025,18 +1020,19 @@ def initialise_rodex_database(database_path: str | os.PathLike[str] | None = Non
     return path
 
 
-def lookup_rodex_registry_uuid(
+def lookup_rodex_registry_id(
     database_path: str | os.PathLike[str] | None = None,
-) -> uuid.UUID:
+) -> RodexRegistryId:
     """Return the durable identity of one exact Rodex registry database."""
     path = initialise_rodex_database(database_path)
     with open_rodex_read_transaction(path) as connection:
         row = connection.execute(
-            f"SELECT uuid_int_1, uuid_int_2 FROM {RODEX_REGISTRIES_TABLE} WHERE id = 1"
+            f"SELECT rodex_registry_id_signed_bigint "
+            f"FROM {RODEX_REGISTRIES_TABLE} WHERE id = 1"
         ).fetchone()
     if row is None:
         raise RodexSessionError("Rodex registry identity disappeared")
-    return join_signed_bigints_into_a_rodex_registry_uuid(int(row[0]), int(row[1]))
+    return RodexRegistryId.from_signed_bigint(int(row[0]))
 
 
 def _verify_registries_table(connection: sqlite3.Connection) -> None:
@@ -1044,8 +1040,7 @@ def _verify_registries_table(connection: sqlite3.Connection) -> None:
     observed = [(row[1], row[2].upper(), row[3], row[5]) for row in columns]
     if observed != [
         ("id", "INTEGER", 0, 1),
-        ("uuid_int_1", "BIGINT", 1, 0),
-        ("uuid_int_2", "BIGINT", 1, 0),
+        ("rodex_registry_id_signed_bigint", "BIGINT", 1, 0),
     ]:
         raise RodexSessionError(f"{RODEX_REGISTRIES_TABLE} schema mismatch: {observed!r}")
     definition_row = connection.execute(
@@ -1065,9 +1060,9 @@ def _verify_sessions_table(connection: sqlite3.Connection) -> None:
     observed = [(row[1], row[2].upper(), row[3], row[5]) for row in columns]
     expected = [
         ("id", "INTEGER", 0, 1),
-        ("rodex_session_identifier_signed_bigint", "BIGINT", 1, 0),
-        ("codex_session_uuid_int_1", "BIGINT", 1, 0),
-        ("codex_session_uuid_int_2", "BIGINT", 1, 0),
+        ("rodex_session_id_signed_bigint", "BIGINT", 1, 0),
+        ("codex_session_id_signed_bigint_1", "BIGINT", 1, 0),
+        ("codex_session_id_signed_bigint_2", "BIGINT", 1, 0),
         ("cool_names_id", "INTEGER", 1, 0),
         ("user_defined_cool_names_id", "INTEGER", 0, 0),
     ]
@@ -1102,14 +1097,14 @@ def _verify_sessions_unique_indexes(connection: sqlite3.Connection) -> None:
     _verify_unique_index(
         connection,
         RODEX_SESSIONS_TABLE,
-        RODEX_SESSION_IDENTIFIER_UNIQUE_INDEX,
-        ["rodex_session_identifier_signed_bigint"],
+        RODEX_SESSION_ID_UNIQUE_INDEX,
+        ["rodex_session_id_signed_bigint"],
     )
     _verify_unique_index(
         connection,
         RODEX_SESSIONS_TABLE,
-        RODEX_CODEX_UUID_UNIQUE_INDEX,
-        ["codex_session_uuid_int_1", "codex_session_uuid_int_2"],
+        RODEX_CODEX_SESSION_ID_UNIQUE_INDEX,
+        ["codex_session_id_signed_bigint_1", "codex_session_id_signed_bigint_2"],
     )
     _verify_unique_index(
         connection,
@@ -1452,8 +1447,8 @@ def _verify_statistics_sources_table(connection: sqlite3.Connection) -> None:
         [
             ("id", "INTEGER", 0, 1),
             ("rodex_sessions_id", "INTEGER", 1, 0),
-            ("codex_session_uuid_int_1", "BIGINT", 1, 0),
-            ("codex_session_uuid_int_2", "BIGINT", 1, 0),
+            ("codex_session_id_signed_bigint_1", "BIGINT", 1, 0),
+            ("codex_session_id_signed_bigint_2", "BIGINT", 1, 0),
             ("first_linked_at_utc", "TEXT", 1, 0),
             ("rollout_file_path", "TEXT", 0, 0),
             ("analyzed_size_bytes", "INTEGER", 0, 0),

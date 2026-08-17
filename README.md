@@ -12,7 +12,7 @@ when needed, and return later using a generated name such as `automatic-beluga`.
 
 - Opens the ordinary interactive Codex TUI inside a private tmux runtime.
 - Keeps Rodex and Codex session identities distinct and linked.
-- Gives each Rodex session one exact 16-character lowercase hexadecimal identifier.
+- Gives each Rodex session one exact 16-character lowercase hexadecimal ID.
 - Assigns every session a permanent, unique two-word name.
 - Reattaches a live session or transparently resumes its saved Codex session.
 - Recovers an empty, unsaved Codex session under the same Rodex identity.
@@ -105,12 +105,13 @@ preference. See the current [tmux manual](https://man.openbsd.org/tmux.1) and
 | `./rodex _stats edgar-work` | Show the latest successful aggregate statistics. |
 | `./rodex _stats edgar-work --json` | Emit the snapshot and freshness metadata as JSON. |
 | `./rodex _stats edgar-work --turn TURN_ID` | Show one exact turn from the latest snapshot. |
-| `./rodex _stats edgar-work --turn TURN_ID --source CODEX_UUID --json` | Qualify a turn ID across resumed Codex sources. |
+| `./rodex _stats edgar-work --turn TURN_ID --source CODEX_SESSION_ID --json` | Qualify a turn ID across resumed Codex sources. |
 | `./rodex _stats-status edgar-work` | Show source coverage and analytics worker health. |
 | `./rodex _mouse edgar-work toggle` | Toggle mouse handling for one verified live session. |
 | `./rodex _mouse edgar-work inherit` | Remove the session override and inherit the tmux global value. |
 
-Rodex flags include `_alias --force` and `_stats NAME --turn ID --source UUID --json`.
+Rodex flags include `_alias --force` and
+`_stats NAME --turn ID --source CODEX_SESSION_ID --json`.
 `_context` is the machine-facing self-identification route for Codex and local tooling.
 It resolves the inherited tmux pane, verifies its live Rodex, registry, and Codex markers
 against the current user's database row, and fails closed outside a matching managed
@@ -145,16 +146,16 @@ codebase for later re-enablement; input currently passes directly to the Codex T
 ## Local data
 
 The durable per-user registry defaults to
-`$XDG_STATE_HOME/rodex/rodex-v2.sqlite3`, or
-`~/.local/state/rodex/rodex-v2.sqlite3` when `XDG_STATE_HOME` is unset. Set
+`$XDG_STATE_HOME/rodex/rodex-v3.sqlite3`, or
+`~/.local/state/rodex/rodex-v3.sqlite3` when `XDG_STATE_HOME` is unset. Set
 `RODEX_DATABASE_PATH` to select another database.
 
-Rodex session identifiers are random 64-bit values rendered only as 16 lowercase hex
-characters, including leading zeroes. They are compact integrity discriminators for
+Rodex session IDs are random 64-bit values rendered only as 16 lowercase hex
+characters, including leading zeroes. Rodex registry IDs use the same 64-bit wire form
+as a separate identity domain. Both are compact integrity discriminators for
 agents and operators, not bearer secrets. SQLite enforces uniqueness and allocation
-tries at most ten independent candidates before failing explicitly. Codex session and
-Rodex registry identities remain their full UUIDs. The ALPHA v2 registry intentionally
-does not read the incompatible pre-v2 database.
+tries at most ten independent candidates before failing explicitly. Codex session IDs
+remain 128-bit values and are stored losslessly across two BIGINT columns.
 
 Short-lived Unix sockets and app-server logs use `$XDG_RUNTIME_DIR/rodex`, normally
 `/run/user/<uid>/rodex`. When `XDG_RUNTIME_DIR` is unset or that socket path would be

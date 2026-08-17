@@ -9,9 +9,9 @@ from pathlib import Path
 from rodex_registry import (
     RodexSessionsUserIdentity,
     create_a_rodex_session,
-    lookup_id_from_a_rodex_session_identifier,
-    lookup_rodex_session_identifier_from_an_id,
+    lookup_rodex_session_id_from_a_rodex_sessions_id,
     lookup_rodex_session_log,
+    lookup_rodex_sessions_id_from_a_rodex_session_id,
 )
 
 
@@ -20,21 +20,21 @@ def test_full_rodex_database_regression(tmp_path: Path) -> None:
     user = RodexSessionsUserIdentity(uid=1009, gid=1010, user_name="dna")
 
     first = create_a_rodex_session(
-        database, codex_session_uuid=uuid.UUID(int=1), user_identity=user
+        database, codex_session_id=uuid.UUID(int=1), user_identity=user
     )
     second = create_a_rodex_session(
-        database, codex_session_uuid=uuid.UUID(int=2), user_identity=user
+        database, codex_session_id=uuid.UUID(int=2), user_identity=user
     )
 
     assert [first.rodex_sessions_id, second.rodex_sessions_id] == [1, 2]
-    assert first.rodex_session_identifier != second.rodex_session_identifier
+    assert first.rodex_session_id != second.rodex_session_id
     assert (
-        lookup_id_from_a_rodex_session_identifier(first.rodex_session_identifier, database)
+        lookup_rodex_sessions_id_from_a_rodex_session_id(first.rodex_session_id, database)
         == first.rodex_sessions_id
     )
     assert (
-        lookup_rodex_session_identifier_from_an_id(second.rodex_sessions_id, database)
-        == second.rodex_session_identifier
+        lookup_rodex_session_id_from_a_rodex_sessions_id(second.rodex_sessions_id, database)
+        == second.rodex_session_id
     )
 
     first_log = lookup_rodex_session_log(first.rodex_sessions_id, database)

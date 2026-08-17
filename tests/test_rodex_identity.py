@@ -1,22 +1,22 @@
 from __future__ import annotations
 
-import uuid
-
 import pytest
 
 import rodex_registry.identity as identity_module
 from rodex_registry.identity import (
-    RODEX_SESSION_IDENTIFIER_BITS,
-    RodexSessionIdentifier,
-    RodexSessionIdentifierError,
-    join_signed_bigints_into_a_codex_session_uuid,
-    join_signed_bigints_into_a_rodex_registry_uuid,
-    parse_rodex_session_identifier,
-    split_codex_session_uuid_into_signed_bigints,
-    split_rodex_registry_uuid_into_signed_bigints,
+    RODEX_ID_BITS,
+    RodexIdError,
+    RodexRegistryId,
+    RodexSessionId,
+    join_signed_bigints_into_a_codex_session_id,
+    parse_codex_session_id,
+    parse_rodex_registry_id,
+    parse_rodex_session_id,
+    split_codex_session_id_into_signed_bigints,
 )
 
 
+@pytest.mark.parametrize("id_type", [RodexRegistryId, RodexSessionId])
 @pytest.mark.parametrize(
     ("value", "rendered"),
     [
@@ -26,16 +26,30 @@ from rodex_registry.identity import (
         ((1 << 64) - 1, "ffffffffffffffff"),
     ],
 )
-def test_identifier_has_one_exact_canonical_wire_form(value: int, rendered: str) -> None:
-    identifier = RodexSessionIdentifier(value)
+def test_rodex_ids_have_one_exact_wire_form(
+    id_type: type[RodexRegistryId] | type[RodexSessionId],
+    value: int,
+    rendered: str,
+) -> None:
+    rodex_id = id_type(value)
 
-    assert str(identifier) == rendered
-    assert len(str(identifier)) == 16
-    assert RodexSessionIdentifier.parse(rendered) == identifier
-    assert parse_rodex_session_identifier(identifier) is identifier
-    assert parse_rodex_session_identifier(rendered) == identifier
+    assert str(rodex_id) == rendered
+    assert len(str(rodex_id)) == 16
+    assert id_type.parse(rendered) == rodex_id
 
 
+def test_each_rodex_id_parser_preserves_its_domain() -> None:
+    registry_id = RodexRegistryId(1)
+    session_id = RodexSessionId(1)
+
+    assert registry_id != session_id
+    assert parse_rodex_registry_id(registry_id) is registry_id
+    assert parse_rodex_registry_id(str(registry_id)) == registry_id
+    assert parse_rodex_session_id(session_id) is session_id
+    assert parse_rodex_session_id(str(session_id)) == session_id
+
+
+@pytest.mark.parametrize("id_type", [RodexRegistryId, RodexSessionId])
 @pytest.mark.parametrize(
     "invalid",
     [
@@ -50,17 +64,23 @@ def test_identifier_has_one_exact_canonical_wire_form(value: int, rendered: str)
         "",
     ],
 )
-def test_identifier_parser_rejects_every_noncanonical_text(invalid: str) -> None:
-    with pytest.raises(RodexSessionIdentifierError, match="16 lowercase hexadecimal"):
-        RodexSessionIdentifier.parse(invalid)
+def test_rodex_id_parsers_reject_noncanonical_text(
+    id_type: type[RodexRegistryId] | type[RodexSessionId], invalid: str
+) -> None:
+    with pytest.raises(RodexIdError, match="16 lowercase hexadecimal"):
+        id_type.parse(invalid)
 
 
+@pytest.mark.parametrize("id_type", [RodexRegistryId, RodexSessionId])
 @pytest.mark.parametrize("invalid", [True, False, -1, 1 << 64, 1.5, "0"])
-def test_identifier_value_rejects_non_unsigned_64_bit_integers(invalid: object) -> None:
-    with pytest.raises(RodexSessionIdentifierError, match="unsigned 64-bit"):
-        RodexSessionIdentifier(invalid)  # type: ignore[arg-type]
+def test_rodex_ids_reject_values_outside_unsigned_64_bits(
+    id_type: type[RodexRegistryId] | type[RodexSessionId], invalid: object
+) -> None:
+    with pytest.raises(RodexIdError, match="unsigned 64-bit"):
+        id_type(invalid)  # type: ignore[arg-type]
 
 
+@pytest.mark.parametrize("id_type", [RodexRegistryId, RodexSessionId])
 @pytest.mark.parametrize(
     ("unsigned", "signed"),
     [
@@ -70,22 +90,27 @@ def test_identifier_value_rejects_non_unsigned_64_bit_integers(invalid: object) 
         ((1 << 64) - 1, -1),
     ],
 )
-def test_identifier_signed_bigint_codec_is_lossless(unsigned: int, signed: int) -> None:
-    identifier = RodexSessionIdentifier(unsigned)
-
-    assert identifier.as_signed_bigint() == signed
-    assert RodexSessionIdentifier.from_signed_bigint(signed) == identifier
-
-
-@pytest.mark.parametrize("invalid", [True, False, -(1 << 63) - 1, 1 << 63, 1.5, "0"])
-def test_identifier_rejects_values_outside_sqlite_signed_bigint(
-    invalid: object,
+def test_rodex_id_bigint_codec_is_lossless(
+    id_type: type[RodexRegistryId] | type[RodexSessionId],
+    unsigned: int,
+    signed: int,
 ) -> None:
-    with pytest.raises(RodexSessionIdentifierError, match="signed 64-bit range"):
-        RodexSessionIdentifier.from_signed_bigint(invalid)  # type: ignore[arg-type]
+    rodex_id = id_type(unsigned)
+
+    assert rodex_id.as_signed_bigint() == signed
+    assert id_type.from_signed_bigint(signed) == rodex_id
 
 
-def test_identifier_generation_requests_exactly_64_random_bits(
+@pytest.mark.parametrize("id_type", [RodexRegistryId, RodexSessionId])
+@pytest.mark.parametrize("invalid", [True, False, -(1 << 63) - 1, 1 << 63, 1.5, "0"])
+def test_rodex_ids_reject_values_outside_sqlite_bigint(
+    id_type: type[RodexRegistryId] | type[RodexSessionId], invalid: object
+) -> None:
+    with pytest.raises(RodexIdError, match="signed 64-bit range"):
+        id_type.from_signed_bigint(invalid)  # type: ignore[arg-type]
+
+
+def test_each_rodex_id_generation_requests_exactly_64_secure_random_bits(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     requested_bits: list[int] = []
@@ -96,31 +121,24 @@ def test_identifier_generation_requests_exactly_64_random_bits(
 
     monkeypatch.setattr(identity_module.secrets, "randbits", generate)
 
-    assert str(RodexSessionIdentifier.generate()) == "0123456789abcdef"
-    assert requested_bits == [RODEX_SESSION_IDENTIFIER_BITS]
+    assert str(RodexRegistryId.generate()) == "0123456789abcdef"
+    assert str(RodexSessionId.generate()) == "0123456789abcdef"
+    assert requested_bits == [RODEX_ID_BITS, RODEX_ID_BITS]
 
 
-@pytest.mark.parametrize(
-    "value",
-    [
-        uuid.UUID("12345678-1234-5678-1234-567812345678"),
-        0,
-        None,
-        b"0000000000000000",
-    ],
-)
-def test_identifier_parser_rejects_non_string_boundary_values(value: object) -> None:
-    with pytest.raises(RodexSessionIdentifierError):
-        RodexSessionIdentifier.parse(value)  # type: ignore[arg-type]
+@pytest.mark.parametrize("id_type", [RodexRegistryId, RodexSessionId])
+@pytest.mark.parametrize("value", [0, None, b"0000000000000000"])
+def test_rodex_id_parsers_reject_non_string_boundary_values(
+    id_type: type[RodexRegistryId] | type[RodexSessionId], value: object
+) -> None:
+    with pytest.raises(RodexIdError):
+        id_type.parse(value)  # type: ignore[arg-type]
 
 
-def test_codex_and_registry_uuid_codecs_remain_explicit_and_lossless() -> None:
-    codex_uuid = uuid.UUID("01a00e9a-80f4-7ea2-83a5-f6ef25ac5e65")
-    registry_uuid = uuid.UUID("06179a35-8126-4d53-9a42-e1042bfc1cb0")
+def test_codex_session_id_remains_a_lossless_128_bit_identity() -> None:
+    codex_session_id = parse_codex_session_id("01a00e9a-80f4-7ea2-83a5-f6ef25ac5e65")
 
-    codex_halves = split_codex_session_uuid_into_signed_bigints(codex_uuid)
-    registry_halves = split_rodex_registry_uuid_into_signed_bigints(registry_uuid)
+    stored_parts = split_codex_session_id_into_signed_bigints(codex_session_id)
 
-    assert join_signed_bigints_into_a_codex_session_uuid(*codex_halves) == codex_uuid
-    assert join_signed_bigints_into_a_rodex_registry_uuid(*registry_halves) == registry_uuid
-    assert codex_halves != registry_halves
+    assert len(stored_parts) == 2
+    assert join_signed_bigints_into_a_codex_session_id(*stored_parts) == codex_session_id

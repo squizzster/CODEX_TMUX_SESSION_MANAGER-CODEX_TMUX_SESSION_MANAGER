@@ -11,8 +11,8 @@ Apply these standards to future schema decisions. These authorative standards ma
   implementation convenience.
 - Enforce identity, cardinality, and referential integrity with database constraints,
   not application assumptions alone.
-- Lookups use `INTEGER` fields. Stored `TEXT` may be payload, but is not indexed or
-  searched when integer identity fields exist.
+- Lookups use `INTEGER` relational keys or `BIGINT` domain IDs. Stored `TEXT` may be
+  payload, but is not indexed or searched when integer identity fields exist.
 - Index fields used for lookup, joins, or enforced uniqueness. Do not index payload
   without an observed query that needs it.
 - Every natural key and one-to-one relationship has a named unique index whose ordered
@@ -21,8 +21,8 @@ Apply these standards to future schema decisions. These authorative standards ma
   when cardinality, lifecycle, reuse, or ownership is genuinely separate.
 - Preserve required canonical identity when adding an optional user-defined identity;
   represent the latter with a separate nullable relationship rather than replacement.
-- Do not introduce redundant association tables or compatibility structure merely to
-  avoid changing an earlier schema merely for compatibility within this pre-release.
+- Do not introduce redundant association tables without a current cardinality or
+  ownership requirement.
 - Lookup tables use their complete natural key: `SELECT id` first and `INSERT` only
   when no row exists. This avoids unnecessary AUTOINCREMENT gaps.
 - Related writes run inside one `BEGIN IMMEDIATE` transaction. Multi-table read views
@@ -46,22 +46,21 @@ Apply these standards to future schema decisions. These authorative standards ma
   and preserve enough bits for the domain's collision requirements.
 - Normalisation, derivation, insertion, and lookup share one authoritative pipeline.
   A matching derived integer identity is occupied; do not fall back to a text lookup.
-- Random Rodex identifiers use exactly 64 bits, one unique index, and ten bounded
+- Random Rodex IDs use exactly 64 bits, one unique index, and ten bounded
   candidates before failing explicitly. They never change representation or width.
   Generated cool names try ten candidates at each approved word count before escalating
   to the next word count, then fail explicitly.
-- In ALPHA, incompatible schema changes may reset a disposable database only after an
-  explicit decision. Additive, verified schema extensions preserve existing contents.
+- In ALPHA, schema changes may reset a disposable database only after an explicit
+  decision. Additive, verified schema extensions preserve existing contents.
 
 ## Current statistics projection
 
-- `rodex_registries` contains the database instance's one durable UUID row. Live tmux
+- `rodex_registries` contains the database instance's one durable 64-bit ID row. Live tmux
   identity includes it so another registry cannot adopt the same session/Codex pair.
-- `rodex_sessions` contains one signed-BIGINT Rodex session identifier, the two signed
-  halves of the Codex UUID, and permanent/optional display-name links. The public Rodex
-  identifier is always serialized as a 16-character lowercase hex string, never a JSON
-  number. The ALPHA schema starts in `rodex-v2.sqlite3`; the incompatible earlier
-  database is deliberately outside this schema rather than migrated or interpreted.
+- `rodex_sessions` contains one signed-BIGINT Rodex session ID, the two signed
+  halves of the Codex session ID, and permanent/optional display-name links. The public Rodex
+  session ID is always serialized as a 16-character lowercase hex string, never a JSON
+  number. The ALPHA schema is stored in `rodex-v3.sqlite3`.
 - `rodex_sessions_statistics` is the latest successful aggregate snapshot, one row per
   Rodex session. Every fixed aggregate and its available base count is a typed scalar
   column. Rodex allocates its monotonic `statistics_revision`; temporary analyzer
@@ -73,8 +72,8 @@ Apply these standards to future schema decisions. These authorative standards ma
   category/name/count facts. Its `(session, category, name)` key supports deterministic
   reconstruction and direct aggregation. `rodex_sessions_statistics_audit_limits`
   retains limitation order with `(session, ordinal)`.
-- `rodex_sessions_statistics_sources` retains every Codex UUID linked to the Rodex
-  lineage. A Codex UUID is globally unique to one lineage. Nullable rollout provenance
+- `rodex_sessions_statistics_sources` retains every Codex session ID linked to the Rodex
+  lineage. A Codex session ID is globally unique to one lineage. Nullable rollout provenance
   represents a registered source not yet authenticated; included provenance carries an
   absolute canonical path, complete-prefix byte count, mtime, SHA-256, and revision.
 - `rodex_sessions_statistics_turns` stores one typed, privacy-filtered projection per
@@ -86,9 +85,9 @@ Apply these standards to future schema decisions. These authorative standards ma
   diagnostic code cannot contain free-form errors or paths. Failure never fabricates or
   overwrites a statistics snapshot.
 - Publishing a session projection, complete turn set, exact included sources, and
-  healthy state is one UUID- and prior-revision-fenced transaction. Revision
+  healthy state is one Codex-session-ID- and prior-revision-fenced transaction. Revision
   mark-and-sweep updates existing turn identities and removes obsolete turns without a
-  variable-length SQL key list. Health-only failure publication uses the UUID fence but
+  variable-length SQL key list. Health-only failure publication uses the ID fence but
   does not mutate last-good statistics, turns, or source analysis.
 - Strict typed projection parsing rejects missing, unknown, or wrongly typed analyzer
   fields before SQL begins. Reads select root and child rows in one transaction; the CLI

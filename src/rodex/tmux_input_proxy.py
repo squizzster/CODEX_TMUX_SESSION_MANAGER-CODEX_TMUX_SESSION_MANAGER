@@ -219,12 +219,12 @@ def _dispatch_rodex_input_command(
             "-v",
             "-t",
             pane_id,
-            "@rodex_codex_session_uuid",
+            "@rodex_codex_session_id",
         )
-        codex_uuid = codex_identity.stdout.strip()
+        codex_session_id = codex_identity.stdout.strip()
         message = (
-            f"Rodex: {session_name} -> Codex {codex_uuid}"
-            if codex_identity.returncode == 0 and codex_uuid
+            f"Rodex: {session_name} -> Codex {codex_session_id}"
+            if codex_identity.returncode == 0 and codex_session_id
             else f"Rodex: {session_name}"
         )
     elif arguments == ("detach",):

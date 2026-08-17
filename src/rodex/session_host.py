@@ -6,7 +6,7 @@ import argparse
 from collections.abc import Sequence
 from pathlib import Path
 
-from rodex_registry.identity import RodexSessionIdentifier
+from rodex_registry.identity import RodexSessionId
 
 from .analytics import AnalyticsWorkerConfig
 from .runtime import run_session_host
@@ -23,7 +23,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--tmux-server-socket", required=True, type=Path)
     parser.add_argument("--rodex-database", type=Path)
     parser.add_argument("--codex-sessions-root", type=Path)
-    parser.add_argument("--rodex-session-identifier", type=RodexSessionIdentifier.parse)
+    parser.add_argument("--rodex-session-id", type=RodexSessionId.parse)
     parser.add_argument("codex_arguments", nargs=argparse.REMAINDER)
     return parser
 
@@ -36,7 +36,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     analytics_values = (
         args.rodex_database,
         args.codex_sessions_root,
-        args.rodex_session_identifier,
+        args.rodex_session_id,
     )
     if any(value is not None for value in analytics_values) and not all(
         value is not None for value in analytics_values
@@ -44,11 +44,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise SystemExit("analytics arguments must be supplied together")
     analytics_config = (
         None
-        if args.rodex_session_identifier is None
+        if args.rodex_session_id is None
         else AnalyticsWorkerConfig(
             rodex_database_path=args.rodex_database,
             codex_sessions_root=args.codex_sessions_root,
-            rodex_session_identifier=args.rodex_session_identifier,
+            rodex_session_id=args.rodex_session_id,
         )
     )
     return run_session_host(

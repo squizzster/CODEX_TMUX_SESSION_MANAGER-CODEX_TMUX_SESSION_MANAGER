@@ -234,7 +234,7 @@ def test_session_creation_allocates_and_owns_one_cool_name(
 
     session = create_a_rodex_session(
         database,
-        codex_session_uuid=uuid.UUID("01a00654-f2bc-7a30-834a-a5f886a65f82"),
+        codex_session_id=uuid.UUID("01a00654-f2bc-7a30-834a-a5f886a65f82"),
     )
 
     assert session.cool_name == "precise-schema"

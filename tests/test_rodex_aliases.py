@@ -13,8 +13,8 @@ from rodex_registry import (
     assign_a_user_defined_cool_name,
     create_a_rodex_session,
     list_rodex_session_runtimes_for_a_user,
-    lookup_rodex_session_id_from_a_cool_name,
     lookup_rodex_session_names,
+    lookup_rodex_sessions_id_from_a_cool_name,
 )
 
 DNA = RodexSessionsUserIdentity(1009, 1010, "dna")
@@ -41,7 +41,7 @@ def _create_session(
     )
     return create_a_rodex_session(
         database,
-        codex_session_uuid=uuid.UUID(int=codex_int),
+        codex_session_id=uuid.UUID(int=codex_int),
         user_identity=owner,
         tmux_server_socket_path=f"/tmp/{cool_name}.sock",
         tmux_session_name=cool_name,
@@ -61,7 +61,7 @@ def test_alias_is_one_owned_integer_identity_and_force_replaces_it(
     )
 
     assert assigned.user_defined_cool_name == "user_defined_field"
-    assert lookup_rodex_session_id_from_a_cool_name("user_defined_field", database) == (
+    assert lookup_rodex_sessions_id_from_a_cool_name("user_defined_field", database) == (
         session_id
     )
     with pytest.raises(RodexSessionError, match="use --force"):
@@ -79,9 +79,9 @@ def test_alias_is_one_owned_integer_identity_and_force_replaces_it(
     )
 
     assert replaced.user_defined_cool_name == "replacement"
-    assert lookup_rodex_session_id_from_a_cool_name("user_defined_field", database) is None
-    assert lookup_rodex_session_id_from_a_cool_name("black-sawfly", database) == session_id
-    assert lookup_rodex_session_id_from_a_cool_name("replacement", database) == session_id
+    assert lookup_rodex_sessions_id_from_a_cool_name("user_defined_field", database) is None
+    assert lookup_rodex_sessions_id_from_a_cool_name("black-sawfly", database) == session_id
+    assert lookup_rodex_sessions_id_from_a_cool_name("replacement", database) == session_id
     assert lookup_rodex_session_names(session_id, database) == replaced
     assert _cool_names(database) == [
         (1, "black-sawfly"),
@@ -102,7 +102,7 @@ def test_duplicate_codex_session_resume_guidance_prefers_the_user_defined_name(
     with pytest.raises(RodexSessionError) as raised:
         create_a_rodex_session(
             database,
-            codex_session_uuid=uuid.UUID(int=1),
+            codex_session_id=uuid.UUID(int=1),
             user_identity=DNA,
         )
 
@@ -201,4 +201,4 @@ def test_runtime_listing_is_filtered_by_the_complete_posix_user_lookup(
     assert runtimes[0].cool_name == "black-sawfly"
     assert runtimes[0].user_defined_cool_name == "work"
     assert runtimes[0].display_name == "work"
-    assert runtimes[0].codex_session_uuid == uuid.UUID(int=1)
+    assert runtimes[0].codex_session_id == uuid.UUID(int=1)

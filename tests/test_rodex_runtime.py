@@ -19,6 +19,7 @@ import pytest
 
 import rodex.runtime as runtime_module
 from rodex.analytics import AnalyticsWorkerConfig
+from rodex.control import LiveRodexControl
 from rodex.runtime import (
     RODEX_TMUX_HISTORY_LIMIT_LINES,
     CurrentTmuxPaneContext,
@@ -35,7 +36,7 @@ from rodex.tmux_status import (
     STATUS_LEFT_CLAIM_PUBLISHER_OPTION,
     STATUS_LEFT_CLAIM_TOKEN_OPTION,
 )
-from rodex_registry import RodexSessionIdentifier
+from rodex_registry import RodexRegistryId, RodexSessionId
 
 
 class FakeWebSocket:
@@ -92,11 +93,11 @@ class RuntimeRunner:
 def test_observer_uses_distinct_codex_identity_fields_and_no_compression(
     tmp_path: Path,
 ) -> None:
-    codex_uuid = "01a00654-f2bc-7a30-834a-a5f886a65f82"
-    connector = RecordingConnector([codex_uuid])
+    codex_session_id = "01a00654-f2bc-7a30-834a-a5f886a65f82"
+    connector = RecordingConnector([codex_session_id])
     launcher = RodexRuntimeLauncher("codex", "tmux", connector=connector)
 
-    assert launcher._list_loaded_codex_threads(tmp_path / "app.sock") == [codex_uuid]
+    assert launcher._list_loaded_codex_threads(tmp_path / "app.sock") == [codex_session_id]
 
     _, options = connector.calls[0]
     assert options["compression"] is None
@@ -117,16 +118,16 @@ def test_observer_uses_distinct_codex_identity_fields_and_no_compression(
     ]
 
 
-def test_start_directly_hosts_codex_in_tmux_and_returns_its_uuid(
+def test_start_directly_hosts_codex_in_tmux_and_returns_its_session_id(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    codex_uuid = "01a00654-f2bc-7a30-834a-a5f886a65f82"
+    codex_session_id = "01a00654-f2bc-7a30-834a-a5f886a65f82"
     monkeypatch.setenv("RODEX_RUNTIME_DIR", str(tmp_path))
     monkeypatch.setattr(
         runtime_module.secrets, "token_hex", lambda size: "0123456789abcdef"
     )
     runner = RuntimeRunner(tmp_path)
-    connector = RecordingConnector([codex_uuid])
+    connector = RecordingConnector([codex_session_id])
     launcher = RodexRuntimeLauncher(
         "/usr/bin/codex",
         "/usr/bin/tmux",
@@ -135,9 +136,9 @@ def test_start_directly_hosts_codex_in_tmux_and_returns_its_uuid(
         python_executable="/venv/bin/python",
     )
 
-    live, observed_uuid = launcher.start(tmp_path, ["--model", "example"])
+    live, observed_codex_session_id = launcher.start(tmp_path, ["--model", "example"])
 
-    assert observed_uuid == uuid.UUID(codex_uuid)
+    assert observed_codex_session_id == uuid.UUID(codex_session_id)
     assert live.tmux_session_name == "rodex-0123456789abcdef"
     new_session = runner.calls[0]
     assert new_session[:3] == [
@@ -164,7 +165,6 @@ def test_start_directly_hosts_codex_in_tmux_and_returns_its_uuid(
         host_command
     )
     assert "--model example" in host_command
-    assert "--rodex-session-uuid" not in host_command
     assert "--rodex-database" not in host_command
     assert "--codex-sessions-root" not in host_command
     assert "send-keys" not in host_command
@@ -187,18 +187,18 @@ def test_start_directly_hosts_codex_in_tmux_and_returns_its_uuid(
             "set-option",
             "-t",
             "=rodex-0123456789abcdef:",
-            "@rodex_codex_session_uuid",
-            codex_uuid,
+            "@rodex_codex_session_id",
+            codex_session_id,
         ],
     ]
 
 
-def test_start_passes_the_exact_leading_zero_identifier_to_the_session_host(
+def test_start_passes_the_exact_leading_zero_session_id_to_the_session_host(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    codex_uuid = "01a00654-f2bc-7a30-834a-a5f886a65f82"
-    rodex_session_identifier = RodexSessionIdentifier.parse("0000000000000001")
-    registry_uuid = uuid.UUID("06179a35-8126-4d53-9a42-e1042bfc1cb0")
+    codex_session_id = "01a00654-f2bc-7a30-834a-a5f886a65f82"
+    rodex_session_id = RodexSessionId.parse("0000000000000001")
+    registry_id = RodexRegistryId.parse("06179a3581264d53")
     monkeypatch.setenv("RODEX_RUNTIME_DIR", str(tmp_path))
     monkeypatch.setenv("RODEX_CODEX_SESSIONS_ROOT", str(tmp_path / "sessions"))
     monkeypatch.setattr(
@@ -209,28 +209,27 @@ def test_start_passes_the_exact_leading_zero_identifier_to_the_session_host(
         "/usr/bin/codex",
         "/usr/bin/tmux",
         runner=runner,
-        connector=RecordingConnector([codex_uuid]),
+        connector=RecordingConnector([codex_session_id]),
         python_executable="/venv/bin/python",
     )
 
     launcher.start(
         tmp_path,
         [],
-        rodex_session_identifier=rodex_session_identifier,
-        rodex_registry_uuid=registry_uuid,
-        rodex_database_path=tmp_path / "rodex-v2.sqlite3",
+        rodex_session_id=rodex_session_id,
+        rodex_registry_id=registry_id,
+        rodex_database_path=tmp_path / "rodex-v3.sqlite3",
     )
 
     host_command = runner.calls[0][-1]
-    assert "--rodex-session-identifier 0000000000000001" in host_command
-    assert f"--rodex-database {tmp_path / 'rodex-v2.sqlite3'}" in host_command
-    assert "--rodex-session-uuid" not in host_command
+    assert "--rodex-session-id 0000000000000001" in host_command
+    assert f"--rodex-database {tmp_path / 'rodex-v3.sqlite3'}" in host_command
 
 
-def test_exact_resume_fails_when_codex_reports_that_uuid_is_not_saved(
+def test_exact_resume_fails_when_codex_reports_that_session_id_is_not_saved(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    codex_uuid = uuid.UUID("01a00654-f2bc-7a30-834a-a5f886a65f82")
+    codex_session_id = uuid.UUID("01a00654-f2bc-7a30-834a-a5f886a65f82")
     monkeypatch.setenv("RODEX_RUNTIME_DIR", str(tmp_path))
     monkeypatch.setattr(
         runtime_module.secrets, "token_hex", lambda size: "0123456789abcdef"
@@ -243,7 +242,7 @@ def test_exact_resume_fails_when_codex_reports_that_uuid_is_not_saved(
         calls.append(command)
         if "new-session" in command:
             (tmp_path / "app-0123456789abcdef.log").write_text(
-                f"ERROR: No saved session found with ID {codex_uuid}. "
+                f"ERROR: No saved session found with ID {codex_session_id}. "
                 "Run `codex resume` without an ID to choose from existing sessions.\n"
             )
         return subprocess.CompletedProcess(
@@ -261,25 +260,25 @@ def test_exact_resume_fails_when_codex_reports_that_uuid_is_not_saved(
     )
 
     with pytest.raises(RodexCodexSessionNotFoundError) as raised:
-        launcher.start(tmp_path, ["resume", str(codex_uuid)])
+        launcher.start(tmp_path, ["resume", str(codex_session_id)])
 
     assert str(raised.value) == (
-        f"Codex has no saved session for exact identity {codex_uuid}"
+        f"Codex has no saved session for exact identity {codex_session_id}"
     )
     assert any("kill-session" in command for command in calls)
 
 
-def test_exact_resume_rejects_a_different_loaded_uuid_before_publishing_control(
+def test_exact_resume_rejects_a_different_loaded_id_before_publishing_control(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    requested_uuid = uuid.UUID("01a00654-f2bc-7a30-834a-a5f886a65f82")
-    observed_uuid = uuid.UUID(int=requested_uuid.int + 1)
+    requested_codex_session_id = uuid.UUID("01a00654-f2bc-7a30-834a-a5f886a65f82")
+    observed_codex_session_id = uuid.UUID(int=requested_codex_session_id.int + 1)
     monkeypatch.setenv("RODEX_RUNTIME_DIR", str(tmp_path))
     monkeypatch.setattr(
         runtime_module.secrets, "token_hex", lambda size: "0123456789abcdef"
     )
     runner = RuntimeRunner(tmp_path)
-    connector = RecordingConnector([str(observed_uuid)])
+    connector = RecordingConnector([str(observed_codex_session_id)])
     launcher = RodexRuntimeLauncher(
         "/usr/bin/codex",
         "/usr/bin/tmux",
@@ -289,11 +288,11 @@ def test_exact_resume_rejects_a_different_loaded_uuid_before_publishing_control(
     )
 
     with pytest.raises(RodexRuntimeError) as raised:
-        launcher.start(tmp_path, ["resume", str(requested_uuid)])
+        launcher.start(tmp_path, ["resume", str(requested_codex_session_id)])
 
     assert str(raised.value) == (
         "Codex resumed an unexpected exact identity: "
-        f"requested {requested_uuid}, observed {observed_uuid}"
+        f"requested {requested_codex_session_id}, observed {observed_codex_session_id}"
     )
     tmux_operations = [command[3] for command in runner.calls]
     assert tmux_operations == ["set-option", "has-session", "kill-session"]
@@ -524,7 +523,7 @@ def test_rename_and_status_configuration_use_the_real_tmux_session_name(
         ],
         ["set-option", "-t", "=automatic-beluga:", "status-right-length", "64"],
     ]
-    assert len(status_commands) == 19
+    assert len(status_commands) == 15
     for event, hook_command in zip(
         ("attached", "detached"), status_commands[11:13], strict=True
     ):
@@ -550,12 +549,6 @@ def test_rename_and_status_configuration_use_the_real_tmux_session_name(
     ):
         assert option in shared_ctrl_c_binding[3]
         assert tmux_format in shared_ctrl_c_binding[3]
-    assert status_commands[15] == ["list-keys", "-T", "root", "C-b"]
-    assert status_commands[16] == ["pipe-pane", "-t", "=automatic-beluga:"]
-    assert status_commands[17:19] == [
-        ["list-keys", "-T", "root", "Enter"],
-        ["list-keys", "-T", "root", "Tab"],
-    ]
 
 
 def test_tmux_slash_switch_reinstalls_retained_bindings(
@@ -614,40 +607,6 @@ def test_shared_ctrl_c_guard_preserves_a_user_owned_binding(tmp_path: Path) -> N
     assert not any(
         "rodex.tmux_shared_ctrl_c" in argument for command in calls for argument in command
     )
-
-
-@pytest.mark.parametrize(
-    ("ctrl_b_binding", "should_unbind"),
-    (
-        (
-            "bind-key -T root C-b run-shell -b 'python -m rodex.tmux_status'\n",
-            True,
-        ),
-        ("bind-key -T root C-b display-message user-binding\n", False),
-    ),
-)
-def test_status_setup_removes_only_deprecated_rodex_ctrl_b_binding(
-    tmp_path: Path,
-    ctrl_b_binding: str,
-    should_unbind: bool,
-) -> None:
-    calls: list[list[str]] = []
-
-    def runner(command: list[str], **_options: object) -> subprocess.CompletedProcess[str]:
-        calls.append(command)
-        if command[-4:] == ["list-keys", "-T", "root", "C-b"]:
-            output = ctrl_b_binding
-        else:
-            output = ""
-        return subprocess.CompletedProcess(command, 0, stdout=output, stderr="")
-
-    RodexRuntimeLauncher("codex", "tmux", runner=runner).configure_identity_status(
-        LiveTmuxSession(tmp_path / "tmux.sock", "automatic-beluga")
-    )
-
-    unbound = any(command[3:] == ["unbind-key", "-T", "root", "C-b"] for command in calls)
-    assert unbound is should_unbind
-    assert not any(command[3:6] == ["bind-key", "-n", "C-b"] for command in calls)
 
 
 def test_real_tmux_fast_ctrl_b_d_detaches_without_ending_session(
@@ -922,7 +881,7 @@ def test_real_tmux_survives_rename_and_status_configuration(tmp_path: Path) -> N
         tmp_path / "events.sock",
     )
     launcher = RodexRuntimeLauncher("codex", tmux_binary)
-    codex_uuid = uuid.UUID("01a00654-f2bc-7a30-834a-a5f886a65f82")
+    codex_session_id = uuid.UUID("01a00654-f2bc-7a30-834a-a5f886a65f82")
     control_clients: list[subprocess.Popen[str]] = []
 
     def tmux_format(format_string: str) -> str:
@@ -1003,7 +962,7 @@ def test_real_tmux_survives_rename_and_status_configuration(tmp_path: Path) -> N
         capture_output=True,
     )
     try:
-        launcher.publish_runtime_control(original, codex_uuid)
+        launcher.publish_runtime_control(original, codex_session_id)
         subprocess.run(
             [
                 tmux_binary,
@@ -1060,7 +1019,7 @@ def test_real_tmux_survives_rename_and_status_configuration(tmp_path: Path) -> N
         discovered = launcher.discover_runtime_control(renamed)
         assert discovered.protocol_proxy_socket_path == tmp_path / "proxy.sock"
         assert discovered.protocol_event_socket_path == tmp_path / "events.sock"
-        assert discovered.codex_session_uuid == codex_uuid
+        assert discovered.codex_session_id == codex_session_id
         shown_status = subprocess.run(
             [
                 tmux_binary,
@@ -1301,12 +1260,12 @@ def test_runtime_control_publishes_pending_then_registered_identity(
         tmp_path / "proxy.sock",
         tmp_path / "events.sock",
     )
-    codex_uuid = uuid.uuid4()
-    rodex_session_identifier = RodexSessionIdentifier.parse("0123456789abcdef")
-    registry_uuid = uuid.uuid4()
+    codex_session_id = uuid.uuid4()
+    rodex_session_id = RodexSessionId.parse("0123456789abcdef")
+    registry_id = RodexRegistryId.generate()
 
     launcher.publish_runtime_control(
-        runtime, codex_uuid, rodex_session_identifier, registry_uuid
+        runtime, codex_session_id, rodex_session_id, registry_id
     )
     launcher.confirm_runtime_registration(runtime)
 
@@ -1316,15 +1275,15 @@ def test_runtime_control_publishes_pending_then_registered_identity(
             "set-option",
             "-t",
             "=rodex-token:",
-            "@rodex_session_identifier",
-            str(rodex_session_identifier),
+            "@rodex_session_id",
+            str(rodex_session_id),
         ],
         [
             "set-option",
             "-t",
             "=rodex-token:",
-            "@rodex_registry_uuid",
-            str(registry_uuid),
+            "@rodex_registry_id",
+            str(registry_id),
         ],
         [
             "set-option",
@@ -1343,20 +1302,55 @@ def test_runtime_control_publishes_pending_then_registered_identity(
     ]
 
 
-@pytest.mark.parametrize(
-    "invalid_identifier",
-    ["0123456789abcde", "0123456789abcdeF", "01234567-89abcdef"],
-)
-def test_runtime_discovery_rejects_a_noncanonical_session_identifier_marker(
+def test_runtime_discovery_reads_the_complete_current_identity_tuple(
     tmp_path: Path,
-    invalid_identifier: str,
 ) -> None:
     values = {
         "@rodex_protocol_proxy_socket_path": str(tmp_path / "proxy.sock"),
         "@rodex_protocol_event_socket_path": str(tmp_path / "events.sock"),
-        "@rodex_codex_session_uuid": "01a00654-f2bc-7a30-834a-a5f886a65f82",
-        "@rodex_session_identifier": invalid_identifier,
-        "@rodex_registry_uuid": "06179a35-8126-4d53-9a42-e1042bfc1cb0",
+        "@rodex_codex_session_id": "01a00654-f2bc-7a30-834a-a5f886a65f82",
+        "@rodex_session_id": "0123456789abcdef",
+        "@rodex_registry_id": "06179a3581264d53",
+        "@rodex_registration_state": "registered",
+    }
+
+    def read_option(
+        command: list[str], **_options: object
+    ) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            command, 0, stdout=f"{values.get(command[-1], '')}\n", stderr=""
+        )
+
+    launcher = RodexRuntimeLauncher("codex", "tmux", runner=read_option)
+
+    control = launcher.discover_runtime_control(
+        LiveTmuxSession(tmp_path / "tmux.sock", "automatic-beluga")
+    )
+
+    assert control == LiveRodexControl(
+        tmp_path / "proxy.sock",
+        tmp_path / "events.sock",
+        uuid.UUID("01a00654-f2bc-7a30-834a-a5f886a65f82"),
+        RodexSessionId.parse("0123456789abcdef"),
+        RodexRegistryId.parse("06179a3581264d53"),
+        "registered",
+    )
+
+
+@pytest.mark.parametrize(
+    "invalid_session_id",
+    ["0123456789abcde", "0123456789abcdeF", "01234567-89abcdef"],
+)
+def test_runtime_discovery_rejects_a_noncanonical_session_id_marker(
+    tmp_path: Path,
+    invalid_session_id: str,
+) -> None:
+    values = {
+        "@rodex_protocol_proxy_socket_path": str(tmp_path / "proxy.sock"),
+        "@rodex_protocol_event_socket_path": str(tmp_path / "events.sock"),
+        "@rodex_codex_session_id": "01a00654-f2bc-7a30-834a-a5f886a65f82",
+        "@rodex_session_id": invalid_session_id,
+        "@rodex_registry_id": "06179a3581264d53",
         "@rodex_registration_state": "registered",
     }
 
@@ -1370,7 +1364,7 @@ def test_runtime_discovery_rejects_a_noncanonical_session_identifier_marker(
     launcher = RodexRuntimeLauncher("codex", "tmux", runner=read_option)
     runtime = LiveTmuxSession(tmp_path / "tmux.sock", "automatic-beluga")
 
-    with pytest.raises(RodexRuntimeError, match="invalid Rodex session identifier"):
+    with pytest.raises(RodexRuntimeError, match="invalid Rodex session ID"):
         launcher.discover_runtime_control(runtime)
 
 
@@ -1633,7 +1627,7 @@ def test_session_host_connects_the_tui_through_the_protocol_proxy(
             analytics_config=AnalyticsWorkerConfig(
                 rodex_database_path=tmp_path / "rodex.sqlite3",
                 codex_sessions_root=tmp_path / "sessions",
-                rodex_session_identifier=RodexSessionIdentifier(1),
+                rodex_session_id=RodexSessionId(1),
             ),
             analytics_supervisor_factory=FailingAnalyticsSupervisor,
         )
@@ -1695,7 +1689,7 @@ def test_session_host_retries_exact_resume_during_active_writer_handoff(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    requested_uuid = uuid.UUID("01a00654-f2bc-7a30-834a-a5f886a65f82")
+    requested_codex_session_id = uuid.UUID("01a00654-f2bc-7a30-834a-a5f886a65f82")
     app_socket = tmp_path / "app.sock"
     tui_launches = 0
     retry_waits: list[float] = []
@@ -1782,7 +1776,8 @@ def test_session_host_retries_exact_resume_during_active_writer_handoff(
         runtime_module,
         "_read_runtime_log_since",
         lambda *_args: (
-            f"thread-store conflict: thread {requested_uuid} already has an active writer"
+            f"thread-store conflict: thread {requested_codex_session_id} "
+            "already has an active writer"
         ),
     )
     monkeypatch.setattr(runtime_module.time, "sleep", retry_waits.append)
@@ -1796,7 +1791,7 @@ def test_session_host_retries_exact_resume_during_active_writer_handoff(
             tmp_path / "events.sock",
             "/usr/bin/tmux",
             tmp_path / "tmux.sock",
-            ["resume", str(requested_uuid)],
+            ["resume", str(requested_codex_session_id)],
         )
         == 0
     )
@@ -1806,24 +1801,27 @@ def test_session_host_retries_exact_resume_during_active_writer_handoff(
 
 
 def test_active_writer_handoff_retry_requires_exact_thread_and_open_window() -> None:
-    requested_uuid = uuid.UUID("01a00654-f2bc-7a30-834a-a5f886a65f82")
-    detail = f"thread-store conflict: thread {requested_uuid} already has an active writer"
+    requested_codex_session_id = uuid.UUID("01a00654-f2bc-7a30-834a-a5f886a65f82")
+    detail = (
+        f"thread-store conflict: thread {requested_codex_session_id} "
+        "already has an active writer"
+    )
 
     assert runtime_module._active_writer_handoff_can_retry(
         detail,
-        requested_uuid,
+        requested_codex_session_id,
         now=9.9,
         deadline=10.0,
     )
     assert not runtime_module._active_writer_handoff_can_retry(
         detail,
-        uuid.UUID(int=requested_uuid.int + 1),
+        uuid.UUID(int=requested_codex_session_id.int + 1),
         now=9.9,
         deadline=10.0,
     )
     assert not runtime_module._active_writer_handoff_can_retry(
         detail,
-        requested_uuid,
+        requested_codex_session_id,
         now=10.0,
         deadline=10.0,
     )

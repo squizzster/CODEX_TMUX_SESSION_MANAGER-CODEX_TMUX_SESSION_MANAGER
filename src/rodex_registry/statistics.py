@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import os
 import sqlite3
-import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -18,9 +17,10 @@ from .errors import (
     RodexSessionTurnStatisticsAmbiguousError,
 )
 from .identity import (
-    join_signed_bigints_into_a_codex_session_uuid,
-    parse_codex_session_uuid,
-    split_codex_session_uuid_into_signed_bigints,
+    CodexSessionId,
+    join_signed_bigints_into_a_codex_session_id,
+    parse_codex_session_id,
+    split_codex_session_id_into_signed_bigints,
 )
 from .schema import (
     _SESSION_PROJECTION_SCALAR_COLUMNS,
@@ -73,7 +73,7 @@ class RodexSessionStatisticsSource:
 
     id: int
     rodex_sessions_id: int
-    codex_session_uuid: uuid.UUID
+    codex_session_id: CodexSessionId
     first_linked_at_utc: str
     rollout_file_path: str | None
     analyzed_size_bytes: int | None
@@ -87,7 +87,7 @@ class RodexSessionStatisticsSource:
 class RodexSessionStatisticsSourceObservation:
     """Exact bytes and filesystem state used for one aggregate calculation."""
 
-    codex_session_uuid: uuid.UUID
+    codex_session_id: CodexSessionId
     rollout_file_path: Path
     analyzed_size_bytes: int
     analyzed_mtime_ns: int
@@ -106,8 +106,8 @@ class RodexSessionTurnStatistics:
     projection: TurnStatisticsProjection
 
     @property
-    def codex_session_uuid(self) -> uuid.UUID:
-        return self.projection.codex_session_uuid
+    def codex_session_id(self) -> CodexSessionId:
+        return self.projection.codex_session_id
 
     @property
     def codex_turn_id(self) -> str:
@@ -162,7 +162,7 @@ def publish_rodex_session_statistics(
     session_id: int,
     database_path: str | os.PathLike[str] | None = None,
     *,
-    expected_current_codex_uuid: uuid.UUID | str,
+    expected_current_codex_session_id: CodexSessionId | str,
     based_on_statistics_revision: int | None,
     statistics_projection_schema_version: str,
     calculated_at_utc: str,
@@ -172,8 +172,8 @@ def publish_rodex_session_statistics(
 ) -> RodexSessionStatistics:
     """Atomically publish one fenced session projection, turns, and sources."""
     _validate_session_id(session_id)
-    expected_halves = split_codex_session_uuid_into_signed_bigints(
-        expected_current_codex_uuid
+    expected_halves = split_codex_session_id_into_signed_bigints(
+        expected_current_codex_session_id
     )
     if based_on_statistics_revision is not None:
         _validate_positive_id(based_on_statistics_revision, "based_on_statistics_revision")
@@ -187,21 +187,21 @@ def publish_rodex_session_statistics(
         raise ValueError(f"unsupported statistics coverage state: {coverage}")
     statistics_projection = validate_session_statistics_projection(statistics_projection)
     observations = tuple(_validate_source_observation(item) for item in analyzed_sources)
-    if len({item.codex_session_uuid for item in observations}) != len(observations):
-        raise ValueError("analyzed_sources contains a duplicate Codex UUID")
+    if len({item.codex_session_id for item in observations}) != len(observations):
+        raise ValueError("analyzed_sources contains a duplicate Codex session ID")
     if statistics_projection.analyzer_source_count != len(observations):
         raise ValueError(
             "analyzer source count must equal authenticated source observations"
         )
     turns = statistics_projection.turn_statistics
-    turn_keys = {(item.codex_session_uuid, item.codex_turn_id) for item in turns}
+    turn_keys = {(item.codex_session_id, item.codex_turn_id) for item in turns}
     if len(turn_keys) != len(turns):
         raise ValueError("turn_statistics contains a duplicate source and turn ID")
 
     path = initialise_rodex_database(database_path)
     with open_rodex_transaction(path) as connection:
         identity_row = connection.execute(
-            f"SELECT codex_session_uuid_int_1, codex_session_uuid_int_2 "
+            f"SELECT codex_session_id_signed_bigint_1, codex_session_id_signed_bigint_2 "
             f"FROM {RODEX_SESSIONS_TABLE} WHERE id = ?",
             (session_id,),
         ).fetchone()
@@ -209,7 +209,7 @@ def publish_rodex_session_statistics(
             raise RodexSessionError(f"Rodex session does not exist: {session_id}")
         if (int(identity_row[0]), int(identity_row[1])) != expected_halves:
             raise RodexSessionStatisticsConflictError(
-                "current Codex UUID changed during statistics calculation"
+                "current Codex session ID changed during statistics calculation"
             )
         previous_row = connection.execute(
             f"SELECT statistics_revision FROM {RODEX_SESSIONS_STATISTICS_TABLE} "
@@ -223,7 +223,8 @@ def publish_rodex_session_statistics(
             )
         new_revision = 1 if previous_revision is None else previous_revision + 1
         registered_rows = connection.execute(
-            f"SELECT id, codex_session_uuid_int_1, codex_session_uuid_int_2 "
+            f"SELECT id, codex_session_id_signed_bigint_1, "
+            "codex_session_id_signed_bigint_2 "
             f"FROM {RODEX_SESSIONS_STATISTICS_SOURCES_TABLE} "
             "WHERE rodex_sessions_id = ?",
             (session_id,),
@@ -231,7 +232,7 @@ def publish_rodex_session_statistics(
         registered = {(int(row[1]), int(row[2])) for row in registered_rows}
         source_ids = {(int(row[1]), int(row[2])): int(row[0]) for row in registered_rows}
         observed = {
-            split_codex_session_uuid_into_signed_bigints(item.codex_session_uuid)
+            split_codex_session_id_into_signed_bigints(item.codex_session_id)
             for item in observations
         }
         if not observed.issubset(registered):
@@ -243,7 +244,7 @@ def publish_rodex_session_statistics(
                 "statistics omit a registered Codex lineage source"
             )
         turn_sources = {
-            split_codex_session_uuid_into_signed_bigints(item.codex_session_uuid)
+            split_codex_session_id_into_signed_bigints(item.codex_session_id)
             for item in turns
         }
         if not turn_sources.issubset(observed):
@@ -346,8 +347,8 @@ def publish_rodex_session_statistics(
                 "rollout_file_path = ?, analyzed_size_bytes = ?, "
                 "analyzed_mtime_ns = ?, analyzed_prefix_sha256 = ?, "
                 "verified_at_utc = ?, included_statistics_revision = ? "
-                "WHERE rodex_sessions_id = ? AND codex_session_uuid_int_1 = ? "
-                "AND codex_session_uuid_int_2 = ?",
+                "WHERE rodex_sessions_id = ? AND codex_session_id_signed_bigint_1 = ? "
+                "AND codex_session_id_signed_bigint_2 = ?",
                 (
                     str(item.rollout_file_path),
                     item.analyzed_size_bytes,
@@ -356,7 +357,7 @@ def publish_rodex_session_statistics(
                     item.verified_at_utc,
                     new_revision,
                     session_id,
-                    *split_codex_session_uuid_into_signed_bigints(item.codex_session_uuid),
+                    *split_codex_session_id_into_signed_bigints(item.codex_session_id),
                 ),
             )
             if cursor.rowcount != 1:
@@ -374,8 +375,8 @@ def publish_rodex_session_statistics(
             f"{column} = excluded.{column}" for column in _TURN_DATABASE_SCALAR_COLUMNS
         )
         for item in turns:
-            source_halves = split_codex_session_uuid_into_signed_bigints(
-                item.codex_session_uuid
+            source_halves = split_codex_session_id_into_signed_bigints(
+                item.codex_session_id
             )
             source_id = source_ids[source_halves]
             turn_hash = _turn_id_sha256_signed_bigints(item.codex_turn_id)
@@ -468,7 +469,7 @@ def record_rodex_session_statistics_worker_health(
     session_id: int,
     database_path: str | os.PathLike[str] | None = None,
     *,
-    expected_current_codex_uuid: uuid.UUID | str,
+    expected_current_codex_session_id: CodexSessionId | str,
     worker_state: str,
     diagnostic_code: str | None,
     last_attempted_at_utc: str,
@@ -477,8 +478,8 @@ def record_rodex_session_statistics_worker_health(
 ) -> RodexSessionStatisticsWorker:
     """Update only fail-open worker health, preserving all last-good statistics."""
     _validate_session_id(session_id)
-    expected_halves = split_codex_session_uuid_into_signed_bigints(
-        expected_current_codex_uuid
+    expected_halves = split_codex_session_id_into_signed_bigints(
+        expected_current_codex_session_id
     )
     state = _normalise_required_text(worker_state, "worker_state")
     if state not in STATISTICS_WORKER_STATES:
@@ -520,7 +521,7 @@ def record_rodex_session_statistics_worker_health(
     path = initialise_rodex_database(database_path)
     with open_rodex_transaction(path) as connection:
         identity_row = connection.execute(
-            f"SELECT codex_session_uuid_int_1, codex_session_uuid_int_2 "
+            f"SELECT codex_session_id_signed_bigint_1, codex_session_id_signed_bigint_2 "
             f"FROM {RODEX_SESSIONS_TABLE} WHERE id = ?",
             (session_id,),
         ).fetchone()
@@ -528,7 +529,7 @@ def record_rodex_session_statistics_worker_health(
             raise RodexSessionError(f"Rodex session does not exist: {session_id}")
         if (int(identity_row[0]), int(identity_row[1])) != expected_halves:
             raise RodexSessionStatisticsConflictError(
-                "current Codex UUID changed before worker health publication"
+                "current Codex session ID changed before worker health publication"
             )
         _upsert_statistics_worker(
             connection,
@@ -580,7 +581,7 @@ def read_rodex_session_turn_statistics(
     codex_turn_id: str,
     database_path: str | os.PathLike[str] | None = None,
     *,
-    codex_session_uuid: uuid.UUID | str | None = None,
+    codex_session_id: CodexSessionId | str | None = None,
 ) -> RodexSessionTurnStatisticsView:
     """Read one exact turn and its parent freshness in one transaction."""
     _validate_session_id(session_id)
@@ -588,8 +589,8 @@ def read_rodex_session_turn_statistics(
     turn_hash = _turn_id_sha256_signed_bigints(turn_id)
     source_halves = (
         None
-        if codex_session_uuid is None
-        else split_codex_session_uuid_into_signed_bigints(codex_session_uuid)
+        if codex_session_id is None
+        else split_codex_session_id_into_signed_bigints(codex_session_id)
     )
     path = initialise_rodex_database(database_path)
     with open_rodex_read_transaction(path) as connection:
@@ -605,8 +606,8 @@ def read_rodex_session_turn_statistics(
         query = (
             f"SELECT turns.id, turns.rodex_sessions_id, "
             "turns.rodex_sessions_statistics_sources_id, "
-            "sources.codex_session_uuid_int_1, "
-            "sources.codex_session_uuid_int_2, turns.codex_turn_id, "
+            "sources.codex_session_id_signed_bigint_1, "
+            "sources.codex_session_id_signed_bigint_2, turns.codex_turn_id, "
             "turns.included_statistics_revision, turns.started_at_utc, "
             f"turns.terminal_at_utc, turns.outcome, {turn_scalar_columns} "
             f"FROM {RODEX_SESSIONS_STATISTICS_TURNS_TABLE} AS turns "
@@ -622,8 +623,8 @@ def read_rodex_session_turn_statistics(
         parameters: tuple[object, ...] = (session_id, *turn_hash, turn_id)
         if source_halves is not None:
             query += (
-                " AND sources.codex_session_uuid_int_1 = ? "
-                "AND sources.codex_session_uuid_int_2 = ?"
+                " AND sources.codex_session_id_signed_bigint_1 = ? "
+                "AND sources.codex_session_id_signed_bigint_2 = ?"
             )
             parameters += source_halves
         turn_rows = connection.execute(query + " ORDER BY turns.id", parameters).fetchall()
@@ -634,7 +635,7 @@ def read_rodex_session_turn_statistics(
         )
     if len(turn_rows) > 1:
         raise RodexSessionTurnStatisticsAmbiguousError(
-            "turn ID exists in multiple Codex sources; qualify it with a session UUID"
+            "turn ID exists in multiple Codex sources; qualify it with a Codex session ID"
         )
     return RodexSessionTurnStatisticsView(
         statistics=(
@@ -676,28 +677,29 @@ def list_rodex_session_statistics_sources(
 def register_codex_statistics_source_in_transaction(
     connection: sqlite3.Connection,
     session_id: int,
-    codex_session_uuid: uuid.UUID,
+    codex_session_id: CodexSessionId,
     first_linked_at_utc: str,
 ) -> None:
     """Register one Codex lineage inside its owning lifecycle transaction."""
-    uuid_halves = split_codex_session_uuid_into_signed_bigints(codex_session_uuid)
+    stored_codex_session_id = split_codex_session_id_into_signed_bigints(codex_session_id)
     row = connection.execute(
         f"SELECT rodex_sessions_id FROM {RODEX_SESSIONS_STATISTICS_SOURCES_TABLE} "
-        "WHERE codex_session_uuid_int_1 = ? AND codex_session_uuid_int_2 = ?",
-        uuid_halves,
+        "WHERE codex_session_id_signed_bigint_1 = ? "
+        "AND codex_session_id_signed_bigint_2 = ?",
+        stored_codex_session_id,
     ).fetchone()
     if row is None:
         connection.execute(
             f"INSERT INTO {RODEX_SESSIONS_STATISTICS_SOURCES_TABLE} "
-            "(rodex_sessions_id, codex_session_uuid_int_1, "
-            "codex_session_uuid_int_2, first_linked_at_utc) VALUES (?, ?, ?, ?)",
-            (session_id, *uuid_halves, first_linked_at_utc),
+            "(rodex_sessions_id, codex_session_id_signed_bigint_1, "
+            "codex_session_id_signed_bigint_2, first_linked_at_utc) VALUES (?, ?, ?, ?)",
+            (session_id, *stored_codex_session_id, first_linked_at_utc),
         )
         return
     if int(row[0]) != session_id:
         raise RodexSessionError(
             "Codex history already belongs to another Rodex statistics lineage: "
-            f"{codex_session_uuid}"
+            f"{codex_session_id}"
         )
 
 
@@ -735,7 +737,7 @@ def _validate_source_observation(
         raise TypeError(
             "analyzed_sources must contain RodexSessionStatisticsSourceObservation values"
         )
-    codex_uuid = parse_codex_session_uuid(observation.codex_session_uuid)
+    codex_session_id = parse_codex_session_id(observation.codex_session_id)
     source_path = observation.rollout_file_path.expanduser().resolve()
     if not source_path.is_absolute():
         raise ValueError("rollout_file_path must resolve to an absolute path")
@@ -753,7 +755,7 @@ def _validate_source_observation(
     ):
         raise ValueError("analyzed_prefix_sha256 must be 64 lowercase hexadecimal digits")
     return RodexSessionStatisticsSourceObservation(
-        codex_session_uuid=codex_uuid,
+        codex_session_id=codex_session_id,
         rollout_file_path=source_path,
         analyzed_size_bytes=observation.analyzed_size_bytes,
         analyzed_mtime_ns=observation.analyzed_mtime_ns,
@@ -836,8 +838,8 @@ def _select_statistics_sources(
     connection: sqlite3.Connection, session_id: int
 ) -> list[tuple[object, ...]]:
     return connection.execute(
-        f"SELECT id, rodex_sessions_id, codex_session_uuid_int_1, "
-        "codex_session_uuid_int_2, first_linked_at_utc, rollout_file_path, "
+        f"SELECT id, rodex_sessions_id, codex_session_id_signed_bigint_1, "
+        "codex_session_id_signed_bigint_2, first_linked_at_utc, rollout_file_path, "
         "analyzed_size_bytes, analyzed_mtime_ns, analyzed_prefix_sha256, "
         "verified_at_utc, included_statistics_revision "
         f"FROM {RODEX_SESSIONS_STATISTICS_SOURCES_TABLE} "
@@ -926,7 +928,7 @@ def _statistics_source_from_row(
     return RodexSessionStatisticsSource(
         id=int(row[0]),
         rodex_sessions_id=int(row[1]),
-        codex_session_uuid=join_signed_bigints_into_a_codex_session_uuid(
+        codex_session_id=join_signed_bigints_into_a_codex_session_id(
             int(row[2]), int(row[3])
         ),
         first_linked_at_utc=str(row[4]),
@@ -952,7 +954,7 @@ def _turn_statistics_from_rows(
     ):
         values[key] = bool(values[key])
     projection = TurnStatisticsProjection(
-        codex_session_uuid=join_signed_bigints_into_a_codex_session_uuid(
+        codex_session_id=join_signed_bigints_into_a_codex_session_id(
             int(row[3]), int(row[4])
         ),
         codex_turn_id=str(row[5]),

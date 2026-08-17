@@ -5,8 +5,8 @@ class RodexSessionError(RuntimeError):
     """The Rodex session registry could not satisfy its contract."""
 
 
-class RodexSessionIdentifierCollisionError(RodexSessionError):
-    """All permitted 64-bit identifier candidates were occupied."""
+class RodexSessionIdCollisionError(RodexSessionError):
+    """All permitted 64-bit session ID candidates were occupied."""
 
 
 class RodexSessionStatisticsConflictError(RodexSessionError):

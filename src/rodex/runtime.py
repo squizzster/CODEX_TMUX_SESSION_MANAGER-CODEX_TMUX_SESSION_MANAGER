@@ -189,6 +189,8 @@ class CurrentTmuxPaneContext:
     """The live tmux session and attachment snapshot inherited by this process."""
 
     tmux_session: LiveTmuxSession
+    tmux_session_id: str
+    tmux_window_id: str
     tmux_pane_id: str
     attached_client_count: int
 
@@ -737,13 +739,24 @@ class RodexRuntimeLauncher:
             "-t",
             pane_id,
             "-F",
-            "#{session_name}\t#{session_attached}",
+            (
+                "#{session_name}\t#{session_id}\t#{window_id}\t#{pane_id}\t"
+                "#{session_attached}"
+            ),
         )
         fields = result.stdout.rstrip("\n").split("\t")
-        if len(fields) != 2 or not fields[0]:
+        if (
+            len(fields) != 5
+            or not fields[0]
+            or not fields[1].startswith("$")
+            or not fields[1][1:].isdigit()
+            or not fields[2].startswith("@")
+            or not fields[2][1:].isdigit()
+            or fields[3] != pane_id
+        ):
             raise RodexRuntimeError("tmux returned an invalid current session context")
         try:
-            attached_client_count = int(fields[1])
+            attached_client_count = int(fields[4])
         except ValueError as error:
             raise RodexRuntimeError(
                 "tmux returned an invalid attached-client count"
@@ -752,6 +765,8 @@ class RodexRuntimeLauncher:
             raise RodexRuntimeError("tmux returned an invalid attached-client count")
         return CurrentTmuxPaneContext(
             tmux_session=LiveTmuxSession(socket_path, fields[0]),
+            tmux_session_id=fields[1],
+            tmux_window_id=fields[2],
             tmux_pane_id=pane_id,
             attached_client_count=attached_client_count,
         )

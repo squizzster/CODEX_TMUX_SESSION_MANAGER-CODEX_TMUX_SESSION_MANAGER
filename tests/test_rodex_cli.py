@@ -161,6 +161,8 @@ class StubLauncher:
     def discover_current_tmux_pane_context(self) -> CurrentTmuxPaneContext:
         return CurrentTmuxPaneContext(
             tmux_session=self.current_tmux_session,
+            tmux_session_id="$0",
+            tmux_window_id="@0",
             tmux_pane_id="%4",
             attached_client_count=self.attached_client_count,
         )
@@ -292,10 +294,17 @@ def test_context_reports_the_verified_current_rodex_session_as_json(
     assert json.loads(capsys.readouterr().out) == {
         "managed_by": "rodex",
         "rodex_session_name": "automatic-beluga",
+        "rodex_permanent_name": "automatic-beluga",
+        "rodex_user_defined_name": None,
         "rodex_session_uuid": str(rodex_uuid),
         "rodex_registry_uuid": str(lookup_rodex_registry_uuid(database)),
+        "rodex_database_path": str(database),
         "codex_session_uuid": str(CODEX_UUID),
+        "tmux_server_socket_path": str(tmp_path / "tmux.sock"),
         "tmux_session_name": "automatic-beluga",
+        "tmux_session_id": "$0",
+        "tmux_window_id": "@0",
+        "tmux_pane_id": "%4",
         "registration_state": "registered",
         "attached_clients": 2,
         "shared": True,
@@ -328,6 +337,38 @@ def test_context_rejects_a_different_registry_before_printing_identity(
         run(["_context"], database_path=database, launcher=launcher)  # type: ignore[arg-type]
 
     assert capsys.readouterr().out == ""
+
+
+def test_context_distinguishes_permanent_and_user_defined_names(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    database = tmp_path / "rodex.sqlite3"
+    monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
+    monkeypatch.setattr(
+        "cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga"
+    )
+    create_controlled_session(database, tmp_path)
+    assign_a_user_defined_cool_name(
+        "automatic-beluga",
+        "work",
+        database,
+        user_identity=DNA,
+        renamed_tmux_session_name="work",
+    )
+    launcher = StubLauncher(tmp_path)
+    launcher.current_tmux_session = replace(
+        launcher.current_tmux_session,
+        tmux_session_name="work",
+    )
+
+    assert run(["_context"], database_path=database, launcher=launcher) == 0  # type: ignore[arg-type]
+
+    context = json.loads(capsys.readouterr().out)
+    assert context["rodex_session_name"] == "work"
+    assert context["rodex_permanent_name"] == "automatic-beluga"
+    assert context["rodex_user_defined_name"] == "work"
 
 
 def test_context_rejects_a_live_name_not_recorded_for_its_identity(

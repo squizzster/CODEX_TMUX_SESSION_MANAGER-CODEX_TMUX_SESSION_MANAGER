@@ -113,7 +113,9 @@ Rodex flags include `_alias --force` and `_stats NAME --turn ID --source UUID --
 `_context` is the machine-facing self-identification route for Codex and local tooling.
 It resolves the inherited tmux pane, verifies its live Rodex, registry, and Codex markers
 against the current user's database row, and fails closed outside a matching managed
-session. The display name is read on every invocation, so an agent need not cache it.
+session. Its JSON includes registry/database provenance, permanent and user-defined
+names, the complete tmux socket/session/window/pane address, and sharing state. The
+display name is read on every invocation, so an agent need not cache it.
 Arguments after `_create` or
 `_detach` are forwarded to the managed Codex TUI; use `--` when an explicit boundary
 improves clarity. Stop `_tail` with `Ctrl-C`; the Rodex session keeps running. Names use 1–80

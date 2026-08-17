@@ -14,8 +14,11 @@ never presented or stored as another domain's identity.
 the calling process's inherited `TMUX` and `TMUX_PANE` values only to address the live
 pane, then authenticates the advertised Rodex, registry, and Codex UUIDs against the
 current POSIX user's persisted runtime. It reports the current display and tmux names,
-registration state, and attached-client snapshot as JSON. Missing, foreign, stale, or
-mismatched identity fails closed rather than being inferred or adopted.
+permanent and optional user-defined names, registry/database provenance, Codex UUID,
+exact tmux socket/session/window/pane address, registration state, and attached-client
+snapshot as JSON. Missing, foreign, stale, or mismatched identity fails closed rather
+than being inferred or adopted. Private proxy/event sockets and runtime logs remain
+implementation details rather than agent context.
 
 ## Basic launch pipeline
 

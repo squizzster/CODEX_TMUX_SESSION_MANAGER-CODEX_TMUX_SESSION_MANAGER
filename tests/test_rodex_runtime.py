@@ -318,7 +318,7 @@ def test_current_tmux_context_resolves_the_inherited_pane_on_its_exact_socket(
         return subprocess.CompletedProcess(
             command,
             0,
-            stdout="tangible-booby\t2\n",
+            stdout="tangible-booby\t$3\t@5\t%7\t2\n",
             stderr="",
         )
 
@@ -328,6 +328,8 @@ def test_current_tmux_context_resolves_the_inherited_pane_on_its_exact_socket(
         {"TMUX": f"{socket_path},1234,0", "TMUX_PANE": "%7"}
     ) == CurrentTmuxPaneContext(
         tmux_session=LiveTmuxSession(socket_path, "tangible-booby"),
+        tmux_session_id="$3",
+        tmux_window_id="@5",
         tmux_pane_id="%7",
         attached_client_count=2,
     )
@@ -341,7 +343,10 @@ def test_current_tmux_context_resolves_the_inherited_pane_on_its_exact_socket(
             "-t",
             "%7",
             "-F",
-            "#{session_name}\t#{session_attached}",
+            (
+                "#{session_name}\t#{session_id}\t#{window_id}\t#{pane_id}\t"
+                "#{session_attached}"
+            ),
         ]
     ]
 
@@ -362,6 +367,34 @@ def test_current_tmux_context_requires_an_inherited_tmux_pane(tmp_path: Path) ->
         )
 
 
+@pytest.mark.parametrize(
+    "reported_context",
+    [
+        "tangible-booby\t3\t@5\t%7\t1",
+        "tangible-booby\t$3\t5\t%7\t1",
+        "tangible-booby\t$3\t@5\t%8\t1",
+    ],
+)
+def test_current_tmux_context_rejects_invalid_reported_object_identities(
+    tmp_path: Path,
+    reported_context: str,
+) -> None:
+    def runner(command: list[str], **_options: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout=f"{reported_context}\n",
+            stderr="",
+        )
+
+    launcher = RodexRuntimeLauncher("codex", "tmux", runner=runner)
+
+    with pytest.raises(RodexRuntimeError, match="invalid current session context"):
+        launcher.discover_current_tmux_pane_context(
+            {"TMUX": f"{tmp_path / 'tmux.sock'},1234,0", "TMUX_PANE": "%7"}
+        )
+
+
 @pytest.mark.parametrize("reported_count", ["many", "-1"])
 def test_current_tmux_context_rejects_an_invalid_attached_client_count(
     tmp_path: Path,
@@ -371,7 +404,7 @@ def test_current_tmux_context_rejects_an_invalid_attached_client_count(
         return subprocess.CompletedProcess(
             command,
             0,
-            stdout=f"tangible-booby\t{reported_count}\n",
+            stdout=f"tangible-booby\t$3\t@5\t%7\t{reported_count}\n",
             stderr="",
         )
 

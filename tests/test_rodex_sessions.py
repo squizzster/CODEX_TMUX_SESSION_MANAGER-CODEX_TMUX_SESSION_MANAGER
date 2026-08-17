@@ -14,6 +14,7 @@ from rodex_functions import (
     RodexSessionUUIDCollisionError,
     create_a_rodex_session,
     default_rodex_database_path,
+    generate_an_unregistered_rodex_uuid_candidate,
     initialise_rodex_database,
     join_signed_bigints_into_a_codex_uuid,
     join_signed_bigints_into_a_rodex_uuid,
@@ -298,11 +299,11 @@ def test_database_unique_index_rejects_duplicate_uuid_halves(tmp_path: Path) -> 
     assert first.id == 1
 
 
-def test_create_retries_after_a_uuid_collision(
+def test_generated_session_uuid_succeeds_on_the_tenth_attempt(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     database = tmp_path / "rodex.sqlite3"
-    candidates = iter([100, 100, 200])
+    candidates = iter([100] * 10 + [200])
     monkeypatch.setattr(session_module.secrets, "randbits", lambda bits: next(candidates))
 
     first = create_a_rodex_session(database, codex_session_uuid=codex_uuid(1))
@@ -320,8 +321,40 @@ def test_create_reports_repeated_uuid_collisions(
     monkeypatch.setattr(session_module.secrets, "randbits", lambda bits: 100)
     create_a_rodex_session(database, codex_session_uuid=codex_uuid(1))
 
-    with pytest.raises(RodexSessionUUIDCollisionError, match="8 attempts"):
+    with pytest.raises(RodexSessionUUIDCollisionError, match="10 attempts"):
         create_a_rodex_session(database, codex_session_uuid=codex_uuid(2))
+
+
+def test_pending_uuid_candidate_succeeds_on_the_tenth_attempt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database = tmp_path / "rodex.sqlite3"
+    create_a_rodex_session(
+        database,
+        codex_session_uuid=codex_uuid(1),
+        rodex_session_uuid=uuid.UUID(int=100),
+    )
+    candidates = iter([100] * 9 + [200])
+    monkeypatch.setattr(session_module.secrets, "randbits", lambda bits: next(candidates))
+
+    candidate = generate_an_unregistered_rodex_uuid_candidate(database)
+
+    assert candidate.int == 200
+
+
+def test_pending_uuid_candidate_exhaustion_is_fatal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database = tmp_path / "rodex.sqlite3"
+    create_a_rodex_session(
+        database,
+        codex_session_uuid=codex_uuid(1),
+        rodex_session_uuid=uuid.UUID(int=100),
+    )
+    monkeypatch.setattr(session_module.secrets, "randbits", lambda bits: 100)
+
+    with pytest.raises(RodexSessionUUIDCollisionError, match="10 attempts"):
+        generate_an_unregistered_rodex_uuid_candidate(database)
 
 
 def test_lookup_id_finds_a_uuid_object(tmp_path: Path) -> None:

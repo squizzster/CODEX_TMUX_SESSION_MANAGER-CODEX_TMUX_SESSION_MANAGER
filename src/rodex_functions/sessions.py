@@ -22,14 +22,16 @@ from cool_name.functions import (
     normalise_rodex_display_name,
     reserve_specific_cool_name,
 )
-from rodex_sql import default_rodex_database_path as _default_rodex_database_path
 from rodex_sql import (
+    INDEX_RE_TRY_ATTEMPTS,
+    index_re_try_attempt_numbers,
     normalise_rodex_database_path,
     open_rodex_read_transaction,
     open_rodex_transaction,
     select_lookup_id,
     select_or_insert_lookup_id,
 )
+from rodex_sql import default_rodex_database_path as _default_rodex_database_path
 
 from .statistics_projection import (
     SessionStatisticsProjection,
@@ -117,7 +119,6 @@ RODEX_SESSIONS_COOL_NAMES_UNIQUE_INDEX: Final = "rodex_sessions_cool_names_id_un
 RODEX_SESSIONS_USER_DEFINED_COOL_NAMES_UNIQUE_INDEX: Final = (
     "rodex_sessions_user_defined_cool_names_id_unique"
 )
-MAX_UUID_GENERATION_ATTEMPTS: Final = 8
 STATISTICS_COVERAGE_STATES: Final = frozenset({"complete", "gapped"})
 STATISTICS_TURN_OUTCOMES: Final = frozenset({"open", "completed", "aborted"})
 STATISTICS_WORKER_STATES: Final = frozenset(
@@ -1339,7 +1340,7 @@ def create_a_rodex_session(
             if preallocated is not None
             else (
                 uuid.UUID(int=secrets.randbits(128))
-                for _ in range(MAX_UUID_GENERATION_ATTEMPTS)
+                for _attempt_number in index_re_try_attempt_numbers()
             )
         )
         for rodex_uuid in candidates:
@@ -1399,8 +1400,7 @@ def create_a_rodex_session(
                 )
             return session
         raise RodexSessionUUIDCollisionError(
-            "could not allocate a unique Rodex UUID after "
-            f"{MAX_UUID_GENERATION_ATTEMPTS} attempts"
+            f"could not allocate a unique Rodex UUID after {INDEX_RE_TRY_ATTEMPTS} attempts"
         )
 
 
@@ -1410,7 +1410,7 @@ def generate_an_unregistered_rodex_uuid_candidate(
     """Generate an unused but deliberately unreserved UUID for a pending launch."""
     path = initialise_rodex_database(database_path)
     with open_rodex_transaction(path) as connection:
-        for _ in range(MAX_UUID_GENERATION_ATTEMPTS):
+        for _attempt_number in index_re_try_attempt_numbers():
             candidate = uuid.UUID(int=secrets.randbits(128))
             uuid_int_1, uuid_int_2 = split_a_rodex_uuid_into_signed_bigints(candidate)
             row = connection.execute(
@@ -1422,7 +1422,7 @@ def generate_an_unregistered_rodex_uuid_candidate(
                 return candidate
     raise RodexSessionUUIDCollisionError(
         "could not generate an unused Rodex UUID candidate after "
-        f"{MAX_UUID_GENERATION_ATTEMPTS} attempts"
+        f"{INDEX_RE_TRY_ATTEMPTS} attempts"
     )
 
 

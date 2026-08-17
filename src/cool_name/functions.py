@@ -14,6 +14,8 @@ from typing import Final
 import coolname
 
 from rodex_sql import (
+    INDEX_RE_TRY_ATTEMPTS,
+    index_re_try_attempt_numbers,
     normalise_rodex_database_path,
     open_rodex_transaction,
     select_lookup_id,
@@ -21,7 +23,6 @@ from rodex_sql import (
 
 COOL_NAMES_TABLE: Final = "cool_names"
 COOL_NAMES_MD5_INTS_UNIQUE_INDEX: Final = "cool_names_md5_ints_unique"
-ATTEMPTS_PER_WORD_COUNT: Final = 5
 RODEX_RESERVED_WORDS: Final = frozenset(
     {
         "a",
@@ -120,7 +121,7 @@ def get_unique_new_cool_name(
     *,
     name_generator: NameGenerator | None = None,
 ) -> str:
-    """Allocate a unique two-word name, falling back to three words after five hits."""
+    """Allocate a two-word name, escalating after ten unsuccessful candidates."""
     path = normalise_rodex_database_path(database_path)
     with open_rodex_transaction(path) as connection:
         return allocate_unique_cool_name(
@@ -137,7 +138,7 @@ def allocate_unique_cool_name(
     create_and_verify_cool_names_schema(connection)
     generate_name = coolname.generate_slug if name_generator is None else name_generator
     for word_count in (2, 3):
-        for _ in range(ATTEMPTS_PER_WORD_COUNT):
+        for _attempt_number in index_re_try_attempt_numbers():
             try:
                 cool_name = normalise_rodex_display_name(generate_name(word_count))
             except CoolNameError:
@@ -159,8 +160,9 @@ def allocate_unique_cool_name(
                 raise CoolNameError("SQLite did not return a cool-name id")
             return CoolName(id=cursor.lastrowid, cool_name=cool_name)
     raise CoolNameGenerationError(
-        "could not allocate a unique cool name after five two-word and "
-        "five three-word attempts"
+        "could not allocate a unique cool name after "
+        f"{INDEX_RE_TRY_ATTEMPTS} two-word and "
+        f"{INDEX_RE_TRY_ATTEMPTS} three-word attempts"
     )
 
 

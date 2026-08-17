@@ -6,11 +6,18 @@ from pathlib import Path
 import pytest
 
 from rodex_sql import (
+    INDEX_RE_TRY_ATTEMPTS,
     RodexSQLError,
+    index_re_try_attempt_numbers,
     open_rodex_transaction,
     select_lookup_id,
     select_or_insert_lookup_id,
 )
+
+
+def test_index_re_try_policy_has_exactly_ten_finite_attempts() -> None:
+    assert INDEX_RE_TRY_ATTEMPTS == 10
+    assert tuple(index_re_try_attempt_numbers()) == tuple(range(1, 11))
 
 
 def create_lookup_table(database: Path) -> None:

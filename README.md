@@ -16,7 +16,8 @@ when needed, and return later using a generated name such as `automatic-beluga`.
 - Reattaches a live session or transparently resumes its saved Codex session.
 - Recovers an empty, unsaved Codex session under the same Rodex identity.
 - Supports an optional user-defined display name without losing the generated name.
-- Shows the Rodex name, tool-call count, and live private/shared state in the tmux bar.
+- Shows the Rodex name, tool-call count, effective mouse mode, and live private/shared
+  state in the tmux bar.
 - Preserves 50,000 lines of conversation scrollback with keyboard copy-mode access.
 - Animates shared arrival and final departure for five seconds without blocking the TUI.
 - Keeps the in-TUI `/rodex` command implementation available but disabled for now.

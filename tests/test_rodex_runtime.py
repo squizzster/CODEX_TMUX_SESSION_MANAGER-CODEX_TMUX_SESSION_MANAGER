@@ -341,9 +341,10 @@ def test_rename_and_status_configuration_use_the_real_tmux_session_name(
             "=automatic-beluga:",
             "status-left",
             "#[fg=green,bold] Rodex: #S #[fg=cyan,bold]| Tools: "
-            "#{@rodex_tool_calls} #[default]",
+            "#{@rodex_tool_calls} #[fg=yellow,bold]| Mouse: "
+            "#{?mouse,ON,OFF} #[default]",
         ],
-        ["set-option", "-t", "=automatic-beluga:", "status-left-length", "68"],
+        ["set-option", "-t", "=automatic-beluga:", "status-left-length", "82"],
         [
             "set-option",
             "-t",
@@ -603,6 +604,7 @@ def test_real_tmux_survives_rename_and_status_configuration(tmp_path: Path) -> N
         assert launcher.session_exists(renamed)
         assert session_option("mouse") == ""
         assert session_option("mouse", inherited=True) == "on"
+        assert launcher.set_mouse_mode(renamed, "status") == "on"
         assert tmux_format("#{pane_pipe}") == "0"
         tab_binding = subprocess.run(
             [
@@ -640,6 +642,7 @@ def test_real_tmux_survives_rename_and_status_configuration(tmp_path: Path) -> N
             capture_output=True,
         )
         assert "Rodex: #S" in shown_status.stdout
+        assert "Mouse: #{?mouse,ON,OFF}" in shown_status.stdout
         shown_sharing_status = subprocess.run(
             [
                 tmux_binary,
@@ -708,7 +711,11 @@ def test_real_tmux_survives_rename_and_status_configuration(tmp_path: Path) -> N
         assert "#[align=centre]" in private_animation
         wait_for_session_option("status-format[0]", populated=False)
         assert session_option("status-style") == ""
-        assert "Rodex: automatic-beluga" in tmux_format("#{T:status-left}")
+        rendered_identity_status = tmux_format("#{T:status-left}")
+        assert "Rodex: automatic-beluga" in rendered_identity_status
+        assert "Mouse: ON" in rendered_identity_status
+        assert launcher.set_mouse_mode(renamed, "off") == "off"
+        assert "Mouse: OFF" in tmux_format("#{T:status-left}")
         assert "[Private session]" in tmux_format("#{E:status-right}")
     finally:
         subprocess.run(

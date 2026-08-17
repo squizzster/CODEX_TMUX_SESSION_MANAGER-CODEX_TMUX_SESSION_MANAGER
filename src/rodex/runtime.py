@@ -657,7 +657,12 @@ class RodexRuntimeLauncher:
             self._tmux(runtime, "set-option", "-t", target, "mouse")
         elif mode != "status":
             self._tmux(runtime, "set-option", "-t", target, "mouse", mode)
-        value = self._read_tmux_option(runtime, target, "mouse")
+        value = self._read_tmux_option(
+            runtime,
+            target,
+            "mouse",
+            include_inherited=True,
+        )
         if value not in {"on", "off"}:
             raise RodexRuntimeError(f"tmux returned an invalid mouse mode: {value}")
         return value
@@ -785,14 +790,16 @@ class RodexRuntimeLauncher:
         runtime: LiveTmuxSession,
         target: str,
         option_name: str,
+        *,
+        include_inherited: bool = False,
     ) -> str:
+        arguments = ["show-options"]
+        if include_inherited:
+            arguments.append("-A")
+        arguments.extend(("-v", "-t", target, option_name))
         result = self._tmux(
             runtime,
-            "show-options",
-            "-v",
-            "-t",
-            target,
-            option_name,
+            *arguments,
         )
         value = result.stdout.strip()
         if not value:

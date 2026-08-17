@@ -12,7 +12,7 @@ import subprocess
 import sys
 import time
 import uuid
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -185,6 +185,15 @@ class LiveTmuxSession:
 
 
 @dataclass(frozen=True, slots=True)
+class CurrentTmuxPaneContext:
+    """The live tmux session and attachment snapshot inherited by this process."""
+
+    tmux_session: LiveTmuxSession
+    tmux_pane_id: str
+    attached_client_count: int
+
+
+@dataclass(frozen=True, slots=True)
 class LiveRodexRuntime(LiveTmuxSession):
     """Addresses for one running Codex TUI hosted by tmux."""
 
@@ -202,6 +211,35 @@ def _exact_tmux_session_target(session_name: str) -> str:
 def _exact_tmux_pane_target(session_name: str) -> str:
     """Address a session exactly through commands whose target is a pane."""
     return f"={session_name}:"
+
+
+def _tmux_socket_path_from_environment(tmux_value: str | None) -> Path:
+    if not tmux_value:
+        raise RodexRuntimeError(
+            "rodex _context must run inside the tmux pane it is identifying"
+        )
+    fields = tmux_value.rsplit(",", 2)
+    if (
+        len(fields) != 3
+        or not fields[0]
+        or not fields[1].isdigit()
+        or not fields[2].isdigit()
+    ):
+        raise RodexRuntimeError("the inherited TMUX environment is invalid")
+    socket_path = Path(fields[0])
+    if not socket_path.is_absolute():
+        raise RodexRuntimeError("the inherited tmux socket path is not absolute")
+    return socket_path
+
+
+def _tmux_pane_id_from_environment(tmux_pane_value: str | None) -> str:
+    if (
+        not tmux_pane_value
+        or not tmux_pane_value.startswith("%")
+        or not tmux_pane_value[1:].isdigit()
+    ):
+        raise RodexRuntimeError("the inherited TMUX_PANE identity is invalid")
+    return tmux_pane_value
 
 
 def _status_animation_hook_command(
@@ -682,6 +720,41 @@ class RodexRuntimeLauncher:
         if result.returncode != 0:
             return ()
         return tuple(name for line in result.stdout.splitlines() if (name := line.strip()))
+
+    def discover_current_tmux_pane_context(
+        self,
+        environment: Mapping[str, str] | None = None,
+    ) -> CurrentTmuxPaneContext:
+        """Resolve the exact session containing the calling process's tmux pane."""
+        inherited = os.environ if environment is None else environment
+        socket_path = _tmux_socket_path_from_environment(inherited.get("TMUX"))
+        pane_id = _tmux_pane_id_from_environment(inherited.get("TMUX_PANE"))
+        socket_runtime = LiveTmuxSession(socket_path, "unused")
+        result = self._tmux(
+            socket_runtime,
+            "display-message",
+            "-p",
+            "-t",
+            pane_id,
+            "-F",
+            "#{session_name}\t#{session_attached}",
+        )
+        fields = result.stdout.rstrip("\n").split("\t")
+        if len(fields) != 2 or not fields[0]:
+            raise RodexRuntimeError("tmux returned an invalid current session context")
+        try:
+            attached_client_count = int(fields[1])
+        except ValueError as error:
+            raise RodexRuntimeError(
+                "tmux returned an invalid attached-client count"
+            ) from error
+        if attached_client_count < 0:
+            raise RodexRuntimeError("tmux returned an invalid attached-client count")
+        return CurrentTmuxPaneContext(
+            tmux_session=LiveTmuxSession(socket_path, fields[0]),
+            tmux_pane_id=pane_id,
+            attached_client_count=attached_client_count,
+        )
 
     def set_mouse_mode(self, runtime: LiveTmuxSession, mode: str) -> str:
         """Set, toggle, inherit, or inspect mouse mode for one exact session."""

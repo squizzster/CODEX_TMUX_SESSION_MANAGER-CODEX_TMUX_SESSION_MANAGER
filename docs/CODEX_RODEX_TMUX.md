@@ -10,6 +10,13 @@ Rodex and Codex UUIDs remain explicitly named on the owning session row. The tmu
 endpoint is a separate operational row joined by `rodex_sessions_id`. Identities are
 never presented or stored as another domain's identity.
 
+`rodex _context` is the single machine-readable self-identification pipeline. It uses
+the calling process's inherited `TMUX` and `TMUX_PANE` values only to address the live
+pane, then authenticates the advertised Rodex, registry, and Codex UUIDs against the
+current POSIX user's persisted runtime. It reports the current display and tmux names,
+registration state, and attached-client snapshot as JSON. Missing, foreign, stale, or
+mismatched identity fails closed rather than being inferred or adopted.
+
 ## Basic launch pipeline
 
 1. Bare `./rodex` (or explicit `./rodex _create`) validates the `codex` and `tmux`

@@ -21,6 +21,7 @@ import rodex.runtime as runtime_module
 from rodex.analytics import AnalyticsWorkerConfig
 from rodex.runtime import (
     RODEX_TMUX_HISTORY_LIMIT_LINES,
+    CurrentTmuxPaneContext,
     LiveRodexRuntime,
     LiveTmuxSession,
     RodexCodexSessionNotFoundError,
@@ -304,6 +305,82 @@ def test_session_exists_checks_the_exact_recorded_tmux_endpoint(tmp_path: Path) 
         "=automatic-beluga",
     ]
     assert runner.options[-1]["check"] is False
+
+
+def test_current_tmux_context_resolves_the_inherited_pane_on_its_exact_socket(
+    tmp_path: Path,
+) -> None:
+    socket_path = tmp_path / "runtime,with-comma" / "tmux.sock"
+    calls: list[list[str]] = []
+
+    def runner(command: list[str], **_options: object) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout="tangible-booby\t2\n",
+            stderr="",
+        )
+
+    launcher = RodexRuntimeLauncher("codex", "tmux", runner=runner)
+
+    assert launcher.discover_current_tmux_pane_context(
+        {"TMUX": f"{socket_path},1234,0", "TMUX_PANE": "%7"}
+    ) == CurrentTmuxPaneContext(
+        tmux_session=LiveTmuxSession(socket_path, "tangible-booby"),
+        tmux_pane_id="%7",
+        attached_client_count=2,
+    )
+    assert calls == [
+        [
+            "tmux",
+            "-S",
+            str(socket_path),
+            "display-message",
+            "-p",
+            "-t",
+            "%7",
+            "-F",
+            "#{session_name}\t#{session_attached}",
+        ]
+    ]
+
+
+def test_current_tmux_context_requires_an_inherited_tmux_pane(tmp_path: Path) -> None:
+    launcher = RodexRuntimeLauncher(
+        "codex",
+        "tmux",
+        runner=lambda *_args, **_options: pytest.fail("tmux should not run"),
+    )
+
+    with pytest.raises(RodexRuntimeError, match="must run inside the tmux pane"):
+        launcher.discover_current_tmux_pane_context({})
+
+    with pytest.raises(RodexRuntimeError, match="TMUX_PANE identity is invalid"):
+        launcher.discover_current_tmux_pane_context(
+            {"TMUX": f"{tmp_path / 'tmux.sock'},1234,0", "TMUX_PANE": "pane-7"}
+        )
+
+
+@pytest.mark.parametrize("reported_count", ["many", "-1"])
+def test_current_tmux_context_rejects_an_invalid_attached_client_count(
+    tmp_path: Path,
+    reported_count: str,
+) -> None:
+    def runner(command: list[str], **_options: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout=f"tangible-booby\t{reported_count}\n",
+            stderr="",
+        )
+
+    launcher = RodexRuntimeLauncher("codex", "tmux", runner=runner)
+
+    with pytest.raises(RodexRuntimeError, match="invalid attached-client count"):
+        launcher.discover_current_tmux_pane_context(
+            {"TMUX": f"{tmp_path / 'tmux.sock'},1234,0", "TMUX_PANE": "%7"}
+        )
 
 
 def test_rename_and_status_configuration_use_the_real_tmux_session_name(

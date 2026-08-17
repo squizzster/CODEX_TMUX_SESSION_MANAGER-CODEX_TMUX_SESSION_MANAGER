@@ -95,6 +95,7 @@ preference. See the current [tmux manual](https://man.openbsd.org/tmux.1) and
 | `./rodex _detach` | Create without attaching and print expanded identity JSON. |
 | `./rodex automatic-beluga` | Attach if live; otherwise resume or recover its Codex session. |
 | `./rodex _running` | List this POSIX user's running Rodex sessions. |
+| `./rodex _context` | Emit this pane's verified Rodex, Codex, tmux, and sharing context as JSON. |
 | `./rodex _alias automatic-beluga edgar-work` | Assign a preferred display name. |
 | `./rodex _alias --force automatic-beluga new-name` | Replace an existing display name. |
 | `./rodex _send edgar-work "Run the tests"` | Start or steer work in a running session. |
@@ -109,6 +110,10 @@ preference. See the current [tmux manual](https://man.openbsd.org/tmux.1) and
 | `./rodex _mouse edgar-work inherit` | Remove the session override and inherit the tmux global value. |
 
 Rodex flags include `_alias --force` and `_stats NAME --turn ID --source UUID --json`.
+`_context` is the machine-facing self-identification route for Codex and local tooling.
+It resolves the inherited tmux pane, verifies its live Rodex, registry, and Codex markers
+against the current user's database row, and fails closed outside a matching managed
+session. The display name is read on every invocation, so an agent need not cache it.
 Arguments after `_create` or
 `_detach` are forwarded to the managed Codex TUI; use `--` when an explicit boundary
 improves clarity. Stop `_tail` with `Ctrl-C`; the Rodex session keeps running. Names use 1–80

@@ -15,6 +15,7 @@ import pytest
 from rodex.cli import RodexExecutableNotFoundError, RodexLaunchError, main, run
 from rodex.control import LiveRodexControl, PromptDispatch
 from rodex.runtime import (
+    CurrentTmuxPaneContext,
     LiveRodexRuntime,
     LiveTmuxSession,
     RodexCodexSessionNotFoundError,
@@ -70,6 +71,10 @@ class StubLauncher:
         self.confirmed: list[LiveTmuxSession] = []
         self.session_names: tuple[str, ...] = ()
         self.mouse_state = "off"
+        self.current_tmux_session = LiveTmuxSession(
+            tmp_path / "tmux.sock", "automatic-beluga"
+        )
+        self.attached_client_count = 1
         self.tmp_path = tmp_path
 
     def start(
@@ -152,6 +157,13 @@ class StubLauncher:
 
     def list_session_names(self, _socket_path: Path) -> tuple[str, ...]:
         return self.session_names
+
+    def discover_current_tmux_pane_context(self) -> CurrentTmuxPaneContext:
+        return CurrentTmuxPaneContext(
+            tmux_session=self.current_tmux_session,
+            tmux_pane_id="%4",
+            attached_client_count=self.attached_client_count,
+        )
 
     def set_mouse_mode(self, _runtime: LiveTmuxSession, mode: str) -> str:
         if mode == "toggle":
@@ -238,6 +250,7 @@ def test_help_prints_rodex_commands_without_codex_tmux_or_database(
     assert "_help" in output.out
     assert "_create" in output.out
     assert "_running" in output.out
+    assert "_context" in output.out
     assert "Every other invocation is passed unchanged to Codex." in output.out
     assert delegator.calls == []
     assert not database.exists()
@@ -254,6 +267,126 @@ def test_help_rejects_arguments_without_checking_prerequisites(
 
     with pytest.raises(RodexLaunchError, match=r"^usage: rodex _help$"):
         run(["_help", "unexpected"], database_path=tmp_path / "rodex.sqlite3")
+
+
+@pytest.mark.parametrize("arguments", [["_context"], ["_context", "--json"]])
+def test_context_reports_the_verified_current_rodex_session_as_json(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    arguments: list[str],
+) -> None:
+    database = tmp_path / "rodex.sqlite3"
+    monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
+    monkeypatch.setattr(
+        "cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga"
+    )
+    create_controlled_session(database, tmp_path)
+    launcher = StubLauncher(tmp_path)
+    launcher.attached_client_count = 2
+
+    assert run(arguments, database_path=database, launcher=launcher) == 0  # type: ignore[arg-type]
+
+    rodex_uuid = lookup_rodex_uuid_from_an_id(1, database)
+    assert rodex_uuid is not None
+    assert json.loads(capsys.readouterr().out) == {
+        "managed_by": "rodex",
+        "rodex_session_name": "automatic-beluga",
+        "rodex_session_uuid": str(rodex_uuid),
+        "rodex_registry_uuid": str(lookup_rodex_registry_uuid(database)),
+        "codex_session_uuid": str(CODEX_UUID),
+        "tmux_session_name": "automatic-beluga",
+        "registration_state": "registered",
+        "attached_clients": 2,
+        "shared": True,
+    }
+    assert launcher.control_discoveries == [
+        launcher.current_tmux_session,
+        launcher.current_tmux_session,
+    ]
+
+
+def test_context_rejects_a_different_registry_before_printing_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    database = tmp_path / "rodex.sqlite3"
+    monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
+    create_controlled_session(database, tmp_path)
+    rodex_uuid = lookup_rodex_uuid_from_an_id(1, database)
+    assert rodex_uuid is not None
+    launcher = StubLauncher(tmp_path)
+    launcher.control = replace(
+        launcher.control,
+        rodex_session_uuid=rodex_uuid,
+        rodex_registry_uuid=uuid.uuid4(),
+        registration_state="registered",
+    )
+
+    with pytest.raises(RodexLaunchError, match="different Rodex registry"):
+        run(["_context"], database_path=database, launcher=launcher)  # type: ignore[arg-type]
+
+    assert capsys.readouterr().out == ""
+
+
+def test_context_rejects_a_live_name_not_recorded_for_its_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database = tmp_path / "rodex.sqlite3"
+    monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
+    create_controlled_session(database, tmp_path)
+    launcher = StubLauncher(tmp_path)
+    launcher.current_tmux_session = replace(
+        launcher.current_tmux_session,
+        tmux_session_name="externally-renamed",
+    )
+
+    with pytest.raises(RodexLaunchError, match="does not match its recorded"):
+        run(["_context"], database_path=database, launcher=launcher)  # type: ignore[arg-type]
+
+
+def test_context_rejects_a_registered_session_owned_by_another_posix_user(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database = tmp_path / "rodex.sqlite3"
+    monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
+    monkeypatch.setattr(
+        "rodex_functions.sessions.current_rodex_sessions_user_identity", lambda: DNA
+    )
+    session = create_a_rodex_session(
+        database,
+        codex_session_uuid=CODEX_UUID,
+        user_identity=RodexSessionsUserIdentity(2001, 2002, "other"),
+        tmux_server_socket_path=tmp_path / "tmux.sock",
+        tmux_session_name="automatic-beluga",
+    )
+    launcher = StubLauncher(tmp_path)
+    launcher.control = replace(
+        launcher.control,
+        rodex_session_uuid=session.rodex_uuid,
+        rodex_registry_uuid=lookup_rodex_registry_uuid(database),
+        registration_state="registered",
+    )
+
+    with pytest.raises(RodexLaunchError, match="not owned by the current POSIX user"):
+        run(["_context"], database_path=database, launcher=launcher)  # type: ignore[arg-type]
+
+
+def test_context_rejects_unknown_arguments(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
+
+    with pytest.raises(RodexLaunchError, match=r"^usage: rodex _context \[--json\]$"):
+        run(
+            ["_context", "unexpected"],
+            database_path=tmp_path / "rodex.sqlite3",
+            launcher=StubLauncher(tmp_path),  # type: ignore[arg-type]
+        )
 
 
 def test_cli_does_not_resolve_away_an_explicit_database_symlink(

@@ -28,6 +28,7 @@ from rodex_functions import (
     generate_an_unregistered_rodex_uuid_candidate,
     list_rodex_session_runtimes_for_a_user,
     lookup_codex_uuid_from_a_rodex_session_id,
+    lookup_id_from_a_rodex_uuid,
     lookup_owned_rodex_session_id_from_a_cool_name,
     lookup_rodex_registry_uuid,
     lookup_rodex_session_id_from_a_cool_name,
@@ -74,6 +75,7 @@ class _PreparedNamedSession:
 
 
 _RUNNING_COMMAND: Final = "_running"
+_CONTEXT_COMMAND: Final = "_context"
 _ALIAS_COMMAND: Final = "_alias"
 _SEND_COMMAND: Final = "_send"
 _WAIT_COMMAND: Final = "_wait"
@@ -88,6 +90,7 @@ _FORCE_FLAG: Final = "--force"
 _RODEX_COMMANDS: Final = frozenset(
     {
         _RUNNING_COMMAND,
+        _CONTEXT_COMMAND,
         _ALIAS_COMMAND,
         _SEND_COMMAND,
         _WAIT_COMMAND,
@@ -110,6 +113,7 @@ Rodex commands:
   _create [NAME] [-- CODEX_ARGS...]  Create and attach to a managed session.
   _detach [SESSION|CODEX_ARGS...]    Create, resume, or recover without attaching.
   _running                           List running Rodex sessions.
+  _context [--json]                  Show this pane's verified live Rodex context.
   _alias [--force] SESSION NAME      Assign a preferred session name.
   _send SESSION PROMPT               Send work to a running session.
   _wait SESSION                      Wait until a running session is idle.
@@ -574,6 +578,14 @@ def _run_reserved_command(
     if not arguments:
         return False
     command = arguments[0]
+    if command == _CONTEXT_COMMAND:
+        if tuple(arguments) not in {
+            (_CONTEXT_COMMAND,),
+            (_CONTEXT_COMMAND, "--json"),
+        }:
+            raise RodexLaunchError("usage: rodex _context [--json]")
+        _print_current_rodex_context(database_path, launcher)
+        return True
     if command == _RUNNING_COMMAND:
         if len(arguments) != 1:
             raise RodexLaunchError("usage: rodex _running")
@@ -1035,6 +1047,82 @@ def _parse_alias_arguments(arguments: list[str]) -> tuple[bool, list[str]]:
         else:
             operands.append(argument)
     return force, operands
+
+
+def _print_current_rodex_context(
+    database_path: Path,
+    launcher: RodexRuntimeLauncher,
+) -> None:
+    """Print one verified snapshot of the Rodex session containing this process."""
+    tmux_context = launcher.discover_current_tmux_pane_context()
+    live_tmux = tmux_context.tmux_session
+    advertised = launcher.discover_runtime_control(live_tmux)
+    if advertised.rodex_session_uuid is None:
+        raise RodexLaunchError(
+            "the current tmux pane does not advertise a Rodex session identity"
+        )
+    registry_uuid = lookup_rodex_registry_uuid(database_path)
+    if advertised.rodex_registry_uuid != registry_uuid:
+        raise RodexLaunchError(
+            "the current tmux pane belongs to a different Rodex registry: "
+            f"expected {registry_uuid}, "
+            f"observed {advertised.rodex_registry_uuid or 'missing'}"
+        )
+    session_id = lookup_id_from_a_rodex_uuid(
+        advertised.rodex_session_uuid,
+        database_path,
+    )
+    if session_id is None:
+        raise RodexLaunchError(
+            "the current tmux pane advertises a Rodex identity absent from this registry"
+        )
+    persisted = next(
+        (
+            runtime
+            for runtime in list_rodex_session_runtimes_for_a_user(database_path)
+            if runtime.rodex_sessions_id == session_id
+        ),
+        None,
+    )
+    if persisted is None:
+        raise RodexLaunchError(
+            "the current tmux pane is not owned by the current POSIX user"
+        )
+    recorded_tmux = LiveTmuxSession(
+        Path(persisted.tmux_server_socket_path),
+        persisted.tmux_session_name,
+    )
+    if recorded_tmux != live_tmux:
+        raise RodexLaunchError(
+            "the current tmux pane does not match its recorded Rodex endpoint: "
+            f"expected {recorded_tmux.tmux_session_name} on "
+            f"{recorded_tmux.tmux_server_socket_path}, observed "
+            f"{live_tmux.tmux_session_name} on {live_tmux.tmux_server_socket_path}"
+        )
+    control = _verify_live_runtime_identity(
+        launcher,
+        live_tmux,
+        expected_rodex_uuid=advertised.rodex_session_uuid,
+        expected_registry_uuid=registry_uuid,
+        expected_codex_uuid=persisted.codex_session_uuid,
+    )
+    print(
+        json.dumps(
+            {
+                "managed_by": "rodex",
+                "rodex_session_name": persisted.display_name,
+                "rodex_session_uuid": str(advertised.rodex_session_uuid),
+                "rodex_registry_uuid": str(registry_uuid),
+                "codex_session_uuid": str(control.codex_session_uuid),
+                "tmux_session_name": live_tmux.tmux_session_name,
+                "registration_state": control.registration_state,
+                "attached_clients": tmux_context.attached_client_count,
+                "shared": tmux_context.attached_client_count > 1,
+            },
+            indent=2,
+        ),
+        flush=True,
+    )
 
 
 def _print_running_sessions(

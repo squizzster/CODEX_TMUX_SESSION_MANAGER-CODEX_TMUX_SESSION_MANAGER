@@ -30,13 +30,18 @@ from .errors import (
 )
 from .identity import (
     CodexSessionId,
+    RodexRuntimeIdentifier,
     RodexSessionId,
     join_signed_bigints_into_a_codex_session_id,
+    join_signed_bigints_into_a_rodex_runtime_identifier,
     parse_codex_session_id,
+    parse_rodex_runtime_identifier,
     parse_rodex_session_id,
     split_codex_session_id_into_signed_bigints,
+    split_rodex_runtime_identifier_into_signed_bigints,
 )
 from .schema import (
+    RODEX_RUNTIME_INSTANCES_TABLE,
     RODEX_SESSIONS_LOG_TABLE,
     RODEX_SESSIONS_TABLE,
     RODEX_SESSIONS_USERS_TABLE,
@@ -104,6 +109,16 @@ class RodexTmuxSession:
 
 
 @dataclass(frozen=True, slots=True)
+class RodexRuntimeInstance:
+    """The exact current runtime incarnation linked to one Rodex session."""
+
+    id: int
+    rodex_sessions_id: int
+    runtime_identifier: RodexRuntimeIdentifier
+    started_at_utc: str
+
+
+@dataclass(frozen=True, slots=True)
 class RodexSessionNames:
     """The permanent and optional user-defined names for one session."""
 
@@ -151,6 +166,7 @@ def create_a_rodex_session(
     user_identity: RodexSessionsUserIdentity | None = None,
     tmux_server_socket_path: str | os.PathLike[str] | None = None,
     tmux_session_name: str | None = None,
+    runtime_identifier: RodexRuntimeIdentifier | str | None = None,
 ) -> RodexSession:
     """Atomically persist a session and any live Codex/tmux linkage."""
     path = initialise_rodex_database(database_path)
@@ -164,6 +180,13 @@ def create_a_rodex_session(
         split_codex_session_id_into_signed_bigints(parsed_codex_session_id)
     )
     tmux_link = _normalise_tmux_link(tmux_server_socket_path, tmux_session_name)
+    parsed_runtime_identifier = (
+        None
+        if runtime_identifier is None
+        else parse_rodex_runtime_identifier(runtime_identifier)
+    )
+    if parsed_runtime_identifier is not None and tmux_link is None:
+        raise ValueError("a runtime identifier requires a tmux endpoint")
     created_at_utc = _utc_now_timestamp()
     with open_rodex_transaction(path) as connection:
         rodex_sessions_users_id = _lookup_or_insert_rodex_sessions_user_id(
@@ -260,6 +283,23 @@ def create_a_rodex_session(
                     "(rodex_sessions_id, tmux_server_socket_path, tmux_session_name) "
                     "VALUES (?, ?, ?)",
                     (session.rodex_sessions_id, socket_path, session_name),
+                )
+            if parsed_runtime_identifier is not None:
+                runtime_identifier_halves = (
+                    split_rodex_runtime_identifier_into_signed_bigints(
+                        parsed_runtime_identifier
+                    )
+                )
+                connection.execute(
+                    f"INSERT INTO {RODEX_RUNTIME_INSTANCES_TABLE} "
+                    "(rodex_sessions_id, runtime_identifier_signed_bigint_1, "
+                    "runtime_identifier_signed_bigint_2, started_at_utc) "
+                    "VALUES (?, ?, ?, ?)",
+                    (
+                        session.rodex_sessions_id,
+                        *runtime_identifier_halves,
+                        created_at_utc,
+                    ),
                 )
             return session
         raise RodexSessionIdCollisionError(
@@ -430,6 +470,7 @@ def record_a_rodex_session_runtime_resume(
     database_path: str | os.PathLike[str] | None = None,
     *,
     codex_session_id: CodexSessionId | str | None = None,
+    runtime_identifier: RodexRuntimeIdentifier | str | None = None,
     accessed_at_utc: datetime | None = None,
 ) -> RodexTmuxSession:
     """Atomically activate a runtime, optionally replacing an unsaved Codex session ID."""
@@ -445,6 +486,11 @@ def record_a_rodex_session_runtime_resume(
         None
         if codex_session_id is None
         else split_codex_session_id_into_signed_bigints(codex_session_id)
+    )
+    parsed_runtime_identifier = (
+        None
+        if runtime_identifier is None
+        else parse_rodex_runtime_identifier(runtime_identifier)
     )
     timestamp = _normalise_utc_datetime(accessed_at_utc)
     path = initialise_rodex_database(database_path)
@@ -474,6 +520,23 @@ def record_a_rodex_session_runtime_resume(
         )
         if tmux_cursor.rowcount != 1:
             raise RodexSessionError(f"Rodex tmux session does not exist: {session_id}")
+        if parsed_runtime_identifier is not None:
+            runtime_identifier_halves = split_rodex_runtime_identifier_into_signed_bigints(
+                parsed_runtime_identifier
+            )
+            connection.execute(
+                f"INSERT INTO {RODEX_RUNTIME_INSTANCES_TABLE} "
+                "(rodex_sessions_id, runtime_identifier_signed_bigint_1, "
+                "runtime_identifier_signed_bigint_2, started_at_utc) "
+                "VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(rodex_sessions_id) DO UPDATE SET "
+                "runtime_identifier_signed_bigint_1 = "
+                "excluded.runtime_identifier_signed_bigint_1, "
+                "runtime_identifier_signed_bigint_2 = "
+                "excluded.runtime_identifier_signed_bigint_2, "
+                "started_at_utc = excluded.started_at_utc",
+                (session_id, *runtime_identifier_halves, timestamp),
+            )
         log_cursor = connection.execute(
             f"UPDATE {RODEX_SESSIONS_LOG_TABLE} SET last_accessed_at_utc = ? "
             "WHERE rodex_sessions_id = ?",
@@ -494,6 +557,32 @@ def record_a_rodex_session_runtime_resume(
         rodex_sessions_id=int(row[1]),
         tmux_server_socket_path=str(row[2]),
         tmux_session_name=str(row[3]),
+    )
+
+
+def lookup_rodex_runtime_instance(
+    session_id: int,
+    database_path: str | os.PathLike[str] | None = None,
+) -> RodexRuntimeInstance | None:
+    """Return the exact persisted current runtime incarnation, when recorded."""
+    _validate_session_id(session_id)
+    path = initialise_rodex_database(database_path)
+    with open_rodex_transaction(path) as connection:
+        row = connection.execute(
+            f"SELECT id, rodex_sessions_id, runtime_identifier_signed_bigint_1, "
+            "runtime_identifier_signed_bigint_2, started_at_utc "
+            f"FROM {RODEX_RUNTIME_INSTANCES_TABLE} WHERE rodex_sessions_id = ?",
+            (session_id,),
+        ).fetchone()
+    if row is None:
+        return None
+    return RodexRuntimeInstance(
+        id=int(row[0]),
+        rodex_sessions_id=int(row[1]),
+        runtime_identifier=join_signed_bigints_into_a_rodex_runtime_identifier(
+            row[2], row[3]
+        ),
+        started_at_utc=str(row[4]),
     )
 
 

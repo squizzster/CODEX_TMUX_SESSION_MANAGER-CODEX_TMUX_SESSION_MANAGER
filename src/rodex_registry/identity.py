@@ -17,6 +17,7 @@ _SIGNED_64_MAX: Final = _SIGNED_64_SIGN_BIT - 1
 _CANONICAL_RODEX_ID = re.compile(r"^[0-9a-f]{16}$")
 
 type CodexSessionId = uuid.UUID
+type RodexRuntimeIdentifier = uuid.UUID
 
 
 class RodexIdError(ValueError):
@@ -105,6 +106,13 @@ def split_codex_session_id_into_signed_bigints(
     return _split_128_bit_id_into_signed_bigints(parse_codex_session_id(value))
 
 
+def split_rodex_runtime_identifier_into_signed_bigints(
+    value: RodexRuntimeIdentifier | str,
+) -> tuple[int, int]:
+    """Map one 128-bit Rodex runtime ID into two lossless signed BIGINTs."""
+    return _split_128_bit_id_into_signed_bigints(parse_rodex_runtime_identifier(value))
+
+
 def parse_codex_session_id(value: CodexSessionId | str) -> CodexSessionId:
     """Parse the exact 128-bit Codex-owned session ID domain."""
     if isinstance(value, uuid.UUID):
@@ -117,6 +125,25 @@ def parse_codex_session_id(value: CodexSessionId | str) -> CodexSessionId:
         raise ValueError("Codex session ID must be a valid 128-bit ID") from error
 
 
+def parse_rodex_runtime_identifier(
+    value: RodexRuntimeIdentifier | str,
+) -> RodexRuntimeIdentifier:
+    """Parse the canonical 128-bit Rodex runtime identity domain."""
+    if isinstance(value, uuid.UUID):
+        return value
+    if not isinstance(value, str):
+        raise TypeError("Rodex runtime identifier must be a UUID or canonical UUID string")
+    try:
+        parsed = uuid.UUID(value)
+    except ValueError as error:
+        raise ValueError(
+            "Rodex runtime identifier must be a canonical UUID string"
+        ) from error
+    if str(parsed) != value:
+        raise ValueError("Rodex runtime identifier must be a canonical UUID string")
+    return parsed
+
+
 def join_signed_bigints_into_a_codex_session_id(
     high_signed: int, low_signed: int
 ) -> CodexSessionId:
@@ -126,7 +153,16 @@ def join_signed_bigints_into_a_codex_session_id(
     )
 
 
-def _split_128_bit_id_into_signed_bigints(value: CodexSessionId) -> tuple[int, int]:
+def join_signed_bigints_into_a_rodex_runtime_identifier(
+    high_signed: int, low_signed: int
+) -> RodexRuntimeIdentifier:
+    """Restore one 128-bit Rodex runtime ID from two signed BIGINTs."""
+    return uuid.UUID(
+        int=(_signed_64_to_unsigned(high_signed) << 64) | _signed_64_to_unsigned(low_signed)
+    )
+
+
+def _split_128_bit_id_into_signed_bigints(value: uuid.UUID) -> tuple[int, int]:
     high_unsigned = value.int >> 64
     low_unsigned = value.int & (_UNSIGNED_64_LIMIT - 1)
     return _unsigned_64_to_signed(high_unsigned), _unsigned_64_to_signed(low_unsigned)

@@ -8,6 +8,7 @@ import json
 import os
 import shutil
 import signal
+import stat as stat_module
 import subprocess
 import sys
 import tempfile
@@ -280,7 +281,9 @@ class AnalyticsRolloutWorker:
                 None
                 if source.rollout_file_path is None
                 else _verify_recorded_source(
-                    source.rollout_file_path, source.codex_session_uuid
+                    source.rollout_file_path,
+                    source.codex_session_uuid,
+                    allowed_root=self._config.codex_sessions_root,
                 )
             )
             if verified is None:
@@ -345,7 +348,9 @@ class AnalyticsRolloutWorker:
             ):
                 try:
                     authenticated, _ = _authenticate_rollout_prefix(
-                        path, source.codex_session_uuid
+                        path,
+                        source.codex_session_uuid,
+                        allowed_root=self._config.codex_sessions_root,
                     )
                 except RodexAnalyticsError:
                     return False
@@ -493,7 +498,8 @@ def locate_verified_rollout(root: Path, codex_uuid: uuid.UUID) -> VerifiedRollou
     verified = [
         source
         for path in sorted(root.rglob(f"*{codex_uuid}*.jsonl"))
-        if (source := _verify_recorded_source(path, codex_uuid)) is not None
+        if (source := _verify_recorded_source(path, codex_uuid, allowed_root=root))
+        is not None
     ]
     if len(verified) > 1:
         raise RodexAnalyticsError(
@@ -520,7 +526,7 @@ def analytics_worker_main(arguments: list[str] | None = None) -> int:
         signal.signal(signum, request_stop)
     worker = AnalyticsRolloutWorker(
         AnalyticsWorkerConfig(
-            rodex_database_path=options.rodex_database.expanduser().resolve(),
+            rodex_database_path=Path(os.path.abspath(options.rodex_database.expanduser())),
             codex_sessions_root=options.codex_sessions_root.expanduser().resolve(),
             rodex_uuid=options.rodex_uuid,
         )
@@ -533,12 +539,16 @@ def analytics_worker_main(arguments: list[str] | None = None) -> int:
 
 
 def _verify_recorded_source(
-    path: str | Path, expected: uuid.UUID
+    path: str | Path,
+    expected: uuid.UUID,
+    *,
+    allowed_root: Path | None = None,
 ) -> VerifiedRollout | None:
-    source_path = Path(path).expanduser().resolve()
     try:
-        stat = source_path.stat()
-        with source_path.open(encoding="utf-8") as records:
+        source_path = _resolve_rollout_path(path, allowed_root=allowed_root)
+        descriptor = _open_rollout_descriptor(source_path)
+        with os.fdopen(descriptor, encoding="utf-8") as records:
+            state = os.fstat(records.fileno())
             for _, line in zip(range(32), records, strict=False):
                 try:
                     record = json.loads(line)
@@ -549,8 +559,8 @@ def _verify_recorded_source(
                 payload = record.get("payload")
                 if not isinstance(payload, dict) or payload.get("id") != str(expected):
                     return None
-                return VerifiedRollout(source_path, stat.st_size, stat.st_mtime_ns)
-    except (OSError, UnicodeError):
+                return VerifiedRollout(source_path, state.st_size, state.st_mtime_ns)
+    except (OSError, UnicodeError, RodexAnalyticsError):
         return None
     return None
 
@@ -589,16 +599,18 @@ def _copy_complete_rollout_prefix(
 def _authenticate_rollout_prefix(
     source_path: Path,
     expected_codex_uuid: uuid.UUID,
+    *,
+    allowed_root: Path | None = None,
 ) -> tuple[AuthenticatedRolloutPrefix, bytes]:
-    resolved_source = source_path.expanduser().resolve()
     try:
-        descriptor = os.open(resolved_source, os.O_RDONLY)
+        resolved_source = _resolve_rollout_path(source_path, allowed_root=allowed_root)
+        descriptor = _open_rollout_descriptor(resolved_source)
         with os.fdopen(descriptor, "rb") as source:
             before = os.fstat(source.fileno())
             content = source.read()
             after = os.fstat(source.fileno())
-        path_state = resolved_source.stat()
-    except OSError as error:
+        path_state = os.stat(resolved_source, follow_symlinks=False)
+    except (OSError, RodexAnalyticsError) as error:
         raise RodexAnalyticsError(f"could not authenticate rollout: {error}") from error
     identity = (before.st_dev, before.st_ino)
     if identity != (after.st_dev, after.st_ino) or identity != (
@@ -625,6 +637,40 @@ def _authenticate_rollout_prefix(
         ),
         analyzed,
     )
+
+
+def _resolve_rollout_path(path: str | Path, *, allowed_root: Path | None = None) -> Path:
+    candidate = Path(path).expanduser()
+    state = candidate.lstat()
+    if stat_module.S_ISLNK(state.st_mode):
+        raise RodexAnalyticsError(f"rollout source is a symbolic link: {candidate}")
+    resolved = candidate.resolve()
+    if allowed_root is not None:
+        root = allowed_root.expanduser().resolve()
+        try:
+            resolved.relative_to(root)
+        except ValueError as error:
+            raise RodexAnalyticsError(
+                f"rollout source escapes the configured sessions root: {candidate}"
+            ) from error
+    return resolved
+
+
+def _open_rollout_descriptor(path: Path) -> int:
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    descriptor = os.open(path, flags)
+    try:
+        state = os.fstat(descriptor)
+        if not stat_module.S_ISREG(state.st_mode):
+            raise RodexAnalyticsError(f"rollout source is not a regular file: {path}")
+        if state.st_uid != os.getuid():
+            raise RodexAnalyticsError(
+                f"rollout source is not owned by uid {os.getuid()}: {path}"
+            )
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
 
 
 def _rollout_content_declares_uuid(content: bytes, expected: uuid.UUID) -> bool:

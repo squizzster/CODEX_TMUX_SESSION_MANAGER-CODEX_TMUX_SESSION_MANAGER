@@ -36,12 +36,12 @@ tmux, or the session database.
 
 ## Scrollback ownership
 
-Rodex configures tmux's global defaults before the first pane is created: each new pane
-inherits a 50,000-line history limit with mouse mode off. The managed Codex TUI runs
+Rodex configures tmux's history default before the first pane is created: each new pane
+inherits a 50,000-line history limit. Mouse configuration remains user-owned and a
+Rodex session inherits tmux's global value unless `_mouse` sets a session override. The managed Codex TUI runs
 without the alternate screen so rendered conversation rows reach that history.
-`Ctrl-b [` enters keyboard copy mode and `q` exits it. Keeping tmux mouse handling off
-leaves selection, scrolling, and context-menu behavior with the outer terminal; an
-attached user may opt in temporarily with `tmux set-option mouse on`.
+`Ctrl-b [` enters keyboard copy mode and `q` exits it. `_mouse NAME inherit` removes a
+session override without changing any other session or the global configuration.
 
 tmux—not the terminal emulator or WebSocket proxy—owns managed-session scrollback.
 The proxy continues to forward protocol frames and selected live events without
@@ -88,7 +88,10 @@ analytics sidecar.
 ## Named reattachment
 
 - `./rodex <cool-name>` resolves the name through its integer identity.
-- If its stored tmux endpoint is live, Rodex attaches to it directly.
+- If its stored tmux endpoint is live, Rodex first verifies its registered Rodex UUID
+  and Codex UUID. A missing or mismatched marker fails closed without attach or rename.
+- If an exact registered runtime was renamed outside Rodex, one unambiguous marker
+  match repairs the endpoint; multiple matches are refused.
 - If it has ended, Rodex starts a fresh tmux/app-server and asks Codex to resume the
   stored Codex UUID; the observed UUID must match before the endpoint is replaced.
 - If Codex explicitly reports that the UUID was never saved, Rodex starts an empty
@@ -97,7 +100,8 @@ analytics sidecar.
 - Both routes preserve the Rodex identity and update `last_accessed_at_utc`.
 - `_detach <cool-name>` follows the same attach, resume, or recovery decision without
   attaching the caller and prints the active identities as JSON.
-- `./rodex _running` lists the current POSIX user's live runtimes.
+- `./rodex _running` lists verified runtimes and reports unverified or unregistered
+  sessions separately.
 - `./rodex _alias SESSION NAME` sets its portable preferred name; `--force` replaces
   it.
 - `_send`, `_wait`, and `_tail` verify the stored and live Codex UUID before acting.
@@ -113,7 +117,8 @@ analytics sidecar.
 - A completely empty Codex TUI may not have saved history. Its cool name recovers by
   starting empty again and replacing only the linked Codex UUID.
 - A failure before SQL registration stops the exact new tmux session and leaves no
-  partial database row.
+  partial database row. A host whose pending registration is never confirmed exits;
+  an exact SQL/pending pair can finish the interrupted confirmation on the next command.
 - Scrollback settings apply when a pane is created. A runtime started by an older
   Rodex version must end and resume, or be replaced by a new session, to gain the
   larger history and inline TUI rendering.

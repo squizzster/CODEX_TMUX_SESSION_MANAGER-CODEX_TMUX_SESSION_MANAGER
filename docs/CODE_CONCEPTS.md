@@ -38,7 +38,7 @@ Convenience belongs at the boundary; identity and state remain exact underneath 
 ## Evolution
 
 - Linux and compatible POSIX systems define the platform boundary.
-- PROTO work favours small coherent changes, real use, and deliberate breaking redesign.
+- ALPHA work keeps changes coherent while broadening boundary and installation checks.
 - Do not preserve accidental compatibility or speculative machinery without evidence.
 - Keep public contracts small, descriptive, and close to the data they govern.
 - Tests should protect identity, transaction, ownership, and lifecycle boundaries quickly.

@@ -22,7 +22,7 @@ Apply these standards to future schema decisions. These authorative standards ma
 - Preserve required canonical identity when adding an optional user-defined identity;
   represent the latter with a separate nullable relationship rather than replacement.
 - Do not introduce redundant association tables or compatibility structure merely to
-  avoid changing an earlier schema, especially in PROTO.
+  avoid changing an earlier schema merely for compatibility within this pre-release.
 - Lookup tables use their complete natural key: `SELECT id` first and `INSERT` only
   when no row exists. This avoids unnecessary AUTOINCREMENT gaps.
 - Related writes run inside one `BEGIN IMMEDIATE` transaction. Multi-table read views
@@ -47,11 +47,13 @@ Apply these standards to future schema decisions. These authorative standards ma
   A matching derived integer identity is occupied; do not fall back to a text lookup.
 - Generated identities use bounded attempts, move to the next approved representation
   when the preferred form is exhausted, and then fail explicitly.
-- In PROTO, incompatible schema changes may reset a disposable database only after an
+- In ALPHA, incompatible schema changes may reset a disposable database only after an
   explicit decision. Additive, verified schema extensions preserve existing contents.
 
 ## Current statistics projection
 
+- `rodex_registries` contains the database instance's one durable UUID row. Live tmux
+  identity includes it so another registry cannot adopt the same session/Codex pair.
 - `rodex_sessions_statistics` is the latest successful aggregate snapshot, one row per
   Rodex session. Every fixed aggregate and its available base count is a typed scalar
   column. Rodex allocates its monotonic `statistics_revision`; temporary analyzer

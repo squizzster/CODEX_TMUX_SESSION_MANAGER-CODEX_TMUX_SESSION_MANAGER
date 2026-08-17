@@ -1,9 +1,9 @@
 #!/bin/sh
 set -eu
 
-# Install with: sudo install -m 0755 usr/local/bin/rodex /usr/local/bin/rodex
+# Recommended: install -m 0755 usr/local/bin/rodex "$HOME/.local/bin/rodex"
 
-# This checkout is the default target when this shim is copied to /usr/local/bin.
+# This checkout is the default target wherever the shim is copied.
 # Override it when the Rodex checkout lives elsewhere.
 RODEX_PROJECT_DIR=${RODEX_PROJECT_DIR:-/external_data/data/work_flow_dna/business_genome_classfication_system/CODEX_TMUX_SESSION_MANAGER}
 
@@ -13,4 +13,68 @@ if [ ! -f "$RODEX_PROJECT_DIR/pyproject.toml" ]; then
     exit 1
 fi
 
-exec uv run --project "$RODEX_PROJECT_DIR" rodex "$@"
+project_owner_uid=$(/usr/bin/stat -Lc '%u' -- "$RODEX_PROJECT_DIR")
+current_uid=$(/usr/bin/id -u)
+if [ "$project_owner_uid" != "$current_uid" ] && [ "$project_owner_uid" != 0 ]; then
+    printf 'rodex: refusing checkout owned by untrusted uid %s while running as uid %s\n' \
+        "$project_owner_uid" "$current_uid" >&2
+    exit 1
+fi
+
+insecure_checkout=$(
+    /usr/bin/find "$RODEX_PROJECT_DIR" \
+        -path "$RODEX_PROJECT_DIR/.git" -prune -o \
+        ! -path "$RODEX_PROJECT_DIR/.venv/.lock" \
+        \( -type f -o -type d \) -perm /022 -print -quit
+)
+if [ -n "$insecure_checkout" ]; then
+    printf 'rodex: refusing group/world-writable project path: %s\n' \
+        "$insecure_checkout" >&2
+    exit 1
+fi
+
+untrusted_checkout=$(
+    /usr/bin/find "$RODEX_PROJECT_DIR" \
+        -path "$RODEX_PROJECT_DIR/.git" -prune -o \
+        ! -uid "$current_uid" ! -uid 0 -print -quit
+)
+if [ -n "$untrusted_checkout" ]; then
+    printf 'rodex: refusing project path with an untrusted owner: %s\n' \
+        "$untrusted_checkout" >&2
+    exit 1
+fi
+
+project_symlink=$(
+    /usr/bin/find "$RODEX_PROJECT_DIR" \
+        -path "$RODEX_PROJECT_DIR/.git" -prune -o \
+        -path "$RODEX_PROJECT_DIR/.venv" -prune -o \
+        -type l -print -quit
+)
+if [ -n "$project_symlink" ]; then
+    printf 'rodex: refusing project source symlink: %s\n' "$project_symlink" >&2
+    exit 1
+fi
+
+UV_BINARY=$(command -v uv || true)
+case "$UV_BINARY" in
+    /*) ;;
+    *)
+        printf 'rodex: uv was not found as an absolute executable on PATH\n' >&2
+        exit 127
+        ;;
+esac
+
+uv_owner_uid=$(/usr/bin/stat -Lc '%u' -- "$UV_BINARY")
+if [ "$uv_owner_uid" != "$current_uid" ] && [ "$uv_owner_uid" != 0 ]; then
+    printf 'rodex: refusing uv owned by untrusted uid %s: %s\n' \
+        "$uv_owner_uid" "$UV_BINARY" >&2
+    exit 1
+fi
+insecure_uv=$(/usr/bin/find "$UV_BINARY" -maxdepth 0 -perm /022 -print -quit)
+if [ -n "$insecure_uv" ]; then
+    printf 'rodex: refusing group/world-writable uv executable: %s\n' \
+        "$UV_BINARY" >&2
+    exit 1
+fi
+
+exec "$UV_BINARY" run --project "$RODEX_PROJECT_DIR" rodex "$@"

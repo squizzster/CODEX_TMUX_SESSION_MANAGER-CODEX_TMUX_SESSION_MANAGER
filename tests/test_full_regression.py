@@ -51,6 +51,7 @@ def test_full_rodex_database_regression(tmp_path: Path) -> None:
             "SELECT name, seq FROM sqlite_sequence ORDER BY name"
         ).fetchall() == [
             ("cool_names", 2),
+            ("rodex_registries", 1),
             ("rodex_sessions", 2),
             ("rodex_sessions_log", 2),
             ("rodex_sessions_statistics_sources", 2),

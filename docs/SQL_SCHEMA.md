@@ -63,6 +63,10 @@ Apply these standards to future schema decisions. These authorative standards ma
   halves of the Codex session ID, and permanent/optional display-name links. The public Rodex
   session ID is always serialized as a 16-character lowercase hex string, never a JSON
   number. The ALPHA schema is stored in `rodex-v3.sqlite3`.
+- `rodex_runtime_instances` contains the two signed-BIGINT halves of the one current
+  random runtime UUID and its start time for a Rodex session. Unique indexes fence both
+  session cardinality and the ordered identity pair against UUID reuse.
+  Resume replaces this control identity; the table contains no conversation content.
 - `rodex_sessions_statistics` is the latest successful aggregate snapshot, one row per
   Rodex session. Every fixed aggregate and its available base count is a typed scalar
   column. Rodex allocates its monotonic `statistics_revision`; temporary analyzer

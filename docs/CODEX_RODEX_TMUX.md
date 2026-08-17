@@ -5,7 +5,9 @@ Rodex is a match-maker and launcher. Each identity keeps its own meaning:
 - **Rodex session:** a random 64-bit ID rendered as exactly 16 lowercase hex
   characters, plus internal `rodex_sessions.id`.
 - **Rodex registry:** a separate random 64-bit ID for one database.
-- **Codex session:** the real 128-bit ID allocated by Codex.
+- **Rodex runtime:** a random UUID for one current live incarnation.
+- **Codex thread/session tree:** separate App Server `thread.id` and `thread.sessionId`;
+  they are equal for the managed root thread but must not be conflated for forks.
 - **tmux session:** the exact tmux server socket path plus tmux session name.
 
 Rodex session, Rodex registry, and Codex session IDs remain explicitly named and typed.
@@ -22,6 +24,7 @@ exact tmux socket/session/window/pane address, registration state, and attached-
 snapshot as JSON. Missing, foreign, stale, or mismatched identity fails closed rather
 than being inferred or adopted. Private proxy/event sockets and runtime logs remain
 implementation details rather than agent context.
+New runtimes also report their UUID and whether it matches the persisted incarnation.
 
 ## Basic launch pipeline
 
@@ -32,7 +35,8 @@ implementation details rather than agent context.
    WebSocket proxy on short Unix sockets, then connects the inline Codex TUI through
    it with `--no-alt-screen`.
 4. Rodex asks that private app-server for its one loaded Codex session ID.
-5. One SQLite transaction creates the Rodex identity, name, user/log, and tmux rows.
+5. One SQLite transaction creates the Rodex/runtime identities, name, user/log, and
+   tmux rows.
 6. tmux is renamed to the cool name and displays its Rodex identity, tool count, and
    live private/shared attachment state in its status bar.
 7. Rodex attaches to the ordinary Codex prompt; forwarded arguments and slash commands
@@ -61,9 +65,11 @@ The proxy continues to forward protocol frames and selected live events without
 screen-scraping, reconstructing terminal rows, or persisting conversation content.
 
 The proxy forwards protocol frames unchanged in both directions, counts unique tool
-starts, and fans structured TUI events to bounded live subscribers. tmux user options
-advertise the live proxy/event sockets and observed Codex session ID; none are new SQLite
-identities. Tool counts cover the current runtime and reset when it is resumed.
+starts, and fans structured TUI events to bounded live subscribers. The TUI and each
+short-lived Rodex control client receive separate upstream App Server connections over
+private Unix sockets. This is the working Phase I topology; approval ownership across
+clients remains deliberately unclaimed until a live-turn Phase II experiment. tmux user
+options advertise the sockets and live identities. Tool counts cover one runtime.
 
 The separate tmux input proxy and completion observer for `/rodex` are retained but
 temporarily disabled by `RODEX_TMUX_SLASH_ENABLED`. Runtime status setup removes their
@@ -123,7 +129,11 @@ analytics sidecar.
   it. A live effective-name change sends exactly one verified `RODEX_AUTO_INFO`
   prompt to the session's single Codex thread, regardless of how many tmux clients
   are attached. Offline and unchanged names do not send one.
-- `_send`, `_wait`, and `_tail` verify the stored and live Codex session ID before acting.
+- `_send`, idle-based `_wait`, and `_tail` remain compatibility commands.
+- `_inspect --json` reports the exact active turn. `_start`, `_steer`, exact `_wait`,
+  `_interrupt`, and `_result` use stdin and/or a caller-supplied turn ID, emit one
+  schema-v1 envelope, and require the persisted runtime UUID. Results stay App
+  Server-owned rather than becoming a second SQLite conversation store.
 
 ## Lifecycle
 

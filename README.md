@@ -23,6 +23,7 @@ when needed, and return later using a generated name such as `automatic-beluga`.
 - Animates shared arrival and final departure for five seconds without blocking the TUI.
 - Keeps the in-TUI `/rodex` command implementation available but disabled for now.
 - Sends work to, waits for, or follows a running session from another shell.
+- Starts, steers, waits for, interrupts, and reads results by exact Codex turn ID.
 - Maintains queryable session and exact-turn statistics from authenticated rollouts.
 - Refuses unregistered tmux name collisions and verifies Rodex and Codex identities
   before attaching to or controlling a live runtime.
@@ -102,6 +103,12 @@ preference. See the current [tmux manual](https://man.openbsd.org/tmux.1) and
 | `./rodex _send edgar-work "Run the tests"` | Start or steer work in a running session. |
 | `./rodex _wait edgar-work` | Wait until the running session is idle. |
 | `./rodex _tail edgar-work` | Follow structured live protocol events as JSON lines. |
+| `./rodex _inspect edgar-work --json` | Read live thread state and its exact active turn ID. |
+| `printf '%s' "$PROMPT" \| ./rodex _start edgar-work --stdin --json` | Start only after the thread is observed idle. |
+| `printf '%s' "$PROMPT" \| ./rodex _steer edgar-work --turn TURN_ID --stdin --json` | Steer one exact active turn. |
+| `./rodex _wait edgar-work --turn TURN_ID --timeout 30m --json` | Wait for one exact turn without interrupting on timeout. |
+| `./rodex _interrupt edgar-work --turn TURN_ID --json` | Interrupt one exact active turn. |
+| `./rodex _result edgar-work --turn TURN_ID --json` | Read bounded live result data without copying it into SQLite. |
 | `./rodex _stats edgar-work` | Show the latest successful aggregate statistics. |
 | `./rodex _stats edgar-work --json` | Emit the snapshot and freshness metadata as JSON. |
 | `./rodex _stats edgar-work --turn TURN_ID` | Show one exact turn from the latest snapshot. |
@@ -118,6 +125,16 @@ against the current user's database row, and fails closed outside a matching man
 session. Its JSON includes registry/database provenance, permanent and user-defined
 names, the complete tmux socket/session/window/pane address, and sharing state. The
 display name is read on every invocation, so an agent need not cache it.
+New runtimes also expose a random runtime UUID and its durable-match state. The exact
+control commands emit a schema-v1 success/error envelope containing separate Rodex
+session, runtime, Codex thread, Codex session-tree, and turn identities. They require
+stdin prompts and a runtime created by this Rodex version. Exit status `2` means invalid
+input or unknown session, `3` means runtime/identity/compatibility failure, `4` is a
+non-interrupting wait timeout, `5` an interrupted turn, `6` a failed turn, and `7` a
+control or indeterminate-dispatch failure. `dispatch_indeterminate` is deliberately not
+retryable: inspect before deciding. Legacy `_send` and idle-based `_wait` remain available.
+The repository-local [Rodex control skill](.agents/skills/rodex-session-control/SKILL.md)
+keeps agent use on this exact identity-and-turn workflow.
 When `_alias` changes the effective name of a live session, Rodex sends one verified
 prompt to that session's Codex thread:
 `RODEX_AUTO_INFO: Rodex session <16-hex-id> is now named '<name>'.` All attached tmux
@@ -156,6 +173,9 @@ as a separate identity domain. Both are compact integrity discriminators for
 agents and operators, not bearer secrets. SQLite enforces uniqueness and allocation
 tries at most ten independent candidates before failing explicitly. Codex session IDs
 remain 128-bit values and are stored losslessly across two BIGINT columns.
+Each current runtime incarnation has a separate random UUID, stored losslessly as its
+ordered signed-`BIGINT` halves and used only as control identity metadata; prompts,
+responses, and App Server results remain Codex-owned.
 
 Short-lived Unix sockets and app-server logs use `$XDG_RUNTIME_DIR/rodex`, normally
 `/run/user/<uid>/rodex`. When `XDG_RUNTIME_DIR` is unset or that socket path would be
@@ -189,6 +209,7 @@ POSIX user. Codex remains responsible for raw history.
 - [Security model](docs/SECURITY.md)
 - [Code concepts](docs/CODE_CONCEPTS.md)
 - [SQL schema methodology](docs/SQL_SCHEMA.md)
+- [Phase II plan (planning only)](docs/PHASE_II_PLAN.md)
 
 ## Development
 
@@ -199,6 +220,7 @@ uv run pytest --cov --cov-report=term-missing
 uv build
 ```
 
-The alpha coverage floor is 70%. Tests include real-tmux boundary coverage for
+The alpha coverage floor is 70%. Tests include real App Server Unix-socket and real-tmux
+boundary coverage for
 scrollback retention, inherited mouse configuration, rename, identity markers, and
 status configuration.

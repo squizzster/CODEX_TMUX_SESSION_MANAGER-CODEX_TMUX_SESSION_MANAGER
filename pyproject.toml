@@ -24,6 +24,7 @@ rodex = "rodex:main"
 dev = [
     "pytest>=8.4.2",
     "pytest-cov>=7.0.0",
+    "pyyaml>=6.0.3",
     "ruff>=0.12.0",
 ]
 

@@ -11,6 +11,7 @@ import stat as stat_module
 import subprocess
 import sys
 import time
+import uuid
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, replace
@@ -24,9 +25,11 @@ from websockets.sync.client import unix_connect
 from rodex_registry.identity import (
     CodexSessionId,
     RodexRegistryId,
+    RodexRuntimeIdentifier,
     RodexSessionId,
     parse_codex_session_id,
     parse_rodex_registry_id,
+    parse_rodex_runtime_identifier,
 )
 
 from .analytics import (
@@ -66,6 +69,7 @@ _CODEX_SESSION_ID_OPTION: Final = "@rodex_codex_session_id"
 _RODEX_SESSION_ID_OPTION: Final = "@rodex_session_id"
 _REGISTRY_ID_OPTION: Final = "@rodex_registry_id"
 _REGISTRATION_STATE_OPTION: Final = "@rodex_registration_state"
+_RUNTIME_IDENTIFIER_OPTION: Final = "@rodex_runtime_identifier"
 RODEX_REGISTRATION_PENDING: Final = "pending"
 RODEX_REGISTRATION_REGISTERED: Final = "registered"
 # One switch owns installation of the tmux `/rodex` bindings and completion pipe.
@@ -210,6 +214,7 @@ class LiveRodexRuntime(LiveTmuxSession):
     app_server_log_path: Path
     protocol_proxy_socket_path: Path
     protocol_event_socket_path: Path
+    runtime_identifier: RodexRuntimeIdentifier | None = None
 
 
 def _exact_tmux_session_target(session_name: str) -> str:
@@ -401,6 +406,7 @@ class RodexRuntimeLauncher:
             app_server_log_path=runtime_root / f"app-{token}.log",
             protocol_proxy_socket_path=runtime_root / f"proxy-{token}.sock",
             protocol_event_socket_path=runtime_root / f"events-{token}.sock",
+            runtime_identifier=uuid.uuid4(),
         )
         _require_short_unix_socket_path(runtime.tmux_server_socket_path)
         _require_short_unix_socket_path(runtime.app_server_socket_path)
@@ -479,11 +485,14 @@ class RodexRuntimeLauncher:
         rodex_registry_id: RodexRegistryId | None = None,
     ) -> None:
         """Advertise live-only control metadata inside the owning tmux session."""
+        if runtime.runtime_identifier is None:
+            raise RodexRuntimeError("a new live runtime requires a runtime identifier")
         target = _exact_tmux_pane_target(runtime.tmux_session_name)
         options = [
             (_PROXY_SOCKET_OPTION, str(runtime.protocol_proxy_socket_path)),
             (_EVENT_SOCKET_OPTION, str(runtime.protocol_event_socket_path)),
             (_CODEX_SESSION_ID_OPTION, str(codex_session_id)),
+            (_RUNTIME_IDENTIFIER_OPTION, str(runtime.runtime_identifier)),
         ]
         if rodex_session_id is not None:
             if rodex_registry_id is None:
@@ -526,6 +535,9 @@ class RodexRuntimeLauncher:
         registration_state = self._read_optional_tmux_option(
             runtime, target, _REGISTRATION_STATE_OPTION
         )
+        runtime_identifier_text = self._read_optional_tmux_option(
+            runtime, target, _RUNTIME_IDENTIFIER_OPTION
+        )
         try:
             codex_session_id = parse_codex_session_id(codex_session_id_text)
         except ValueError as error:
@@ -552,6 +564,32 @@ class RodexRuntimeLauncher:
             raise RodexRuntimeError(
                 "live tmux session advertised an invalid Rodex registry ID"
             ) from error
+        try:
+            runtime_identifier = (
+                None
+                if runtime_identifier_text is None
+                else parse_rodex_runtime_identifier(runtime_identifier_text)
+            )
+        except ValueError as error:
+            try:
+                parsed_noncanonical_identifier = (
+                    None
+                    if runtime_identifier_text is None
+                    else uuid.UUID(runtime_identifier_text)
+                )
+            except ValueError:
+                parsed_noncanonical_identifier = None
+            if (
+                runtime_identifier_text is not None
+                and parsed_noncanonical_identifier is not None
+                and str(parsed_noncanonical_identifier) != runtime_identifier_text
+            ):
+                raise RodexRuntimeError(
+                    "live tmux session advertised a noncanonical runtime identifier"
+                ) from error
+            raise RodexRuntimeError(
+                "live tmux session advertised an invalid runtime identifier"
+            ) from error
         return LiveRodexControl(
             Path(proxy_path),
             Path(event_path),
@@ -559,6 +597,7 @@ class RodexRuntimeLauncher:
             rodex_session_id,
             rodex_registry_id,
             registration_state,
+            runtime_identifier,
         )
 
     def rename(self, runtime: LiveTmuxSession, tmux_session_name: str) -> LiveTmuxSession:

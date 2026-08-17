@@ -13,6 +13,7 @@ from rodex_registry import (
     create_a_rodex_session,
     initialise_rodex_database,
     lookup_codex_session_id_from_a_rodex_sessions_id,
+    lookup_rodex_runtime_instance,
     lookup_rodex_session_log,
     lookup_rodex_sessions_id_from_a_codex_session_id,
     lookup_rodex_tmux_session,
@@ -76,6 +77,125 @@ def test_tmux_sessions_table_has_its_own_id_and_two_unique_keys(tmp_path: Path) 
         ("rodex_tmux_sessions_rodex_sessions_id_unique", 1),
         ("rodex_tmux_sessions_endpoint_unique", 1),
     }
+
+
+def test_runtime_instance_table_identifies_one_exact_current_incarnation(
+    tmp_path: Path,
+) -> None:
+    database = initialise_rodex_database(tmp_path / "rodex.sqlite3")
+
+    columns = fetch_all(database, "PRAGMA table_info(rodex_runtime_instances)")
+    indexes = fetch_all(database, "PRAGMA index_list(rodex_runtime_instances)")
+
+    assert [(row[1], row[2], row[3], row[5]) for row in columns] == [
+        ("id", "INTEGER", 0, 1),
+        ("rodex_sessions_id", "INTEGER", 1, 0),
+        ("runtime_identifier_signed_bigint_1", "BIGINT", 1, 0),
+        ("runtime_identifier_signed_bigint_2", "BIGINT", 1, 0),
+        ("started_at_utc", "TEXT", 1, 0),
+    ]
+    assert {(row[1], row[2]) for row in indexes} == {
+        ("rodex_runtime_instances_identifier_unique", 1),
+        ("rodex_runtime_instances_rodex_sessions_id_unique", 1),
+    }
+    assert [
+        row[2]
+        for row in fetch_all(
+            database,
+            "PRAGMA index_info(rodex_runtime_instances_identifier_unique)",
+        )
+    ] == [
+        "runtime_identifier_signed_bigint_1",
+        "runtime_identifier_signed_bigint_2",
+    ]
+
+
+def test_create_and_resume_persist_the_exact_current_runtime_identifier(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "rodex.sqlite3"
+    first_runtime = uuid.UUID("0c01ee2e-ad72-40e1-b337-7202e099c2fe")
+    second_runtime = uuid.UUID("e6877350-da74-4e32-a4a5-7174e245f9a5")
+    session = create_a_rodex_session(
+        database,
+        codex_session_id=CODEX_SESSION_ID,
+        tmux_server_socket_path="/tmp/rodex/tmux.sock",
+        tmux_session_name="automatic-beluga",
+        runtime_identifier=first_runtime,
+    )
+
+    initial = lookup_rodex_runtime_instance(session.rodex_sessions_id, database)
+    assert initial is not None
+    assert initial.runtime_identifier == first_runtime
+
+    record_a_rodex_session_runtime_resume(
+        session.rodex_sessions_id,
+        "/tmp/rodex/tmux.sock",
+        "automatic-beluga",
+        database,
+        runtime_identifier=second_runtime,
+        accessed_at_utc=datetime(2026, 8, 15, 18, 30, tzinfo=UTC),
+    )
+
+    resumed = lookup_rodex_runtime_instance(session.rodex_sessions_id, database)
+    assert resumed is not None
+    assert resumed.id == initial.id
+    assert resumed.runtime_identifier == second_runtime
+    assert resumed.started_at_utc == "2026-08-15T18:30:00.000000Z"
+
+
+@pytest.mark.parametrize(
+    "column_name",
+    [
+        "runtime_identifier_signed_bigint_1",
+        "runtime_identifier_signed_bigint_2",
+    ],
+)
+def test_runtime_identifier_bigints_reject_non_integer_storage(
+    tmp_path: Path, column_name: str
+) -> None:
+    database = tmp_path / f"{column_name}.sqlite3"
+    session = create_a_rodex_session(
+        database,
+        codex_session_id=CODEX_SESSION_ID,
+        tmux_server_socket_path="/tmp/rodex/tmux.sock",
+        tmux_session_name="automatic-beluga",
+        runtime_identifier=uuid.UUID("0c01ee2e-ad72-40e1-b337-7202e099c2fe"),
+    )
+
+    with (
+        sqlite3.connect(database) as connection,
+        pytest.raises(sqlite3.IntegrityError, match="CHECK constraint failed"),
+    ):
+        connection.execute(
+            f"UPDATE rodex_runtime_instances SET {column_name} = 1.5 "
+            "WHERE rodex_sessions_id = ?",
+            (session.rodex_sessions_id,),
+        )
+
+
+def test_runtime_identifier_reader_does_not_coerce_corrupt_storage(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "rodex.sqlite3"
+    session = create_a_rodex_session(
+        database,
+        codex_session_id=CODEX_SESSION_ID,
+        tmux_server_socket_path="/tmp/rodex/tmux.sock",
+        tmux_session_name="automatic-beluga",
+        runtime_identifier=uuid.UUID("0c01ee2e-ad72-40e1-b337-7202e099c2fe"),
+    )
+    with sqlite3.connect(database) as connection:
+        connection.execute("PRAGMA ignore_check_constraints = ON")
+        connection.execute(
+            "UPDATE rodex_runtime_instances "
+            "SET runtime_identifier_signed_bigint_1 = 1.5 "
+            "WHERE rodex_sessions_id = ?",
+            (session.rodex_sessions_id,),
+        )
+
+    with pytest.raises(ValueError, match="signed 64-bit"):
+        lookup_rodex_runtime_instance(session.rodex_sessions_id, database)
 
 
 def test_one_transaction_matches_rodex_codex_and_tmux_without_mixing_ids(

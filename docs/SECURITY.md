@@ -8,12 +8,15 @@ listener; control endpoints are Unix sockets below a private runtime root.
 ## Enforced boundaries
 
 - A live attach or control action requires the durable SQL row and matching advertised
-  64-bit Rodex session ID, Rodex registry ID, Codex session ID, and `registered`
-  state. Missing, duplicated, or conflicting identity fails closed.
+  Rodex session, registry, Codex thread, and `registered` state. Exact machine control
+  additionally requires the current persisted/runtime UUID and characterized App Server
+  version. Missing, duplicated, or conflicting identity fails closed.
 - New runtimes begin `pending`, become usable after the SQL identity commits, and exit
   if confirmation never arrives. An exact committed/pending pair is recoverable.
 - Runtime roots are real, current-user-owned directories at mode `0700`, below either a
   private parent or root-owned sticky storage. Sockets and logs are mode `0600`.
+- Codex/App Server, proxy, event, and control traffic uses Unix-domain WebSockets only;
+  Rodex opens no TCP listener.
 - SQLite databases are current-user-owned regular files at mode `0600` below a private
   directory. Final symlinks and nonregular paths are rejected. WAL plus a busy timeout
   separates normal readers from analytics writes.
@@ -35,3 +38,4 @@ less harmful than attaching to or destroying the wrong runtime.
 The 16-hex Rodex session ID is an integrity discriminator, not a credential.
 Authorization comes from the current-uid filesystem boundary plus the exact durable and
 live identity tuple. Do not expose the ID later as a bearer-authentication token.
+The runtime UUID has the same role: incarnation fencing, not authentication.

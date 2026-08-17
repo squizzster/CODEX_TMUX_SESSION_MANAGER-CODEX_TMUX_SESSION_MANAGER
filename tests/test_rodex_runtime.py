@@ -168,7 +168,7 @@ def test_start_directly_hosts_codex_in_tmux_and_returns_its_session_id(
     assert "--rodex-database" not in host_command
     assert "--codex-sessions-root" not in host_command
     assert "send-keys" not in host_command
-    assert [command[3:] for command in runner.calls[-3:]] == [
+    assert [command[3:] for command in runner.calls[-4:-1]] == [
         [
             "set-option",
             "-t",
@@ -191,6 +191,13 @@ def test_start_directly_hosts_codex_in_tmux_and_returns_its_session_id(
             codex_session_id,
         ],
     ]
+    assert runner.calls[-1][3:-1] == [
+        "set-option",
+        "-t",
+        "=rodex-0123456789abcdef:",
+        "@rodex_runtime_identifier",
+    ]
+    assert uuid.UUID(runner.calls[-1][-1]) == live.runtime_identifier
 
 
 def test_start_passes_the_exact_leading_zero_session_id_to_the_session_host(
@@ -879,6 +886,7 @@ def test_real_tmux_survives_rename_and_status_configuration(tmp_path: Path) -> N
         tmp_path / "app.log",
         tmp_path / "proxy.sock",
         tmp_path / "events.sock",
+        uuid.uuid4(),
     )
     launcher = RodexRuntimeLauncher("codex", tmux_binary)
     codex_session_id = uuid.UUID("01a00654-f2bc-7a30-834a-a5f886a65f82")
@@ -1259,6 +1267,7 @@ def test_runtime_control_publishes_pending_then_registered_identity(
         tmp_path / "app.log",
         tmp_path / "proxy.sock",
         tmp_path / "events.sock",
+        uuid.uuid4(),
     )
     codex_session_id = uuid.uuid4()
     rodex_session_id = RodexSessionId.parse("0123456789abcdef")
@@ -1270,6 +1279,13 @@ def test_runtime_control_publishes_pending_then_registered_identity(
     launcher.confirm_runtime_registration(runtime)
 
     options = [command[3:] for command in runner.calls]
+    assert [
+        "set-option",
+        "-t",
+        "=rodex-token:",
+        "@rodex_runtime_identifier",
+        str(runtime.runtime_identifier),
+    ] in options
     assert options[-4:] == [
         [
             "set-option",
@@ -1312,6 +1328,7 @@ def test_runtime_discovery_reads_the_complete_current_identity_tuple(
         "@rodex_session_id": "0123456789abcdef",
         "@rodex_registry_id": "06179a3581264d53",
         "@rodex_registration_state": "registered",
+        "@rodex_runtime_identifier": "0c01ee2e-ad72-40e1-b337-7202e099c2fe",
     }
 
     def read_option(
@@ -1334,7 +1351,33 @@ def test_runtime_discovery_reads_the_complete_current_identity_tuple(
         RodexSessionId.parse("0123456789abcdef"),
         RodexRegistryId.parse("06179a3581264d53"),
         "registered",
+        uuid.UUID("0c01ee2e-ad72-40e1-b337-7202e099c2fe"),
     )
+
+
+def test_runtime_discovery_rejects_a_noncanonical_runtime_identifier(
+    tmp_path: Path,
+) -> None:
+    values = {
+        "@rodex_protocol_proxy_socket_path": str(tmp_path / "proxy.sock"),
+        "@rodex_protocol_event_socket_path": str(tmp_path / "events.sock"),
+        "@rodex_codex_session_id": "01a00654-f2bc-7a30-834a-a5f886a65f82",
+        "@rodex_runtime_identifier": "0C01EE2E-AD72-40E1-B337-7202E099C2FE",
+    }
+
+    def read_option(
+        command: list[str], **_options: object
+    ) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            command, 0, stdout=f"{values.get(command[-1], '')}\n", stderr=""
+        )
+
+    launcher = RodexRuntimeLauncher("codex", "tmux", runner=read_option)
+
+    with pytest.raises(RodexRuntimeError, match="noncanonical runtime identifier"):
+        launcher.discover_runtime_control(
+            LiveTmuxSession(tmp_path / "tmux.sock", "automatic-beluga")
+        )
 
 
 @pytest.mark.parametrize(

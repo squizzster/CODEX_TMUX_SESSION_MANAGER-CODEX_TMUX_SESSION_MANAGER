@@ -1,0 +1,32 @@
+{
+  "codex_cli_version": "0.147.0",
+  "initialize_user_agent": "rodex-control/0.147.0 (platform metadata)",
+  "request_id_types": [
+    "integer",
+    "string"
+  ],
+  "thread_required_fields": [
+    "id",
+    "sessionId",
+    "status",
+    "turns"
+  ],
+  "turn_statuses": [
+    "completed",
+    "failed",
+    "inProgress",
+    "interrupted"
+  ],
+  "turn_interrupt_required_params": [
+    "threadId",
+    "turnId"
+  ],
+  "turn_steer_required_params": [
+    "expectedTurnId",
+    "input",
+    "threadId"
+  ],
+  "turn_start_optional_params": [
+    "clientUserMessageId"
+  ]
+}

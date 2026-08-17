@@ -214,6 +214,36 @@ def test_full_projection_round_trips_through_relational_rows(tmp_path: Path) -> 
     assert view.sources[0].included_statistics_revision == 1
 
 
+def test_turn_identity_bigints_reject_non_integer_storage(tmp_path: Path) -> None:
+    database = tmp_path / "rodex.sqlite3"
+    create_a_rodex_session(database, codex_session_id=CODEX_SESSION_ID)
+    _publish(database, tmp_path, projection=_projection((_turn("turn-exact"),)))
+
+    with sqlite3.connect(database) as connection:
+        for part_number in range(1, 5):
+            column_name = f"codex_turn_id_sha256_int_{part_number}"
+            with pytest.raises(sqlite3.IntegrityError, match="CHECK constraint failed"):
+                connection.execute(
+                    f"UPDATE rodex_sessions_statistics_turns SET {column_name} = 1.5"
+                )
+
+
+def test_statistics_reader_does_not_coerce_corrupt_source_identity(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "rodex.sqlite3"
+    create_a_rodex_session(database, codex_session_id=CODEX_SESSION_ID)
+    with sqlite3.connect(database) as connection:
+        connection.execute("PRAGMA ignore_check_constraints = ON")
+        connection.execute(
+            "UPDATE rodex_sessions_statistics_sources "
+            "SET codex_session_id_signed_bigint_1 = 1.5"
+        )
+
+    with pytest.raises(ValueError, match="signed 64-bit"):
+        read_rodex_session_statistics(1, database)
+
+
 def test_sql_can_sum_group_and_filter_base_statistics(tmp_path: Path) -> None:
     database = tmp_path / "rodex.sqlite3"
     create_a_rodex_session(database, codex_session_id=CODEX_SESSION_ID)

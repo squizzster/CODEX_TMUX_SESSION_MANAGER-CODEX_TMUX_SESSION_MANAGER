@@ -36,6 +36,8 @@ Apply these standards to future schema decisions. These authorative standards ma
 - Unsigned identity up to 64 bits is stored losslessly in one signed `BIGINT` through
   an explicit two's-complement codec. Wider identity is stored losslessly in ordered
   signed `BIGINT` fields with one composite unique index.
+- Every identity `BIGINT` enforces `typeof(column) = 'integer'`; readers pass stored
+  values through strict codecs without coercion so malformed storage fails closed.
 - Derived-identity field names state the source value, derivation, integer storage,
   and part order. Never truncate identity merely to fit one column.
 - Names must identify the domain that owns an identity. Similar representations from

@@ -222,7 +222,9 @@ _TURN_DATABASE_SCALAR_COLUMNS: Final = (
 _CREATE_REGISTRIES_TABLE = f"""
 CREATE TABLE IF NOT EXISTS {RODEX_REGISTRIES_TABLE} (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    rodex_registry_id_signed_bigint BIGINT NOT NULL,
+    rodex_registry_id_signed_bigint BIGINT NOT NULL CHECK (
+        typeof(rodex_registry_id_signed_bigint) = 'integer'
+    ),
     CHECK (id = 1)
 )
 """
@@ -233,9 +235,15 @@ ON {RODEX_REGISTRIES_TABLE} (rodex_registry_id_signed_bigint)
 _CREATE_TABLE = f"""
 CREATE TABLE IF NOT EXISTS {RODEX_SESSIONS_TABLE} (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    rodex_session_id_signed_bigint BIGINT NOT NULL,
-    codex_session_id_signed_bigint_1 BIGINT NOT NULL,
-    codex_session_id_signed_bigint_2 BIGINT NOT NULL,
+    rodex_session_id_signed_bigint BIGINT NOT NULL CHECK (
+        typeof(rodex_session_id_signed_bigint) = 'integer'
+    ),
+    codex_session_id_signed_bigint_1 BIGINT NOT NULL CHECK (
+        typeof(codex_session_id_signed_bigint_1) = 'integer'
+    ),
+    codex_session_id_signed_bigint_2 BIGINT NOT NULL CHECK (
+        typeof(codex_session_id_signed_bigint_2) = 'integer'
+    ),
     cool_names_id INTEGER NOT NULL,
     user_defined_cool_names_id INTEGER DEFAULT NULL,
     FOREIGN KEY (cool_names_id) REFERENCES cool_names (id),
@@ -567,8 +575,12 @@ _CREATE_STATISTICS_SOURCES_TABLE = f"""
 CREATE TABLE IF NOT EXISTS {RODEX_SESSIONS_STATISTICS_SOURCES_TABLE} (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     rodex_sessions_id INTEGER NOT NULL,
-    codex_session_id_signed_bigint_1 BIGINT NOT NULL,
-    codex_session_id_signed_bigint_2 BIGINT NOT NULL,
+    codex_session_id_signed_bigint_1 BIGINT NOT NULL CHECK (
+        typeof(codex_session_id_signed_bigint_1) = 'integer'
+    ),
+    codex_session_id_signed_bigint_2 BIGINT NOT NULL CHECK (
+        typeof(codex_session_id_signed_bigint_2) = 'integer'
+    ),
     first_linked_at_utc TEXT NOT NULL,
     rollout_file_path TEXT DEFAULT NULL,
     analyzed_size_bytes INTEGER DEFAULT NULL CHECK (
@@ -623,10 +635,18 @@ CREATE TABLE IF NOT EXISTS {RODEX_SESSIONS_STATISTICS_TURNS_TABLE} (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     rodex_sessions_id INTEGER NOT NULL,
     rodex_sessions_statistics_sources_id INTEGER NOT NULL,
-    codex_turn_id_sha256_int_1 BIGINT NOT NULL,
-    codex_turn_id_sha256_int_2 BIGINT NOT NULL,
-    codex_turn_id_sha256_int_3 BIGINT NOT NULL,
-    codex_turn_id_sha256_int_4 BIGINT NOT NULL,
+    codex_turn_id_sha256_int_1 BIGINT NOT NULL CHECK (
+        typeof(codex_turn_id_sha256_int_1) = 'integer'
+    ),
+    codex_turn_id_sha256_int_2 BIGINT NOT NULL CHECK (
+        typeof(codex_turn_id_sha256_int_2) = 'integer'
+    ),
+    codex_turn_id_sha256_int_3 BIGINT NOT NULL CHECK (
+        typeof(codex_turn_id_sha256_int_3) = 'integer'
+    ),
+    codex_turn_id_sha256_int_4 BIGINT NOT NULL CHECK (
+        typeof(codex_turn_id_sha256_int_4) = 'integer'
+    ),
     codex_turn_id TEXT NOT NULL,
     included_statistics_revision INTEGER NOT NULL CHECK (
         included_statistics_revision >= 1
@@ -1032,7 +1052,7 @@ def lookup_rodex_registry_id(
         ).fetchone()
     if row is None:
         raise RodexSessionError("Rodex registry identity disappeared")
-    return RodexRegistryId.from_signed_bigint(int(row[0]))
+    return RodexRegistryId.from_signed_bigint(row[0])
 
 
 def _verify_registries_table(connection: sqlite3.Connection) -> None:
@@ -1051,6 +1071,7 @@ def _verify_registries_table(connection: sqlite3.Connection) -> None:
     if (
         "ID INTEGER PRIMARY KEY AUTOINCREMENT" not in definition
         or "CHECK (ID = 1)" not in definition
+        or "TYPEOF(RODEX_REGISTRY_ID_SIGNED_BIGINT) = 'INTEGER'" not in definition
     ):
         raise RodexSessionError(f"{RODEX_REGISTRIES_TABLE} constraints mismatch")
 
@@ -1075,6 +1096,13 @@ def _verify_sessions_table(connection: sqlite3.Connection) -> None:
     definition = " ".join(str(definition_row[0]).upper().split())
     if "ID INTEGER PRIMARY KEY AUTOINCREMENT" not in definition:
         raise RodexSessionError(f"{RODEX_SESSIONS_TABLE} id must use AUTOINCREMENT")
+    required_identity_constraints = (
+        "TYPEOF(RODEX_SESSION_ID_SIGNED_BIGINT) = 'INTEGER'",
+        "TYPEOF(CODEX_SESSION_ID_SIGNED_BIGINT_1) = 'INTEGER'",
+        "TYPEOF(CODEX_SESSION_ID_SIGNED_BIGINT_2) = 'INTEGER'",
+    )
+    if any(fragment not in definition for fragment in required_identity_constraints):
+        raise RodexSessionError(f"{RODEX_SESSIONS_TABLE} identity constraints mismatch")
     if columns[-1][4] != "NULL":
         raise RodexSessionError(
             f"{RODEX_SESSIONS_TABLE}.user_defined_cool_names_id must default to NULL"
@@ -1484,6 +1512,8 @@ def _verify_statistics_sources_table(connection: sqlite3.Connection) -> None:
         connection,
         RODEX_SESSIONS_STATISTICS_SOURCES_TABLE,
         (
+            "TYPEOF(CODEX_SESSION_ID_SIGNED_BIGINT_1) = 'INTEGER'",
+            "TYPEOF(CODEX_SESSION_ID_SIGNED_BIGINT_2) = 'INTEGER'",
             "ANALYZED_SIZE_BYTES IS NULL OR ANALYZED_SIZE_BYTES >= 0",
             "ANALYZED_MTIME_NS IS NULL OR ANALYZED_MTIME_NS >= 0",
             "INCLUDED_STATISTICS_REVISION IS NULL OR INCLUDED_STATISTICS_REVISION >= 1",
@@ -1597,6 +1627,10 @@ def _verify_statistics_turns_table(connection: sqlite3.Connection) -> None:
         connection,
         RODEX_SESSIONS_STATISTICS_TURNS_TABLE,
         (
+            "TYPEOF(CODEX_TURN_ID_SHA256_INT_1) = 'INTEGER'",
+            "TYPEOF(CODEX_TURN_ID_SHA256_INT_2) = 'INTEGER'",
+            "TYPEOF(CODEX_TURN_ID_SHA256_INT_3) = 'INTEGER'",
+            "TYPEOF(CODEX_TURN_ID_SHA256_INT_4) = 'INTEGER'",
             "CHECK ( INCLUDED_STATISTICS_REVISION >= 1 )",
             "OUTCOME IN ('OPEN', 'COMPLETED', 'ABORTED')",
             "OUTCOME != 'OPEN' OR TERMINAL_AT_UTC IS NULL",

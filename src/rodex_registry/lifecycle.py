@@ -374,7 +374,7 @@ def lookup_rodex_session_id_from_a_rodex_sessions_id(
         ).fetchone()
     if row is None:
         return None
-    return RodexSessionId.from_signed_bigint(int(row[0]))
+    return RodexSessionId.from_signed_bigint(row[0])
 
 
 def lookup_rodex_session_log(
@@ -512,7 +512,7 @@ def lookup_codex_session_id_from_a_rodex_sessions_id(
         ).fetchone()
     if row is None:
         return None
-    return join_signed_bigints_into_a_codex_session_id(int(row[0]), int(row[1]))
+    return join_signed_bigints_into_a_codex_session_id(row[0], row[1])
 
 
 def lookup_rodex_tmux_session(
@@ -729,9 +729,7 @@ def list_rodex_session_runtimes_for_a_user(
             rodex_sessions_id=int(row[0]),
             cool_name=str(row[1]),
             user_defined_cool_name=None if row[2] is None else str(row[2]),
-            codex_session_id=join_signed_bigints_into_a_codex_session_id(
-                int(row[3]), int(row[4])
-            ),
+            codex_session_id=join_signed_bigints_into_a_codex_session_id(row[3], row[4]),
             tmux_server_socket_path=str(row[5]),
             tmux_session_name=str(row[6]),
         )

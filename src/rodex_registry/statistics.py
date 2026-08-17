@@ -928,9 +928,7 @@ def _statistics_source_from_row(
     return RodexSessionStatisticsSource(
         id=int(row[0]),
         rodex_sessions_id=int(row[1]),
-        codex_session_id=join_signed_bigints_into_a_codex_session_id(
-            int(row[2]), int(row[3])
-        ),
+        codex_session_id=join_signed_bigints_into_a_codex_session_id(row[2], row[3]),
         first_linked_at_utc=str(row[4]),
         rollout_file_path=None if row[5] is None else str(row[5]),
         analyzed_size_bytes=None if row[6] is None else int(row[6]),
@@ -954,9 +952,7 @@ def _turn_statistics_from_rows(
     ):
         values[key] = bool(values[key])
     projection = TurnStatisticsProjection(
-        codex_session_id=join_signed_bigints_into_a_codex_session_id(
-            int(row[3]), int(row[4])
-        ),
+        codex_session_id=join_signed_bigints_into_a_codex_session_id(row[3], row[4]),
         codex_turn_id=str(row[5]),
         started_at_utc=None if row[7] is None else str(row[7]),
         terminal_at_utc=None if row[8] is None else str(row[8]),

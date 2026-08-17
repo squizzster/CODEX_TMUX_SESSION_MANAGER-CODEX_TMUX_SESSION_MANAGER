@@ -131,6 +131,62 @@ def test_rodex_sessions_table_has_the_complete_root_identity(tmp_path: Path) -> 
     assert columns[-1][4] == "NULL"
 
 
+def test_identity_bigint_columns_reject_non_integer_storage(tmp_path: Path) -> None:
+    database = tmp_path / "rodex.sqlite3"
+    create_a_rodex_session(database, codex_session_id=codex_session_id(1))
+    identity_columns = (
+        ("rodex_registries", "rodex_registry_id_signed_bigint"),
+        ("rodex_sessions", "rodex_session_id_signed_bigint"),
+        ("rodex_sessions", "codex_session_id_signed_bigint_1"),
+        ("rodex_sessions", "codex_session_id_signed_bigint_2"),
+        (
+            "rodex_sessions_statistics_sources",
+            "codex_session_id_signed_bigint_1",
+        ),
+        (
+            "rodex_sessions_statistics_sources",
+            "codex_session_id_signed_bigint_2",
+        ),
+    )
+
+    with sqlite3.connect(database) as connection:
+        for table_name, column_name in identity_columns:
+            with pytest.raises(sqlite3.IntegrityError, match="CHECK constraint failed"):
+                connection.execute(f"UPDATE {table_name} SET {column_name} = 1.5")
+
+
+def test_identity_readers_do_not_coerce_corrupt_storage(tmp_path: Path) -> None:
+    cases = (
+        (
+            "registry",
+            "rodex_registries",
+            "rodex_registry_id_signed_bigint",
+            lookup_rodex_registry_id,
+        ),
+        (
+            "session",
+            "rodex_sessions",
+            "rodex_session_id_signed_bigint",
+            lambda path: lookup_rodex_session_id_from_a_rodex_sessions_id(1, path),
+        ),
+        (
+            "codex",
+            "rodex_sessions",
+            "codex_session_id_signed_bigint_1",
+            lambda path: lookup_codex_session_id_from_a_rodex_sessions_id(1, path),
+        ),
+    )
+    for case_name, table_name, column_name, reader in cases:
+        database = tmp_path / f"{case_name}.sqlite3"
+        create_a_rodex_session(database, codex_session_id=codex_session_id(1))
+        with sqlite3.connect(database) as connection:
+            connection.execute("PRAGMA ignore_check_constraints = ON")
+            connection.execute(f"UPDATE {table_name} SET {column_name} = 1.5")
+
+        with pytest.raises(ValueError, match="signed 64-bit"):
+            reader(database)
+
+
 def test_id_uses_sqlite_autoincrement(tmp_path: Path) -> None:
     database = initialise_rodex_database(tmp_path / "rodex.sqlite3")
 
@@ -198,7 +254,9 @@ def test_initialisation_rejects_an_id_without_autoincrement(tmp_path: Path) -> N
         initialise_rodex_database(database)
 
 
-def test_initialisation_repairs_a_missing_unique_index(tmp_path: Path) -> None:
+def test_initialisation_rejects_missing_identity_type_constraints(
+    tmp_path: Path,
+) -> None:
     database = tmp_path / "rodex.sqlite3"
     with sqlite3.connect(database) as connection:
         connection.execute(
@@ -207,6 +265,28 @@ def test_initialisation_repairs_a_missing_unique_index(tmp_path: Path) -> None:
             "rodex_session_id_signed_bigint BIGINT NOT NULL, "
             "codex_session_id_signed_bigint_1 BIGINT NOT NULL, "
             "codex_session_id_signed_bigint_2 BIGINT NOT NULL, "
+            "cool_names_id INTEGER NOT NULL, "
+            "user_defined_cool_names_id INTEGER DEFAULT NULL, "
+            "FOREIGN KEY (cool_names_id) REFERENCES cool_names (id), "
+            "FOREIGN KEY (user_defined_cool_names_id) REFERENCES cool_names (id))"
+        )
+
+    with pytest.raises(RodexSessionError, match="identity constraints mismatch"):
+        initialise_rodex_database(database)
+
+
+def test_initialisation_repairs_a_missing_unique_index(tmp_path: Path) -> None:
+    database = tmp_path / "rodex.sqlite3"
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "CREATE TABLE rodex_sessions ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "rodex_session_id_signed_bigint BIGINT NOT NULL "
+            "CHECK (typeof(rodex_session_id_signed_bigint) = 'integer'), "
+            "codex_session_id_signed_bigint_1 BIGINT NOT NULL "
+            "CHECK (typeof(codex_session_id_signed_bigint_1) = 'integer'), "
+            "codex_session_id_signed_bigint_2 BIGINT NOT NULL "
+            "CHECK (typeof(codex_session_id_signed_bigint_2) = 'integer'), "
             "cool_names_id INTEGER NOT NULL, "
             "user_defined_cool_names_id INTEGER DEFAULT NULL, "
             "FOREIGN KEY (cool_names_id) REFERENCES cool_names (id), "

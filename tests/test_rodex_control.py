@@ -15,7 +15,7 @@ from rodex.control import (
 )
 from rodex.protocol_proxy import EVENT_STREAM_READY_MESSAGE
 
-CODEX_UUID = uuid.UUID("01a00654-f2bc-7a30-834a-a5f886a65f82")
+CODEX_SESSION_ID = uuid.UUID("01a00654-f2bc-7a30-834a-a5f886a65f82")
 
 
 class FakeWebSocket:
@@ -63,7 +63,7 @@ def control(tmp_path: Path) -> LiveRodexControl:
     return LiveRodexControl(
         tmp_path / "proxy.sock",
         tmp_path / "events.sock",
-        CODEX_UUID,
+        CODEX_SESSION_ID,
     )
 
 
@@ -72,12 +72,12 @@ def verified_responses(
 ) -> list[dict[str, Any]]:
     return [
         {"id": 0, "result": {}},
-        {"id": 1, "result": {"data": [str(CODEX_UUID)]}},
+        {"id": 1, "result": {"data": [str(CODEX_SESSION_ID)]}},
         {
             "id": 2,
             "result": {
                 "thread": {
-                    "id": str(CODEX_UUID),
+                    "id": str(CODEX_SESSION_ID),
                     "status": {
                         "type": status,
                         **({"activeFlags": []} if status == "active" else {}),
@@ -90,7 +90,9 @@ def verified_responses(
     ]
 
 
-def test_send_starts_an_idle_turn_after_uuid_verification(tmp_path: Path) -> None:
+def test_send_starts_an_idle_turn_after_codex_session_id_verification(
+    tmp_path: Path,
+) -> None:
     protocol = FakeWebSocket(
         [
             *verified_responses(status="idle"),
@@ -111,7 +113,7 @@ def test_send_starts_an_idle_turn_after_uuid_verification(tmp_path: Path) -> Non
         "method": "turn/start",
         "id": 3,
         "params": {
-            "threadId": str(CODEX_UUID),
+            "threadId": str(CODEX_SESSION_ID),
             "input": [{"type": "text", "text": "run tests"}],
         },
     }
@@ -129,7 +131,7 @@ def test_send_steers_the_exact_active_turn(tmp_path: Path) -> None:
         responses=[
             {
                 "method": "rodex/event-stream/ready",
-                "params": {"activeTurns": {str(CODEX_UUID): "turn-active"}},
+                "params": {"activeTurns": {str(CODEX_SESSION_ID): "turn-active"}},
             }
         ]
     )
@@ -152,7 +154,7 @@ def test_thread_inspection_does_not_require_rollout_history(tmp_path: Path) -> N
     assert protocol.sent[-1]["params"]["includeTurns"] is False
 
 
-def test_control_rejects_an_endpoint_without_the_expected_codex_uuid(
+def test_control_rejects_an_endpoint_without_the_expected_codex_session_id(
     tmp_path: Path,
 ) -> None:
     protocol = FakeWebSocket(
@@ -179,7 +181,7 @@ def test_wait_subscribes_before_inspection_and_returns_on_turn_completion(
             {
                 "method": "turn/completed",
                 "params": {
-                    "threadId": str(CODEX_UUID),
+                    "threadId": str(CODEX_SESSION_ID),
                     "turn": {"id": "turn-active", "status": "completed"},
                 },
             }
@@ -206,21 +208,21 @@ def test_wait_does_not_accept_a_queued_completion_from_the_previous_turn(
             {
                 "method": "turn/completed",
                 "params": {
-                    "threadId": str(CODEX_UUID),
+                    "threadId": str(CODEX_SESSION_ID),
                     "turn": {"id": "turn-a", "status": "completed"},
                 },
             },
             {
                 "method": "turn/started",
                 "params": {
-                    "threadId": str(CODEX_UUID),
+                    "threadId": str(CODEX_SESSION_ID),
                     "turn": {"id": "turn-b", "status": "inProgress"},
                 },
             },
             {
                 "method": "turn/completed",
                 "params": {
-                    "threadId": str(CODEX_UUID),
+                    "threadId": str(CODEX_SESSION_ID),
                     "turn": {"id": "turn-b", "status": "completed"},
                 },
             },
@@ -240,7 +242,7 @@ def test_tail_emits_structured_collaboration_events_but_not_token_deltas(
     collab_event = {
         "method": "item/started",
         "params": {
-            "threadId": str(CODEX_UUID),
+            "threadId": str(CODEX_SESSION_ID),
             "turnId": "turn-1",
             "item": {
                 "type": "collabAgentToolCall",
@@ -254,7 +256,7 @@ def test_tail_emits_structured_collaboration_events_but_not_token_deltas(
         events=[
             {
                 "method": "agentMessage/delta",
-                "params": {"threadId": str(CODEX_UUID), "delta": "noise"},
+                "params": {"threadId": str(CODEX_SESSION_ID), "delta": "noise"},
             },
             collab_event,
         ],

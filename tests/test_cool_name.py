@@ -15,7 +15,7 @@ from cool_name import (
     initialise_cool_names_database,
     is_reserved_rodex_name,
 )
-from rodex_functions import create_a_rodex_session, initialise_rodex_database
+from rodex_registry import create_a_rodex_session, initialise_rodex_database
 
 
 def fetch_all(database: Path, query: str) -> list[tuple[object, ...]]:
@@ -79,7 +79,7 @@ def test_absent_cool_name_returns_none(tmp_path: Path) -> None:
     assert get_unique_id_from_cool_name("not-allocated", database) is None
 
 
-def test_five_blocked_two_word_names_fall_back_to_three_words_without_id_gaps(
+def test_ten_blocked_two_word_names_fall_back_to_three_words_without_id_gaps(
     tmp_path: Path,
 ) -> None:
     database = tmp_path / "rodex.sqlite3"
@@ -93,14 +93,14 @@ def test_five_blocked_two_word_names_fall_back_to_three_words_without_id_gaps(
     allocated = get_unique_new_cool_name(database, name_generator=generate_name)
 
     assert allocated == "fresh-three-name"
-    assert requested_word_counts == [2, 2, 2, 2, 2, 3]
+    assert requested_word_counts == [2] * 10 + [3]
     assert fetch_all(database, "SELECT id, cool_name FROM cool_names ORDER BY id") == [
         (1, "blocked-name"),
         (2, "fresh-three-name"),
     ]
 
 
-def test_ten_blocked_names_fail_after_exactly_five_attempts_at_each_size(
+def test_twenty_blocked_names_fail_after_ten_attempts_at_each_size(
     tmp_path: Path,
 ) -> None:
     database = tmp_path / "rodex.sqlite3"
@@ -111,10 +111,10 @@ def test_ten_blocked_names_fail_after_exactly_five_attempts_at_each_size(
         requested_word_counts.append(word_count)
         return "blocked-name"
 
-    with pytest.raises(CoolNameGenerationError, match="five two-word"):
+    with pytest.raises(CoolNameGenerationError, match="10 two-word"):
         get_unique_new_cool_name(database, name_generator=generate_blocked_name)
 
-    assert requested_word_counts == [2, 2, 2, 2, 2, 3, 3, 3, 3, 3]
+    assert requested_word_counts == [2] * 10 + [3] * 10
     assert fetch_all(database, "SELECT id, cool_name FROM cool_names") == [
         (1, "blocked-name")
     ]
@@ -182,7 +182,7 @@ def test_reserved_names_are_case_insensitive_and_automatic_allocation_skips_them
     assert get_unique_new_cool_name(database, name_generator=generate_name) == (
         "fresh-three-name"
     )
-    assert requested_word_counts == [2, 2, 2, 2, 2, 3]
+    assert requested_word_counts == [2] * 10 + [3]
     assert fetch_all(database, "SELECT id, cool_name FROM cool_names") == [
         (1, "fresh-three-name")
     ]
@@ -234,7 +234,7 @@ def test_session_creation_allocates_and_owns_one_cool_name(
 
     session = create_a_rodex_session(
         database,
-        codex_session_uuid=uuid.UUID("01a00654-f2bc-7a30-834a-a5f886a65f82"),
+        codex_session_id=uuid.UUID("01a00654-f2bc-7a30-834a-a5f886a65f82"),
     )
 
     assert session.cool_name == "precise-schema"

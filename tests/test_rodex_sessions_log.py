@@ -7,8 +7,8 @@ from pathlib import Path
 
 import pytest
 
-import rodex_functions.sessions as session_module
-from rodex_functions import (
+import rodex_registry.lifecycle as session_module
+from rodex_registry import (
     RodexSessionError,
     RodexSessionsUserIdentity,
     create_a_rodex_session,
@@ -20,8 +20,8 @@ from rodex_functions import (
 
 ALICE = RodexSessionsUserIdentity(uid=1001, gid=1002, user_name="alice")
 BOB = RodexSessionsUserIdentity(uid=2001, gid=2002, user_name="bob")
-CODEX_UUID_1 = uuid.UUID(int=(1 << 120) + 1)
-CODEX_UUID_2 = uuid.UUID(int=(1 << 120) + 2)
+CODEX_SESSION_ID_1 = uuid.UUID(int=(1 << 120) + 1)
+CODEX_SESSION_ID_2 = uuid.UUID(int=(1 << 120) + 2)
 
 
 def fetch_all(database: Path, query: str) -> list[tuple[object, ...]]:
@@ -106,14 +106,14 @@ def test_creating_a_session_also_creates_its_one_log_row(
     monkeypatch.setattr(session_module, "_utc_now_timestamp", lambda: timestamp)
 
     session = create_a_rodex_session(
-        database, codex_session_uuid=CODEX_UUID_1, user_identity=ALICE
+        database, codex_session_id=CODEX_SESSION_ID_1, user_identity=ALICE
     )
 
     assert fetch_all(
         database,
         "SELECT id, rodex_sessions_id, created_at_utc, rodex_sessions_users_id, "
         "last_accessed_at_utc FROM rodex_sessions_log",
-    ) == [(1, session.id, timestamp, 1, timestamp)]
+    ) == [(1, session.rodex_sessions_id, timestamp, 1, timestamp)]
 
 
 def test_session_user_defaults_to_the_posix_operating_system_identity(
@@ -128,9 +128,9 @@ def test_session_user_defaults_to_the_posix_operating_system_identity(
         lambda uid: type("PasswordEntry", (), {"pw_name": "dna"})(),
     )
 
-    session = create_a_rodex_session(database, codex_session_uuid=CODEX_UUID_1)
+    session = create_a_rodex_session(database, codex_session_id=CODEX_SESSION_ID_1)
 
-    log = lookup_rodex_session_log(session.id, database)
+    log = lookup_rodex_session_log(session.rodex_sessions_id, database)
     assert log is not None
     assert lookup_rodex_sessions_user(log.rodex_sessions_users_id, database) == (
         session_module.RodexSessionsUser(id=1, uid=1009, gid=1010, user_name="dna")
@@ -142,7 +142,7 @@ def test_user_name_must_not_be_empty(tmp_path: Path, invalid_user: str) -> None:
     with pytest.raises(ValueError, match="non-empty string"):
         create_a_rodex_session(
             tmp_path / "rodex.sqlite3",
-            codex_session_uuid=CODEX_UUID_1,
+            codex_session_id=CODEX_SESSION_ID_1,
             user_identity=RodexSessionsUserIdentity(1, 1, invalid_user),
         )
 
@@ -151,16 +151,16 @@ def test_log_ids_auto_increment_independently_from_session_ids(tmp_path: Path) -
     database = tmp_path / "rodex.sqlite3"
 
     first = create_a_rodex_session(
-        database, codex_session_uuid=CODEX_UUID_1, user_identity=ALICE
+        database, codex_session_id=CODEX_SESSION_ID_1, user_identity=ALICE
     )
     second = create_a_rodex_session(
-        database, codex_session_uuid=CODEX_UUID_2, user_identity=BOB
+        database, codex_session_id=CODEX_SESSION_ID_2, user_identity=BOB
     )
 
     assert fetch_all(
         database,
         "SELECT id, rodex_sessions_id FROM rodex_sessions_log ORDER BY id",
-    ) == [(1, first.id), (2, second.id)]
+    ) == [(1, first.rodex_sessions_id), (2, second.rodex_sessions_id)]
     assert fetch_all(
         database,
         "SELECT name, seq FROM sqlite_sequence WHERE name = 'rodex_sessions_log'",
@@ -170,7 +170,7 @@ def test_log_ids_auto_increment_independently_from_session_ids(tmp_path: Path) -
 def test_unique_index_rejects_a_second_log_for_the_same_session(tmp_path: Path) -> None:
     database = tmp_path / "rodex.sqlite3"
     session = create_a_rodex_session(
-        database, codex_session_uuid=CODEX_UUID_1, user_identity=ALICE
+        database, codex_session_id=CODEX_SESSION_ID_1, user_identity=ALICE
     )
 
     with (
@@ -181,7 +181,7 @@ def test_unique_index_rejects_a_second_log_for_the_same_session(tmp_path: Path) 
             "INSERT INTO rodex_sessions_log "
             "(rodex_sessions_id, created_at_utc, rodex_sessions_users_id, "
             "last_accessed_at_utc) VALUES (?, ?, ?, ?)",
-            (session.id, "now", 1, "now"),
+            (session.rodex_sessions_id, "now", 1, "now"),
         )
 
 
@@ -201,14 +201,14 @@ def test_foreign_key_rejects_a_log_for_an_unknown_session(tmp_path: Path) -> Non
 def test_lookup_returns_the_log_for_a_session(tmp_path: Path) -> None:
     database = tmp_path / "rodex.sqlite3"
     session = create_a_rodex_session(
-        database, codex_session_uuid=CODEX_UUID_1, user_identity=ALICE
+        database, codex_session_id=CODEX_SESSION_ID_1, user_identity=ALICE
     )
 
-    log = lookup_rodex_session_log(session.id, database)
+    log = lookup_rodex_session_log(session.rodex_sessions_id, database)
 
     assert log is not None
     assert log.id == 1
-    assert log.rodex_sessions_id == session.id
+    assert log.rodex_sessions_id == session.rodex_sessions_id
     assert log.rodex_sessions_users_id == 1
 
 
@@ -225,11 +225,13 @@ def test_record_access_changes_only_the_last_access_timestamp(
     created = "2026-08-15T10:00:00.000000Z"
     monkeypatch.setattr(session_module, "_utc_now_timestamp", lambda: created)
     session = create_a_rodex_session(
-        database, codex_session_uuid=CODEX_UUID_1, user_identity=ALICE
+        database, codex_session_id=CODEX_SESSION_ID_1, user_identity=ALICE
     )
     accessed = datetime(2026, 8, 15, 11, 30, tzinfo=UTC)
 
-    updated = record_a_rodex_session_access(session.id, database, accessed_at_utc=accessed)
+    updated = record_a_rodex_session_access(
+        session.rodex_sessions_id, database, accessed_at_utc=accessed
+    )
 
     assert updated.created_at_utc == created
     assert updated.rodex_sessions_users_id == 1
@@ -238,11 +240,11 @@ def test_record_access_changes_only_the_last_access_timestamp(
 
 def test_access_timestamp_is_converted_to_utc(tmp_path: Path) -> None:
     database = tmp_path / "rodex.sqlite3"
-    session = create_a_rodex_session(database, codex_session_uuid=CODEX_UUID_1)
+    session = create_a_rodex_session(database, codex_session_id=CODEX_SESSION_ID_1)
     plus_two = timezone(timedelta(hours=2))
 
     updated = record_a_rodex_session_access(
-        session.id,
+        session.rodex_sessions_id,
         database,
         accessed_at_utc=datetime(2026, 8, 15, 14, 0, tzinfo=plus_two),
     )
@@ -252,11 +254,11 @@ def test_access_timestamp_is_converted_to_utc(tmp_path: Path) -> None:
 
 def test_access_rejects_a_naive_datetime(tmp_path: Path) -> None:
     database = tmp_path / "rodex.sqlite3"
-    session = create_a_rodex_session(database, codex_session_uuid=CODEX_UUID_1)
+    session = create_a_rodex_session(database, codex_session_id=CODEX_SESSION_ID_1)
 
     with pytest.raises(ValueError, match="timezone-aware"):
         record_a_rodex_session_access(
-            session.id,
+            session.rodex_sessions_id,
             database,
             accessed_at_utc=datetime(2026, 8, 15, 12, 0),
         )

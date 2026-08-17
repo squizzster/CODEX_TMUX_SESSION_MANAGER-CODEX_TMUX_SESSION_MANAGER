@@ -12,6 +12,7 @@ when needed, and return later using a generated name such as `automatic-beluga`.
 
 - Opens the ordinary interactive Codex TUI inside a private tmux runtime.
 - Keeps Rodex and Codex session identities distinct and linked.
+- Gives each Rodex session one exact 16-character lowercase hexadecimal ID.
 - Assigns every session a permanent, unique two-word name.
 - Reattaches a live session or transparently resumes its saved Codex session.
 - Recovers an empty, unsaved Codex session under the same Rodex identity.
@@ -25,6 +26,8 @@ when needed, and return later using a generated name such as `automatic-beluga`.
 - Maintains queryable session and exact-turn statistics from authenticated rollouts.
 - Refuses unregistered tmux name collisions and verifies Rodex and Codex identities
   before attaching to or controlling a live runtime.
+- Serializes concurrent opens of one ended name and tolerates the bounded Codex-writer
+  shutdown handoff without creating duplicate runtimes.
 
 Rodex does not replace or reinterpret nonempty Codex CLI invocations. With no
 arguments it creates and attaches to a managed session. Exact underscore Rodex
@@ -51,8 +54,13 @@ uv sync
 ```
 
 At the `›` prompt, use Codex normally. Detach without ending the session with
-`Ctrl-b d`. Enter tmux copy mode with `Ctrl-b [`, navigate with the keyboard, and leave
-it with `q`. Rodex inherits your tmux mouse preference instead of overriding it.
+`Ctrl-b d`. With the default prefix, `Ctrl-b` shows `CTRL-B MODE` while tmux waits for
+the command key, without delaying it, so fast sequences still work. Enter copy mode with
+`Ctrl-b [`, navigate with the keyboard, and leave it with `q`. Rodex inherits your tmux
+mouse preference instead of overriding it. In a shared session, one `Ctrl-C` warns that
+another press may end the session for everyone and offers `Ctrl-b d` as the detach-only
+route; the same client must press it again within two seconds to pass the key to Codex.
+Custom prefixes and user-owned root `C-b` bindings are left unchanged.
 
 To expose this checkout as a per-user `rodex` command, follow the
 [installation guide](INSTALL.md).
@@ -88,6 +96,7 @@ preference. See the current [tmux manual](https://man.openbsd.org/tmux.1) and
 | `./rodex _detach` | Create without attaching and print expanded identity JSON. |
 | `./rodex automatic-beluga` | Attach if live; otherwise resume or recover its Codex session. |
 | `./rodex _running` | List this POSIX user's running Rodex sessions. |
+| `./rodex _context` | Emit this pane's verified Rodex, Codex, tmux, and sharing context as JSON. |
 | `./rodex _alias automatic-beluga edgar-work` | Assign a preferred display name. |
 | `./rodex _alias --force automatic-beluga new-name` | Replace an existing display name. |
 | `./rodex _send edgar-work "Run the tests"` | Start or steer work in a running session. |
@@ -96,12 +105,25 @@ preference. See the current [tmux manual](https://man.openbsd.org/tmux.1) and
 | `./rodex _stats edgar-work` | Show the latest successful aggregate statistics. |
 | `./rodex _stats edgar-work --json` | Emit the snapshot and freshness metadata as JSON. |
 | `./rodex _stats edgar-work --turn TURN_ID` | Show one exact turn from the latest snapshot. |
-| `./rodex _stats edgar-work --turn TURN_ID --source CODEX_UUID --json` | Qualify a turn ID across resumed Codex sources. |
+| `./rodex _stats edgar-work --turn TURN_ID --source CODEX_SESSION_ID --json` | Qualify a turn ID across resumed Codex sources. |
 | `./rodex _stats-status edgar-work` | Show source coverage and analytics worker health. |
 | `./rodex _mouse edgar-work toggle` | Toggle mouse handling for one verified live session. |
 | `./rodex _mouse edgar-work inherit` | Remove the session override and inherit the tmux global value. |
 
-Rodex flags include `_alias --force` and `_stats NAME --turn ID --source UUID --json`.
+Rodex flags include `_alias --force` and
+`_stats NAME --turn ID --source CODEX_SESSION_ID --json`.
+`_context` is the machine-facing self-identification route for Codex and local tooling.
+It resolves the inherited tmux pane, verifies its live Rodex, registry, and Codex markers
+against the current user's database row, and fails closed outside a matching managed
+session. Its JSON includes registry/database provenance, permanent and user-defined
+names, the complete tmux socket/session/window/pane address, and sharing state. The
+display name is read on every invocation, so an agent need not cache it.
+When `_alias` changes the effective name of a live session, Rodex sends one verified
+prompt to that session's Codex thread:
+`RODEX_AUTO_INFO: Rodex session <16-hex-id> is now named '<name>'.` All attached tmux
+clients share that thread, so Rodex does not broadcast per client. Offline sessions
+and unchanged names produce no prompt. If delivery fails, Rodex reports the failure
+without rolling back the already committed name change.
 Arguments after `_create` or
 `_detach` are forwarded to the managed Codex TUI; use `--` when an explicit boundary
 improves clarity. Stop `_tail` with `Ctrl-C`; the Rodex session keeps running. Names use 1–80
@@ -124,9 +146,16 @@ codebase for later re-enablement; input currently passes directly to the Codex T
 ## Local data
 
 The durable per-user registry defaults to
-`$XDG_STATE_HOME/rodex/rodex.sqlite3`, or
-`~/.local/state/rodex/rodex.sqlite3` when `XDG_STATE_HOME` is unset. Set
+`$XDG_STATE_HOME/rodex/rodex-v3.sqlite3`, or
+`~/.local/state/rodex/rodex-v3.sqlite3` when `XDG_STATE_HOME` is unset. Set
 `RODEX_DATABASE_PATH` to select another database.
+
+Rodex session IDs are random 64-bit values rendered only as 16 lowercase hex
+characters, including leading zeroes. Rodex registry IDs use the same 64-bit wire form
+as a separate identity domain. Both are compact integrity discriminators for
+agents and operators, not bearer secrets. SQLite enforces uniqueness and allocation
+tries at most ten independent candidates before failing explicitly. Codex session IDs
+remain 128-bit values and are stored losslessly across two BIGINT columns.
 
 Short-lived Unix sockets and app-server logs use `$XDG_RUNTIME_DIR/rodex`, normally
 `/run/user/<uid>/rodex`. When `XDG_RUNTIME_DIR` is unset or that socket path would be

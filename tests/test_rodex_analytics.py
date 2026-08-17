@@ -22,7 +22,8 @@ from rodex.analytics import (
     RodexAnalyticsError,
     locate_verified_rollout,
 )
-from rodex_functions import (
+from rodex_registry import (
+    RodexSessionId,
     create_a_rodex_session,
     list_rodex_session_statistics_sources,
     parse_session_statistics_snapshot,
@@ -31,9 +32,9 @@ from rodex_functions import (
     record_a_rodex_session_runtime_resume,
 )
 
-RODEX_UUID = uuid.UUID("12345678-1234-5678-1234-567812345678")
-CODEX_UUID = uuid.UUID("01a00654-f2bc-7a30-834a-a5f886a65f82")
-REPLACEMENT_CODEX_UUID = uuid.UUID(int=CODEX_UUID.int + 1)
+RODEX_SESSION_ID = RodexSessionId.parse("1234567890abcdef")
+CODEX_SESSION_ID = uuid.UUID("01a00654-f2bc-7a30-834a-a5f886a65f82")
+REPLACEMENT_CODEX_SESSION_ID = uuid.UUID(int=CODEX_SESSION_ID.int + 1)
 
 
 class FakeAnalyticsAdapter:
@@ -102,14 +103,14 @@ class RecordingStop:
         return True
 
 
-def _rollout(root: Path, codex_uuid: uuid.UUID) -> Path:
-    path = root / "2026" / "08" / "16" / f"rollout-example-{codex_uuid}.jsonl"
+def _rollout(root: Path, codex_session_id: uuid.UUID) -> Path:
+    path = root / "2026" / "08" / "16" / f"rollout-example-{codex_session_id}.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
     records = [
         {
             "timestamp": "2026-08-16T12:00:00Z",
             "type": "session_meta",
-            "payload": {"id": str(codex_uuid)},
+            "payload": {"id": str(codex_session_id)},
         },
         {
             "timestamp": "2026-08-16T12:00:01Z",
@@ -132,15 +133,17 @@ def _config(tmp_path: Path) -> AnalyticsWorkerConfig:
     return AnalyticsWorkerConfig(
         rodex_database_path=tmp_path / "rodex.sqlite3",
         codex_sessions_root=tmp_path / "sessions",
-        rodex_uuid=RODEX_UUID,
+        rodex_session_id=RODEX_SESSION_ID,
     )
 
 
-def _create(config: AnalyticsWorkerConfig, codex_uuid: uuid.UUID = CODEX_UUID) -> None:
+def _create(
+    config: AnalyticsWorkerConfig, codex_session_id: uuid.UUID = CODEX_SESSION_ID
+) -> None:
     create_a_rodex_session(
         config.rodex_database_path,
-        rodex_session_uuid=RODEX_UUID,
-        codex_session_uuid=codex_uuid,
+        rodex_session_id=RODEX_SESSION_ID,
+        codex_session_id=codex_session_id,
     )
 
 
@@ -159,6 +162,27 @@ def test_worker_waits_for_unregistered_identity_without_opening_analyzer(
 
     assert state == "catching_up"
     assert adapters == []
+
+
+def test_worker_with_the_wrong_session_id_cannot_publish_for_an_existing_session(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    _create(config)
+    wrong_config = replace(
+        config,
+        rodex_session_id=RodexSessionId(RODEX_SESSION_ID.value + 1),
+    )
+    adapters: list[FakeAnalyticsAdapter] = []
+
+    state = AnalyticsRolloutWorker(
+        wrong_config,
+        adapter_factory=lambda: adapters.append(FakeAnalyticsAdapter()) or adapters[-1],
+    ).poll_once()
+
+    assert state == "catching_up"
+    assert adapters == []
+    assert read_rodex_session_statistics(1, config.rodex_database_path).statistics is None
 
 
 @pytest.mark.parametrize("state, expected_wait", [("up_to_date", 0.125), ("degraded", 2.0)])
@@ -183,7 +207,7 @@ def test_worker_backfills_verified_rollout_and_projects_only_aggregates(
     tmp_path: Path,
 ) -> None:
     config = _config(tmp_path)
-    rollout = _rollout(config.codex_sessions_root, CODEX_UUID)
+    rollout = _rollout(config.codex_sessions_root, CODEX_SESSION_ID)
     _create(config)
     adapter = FakeAnalyticsAdapter()
     worker = AnalyticsRolloutWorker(config, adapter_factory=lambda: adapter)
@@ -193,7 +217,7 @@ def test_worker_backfills_verified_rollout_and_projects_only_aggregates(
     assert adapter.analyses[0][0] == (rollout.read_bytes(),)
     assert adapter.analyses[0][1].startswith("posix:")
     source = list_rodex_session_statistics_sources(1, config.rodex_database_path)[0]
-    assert source.codex_session_uuid == CODEX_UUID
+    assert source.codex_session_id == CODEX_SESSION_ID
     assert source.rollout_file_path == str(rollout.resolve())
     assert source.analyzed_prefix_sha256 is not None
     view = read_rodex_session_statistics(1, config.rodex_database_path)
@@ -207,7 +231,7 @@ def test_worker_backfills_verified_rollout_and_projects_only_aggregates(
 
 def test_unchanged_rollout_does_not_recalculate_but_append_does(tmp_path: Path) -> None:
     config = _config(tmp_path)
-    rollout = _rollout(config.codex_sessions_root, CODEX_UUID)
+    rollout = _rollout(config.codex_sessions_root, CODEX_SESSION_ID)
     _create(config)
     adapter = FakeAnalyticsAdapter()
     worker = AnalyticsRolloutWorker(config, adapter_factory=lambda: adapter)
@@ -229,7 +253,7 @@ def test_unchanged_rollout_does_not_recalculate_but_append_does(tmp_path: Path) 
 
 def test_worker_analyzes_only_through_final_complete_newline(tmp_path: Path) -> None:
     config = _config(tmp_path)
-    rollout = _rollout(config.codex_sessions_root, CODEX_UUID)
+    rollout = _rollout(config.codex_sessions_root, CODEX_SESSION_ID)
     with rollout.open("ab") as output:
         output.write(b'{"incomplete":true')
     _create(config)
@@ -251,7 +275,7 @@ def test_same_size_rewrite_with_restored_mtime_is_reauthenticated(
     tmp_path: Path,
 ) -> None:
     config = _config(tmp_path)
-    rollout = _rollout(config.codex_sessions_root, CODEX_UUID)
+    rollout = _rollout(config.codex_sessions_root, CODEX_SESSION_ID)
     with rollout.open("a", encoding="utf-8") as output:
         output.write('{"type":"event_msg","payload":{"marker":"one"}}\n')
     _create(config)
@@ -278,12 +302,12 @@ def test_replacement_retains_old_source_and_analyzes_full_history(
     tmp_path: Path,
 ) -> None:
     config = _config(tmp_path)
-    first = _rollout(config.codex_sessions_root, CODEX_UUID)
-    replacement = _rollout(config.codex_sessions_root, REPLACEMENT_CODEX_UUID)
+    first = _rollout(config.codex_sessions_root, CODEX_SESSION_ID)
+    replacement = _rollout(config.codex_sessions_root, REPLACEMENT_CODEX_SESSION_ID)
     create_a_rodex_session(
         config.rodex_database_path,
-        rodex_session_uuid=RODEX_UUID,
-        codex_session_uuid=CODEX_UUID,
+        rodex_session_id=RODEX_SESSION_ID,
+        codex_session_id=CODEX_SESSION_ID,
         tmux_server_socket_path=tmp_path / "tmux.sock",
         tmux_session_name="first",
     )
@@ -295,16 +319,16 @@ def test_replacement_retains_old_source_and_analyzes_full_history(
         tmp_path / "tmux.sock",
         "replacement",
         config.rodex_database_path,
-        codex_session_uuid=REPLACEMENT_CODEX_UUID,
+        codex_session_id=REPLACEMENT_CODEX_SESSION_ID,
     )
 
     assert worker.poll_once() == "up_to_date"
 
     assert adapter.analyses[-1][0] == (first.read_bytes(), replacement.read_bytes())
     sources = list_rodex_session_statistics_sources(1, config.rodex_database_path)
-    assert [source.codex_session_uuid for source in sources] == [
-        CODEX_UUID,
-        REPLACEMENT_CODEX_UUID,
+    assert [source.codex_session_id for source in sources] == [
+        CODEX_SESSION_ID,
+        REPLACEMENT_CODEX_SESSION_ID,
     ]
     assert all(source.included_statistics_revision == 2 for source in sources)
 
@@ -313,7 +337,7 @@ def test_analyzer_failure_preserves_last_good_aggregate_and_increments_health(
     tmp_path: Path,
 ) -> None:
     config = _config(tmp_path)
-    rollout = _rollout(config.codex_sessions_root, CODEX_UUID)
+    rollout = _rollout(config.codex_sessions_root, CODEX_SESSION_ID)
     _create(config)
     adapter = FakeAnalyticsAdapter()
     worker = AnalyticsRolloutWorker(config, adapter_factory=lambda: adapter)
@@ -338,7 +362,7 @@ def test_analyzer_schema_drift_degrades_without_replacing_relational_snapshot(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     config = _config(tmp_path)
-    rollout = _rollout(config.codex_sessions_root, CODEX_UUID)
+    rollout = _rollout(config.codex_sessions_root, CODEX_SESSION_ID)
     _create(config)
     first_worker = AnalyticsRolloutWorker(
         config, adapter_factory=lambda: FakeAnalyticsAdapter()
@@ -384,7 +408,7 @@ def test_analyzer_schema_drift_degrades_without_replacing_relational_snapshot(
 
 def test_source_change_during_analysis_does_not_publish(tmp_path: Path) -> None:
     config = _config(tmp_path)
-    rollout = _rollout(config.codex_sessions_root, CODEX_UUID)
+    rollout = _rollout(config.codex_sessions_root, CODEX_SESSION_ID)
     _create(config)
     adapter = FakeAnalyticsAdapter()
     adapter.on_analyze = lambda: rollout.write_text(
@@ -405,12 +429,12 @@ def test_stale_worker_cannot_publish_snapshot_or_health_after_replacement(
     tmp_path: Path,
 ) -> None:
     config = _config(tmp_path)
-    _rollout(config.codex_sessions_root, CODEX_UUID)
-    _rollout(config.codex_sessions_root, REPLACEMENT_CODEX_UUID)
+    _rollout(config.codex_sessions_root, CODEX_SESSION_ID)
+    _rollout(config.codex_sessions_root, REPLACEMENT_CODEX_SESSION_ID)
     create_a_rodex_session(
         config.rodex_database_path,
-        rodex_session_uuid=RODEX_UUID,
-        codex_session_uuid=CODEX_UUID,
+        rodex_session_id=RODEX_SESSION_ID,
+        codex_session_id=CODEX_SESSION_ID,
         tmux_server_socket_path=tmp_path / "tmux.sock",
         tmux_session_name="first",
     )
@@ -420,7 +444,7 @@ def test_stale_worker_cannot_publish_snapshot_or_health_after_replacement(
         tmp_path / "tmux.sock",
         "replacement",
         config.rodex_database_path,
-        codex_session_uuid=REPLACEMENT_CODEX_UUID,
+        codex_session_id=REPLACEMENT_CODEX_SESSION_ID,
     )
 
     state = AnalyticsRolloutWorker(config, adapter_factory=lambda: adapter).poll_once()
@@ -435,7 +459,7 @@ def test_stale_worker_cannot_publish_snapshot_or_health_after_replacement(
 
 def test_partial_usable_analysis_publishes_gapped_coverage(tmp_path: Path) -> None:
     config = _config(tmp_path)
-    _rollout(config.codex_sessions_root, CODEX_UUID)
+    _rollout(config.codex_sessions_root, CODEX_SESSION_ID)
     _create(config)
     adapter = FakeAnalyticsAdapter()
     adapter.coverage_state = "gapped"
@@ -454,11 +478,11 @@ def test_rollout_locator_rejects_filename_match_with_wrong_internal_identity(
     tmp_path: Path,
 ) -> None:
     root = tmp_path / "sessions"
-    _rollout(root, REPLACEMENT_CODEX_UUID).rename(
-        root / "2026" / "08" / "16" / f"rollout-forged-{CODEX_UUID}.jsonl"
+    _rollout(root, REPLACEMENT_CODEX_SESSION_ID).rename(
+        root / "2026" / "08" / "16" / f"rollout-forged-{CODEX_SESSION_ID}.jsonl"
     )
 
-    assert locate_verified_rollout(root, CODEX_UUID) is None
+    assert locate_verified_rollout(root, CODEX_SESSION_ID) is None
 
 
 def test_rollout_locator_rejects_a_matching_symlink_that_escapes_the_root(
@@ -466,11 +490,11 @@ def test_rollout_locator_rejects_a_matching_symlink_that_escapes_the_root(
 ) -> None:
     root = tmp_path / "sessions"
     root.mkdir()
-    outside = _rollout(tmp_path / "outside", CODEX_UUID)
-    candidate = root / f"rollout-linked-{CODEX_UUID}.jsonl"
+    outside = _rollout(tmp_path / "outside", CODEX_SESSION_ID)
+    candidate = root / f"rollout-linked-{CODEX_SESSION_ID}.jsonl"
     candidate.symlink_to(outside)
 
-    assert locate_verified_rollout(root, CODEX_UUID) is None
+    assert locate_verified_rollout(root, CODEX_SESSION_ID) is None
 
 
 def test_rollout_locator_rejects_a_matching_fifo_without_blocking(
@@ -478,10 +502,10 @@ def test_rollout_locator_rejects_a_matching_fifo_without_blocking(
 ) -> None:
     root = tmp_path / "sessions"
     root.mkdir()
-    candidate = root / f"rollout-pipe-{CODEX_UUID}.jsonl"
+    candidate = root / f"rollout-pipe-{CODEX_SESSION_ID}.jsonl"
     os.mkfifo(candidate)
 
-    assert locate_verified_rollout(root, CODEX_UUID) is None
+    assert locate_verified_rollout(root, CODEX_SESSION_ID) is None
 
 
 def test_supervisor_start_failure_is_fail_open_and_health_only(tmp_path: Path) -> None:
@@ -565,7 +589,7 @@ def test_supervisor_close_kills_and_reaps_a_worker_that_ignores_terminate(
 
 
 def test_real_adapter_uses_existing_in_memory_analyzer_api(tmp_path: Path) -> None:
-    rollout = _rollout(tmp_path, CODEX_UUID)
+    rollout = _rollout(tmp_path, CODEX_SESSION_ID)
 
     calculation = CodexProtocolAnalyticsAdapter().analyze_rollouts([rollout], "test-user")
 
@@ -573,8 +597,8 @@ def test_real_adapter_uses_existing_in_memory_analyzer_api(tmp_path: Path) -> No
     assert calculation.statistics_projection.analyzer_source_count == 1
     assert len(calculation.statistics_projection.turn_statistics) == 1
     assert (
-        calculation.statistics_projection.turn_statistics[0].codex_session_uuid
-        == CODEX_UUID
+        calculation.statistics_projection.turn_statistics[0].codex_session_id
+        == CODEX_SESSION_ID
     )
     assert calculation.statistics_projection.turn_statistics[0].codex_turn_id == "turn-test"
 
@@ -584,7 +608,7 @@ def test_real_worker_publishes_exact_turn_projection_into_rodex_sql(
 ) -> None:
     config = _config(tmp_path)
     _create(config)
-    _rollout(config.codex_sessions_root, CODEX_UUID)
+    _rollout(config.codex_sessions_root, CODEX_SESSION_ID)
 
     assert AnalyticsRolloutWorker(config).poll_once() == "up_to_date"
 
@@ -594,7 +618,7 @@ def test_real_worker_publishes_exact_turn_projection_into_rodex_sql(
     assert exact.worker is not None
     assert exact.worker.worker_state == "up_to_date"
     assert exact.turn is not None
-    assert exact.turn.codex_session_uuid == CODEX_UUID
+    assert exact.turn.codex_session_id == CODEX_SESSION_ID
     assert exact.turn.included_statistics_revision == exact.statistics.statistics_revision
     assert exact.turn.outcome == "completed"
 

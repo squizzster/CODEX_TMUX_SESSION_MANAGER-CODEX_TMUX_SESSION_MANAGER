@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import shutil
 import sqlite3
+import stat as stat_module
 import sys
-import uuid
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
+from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
@@ -16,21 +19,26 @@ from cool_name import (
     CoolNameError,
     normalise_rodex_display_name,
 )
-from rodex_functions import (
+from rodex_registry import (
+    CodexSessionId,
+    RodexRegistryId,
     RodexSessionError,
+    RodexSessionId,
     RodexSessionTurnStatisticsAmbiguousError,
     create_a_rodex_session,
     default_rodex_database_path,
-    generate_an_unregistered_rodex_uuid_candidate,
+    generate_an_unregistered_rodex_session_id_candidate,
     list_rodex_session_runtimes_for_a_user,
-    lookup_codex_uuid_from_a_rodex_session_id,
-    lookup_owned_rodex_session_id_from_a_cool_name,
-    lookup_rodex_registry_uuid,
-    lookup_rodex_session_id_from_a_cool_name,
+    lookup_codex_session_id_from_a_rodex_sessions_id,
+    lookup_owned_rodex_sessions_id_from_a_cool_name,
+    lookup_rodex_registry_id,
+    lookup_rodex_session_id_from_a_rodex_sessions_id,
     lookup_rodex_session_names,
+    lookup_rodex_sessions_id_from_a_cool_name,
+    lookup_rodex_sessions_id_from_a_rodex_session_id,
     lookup_rodex_tmux_session,
-    lookup_rodex_uuid_from_an_id,
     open_a_user_defined_cool_name_assignment,
+    parse_codex_session_id,
     read_rodex_session_statistics,
     read_rodex_session_turn_statistics,
     record_a_rodex_session_access,
@@ -61,7 +69,16 @@ class RodexExecutableNotFoundError(RodexLaunchError):
     """A required executable could not be resolved from PATH."""
 
 
+@dataclass(frozen=True, slots=True)
+class _PreparedNamedSession:
+    session_id: int
+    display_name: str
+    active_tmux: LiveTmuxSession
+    attach_message: str
+
+
 _RUNNING_COMMAND: Final = "_running"
+_CONTEXT_COMMAND: Final = "_context"
 _ALIAS_COMMAND: Final = "_alias"
 _SEND_COMMAND: Final = "_send"
 _WAIT_COMMAND: Final = "_wait"
@@ -76,6 +93,7 @@ _FORCE_FLAG: Final = "--force"
 _RODEX_COMMANDS: Final = frozenset(
     {
         _RUNNING_COMMAND,
+        _CONTEXT_COMMAND,
         _ALIAS_COMMAND,
         _SEND_COMMAND,
         _WAIT_COMMAND,
@@ -98,11 +116,12 @@ Rodex commands:
   _create [NAME] [-- CODEX_ARGS...]  Create and attach to a managed session.
   _detach [SESSION|CODEX_ARGS...]    Create, resume, or recover without attaching.
   _running                           List running Rodex sessions.
+  _context [--json]                  Show this pane's verified live Rodex context.
   _alias [--force] SESSION NAME      Assign a preferred session name.
   _send SESSION PROMPT               Send work to a running session.
   _wait SESSION                      Wait until a running session is idle.
   _tail SESSION                      Follow live protocol events as JSON lines.
-  _stats SESSION [--turn ID] [--source UUID] [--json]
+  _stats SESSION [--turn ID] [--source CODEX_SESSION_ID] [--json]
                                      Show persistent session or exact-turn statistics.
   _stats-status SESSION              Show analytics freshness and health.
   _mouse SESSION [MODE]              Show or set mouse: on, off, toggle, inherit.
@@ -195,26 +214,28 @@ def run(
     if requested_name is not None:
         requested_name = normalise_rodex_display_name(requested_name)
         if (
-            lookup_rodex_session_id_from_a_cool_name(requested_name, resolved_database)
+            lookup_rodex_sessions_id_from_a_cool_name(requested_name, resolved_database)
             is not None
         ):
             raise RodexLaunchError(f"Rodex session name already exists: {requested_name}")
 
-    planned_rodex_uuid = generate_an_unregistered_rodex_uuid_candidate(resolved_database)
-    registry_uuid = lookup_rodex_registry_uuid(resolved_database)
-    live_runtime, codex_session_uuid = runtime_launcher.start(
+    planned_rodex_session_id = generate_an_unregistered_rodex_session_id_candidate(
+        resolved_database
+    )
+    registry_id = lookup_rodex_registry_id(resolved_database)
+    live_runtime, codex_session_id = runtime_launcher.start(
         Path.cwd(),
         codex_arguments,
-        rodex_session_uuid=planned_rodex_uuid,
-        rodex_registry_uuid=registry_uuid,
+        rodex_session_id=planned_rodex_session_id,
+        rodex_registry_id=registry_id,
         rodex_database_path=resolved_database,
     )
     active_tmux: LiveTmuxSession = live_runtime
     try:
         session = create_a_rodex_session(
             resolved_database,
-            codex_session_uuid=codex_session_uuid,
-            rodex_session_uuid=planned_rodex_uuid,
+            codex_session_id=codex_session_id,
+            rodex_session_id=planned_rodex_session_id,
             tmux_server_socket_path=live_runtime.tmux_server_socket_path,
             tmux_session_name=live_runtime.tmux_session_name,
         )
@@ -223,7 +244,9 @@ def run(
         if requested_name is None:
             active_tmux = _rename_tmux_identity(runtime_launcher, active_tmux, display_name)
             update_rodex_tmux_session_name(
-                session.id, active_tmux.tmux_session_name, resolved_database
+                session.rodex_sessions_id,
+                active_tmux.tmux_session_name,
+                resolved_database,
             )
         else:
             with open_a_user_defined_cool_name_assignment(
@@ -240,10 +263,11 @@ def run(
         raise
 
     if detach:
-        _print_detached_runtime(display_name, session.rodex_uuid, codex_session_uuid)
+        _print_detached_runtime(display_name, session.rodex_session_id, codex_session_id)
         return 0
     print(
-        f"Rodex {display_name} [{session.rodex_uuid}] -> Codex {codex_session_uuid} "
+        f"Rodex {display_name} [{session.rodex_session_id}] "
+        f"-> Codex {codex_session_id} "
         f"({active_tmux.tmux_session_name})",
         flush=True,
     )
@@ -262,9 +286,38 @@ def _open_named_session(
     if len(arguments) != 1 or arguments[0].startswith("-"):
         return False
     cool_name = arguments[0]
-    session_id = lookup_owned_rodex_session_id_from_a_cool_name(cool_name, database_path)
+    session_id = lookup_owned_rodex_sessions_id_from_a_cool_name(cool_name, database_path)
     if session_id is None:
         return False
+    with _open_named_session_transition_lock(database_path, session_id):
+        prepared = _prepare_named_session(
+            session_id,
+            cool_name,
+            database_path,
+            launcher,
+            codex_available=codex_available,
+        )
+    if detach:
+        _print_existing_detached_runtime(
+            prepared.session_id,
+            prepared.display_name,
+            database_path,
+        )
+        return True
+    print(prepared.attach_message, flush=True)
+    launcher.attach(prepared.active_tmux)
+    return True
+
+
+def _prepare_named_session(
+    session_id: int,
+    cool_name: str,
+    database_path: Path,
+    launcher: RodexRuntimeLauncher,
+    *,
+    codex_available: bool,
+) -> _PreparedNamedSession:
+    """Resolve or resume one identity while its cross-process transition is locked."""
     names = lookup_rodex_session_names(session_id, database_path)
     if names is None:
         raise RodexLaunchError(f"Rodex session disappeared: {cool_name}")
@@ -276,22 +329,24 @@ def _open_named_session(
         tmux_server_socket_path=Path(tmux_link.tmux_server_socket_path),
         tmux_session_name=tmux_link.tmux_session_name,
     )
-    codex_session_uuid = lookup_codex_uuid_from_a_rodex_session_id(
+    codex_session_id = lookup_codex_session_id_from_a_rodex_sessions_id(
         session_id, database_path
     )
-    if codex_session_uuid is None:
+    if codex_session_id is None:
         raise RodexLaunchError(f"Rodex session has no Codex identity: {cool_name}")
-    rodex_uuid = lookup_rodex_uuid_from_an_id(session_id, database_path)
-    if rodex_uuid is None:
+    rodex_session_id = lookup_rodex_session_id_from_a_rodex_sessions_id(
+        session_id, database_path
+    )
+    if rodex_session_id is None:
         raise RodexLaunchError(f"Rodex session has no Rodex identity: {cool_name}")
-    registry_uuid = lookup_rodex_registry_uuid(database_path)
+    registry_id = lookup_rodex_registry_id(database_path)
     if launcher.session_exists(recorded_tmux):
         _verify_live_runtime_identity(
             launcher,
             recorded_tmux,
-            expected_rodex_uuid=rodex_uuid,
-            expected_registry_uuid=registry_uuid,
-            expected_codex_uuid=codex_session_uuid,
+            expected_rodex_session_id=rodex_session_id,
+            expected_registry_id=registry_id,
+            expected_codex_session_id=codex_session_id,
         )
         active_tmux = _prepare_existing_tmux_identity(
             launcher,
@@ -301,22 +356,19 @@ def _open_named_session(
             database_path,
         )
         record_a_rodex_session_access(session_id, database_path)
-        if detach:
-            _print_existing_detached_runtime(session_id, display_name, database_path)
-            return True
-        print(
+        return _PreparedNamedSession(
+            session_id,
+            display_name,
+            active_tmux,
             f"Reattaching Rodex {display_name} ({active_tmux.tmux_session_name})",
-            flush=True,
         )
-        launcher.attach(active_tmux)
-        return True
 
     relocated = _find_relocated_live_runtime(
         launcher,
         recorded_tmux.tmux_server_socket_path,
-        expected_rodex_uuid=rodex_uuid,
-        expected_registry_uuid=registry_uuid,
-        expected_codex_uuid=codex_session_uuid,
+        expected_rodex_session_id=rodex_session_id,
+        expected_registry_id=registry_id,
+        expected_codex_session_id=codex_session_id,
     )
     if relocated is not None:
         active_tmux = _prepare_existing_tmux_identity(
@@ -327,15 +379,12 @@ def _open_named_session(
             database_path,
         )
         record_a_rodex_session_access(session_id, database_path)
-        if detach:
-            _print_existing_detached_runtime(session_id, display_name, database_path)
-            return True
-        print(
+        return _PreparedNamedSession(
+            session_id,
+            display_name,
+            active_tmux,
             f"Reattached relocated Rodex {display_name} ({active_tmux.tmux_session_name})",
-            flush=True,
         )
-        launcher.attach(active_tmux)
-        return True
 
     if not codex_available:
         configured_codex = os.environ.get("RODEX_CODEX_BINARY", "codex")
@@ -344,43 +393,43 @@ def _open_named_session(
         )
     replaced_unsaved_codex_identity = False
     try:
-        resumed_runtime, observed_codex_uuid = launcher.start(
+        resumed_runtime, observed_codex_session_id = launcher.start(
             Path.cwd(),
-            ["resume", str(codex_session_uuid)],
-            rodex_session_uuid=rodex_uuid,
-            rodex_registry_uuid=registry_uuid,
+            ["resume", str(codex_session_id)],
+            rodex_session_id=rodex_session_id,
+            rodex_registry_id=registry_id,
             rodex_database_path=database_path,
         )
     except RodexCodexSessionNotFoundError:
         try:
-            resumed_runtime, observed_codex_uuid = launcher.start(
+            resumed_runtime, observed_codex_session_id = launcher.start(
                 Path.cwd(),
                 [],
-                rodex_session_uuid=rodex_uuid,
-                rodex_registry_uuid=registry_uuid,
+                rodex_session_id=rodex_session_id,
+                rodex_registry_id=registry_id,
                 rodex_database_path=database_path,
             )
         except RodexRuntimeError as error:
             raise RodexLaunchError(
                 f"Rodex session {display_name!r} is recorded but not running; "
-                f"Codex session {codex_session_uuid} was not saved and a replacement "
+                f"Codex session {codex_session_id} was not saved and a replacement "
                 f"Codex runtime could not be started: {error}"
             ) from error
         replaced_unsaved_codex_identity = True
     except RodexRuntimeError as error:
         raise RodexLaunchError(
             f"Rodex session {display_name!r} is recorded but not running; "
-            f"Codex session {codex_session_uuid} could not be resumed: {error}"
+            f"Codex session {codex_session_id} could not be resumed: {error}"
         ) from error
     active_tmux: LiveTmuxSession = resumed_runtime
     try:
         if (
             not replaced_unsaved_codex_identity
-            and observed_codex_uuid != codex_session_uuid
+            and observed_codex_session_id != codex_session_id
         ):
             raise RodexLaunchError(
                 "Codex resumed an unexpected session: "
-                f"expected {codex_session_uuid}, observed {observed_codex_uuid}"
+                f"expected {codex_session_id}, observed {observed_codex_session_id}"
             )
         active_tmux = _rename_tmux_identity(launcher, active_tmux, display_name)
         record_a_rodex_session_runtime_resume(
@@ -388,8 +437,8 @@ def _open_named_session(
             active_tmux.tmux_server_socket_path,
             active_tmux.tmux_session_name,
             database_path,
-            codex_session_uuid=(
-                observed_codex_uuid if replaced_unsaved_codex_identity else None
+            codex_session_id=(
+                observed_codex_session_id if replaced_unsaved_codex_identity else None
             ),
         )
         launcher.confirm_runtime_registration(active_tmux)
@@ -398,17 +447,38 @@ def _open_named_session(
         launcher.stop(active_tmux, check=False)
         raise
 
-    if detach:
-        _print_existing_detached_runtime(session_id, display_name, database_path)
-        return True
     action = "Recovered" if replaced_unsaved_codex_identity else "Resumed"
-    print(
-        f"{action} Rodex {display_name} -> Codex {observed_codex_uuid} "
+    return _PreparedNamedSession(
+        session_id,
+        display_name,
+        active_tmux,
+        f"{action} Rodex {display_name} -> Codex {observed_codex_session_id} "
         f"({active_tmux.tmux_session_name})",
-        flush=True,
     )
-    launcher.attach(active_tmux)
-    return True
+
+
+@contextmanager
+def _open_named_session_transition_lock(
+    database_path: Path,
+    session_id: int,
+) -> Iterator[None]:
+    """Serialize one named session's liveness decision and runtime replacement."""
+    lock_path = database_path.parent / f".{database_path.name}.session-{session_id}.lock"
+    flags = os.O_RDWR | os.O_CREAT
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(lock_path, flags, 0o600)
+    try:
+        state = os.fstat(descriptor)
+        if not stat_module.S_ISREG(state.st_mode) or state.st_uid != os.getuid():
+            raise RodexLaunchError(
+                f"session transition lock is not a private regular file: {lock_path}"
+            )
+        os.fchmod(descriptor, 0o600)
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
 
 
 def _parse_launch_arguments(
@@ -438,7 +508,7 @@ def _possible_existing_rodex_name(arguments: list[str], database_path: Path) -> 
         return False
     try:
         return (
-            lookup_owned_rodex_session_id_from_a_cool_name(arguments[0], database_path)
+            lookup_owned_rodex_sessions_id_from_a_cool_name(arguments[0], database_path)
             is not None
         )
     except (CoolNameError, ValueError):
@@ -485,23 +555,29 @@ def _delegate_to_codex(
 def _print_existing_detached_runtime(
     session_id: int, display_name: str, database_path: Path
 ) -> None:
-    rodex_uuid = lookup_rodex_uuid_from_an_id(session_id, database_path)
-    codex_uuid = lookup_codex_uuid_from_a_rodex_session_id(session_id, database_path)
-    if rodex_uuid is None or codex_uuid is None:
+    rodex_session_id = lookup_rodex_session_id_from_a_rodex_sessions_id(
+        session_id, database_path
+    )
+    codex_session_id = lookup_codex_session_id_from_a_rodex_sessions_id(
+        session_id, database_path
+    )
+    if rodex_session_id is None or codex_session_id is None:
         raise RodexLaunchError(f"Rodex session identity disappeared: {display_name}")
-    _print_detached_runtime(display_name, rodex_uuid, codex_uuid)
+    _print_detached_runtime(display_name, rodex_session_id, codex_session_id)
 
 
 def _print_detached_runtime(
-    display_name: str, rodex_uuid: uuid.UUID, codex_uuid: uuid.UUID
+    display_name: str,
+    rodex_session_id: RodexSessionId,
+    codex_session_id: CodexSessionId,
 ) -> None:
     print(
         json.dumps(
             {
                 "status": "running",
                 "rodex_session_name": display_name,
-                "rodex_session_uuid": str(rodex_uuid),
-                "codex_session_uuid": str(codex_uuid),
+                "rodex_session_id": str(rodex_session_id),
+                "codex_session_id": str(codex_session_id),
             },
             indent=2,
         ),
@@ -518,6 +594,14 @@ def _run_reserved_command(
     if not arguments:
         return False
     command = arguments[0]
+    if command == _CONTEXT_COMMAND:
+        if tuple(arguments) not in {
+            (_CONTEXT_COMMAND,),
+            (_CONTEXT_COMMAND, "--json"),
+        }:
+            raise RodexLaunchError("usage: rodex _context [--json]")
+        _print_current_rodex_context(database_path, launcher)
+        return True
     if command == _RUNNING_COMMAND:
         if len(arguments) != 1:
             raise RodexLaunchError("usage: rodex _running")
@@ -596,21 +680,30 @@ def _run_reserved_command(
             raise RodexLaunchError(
                 "usage: rodex _alias [--force] SESSION_NAME USER_DEFINED_NAME"
             )
-        alias_session_id = lookup_owned_rodex_session_id_from_a_cool_name(
+        alias_session_id = lookup_owned_rodex_sessions_id_from_a_cool_name(
             operands[0], database_path
         )
-        expected_codex_uuid = (
+        previous_names = (
             None
             if alias_session_id is None
-            else lookup_codex_uuid_from_a_rodex_session_id(alias_session_id, database_path)
+            else lookup_rodex_session_names(alias_session_id, database_path)
         )
-        expected_rodex_uuid = (
+        expected_codex_session_id = (
             None
             if alias_session_id is None
-            else lookup_rodex_uuid_from_an_id(alias_session_id, database_path)
+            else lookup_codex_session_id_from_a_rodex_sessions_id(
+                alias_session_id, database_path
+            )
         )
-        expected_registry_uuid = (
-            None if alias_session_id is None else lookup_rodex_registry_uuid(database_path)
+        expected_rodex_session_id = (
+            None
+            if alias_session_id is None
+            else lookup_rodex_session_id_from_a_rodex_sessions_id(
+                alias_session_id, database_path
+            )
+        )
+        expected_registry_id = (
+            None if alias_session_id is None else lookup_rodex_registry_id(database_path)
         )
         recorded_tmux: LiveTmuxSession | None = None
         active_tmux: LiveTmuxSession | None = None
@@ -624,9 +717,9 @@ def _run_reserved_command(
                 )
                 if launcher.session_exists(recorded_tmux):
                     if (
-                        expected_codex_uuid is None
-                        or expected_rodex_uuid is None
-                        or expected_registry_uuid is None
+                        expected_codex_session_id is None
+                        or expected_rodex_session_id is None
+                        or expected_registry_id is None
                     ):
                         raise RodexLaunchError(
                             "Rodex session identity disappeared during alias change"
@@ -634,9 +727,9 @@ def _run_reserved_command(
                     verified_control = _verify_live_runtime_identity(
                         launcher,
                         recorded_tmux,
-                        expected_rodex_uuid=expected_rodex_uuid,
-                        expected_registry_uuid=expected_registry_uuid,
-                        expected_codex_uuid=expected_codex_uuid,
+                        expected_rodex_session_id=expected_rodex_session_id,
+                        expected_registry_id=expected_registry_id,
+                        expected_codex_session_id=expected_codex_session_id,
                     )
         try:
             with open_a_user_defined_cool_name_assignment(
@@ -666,6 +759,32 @@ def _run_reserved_command(
             raise
         if active_tmux is not None:
             launcher.configure_identity_status(active_tmux)
+        if (
+            active_tmux is not None
+            and verified_control is not None
+            and expected_rodex_session_id is not None
+            and previous_names is not None
+            and previous_names.display_name != assignment.names.display_name
+        ):
+            auto_info = (
+                f"RODEX_AUTO_INFO: Rodex session {expected_rodex_session_id} "
+                f"is now named {assignment.names.display_name!r}."
+            )
+            try:
+                control_client.send_prompt(
+                    verified_control,
+                    auto_info,
+                    revalidate=lambda: _revalidate_live_control(
+                        launcher,
+                        active_tmux,
+                        verified_control,
+                    ),
+                )
+            except (RodexControlError, RodexLaunchError, RodexRuntimeError) as error:
+                raise RodexLaunchError(
+                    f"Rodex name changed to {assignment.names.display_name!r}, but "
+                    f"RODEX_AUTO_INFO delivery failed: {error}"
+                ) from error
         print(f"Rodex name: {assignment.names.display_name}", flush=True)
         return True
     return False
@@ -682,17 +801,17 @@ def _run_statistics_command(arguments: list[str], database_path: Path) -> bool:
         session_name = arguments[1]
         as_json = False
         turn_id = None
-        source_uuid = None
+        source_codex_session_id = None
     else:
         if len(arguments) < 2:
             raise RodexLaunchError(
                 "usage: rodex _stats SESSION_NAME "
-                "[--turn TURN_ID] [--source CODEX_SESSION_UUID] [--json]"
+                "[--turn TURN_ID] [--source CODEX_SESSION_ID] [--json]"
             )
         session_name = arguments[1]
         as_json = False
         turn_id: str | None = None
-        source_uuid: uuid.UUID | None = None
+        source_codex_session_id: CodexSessionId | None = None
         index = 2
         while index < len(arguments):
             option = arguments[index]
@@ -703,23 +822,27 @@ def _run_statistics_command(arguments: list[str], database_path: Path) -> bool:
                 turn_id = arguments[index + 1]
                 index += 2
             elif (
-                option == "--source" and source_uuid is None and index + 1 < len(arguments)
+                option == "--source"
+                and source_codex_session_id is None
+                and index + 1 < len(arguments)
             ):
                 try:
-                    source_uuid = uuid.UUID(arguments[index + 1])
+                    source_codex_session_id = parse_codex_session_id(arguments[index + 1])
                 except ValueError as error:
                     raise RodexLaunchError(
-                        "--source requires a valid Codex session UUID"
+                        "--source requires a valid Codex session ID"
                     ) from error
                 index += 2
             else:
                 raise RodexLaunchError(
                     "usage: rodex _stats SESSION_NAME "
-                    "[--turn TURN_ID] [--source CODEX_SESSION_UUID] [--json]"
+                    "[--turn TURN_ID] [--source CODEX_SESSION_ID] [--json]"
                 )
-        if source_uuid is not None and turn_id is None:
+        if source_codex_session_id is not None and turn_id is None:
             raise RodexLaunchError("--source requires --turn")
-    session_id = lookup_owned_rodex_session_id_from_a_cool_name(session_name, database_path)
+    session_id = lookup_owned_rodex_sessions_id_from_a_cool_name(
+        session_name, database_path
+    )
     if session_id is None:
         raise RodexLaunchError(f"unknown Rodex session: {session_name}")
     try:
@@ -730,7 +853,7 @@ def _run_statistics_command(arguments: list[str], database_path: Path) -> bool:
                 session_id,
                 turn_id,
                 database_path,
-                codex_session_uuid=source_uuid,
+                codex_session_id=source_codex_session_id,
             )
         )
     except RodexSessionTurnStatisticsAmbiguousError as error:
@@ -776,7 +899,7 @@ def _run_statistics_command(arguments: list[str], database_path: Path) -> bool:
                 f"turn is not present in the latest statistics snapshot: {turn_id}"
             )
         payload["turn"] = {
-            "codex_session_uuid": str(turn.codex_session_uuid),
+            "codex_session_id": str(turn.codex_session_id),
             "turn_id": turn.codex_turn_id,
             "started_at_utc": turn.started_at_utc,
             "terminal_at_utc": turn.terminal_at_utc,
@@ -818,7 +941,9 @@ def _resolve_live_control(
     database_path: Path,
     launcher: RodexRuntimeLauncher,
 ) -> tuple[int, LiveTmuxSession, LiveRodexControl]:
-    session_id = lookup_owned_rodex_session_id_from_a_cool_name(session_name, database_path)
+    session_id = lookup_owned_rodex_sessions_id_from_a_cool_name(
+        session_name, database_path
+    )
     if session_id is None:
         raise RodexLaunchError(f"unknown Rodex session: {session_name}")
     tmux_link = lookup_rodex_tmux_session(session_id, database_path)
@@ -829,21 +954,23 @@ def _resolve_live_control(
     )
     if not launcher.session_exists(runtime):
         raise RodexLaunchError(f"Rodex session is not running: {session_name}")
-    expected_codex_uuid = lookup_codex_uuid_from_a_rodex_session_id(
+    expected_codex_session_id = lookup_codex_session_id_from_a_rodex_sessions_id(
         session_id, database_path
     )
-    if expected_codex_uuid is None:
+    if expected_codex_session_id is None:
         raise RodexLaunchError(f"Rodex session has no Codex identity: {session_name}")
-    expected_rodex_uuid = lookup_rodex_uuid_from_an_id(session_id, database_path)
-    if expected_rodex_uuid is None:
+    expected_rodex_session_id = lookup_rodex_session_id_from_a_rodex_sessions_id(
+        session_id, database_path
+    )
+    if expected_rodex_session_id is None:
         raise RodexLaunchError(f"Rodex session has no Rodex identity: {session_name}")
-    expected_registry_uuid = lookup_rodex_registry_uuid(database_path)
+    expected_registry_id = lookup_rodex_registry_id(database_path)
     control = _verify_live_runtime_identity(
         launcher,
         runtime,
-        expected_rodex_uuid=expected_rodex_uuid,
-        expected_registry_uuid=expected_registry_uuid,
-        expected_codex_uuid=expected_codex_uuid,
+        expected_rodex_session_id=expected_rodex_session_id,
+        expected_registry_id=expected_registry_id,
+        expected_codex_session_id=expected_codex_session_id,
     )
     return session_id, runtime, control
 
@@ -852,24 +979,24 @@ def _verify_live_runtime_identity(
     launcher: RodexRuntimeLauncher,
     runtime: LiveTmuxSession,
     *,
-    expected_rodex_uuid: uuid.UUID,
-    expected_registry_uuid: uuid.UUID,
-    expected_codex_uuid: uuid.UUID,
+    expected_rodex_session_id: RodexSessionId,
+    expected_registry_id: RodexRegistryId,
+    expected_codex_session_id: CodexSessionId,
 ) -> LiveRodexControl:
     control = launcher.discover_runtime_control(runtime)
     if (
         control.registration_state == RODEX_REGISTRATION_PENDING
-        and control.rodex_session_uuid == expected_rodex_uuid
-        and control.rodex_registry_uuid == expected_registry_uuid
-        and control.codex_session_uuid == expected_codex_uuid
+        and control.rodex_session_id == expected_rodex_session_id
+        and control.rodex_registry_id == expected_registry_id
+        and control.codex_session_id == expected_codex_session_id
     ):
         launcher.confirm_runtime_registration(runtime)
         control = launcher.discover_runtime_control(runtime)
     _require_live_runtime_identity(
         control,
-        expected_rodex_uuid=expected_rodex_uuid,
-        expected_registry_uuid=expected_registry_uuid,
-        expected_codex_uuid=expected_codex_uuid,
+        expected_rodex_session_id=expected_rodex_session_id,
+        expected_registry_id=expected_registry_id,
+        expected_codex_session_id=expected_codex_session_id,
     )
     return control
 
@@ -877,9 +1004,9 @@ def _verify_live_runtime_identity(
 def _require_live_runtime_identity(
     control: LiveRodexControl,
     *,
-    expected_rodex_uuid: uuid.UUID,
-    expected_registry_uuid: uuid.UUID,
-    expected_codex_uuid: uuid.UUID,
+    expected_rodex_session_id: RodexSessionId,
+    expected_registry_id: RodexRegistryId,
+    expected_codex_session_id: CodexSessionId,
 ) -> None:
     if control.registration_state != RODEX_REGISTRATION_REGISTERED:
         raise RodexLaunchError(
@@ -887,22 +1014,22 @@ def _require_live_runtime_identity(
             f"expected {RODEX_REGISTRATION_REGISTERED}, "
             f"observed {control.registration_state or 'missing'}"
         )
-    if control.rodex_session_uuid != expected_rodex_uuid:
+    if control.rodex_session_id != expected_rodex_session_id:
         raise RodexLaunchError(
             "live runtime advertised an unexpected Rodex identity: "
-            f"expected {expected_rodex_uuid}, "
-            f"observed {control.rodex_session_uuid or 'missing'}"
+            f"expected {expected_rodex_session_id}, "
+            f"observed {control.rodex_session_id or 'missing'}"
         )
-    if control.rodex_registry_uuid != expected_registry_uuid:
+    if control.rodex_registry_id != expected_registry_id:
         raise RodexLaunchError(
             "live runtime advertised an unexpected Rodex registry identity: "
-            f"expected {expected_registry_uuid}, "
-            f"observed {control.rodex_registry_uuid or 'missing'}"
+            f"expected {expected_registry_id}, "
+            f"observed {control.rodex_registry_id or 'missing'}"
         )
-    if control.codex_session_uuid != expected_codex_uuid:
+    if control.codex_session_id != expected_codex_session_id:
         raise RodexLaunchError(
             "live runtime advertised an unexpected Codex identity: "
-            f"expected {expected_codex_uuid}, observed {control.codex_session_uuid}"
+            f"expected {expected_codex_session_id}, observed {control.codex_session_id}"
         )
 
 
@@ -910,11 +1037,11 @@ def _find_relocated_live_runtime(
     launcher: RodexRuntimeLauncher,
     tmux_server_socket_path: Path,
     *,
-    expected_rodex_uuid: uuid.UUID,
-    expected_registry_uuid: uuid.UUID,
-    expected_codex_uuid: uuid.UUID,
+    expected_rodex_session_id: RodexSessionId,
+    expected_registry_id: RodexRegistryId,
+    expected_codex_session_id: CodexSessionId,
 ) -> LiveTmuxSession | None:
-    matches: list[LiveTmuxSession] = []
+    matches: list[tuple[LiveTmuxSession, LiveRodexControl]] = []
     unverifiable_same_codex: list[str] = []
     for name in launcher.list_session_names(tmux_server_socket_path):
         candidate = LiveTmuxSession(tmux_server_socket_path, name)
@@ -922,14 +1049,15 @@ def _find_relocated_live_runtime(
             control = launcher.discover_runtime_control(candidate)
         except RodexRuntimeError:
             continue
-        if control.codex_session_uuid != expected_codex_uuid:
+        if control.codex_session_id != expected_codex_session_id:
             continue
         if (
-            control.rodex_session_uuid == expected_rodex_uuid
-            and control.rodex_registry_uuid == expected_registry_uuid
-            and control.registration_state == RODEX_REGISTRATION_REGISTERED
+            control.rodex_session_id == expected_rodex_session_id
+            and control.rodex_registry_id == expected_registry_id
+            and control.registration_state
+            in {RODEX_REGISTRATION_PENDING, RODEX_REGISTRATION_REGISTERED}
         ):
-            matches.append(candidate)
+            matches.append((candidate, control))
         else:
             unverifiable_same_codex.append(name)
     if unverifiable_same_codex:
@@ -940,9 +1068,20 @@ def _find_relocated_live_runtime(
     if len(matches) > 1:
         raise RodexLaunchError(
             "multiple live runtimes advertise the same Rodex/Codex identity: "
-            + ", ".join(sorted(item.tmux_session_name for item in matches))
+            + ", ".join(sorted(item.tmux_session_name for item, _control in matches))
         )
-    return matches[0] if matches else None
+    if not matches:
+        return None
+    candidate, control = matches[0]
+    if control.registration_state == RODEX_REGISTRATION_PENDING:
+        launcher.confirm_runtime_registration(candidate)
+        _require_live_runtime_identity(
+            launcher.discover_runtime_control(candidate),
+            expected_rodex_session_id=expected_rodex_session_id,
+            expected_registry_id=expected_registry_id,
+            expected_codex_session_id=expected_codex_session_id,
+        )
+    return candidate
 
 
 def _revalidate_live_control(
@@ -969,12 +1108,95 @@ def _parse_alias_arguments(arguments: list[str]) -> tuple[bool, list[str]]:
     return force, operands
 
 
+def _print_current_rodex_context(
+    database_path: Path,
+    launcher: RodexRuntimeLauncher,
+) -> None:
+    """Print one verified snapshot of the Rodex session containing this process."""
+    tmux_context = launcher.discover_current_tmux_pane_context()
+    live_tmux = tmux_context.tmux_session
+    advertised = launcher.discover_runtime_control(live_tmux)
+    if advertised.rodex_session_id is None:
+        raise RodexLaunchError(
+            "the current tmux pane does not advertise a Rodex session identity"
+        )
+    registry_id = lookup_rodex_registry_id(database_path)
+    if advertised.rodex_registry_id != registry_id:
+        raise RodexLaunchError(
+            "the current tmux pane belongs to a different Rodex registry: "
+            f"expected {registry_id}, "
+            f"observed {advertised.rodex_registry_id or 'missing'}"
+        )
+    session_id = lookup_rodex_sessions_id_from_a_rodex_session_id(
+        advertised.rodex_session_id,
+        database_path,
+    )
+    if session_id is None:
+        raise RodexLaunchError(
+            "the current tmux pane advertises a Rodex identity absent from this registry"
+        )
+    persisted = next(
+        (
+            runtime
+            for runtime in list_rodex_session_runtimes_for_a_user(database_path)
+            if runtime.rodex_sessions_id == session_id
+        ),
+        None,
+    )
+    if persisted is None:
+        raise RodexLaunchError(
+            "the current tmux pane is not owned by the current POSIX user"
+        )
+    recorded_tmux = LiveTmuxSession(
+        Path(persisted.tmux_server_socket_path),
+        persisted.tmux_session_name,
+    )
+    if recorded_tmux != live_tmux:
+        raise RodexLaunchError(
+            "the current tmux pane does not match its recorded Rodex endpoint: "
+            f"expected {recorded_tmux.tmux_session_name} on "
+            f"{recorded_tmux.tmux_server_socket_path}, observed "
+            f"{live_tmux.tmux_session_name} on {live_tmux.tmux_server_socket_path}"
+        )
+    control = _verify_live_runtime_identity(
+        launcher,
+        live_tmux,
+        expected_rodex_session_id=advertised.rodex_session_id,
+        expected_registry_id=registry_id,
+        expected_codex_session_id=persisted.codex_session_id,
+    )
+    print(
+        json.dumps(
+            {
+                "managed_by": "rodex",
+                "rodex_session_name": persisted.display_name,
+                "rodex_permanent_name": persisted.cool_name,
+                "rodex_user_defined_name": persisted.user_defined_cool_name,
+                "rodex_session_id": str(advertised.rodex_session_id),
+                "rodex_registry_id": str(registry_id),
+                "rodex_database_path": str(database_path),
+                "codex_session_id": str(control.codex_session_id),
+                "tmux_server_socket_path": str(live_tmux.tmux_server_socket_path),
+                "tmux_session_name": live_tmux.tmux_session_name,
+                "tmux_session_id": tmux_context.tmux_session_id,
+                "tmux_window_id": tmux_context.tmux_window_id,
+                "tmux_pane_id": tmux_context.tmux_pane_id,
+                "registration_state": control.registration_state,
+                "attached_clients": tmux_context.attached_client_count,
+                "shared": tmux_context.attached_client_count > 1,
+            },
+            indent=2,
+        ),
+        flush=True,
+    )
+
+
 def _print_running_sessions(
     database_path: Path,
     launcher: RodexRuntimeLauncher,
 ) -> None:
     persisted = list_rodex_session_runtimes_for_a_user(database_path)
-    registry_uuid = lookup_rodex_registry_uuid(database_path)
+    registry_id = lookup_rodex_registry_id(database_path)
     running = []
     identity_failures: list[tuple[str, str]] = []
     registered_endpoints: set[tuple[Path, str]] = set()
@@ -986,19 +1208,21 @@ def _print_running_sessions(
         live = LiveTmuxSession(socket_path, runtime.tmux_session_name)
         if not launcher.session_exists(live):
             continue
-        expected_rodex_uuid = lookup_rodex_uuid_from_an_id(
+        expected_rodex_session_id = lookup_rodex_session_id_from_a_rodex_sessions_id(
             runtime.rodex_sessions_id, database_path
         )
-        if expected_rodex_uuid is None:
-            identity_failures.append((runtime.display_name, "missing durable Rodex UUID"))
+        if expected_rodex_session_id is None:
+            identity_failures.append(
+                (runtime.display_name, "missing durable Rodex session ID")
+            )
             continue
         try:
             _verify_live_runtime_identity(
                 launcher,
                 live,
-                expected_rodex_uuid=expected_rodex_uuid,
-                expected_registry_uuid=registry_uuid,
-                expected_codex_uuid=runtime.codex_session_uuid,
+                expected_rodex_session_id=expected_rodex_session_id,
+                expected_registry_id=registry_id,
+                expected_codex_session_id=runtime.codex_session_id,
             )
         except (RodexLaunchError, RodexRuntimeError) as error:
             identity_failures.append((runtime.display_name, str(error)))
@@ -1020,7 +1244,7 @@ def _print_running_sessions(
     print(f"Running Rodex sessions: {len(running)}", flush=True)
     for runtime in running:
         print(
-            f"{runtime.display_name} -> Codex {runtime.codex_session_uuid}",
+            f"{runtime.display_name} -> Codex {runtime.codex_session_id}",
             flush=True,
         )
     if identity_failures:

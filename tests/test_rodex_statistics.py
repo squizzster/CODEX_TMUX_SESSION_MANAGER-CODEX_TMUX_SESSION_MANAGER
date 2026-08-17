@@ -10,9 +10,9 @@ from pathlib import Path
 import pytest
 from test_statistics_projection import _snapshot as analyzer_snapshot
 
-import rodex_functions.sessions as sessions_module
+import rodex_registry.statistics as statistics_module
 from rodex.cli import RodexLaunchError, run
-from rodex_functions import (
+from rodex_registry import (
     RodexSessionError,
     RodexSessionStatisticsConflictError,
     RodexSessionStatisticsSourceObservation,
@@ -21,7 +21,7 @@ from rodex_functions import (
     StatisticsProjectionError,
     TurnStatisticsProjection,
     create_a_rodex_session,
-    generate_an_unregistered_rodex_uuid_candidate,
+    generate_an_unregistered_rodex_session_id_candidate,
     list_rodex_session_statistics_sources,
     parse_session_statistics_snapshot,
     publish_rodex_session_statistics,
@@ -33,8 +33,8 @@ from rodex_functions import (
     turn_statistics_as_dict,
 )
 
-CODEX_UUID = uuid.UUID("01a00654-f2bc-7a30-834a-a5f886a65f82")
-REPLACEMENT_UUID = uuid.UUID(int=CODEX_UUID.int + 1)
+CODEX_SESSION_ID = uuid.UUID("01a00654-f2bc-7a30-834a-a5f886a65f82")
+REPLACEMENT_CODEX_SESSION_ID = uuid.UUID(int=CODEX_SESSION_ID.int + 1)
 
 
 def _columns(database: Path, table: str) -> list[str]:
@@ -47,11 +47,11 @@ def _index_columns(database: Path, index: str) -> list[str]:
         return [str(row[2]) for row in connection.execute(f"PRAGMA index_info({index})")]
 
 
-def _observation(root: Path, codex_uuid: uuid.UUID, marker: str = "a"):
-    path = (root / f"rollout-{codex_uuid}.jsonl").resolve()
+def _observation(root: Path, codex_session_id: uuid.UUID, marker: str = "a"):
+    path = (root / f"rollout-{codex_session_id}.jsonl").resolve()
     content = marker.encode()
     return RodexSessionStatisticsSourceObservation(
-        codex_session_uuid=codex_uuid,
+        codex_session_id=codex_session_id,
         rollout_file_path=path,
         analyzed_size_bytes=len(content),
         analyzed_mtime_ns=123,
@@ -67,7 +67,7 @@ def _base_projection() -> SessionStatisticsProjection:
 def _turn(
     turn_id: str,
     *,
-    codex_uuid: uuid.UUID = CODEX_UUID,
+    codex_session_id: uuid.UUID = CODEX_SESSION_ID,
     outcome: str = "completed",
     total_tokens: int = 10,
     terminal_at: str | None = "2026-08-16T12:00:01.000000Z",
@@ -75,7 +75,7 @@ def _turn(
     base = _base_projection().turn_statistics[0]
     return replace(
         base,
-        codex_session_uuid=codex_uuid,
+        codex_session_id=codex_session_id,
         codex_turn_id=turn_id,
         outcome=outcome,
         terminal_at_utc=terminal_at,
@@ -116,14 +116,14 @@ def _publish(
     *,
     based_on: int | None = None,
     projection: SessionStatisticsProjection | None = None,
-    expected_uuid: uuid.UUID = CODEX_UUID,
-    sources: tuple[uuid.UUID, ...] = (CODEX_UUID,),
+    expected_codex_session_id: uuid.UUID = CODEX_SESSION_ID,
+    sources: tuple[uuid.UUID, ...] = (CODEX_SESSION_ID,),
 ):
     supplied_projection = _projection(()) if projection is None else projection
     return publish_rodex_session_statistics(
         1,
         database,
-        expected_current_codex_uuid=expected_uuid,
+        expected_current_codex_session_id=expected_codex_session_id,
         based_on_statistics_revision=based_on,
         statistics_projection_schema_version="rodex-statistics-v3",
         calculated_at_utc="2026-08-16T12:00:00Z",
@@ -144,7 +144,7 @@ def test_schema_is_relational_queryable_and_contains_no_json_columns(
     tmp_path: Path,
 ) -> None:
     database = tmp_path / "rodex.sqlite3"
-    create_a_rodex_session(database, codex_session_uuid=CODEX_UUID)
+    create_a_rodex_session(database, codex_session_id=CODEX_SESSION_ID)
 
     table_names = (
         "rodex_sessions_statistics",
@@ -194,7 +194,7 @@ def test_schema_is_relational_queryable_and_contains_no_json_columns(
 
 def test_full_projection_round_trips_through_relational_rows(tmp_path: Path) -> None:
     database = tmp_path / "rodex.sqlite3"
-    create_a_rodex_session(database, codex_session_uuid=CODEX_UUID)
+    create_a_rodex_session(database, codex_session_id=CODEX_SESSION_ID)
     projection = _projection((_turn("turn-exact", total_tokens=42),))
 
     published = _publish(database, tmp_path, projection=projection)
@@ -214,9 +214,39 @@ def test_full_projection_round_trips_through_relational_rows(tmp_path: Path) -> 
     assert view.sources[0].included_statistics_revision == 1
 
 
+def test_turn_identity_bigints_reject_non_integer_storage(tmp_path: Path) -> None:
+    database = tmp_path / "rodex.sqlite3"
+    create_a_rodex_session(database, codex_session_id=CODEX_SESSION_ID)
+    _publish(database, tmp_path, projection=_projection((_turn("turn-exact"),)))
+
+    with sqlite3.connect(database) as connection:
+        for part_number in range(1, 5):
+            column_name = f"codex_turn_id_sha256_int_{part_number}"
+            with pytest.raises(sqlite3.IntegrityError, match="CHECK constraint failed"):
+                connection.execute(
+                    f"UPDATE rodex_sessions_statistics_turns SET {column_name} = 1.5"
+                )
+
+
+def test_statistics_reader_does_not_coerce_corrupt_source_identity(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "rodex.sqlite3"
+    create_a_rodex_session(database, codex_session_id=CODEX_SESSION_ID)
+    with sqlite3.connect(database) as connection:
+        connection.execute("PRAGMA ignore_check_constraints = ON")
+        connection.execute(
+            "UPDATE rodex_sessions_statistics_sources "
+            "SET codex_session_id_signed_bigint_1 = 1.5"
+        )
+
+    with pytest.raises(ValueError, match="signed 64-bit"):
+        read_rodex_session_statistics(1, database)
+
+
 def test_sql_can_sum_group_and_filter_base_statistics(tmp_path: Path) -> None:
     database = tmp_path / "rodex.sqlite3"
-    create_a_rodex_session(database, codex_session_uuid=CODEX_UUID)
+    create_a_rodex_session(database, codex_session_id=CODEX_SESSION_ID)
     projection = _projection(
         (
             _turn("turn-a", total_tokens=40),
@@ -245,7 +275,7 @@ def test_revision_mark_and_sweep_preserves_identity_and_replaces_children(
     tmp_path: Path,
 ) -> None:
     database = tmp_path / "rodex.sqlite3"
-    create_a_rodex_session(database, codex_session_uuid=CODEX_UUID)
+    create_a_rodex_session(database, codex_session_id=CODEX_SESSION_ID)
     _publish(database, tmp_path, projection=_projection((_turn("a"), _turn("b"))))
     first_a = read_rodex_session_turn_statistics(1, "a", database).turn
     assert first_a is not None
@@ -276,14 +306,14 @@ def test_publication_failure_rolls_back_every_relational_fact(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     database = tmp_path / "rodex.sqlite3"
-    create_a_rodex_session(database, codex_session_uuid=CODEX_UUID)
+    create_a_rodex_session(database, codex_session_id=CODEX_SESSION_ID)
     before = _publish(database, tmp_path, projection=_projection((_turn("stable"),)))
     before_bytes = database.read_bytes()
 
     def fail_health(*_args: object, **_kwargs: object) -> None:
         raise RuntimeError("forced publication failure")
 
-    monkeypatch.setattr(sessions_module, "_upsert_statistics_worker", fail_health)
+    monkeypatch.setattr(statistics_module, "_upsert_statistics_worker", fail_health)
     with pytest.raises(RuntimeError, match="forced publication failure"):
         _publish(
             database,
@@ -302,7 +332,7 @@ def test_publication_failure_rolls_back_every_relational_fact(
 
 def test_directly_constructed_incomplete_projection_cannot_publish(tmp_path: Path) -> None:
     database = tmp_path / "rodex.sqlite3"
-    create_a_rodex_session(database, codex_session_uuid=CODEX_UUID)
+    create_a_rodex_session(database, codex_session_id=CODEX_SESSION_ID)
     invalid = replace(_projection(()), distributions=())
 
     with pytest.raises(StatisticsProjectionError, match="structurally incomplete"):
@@ -315,7 +345,7 @@ def test_same_turn_id_in_two_sources_requires_exact_source(tmp_path: Path) -> No
     database = tmp_path / "rodex.sqlite3"
     create_a_rodex_session(
         database,
-        codex_session_uuid=CODEX_UUID,
+        codex_session_id=CODEX_SESSION_ID,
         tmux_server_socket_path=tmp_path / "tmux.sock",
         tmux_session_name="first",
     )
@@ -325,12 +355,12 @@ def test_same_turn_id_in_two_sources_requires_exact_source(tmp_path: Path) -> No
         tmp_path / "tmux.sock",
         "replacement",
         database,
-        codex_session_uuid=REPLACEMENT_UUID,
+        codex_session_id=REPLACEMENT_CODEX_SESSION_ID,
     )
     projection = _projection(
         (
-            _turn("shared", codex_uuid=CODEX_UUID, total_tokens=10),
-            _turn("shared", codex_uuid=REPLACEMENT_UUID, total_tokens=20),
+            _turn("shared", codex_session_id=CODEX_SESSION_ID, total_tokens=10),
+            _turn("shared", codex_session_id=REPLACEMENT_CODEX_SESSION_ID, total_tokens=20),
         )
     )
     _publish(
@@ -338,14 +368,14 @@ def test_same_turn_id_in_two_sources_requires_exact_source(tmp_path: Path) -> No
         tmp_path,
         based_on=1,
         projection=projection,
-        expected_uuid=REPLACEMENT_UUID,
-        sources=(CODEX_UUID, REPLACEMENT_UUID),
+        expected_codex_session_id=REPLACEMENT_CODEX_SESSION_ID,
+        sources=(CODEX_SESSION_ID, REPLACEMENT_CODEX_SESSION_ID),
     )
 
     with pytest.raises(RodexSessionTurnStatisticsAmbiguousError):
         read_rodex_session_turn_statistics(1, "shared", database)
     exact = read_rodex_session_turn_statistics(
-        1, "shared", database, codex_session_uuid=REPLACEMENT_UUID
+        1, "shared", database, codex_session_id=REPLACEMENT_CODEX_SESSION_ID
     ).turn
     assert exact is not None and exact.projection.total_tokens == 20
 
@@ -356,7 +386,7 @@ def test_unanalyzed_source_and_digest_collision_are_atomic_conflicts(
     database = tmp_path / "rodex.sqlite3"
     create_a_rodex_session(
         database,
-        codex_session_uuid=CODEX_UUID,
+        codex_session_id=CODEX_SESSION_ID,
         tmux_server_socket_path=tmp_path / "tmux.sock",
         tmux_session_name="first",
     )
@@ -365,20 +395,22 @@ def test_unanalyzed_source_and_digest_collision_are_atomic_conflicts(
         tmp_path / "tmux.sock",
         "replacement",
         database,
-        codex_session_uuid=REPLACEMENT_UUID,
+        codex_session_id=REPLACEMENT_CODEX_SESSION_ID,
     )
     with pytest.raises(RodexSessionStatisticsConflictError, match="omit"):
         _publish(
             database,
             tmp_path,
-            projection=_projection((_turn("old", codex_uuid=CODEX_UUID),)),
-            expected_uuid=REPLACEMENT_UUID,
-            sources=(REPLACEMENT_UUID,),
+            projection=_projection((_turn("old", codex_session_id=CODEX_SESSION_ID),)),
+            expected_codex_session_id=REPLACEMENT_CODEX_SESSION_ID,
+            sources=(REPLACEMENT_CODEX_SESSION_ID,),
         )
     assert read_rodex_session_statistics(1, database).statistics is None
 
     monkeypatch.setattr(
-        sessions_module, "_turn_id_sha256_signed_bigints", lambda _value: (1, 2, 3, 4)
+        statistics_module,
+        "_turn_id_sha256_signed_bigints",
+        lambda _value: (1, 2, 3, 4),
     )
     with pytest.raises(RodexSessionStatisticsConflictError, match="digest collision"):
         _publish(
@@ -386,18 +418,18 @@ def test_unanalyzed_source_and_digest_collision_are_atomic_conflicts(
             tmp_path,
             projection=_projection(
                 (
-                    _turn("first", codex_uuid=REPLACEMENT_UUID),
-                    _turn("second", codex_uuid=REPLACEMENT_UUID),
+                    _turn("first", codex_session_id=REPLACEMENT_CODEX_SESSION_ID),
+                    _turn("second", codex_session_id=REPLACEMENT_CODEX_SESSION_ID),
                 )
             ),
-            expected_uuid=REPLACEMENT_UUID,
-            sources=(CODEX_UUID, REPLACEMENT_UUID),
+            expected_codex_session_id=REPLACEMENT_CODEX_SESSION_ID,
+            sources=(CODEX_SESSION_ID, REPLACEMENT_CODEX_SESSION_ID),
         )
 
 
 def test_turn_mark_and_sweep_scales_beyond_sqlite_bind_limit(tmp_path: Path) -> None:
     database = tmp_path / "rodex.sqlite3"
-    create_a_rodex_session(database, codex_session_uuid=CODEX_UUID)
+    create_a_rodex_session(database, codex_session_id=CODEX_SESSION_ID)
     turns = tuple(_turn(f"turn-{index}") for index in range(1_100))
     projection = _projection(turns)
     _publish(database, tmp_path, projection=projection)
@@ -409,11 +441,13 @@ def test_turn_mark_and_sweep_scales_beyond_sqlite_bind_limit(tmp_path: Path) -> 
         ).fetchone() == (1_100, 2, 2)
 
 
-def test_stale_uuid_and_revision_fences_preserve_last_good_rows(tmp_path: Path) -> None:
+def test_stale_codex_session_id_and_revision_fences_preserve_last_good_rows(
+    tmp_path: Path,
+) -> None:
     database = tmp_path / "rodex.sqlite3"
     create_a_rodex_session(
         database,
-        codex_session_uuid=CODEX_UUID,
+        codex_session_id=CODEX_SESSION_ID,
         tmux_server_socket_path=tmp_path / "tmux.sock",
         tmux_session_name="first",
     )
@@ -433,20 +467,20 @@ def test_stale_uuid_and_revision_fences_preserve_last_good_rows(tmp_path: Path) 
         tmp_path / "tmux.sock",
         "replacement",
         database,
-        codex_session_uuid=REPLACEMENT_UUID,
+        codex_session_id=REPLACEMENT_CODEX_SESSION_ID,
     )
-    with pytest.raises(RodexSessionStatisticsConflictError, match="Codex UUID"):
+    with pytest.raises(RodexSessionStatisticsConflictError, match="Codex session ID"):
         _publish(database, tmp_path, based_on=first.statistics_revision)
 
 
 def test_health_is_separate_and_preserves_last_good_statistics(tmp_path: Path) -> None:
     database = tmp_path / "rodex.sqlite3"
-    create_a_rodex_session(database, codex_session_uuid=CODEX_UUID)
+    create_a_rodex_session(database, codex_session_id=CODEX_SESSION_ID)
     snapshot = _publish(database, tmp_path)
     health = record_rodex_session_statistics_worker_health(
         1,
         database,
-        expected_current_codex_uuid=CODEX_UUID,
+        expected_current_codex_session_id=CODEX_SESSION_ID,
         worker_state="degraded",
         diagnostic_code="analytics_io_error",
         last_attempted_at_utc="2026-08-16T12:01:00Z",
@@ -460,7 +494,7 @@ def test_health_is_separate_and_preserves_last_good_statistics(tmp_path: Path) -
 
 def test_foreign_keys_and_checks_reject_detached_relational_facts(tmp_path: Path) -> None:
     database = tmp_path / "rodex.sqlite3"
-    create_a_rodex_session(database, codex_session_uuid=CODEX_UUID)
+    create_a_rodex_session(database, codex_session_id=CODEX_SESSION_ID)
     _publish(database, tmp_path, projection=_projection((_turn("turn-a"),)))
 
     statements = (
@@ -485,7 +519,7 @@ def test_cli_reconstructs_json_from_sql_without_runtime_dependencies(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     database = tmp_path / "rodex.sqlite3"
-    created = create_a_rodex_session(database, codex_session_uuid=CODEX_UUID)
+    created = create_a_rodex_session(database, codex_session_id=CODEX_SESSION_ID)
     _publish(
         database, tmp_path, projection=_projection((_turn("turn-exact", total_tokens=42),))
     )
@@ -515,7 +549,7 @@ def test_cli_reconstructs_json_from_sql_without_runtime_dependencies(
 
 def test_no_raw_or_redundant_json_is_persisted(tmp_path: Path) -> None:
     database = tmp_path / "rodex.sqlite3"
-    create_a_rodex_session(database, codex_session_uuid=CODEX_UUID)
+    create_a_rodex_session(database, codex_session_id=CODEX_SESSION_ID)
     _publish(database, tmp_path, projection=_projection((_turn("private"),)))
     database_bytes = database.read_bytes()
     assert b"must-not-persist" not in database_bytes
@@ -527,7 +561,7 @@ def test_historical_source_cannot_move_to_another_lineage(tmp_path: Path) -> Non
     database = tmp_path / "rodex.sqlite3"
     create_a_rodex_session(
         database,
-        codex_session_uuid=CODEX_UUID,
+        codex_session_id=CODEX_SESSION_ID,
         tmux_server_socket_path=tmp_path / "tmux.sock",
         tmux_session_name="first",
     )
@@ -536,22 +570,21 @@ def test_historical_source_cannot_move_to_another_lineage(tmp_path: Path) -> Non
         tmp_path / "tmux.sock",
         "replacement",
         database,
-        codex_session_uuid=REPLACEMENT_UUID,
+        codex_session_id=REPLACEMENT_CODEX_SESSION_ID,
     )
     with pytest.raises(RodexSessionError, match="statistics lineage"):
-        create_a_rodex_session(database, codex_session_uuid=CODEX_UUID)
+        create_a_rodex_session(database, codex_session_id=CODEX_SESSION_ID)
     assert [
-        item.codex_session_uuid
-        for item in list_rodex_session_statistics_sources(1, database)
-    ] == [CODEX_UUID, REPLACEMENT_UUID]
+        item.codex_session_id for item in list_rodex_session_statistics_sources(1, database)
+    ] == [CODEX_SESSION_ID, REPLACEMENT_CODEX_SESSION_ID]
 
 
-def test_unregistered_uuid_candidate_becomes_persisted_identity(tmp_path: Path) -> None:
+def test_unregistered_codex_session_id_becomes_persisted_identity(tmp_path: Path) -> None:
     database = tmp_path / "rodex.sqlite3"
-    candidate = generate_an_unregistered_rodex_uuid_candidate(database)
+    candidate = generate_an_unregistered_rodex_session_id_candidate(database)
     created = create_a_rodex_session(
         database,
-        rodex_session_uuid=candidate,
-        codex_session_uuid=CODEX_UUID,
+        rodex_session_id=candidate,
+        codex_session_id=CODEX_SESSION_ID,
     )
-    assert created.rodex_uuid == candidate
+    assert created.rodex_session_id == candidate

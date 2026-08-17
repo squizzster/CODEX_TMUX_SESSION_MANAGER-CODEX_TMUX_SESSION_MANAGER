@@ -9,11 +9,11 @@ import pytest
 
 from rodex.status_animation import (
     FRAME_INTERVAL_SECONDS,
-    STATUS_ANIMATION_TOKEN_OPTION,
     AsyncCommandResult,
     animate_status,
     status_frames,
 )
+from rodex.tmux_status import STATUS_ANIMATION_TOKEN_OPTION
 
 
 class FakeTmux:
@@ -92,12 +92,17 @@ def test_animation_uses_scheduled_frames_and_restores_the_entire_status_format()
     refresh_commands = [command for command in tmux.commands if "refresh-client" in command]
 
     assert len(frame_commands) == 25
+    assert all(
+        command[3:6] == ["if-shell", "-t", "=automatic-beluga:"]
+        for command in frame_commands
+    )
     assert len(deadlines) == 25
     assert all(
         later - earlier == pytest.approx(FRAME_INTERVAL_SECONDS)
         for earlier, later in pairwise(deadlines)
     )
     assert len(restore_commands) == 1
+    assert restore_commands[0][3:6] == ["if-shell", "-t", "=automatic-beluga:"]
     assert "set-option -u -t =automatic-beluga: status-format" in restore_commands[0][-1]
     assert "status-format[0]" not in restore_commands[0][-1]
     assert [command[-1] for command in refresh_commands] == [

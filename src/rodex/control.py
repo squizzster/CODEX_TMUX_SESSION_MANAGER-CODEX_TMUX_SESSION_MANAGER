@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -11,6 +10,8 @@ from typing import Any, Literal
 
 from websockets.exceptions import ConnectionClosed, InvalidHandshake
 from websockets.sync.client import unix_connect
+
+from rodex_registry.identity import CodexSessionId, RodexRegistryId, RodexSessionId
 
 from .protocol_proxy import EVENT_STREAM_READY_METHOD
 from .version import RODEX_VERSION
@@ -30,9 +31,9 @@ class LiveRodexControl:
 
     protocol_proxy_socket_path: Path
     protocol_event_socket_path: Path
-    codex_session_uuid: uuid.UUID
-    rodex_session_uuid: uuid.UUID | None = None
-    rodex_registry_uuid: uuid.UUID | None = None
+    codex_session_id: CodexSessionId
+    rodex_session_id: RodexSessionId | None = None
+    rodex_registry_id: RodexRegistryId | None = None
     registration_state: str | None = None
 
 
@@ -63,7 +64,7 @@ class CodexControlClient:
     def inspect(self, control: LiveRodexControl) -> CodexThreadState:
         """Return the verified thread's current runtime state."""
         with self._open_protocol(control.protocol_proxy_socket_path) as websocket:
-            thread = self._verify_and_read_thread(websocket, control.codex_session_uuid)
+            thread = self._verify_and_read_thread(websocket, control.codex_session_id)
         return _thread_state(thread)
 
     def send_prompt(
@@ -79,10 +80,10 @@ class CodexControlClient:
         try:
             with self._open_events(control.protocol_event_socket_path) as events:
                 ready = _expect_event_stream_ready(events)
-                active_turn_id = _ready_active_turn_id(ready, control.codex_session_uuid)
+                active_turn_id = _ready_active_turn_id(ready, control.codex_session_id)
                 with self._open_protocol(control.protocol_proxy_socket_path) as websocket:
                     thread = self._verify_and_read_thread(
-                        websocket, control.codex_session_uuid
+                        websocket, control.codex_session_id
                     )
                     state = _thread_state(thread, active_turn_id=active_turn_id)
                     if state.can_accept_direct_input is False:
@@ -99,7 +100,7 @@ class CodexControlClient:
                             3,
                             "turn/steer",
                             {
-                                "threadId": str(control.codex_session_uuid),
+                                "threadId": str(control.codex_session_id),
                                 "expectedTurnId": state.active_turn_id,
                                 "input": user_input,
                             },
@@ -114,7 +115,7 @@ class CodexControlClient:
                         3,
                         "turn/start",
                         {
-                            "threadId": str(control.codex_session_uuid),
+                            "threadId": str(control.codex_session_id),
                             "input": user_input,
                         },
                     )
@@ -143,7 +144,7 @@ class CodexControlClient:
                 for message in events:
                     payload = _protocol_payload(message)
                     if payload is None or not _belongs_to_thread(
-                        payload, control.codex_session_uuid
+                        payload, control.codex_session_id
                     ):
                         continue
                     method = payload.get("method")
@@ -178,7 +179,7 @@ class CodexControlClient:
                 for message in events:
                     payload = _protocol_payload(message)
                     if payload is None or not _belongs_to_thread(
-                        payload, control.codex_session_uuid
+                        payload, control.codex_session_id
                     ):
                         continue
                     formatted = format_protocol_log_event(payload)
@@ -208,7 +209,7 @@ class CodexControlClient:
         )
 
     def _verify_and_read_thread(
-        self, websocket: Any, expected_codex_uuid: uuid.UUID
+        self, websocket: Any, expected_codex_session_id: CodexSessionId
     ) -> dict[str, Any]:
         _request(
             websocket,
@@ -225,7 +226,7 @@ class CodexControlClient:
         websocket.send(json.dumps({"method": "initialized", "params": {}}))
         loaded = _request(websocket, 1, "thread/loaded/list", {})
         loaded_ids = loaded.get("data")
-        expected = str(expected_codex_uuid)
+        expected = str(expected_codex_session_id)
         if not isinstance(loaded_ids, list) or expected not in loaded_ids:
             raise RodexControlError(
                 f"live endpoint does not contain expected Codex session {expected}"
@@ -336,9 +337,9 @@ def _protocol_payload(message: str | bytes) -> dict[str, Any] | None:
     return payload if isinstance(payload, dict) else None
 
 
-def _belongs_to_thread(payload: dict[str, Any], codex_uuid: uuid.UUID) -> bool:
+def _belongs_to_thread(payload: dict[str, Any], codex_session_id: CodexSessionId) -> bool:
     params = payload.get("params")
-    return isinstance(params, dict) and params.get("threadId") == str(codex_uuid)
+    return isinstance(params, dict) and params.get("threadId") == str(codex_session_id)
 
 
 def _nested(payload: dict[str, Any], *keys: str) -> Any:
@@ -362,12 +363,12 @@ def _expect_event_stream_ready(events: Any) -> dict[str, Any]:
 
 
 def _ready_active_turn_id(
-    ready: dict[str, Any], codex_session_uuid: uuid.UUID
+    ready: dict[str, Any], codex_session_id: CodexSessionId
 ) -> str | None:
     active_turns = _nested(ready, "params", "activeTurns")
     if not isinstance(active_turns, dict):
         raise RodexControlError("Codex event stream sent invalid active-turn state")
-    turn_id = active_turns.get(str(codex_session_uuid))
+    turn_id = active_turns.get(str(codex_session_id))
     if turn_id is not None and not isinstance(turn_id, str):
         raise RodexControlError("Codex event stream sent an invalid active turn id")
     return turn_id

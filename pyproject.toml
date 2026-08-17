@@ -18,7 +18,6 @@ dependencies = [
 ]
 
 [project.scripts]
-ctsm = "codex_tmux_session_manager:main"
 rodex = "rodex:main"
 
 [dependency-groups]
@@ -34,7 +33,7 @@ testpaths = ["tests"]
 
 [tool.coverage.run]
 branch = true
-source = ["codex_tmux_session_manager", "cool_name", "rodex", "rodex_functions", "rodex_sql"]
+source = ["cool_name", "rodex", "rodex_registry", "rodex_sql"]
 
 [tool.coverage.report]
 fail_under = 70
@@ -49,10 +48,9 @@ select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
 
 [tool.uv.build-backend]
 module-name = [
-    "codex_tmux_session_manager",
     "cool_name",
     "rodex",
-    "rodex_functions",
+    "rodex_registry",
     "rodex_sql",
 ]
 

@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
-from .tmux_status import COMPLETION_TOKEN_OPTION, RODEX_STATUS_LEFT_FORMAT
+from .tmux_status import STATUS_LEFT_PUBLISHER_COMPLETION, TmuxStatusLeftPipeline
 
 _RODEX_COMMAND: Final = "/rodex"
 _PROMPT_PREFIX: Final = "\N{SINGLE RIGHT-POINTING ANGLE QUOTATION MARK} "
@@ -203,8 +203,9 @@ def _dispatch_rodex_input_command(
     client_name: str,
     tmux: Callable[..., subprocess.CompletedProcess[str]],
 ) -> int:
-    tmux("set-option", "-u", "-t", pane_id, COMPLETION_TOKEN_OPTION)
-    tmux("set-option", "-t", pane_id, "status-left", RODEX_STATUS_LEFT_FORMAT)
+    TmuxStatusLeftPipeline(tmux, pane_id).restore_if_publisher_matches(
+        STATUS_LEFT_PUBLISHER_COMPLETION
+    )
     arguments = command.arguments
     if command.parse_error:
         message = "Rodex: command contains an unmatched quote"
@@ -218,12 +219,12 @@ def _dispatch_rodex_input_command(
             "-v",
             "-t",
             pane_id,
-            "@rodex_codex_session_uuid",
+            "@rodex_codex_session_id",
         )
-        codex_uuid = codex_identity.stdout.strip()
+        codex_session_id = codex_identity.stdout.strip()
         message = (
-            f"Rodex: {session_name} -> Codex {codex_uuid}"
-            if codex_identity.returncode == 0 and codex_uuid
+            f"Rodex: {session_name} -> Codex {codex_session_id}"
+            if codex_identity.returncode == 0 and codex_session_id
             else f"Rodex: {session_name}"
         )
     elif arguments == ("detach",):

@@ -8,21 +8,22 @@ from pathlib import Path
 
 import pytest
 
-import rodex_functions.sessions as session_module
-from rodex_functions import (
+import rodex_registry.identity as identity_module
+from rodex_registry import (
+    RodexRegistryId,
     RodexSessionError,
-    RodexSessionUUIDCollisionError,
+    RodexSessionId,
+    RodexSessionIdCollisionError,
     create_a_rodex_session,
     default_rodex_database_path,
+    generate_an_unregistered_rodex_session_id_candidate,
     initialise_rodex_database,
-    join_signed_bigints_into_a_codex_uuid,
-    join_signed_bigints_into_a_rodex_uuid,
-    lookup_codex_uuid_from_a_rodex_session_id,
-    lookup_id_from_a_rodex_uuid,
-    lookup_rodex_registry_uuid,
-    lookup_rodex_uuid_from_an_id,
-    split_a_codex_uuid_into_signed_bigints,
-    split_a_rodex_uuid_into_signed_bigints,
+    join_signed_bigints_into_a_codex_session_id,
+    lookup_codex_session_id_from_a_rodex_sessions_id,
+    lookup_rodex_registry_id,
+    lookup_rodex_session_id_from_a_rodex_sessions_id,
+    lookup_rodex_sessions_id_from_a_rodex_session_id,
+    split_codex_session_id_into_signed_bigints,
 )
 from rodex_sql import RodexSQLError
 
@@ -32,7 +33,7 @@ def fetch_all(database: Path, query: str) -> list[tuple[object, ...]]:
         return connection.execute(query).fetchall()
 
 
-def codex_uuid(sequence: int) -> uuid.UUID:
+def codex_session_id(sequence: int) -> uuid.UUID:
     return uuid.UUID(int=(1 << 120) + sequence)
 
 
@@ -47,14 +48,37 @@ def test_initialise_creates_database_parent_directories(tmp_path: Path) -> None:
         assert connection.execute("PRAGMA journal_mode").fetchone() == ("wal",)
 
 
-def test_each_database_has_one_stable_distinct_registry_identity(tmp_path: Path) -> None:
+def test_each_database_has_one_stable_distinct_64_bit_registry_id(tmp_path: Path) -> None:
     first = tmp_path / "first.sqlite3"
     second = tmp_path / "second.sqlite3"
 
-    first_uuid = lookup_rodex_registry_uuid(first)
+    first_registry_id = lookup_rodex_registry_id(first)
 
-    assert lookup_rodex_registry_uuid(first) == first_uuid
-    assert lookup_rodex_registry_uuid(second) != first_uuid
+    assert isinstance(first_registry_id, RodexRegistryId)
+    assert len(str(first_registry_id)) == 16
+    assert lookup_rodex_registry_id(first) == first_registry_id
+    assert lookup_rodex_registry_id(second) != first_registry_id
+
+
+def test_registry_id_has_one_bigint_column_and_named_unique_index(
+    tmp_path: Path,
+) -> None:
+    database = initialise_rodex_database(tmp_path / "rodex.sqlite3")
+
+    columns = fetch_all(database, "PRAGMA table_info(rodex_registries)")
+    indexes = fetch_all(database, "PRAGMA index_list(rodex_registries)")
+    index_columns = fetch_all(
+        database, "PRAGMA index_info(rodex_registries_registry_id_unique)"
+    )
+
+    assert [(row[1], row[2], row[3], row[5]) for row in columns] == [
+        ("id", "INTEGER", 0, 1),
+        ("rodex_registry_id_signed_bigint", "BIGINT", 1, 0),
+    ]
+    assert {(row[1], row[2]) for row in indexes} == {
+        ("rodex_registries_registry_id_unique", 1)
+    }
+    assert [row[2] for row in index_columns] == ["rodex_registry_id_signed_bigint"]
 
 
 def test_initialise_repairs_an_existing_database_to_private_permissions(
@@ -93,10 +117,9 @@ def test_rodex_sessions_table_has_the_complete_root_identity(tmp_path: Path) -> 
 
     assert [(row[1], row[2], row[3], row[5]) for row in columns] == [
         ("id", "INTEGER", 0, 1),
-        ("uuid_int_1", "BIGINT", 1, 0),
-        ("uuid_int_2", "BIGINT", 1, 0),
-        ("codex_session_uuid_int_1", "BIGINT", 1, 0),
-        ("codex_session_uuid_int_2", "BIGINT", 1, 0),
+        ("rodex_session_id_signed_bigint", "BIGINT", 1, 0),
+        ("codex_session_id_signed_bigint_1", "BIGINT", 1, 0),
+        ("codex_session_id_signed_bigint_2", "BIGINT", 1, 0),
         ("cool_names_id", "INTEGER", 1, 0),
         ("user_defined_cool_names_id", "INTEGER", 0, 0),
     ]
@@ -106,6 +129,62 @@ def test_rodex_sessions_table_has_the_complete_root_identity(tmp_path: Path) -> 
         ("cool_names", "user_defined_cool_names_id", "id"),
     }
     assert columns[-1][4] == "NULL"
+
+
+def test_identity_bigint_columns_reject_non_integer_storage(tmp_path: Path) -> None:
+    database = tmp_path / "rodex.sqlite3"
+    create_a_rodex_session(database, codex_session_id=codex_session_id(1))
+    identity_columns = (
+        ("rodex_registries", "rodex_registry_id_signed_bigint"),
+        ("rodex_sessions", "rodex_session_id_signed_bigint"),
+        ("rodex_sessions", "codex_session_id_signed_bigint_1"),
+        ("rodex_sessions", "codex_session_id_signed_bigint_2"),
+        (
+            "rodex_sessions_statistics_sources",
+            "codex_session_id_signed_bigint_1",
+        ),
+        (
+            "rodex_sessions_statistics_sources",
+            "codex_session_id_signed_bigint_2",
+        ),
+    )
+
+    with sqlite3.connect(database) as connection:
+        for table_name, column_name in identity_columns:
+            with pytest.raises(sqlite3.IntegrityError, match="CHECK constraint failed"):
+                connection.execute(f"UPDATE {table_name} SET {column_name} = 1.5")
+
+
+def test_identity_readers_do_not_coerce_corrupt_storage(tmp_path: Path) -> None:
+    cases = (
+        (
+            "registry",
+            "rodex_registries",
+            "rodex_registry_id_signed_bigint",
+            lookup_rodex_registry_id,
+        ),
+        (
+            "session",
+            "rodex_sessions",
+            "rodex_session_id_signed_bigint",
+            lambda path: lookup_rodex_session_id_from_a_rodex_sessions_id(1, path),
+        ),
+        (
+            "codex",
+            "rodex_sessions",
+            "codex_session_id_signed_bigint_1",
+            lambda path: lookup_codex_session_id_from_a_rodex_sessions_id(1, path),
+        ),
+    )
+    for case_name, table_name, column_name, reader in cases:
+        database = tmp_path / f"{case_name}.sqlite3"
+        create_a_rodex_session(database, codex_session_id=codex_session_id(1))
+        with sqlite3.connect(database) as connection:
+            connection.execute("PRAGMA ignore_check_constraints = ON")
+            connection.execute(f"UPDATE {table_name} SET {column_name} = 1.5")
+
+        with pytest.raises(ValueError, match="signed 64-bit"):
+            reader(database)
 
 
 def test_id_uses_sqlite_autoincrement(tmp_path: Path) -> None:
@@ -120,19 +199,22 @@ def test_id_uses_sqlite_autoincrement(tmp_path: Path) -> None:
     assert "INTEGER PRIMARY KEY AUTOINCREMENT" in table_sql.upper()
 
 
-def test_uuid_halves_have_a_named_unique_index(tmp_path: Path) -> None:
+def test_session_id_has_one_named_unique_index(tmp_path: Path) -> None:
     database = initialise_rodex_database(tmp_path / "rodex.sqlite3")
 
     indexes = fetch_all(database, "PRAGMA index_list(rodex_sessions)")
-    columns = fetch_all(database, "PRAGMA index_info(rodex_sessions_uuid_ints_unique)")
+    columns = fetch_all(
+        database,
+        "PRAGMA index_info(rodex_sessions_session_id_unique)",
+    )
 
     assert {(row[1], row[2]) for row in indexes} == {
-        ("rodex_sessions_uuid_ints_unique", 1),
-        ("rodex_sessions_codex_session_uuid_ints_unique", 1),
+        ("rodex_sessions_session_id_unique", 1),
+        ("rodex_sessions_codex_session_id_unique", 1),
         ("rodex_sessions_cool_names_id_unique", 1),
         ("rodex_sessions_user_defined_cool_names_id_unique", 1),
     }
-    assert [row[2] for row in columns] == ["uuid_int_1", "uuid_int_2"]
+    assert [row[2] for row in columns] == ["rodex_session_id_signed_bigint"]
 
 
 def test_initialisation_is_idempotent(tmp_path: Path) -> None:
@@ -158,10 +240,11 @@ def test_initialisation_rejects_an_id_without_autoincrement(tmp_path: Path) -> N
     with sqlite3.connect(database) as connection:
         connection.execute(
             "CREATE TABLE rodex_sessions ("
-            "id INTEGER PRIMARY KEY, uuid_int_1 BIGINT NOT NULL, "
-            "uuid_int_2 BIGINT NOT NULL, "
-            "codex_session_uuid_int_1 BIGINT NOT NULL, "
-            "codex_session_uuid_int_2 BIGINT NOT NULL, cool_names_id INTEGER NOT NULL, "
+            "id INTEGER PRIMARY KEY, "
+            "rodex_session_id_signed_bigint BIGINT NOT NULL, "
+            "codex_session_id_signed_bigint_1 BIGINT NOT NULL, "
+            "codex_session_id_signed_bigint_2 BIGINT NOT NULL, "
+            "cool_names_id INTEGER NOT NULL, "
             "user_defined_cool_names_id INTEGER DEFAULT NULL, "
             "FOREIGN KEY (cool_names_id) REFERENCES cool_names (id), "
             "FOREIGN KEY (user_defined_cool_names_id) REFERENCES cool_names (id))"
@@ -171,15 +254,40 @@ def test_initialisation_rejects_an_id_without_autoincrement(tmp_path: Path) -> N
         initialise_rodex_database(database)
 
 
+def test_initialisation_rejects_missing_identity_type_constraints(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "rodex.sqlite3"
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "CREATE TABLE rodex_sessions ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "rodex_session_id_signed_bigint BIGINT NOT NULL, "
+            "codex_session_id_signed_bigint_1 BIGINT NOT NULL, "
+            "codex_session_id_signed_bigint_2 BIGINT NOT NULL, "
+            "cool_names_id INTEGER NOT NULL, "
+            "user_defined_cool_names_id INTEGER DEFAULT NULL, "
+            "FOREIGN KEY (cool_names_id) REFERENCES cool_names (id), "
+            "FOREIGN KEY (user_defined_cool_names_id) REFERENCES cool_names (id))"
+        )
+
+    with pytest.raises(RodexSessionError, match="identity constraints mismatch"):
+        initialise_rodex_database(database)
+
+
 def test_initialisation_repairs_a_missing_unique_index(tmp_path: Path) -> None:
     database = tmp_path / "rodex.sqlite3"
     with sqlite3.connect(database) as connection:
         connection.execute(
             "CREATE TABLE rodex_sessions ("
             "id INTEGER PRIMARY KEY AUTOINCREMENT, "
-            "uuid_int_1 BIGINT NOT NULL, uuid_int_2 BIGINT NOT NULL, "
-            "codex_session_uuid_int_1 BIGINT NOT NULL, "
-            "codex_session_uuid_int_2 BIGINT NOT NULL, cool_names_id INTEGER NOT NULL, "
+            "rodex_session_id_signed_bigint BIGINT NOT NULL "
+            "CHECK (typeof(rodex_session_id_signed_bigint) = 'integer'), "
+            "codex_session_id_signed_bigint_1 BIGINT NOT NULL "
+            "CHECK (typeof(codex_session_id_signed_bigint_1) = 'integer'), "
+            "codex_session_id_signed_bigint_2 BIGINT NOT NULL "
+            "CHECK (typeof(codex_session_id_signed_bigint_2) = 'integer'), "
+            "cool_names_id INTEGER NOT NULL, "
             "user_defined_cool_names_id INTEGER DEFAULT NULL, "
             "FOREIGN KEY (cool_names_id) REFERENCES cool_names (id), "
             "FOREIGN KEY (user_defined_cool_names_id) REFERENCES cool_names (id))"
@@ -187,187 +295,233 @@ def test_initialisation_repairs_a_missing_unique_index(tmp_path: Path) -> None:
 
     initialise_rodex_database(database)
 
-    assert fetch_all(database, "PRAGMA index_info(rodex_sessions_uuid_ints_unique)")
-
-
-@pytest.mark.parametrize(
-    "uuid_integer",
-    [
-        0,
-        1,
-        (1 << 63) - 1,
-        1 << 63,
-        (1 << 64) - 1,
-        1 << 64,
-        1 << 127,
-        (1 << 128) - 1,
-        0x0123456789ABCDEFFEDCBA9876543210,
-    ],
-)
-def test_uuid_split_and_join_preserves_every_bit(uuid_integer: int) -> None:
-    original = uuid.UUID(int=uuid_integer)
-
-    stored = split_a_rodex_uuid_into_signed_bigints(original)
-
-    assert join_signed_bigints_into_a_rodex_uuid(*stored) == original
-    assert all(-(1 << 63) <= half < (1 << 63) for half in stored)
-
-
-def test_split_accepts_the_hyphenated_string_form() -> None:
-    value = "01234567-89ab-cdef-fedc-ba9876543210"
-
-    assert split_a_rodex_uuid_into_signed_bigints(value) == (
-        0x0123456789ABCDEF,
-        -0x0123456789ABCDF0,
+    assert fetch_all(
+        database,
+        "PRAGMA index_info(rodex_sessions_session_id_unique)",
     )
 
 
-def test_codex_uuid_storage_helpers_preserve_the_codex_identity() -> None:
+def test_codex_session_id_storage_helpers_preserve_the_codex_identity() -> None:
     original = uuid.UUID("01a00654-f2bc-7a30-834a-a5f886a65f82")
 
-    stored = split_a_codex_uuid_into_signed_bigints(original)
+    stored = split_codex_session_id_into_signed_bigints(original)
 
-    assert join_signed_bigints_into_a_codex_uuid(*stored) == original
-
-
-@pytest.mark.parametrize("bad_half", [-(1 << 63) - 1, 1 << 63])
-def test_join_rejects_values_outside_sqlite_bigint_range(bad_half: int) -> None:
-    with pytest.raises(ValueError, match="signed 64-bit"):
-        join_signed_bigints_into_a_rodex_uuid(bad_half, 0)
+    assert join_signed_bigints_into_a_codex_session_id(*stored) == original
 
 
-@pytest.mark.parametrize("bad_half", [True, 1.5, "1"])
-def test_join_rejects_non_integer_halves(bad_half: object) -> None:
-    with pytest.raises(TypeError, match="integers"):
-        join_signed_bigints_into_a_rodex_uuid(bad_half, 0)  # type: ignore[arg-type]
-
-
-def test_create_returns_the_auto_increment_id_and_secure_uuid(
+def test_create_returns_the_internal_id_and_canonical_session_id(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     database = tmp_path / "rodex.sqlite3"
-    random_value = 0xFEDCBA98765432100123456789ABCDEF
-    monkeypatch.setattr(session_module.secrets, "randbits", lambda bits: random_value)
+    random_value = 0xFEDCBA9876543210
+    monkeypatch.setattr(identity_module.secrets, "randbits", lambda bits: random_value)
 
-    created = create_a_rodex_session(database, codex_session_uuid=codex_uuid(1))
+    created = create_a_rodex_session(database, codex_session_id=codex_session_id(1))
 
-    assert created.id == 1
-    assert created.rodex_uuid.int == random_value
-    assert created.codex_session_uuid == codex_uuid(1)
-    assert created.uuid_int_1 == 0xFEDCBA9876543210
-    assert created.uuid_int_2 == 0x0123456789ABCDEF
+    assert created.rodex_sessions_id == 1
+    assert created.rodex_session_id == RodexSessionId(random_value)
+    assert str(created.rodex_session_id) == "fedcba9876543210"
+    assert created.codex_session_id == codex_session_id(1)
 
 
-def test_create_stores_signed_bigints_without_losing_uuid_bits(
+def test_create_stores_all_session_id_bits_as_one_sqlite_integer(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     database = tmp_path / "rodex.sqlite3"
-    monkeypatch.setattr(session_module.secrets, "randbits", lambda bits: (1 << 128) - 1)
+    monkeypatch.setattr(identity_module.secrets, "randbits", lambda bits: (1 << 64) - 1)
 
-    create_a_rodex_session(database, codex_session_uuid=codex_uuid(1))
+    create_a_rodex_session(database, codex_session_id=codex_session_id(1))
 
-    assert fetch_all(database, "SELECT uuid_int_1, uuid_int_2 FROM rodex_sessions") == [
-        (-1, -1)
-    ]
+    assert fetch_all(
+        database,
+        "SELECT rodex_session_id_signed_bigint, "
+        "typeof(rodex_session_id_signed_bigint) FROM rodex_sessions",
+    ) == [(-1, "integer")]
 
 
 def test_create_allocates_monotonically_increasing_internal_ids(tmp_path: Path) -> None:
     database = tmp_path / "rodex.sqlite3"
 
-    first = create_a_rodex_session(database, codex_session_uuid=codex_uuid(1))
-    second = create_a_rodex_session(database, codex_session_uuid=codex_uuid(2))
-    third = create_a_rodex_session(database, codex_session_uuid=codex_uuid(3))
+    first = create_a_rodex_session(database, codex_session_id=codex_session_id(1))
+    second = create_a_rodex_session(database, codex_session_id=codex_session_id(2))
+    third = create_a_rodex_session(database, codex_session_id=codex_session_id(3))
 
-    assert [first.id, second.id, third.id] == [1, 2, 3]
-    assert len({first.rodex_uuid, second.rodex_uuid, third.rodex_uuid}) == 3
+    assert [
+        first.rodex_sessions_id,
+        second.rodex_sessions_id,
+        third.rodex_sessions_id,
+    ] == [1, 2, 3]
+    assert (
+        len(
+            {
+                first.rodex_session_id,
+                second.rodex_session_id,
+                third.rodex_session_id,
+            }
+        )
+        == 3
+    )
 
 
-def test_database_unique_index_rejects_duplicate_uuid_halves(tmp_path: Path) -> None:
+def test_database_unique_index_rejects_duplicate_session_id(tmp_path: Path) -> None:
     database = tmp_path / "rodex.sqlite3"
-    first = create_a_rodex_session(database, codex_session_uuid=codex_uuid(1))
-    second = create_a_rodex_session(database, codex_session_uuid=codex_uuid(2))
-    stored_uuid = fetch_all(
+    first = create_a_rodex_session(database, codex_session_id=codex_session_id(1))
+    second = create_a_rodex_session(database, codex_session_id=codex_session_id(2))
+    stored_session_id = fetch_all(
         database,
-        "SELECT uuid_int_1, uuid_int_2 FROM rodex_sessions WHERE id = 1",
-    )[0]
+        "SELECT rodex_session_id_signed_bigint FROM rodex_sessions WHERE id = 1",
+    )[0][0]
     with sqlite3.connect(database) as connection, pytest.raises(sqlite3.IntegrityError):
         connection.execute(
-            "UPDATE rodex_sessions SET uuid_int_1 = ?, uuid_int_2 = ? WHERE id = ?",
-            (*stored_uuid, second.id),
+            "UPDATE rodex_sessions SET rodex_session_id_signed_bigint = ? WHERE id = ?",
+            (stored_session_id, second.rodex_sessions_id),
         )
-    assert first.id == 1
+    assert first.rodex_sessions_id == 1
 
 
-def test_create_retries_after_a_uuid_collision(
+def test_generated_session_id_succeeds_on_the_tenth_attempt(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     database = tmp_path / "rodex.sqlite3"
-    candidates = iter([100, 100, 200])
-    monkeypatch.setattr(session_module.secrets, "randbits", lambda bits: next(candidates))
+    candidates = iter([100] * 10 + [200])
+    monkeypatch.setattr(identity_module.secrets, "randbits", lambda bits: next(candidates))
 
-    first = create_a_rodex_session(database, codex_session_uuid=codex_uuid(1))
-    second = create_a_rodex_session(database, codex_session_uuid=codex_uuid(2))
+    first = create_a_rodex_session(database, codex_session_id=codex_session_id(1))
+    second = create_a_rodex_session(database, codex_session_id=codex_session_id(2))
 
-    assert first.rodex_uuid.int == 100
-    assert second.rodex_uuid.int == 200
-    assert second.id == 2
+    assert first.rodex_session_id.value == 100
+    assert second.rodex_session_id.value == 200
+    assert second.rodex_sessions_id == 2
 
 
-def test_create_reports_repeated_uuid_collisions(
+def test_create_reports_ten_repeated_session_id_collisions(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     database = tmp_path / "rodex.sqlite3"
-    monkeypatch.setattr(session_module.secrets, "randbits", lambda bits: 100)
-    create_a_rodex_session(database, codex_session_uuid=codex_uuid(1))
+    monkeypatch.setattr(identity_module.secrets, "randbits", lambda bits: 100)
+    create_a_rodex_session(database, codex_session_id=codex_session_id(1))
 
-    with pytest.raises(RodexSessionUUIDCollisionError, match="8 attempts"):
-        create_a_rodex_session(database, codex_session_uuid=codex_uuid(2))
+    with pytest.raises(RodexSessionIdCollisionError, match="10 attempts"):
+        create_a_rodex_session(database, codex_session_id=codex_session_id(2))
 
 
-def test_lookup_id_finds_a_uuid_object(tmp_path: Path) -> None:
+def test_unrelated_integrity_error_is_not_misreported_as_session_id_collision(
+    tmp_path: Path,
+) -> None:
+    database = initialise_rodex_database(tmp_path / "rodex.sqlite3")
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "CREATE TRIGGER reject_session BEFORE INSERT ON rodex_sessions "
+            "BEGIN SELECT RAISE(FAIL, 'forced unrelated integrity failure'); END"
+        )
+
+    with pytest.raises(sqlite3.IntegrityError, match="unrelated integrity failure"):
+        create_a_rodex_session(
+            database,
+            codex_session_id=codex_session_id(1),
+            rodex_session_id=RodexSessionId(200),
+        )
+
+
+def test_pending_session_id_candidate_succeeds_on_the_tenth_attempt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     database = tmp_path / "rodex.sqlite3"
-    created = create_a_rodex_session(database, codex_session_uuid=codex_uuid(1))
+    create_a_rodex_session(
+        database,
+        codex_session_id=codex_session_id(1),
+        rodex_session_id=RodexSessionId(100),
+    )
+    candidates = iter([100] * 9 + [200])
+    monkeypatch.setattr(identity_module.secrets, "randbits", lambda bits: next(candidates))
 
-    assert lookup_id_from_a_rodex_uuid(created.rodex_uuid, database) == created.id
+    candidate = generate_an_unregistered_rodex_session_id_candidate(database)
+
+    assert candidate.value == 200
+    assert lookup_rodex_sessions_id_from_a_rodex_session_id(candidate, database) is None
 
 
-def test_lookup_id_finds_a_uuid_string(tmp_path: Path) -> None:
+def test_pending_session_id_candidate_exhaustion_is_fatal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     database = tmp_path / "rodex.sqlite3"
-    created = create_a_rodex_session(database, codex_session_uuid=codex_uuid(1))
+    create_a_rodex_session(
+        database,
+        codex_session_id=codex_session_id(1),
+        rodex_session_id=RodexSessionId(100),
+    )
+    monkeypatch.setattr(identity_module.secrets, "randbits", lambda bits: 100)
 
-    assert lookup_id_from_a_rodex_uuid(str(created.rodex_uuid), database) == created.id
+    with pytest.raises(RodexSessionIdCollisionError, match="10 attempts"):
+        generate_an_unregistered_rodex_session_id_candidate(database)
 
 
-def test_lookup_id_returns_none_for_an_unknown_uuid(tmp_path: Path) -> None:
+def test_lookup_id_finds_a_session_id_object(tmp_path: Path) -> None:
+    database = tmp_path / "rodex.sqlite3"
+    created = create_a_rodex_session(database, codex_session_id=codex_session_id(1))
+
+    assert (
+        lookup_rodex_sessions_id_from_a_rodex_session_id(created.rodex_session_id, database)
+        == created.rodex_sessions_id
+    )
+
+
+def test_lookup_id_finds_a_canonical_session_id_string(tmp_path: Path) -> None:
+    database = tmp_path / "rodex.sqlite3"
+    created = create_a_rodex_session(database, codex_session_id=codex_session_id(1))
+
+    assert (
+        lookup_rodex_sessions_id_from_a_rodex_session_id(
+            str(created.rodex_session_id), database
+        )
+        == created.rodex_sessions_id
+    )
+
+
+def test_lookup_id_returns_none_for_an_unknown_session_id(tmp_path: Path) -> None:
     database = tmp_path / "rodex.sqlite3"
 
-    assert lookup_id_from_a_rodex_uuid(uuid.UUID(int=42), database) is None
+    assert (
+        lookup_rodex_sessions_id_from_a_rodex_session_id("000000000000002a", database)
+        is None
+    )
 
 
-def test_lookup_uuid_finds_an_internal_id(tmp_path: Path) -> None:
+def test_lookup_session_id_finds_an_internal_id(tmp_path: Path) -> None:
     database = tmp_path / "rodex.sqlite3"
-    created = create_a_rodex_session(database, codex_session_uuid=codex_uuid(1))
+    created = create_a_rodex_session(database, codex_session_id=codex_session_id(1))
 
-    assert lookup_rodex_uuid_from_an_id(created.id, database) == created.rodex_uuid
+    assert (
+        lookup_rodex_session_id_from_a_rodex_sessions_id(
+            created.rodex_sessions_id, database
+        )
+        == created.rodex_session_id
+    )
 
 
-def test_codex_uuid_is_looked_up_directly_from_the_root_session(tmp_path: Path) -> None:
+def test_codex_session_id_is_looked_up_directly_from_the_root_session(
+    tmp_path: Path,
+) -> None:
     database = tmp_path / "rodex.sqlite3"
-    created = create_a_rodex_session(database, codex_session_uuid=codex_uuid(1))
+    created = create_a_rodex_session(database, codex_session_id=codex_session_id(1))
 
-    assert lookup_codex_uuid_from_a_rodex_session_id(created.id, database) == codex_uuid(1)
+    assert lookup_codex_session_id_from_a_rodex_sessions_id(
+        created.rodex_sessions_id, database
+    ) == codex_session_id(1)
 
 
-def test_lookup_uuid_returns_none_for_an_unknown_id(tmp_path: Path) -> None:
+def test_lookup_session_id_returns_none_for_an_unknown_id(tmp_path: Path) -> None:
     database = tmp_path / "rodex.sqlite3"
 
-    assert lookup_rodex_uuid_from_an_id(999, database) is None
+    assert lookup_rodex_session_id_from_a_rodex_sessions_id(999, database) is None
 
 
 @pytest.mark.parametrize("bad_id", [0, -1, True, 1.5, "1"])
-def test_lookup_uuid_rejects_invalid_internal_ids(tmp_path: Path, bad_id: object) -> None:
+def test_lookup_session_id_rejects_invalid_internal_ids(
+    tmp_path: Path, bad_id: object
+) -> None:
     with pytest.raises(ValueError, match="positive integer"):
-        lookup_rodex_uuid_from_an_id(bad_id, tmp_path / "db.sqlite3")  # type: ignore[arg-type]
+        lookup_rodex_session_id_from_a_rodex_sessions_id(bad_id, tmp_path / "db.sqlite3")  # type: ignore[arg-type]
 
 
 def test_default_database_path_uses_xdg_state_home(
@@ -377,7 +531,7 @@ def test_default_database_path_uses_xdg_state_home(
     state_home = tmp_path / "state"
     monkeypatch.setenv("XDG_STATE_HOME", str(state_home))
 
-    assert default_rodex_database_path() == state_home / "rodex" / "rodex.sqlite3"
+    assert default_rodex_database_path() == state_home / "rodex" / "rodex-v3.sqlite3"
 
 
 def test_default_database_path_uses_home_state_directory_without_xdg_override(
@@ -389,7 +543,7 @@ def test_default_database_path_uses_home_state_directory_without_xdg_override(
     monkeypatch.setattr(Path, "home", lambda: home)
 
     assert default_rodex_database_path() == (
-        home / ".local" / "state" / "rodex" / "rodex.sqlite3"
+        home / ".local" / "state" / "rodex" / "rodex-v3.sqlite3"
     )
 
 

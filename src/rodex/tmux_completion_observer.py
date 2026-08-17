@@ -17,8 +17,9 @@ from .tmux_input_proxy import (
     native_popup_confirms_no_match,
 )
 from .tmux_status import (
-    COMPLETION_TOKEN_OPTION,
-    RODEX_STATUS_LEFT_FORMAT,
+    STATUS_LEFT_PUBLISHER_COMPLETION,
+    StatusLeftPriority,
+    TmuxStatusLeftPipeline,
     completion_status_left_format,
 )
 
@@ -65,6 +66,7 @@ class TmuxCompletionObserver:
         self._run = runner
         self._token_factory = token_factory
         self._token: str | None = None
+        self._status = TmuxStatusLeftPipeline(self._tmux, pane_id)
         self.completion_visible = False
 
     def inspect_redraw(self) -> None:
@@ -98,26 +100,12 @@ class TmuxCompletionObserver:
             self.clear()
             return
         token = self._token_factory()
-        published = self._tmux(
-            "set-option",
-            "-t",
-            self._pane_id,
-            COMPLETION_TOKEN_OPTION,
-            token,
-        )
-        if published.returncode != 0:
-            self.completion_visible = False
-            self._token = None
-            return
-        displayed = self._tmux(
-            "set-option",
-            "-t",
-            self._pane_id,
-            "status-left",
-            completion_status_left_format(message),
-        )
-        if displayed.returncode != 0:
-            self._tmux("set-option", "-u", "-t", self._pane_id, COMPLETION_TOKEN_OPTION)
+        if not self._status.publish_transient(
+            publisher=STATUS_LEFT_PUBLISHER_COMPLETION,
+            token=token,
+            priority=StatusLeftPriority.COMPLETION,
+            status_format=completion_status_left_format(message),
+        ):
             self.completion_visible = False
             self._token = None
             return
@@ -125,29 +113,14 @@ class TmuxCompletionObserver:
         self.completion_visible = True
 
     def clear(self) -> None:
-        """Restore the normal status only while this observer owns the ribbon."""
+        """Restore the normal status only while this observer's claim remains current."""
         if not self.completion_visible:
             return
         token = self._token
-        owner = self._tmux(
-            "show-options",
-            "-v",
-            "-t",
-            self._pane_id,
-            COMPLETION_TOKEN_OPTION,
-        )
         self.completion_visible = False
         self._token = None
-        if owner.returncode != 0 or not token or owner.stdout.strip() != token:
-            return
-        self._tmux("set-option", "-u", "-t", self._pane_id, COMPLETION_TOKEN_OPTION)
-        self._tmux(
-            "set-option",
-            "-t",
-            self._pane_id,
-            "status-left",
-            RODEX_STATUS_LEFT_FORMAT,
-        )
+        if token:
+            self._status.restore_if_token_matches(token)
 
     def _tmux(self, *arguments: str) -> subprocess.CompletedProcess[str]:
         return self._run(

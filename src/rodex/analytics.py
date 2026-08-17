@@ -13,7 +13,6 @@ import subprocess
 import sys
 import tempfile
 import time
-import uuid
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
@@ -22,15 +21,17 @@ from pathlib import Path
 from threading import Event
 from typing import Any, Protocol
 
-from rodex_functions import (
+from rodex_registry import (
+    CodexSessionId,
+    RodexSessionId,
     RodexSessionStatistics,
     RodexSessionStatisticsSource,
     RodexSessionStatisticsSourceObservation,
     SessionStatisticsProjection,
     StatisticsProjectionError,
     current_rodex_sessions_user_identity,
-    lookup_codex_uuid_from_a_rodex_session_id,
-    lookup_id_from_a_rodex_uuid,
+    lookup_codex_session_id_from_a_rodex_sessions_id,
+    lookup_rodex_sessions_id_from_a_rodex_session_id,
     parse_session_statistics_snapshot,
     publish_rodex_session_statistics,
     read_rodex_session_statistics,
@@ -73,12 +74,12 @@ class AnalyticsWorkerConfig:
 
     rodex_database_path: Path
     codex_sessions_root: Path
-    rodex_uuid: uuid.UUID
+    rodex_session_id: RodexSessionId
 
 
 @dataclass(frozen=True, slots=True)
 class VerifiedRollout:
-    """A rollout whose internal session metadata matches the requested Codex UUID."""
+    """A rollout whose internal session metadata matches the requested Codex session ID."""
 
     path: Path
     size_bytes: int
@@ -183,38 +184,40 @@ class AnalyticsRolloutWorker:
         self._adapter_factory = adapter_factory
         self._now = now
         self._session_id: int | None = None
-        self._expected_codex_uuid: uuid.UUID | None = None
-        self._source_authentication: dict[uuid.UUID, AuthenticatedRolloutPrefix] = {}
+        self._expected_codex_session_id: CodexSessionId | None = None
+        self._source_authentication: dict[CodexSessionId, AuthenticatedRolloutPrefix] = {}
 
     def poll_once(self) -> str:
         """Perform one reconciliation; no analytics failure is allowed to escape."""
-        expected_codex_uuid: uuid.UUID | None = None
+        expected_codex_session_id: CodexSessionId | None = None
         try:
-            session_id = lookup_id_from_a_rodex_uuid(
-                self._config.rodex_uuid, self._config.rodex_database_path
+            session_id = lookup_rodex_sessions_id_from_a_rodex_session_id(
+                self._config.rodex_session_id, self._config.rodex_database_path
             )
             self._session_id = session_id
             if session_id is None:
                 return "catching_up"
-            codex_uuid = lookup_codex_uuid_from_a_rodex_session_id(
+            codex_session_id = lookup_codex_session_id_from_a_rodex_sessions_id(
                 session_id, self._config.rodex_database_path
             )
-            expected_codex_uuid = codex_uuid
-            if codex_uuid is None:
+            expected_codex_session_id = codex_session_id
+            if codex_session_id is None:
                 return "catching_up"
-            self._expected_codex_uuid = codex_uuid
+            self._expected_codex_session_id = codex_session_id
             view = read_rodex_session_statistics(
                 session_id, self._config.rodex_database_path
             )
             if self._view_matches_live_sources(view.statistics, view.sources):
                 if view.worker is None or view.worker.worker_state != "up_to_date":
-                    self._project_health("up_to_date", None, codex_uuid)
+                    self._project_health("up_to_date", None, codex_session_id)
                 return "up_to_date"
-            self._project_health("catching_up", None, codex_uuid)
+            self._project_health("catching_up", None, codex_session_id)
             with tempfile.TemporaryDirectory(prefix="rodex-analytics-") as temporary:
                 stable_copies = self._copy_registered_sources(view.sources, Path(temporary))
                 if stable_copies is None:
-                    self._project_health("catching_up", "rollout_not_found", codex_uuid)
+                    self._project_health(
+                        "catching_up", "rollout_not_found", codex_session_id
+                    )
                     return "catching_up"
                 calculation = self._adapter_factory().analyze_rollouts(
                     [item.temporary_path for item in stable_copies],
@@ -226,7 +229,7 @@ class AnalyticsRolloutWorker:
                 publish_rodex_session_statistics(
                     session_id,
                     self._config.rodex_database_path,
-                    expected_current_codex_uuid=codex_uuid,
+                    expected_current_codex_session_id=codex_session_id,
                     based_on_statistics_revision=(
                         None
                         if view.statistics is None
@@ -241,7 +244,7 @@ class AnalyticsRolloutWorker:
                     analyzed_sources=[item.observation for item in stable_copies],
                 )
                 self._source_authentication = {
-                    item.observation.codex_session_uuid: authenticated
+                    item.observation.codex_session_id: authenticated
                     for item, authenticated in zip(
                         stable_copies, authenticated_sources, strict=True
                     )
@@ -251,7 +254,7 @@ class AnalyticsRolloutWorker:
             self._project_health(
                 "degraded",
                 _diagnostic_code(error),
-                expected_codex_uuid,
+                expected_codex_session_id,
                 failed=True,
             )
             return "degraded"
@@ -282,21 +285,21 @@ class AnalyticsRolloutWorker:
                 if source.rollout_file_path is None
                 else _verify_recorded_source(
                     source.rollout_file_path,
-                    source.codex_session_uuid,
+                    source.codex_session_id,
                     allowed_root=self._config.codex_sessions_root,
                 )
             )
             if verified is None:
                 verified = locate_verified_rollout(
                     self._config.codex_sessions_root,
-                    source.codex_session_uuid,
+                    source.codex_session_id,
                 )
             if verified is None:
                 return None
             copies.append(
                 _copy_complete_rollout_prefix(
                     verified.path,
-                    source.codex_session_uuid,
+                    source.codex_session_id,
                     temporary_root / f"source-{index}.jsonl",
                     self._timestamp(),
                 )
@@ -330,7 +333,7 @@ class AnalyticsRolloutWorker:
                 stat = path.stat()
             except OSError:
                 return False
-            authenticated = self._source_authentication.get(source.codex_session_uuid)
+            authenticated = self._source_authentication.get(source.codex_session_id)
             if authenticated is None or (
                 authenticated.path,
                 authenticated.source_device,
@@ -349,12 +352,12 @@ class AnalyticsRolloutWorker:
                 try:
                     authenticated, _ = _authenticate_rollout_prefix(
                         path,
-                        source.codex_session_uuid,
+                        source.codex_session_id,
                         allowed_root=self._config.codex_sessions_root,
                     )
                 except RodexAnalyticsError:
                     return False
-                self._source_authentication[source.codex_session_uuid] = authenticated
+                self._source_authentication[source.codex_session_id] = authenticated
             if (
                 authenticated.analyzed_size_bytes != source.analyzed_size_bytes
                 or authenticated.analyzed_prefix_sha256 != source.analyzed_prefix_sha256
@@ -366,12 +369,12 @@ class AnalyticsRolloutWorker:
         self,
         state: str,
         diagnostic_code: str | None,
-        expected_codex_uuid: uuid.UUID | None,
+        expected_codex_session_id: CodexSessionId | None,
         *,
         failed: bool = False,
     ) -> None:
         session_id = self._session_id
-        if session_id is None or expected_codex_uuid is None:
+        if session_id is None or expected_codex_session_id is None:
             return
         try:
             view = read_rodex_session_statistics(
@@ -383,7 +386,7 @@ class AnalyticsRolloutWorker:
             record_rodex_session_statistics_worker_health(
                 session_id,
                 self._config.rodex_database_path,
-                expected_current_codex_uuid=expected_codex_uuid,
+                expected_current_codex_session_id=expected_codex_session_id,
                 worker_state=state,
                 diagnostic_code=diagnostic_code,
                 last_attempted_at_utc=now.isoformat(timespec="microseconds"),
@@ -407,7 +410,7 @@ class AnalyticsRolloutWorker:
         session_id = self._session_id
         if session_id is None:
             return
-        self._project_health("stopped", None, self._expected_codex_uuid)
+        self._project_health("stopped", None, self._expected_codex_session_id)
 
 
 class AnalyticsSubprocessSupervisor:
@@ -477,8 +480,8 @@ def analytics_worker_command(
         str(config.rodex_database_path),
         "--codex-sessions-root",
         str(config.codex_sessions_root),
-        "--rodex-uuid",
-        str(config.rodex_uuid),
+        "--rodex-session-id",
+        str(config.rodex_session_id),
     ]
 
 
@@ -491,19 +494,21 @@ def default_codex_sessions_root() -> Path:
     return (root / "sessions").resolve()
 
 
-def locate_verified_rollout(root: Path, codex_uuid: uuid.UUID) -> VerifiedRollout | None:
-    """Find the one rollout whose own session metadata confirms the exact UUID."""
+def locate_verified_rollout(
+    root: Path, codex_session_id: CodexSessionId
+) -> VerifiedRollout | None:
+    """Find the rollout whose metadata confirms the exact Codex session ID."""
     if not root.is_dir():
         return None
     verified = [
         source
-        for path in sorted(root.rglob(f"*{codex_uuid}*.jsonl"))
-        if (source := _verify_recorded_source(path, codex_uuid, allowed_root=root))
+        for path in sorted(root.rglob(f"*{codex_session_id}*.jsonl"))
+        if (source := _verify_recorded_source(path, codex_session_id, allowed_root=root))
         is not None
     ]
     if len(verified) > 1:
         raise RodexAnalyticsError(
-            f"multiple rollout files declare Codex identity {codex_uuid}"
+            f"multiple rollout files declare Codex identity {codex_session_id}"
         )
     return verified[0] if verified else None
 
@@ -514,7 +519,11 @@ def analytics_worker_main(arguments: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m rodex.analytics_worker")
     parser.add_argument("--rodex-database", required=True, type=Path)
     parser.add_argument("--codex-sessions-root", required=True, type=Path)
-    parser.add_argument("--rodex-uuid", required=True, type=uuid.UUID)
+    parser.add_argument(
+        "--rodex-session-id",
+        required=True,
+        type=RodexSessionId.parse,
+    )
     options = parser.parse_args(arguments)
     _lower_process_priority()
     stop = Event()
@@ -528,7 +537,7 @@ def analytics_worker_main(arguments: list[str] | None = None) -> int:
         AnalyticsWorkerConfig(
             rodex_database_path=Path(os.path.abspath(options.rodex_database.expanduser())),
             codex_sessions_root=options.codex_sessions_root.expanduser().resolve(),
-            rodex_uuid=options.rodex_uuid,
+            rodex_session_id=options.rodex_session_id,
         )
     )
     try:
@@ -540,7 +549,7 @@ def analytics_worker_main(arguments: list[str] | None = None) -> int:
 
 def _verify_recorded_source(
     path: str | Path,
-    expected: uuid.UUID,
+    expected: CodexSessionId,
     *,
     allowed_root: Path | None = None,
 ) -> VerifiedRollout | None:
@@ -567,11 +576,13 @@ def _verify_recorded_source(
 
 def _copy_complete_rollout_prefix(
     source_path: Path,
-    expected_codex_uuid: uuid.UUID,
+    expected_codex_session_id: CodexSessionId,
     temporary_path: Path,
     verified_at_utc: str,
 ) -> StableRolloutCopy:
-    authenticated, analyzed = _authenticate_rollout_prefix(source_path, expected_codex_uuid)
+    authenticated, analyzed = _authenticate_rollout_prefix(
+        source_path, expected_codex_session_id
+    )
     try:
         output_descriptor = os.open(
             temporary_path,
@@ -585,7 +596,7 @@ def _copy_complete_rollout_prefix(
     return StableRolloutCopy(
         temporary_path=temporary_path,
         observation=RodexSessionStatisticsSourceObservation(
-            codex_session_uuid=expected_codex_uuid,
+            codex_session_id=expected_codex_session_id,
             rollout_file_path=authenticated.path,
             analyzed_size_bytes=authenticated.analyzed_size_bytes,
             analyzed_mtime_ns=authenticated.source_mtime_ns,
@@ -598,7 +609,7 @@ def _copy_complete_rollout_prefix(
 
 def _authenticate_rollout_prefix(
     source_path: Path,
-    expected_codex_uuid: uuid.UUID,
+    expected_codex_session_id: CodexSessionId,
     *,
     allowed_root: Path | None = None,
 ) -> tuple[AuthenticatedRolloutPrefix, bytes]:
@@ -622,7 +633,7 @@ def _authenticate_rollout_prefix(
     if final_newline < 0:
         raise RodexAnalyticsError("rollout contains no complete newline-terminated record")
     analyzed = content[: final_newline + 1]
-    if not _rollout_content_declares_uuid(analyzed, expected_codex_uuid):
+    if not _rollout_content_declares_codex_session_id(analyzed, expected_codex_session_id):
         raise RodexAnalyticsError("rollout has an unexpected Codex identity")
     return (
         AuthenticatedRolloutPrefix(
@@ -673,7 +684,9 @@ def _open_rollout_descriptor(path: Path) -> int:
         raise
 
 
-def _rollout_content_declares_uuid(content: bytes, expected: uuid.UUID) -> bool:
+def _rollout_content_declares_codex_session_id(
+    content: bytes, expected: CodexSessionId
+) -> bool:
     for line in content.splitlines()[:32]:
         try:
             record = json.loads(line)
@@ -691,7 +704,7 @@ def _verify_source_unchanged(
 ) -> AuthenticatedRolloutPrefix:
     current, _ = _authenticate_rollout_prefix(
         source.observation.rollout_file_path,
-        source.observation.codex_session_uuid,
+        source.observation.codex_session_id,
     )
     original = source.authenticated_source
     if (
@@ -773,21 +786,23 @@ def _diagnostic_code(error: Exception) -> str:
 
 
 def _project_supervisor_health(config: AnalyticsWorkerConfig, code: str) -> None:
-    session_id = lookup_id_from_a_rodex_uuid(config.rodex_uuid, config.rodex_database_path)
+    session_id = lookup_rodex_sessions_id_from_a_rodex_session_id(
+        config.rodex_session_id, config.rodex_database_path
+    )
     if session_id is None:
         return
     try:
-        expected_codex_uuid = lookup_codex_uuid_from_a_rodex_session_id(
+        expected_codex_session_id = lookup_codex_session_id_from_a_rodex_sessions_id(
             session_id, config.rodex_database_path
         )
-        if expected_codex_uuid is None:
+        if expected_codex_session_id is None:
             return
         view = read_rodex_session_statistics(session_id, config.rodex_database_path)
         now = datetime.now(UTC)
         record_rodex_session_statistics_worker_health(
             session_id,
             config.rodex_database_path,
-            expected_current_codex_uuid=expected_codex_uuid,
+            expected_current_codex_session_id=expected_codex_session_id,
             worker_state="degraded",
             diagnostic_code=code,
             last_attempted_at_utc=now.isoformat(timespec="microseconds"),

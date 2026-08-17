@@ -25,6 +25,8 @@ when needed, and return later using a generated name such as `automatic-beluga`.
 - Maintains queryable session and exact-turn statistics from authenticated rollouts.
 - Refuses unregistered tmux name collisions and verifies Rodex and Codex identities
   before attaching to or controlling a live runtime.
+- Serializes concurrent opens of one ended name and tolerates the bounded Codex-writer
+  shutdown handoff without creating duplicate runtimes.
 
 Rodex does not replace or reinterpret nonempty Codex CLI invocations. With no
 arguments it creates and attaches to a managed session. Exact underscore Rodex
@@ -51,8 +53,13 @@ uv sync
 ```
 
 At the `›` prompt, use Codex normally. Detach without ending the session with
-`Ctrl-b d`. Enter tmux copy mode with `Ctrl-b [`, navigate with the keyboard, and leave
-it with `q`. Rodex inherits your tmux mouse preference instead of overriding it.
+`Ctrl-b d`. With the default prefix, `Ctrl-b` shows `CTRL-B MODE` while tmux waits for
+the command key, without delaying it, so fast sequences still work. Enter copy mode with
+`Ctrl-b [`, navigate with the keyboard, and leave it with `q`. Rodex inherits your tmux
+mouse preference instead of overriding it. In a shared session, one `Ctrl-C` warns that
+another press may end the session for everyone and offers `Ctrl-b d` as the detach-only
+route; the same client must press it again within two seconds to pass the key to Codex.
+Custom prefixes and user-owned root `C-b` bindings are left unchanged.
 
 To expose this checkout as a per-user `rodex` command, follow the
 [installation guide](INSTALL.md).

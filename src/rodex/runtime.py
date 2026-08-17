@@ -34,16 +34,20 @@ from .protocol_proxy import (
     TmuxToolCallStatus,
     ToolCallCounter,
 )
-from .status_animation import STATUS_ANIMATION_TOKEN_OPTION
 from .tmux_status import (
-    COMPLETION_TOKEN_OPTION,
     RODEX_STATUS_LEFT_FORMAT,
     RODEX_STATUS_LEFT_LENGTH,
+    STATUS_ANIMATION_TOKEN_OPTION,
+    STATUS_LEFT_CLAIM_PRIORITY_OPTION,
+    STATUS_LEFT_CLAIM_PUBLISHER_OPTION,
+    STATUS_LEFT_CLAIM_TOKEN_OPTION,
 )
 from .version import RODEX_VERSION
 
 SUN_PATH_MAX_BYTES: Final = 107
 DEFAULT_STARTUP_TIMEOUT_SECONDS: Final = 15.0
+CODEX_ACTIVE_WRITER_HANDOFF_TIMEOUT_SECONDS: Final = 10.0
+CODEX_ACTIVE_WRITER_RETRY_INTERVAL_SECONDS: Final = 0.25
 RUNTIME_PATH_KEEPALIVE_INTERVAL_SECONDS: Final = 60.0 * 60.0
 RODEX_REGISTRATION_TIMEOUT_SECONDS: Final = 60.0
 RODEX_TMUX_HISTORY_LIMIT_LINES: Final = 50_000
@@ -255,6 +259,31 @@ def _tmux_input_proxy_binding_command(
         )
     )
     return f"run-shell {shlex.quote(proxy_command)}"
+
+
+def _shared_ctrl_c_binding_command(
+    python_executable: str,
+    tmux_binary: str,
+    runtime: LiveTmuxSession,
+) -> str:
+    guard_command = shlex.join(
+        (
+            python_executable,
+            "-m",
+            "rodex.tmux_shared_ctrl_c",
+            "--tmux-binary",
+            tmux_binary,
+            "--tmux-server-socket",
+            str(runtime.tmux_server_socket_path),
+            "--pane-id",
+            "#{pane_id}",
+            "--client-name",
+            "#{client_name}",
+            "--attached-count",
+            "#{session_attached}",
+        )
+    )
+    return f"run-shell -b {shlex.quote(guard_command)}"
 
 
 def _tmux_completion_observer_command(
@@ -493,7 +522,9 @@ class RodexRuntimeLauncher:
         target = _exact_tmux_pane_target(runtime.tmux_session_name)
         for transient_option in (
             STATUS_ANIMATION_TOKEN_OPTION,
-            COMPLETION_TOKEN_OPTION,
+            STATUS_LEFT_CLAIM_PUBLISHER_OPTION,
+            STATUS_LEFT_CLAIM_TOKEN_OPTION,
+            STATUS_LEFT_CLAIM_PRIORITY_OPTION,
             "status-format",
             "status-style",
         ):
@@ -552,6 +583,8 @@ class RodexRuntimeLauncher:
                     event,
                 ),
             )
+        self._install_shared_ctrl_c_guard(runtime)
+        self._remove_rodex_owned_root_binding(runtime, "C-b", "rodex.tmux_status")
         if RODEX_TMUX_SLASH_ENABLED:
             self._tmux(
                 runtime,
@@ -583,7 +616,11 @@ class RodexRuntimeLauncher:
             # an older Rodex release no longer intercept input or show completions.
             self._tmux(runtime, "pipe-pane", "-t", target)
             for key in ("Enter", "Tab"):
-                self._remove_rodex_owned_root_binding(runtime, key)
+                self._remove_rodex_owned_root_binding(
+                    runtime,
+                    key,
+                    "rodex.tmux_input_proxy",
+                )
 
     def _start_tmux_session(
         self,
@@ -824,7 +861,12 @@ class RodexRuntimeLauncher:
         value = result.stdout.strip()
         return value or None
 
-    def _remove_rodex_owned_root_binding(self, runtime: LiveTmuxSession, key: str) -> None:
+    def _remove_rodex_owned_root_binding(
+        self,
+        runtime: LiveTmuxSession,
+        key: str,
+        rodex_module: str,
+    ) -> None:
         result = self._tmux(
             runtime,
             "list-keys",
@@ -833,8 +875,35 @@ class RodexRuntimeLauncher:
             key,
             check=False,
         )
-        if result.returncode == 0 and "rodex.tmux_input_proxy" in result.stdout:
+        if result.returncode == 0 and rodex_module in result.stdout:
             self._tmux(runtime, "unbind-key", "-T", "root", key)
+
+    def _install_shared_ctrl_c_guard(self, runtime: LiveTmuxSession) -> None:
+        existing = self._tmux(
+            runtime,
+            "list-keys",
+            "-T",
+            "root",
+            "C-c",
+            check=False,
+        )
+        if (
+            existing.returncode == 0
+            and existing.stdout.strip()
+            and "rodex.tmux_shared_ctrl_c" not in existing.stdout
+        ):
+            return
+        self._tmux(
+            runtime,
+            "bind-key",
+            "-n",
+            "C-c",
+            _shared_ctrl_c_binding_command(
+                self._python_executable,
+                self._tmux_binary,
+                runtime,
+            ),
+        )
 
 
 def default_runtime_root_path() -> Path:
@@ -897,6 +966,9 @@ def run_session_host(
     def stop_on_signal(signum: int, _frame: object) -> None:
         if not shutting_down:
             raise SystemExit(128 + signum)
+
+    def leave_sigint_to_foreground_tui(_signum: int, _frame: object) -> None:
+        return None
 
     previous_handlers = {
         signum: signal.signal(signum, stop_on_signal)
@@ -964,39 +1036,72 @@ def run_session_host(
                 *codex_arguments,
             ]
             tui_options: dict[str, object] = {}
-            if _requested_exact_codex_resume(codex_arguments) is not None:
+            requested_codex_uuid = _requested_exact_codex_resume(codex_arguments)
+            if requested_codex_uuid is not None:
                 # Startup happens before attach, so preserve exact-resume failures where
                 # the outer launcher can report them instead of losing the dead pane.
                 tui_options["stderr"] = log
-            tui = subprocess.Popen(tui_command, **tui_options)
+            active_writer_deadline = (
+                None
+                if requested_codex_uuid is None
+                else time.monotonic() + CODEX_ACTIVE_WRITER_HANDOFF_TIMEOUT_SECONDS
+            )
+            inherited_sigint_handler: object | None = None
             while True:
-                if (
-                    registration_deadline is not None
-                    and time.monotonic() >= registration_deadline
-                ):
-                    if not _runtime_registration_is_confirmed(
-                        tmux_binary,
-                        tmux_server_socket_path,
-                        tmux_pane_target,
-                    ):
-                        raise RodexRuntimeError(
-                            "runtime registration was not confirmed before its deadline"
-                        )
-                    registration_deadline = None
-                if analytics_supervisor is not None:
-                    try:
-                        analytics_supervisor.poll()
-                    except Exception:
-                        analytics_supervisor = None
-                failure = runtime_path_keepalive.failure
-                if failure is not None:
-                    _record_runtime_path_keepalive_failure(log, failure)
-                    raise failure
+                attempt_log_offset = os.fstat(log.fileno()).st_size
+                if inherited_sigint_handler is not None:
+                    signal.signal(signal.SIGINT, inherited_sigint_handler)
                 try:
-                    returncode = tui.wait(timeout=_TUI_SUPERVISION_INTERVAL_SECONDS)
-                except subprocess.TimeoutExpired:
-                    continue
-                break
+                    tui = subprocess.Popen(tui_command, **tui_options)
+                finally:
+                    replaced_handler = signal.signal(
+                        signal.SIGINT,
+                        leave_sigint_to_foreground_tui,
+                    )
+                    if inherited_sigint_handler is None:
+                        inherited_sigint_handler = replaced_handler
+                        previous_handlers[signal.SIGINT] = replaced_handler
+                while True:
+                    if (
+                        registration_deadline is not None
+                        and time.monotonic() >= registration_deadline
+                    ):
+                        if not _runtime_registration_is_confirmed(
+                            tmux_binary,
+                            tmux_server_socket_path,
+                            tmux_pane_target,
+                        ):
+                            raise RodexRuntimeError(
+                                "runtime registration was not confirmed before its deadline"
+                            )
+                        registration_deadline = None
+                    if analytics_supervisor is not None:
+                        try:
+                            analytics_supervisor.poll()
+                        except Exception:
+                            analytics_supervisor = None
+                    failure = runtime_path_keepalive.failure
+                    if failure is not None:
+                        _record_runtime_path_keepalive_failure(log, failure)
+                        raise failure
+                    try:
+                        returncode = tui.wait(timeout=_TUI_SUPERVISION_INTERVAL_SECONDS)
+                    except subprocess.TimeoutExpired:
+                        continue
+                    break
+                if (
+                    returncode == 0
+                    or requested_codex_uuid is None
+                    or active_writer_deadline is None
+                    or not _active_writer_handoff_can_retry(
+                        _read_runtime_log_since(log, attempt_log_offset),
+                        requested_codex_uuid,
+                        now=time.monotonic(),
+                        deadline=active_writer_deadline,
+                    )
+                ):
+                    break
+                time.sleep(CODEX_ACTIVE_WRITER_RETRY_INTERVAL_SECONDS)
             try:
                 runtime_path_keepalive.close()
             except RodexRuntimeError as error:
@@ -1140,7 +1245,7 @@ def _require_secure_runtime_parent(parent: Path) -> None:
 
 
 def _open_private_runtime_log(path: Path) -> BinaryIO:
-    flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND
+    flags = os.O_RDWR | os.O_CREAT | os.O_APPEND
     flags |= getattr(os, "O_NOFOLLOW", 0)
     descriptor = os.open(path, flags, 0o600)
     try:
@@ -1148,7 +1253,7 @@ def _open_private_runtime_log(path: Path) -> BinaryIO:
         if not stat_module.S_ISREG(state.st_mode) or state.st_uid != os.getuid():
             raise RodexRuntimeError(f"runtime log is not a private regular file: {path}")
         os.fchmod(descriptor, 0o600)
-        return os.fdopen(descriptor, "ab", buffering=0)
+        return os.fdopen(descriptor, "a+b", buffering=0)
     except BaseException:
         os.close(descriptor)
         raise
@@ -1183,6 +1288,15 @@ def _read_runtime_error_detail(log_path: Path) -> str:
     return text[-1000:]
 
 
+def _read_runtime_log_since(log: BinaryIO, offset: int) -> str:
+    """Read only diagnostics emitted by one TUI launch attempt."""
+    log.flush()
+    log.seek(offset)
+    detail = log.read().decode("utf-8", errors="replace")
+    log.seek(0, os.SEEK_END)
+    return detail[-1000:]
+
+
 def _requested_exact_codex_resume(
     codex_arguments: Sequence[str],
 ) -> uuid.UUID | None:
@@ -1198,3 +1312,22 @@ def _requested_exact_codex_resume(
 def _codex_reports_missing_session(detail: str, requested_uuid: uuid.UUID) -> bool:
     """Recognise Codex's exact-ID failure without weakening identity matching."""
     return f"No saved session found with ID {requested_uuid}" in detail
+
+
+def _codex_reports_active_writer(detail: str, requested_uuid: uuid.UUID) -> bool:
+    """Recognise the bounded shutdown handoff conflict for an exact thread."""
+    return (
+        "thread-store conflict" in detail
+        and f"thread {requested_uuid} already has an active writer" in detail
+    )
+
+
+def _active_writer_handoff_can_retry(
+    detail: str,
+    requested_uuid: uuid.UUID,
+    *,
+    now: float,
+    deadline: float,
+) -> bool:
+    """Bound retries to the exact writer and the startup handoff window."""
+    return now < deadline and _codex_reports_active_writer(detail, requested_uuid)

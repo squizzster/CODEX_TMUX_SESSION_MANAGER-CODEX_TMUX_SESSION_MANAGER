@@ -91,18 +91,37 @@ lookup. Detailed rules live in [SQL_SCHEMA.md](SQL_SCHEMA.md), not duplicated he
    relink the new Codex UUID; every other resume failure remains fatal.
 6. Replace the tmux endpoint before attaching.
 
+Named opens hold one private, per-session advisory transition lock only across live
+resolution, resume, and durable endpoint replacement; the lock is released before the
+blocking tmux attach. Concurrent shells therefore converge on the first verified
+runtime instead of launching duplicate writers. An exact relocated `pending` runtime
+repairs an interrupted launch. During ordinary shutdown, the new session host retries
+only the exact Codex `active writer` handoff conflict for a bounded interval while
+keeping its single tmux runtime alive. Persistent or mismatched writers still fail.
+
 `_running` follows the same ownership and live-endpoint rules. `_alias` changes use the
 same naming pipeline and compensate a tmux rename if the database transition fails.
 
-tmux hooks launch sharing animations in a short-lived background process. Ownership
-tokens stop an older animator restoring over a newer one; the owner removes temporary
-status overrides and redraws attached clients without delaying tmux or the TUI.
+tmux hooks launch sharing animations in a short-lived background process. Animation
+tokens stop an older process restoring over a newer one; the current process removes
+temporary full-line overrides and redraws attached clients without delaying the TUI.
+
+`TmuxStatusLeftPipeline` is the authoritative path for transient status-left messages.
+Completion hints and the shared `Ctrl-C` warning publish named, tokenized claims with
+stable priorities. Each claim-and-render and guarded restore is one tmux server command,
+so concurrent background publishers cannot leave claim metadata and visible text from
+different messages. The base format reads tmux's per-client `client_prefix` state and
+shows `CTRL-B MODE` exactly while the default prefix is awaiting its command key. It
+does not intercept input, start a process, use a timer, or replace a user root binding.
 
 The `/rodex` input proxy and completion observer are retained but temporarily disabled
 by `RODEX_TMUX_SLASH_ENABLED` at the runtime configuration boundary. Status setup
 removes their pane pipe and tmux Enter/Tab bindings so input passes directly to the
-Codex TUI. When enabled, it consumes only exact `/rodex` input and otherwise forwards
-keys unchanged; both retained paths remain tested while inactive.
+Codex TUI. A publisher-aware `Ctrl-C` binding remains active: it forwards
+privately attached input unchanged, but requires same-client confirmation before a
+shared interrupt or exit. It does not replace a user-owned root binding. When the
+slash proxy is enabled, it consumes only exact `/rodex` input and otherwise forwards
+keys unchanged; both retained slash paths remain tested while inactive.
 
 ## Persistent analytics
 

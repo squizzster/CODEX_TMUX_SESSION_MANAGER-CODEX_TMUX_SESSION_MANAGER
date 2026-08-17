@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import shutil
 import sqlite3
+import stat as stat_module
 import sys
 import uuid
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
+from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
@@ -59,6 +63,14 @@ class RodexLaunchError(RuntimeError):
 
 class RodexExecutableNotFoundError(RodexLaunchError):
     """A required executable could not be resolved from PATH."""
+
+
+@dataclass(frozen=True, slots=True)
+class _PreparedNamedSession:
+    session_id: int
+    display_name: str
+    active_tmux: LiveTmuxSession
+    attach_message: str
 
 
 _RUNNING_COMMAND: Final = "_running"
@@ -265,6 +277,35 @@ def _open_named_session(
     session_id = lookup_owned_rodex_session_id_from_a_cool_name(cool_name, database_path)
     if session_id is None:
         return False
+    with _open_named_session_transition_lock(database_path, session_id):
+        prepared = _prepare_named_session(
+            session_id,
+            cool_name,
+            database_path,
+            launcher,
+            codex_available=codex_available,
+        )
+    if detach:
+        _print_existing_detached_runtime(
+            prepared.session_id,
+            prepared.display_name,
+            database_path,
+        )
+        return True
+    print(prepared.attach_message, flush=True)
+    launcher.attach(prepared.active_tmux)
+    return True
+
+
+def _prepare_named_session(
+    session_id: int,
+    cool_name: str,
+    database_path: Path,
+    launcher: RodexRuntimeLauncher,
+    *,
+    codex_available: bool,
+) -> _PreparedNamedSession:
+    """Resolve or resume one identity while its cross-process transition is locked."""
     names = lookup_rodex_session_names(session_id, database_path)
     if names is None:
         raise RodexLaunchError(f"Rodex session disappeared: {cool_name}")
@@ -301,15 +342,12 @@ def _open_named_session(
             database_path,
         )
         record_a_rodex_session_access(session_id, database_path)
-        if detach:
-            _print_existing_detached_runtime(session_id, display_name, database_path)
-            return True
-        print(
+        return _PreparedNamedSession(
+            session_id,
+            display_name,
+            active_tmux,
             f"Reattaching Rodex {display_name} ({active_tmux.tmux_session_name})",
-            flush=True,
         )
-        launcher.attach(active_tmux)
-        return True
 
     relocated = _find_relocated_live_runtime(
         launcher,
@@ -327,15 +365,12 @@ def _open_named_session(
             database_path,
         )
         record_a_rodex_session_access(session_id, database_path)
-        if detach:
-            _print_existing_detached_runtime(session_id, display_name, database_path)
-            return True
-        print(
+        return _PreparedNamedSession(
+            session_id,
+            display_name,
+            active_tmux,
             f"Reattached relocated Rodex {display_name} ({active_tmux.tmux_session_name})",
-            flush=True,
         )
-        launcher.attach(active_tmux)
-        return True
 
     if not codex_available:
         configured_codex = os.environ.get("RODEX_CODEX_BINARY", "codex")
@@ -398,17 +433,38 @@ def _open_named_session(
         launcher.stop(active_tmux, check=False)
         raise
 
-    if detach:
-        _print_existing_detached_runtime(session_id, display_name, database_path)
-        return True
     action = "Recovered" if replaced_unsaved_codex_identity else "Resumed"
-    print(
+    return _PreparedNamedSession(
+        session_id,
+        display_name,
+        active_tmux,
         f"{action} Rodex {display_name} -> Codex {observed_codex_uuid} "
         f"({active_tmux.tmux_session_name})",
-        flush=True,
     )
-    launcher.attach(active_tmux)
-    return True
+
+
+@contextmanager
+def _open_named_session_transition_lock(
+    database_path: Path,
+    session_id: int,
+) -> Iterator[None]:
+    """Serialize one named session's liveness decision and runtime replacement."""
+    lock_path = database_path.parent / f".{database_path.name}.session-{session_id}.lock"
+    flags = os.O_RDWR | os.O_CREAT
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(lock_path, flags, 0o600)
+    try:
+        state = os.fstat(descriptor)
+        if not stat_module.S_ISREG(state.st_mode) or state.st_uid != os.getuid():
+            raise RodexLaunchError(
+                f"session transition lock is not a private regular file: {lock_path}"
+            )
+        os.fchmod(descriptor, 0o600)
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
 
 
 def _parse_launch_arguments(
@@ -914,7 +970,7 @@ def _find_relocated_live_runtime(
     expected_registry_uuid: uuid.UUID,
     expected_codex_uuid: uuid.UUID,
 ) -> LiveTmuxSession | None:
-    matches: list[LiveTmuxSession] = []
+    matches: list[tuple[LiveTmuxSession, LiveRodexControl]] = []
     unverifiable_same_codex: list[str] = []
     for name in launcher.list_session_names(tmux_server_socket_path):
         candidate = LiveTmuxSession(tmux_server_socket_path, name)
@@ -927,9 +983,10 @@ def _find_relocated_live_runtime(
         if (
             control.rodex_session_uuid == expected_rodex_uuid
             and control.rodex_registry_uuid == expected_registry_uuid
-            and control.registration_state == RODEX_REGISTRATION_REGISTERED
+            and control.registration_state
+            in {RODEX_REGISTRATION_PENDING, RODEX_REGISTRATION_REGISTERED}
         ):
-            matches.append(candidate)
+            matches.append((candidate, control))
         else:
             unverifiable_same_codex.append(name)
     if unverifiable_same_codex:
@@ -940,9 +997,20 @@ def _find_relocated_live_runtime(
     if len(matches) > 1:
         raise RodexLaunchError(
             "multiple live runtimes advertise the same Rodex/Codex identity: "
-            + ", ".join(sorted(item.tmux_session_name for item in matches))
+            + ", ".join(sorted(item.tmux_session_name for item, _control in matches))
         )
-    return matches[0] if matches else None
+    if not matches:
+        return None
+    candidate, control = matches[0]
+    if control.registration_state == RODEX_REGISTRATION_PENDING:
+        launcher.confirm_runtime_registration(candidate)
+        _require_live_runtime_identity(
+            launcher.discover_runtime_control(candidate),
+            expected_rodex_uuid=expected_rodex_uuid,
+            expected_registry_uuid=expected_registry_uuid,
+            expected_codex_uuid=expected_codex_uuid,
+        )
+    return candidate
 
 
 def _revalidate_live_control(

@@ -94,6 +94,9 @@ analytics sidecar.
   match repairs the endpoint; multiple matches are refused.
 - If it has ended, Rodex starts a fresh tmux/app-server and asks Codex to resume the
   stored Codex UUID; the observed UUID must match before the endpoint is replaced.
+- Concurrent opens of one ended name serialize through a private per-session lock and
+  converge on one runtime. A short old-writer shutdown handoff is retried in place;
+  persistent or wrong-thread writer conflicts remain hard failures.
 - If Codex explicitly reports that the UUID was never saved, Rodex starts an empty
   Codex runtime and atomically relinks its new UUID to the existing Rodex identity.
   Other resume failures and UUID mismatches remain hard failures.
@@ -109,6 +112,14 @@ analytics sidecar.
 ## Lifecycle
 
 - `Ctrl-b d` detaches while Codex, its app-server, and tmux continue running.
+- With the default `C-b` prefix, Rodex displays `CTRL-B MODE` while tmux awaits the
+  following command key. It uses tmux's per-client prefix state without intercepting
+  input; a fast `Ctrl-b d` therefore still detaches normally. A custom prefix or
+  user-owned root `C-b` binding is not replaced.
+- In a shared session, one `Ctrl-C` is held as an accidental-exit guard and points to
+  `Ctrl-b d` as the detach-only route. The same client must press `Ctrl-C` again within
+  two seconds to send the interrupt to Codex, where it may end the TUI for every
+  attached client. A private session retains Codex's native `Ctrl-C` behavior.
 - A second attached client triggers a five-second shared-arrival animation. Returning
   to one client triggers its private-session counterpart. Both run in a separate
   one-shot process and restore the ordinary status bar without delaying the TUI.
@@ -118,7 +129,8 @@ analytics sidecar.
   starting empty again and replacing only the linked Codex UUID.
 - A failure before SQL registration stops the exact new tmux session and leaves no
   partial database row. A host whose pending registration is never confirmed exits;
-  an exact SQL/pending pair can finish the interrupted confirmation on the next command.
+  one exact matching pending runtime can finish an interrupted confirmation on the
+  next command, including when it was launched under a temporary tmux name.
 - Scrollback settings apply when a pane is created. A runtime started by an older
   Rodex version must end and resume, or be replaced by a new session, to gain the
   larger history and inline TUI rendering.

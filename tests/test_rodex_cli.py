@@ -403,6 +403,41 @@ def test_named_attach_recovers_one_externally_renamed_exact_runtime(
     assert launcher.attached
 
 
+def test_named_attach_recovers_one_relocated_pending_runtime(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database = tmp_path / "rodex.sqlite3"
+    monkeypatch.setattr(
+        "cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga"
+    )
+    monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
+    create_controlled_session(database, tmp_path)
+    rodex_uuid = lookup_rodex_uuid_from_an_id(1, database)
+    assert rodex_uuid is not None
+    launcher = StubLauncher(tmp_path)
+    launcher.live = False
+    launcher.session_names = ("interrupted-resume",)
+    launcher.control = replace(
+        launcher.control,
+        rodex_session_uuid=rodex_uuid,
+        registration_state="pending",
+    )
+
+    assert run(["automatic-beluga"], database_path=database, launcher=launcher) == 0  # type: ignore[arg-type]
+
+    assert launcher.confirmed == [
+        LiveTmuxSession(tmp_path / "tmux.sock", "interrupted-resume")
+    ]
+    assert launcher.started == []
+    assert launcher.renamed == [
+        (
+            LiveTmuxSession(tmp_path / "tmux.sock", "interrupted-resume"),
+            "automatic-beluga",
+        )
+    ]
+
+
 def test_named_attach_refuses_multiple_relocated_exact_runtimes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1255,6 +1290,144 @@ def test_ended_cool_name_argument_transparently_resumes_its_codex_session(
     assert f"Resumed Rodex automatic-beluga -> Codex {CODEX_UUID}" in (
         capsys.readouterr().out
     )
+
+
+def test_concurrent_ended_session_opens_start_only_one_runtime(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database = tmp_path / "rodex.sqlite3"
+    monkeypatch.setattr(
+        "cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga"
+    )
+    monkeypatch.setattr(
+        "rodex_functions.sessions.current_rodex_sessions_user_identity", lambda: DNA
+    )
+    monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
+    session = create_a_rodex_session(
+        database,
+        codex_session_uuid=CODEX_UUID,
+        user_identity=DNA,
+        tmux_server_socket_path=tmp_path / "stale.sock",
+        tmux_session_name="automatic-beluga",
+    )
+    registry_uuid = lookup_rodex_registry_uuid(database)
+    state_lock = Lock()
+    live_name: list[str | None] = [None]
+    start_calls = 0
+    first_start_entered = Event()
+    allow_first_start = Event()
+    second_attempt_entered = Event()
+    second_finished = Event()
+
+    class ConcurrentResumeLauncher(StubLauncher):
+        def __init__(self, *, first: bool) -> None:
+            super().__init__(tmp_path)
+            self.first = first
+            self.control = replace(
+                self.control,
+                rodex_session_uuid=session.rodex_uuid,
+                rodex_registry_uuid=registry_uuid,
+                registration_state="registered",
+            )
+
+        def session_exists(self, runtime: LiveTmuxSession) -> bool:
+            with state_lock:
+                return runtime.tmux_session_name == live_name[0]
+
+        def list_session_names(self, _socket_path: Path) -> tuple[str, ...]:
+            with state_lock:
+                return () if live_name[0] is None else (live_name[0],)
+
+        def start(self, *args: object, **kwargs: object):  # type: ignore[no-untyped-def]
+            nonlocal start_calls
+            with state_lock:
+                start_calls += 1
+            if self.first:
+                first_start_entered.set()
+                assert allow_first_start.wait(5)
+            with state_lock:
+                live_name[0] = self.runtime.tmux_session_name
+            return self.runtime, CODEX_UUID
+
+        def rename(
+            self, runtime: LiveTmuxSession, tmux_session_name: str
+        ) -> LiveTmuxSession:
+            renamed = super().rename(runtime, tmux_session_name)
+            with state_lock:
+                live_name[0] = tmux_session_name
+            return renamed
+
+    errors: list[BaseException] = []
+    first_launcher = ConcurrentResumeLauncher(first=True)
+    second_launcher = ConcurrentResumeLauncher(first=False)
+
+    def open_session(launcher: ConcurrentResumeLauncher, *, second: bool) -> None:
+        if second:
+            second_attempt_entered.set()
+        try:
+            run(["automatic-beluga"], database_path=database, launcher=launcher)
+        except BaseException as error:
+            errors.append(error)
+        finally:
+            if second:
+                second_finished.set()
+
+    first_thread = Thread(
+        target=open_session, args=(first_launcher,), kwargs={"second": False}
+    )
+    second_thread = Thread(
+        target=open_session,
+        args=(second_launcher,),
+        kwargs={"second": True},
+    )
+    first_thread.start()
+    assert first_start_entered.wait(5), errors
+    second_thread.start()
+    assert second_attempt_entered.wait(5)
+    try:
+        second_was_serialized = not second_finished.wait(0.25)
+    finally:
+        allow_first_start.set()
+    first_thread.join(5)
+    second_thread.join(5)
+
+    assert second_was_serialized
+    assert not first_thread.is_alive()
+    assert not second_thread.is_alive()
+    assert errors == []
+    assert start_calls == 1
+    assert first_launcher.attached
+    assert second_launcher.attached
+    lock_path = tmp_path / ".rodex.sqlite3.session-1.lock"
+    assert lock_path.stat().st_mode & 0o777 == 0o600
+
+
+def test_named_session_transition_lock_rejects_a_symlink(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database = tmp_path / "rodex.sqlite3"
+    monkeypatch.setattr(
+        "cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga"
+    )
+    monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
+    create_a_rodex_session(
+        database,
+        codex_session_uuid=CODEX_UUID,
+        user_identity=DNA,
+        tmux_server_socket_path=tmp_path / "stale.sock",
+        tmux_session_name="automatic-beluga",
+    )
+    lock_target = tmp_path / "lock-target"
+    lock_target.touch()
+    (tmp_path / ".rodex.sqlite3.session-1.lock").symlink_to(lock_target)
+    launcher = StubLauncher(tmp_path)
+
+    with pytest.raises(OSError):
+        run(["automatic-beluga"], database_path=database, launcher=launcher)
+
+    assert launcher.attached == []
 
 
 def test_unsaved_codex_session_starts_fresh_and_relinks_the_rodex_identity(

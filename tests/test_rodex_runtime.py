@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import json
 import os
+import pty
 import shlex
 import shutil
+import signal
 import socket
 import subprocess
+import sys
 import time
 import uuid
 from pathlib import Path
@@ -24,6 +27,12 @@ from rodex.runtime import (
     RodexRuntimeError,
     RodexRuntimeLauncher,
     run_session_host,
+)
+from rodex.tmux_status import (
+    RODEX_STATUS_LEFT_FORMAT,
+    STATUS_LEFT_CLAIM_PRIORITY_OPTION,
+    STATUS_LEFT_CLAIM_PUBLISHER_OPTION,
+    STATUS_LEFT_CLAIM_TOKEN_OPTION,
 )
 
 
@@ -317,7 +326,7 @@ def test_rename_and_status_configuration_use_the_real_tmux_session_name(
         "automatic-beluga",
     ]
     status_commands = [command[3:] for command in runner.calls[1:]]
-    assert status_commands[0:9] == [
+    assert status_commands[0:11] == [
         [
             "set-option",
             "-u",
@@ -330,7 +339,21 @@ def test_rename_and_status_configuration_use_the_real_tmux_session_name(
             "-u",
             "-t",
             "=automatic-beluga:",
-            "@rodex_completion_token",
+            STATUS_LEFT_CLAIM_PUBLISHER_OPTION,
+        ],
+        [
+            "set-option",
+            "-u",
+            "-t",
+            "=automatic-beluga:",
+            STATUS_LEFT_CLAIM_TOKEN_OPTION,
+        ],
+        [
+            "set-option",
+            "-u",
+            "-t",
+            "=automatic-beluga:",
+            STATUS_LEFT_CLAIM_PRIORITY_OPTION,
         ],
         ["set-option", "-u", "-t", "=automatic-beluga:", "status-format"],
         ["set-option", "-u", "-t", "=automatic-beluga:", "status-style"],
@@ -340,11 +363,9 @@ def test_rename_and_status_configuration_use_the_real_tmux_session_name(
             "-t",
             "=automatic-beluga:",
             "status-left",
-            "#[fg=green,bold] Rodex: #S #[fg=cyan,bold]| Tools: "
-            "#{@rodex_tool_calls} #[fg=yellow,bold]| Mouse: "
-            "#{?mouse,ON,OFF} #[default]",
+            RODEX_STATUS_LEFT_FORMAT,
         ],
-        ["set-option", "-t", "=automatic-beluga:", "status-left-length", "82"],
+        ["set-option", "-t", "=automatic-beluga:", "status-left-length", "160"],
         [
             "set-option",
             "-t",
@@ -358,9 +379,9 @@ def test_rename_and_status_configuration_use_the_real_tmux_session_name(
         ],
         ["set-option", "-t", "=automatic-beluga:", "status-right-length", "64"],
     ]
-    assert len(status_commands) == 14
+    assert len(status_commands) == 19
     for event, hook_command in zip(
-        ("attached", "detached"), status_commands[9:11], strict=True
+        ("attached", "detached"), status_commands[11:13], strict=True
     ):
         assert hook_command[:4] == [
             "set-hook",
@@ -372,8 +393,21 @@ def test_rename_and_status_configuration_use_the_real_tmux_session_name(
         assert "/venv/bin/python -m rodex.status_animation" in hook_command[4]
         assert f"--event {event}" in hook_command[4]
         assert hook_command[4].endswith(">/dev/null 2>&1'")
-    assert status_commands[11] == ["pipe-pane", "-t", "=automatic-beluga:"]
-    assert status_commands[12:14] == [
+    assert status_commands[13] == ["list-keys", "-T", "root", "C-c"]
+    shared_ctrl_c_binding = status_commands[14]
+    assert shared_ctrl_c_binding[:3] == ["bind-key", "-n", "C-c"]
+    assert shared_ctrl_c_binding[3].startswith("run-shell -b ")
+    assert "/venv/bin/python -m rodex.tmux_shared_ctrl_c" in shared_ctrl_c_binding[3]
+    for option, tmux_format in (
+        ("--pane-id", "#{pane_id}"),
+        ("--client-name", "#{client_name}"),
+        ("--attached-count", "#{session_attached}"),
+    ):
+        assert option in shared_ctrl_c_binding[3]
+        assert tmux_format in shared_ctrl_c_binding[3]
+    assert status_commands[15] == ["list-keys", "-T", "root", "C-b"]
+    assert status_commands[16] == ["pipe-pane", "-t", "=automatic-beluga:"]
+    assert status_commands[17:19] == [
         ["list-keys", "-T", "root", "Enter"],
         ["list-keys", "-T", "root", "Tab"],
     ]
@@ -393,7 +427,9 @@ def test_tmux_slash_switch_reinstalls_retained_bindings(
     launcher.configure_identity_status(runtime)
 
     status_commands = [command[3:] for command in runner.calls]
-    completion_pipe = status_commands[11]
+    completion_pipe = next(
+        command for command in status_commands if command[0] == "pipe-pane"
+    )
     assert completion_pipe[:4] == [
         "pipe-pane",
         "-O",
@@ -401,10 +437,249 @@ def test_tmux_slash_switch_reinstalls_retained_bindings(
         "=automatic-beluga:",
     ]
     assert "/venv/bin/python -m rodex.tmux_completion_observer" in completion_pipe[4]
-    for key, input_binding in zip(("Enter", "Tab"), status_commands[12:14], strict=True):
+    input_bindings = [
+        command
+        for command in status_commands
+        if command[:3] in (["bind-key", "-n", "Enter"], ["bind-key", "-n", "Tab"])
+    ]
+    for key, input_binding in zip(("Enter", "Tab"), input_bindings, strict=True):
         assert input_binding[:3] == ["bind-key", "-n", key]
         assert "/venv/bin/python -m rodex.tmux_input_proxy" in input_binding[3]
         assert f"--key {key}" in input_binding[3]
+
+
+def test_shared_ctrl_c_guard_preserves_a_user_owned_binding(tmp_path: Path) -> None:
+    calls: list[list[str]] = []
+
+    def runner(command: list[str], **_options: object) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        output = (
+            "bind-key -T root C-c display-message user-binding\n"
+            if command[-4:] == ["list-keys", "-T", "root", "C-c"]
+            else ""
+        )
+        return subprocess.CompletedProcess(command, 0, stdout=output, stderr="")
+
+    launcher = RodexRuntimeLauncher("codex", "tmux", runner=runner)
+    launcher.configure_identity_status(
+        LiveTmuxSession(tmp_path / "tmux.sock", "automatic-beluga")
+    )
+
+    assert not any(command[3:6] == ["bind-key", "-n", "C-c"] for command in calls)
+    assert not any(
+        "rodex.tmux_shared_ctrl_c" in argument for command in calls for argument in command
+    )
+
+
+@pytest.mark.parametrize(
+    ("ctrl_b_binding", "should_unbind"),
+    (
+        (
+            "bind-key -T root C-b run-shell -b 'python -m rodex.tmux_status'\n",
+            True,
+        ),
+        ("bind-key -T root C-b display-message user-binding\n", False),
+    ),
+)
+def test_status_setup_removes_only_deprecated_rodex_ctrl_b_binding(
+    tmp_path: Path,
+    ctrl_b_binding: str,
+    should_unbind: bool,
+) -> None:
+    calls: list[list[str]] = []
+
+    def runner(command: list[str], **_options: object) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        if command[-4:] == ["list-keys", "-T", "root", "C-b"]:
+            output = ctrl_b_binding
+        else:
+            output = ""
+        return subprocess.CompletedProcess(command, 0, stdout=output, stderr="")
+
+    RodexRuntimeLauncher("codex", "tmux", runner=runner).configure_identity_status(
+        LiveTmuxSession(tmp_path / "tmux.sock", "automatic-beluga")
+    )
+
+    unbound = any(command[3:] == ["unbind-key", "-T", "root", "C-b"] for command in calls)
+    assert unbound is should_unbind
+    assert not any(command[3:6] == ["bind-key", "-n", "C-b"] for command in calls)
+
+
+def test_real_tmux_fast_ctrl_b_d_detaches_without_ending_session(
+    tmp_path: Path,
+) -> None:
+    tmux_binary = shutil.which("tmux")
+    if tmux_binary is None:
+        pytest.skip("tmux is not installed")
+    socket_path = tmp_path / "tmux.sock"
+    session_name = "fast-prefix-detach"
+    client_pid: int | None = None
+    terminal_master: int | None = None
+
+    def tmux(*arguments: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [tmux_binary, "-S", str(socket_path), *arguments],
+            check=check,
+            text=True,
+            capture_output=True,
+        )
+
+    tmux("new-session", "-d", "-s", session_name, "sleep 30")
+    try:
+        launcher = RodexRuntimeLauncher(
+            "codex", tmux_binary, python_executable=sys.executable
+        )
+        launcher.configure_identity_status(LiveTmuxSession(socket_path, session_name))
+        binding = tmux("list-keys", "-T", "root", "C-b", check=False)
+        assert "rodex.tmux_status" not in binding.stdout
+
+        client_pid, terminal_master = pty.fork()
+        if client_pid == 0:
+            environment = os.environ.copy()
+            environment["TERM"] = "xterm-256color"
+            os.execve(
+                tmux_binary,
+                [
+                    tmux_binary,
+                    "-S",
+                    str(socket_path),
+                    "attach-session",
+                    "-t",
+                    f"={session_name}",
+                ],
+                environment,
+            )
+
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            attached = tmux(
+                "display-message",
+                "-p",
+                "-t",
+                f"={session_name}:",
+                "-F",
+                "#{session_attached}",
+            )
+            if attached.stdout.strip() == "1":
+                break
+            time.sleep(0.01)
+        else:
+            pytest.fail("tmux client did not attach")
+
+        os.write(terminal_master, b"\x02d")
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            attached = tmux(
+                "display-message",
+                "-p",
+                "-t",
+                f"={session_name}:",
+                "-F",
+                "#{session_attached}",
+            )
+            if attached.stdout.strip() == "0":
+                break
+            time.sleep(0.01)
+        else:
+            pytest.fail("fast Ctrl-b d did not detach the current client")
+
+        assert tmux("has-session", "-t", f"={session_name}", check=False).returncode == 0
+    finally:
+        tmux("kill-server", check=False)
+        if client_pid is not None:
+            waited_pid, _status = os.waitpid(client_pid, os.WNOHANG)
+            if waited_pid == 0:
+                os.kill(client_pid, signal.SIGTERM)
+                os.waitpid(client_pid, 0)
+        if terminal_master is not None:
+            os.close(terminal_master)
+
+
+def test_real_tmux_ctrl_b_banner_tracks_the_waiting_prefix_state(
+    tmp_path: Path,
+) -> None:
+    tmux_binary = shutil.which("tmux")
+    if tmux_binary is None:
+        pytest.skip("tmux is not installed")
+    socket_path = tmp_path / "tmux.sock"
+    session_name = "visible-prefix-mode"
+    client_pid: int | None = None
+    terminal_master: int | None = None
+
+    def tmux(*arguments: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [tmux_binary, "-S", str(socket_path), *arguments],
+            check=check,
+            text=True,
+            capture_output=True,
+        )
+
+    tmux("new-session", "-d", "-s", session_name, "sleep 30")
+    try:
+        RodexRuntimeLauncher("codex", tmux_binary).configure_identity_status(
+            LiveTmuxSession(socket_path, session_name)
+        )
+        client_pid, terminal_master = pty.fork()
+        if client_pid == 0:
+            environment = os.environ.copy()
+            environment["TERM"] = "xterm-256color"
+            os.execve(
+                tmux_binary,
+                [
+                    tmux_binary,
+                    "-S",
+                    str(socket_path),
+                    "attach-session",
+                    "-t",
+                    f"={session_name}",
+                ],
+                environment,
+            )
+
+        deadline = time.monotonic() + 2
+        client_name = ""
+        while time.monotonic() < deadline:
+            clients = tmux(
+                "list-clients",
+                "-t",
+                f"={session_name}",
+                "-F",
+                "#{client_name}",
+            )
+            client_name = clients.stdout.strip()
+            if client_name:
+                break
+            time.sleep(0.01)
+        else:
+            pytest.fail("tmux client did not attach")
+
+        os.write(terminal_master, b"\x02")
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            rendered = tmux(
+                "list-clients",
+                "-t",
+                f"={session_name}",
+                "-F",
+                "#{client_prefix}|#{T:status-left}",
+            )
+            if rendered.stdout.startswith("1|") and "CTRL-B MODE" in rendered.stdout:
+                break
+            time.sleep(0.01)
+        else:
+            pytest.fail("Ctrl-b did not expose the waiting prefix banner")
+
+        os.write(terminal_master, b"d")
+        assert tmux("has-session", "-t", f"={session_name}", check=False).returncode == 0
+    finally:
+        tmux("kill-server", check=False)
+        if client_pid is not None:
+            waited_pid, _status = os.waitpid(client_pid, os.WNOHANG)
+            if waited_pid == 0:
+                os.kill(client_pid, signal.SIGTERM)
+                os.waitpid(client_pid, 0)
+        if terminal_master is not None:
+            os.close(terminal_master)
 
 
 def test_rodex_does_not_override_user_mouse_preferences(tmp_path: Path) -> None:
@@ -622,6 +897,21 @@ def test_real_tmux_survives_rename_and_status_configuration(tmp_path: Path) -> N
         )
         assert tab_binding.returncode != 0
         assert "rodex.tmux_input_proxy" not in tab_binding.stdout
+        ctrl_c_binding = subprocess.run(
+            [
+                tmux_binary,
+                "-S",
+                str(socket_path),
+                "list-keys",
+                "-T",
+                "root",
+                "C-c",
+            ],
+            check=True,
+            text=True,
+            capture_output=True,
+        )
+        assert "rodex.tmux_shared_ctrl_c" in ctrl_c_binding.stdout
         discovered = launcher.discover_runtime_control(renamed)
         assert discovered.protocol_proxy_socket_path == tmp_path / "proxy.sock"
         assert discovered.protocol_event_socket_path == tmp_path / "events.sock"
@@ -1143,8 +1433,10 @@ def test_session_host_connects_the_tui_through_the_protocol_proxy(
     monkeypatch.setattr(runtime_module, "CodexProtocolEventTap", FakeEventTap)
     monkeypatch.setattr(runtime_module, "CodexProtocolProxy", FakeProxy)
     monkeypatch.setattr(runtime_module, "_RuntimePathKeepalive", FakeKeepalive)
+    signal_changes: list[tuple[int, bool]] = []
 
-    def record_signal_change(_signum: int, handler: object) -> object:
+    def record_signal_change(signum: int, handler: object) -> object:
+        signal_changes.append((signum, callable(handler)))
         proxy_lifecycle.append("signal-install" if callable(handler) else "signal-restore")
         return runtime_module.signal.SIG_DFL
 
@@ -1171,6 +1463,14 @@ def test_session_host_connects_the_tui_through_the_protocol_proxy(
     )
 
     assert status_updates == [0]
+    assert signal_changes == [
+        (runtime_module.signal.SIGHUP, True),
+        (runtime_module.signal.SIGTERM, True),
+        (runtime_module.signal.SIGINT, True),
+        (runtime_module.signal.SIGHUP, False),
+        (runtime_module.signal.SIGTERM, False),
+        (runtime_module.signal.SIGINT, False),
+    ]
     assert proxy_lifecycle == [
         "signal-install",
         "signal-install",
@@ -1178,9 +1478,11 @@ def test_session_host_connects_the_tui_through_the_protocol_proxy(
         "start",
         "keepalive-start",
         "analytics-poll-failed",
+        "signal-install",
         "keepalive-close",
         "close",
         "event-close",
+        "signal-restore",
         "signal-restore",
         "signal-restore",
     ]
@@ -1209,6 +1511,144 @@ def test_session_host_connects_the_tui_through_the_protocol_proxy(
         assert not (tmp_path / "app.log").exists()
     else:
         assert tui_options == [{}]
+
+
+def test_session_host_retries_exact_resume_during_active_writer_handoff(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requested_uuid = uuid.UUID("01a00654-f2bc-7a30-834a-a5f886a65f82")
+    app_socket = tmp_path / "app.sock"
+    tui_launches = 0
+    retry_waits: list[float] = []
+
+    class FakeProcess:
+        def __init__(self, kind: str, returncode: int | None) -> None:
+            self.kind = kind
+            self.returncode = returncode
+
+        def poll(self) -> int | None:
+            return self.returncode
+
+        def wait(self, timeout: float | None = None) -> int:
+            assert self.returncode is not None
+            return self.returncode
+
+        def terminate(self) -> None:
+            self.returncode = -15
+
+        def kill(self) -> None:
+            self.returncode = -9
+
+    def start_process(command: list[str], **options: object) -> FakeProcess:
+        nonlocal tui_launches
+        if "app-server" in command:
+            return FakeProcess("app", None)
+        assert options.get("stderr") is not None
+        tui_launches += 1
+        return FakeProcess("tui", 1 if tui_launches == 1 else 0)
+
+    class FakeStatus:
+        def __init__(self, *args: object) -> None:
+            return None
+
+        def update(self, count: int) -> None:
+            assert count == 0
+
+    class FakeEventTap:
+        def __init__(self, _path: Path) -> None:
+            return None
+
+        def start(self) -> None:
+            return None
+
+        def publish(self, _message: str | bytes) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+    class FakeProxy:
+        def __init__(self, *args: object) -> None:
+            return None
+
+        def start(self) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+    class FakeKeepalive:
+        failure: RodexRuntimeError | None = None
+
+        def __init__(self, _paths: tuple[Path, ...]) -> None:
+            return None
+
+        def start(self) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(runtime_module.subprocess, "Popen", start_process)
+    monkeypatch.setattr(
+        runtime_module,
+        "_wait_for_app_server_socket",
+        lambda *_args: app_socket.touch(),
+    )
+    monkeypatch.setattr(runtime_module, "TmuxToolCallStatus", FakeStatus)
+    monkeypatch.setattr(runtime_module, "CodexProtocolEventTap", FakeEventTap)
+    monkeypatch.setattr(runtime_module, "CodexProtocolProxy", FakeProxy)
+    monkeypatch.setattr(runtime_module, "_RuntimePathKeepalive", FakeKeepalive)
+    monkeypatch.setattr(
+        runtime_module,
+        "_read_runtime_log_since",
+        lambda *_args: (
+            f"thread-store conflict: thread {requested_uuid} already has an active writer"
+        ),
+    )
+    monkeypatch.setattr(runtime_module.time, "sleep", retry_waits.append)
+
+    assert (
+        run_session_host(
+            "/usr/bin/codex",
+            app_socket,
+            tmp_path / "app.log",
+            tmp_path / "proxy.sock",
+            tmp_path / "events.sock",
+            "/usr/bin/tmux",
+            tmp_path / "tmux.sock",
+            ["resume", str(requested_uuid)],
+        )
+        == 0
+    )
+
+    assert tui_launches == 2
+    assert retry_waits == [runtime_module.CODEX_ACTIVE_WRITER_RETRY_INTERVAL_SECONDS]
+
+
+def test_active_writer_handoff_retry_requires_exact_thread_and_open_window() -> None:
+    requested_uuid = uuid.UUID("01a00654-f2bc-7a30-834a-a5f886a65f82")
+    detail = f"thread-store conflict: thread {requested_uuid} already has an active writer"
+
+    assert runtime_module._active_writer_handoff_can_retry(
+        detail,
+        requested_uuid,
+        now=9.9,
+        deadline=10.0,
+    )
+    assert not runtime_module._active_writer_handoff_can_retry(
+        detail,
+        uuid.UUID(int=requested_uuid.int + 1),
+        now=9.9,
+        deadline=10.0,
+    )
+    assert not runtime_module._active_writer_handoff_can_retry(
+        detail,
+        requested_uuid,
+        now=10.0,
+        deadline=10.0,
+    )
 
 
 def test_session_host_terminates_the_tui_when_runtime_keepalive_fails(

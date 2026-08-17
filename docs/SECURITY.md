@@ -17,6 +17,9 @@ listener; control endpoints are Unix sockets below a private runtime root.
 - SQLite databases are current-user-owned regular files at mode `0600` below a private
   directory. Final symlinks and nonregular paths are rejected. WAL plus a busy timeout
   separates normal readers from analytics writes.
+- Named runtime transitions use current-user-owned regular advisory-lock files at mode
+  `0600` with no-follow opens. The per-session lock is held through identity checking
+  and endpoint replacement, then released before terminal attachment.
 - Analytics reads only current-user-owned regular rollout files inside the configured
   sessions root, using no-follow and nonblocking opens before authenticating the Codex
   UUID and stable complete-record prefix.

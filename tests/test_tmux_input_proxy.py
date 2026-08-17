@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shlex
 import subprocess
 from pathlib import Path
 
@@ -16,7 +17,13 @@ from rodex.tmux_input_proxy import (
     proxy_enter_key,
     proxy_input_key,
 )
-from rodex.tmux_status import RODEX_STATUS_LEFT_FORMAT
+from rodex.tmux_status import (
+    RODEX_STATUS_LEFT_FORMAT,
+    STATUS_LEFT_CLAIM_PRIORITY_OPTION,
+    STATUS_LEFT_CLAIM_PUBLISHER_OPTION,
+    STATUS_LEFT_CLAIM_TOKEN_OPTION,
+    STATUS_LEFT_PUBLISHER_COMPLETION,
+)
 
 PROMPT = "\N{SINGLE RIGHT-POINTING ANGLE QUOTATION MARK} "
 
@@ -33,6 +40,12 @@ class RecordingRunner:
         self.capture_returncode = capture_returncode
         self.cursor_text = cursor_text
         self.commands: list[list[str]] = []
+        self.status_options = {
+            STATUS_LEFT_CLAIM_PRIORITY_OPTION: "10",
+            STATUS_LEFT_CLAIM_PUBLISHER_OPTION: STATUS_LEFT_PUBLISHER_COMPLETION,
+            STATUS_LEFT_CLAIM_TOKEN_OPTION: "completion-token",
+        }
+        self.status_left = "completion status"
 
     def __call__(
         self, command: list[str], **options: object
@@ -46,12 +59,34 @@ class RecordingRunner:
                 command, 0, stdout=self.cursor_text, stderr=""
             )
         if "show-options" in command:
+            if command[-1] in self.status_options:
+                return subprocess.CompletedProcess(
+                    command,
+                    0,
+                    stdout=self.status_options[command[-1]],
+                    stderr="",
+                )
             return subprocess.CompletedProcess(
                 command,
                 0,
                 stdout="01a00654-f2bc-7a30-834a-a5f886a65f82\n",
                 stderr="",
             )
+        if "if-shell" in command:
+            condition = command[-2]
+            should_apply = False
+            if STATUS_LEFT_CLAIM_PUBLISHER_OPTION in condition:
+                expected = condition.rsplit(",", maxsplit=1)[1].removesuffix("}")
+                should_apply = (
+                    self.status_options.get(STATUS_LEFT_CLAIM_PUBLISHER_OPTION) == expected
+                )
+            if should_apply:
+                for action in command[-1].split(" ; "):
+                    arguments = shlex.split(action)
+                    if "-u" in arguments:
+                        self.status_options.pop(arguments[-1], None)
+                    elif arguments[-2] == "status-left":
+                        self.status_left = arguments[-1]
         if "capture-pane" in command:
             return subprocess.CompletedProcess(
                 command,
@@ -269,19 +304,14 @@ def test_rodex_hi_is_cleared_and_acknowledged_in_tmux(tmp_path: Path) -> None:
     )
 
     assert runner.commands[2][-4:] == ["send-keys", "-t", "%4", "C-c"]
-    assert runner.commands[3][-5:] == [
-        "set-option",
-        "-u",
-        "-t",
-        "%4",
-        "@rodex_completion_token",
-    ]
-    assert runner.commands[4][-3:] == [
-        "%4",
-        "status-left",
-        RODEX_STATUS_LEFT_FORMAT,
-    ]
-    assert runner.commands[5][-6:] == [
+    status_restore = runner.commands[3]
+    assert status_restore[3:7] == ["if-shell", "-t", "%4", "-F"]
+    assert STATUS_LEFT_CLAIM_PUBLISHER_OPTION in status_restore[-2]
+    assert STATUS_LEFT_PUBLISHER_COMPLETION in status_restore[-2]
+    assert RODEX_STATUS_LEFT_FORMAT in status_restore[-1]
+    assert runner.status_options == {}
+    assert runner.status_left == RODEX_STATUS_LEFT_FORMAT
+    assert runner.commands[4][-6:] == [
         "display-message",
         "-d",
         "5000",
@@ -325,14 +355,25 @@ def test_rodex_identity_reads_the_live_codex_uuid(tmp_path: Path) -> None:
         == 0
     )
 
-    assert runner.commands[5][-5:] == [
+    identity_query = next(
+        command
+        for command in runner.commands
+        if command[-1:] == ["@rodex_codex_session_uuid"]
+    )
+    assert identity_query[-5:] == [
         "show-options",
         "-v",
         "-t",
         "%4",
         "@rodex_codex_session_uuid",
     ]
-    assert runner.commands[6][-1] == (
+    identity_message = next(
+        command[-1]
+        for command in runner.commands
+        if command[:4] == ["tmux", "-S", str(tmp_path / "tmux.sock"), "display-message"]
+        and "Rodex: azure-crocodile -> Codex" in command[-1]
+    )
+    assert identity_message == (
         "Rodex: azure-crocodile -> Codex 01a00654-f2bc-7a30-834a-a5f886a65f82"
     )
 

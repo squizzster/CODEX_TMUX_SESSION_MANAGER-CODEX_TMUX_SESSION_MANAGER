@@ -12,10 +12,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, Literal
 
+from .tmux_status import STATUS_ANIMATION_TOKEN_OPTION
+
 StatusEvent = Literal["attached", "detached"]
 
 FRAME_INTERVAL_SECONDS: Final = 0.2
-STATUS_ANIMATION_TOKEN_OPTION: Final = "@rodex_status_animation_token"
 _CLIENT_NAME_FORMAT: Final = "#{client_name}"
 _ATTACHED_COUNT_FORMAT: Final = "#{session_attached}"
 
@@ -217,12 +218,14 @@ async def animate_status(
     loop = asyncio.get_running_loop()
     next_frame_at = loop.time()
     for frame in frames:
-        if not await _owns_animation(tmux, pane_target, token):
+        if not await _animation_token_matches(tmux, pane_target, token):
             return
         apply_result = await tmux(
             "if-shell",
+            "-t",
+            pane_target,
             "-F",
-            _owner_format(token),
+            _animation_token_condition(token),
             _frame_command(pane_target, frame),
         )
         if apply_result.returncode != 0:
@@ -260,7 +263,7 @@ async def _wait_until(deadline: float) -> None:
         handle.cancel()
 
 
-async def _owns_animation(
+async def _animation_token_matches(
     tmux: Callable[..., Awaitable[AsyncCommandResult]],
     pane_target: str,
     token: str,
@@ -279,8 +282,10 @@ async def _restore_normal_status(
 ) -> None:
     await tmux(
         "if-shell",
+        "-t",
+        pane_target,
         "-F",
-        _owner_format(token),
+        _animation_token_condition(token),
         " ; ".join(
             (
                 shlex.join(("set-option", "-u", "-t", pane_target, "status-format")),
@@ -305,7 +310,7 @@ async def _restore_normal_status(
             await tmux("refresh-client", "-S", "-t", client_name)
 
 
-def _owner_format(token: str) -> str:
+def _animation_token_condition(token: str) -> str:
     return f"#{{==:#{{{STATUS_ANIMATION_TOKEN_OPTION}}},{token}}}"
 
 

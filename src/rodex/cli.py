@@ -667,6 +667,11 @@ def _run_reserved_command(
         alias_session_id = lookup_owned_rodex_session_id_from_a_cool_name(
             operands[0], database_path
         )
+        previous_names = (
+            None
+            if alias_session_id is None
+            else lookup_rodex_session_names(alias_session_id, database_path)
+        )
         expected_codex_uuid = (
             None
             if alias_session_id is None
@@ -734,6 +739,32 @@ def _run_reserved_command(
             raise
         if active_tmux is not None:
             launcher.configure_identity_status(active_tmux)
+        if (
+            active_tmux is not None
+            and verified_control is not None
+            and expected_rodex_uuid is not None
+            and previous_names is not None
+            and previous_names.display_name != assignment.names.display_name
+        ):
+            auto_info = (
+                f"RODEX_AUTO_INFO: Rodex session {expected_rodex_uuid} "
+                f"is now named {assignment.names.display_name!r}."
+            )
+            try:
+                control_client.send_prompt(
+                    verified_control,
+                    auto_info,
+                    revalidate=lambda: _revalidate_live_control(
+                        launcher,
+                        active_tmux,
+                        verified_control,
+                    ),
+                )
+            except (RodexControlError, RodexLaunchError, RodexRuntimeError) as error:
+                raise RodexLaunchError(
+                    f"Rodex name changed to {assignment.names.display_name!r}, but "
+                    f"RODEX_AUTO_INFO delivery failed: {error}"
+                ) from error
         print(f"Rodex name: {assignment.names.display_name}", flush=True)
         return True
     return False

@@ -116,6 +116,12 @@ against the current user's database row, and fails closed outside a matching man
 session. Its JSON includes registry/database provenance, permanent and user-defined
 names, the complete tmux socket/session/window/pane address, and sharing state. The
 display name is read on every invocation, so an agent need not cache it.
+When `_alias` changes the effective name of a live session, Rodex sends one verified
+prompt to that session's Codex thread:
+`RODEX_AUTO_INFO: Rodex session <UUID> is now named '<name>'.` All attached tmux
+clients share that thread, so Rodex does not broadcast per client. Offline sessions
+and unchanged names produce no prompt. If delivery fails, Rodex reports the failure
+without rolling back the already committed name change.
 Arguments after `_create` or
 `_detach` are forwarded to the managed Codex TUI; use `--` when an explicit boundary
 improves clarity. Stop `_tail` with `Ctrl-C`; the Rodex session keeps running. Names use 1–80

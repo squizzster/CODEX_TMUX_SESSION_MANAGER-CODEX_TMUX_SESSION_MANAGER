@@ -13,7 +13,7 @@ from typing import Any
 import pytest
 
 from rodex.cli import RodexExecutableNotFoundError, RodexLaunchError, main, run
-from rodex.control import LiveRodexControl, PromptDispatch
+from rodex.control import LiveRodexControl, PromptDispatch, RodexControlError
 from rodex.runtime import (
     CurrentTmuxPaneContext,
     LiveRodexRuntime,
@@ -180,6 +180,7 @@ class StubControlClient:
         self.sent: list[tuple[LiveRodexControl, str]] = []
         self.waited: list[LiveRodexControl] = []
         self.tailed: list[LiveRodexControl] = []
+        self.send_error: RodexControlError | None = None
 
     def send_prompt(
         self,
@@ -189,6 +190,8 @@ class StubControlClient:
         revalidate: Any,
     ) -> PromptDispatch:
         revalidate()
+        if self.send_error is not None:
+            raise self.send_error
         self.sent.append((control, prompt))
         return PromptDispatch("started", "turn-1")
 
@@ -1795,7 +1798,7 @@ def test_alias_command_accepts_force_without_starting_codex(
         "rodex.cli.shutil.which",
         lambda name: None if name == "codex" else available_prerequisite(name),
     )
-    create_a_rodex_session(
+    session = create_a_rodex_session(
         database,
         codex_session_uuid=CODEX_UUID,
         user_identity=DNA,
@@ -1803,12 +1806,14 @@ def test_alias_command_accepts_force_without_starting_codex(
         tmux_session_name="black-sawfly",
     )
     launcher = StubLauncher(tmp_path)
+    control = StubControlClient()
 
     assert (
         run(
             [command, "black-sawfly", "first"],
             database_path=database,
             launcher=launcher,  # type: ignore[arg-type]
+            control_client=control,  # type: ignore[arg-type]
         )
         == 0
     )
@@ -1817,6 +1822,7 @@ def test_alias_command_accepts_force_without_starting_codex(
             [command, force_flag, "black-sawfly", "replacement"],
             database_path=database,
             launcher=launcher,  # type: ignore[arg-type]
+            control_client=control,  # type: ignore[arg-type]
         )
         == 0
     )
@@ -1827,7 +1833,125 @@ def test_alias_command_accepts_force_without_starting_codex(
     tmux_link = lookup_rodex_tmux_session(1, database)
     assert tmux_link is not None
     assert tmux_link.tmux_session_name == "replacement"
+    assert [prompt for _live_control, prompt in control.sent] == [
+        f"RODEX_AUTO_INFO: Rodex session {session.rodex_uuid} is now named 'first'.",
+        (
+            f"RODEX_AUTO_INFO: Rodex session {session.rodex_uuid} "
+            "is now named 'replacement'."
+        ),
+    ]
     assert "Rodex name: replacement" in capsys.readouterr().out
+
+
+def test_alias_does_not_send_auto_info_when_the_session_is_not_running(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database = tmp_path / "rodex.sqlite3"
+    monkeypatch.setattr(
+        "cool_name.functions.coolname.generate_slug", lambda _count: "black-sawfly"
+    )
+    monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
+    create_a_rodex_session(
+        database,
+        codex_session_uuid=CODEX_UUID,
+        user_identity=DNA,
+        tmux_server_socket_path=tmp_path / "tmux.sock",
+        tmux_session_name="black-sawfly",
+    )
+    launcher = StubLauncher(tmp_path)
+    launcher.live = False
+    control = StubControlClient()
+
+    assert (
+        run(
+            ["_alias", "black-sawfly", "work"],
+            database_path=database,
+            launcher=launcher,  # type: ignore[arg-type]
+            control_client=control,  # type: ignore[arg-type]
+        )
+        == 0
+    )
+
+    assert control.sent == []
+
+
+def test_alias_does_not_send_auto_info_when_the_display_name_is_unchanged(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database = tmp_path / "rodex.sqlite3"
+    monkeypatch.setattr(
+        "cool_name.functions.coolname.generate_slug", lambda _count: "black-sawfly"
+    )
+    monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
+    create_a_rodex_session(
+        database,
+        codex_session_uuid=CODEX_UUID,
+        user_identity=DNA,
+        tmux_server_socket_path=tmp_path / "tmux.sock",
+        tmux_session_name="black-sawfly",
+    )
+    assign_a_user_defined_cool_name(
+        "black-sawfly",
+        "work",
+        database,
+        user_identity=DNA,
+        renamed_tmux_session_name="work",
+    )
+    launcher = StubLauncher(tmp_path)
+    control = StubControlClient()
+
+    assert (
+        run(
+            ["_alias", "work", "work"],
+            database_path=database,
+            launcher=launcher,  # type: ignore[arg-type]
+            control_client=control,  # type: ignore[arg-type]
+        )
+        == 0
+    )
+
+    assert control.sent == []
+
+
+def test_alias_reports_auto_info_failure_without_rolling_back_the_new_name(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database = tmp_path / "rodex.sqlite3"
+    monkeypatch.setattr(
+        "cool_name.functions.coolname.generate_slug", lambda _count: "black-sawfly"
+    )
+    monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
+    create_a_rodex_session(
+        database,
+        codex_session_uuid=CODEX_UUID,
+        user_identity=DNA,
+        tmux_server_socket_path=tmp_path / "tmux.sock",
+        tmux_session_name="black-sawfly",
+    )
+    launcher = StubLauncher(tmp_path)
+    control = StubControlClient()
+    control.send_error = RodexControlError("delivery unavailable")
+
+    with pytest.raises(
+        RodexLaunchError,
+        match=r"name changed to 'work'.*RODEX_AUTO_INFO delivery failed",
+    ):
+        run(
+            ["_alias", "black-sawfly", "work"],
+            database_path=database,
+            launcher=launcher,  # type: ignore[arg-type]
+            control_client=control,  # type: ignore[arg-type]
+        )
+
+    names = lookup_rodex_session_names(1, database)
+    assert names is not None
+    assert names.display_name == "work"
+    tmux_link = lookup_rodex_tmux_session(1, database)
+    assert tmux_link is not None
+    assert tmux_link.tmux_session_name == "work"
 
 
 def test_alias_replacement_without_force_is_reported_on_stderr(
@@ -2077,11 +2201,13 @@ def test_alias_rename_failure_preserves_the_previous_name_everywhere(
         tmux_session_name="safe-name",
     )
     launcher = StubLauncher(tmp_path)
+    control = StubControlClient()
     assert (
         run(
             ["_alias", "safe-name", "first"],
             database_path=database,
             launcher=launcher,  # type: ignore[arg-type]
+            control_client=control,  # type: ignore[arg-type]
         )
         == 0
     )
@@ -2095,6 +2221,7 @@ def test_alias_rename_failure_preserves_the_previous_name_everywhere(
             ["_alias", "--force", "safe-name", "replacement"],
             database_path=database,
             launcher=launcher,  # type: ignore[arg-type]
+            control_client=control,  # type: ignore[arg-type]
         )
 
     names = lookup_rodex_session_names(1, database)
@@ -2209,6 +2336,7 @@ def test_concurrent_alias_commands_serialize_across_tmux_and_database(
 
     first_errors: list[BaseException] = []
     second_errors: list[BaseException] = []
+    control = StubControlClient()
 
     def assign_name(
         name: str,
@@ -2221,6 +2349,7 @@ def test_concurrent_alias_commands_serialize_across_tmux_and_database(
                 ["_alias", "safe-name", name],
                 database_path=database,
                 launcher=launcher,  # type: ignore[arg-type]
+                control_client=control,  # type: ignore[arg-type]
             )
         except BaseException as error:
             errors.append(error)
@@ -2276,6 +2405,9 @@ def test_concurrent_alias_commands_serialize_across_tmux_and_database(
     assert tmux_link is not None
     assert tmux_link.tmux_session_name == "first"
     assert live_name == ["first"]
+    assert [prompt for _live_control, prompt in control.sent] == [
+        f"RODEX_AUTO_INFO: Rodex session {session.rodex_uuid} is now named 'first'."
+    ]
 
 
 def test_named_open_rejects_a_session_owned_by_another_posix_user(

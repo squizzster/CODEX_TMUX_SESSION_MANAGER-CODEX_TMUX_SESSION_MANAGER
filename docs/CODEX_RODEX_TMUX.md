@@ -116,7 +116,9 @@ analytics sidecar.
 - `./rodex _running` lists verified runtimes and reports unverified or unregistered
   sessions separately.
 - `./rodex _alias SESSION NAME` sets its portable preferred name; `--force` replaces
-  it.
+  it. A live effective-name change sends exactly one verified `RODEX_AUTO_INFO`
+  prompt to the session's single Codex thread, regardless of how many tmux clients
+  are attached. Offline and unchanged names do not send one.
 - `_send`, `_wait`, and `_tail` verify the stored and live Codex UUID before acting.
 
 ## Lifecycle

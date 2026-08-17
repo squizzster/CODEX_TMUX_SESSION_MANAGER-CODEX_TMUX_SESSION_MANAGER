@@ -68,6 +68,7 @@ class CodexProtocolEventTap:
                 compression=None,
                 max_size=None,
             )
+            self._event_socket_path.chmod(0o600)
         except OSError as error:
             raise RodexProtocolProxyError(
                 f"could not bind Codex protocol event tap: {error}"
@@ -248,6 +249,7 @@ class CodexProtocolProxy:
                 compression=None,
                 max_size=None,
             )
+            self._proxy_socket_path.chmod(0o600)
         except OSError as error:
             raise RodexProtocolProxyError(
                 f"could not bind Codex protocol proxy: {error}"

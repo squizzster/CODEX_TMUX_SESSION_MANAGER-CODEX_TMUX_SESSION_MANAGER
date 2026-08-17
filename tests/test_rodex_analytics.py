@@ -461,6 +461,29 @@ def test_rollout_locator_rejects_filename_match_with_wrong_internal_identity(
     assert locate_verified_rollout(root, CODEX_UUID) is None
 
 
+def test_rollout_locator_rejects_a_matching_symlink_that_escapes_the_root(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "sessions"
+    root.mkdir()
+    outside = _rollout(tmp_path / "outside", CODEX_UUID)
+    candidate = root / f"rollout-linked-{CODEX_UUID}.jsonl"
+    candidate.symlink_to(outside)
+
+    assert locate_verified_rollout(root, CODEX_UUID) is None
+
+
+def test_rollout_locator_rejects_a_matching_fifo_without_blocking(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "sessions"
+    root.mkdir()
+    candidate = root / f"rollout-pipe-{CODEX_UUID}.jsonl"
+    os.mkfifo(candidate)
+
+    assert locate_verified_rollout(root, CODEX_UUID) is None
+
+
 def test_supervisor_start_failure_is_fail_open_and_health_only(tmp_path: Path) -> None:
     config = _config(tmp_path)
     _create(config)

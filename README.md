@@ -4,8 +4,9 @@ Rodex creates a durable tmux-hosted Codex session when invoked with no arguments
 gives its own commands an underscore namespace. Start normally with `./rodex`, detach
 when needed, and return later using a generated name such as `automatic-beluga`.
 
-> **Development status: PROTO.** Rodex is a Linux/POSIX prototype under active
-> development. Breaking changes and disposable database resets are expected.
+> **Development status: ALPHA.** Rodex is a Linux/POSIX pre-release under active
+> validation. Interfaces may still change, but identity, lifecycle, installation,
+> security, and primary workflows have automated boundary coverage.
 
 ## What Rodex does
 
@@ -21,6 +22,8 @@ when needed, and return later using a generated name such as `automatic-beluga`.
 - Keeps the in-TUI `/rodex` command implementation available but disabled for now.
 - Sends work to, waits for, or follows a running session from another shell.
 - Maintains queryable session and exact-turn statistics from authenticated rollouts.
+- Refuses unregistered tmux name collisions and verifies Rodex and Codex identities
+  before attaching to or controlling a live runtime.
 
 Rodex does not replace or reinterpret nonempty Codex CLI invocations. With no
 arguments it creates and attaches to a managed session. Exact underscore Rodex
@@ -48,10 +51,30 @@ uv sync
 
 At the `›` prompt, use Codex normally. Detach without ending the session with
 `Ctrl-b d`. Enter tmux copy mode with `Ctrl-b [`, navigate with the keyboard, and leave
-it with `q`. Mouse mode is off by default so the outer terminal keeps mouse control.
+it with `q`. Rodex inherits your tmux mouse preference instead of overriding it.
 
-To expose this checkout as the system-wide `rodex` command, follow the
+To expose this checkout as a per-user `rodex` command, follow the
 [installation guide](INSTALL.md).
+
+### Modern tmux keyboard and mouse setup
+
+Current tmux uses one `mouse` option; the older `mode-mouse`, `mouse-resize-pane`,
+`mouse-select-pane`, and `mouse-select-window` options are obsolete. A compact vi-like
+configuration is:
+
+```tmux
+set -g status-keys vi
+setw -g mode-keys vi
+bind-key m set-option -g mouse \; display-message 'Mouse: #{?mouse,ON,OFF}'
+```
+
+With no value, `set-option` toggles a boolean option. This binding replaces tmux's
+default `prefix + m` mark-pane action, avoiding the misleading `M` pane flag that can
+otherwise appear in the status bar. Rodex sessions inherit the global value unless an
+explicit session value is set. Use `rodex _mouse NAME toggle`, `on`, or `off` for one
+verified Rodex session, and `rodex _mouse NAME inherit` to return it to the global
+preference. See the current [tmux manual](https://man.openbsd.org/tmux.1) and
+[tmux getting-started guide](https://github.com/tmux/tmux/wiki/Getting-Started).
 
 ## Common commands
 
@@ -74,6 +97,8 @@ To expose this checkout as the system-wide `rodex` command, follow the
 | `./rodex _stats edgar-work --turn TURN_ID` | Show one exact turn from the latest snapshot. |
 | `./rodex _stats edgar-work --turn TURN_ID --source CODEX_UUID --json` | Qualify a turn ID across resumed Codex sources. |
 | `./rodex _stats-status edgar-work` | Show source coverage and analytics worker health. |
+| `./rodex _mouse edgar-work toggle` | Toggle mouse handling for one verified live session. |
+| `./rodex _mouse edgar-work inherit` | Remove the session override and inherit the tmux global value. |
 
 Rodex flags include `_alias --force` and `_stats NAME --turn ID --source UUID --json`.
 Arguments after `_create` or
@@ -86,7 +111,9 @@ top-level commands and aliases.
 No arguments is the default managed-create route and is equivalent to `_create`. A
 single argument is the other exception to ordinary Codex passthrough: if it matches an
 existing Rodex name, Rodex opens that session. Otherwise it—and every other non-Rodex
-invocation—is passed unchanged to Codex. An existing Rodex name wins even if a later
+invocation—is passed unchanged to Codex, unless that bare name collides with an
+unregistered session on Rodex's private tmux server. Such a collision fails explicitly
+and is shown by `_running`; Rodex never adopts or deletes it automatically. An existing Rodex name wins even if a later
 Codex release introduces a command with the same spelling.
 
 The in-TUI `/rodex` command and its completion ribbon are temporarily disabled through
@@ -104,6 +131,11 @@ Short-lived Unix sockets and app-server logs use `$XDG_RUNTIME_DIR/rodex`, norma
 `/run/user/<uid>/rodex`. When `XDG_RUNTIME_DIR` is unset or that socket path would be
 too long, Rodex uses the private fallback `/tmp/rodex-<uid>`. Set `RODEX_RUNTIME_DIR`
 to override it.
+
+The registry is held in a private directory and repaired to mode `0600`; runtime roots
+are mode `0700`, and live sockets and logs are mode `0600`. Symlink, owner, and file-type
+checks fail closed. SQLite uses WAL mode with a busy timeout so analytics writes do not
+block consistent readers during ordinary concurrent use.
 
 Each live session host refreshes every required runtime pathname hourly. This protects
 weeks-long detached sessions from age-based temporary-file cleanup without making dead
@@ -124,6 +156,7 @@ POSIX user. Codex remains responsible for raw history.
 - [Installation](INSTALL.md)
 - [Architecture](docs/ARCHITECTURE.md)
 - [Codex, Rodex, and tmux boundaries](docs/CODEX_RODEX_TMUX.md)
+- [Security model](docs/SECURITY.md)
 - [Code concepts](docs/CODE_CONCEPTS.md)
 - [SQL schema methodology](docs/SQL_SCHEMA.md)
 
@@ -136,5 +169,6 @@ uv run pytest --cov --cov-report=term-missing
 uv build
 ```
 
-The prototype coverage floor is 70%. Tests include real-tmux boundary coverage for
-scrollback retention with mouse disabled, rename, and status configuration.
+The alpha coverage floor is 70%. Tests include real-tmux boundary coverage for
+scrollback retention, inherited mouse configuration, rename, identity markers, and
+status configuration.

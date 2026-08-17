@@ -97,7 +97,7 @@ def test_observer_uses_distinct_codex_identity_fields_and_no_compression(
                 "clientInfo": {
                     "name": "rodex",
                     "title": "Rodex",
-                    "version": "0.4.0",
+                    "version": "0.5.0a1",
                 }
             },
         },
@@ -134,19 +134,14 @@ def test_start_directly_hosts_codex_in_tmux_and_returns_its_uuid(
         "-S",
         str(tmp_path / "tmux.sock"),
     ]
-    assert new_session[3:13] == [
+    assert new_session[3:8] == [
         "set-option",
         "-g",
         "history-limit",
         str(RODEX_TMUX_HISTORY_LIMIT_LINES),
         ";",
-        "set-option",
-        "-g",
-        "mouse",
-        "off",
-        ";",
     ]
-    assert new_session[13:17] == [
+    assert new_session[8:12] == [
         "new-session",
         "-d",
         "-s",
@@ -322,14 +317,7 @@ def test_rename_and_status_configuration_use_the_real_tmux_session_name(
         "automatic-beluga",
     ]
     status_commands = [command[3:] for command in runner.calls[1:]]
-    assert status_commands[0] == [
-        "set-option",
-        "-t",
-        "=automatic-beluga:",
-        "mouse",
-        "off",
-    ]
-    assert status_commands[1:10] == [
+    assert status_commands[0:9] == [
         [
             "set-option",
             "-u",
@@ -369,9 +357,9 @@ def test_rename_and_status_configuration_use_the_real_tmux_session_name(
         ],
         ["set-option", "-t", "=automatic-beluga:", "status-right-length", "64"],
     ]
-    assert len(status_commands) == 15
+    assert len(status_commands) == 14
     for event, hook_command in zip(
-        ("attached", "detached"), status_commands[10:12], strict=True
+        ("attached", "detached"), status_commands[9:11], strict=True
     ):
         assert hook_command[:4] == [
             "set-hook",
@@ -383,10 +371,10 @@ def test_rename_and_status_configuration_use_the_real_tmux_session_name(
         assert "/venv/bin/python -m rodex.status_animation" in hook_command[4]
         assert f"--event {event}" in hook_command[4]
         assert hook_command[4].endswith(">/dev/null 2>&1'")
-    assert status_commands[12] == ["pipe-pane", "-t", "=automatic-beluga:"]
-    assert status_commands[13:15] == [
-        ["unbind-key", "-n", "Enter"],
-        ["unbind-key", "-n", "Tab"],
+    assert status_commands[11] == ["pipe-pane", "-t", "=automatic-beluga:"]
+    assert status_commands[12:14] == [
+        ["list-keys", "-T", "root", "Enter"],
+        ["list-keys", "-T", "root", "Tab"],
     ]
 
 
@@ -404,14 +392,7 @@ def test_tmux_slash_switch_reinstalls_retained_bindings(
     launcher.configure_identity_status(runtime)
 
     status_commands = [command[3:] for command in runner.calls]
-    assert status_commands[0] == [
-        "set-option",
-        "-t",
-        "=automatic-beluga:",
-        "mouse",
-        "off",
-    ]
-    completion_pipe = status_commands[12]
+    completion_pipe = status_commands[11]
     assert completion_pipe[:4] == [
         "pipe-pane",
         "-O",
@@ -419,17 +400,13 @@ def test_tmux_slash_switch_reinstalls_retained_bindings(
         "=automatic-beluga:",
     ]
     assert "/venv/bin/python -m rodex.tmux_completion_observer" in completion_pipe[4]
-    for key, input_binding in zip(("Enter", "Tab"), status_commands[13:15], strict=True):
+    for key, input_binding in zip(("Enter", "Tab"), status_commands[12:14], strict=True):
         assert input_binding[:3] == ["bind-key", "-n", key]
         assert "/venv/bin/python -m rodex.tmux_input_proxy" in input_binding[3]
         assert f"--key {key}" in input_binding[3]
 
 
-def test_tmux_mouse_switch_enables_new_and_reconfigured_sessions(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(runtime_module, "RODEX_TMUX_MOUSE_ENABLED", True)
+def test_rodex_does_not_override_user_mouse_preferences(tmp_path: Path) -> None:
     runner = RuntimeRunner(tmp_path)
     launcher = RodexRuntimeLauncher("codex", "tmux", runner=runner)
     runtime = LiveTmuxSession(tmp_path / "tmux.sock", "automatic-beluga")
@@ -437,25 +414,7 @@ def test_tmux_mouse_switch_enables_new_and_reconfigured_sessions(
     launcher._start_tmux_session(runtime, tmp_path, "sleep 30")
     launcher.configure_identity_status(runtime)
 
-    assert runner.calls[0][3:13] == [
-        "set-option",
-        "-g",
-        "history-limit",
-        str(RODEX_TMUX_HISTORY_LIMIT_LINES),
-        ";",
-        "set-option",
-        "-g",
-        "mouse",
-        "on",
-        ";",
-    ]
-    assert runner.calls[1][3:] == [
-        "set-option",
-        "-t",
-        "=automatic-beluga:",
-        "mouse",
-        "on",
-    ]
+    assert not any("mouse" in command for command in runner.calls)
 
 
 def test_real_tmux_session_preserves_scrollback_with_mouse_disabled(
@@ -624,11 +583,26 @@ def test_real_tmux_survives_rename_and_status_configuration(tmp_path: Path) -> N
     )
     try:
         launcher.publish_runtime_control(original, codex_uuid)
+        subprocess.run(
+            [
+                tmux_binary,
+                "-S",
+                str(socket_path),
+                "set-option",
+                "-g",
+                "mouse",
+                "on",
+            ],
+            check=True,
+            text=True,
+            capture_output=True,
+        )
         renamed = launcher.rename(original, "automatic-beluga")
         launcher.configure_identity_status(renamed)
 
         assert launcher.session_exists(renamed)
-        assert session_option("mouse") == "off"
+        assert session_option("mouse") == ""
+        assert session_option("mouse", inherited=True) == "on"
         assert tmux_format("#{pane_pipe}") == "0"
         tab_binding = subprocess.run(
             [
@@ -822,6 +796,138 @@ def test_runtime_path_keepalive_does_not_recreate_a_missing_socket(
         keepalive.start()
 
     assert not missing_socket.exists()
+
+
+def test_runtime_path_keepalive_rejects_path_substitution(tmp_path: Path) -> None:
+    runtime_path = tmp_path / "live.sock"
+    runtime_path.touch()
+    keepalive = runtime_module._RuntimePathKeepalive((runtime_path,))
+    keepalive.start()
+    keepalive.close()
+    runtime_path.unlink()
+    runtime_path.touch()
+
+    with pytest.raises(RodexRuntimeError, match="identity changed"):
+        keepalive._refresh()
+
+
+def test_runtime_root_rejects_a_precreated_symlink(tmp_path: Path) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    runtime_root = tmp_path / "runtime"
+    runtime_root.symlink_to(target, target_is_directory=True)
+
+    with pytest.raises(RodexRuntimeError, match="not a real directory"):
+        runtime_module._prepare_runtime_root(runtime_root)
+
+
+def test_runtime_root_rejects_a_group_writable_parent(tmp_path: Path) -> None:
+    parent = tmp_path / "shared"
+    parent.mkdir()
+    parent.chmod(0o770)
+
+    with pytest.raises(RodexRuntimeError, match="not private"):
+        runtime_module._prepare_runtime_root(parent / "runtime")
+
+
+def test_private_runtime_log_repairs_mode_and_rejects_symlinks(
+    tmp_path: Path,
+) -> None:
+    log_path = tmp_path / "app.log"
+    log_path.touch(mode=0o644)
+    with runtime_module._open_private_runtime_log(log_path) as log:
+        assert os.fstat(log.fileno()).st_mode & 0o777 == 0o600
+
+    target = tmp_path / "target.log"
+    target.touch()
+    log_path.unlink()
+    log_path.symlink_to(target)
+    with pytest.raises(OSError):
+        runtime_module._open_private_runtime_log(log_path)
+
+
+def test_runtime_control_publishes_pending_then_registered_identity(
+    tmp_path: Path,
+) -> None:
+    runner = RuntimeRunner(tmp_path)
+    launcher = RodexRuntimeLauncher("codex", "tmux", runner=runner)
+    runtime = LiveRodexRuntime(
+        tmp_path / "tmux.sock",
+        "rodex-token",
+        tmp_path / "app.sock",
+        tmp_path / "app.log",
+        tmp_path / "proxy.sock",
+        tmp_path / "events.sock",
+    )
+    codex_uuid = uuid.uuid4()
+    rodex_uuid = uuid.uuid4()
+    registry_uuid = uuid.uuid4()
+
+    launcher.publish_runtime_control(runtime, codex_uuid, rodex_uuid, registry_uuid)
+    launcher.confirm_runtime_registration(runtime)
+
+    options = [command[3:] for command in runner.calls]
+    assert options[-4:] == [
+        [
+            "set-option",
+            "-t",
+            "=rodex-token:",
+            "@rodex_session_uuid",
+            str(rodex_uuid),
+        ],
+        [
+            "set-option",
+            "-t",
+            "=rodex-token:",
+            "@rodex_registry_uuid",
+            str(registry_uuid),
+        ],
+        [
+            "set-option",
+            "-t",
+            "=rodex-token:",
+            "@rodex_registration_state",
+            "pending",
+        ],
+        [
+            "set-option",
+            "-t",
+            "=rodex-token:",
+            "@rodex_registration_state",
+            "registered",
+        ],
+    ]
+
+
+def test_runtime_registration_check_uses_the_exact_pane_and_private_socket(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: list[list[str]] = []
+
+    def run_tmux(
+        command: list[str], **_options: object
+    ) -> subprocess.CompletedProcess[str]:
+        observed.append(command)
+        return subprocess.CompletedProcess(command, 0, stdout="registered\n", stderr="")
+
+    monkeypatch.setattr(runtime_module.subprocess, "run", run_tmux)
+
+    assert runtime_module._runtime_registration_is_confirmed(
+        "/usr/bin/tmux", tmp_path / "tmux.sock", "%4"
+    )
+    assert observed == [
+        [
+            "/usr/bin/tmux",
+            "-S",
+            str(tmp_path / "tmux.sock"),
+            "show-options",
+            "-v",
+            "-t",
+            "%4",
+            "@rodex_registration_state",
+        ]
+    ]
 
 
 def test_runtime_path_keepalive_reports_a_periodic_refresh_failure(
@@ -1021,7 +1127,11 @@ def test_session_host_connects_the_tui_through_the_protocol_proxy(
 
     monkeypatch.setenv("TMUX_PANE", "%4")
     monkeypatch.setattr(runtime_module.subprocess, "Popen", start_process)
-    monkeypatch.setattr(runtime_module, "_wait_for_app_server_socket", lambda *args: None)
+    monkeypatch.setattr(
+        runtime_module,
+        "_wait_for_app_server_socket",
+        lambda *_args: app_socket.touch(),
+    )
     monkeypatch.setattr(runtime_module, "TmuxToolCallStatus", FakeStatus)
     monkeypatch.setattr(runtime_module, "CodexProtocolEventTap", FakeEventTap)
     monkeypatch.setattr(runtime_module, "CodexProtocolProxy", FakeProxy)
@@ -1088,7 +1198,8 @@ def test_session_host_connects_the_tui_through_the_protocol_proxy(
     if captures_stderr:
         captured_stderr = tui_options[0].get("stderr")
         assert captured_stderr is not None
-        assert cast(BinaryIO, captured_stderr).name == str(tmp_path / "app.log")
+        assert cast(BinaryIO, captured_stderr).closed
+        assert not (tmp_path / "app.log").exists()
     else:
         assert tui_options == [{}]
 
@@ -1180,7 +1291,11 @@ def test_session_host_terminates_the_tui_when_runtime_keepalive_fails(
         "Popen",
         lambda command, **options: FakeProcess(command),
     )
-    monkeypatch.setattr(runtime_module, "_wait_for_app_server_socket", lambda *args: None)
+    monkeypatch.setattr(
+        runtime_module,
+        "_wait_for_app_server_socket",
+        lambda *_args: (tmp_path / "app.sock").touch(),
+    )
     monkeypatch.setattr(runtime_module, "TmuxToolCallStatus", FakeStatus)
     monkeypatch.setattr(runtime_module, "CodexProtocolEventTap", FakeEventTap)
     monkeypatch.setattr(runtime_module, "CodexProtocolProxy", FakeProxy)

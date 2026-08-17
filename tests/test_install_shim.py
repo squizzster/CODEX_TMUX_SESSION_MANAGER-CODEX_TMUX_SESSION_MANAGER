@@ -155,3 +155,29 @@ def test_usr_local_bin_shim_reports_a_missing_project(tmp_path: Path) -> None:
     assert result.returncode == 1
     assert f"project not found at {missing_project}" in result.stderr
     assert "set RODEX_PROJECT_DIR" in result.stderr
+
+
+def test_usr_local_bin_shim_rejects_group_writable_project_code(
+    tmp_path: Path,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    (project_root / "pyproject.toml").write_text("[project]\nname='probe'\n")
+    insecure_source = project_root / "probe.py"
+    insecure_source.write_text("print('unsafe')\n", encoding="utf-8")
+    insecure_source.chmod(0o664)
+    shim = Path(__file__).parents[1] / "usr" / "local" / "bin" / "rodex"
+    environment = os.environ.copy()
+    environment["RODEX_PROJECT_DIR"] = str(project_root)
+
+    result = subprocess.run(
+        [shim, "_running"],
+        check=False,
+        env=environment,
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 1
+    assert "refusing group/world-writable project path" in result.stderr
+    assert str(insecure_source) in result.stderr

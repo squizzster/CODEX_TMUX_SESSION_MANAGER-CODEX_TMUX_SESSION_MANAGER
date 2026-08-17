@@ -7,11 +7,13 @@ import os
 import secrets
 import shlex
 import signal
+import stat as stat_module
 import subprocess
 import sys
 import time
 import uuid
 from collections.abc import Callable, Sequence
+from contextlib import suppress
 from dataclasses import dataclass, replace
 from pathlib import Path
 from threading import Event, Thread
@@ -38,18 +40,23 @@ from .tmux_status import (
     RODEX_STATUS_LEFT_FORMAT,
     RODEX_STATUS_LEFT_LENGTH,
 )
+from .version import RODEX_VERSION
 
 SUN_PATH_MAX_BYTES: Final = 107
 DEFAULT_STARTUP_TIMEOUT_SECONDS: Final = 15.0
 RUNTIME_PATH_KEEPALIVE_INTERVAL_SECONDS: Final = 60.0 * 60.0
+RODEX_REGISTRATION_TIMEOUT_SECONDS: Final = 60.0
 RODEX_TMUX_HISTORY_LIMIT_LINES: Final = 50_000
-# One switch owns tmux mouse handling for both new and reconfigured sessions.
-RODEX_TMUX_MOUSE_ENABLED: Final = False
 _TUI_SUPERVISION_INTERVAL_SECONDS: Final = 1.0
 _POLL_INTERVAL_SECONDS: Final = 0.05
 _PROXY_SOCKET_OPTION: Final = "@rodex_protocol_proxy_socket_path"
 _EVENT_SOCKET_OPTION: Final = "@rodex_protocol_event_socket_path"
 _CODEX_UUID_OPTION: Final = "@rodex_codex_session_uuid"
+_RODEX_UUID_OPTION: Final = "@rodex_session_uuid"
+_REGISTRY_UUID_OPTION: Final = "@rodex_registry_uuid"
+_REGISTRATION_STATE_OPTION: Final = "@rodex_registration_state"
+RODEX_REGISTRATION_PENDING: Final = "pending"
+RODEX_REGISTRATION_REGISTERED: Final = "registered"
 # One switch owns installation of the tmux `/rodex` bindings and completion pipe.
 RODEX_TMUX_SLASH_ENABLED: Final = False
 _SHARING_STATUS_FORMAT: Final = (
@@ -91,6 +98,7 @@ class _RuntimePathKeepalive:
         self._thread: Thread | None = None
         self._failure: RodexRuntimeError | None = None
         self._failure_reported = Event()
+        self._identities: dict[Path, tuple[int, int, int, int]] = {}
 
     @property
     def failure(self) -> RodexRuntimeError | None:
@@ -101,6 +109,7 @@ class _RuntimePathKeepalive:
         """Refresh synchronously, then protect the paths until closed."""
         if self._thread is not None:
             raise RodexRuntimeError("runtime path keepalive is already running")
+        self._identities = {path: _runtime_path_identity(path) for path in self._paths}
         self._refresh()
         self._thread = Thread(
             target=self._run,
@@ -137,11 +146,30 @@ class _RuntimePathKeepalive:
     def _refresh(self) -> None:
         for path in self._paths:
             try:
+                expected = self._identities[path]
+                if _runtime_path_identity(path) != expected:
+                    raise RodexRuntimeError(f"live runtime path identity changed: {path}")
                 os.utime(path, None, follow_symlinks=False)
+                if _runtime_path_identity(path) != expected:
+                    raise RodexRuntimeError(
+                        f"live runtime path identity changed while refreshing: {path}"
+                    )
+            except RodexRuntimeError:
+                raise
             except OSError as error:
                 raise RodexRuntimeError(
                     f"could not refresh live runtime path {path}: {error}"
                 ) from error
+
+
+def _runtime_path_identity(path: Path) -> tuple[int, int, int, int]:
+    try:
+        state = path.lstat()
+    except OSError as error:
+        raise RodexRuntimeError(
+            f"could not inspect live runtime path {path}: {error}"
+        ) from error
+    return (state.st_dev, state.st_ino, state.st_mode & 0o170000, state.st_uid)
 
 
 @dataclass(frozen=True, slots=True)
@@ -170,11 +198,6 @@ def _exact_tmux_session_target(session_name: str) -> str:
 def _exact_tmux_pane_target(session_name: str) -> str:
     """Address a session exactly through commands whose target is a pane."""
     return f"={session_name}:"
-
-
-def _tmux_mouse_mode() -> str:
-    """Translate the single Rodex mouse switch into tmux option vocabulary."""
-    return "on" if RODEX_TMUX_MOUSE_ENABLED else "off"
 
 
 def _status_animation_hook_command(
@@ -285,6 +308,7 @@ class RodexRuntimeLauncher:
         codex_arguments: Sequence[str],
         *,
         rodex_session_uuid: uuid.UUID | None = None,
+        rodex_registry_uuid: uuid.UUID | None = None,
         rodex_database_path: Path | None = None,
     ) -> tuple[LiveRodexRuntime, uuid.UUID]:
         """Start tmux and return only after its single Codex UUID is observable."""
@@ -327,11 +351,13 @@ class RodexRuntimeLauncher:
             str(runtime.tmux_server_socket_path),
         ]
         if rodex_session_uuid is not None:
-            if rodex_database_path is None:
+            if rodex_database_path is None or rodex_registry_uuid is None:
                 raise RodexRuntimeError(
-                    "Rodex analytics identity requires an explicit database path"
+                    "Rodex runtime identity requires a registry UUID and database path"
                 )
-            analytics_rodex_database = rodex_database_path.expanduser().resolve()
+            analytics_rodex_database = Path(
+                os.path.abspath(rodex_database_path.expanduser())
+            )
             host_arguments.extend(
                 [
                     "--rodex-database",
@@ -355,23 +381,54 @@ class RodexRuntimeLauncher:
                     "Codex resumed an unexpected exact identity: "
                     f"requested {requested_codex_uuid}, observed {codex_uuid}"
                 )
-            self.publish_runtime_control(runtime, codex_uuid)
+            self.publish_runtime_control(
+                runtime,
+                codex_uuid,
+                rodex_session_uuid,
+                rodex_registry_uuid,
+            )
         except BaseException:
             self.stop(runtime, check=False)
             raise
         return runtime, codex_uuid
 
     def publish_runtime_control(
-        self, runtime: LiveRodexRuntime, codex_session_uuid: uuid.UUID
+        self,
+        runtime: LiveRodexRuntime,
+        codex_session_uuid: uuid.UUID,
+        rodex_session_uuid: uuid.UUID | None = None,
+        rodex_registry_uuid: uuid.UUID | None = None,
     ) -> None:
         """Advertise live-only control metadata inside the owning tmux session."""
         target = _exact_tmux_pane_target(runtime.tmux_session_name)
-        for option_name, value in (
+        options = [
             (_PROXY_SOCKET_OPTION, str(runtime.protocol_proxy_socket_path)),
             (_EVENT_SOCKET_OPTION, str(runtime.protocol_event_socket_path)),
             (_CODEX_UUID_OPTION, str(codex_session_uuid)),
-        ):
+        ]
+        if rodex_session_uuid is not None:
+            if rodex_registry_uuid is None:
+                raise RodexRuntimeError("Rodex session identity requires a registry UUID")
+            options.extend(
+                (
+                    (_RODEX_UUID_OPTION, str(rodex_session_uuid)),
+                    (_REGISTRY_UUID_OPTION, str(rodex_registry_uuid)),
+                    (_REGISTRATION_STATE_OPTION, RODEX_REGISTRATION_PENDING),
+                )
+            )
+        for option_name, value in options:
             self._tmux(runtime, "set-option", "-t", target, option_name, value)
+
+    def confirm_runtime_registration(self, runtime: LiveTmuxSession) -> None:
+        """Mark one exact live runtime usable only after its SQL identity commits."""
+        self._tmux(
+            runtime,
+            "set-option",
+            "-t",
+            _exact_tmux_pane_target(runtime.tmux_session_name),
+            _REGISTRATION_STATE_OPTION,
+            RODEX_REGISTRATION_REGISTERED,
+        )
 
     def discover_runtime_control(self, runtime: LiveTmuxSession) -> LiveRodexControl:
         """Read the current control endpoints from one exact live tmux session."""
@@ -379,13 +436,43 @@ class RodexRuntimeLauncher:
         proxy_path = self._read_tmux_option(runtime, target, _PROXY_SOCKET_OPTION)
         event_path = self._read_tmux_option(runtime, target, _EVENT_SOCKET_OPTION)
         codex_uuid_text = self._read_tmux_option(runtime, target, _CODEX_UUID_OPTION)
+        rodex_uuid_text = self._read_optional_tmux_option(
+            runtime, target, _RODEX_UUID_OPTION
+        )
+        registry_uuid_text = self._read_optional_tmux_option(
+            runtime, target, _REGISTRY_UUID_OPTION
+        )
+        registration_state = self._read_optional_tmux_option(
+            runtime, target, _REGISTRATION_STATE_OPTION
+        )
         try:
             codex_uuid = uuid.UUID(codex_uuid_text)
         except ValueError as error:
             raise RodexRuntimeError(
                 "live tmux session advertised an invalid Codex UUID"
             ) from error
-        return LiveRodexControl(Path(proxy_path), Path(event_path), codex_uuid)
+        try:
+            rodex_uuid = None if rodex_uuid_text is None else uuid.UUID(rodex_uuid_text)
+        except ValueError as error:
+            raise RodexRuntimeError(
+                "live tmux session advertised an invalid Rodex UUID"
+            ) from error
+        try:
+            registry_uuid = (
+                None if registry_uuid_text is None else uuid.UUID(registry_uuid_text)
+            )
+        except ValueError as error:
+            raise RodexRuntimeError(
+                "live tmux session advertised an invalid Rodex registry UUID"
+            ) from error
+        return LiveRodexControl(
+            Path(proxy_path),
+            Path(event_path),
+            codex_uuid,
+            rodex_uuid,
+            registry_uuid,
+            registration_state,
+        )
 
     def rename(self, runtime: LiveTmuxSession, tmux_session_name: str) -> LiveTmuxSession:
         """Rename one exact tmux session and return its updated address."""
@@ -404,7 +491,6 @@ class RodexRuntimeLauncher:
     def configure_identity_status(self, runtime: LiveTmuxSession) -> None:
         """Configure Rodex-owned interaction and status for one live session."""
         target = _exact_tmux_pane_target(runtime.tmux_session_name)
-        self._tmux(runtime, "set-option", "-t", target, "mouse", _tmux_mouse_mode())
         for transient_option in (
             STATUS_ANIMATION_TOKEN_OPTION,
             COMPLETION_TOKEN_OPTION,
@@ -497,7 +583,7 @@ class RodexRuntimeLauncher:
             # an older Rodex release no longer intercept input or show completions.
             self._tmux(runtime, "pipe-pane", "-t", target)
             for key in ("Enter", "Tab"):
-                self._tmux(runtime, "unbind-key", "-n", key)
+                self._remove_rodex_owned_root_binding(runtime, key)
 
     def _start_tmux_session(
         self,
@@ -512,11 +598,6 @@ class RodexRuntimeLauncher:
             "-g",
             "history-limit",
             str(RODEX_TMUX_HISTORY_LIMIT_LINES),
-            ";",
-            "set-option",
-            "-g",
-            "mouse",
-            _tmux_mouse_mode(),
             ";",
             "new-session",
             "-d",
@@ -550,6 +631,36 @@ class RodexRuntimeLauncher:
             check=False,
         )
         return result.returncode == 0
+
+    def list_session_names(self, tmux_server_socket_path: Path) -> tuple[str, ...]:
+        """List exact live names on one existing tmux server socket."""
+        runtime = LiveTmuxSession(tmux_server_socket_path, "unused")
+        result = self._tmux(
+            runtime,
+            "list-sessions",
+            "-F",
+            "#{session_name}",
+            check=False,
+        )
+        if result.returncode != 0:
+            return ()
+        return tuple(name for line in result.stdout.splitlines() if (name := line.strip()))
+
+    def set_mouse_mode(self, runtime: LiveTmuxSession, mode: str) -> str:
+        """Set, toggle, inherit, or inspect mouse mode for one exact session."""
+        if mode not in {"on", "off", "toggle", "inherit", "status"}:
+            raise ValueError(f"unsupported tmux mouse mode: {mode}")
+        target = _exact_tmux_pane_target(runtime.tmux_session_name)
+        if mode == "inherit":
+            self._tmux(runtime, "set-option", "-u", "-t", target, "mouse")
+        elif mode == "toggle":
+            self._tmux(runtime, "set-option", "-t", target, "mouse")
+        elif mode != "status":
+            self._tmux(runtime, "set-option", "-t", target, "mouse", mode)
+        value = self._read_tmux_option(runtime, target, "mouse")
+        if value not in {"on", "off"}:
+            raise RodexRuntimeError(f"tmux returned an invalid mouse mode: {value}")
+        return value
 
     def stop(self, runtime: LiveTmuxSession, *, check: bool = True) -> None:
         """Stop exactly one tmux session, allowing its supervisor to clean up."""
@@ -625,7 +736,7 @@ class RodexRuntimeLauncher:
                             "clientInfo": {
                                 "name": "rodex",
                                 "title": "Rodex",
-                                "version": "0.4.0",
+                                "version": RODEX_VERSION,
                             }
                         },
                     }
@@ -688,20 +799,59 @@ class RodexRuntimeLauncher:
             raise RodexRuntimeError(f"live tmux session does not advertise {option_name}")
         return value
 
+    def _read_optional_tmux_option(
+        self,
+        runtime: LiveTmuxSession,
+        target: str,
+        option_name: str,
+    ) -> str | None:
+        result = self._tmux(
+            runtime,
+            "show-options",
+            "-v",
+            "-t",
+            target,
+            option_name,
+            check=False,
+        )
+        value = result.stdout.strip()
+        return value or None
 
-def default_runtime_root() -> Path:
-    """Return a short, private Linux runtime directory shared by Rodex sessions."""
+    def _remove_rodex_owned_root_binding(self, runtime: LiveTmuxSession, key: str) -> None:
+        result = self._tmux(
+            runtime,
+            "list-keys",
+            "-T",
+            "root",
+            key,
+            check=False,
+        )
+        if result.returncode == 0 and "rodex.tmux_input_proxy" in result.stdout:
+            self._tmux(runtime, "unbind-key", "-T", "root", key)
+
+
+def default_runtime_root_path() -> Path:
+    """Resolve the shared runtime root without creating or changing it."""
     configured = os.environ.get("RODEX_RUNTIME_DIR")
     if configured:
-        root = Path(configured).expanduser().resolve()
-        return _prepare_runtime_root(root)
+        return Path(os.path.abspath(Path(configured).expanduser()))
 
     xdg_runtime = os.environ.get("XDG_RUNTIME_DIR")
     if xdg_runtime:
-        candidate = Path(xdg_runtime).expanduser().resolve() / "rodex"
+        candidate = Path(os.path.abspath(Path(xdg_runtime).expanduser())) / "rodex"
         if len(os.fsencode(candidate / "app-0000000000000000.sock")) <= SUN_PATH_MAX_BYTES:
-            return _prepare_runtime_root(candidate)
-    return _prepare_runtime_root(Path("/tmp") / f"rodex-{os.getuid()}")
+            return candidate
+    return Path("/tmp") / f"rodex-{os.getuid()}"
+
+
+def default_tmux_server_socket_path() -> Path:
+    """Resolve the default shared tmux socket without mutating runtime state."""
+    return default_runtime_root_path() / "tmux.sock"
+
+
+def default_runtime_root() -> Path:
+    """Return a prepared private runtime directory shared by Rodex sessions."""
+    return _prepare_runtime_root(default_runtime_root_path())
 
 
 def run_session_host(
@@ -730,6 +880,11 @@ def run_session_host(
     protocol_event_tap: CodexProtocolEventTap | None = None
     runtime_path_keepalive: _RuntimePathKeepalive | None = None
     analytics_supervisor: AnalyticsSubprocessSupervisor | None = None
+    registration_deadline = (
+        None
+        if analytics_config is None
+        else time.monotonic() + RODEX_REGISTRATION_TIMEOUT_SECONDS
+    )
     shutting_down = False
 
     def stop_on_signal(signum: int, _frame: object) -> None:
@@ -741,7 +896,7 @@ def run_session_host(
         for signum in (signal.SIGHUP, signal.SIGTERM)
     }
     try:
-        with app_server_log_path.open("ab", buffering=0) as log:
+        with _open_private_runtime_log(app_server_log_path) as log:
             app_server = subprocess.Popen(
                 [
                     codex_binary,
@@ -754,6 +909,7 @@ def run_session_host(
                 stderr=subprocess.STDOUT,
             )
             _wait_for_app_server_socket(app_server, app_server_socket_path)
+            app_server_socket_path.chmod(0o600)
             tmux_pane_target = os.environ.get("TMUX_PANE", "")
             tool_call_status = TmuxToolCallStatus(
                 tmux_binary,
@@ -807,6 +963,19 @@ def run_session_host(
                 tui_options["stderr"] = log
             tui = subprocess.Popen(tui_command, **tui_options)
             while True:
+                if (
+                    registration_deadline is not None
+                    and time.monotonic() >= registration_deadline
+                ):
+                    if not _runtime_registration_is_confirmed(
+                        tmux_binary,
+                        tmux_server_socket_path,
+                        tmux_pane_target,
+                    ):
+                        raise RodexRuntimeError(
+                            "runtime registration was not confirmed before its deadline"
+                        )
+                    registration_deadline = None
                 if analytics_supervisor is not None:
                     try:
                         analytics_supervisor.poll()
@@ -877,6 +1046,31 @@ def _record_runtime_path_keepalive_failure(log: BinaryIO, error: RodexRuntimeErr
     log.flush()
 
 
+def _runtime_registration_is_confirmed(
+    tmux_binary: str,
+    tmux_server_socket_path: Path,
+    tmux_pane_target: str,
+) -> bool:
+    if not tmux_pane_target:
+        return False
+    result = subprocess.run(
+        [
+            tmux_binary,
+            "-S",
+            str(tmux_server_socket_path),
+            "show-options",
+            "-v",
+            "-t",
+            tmux_pane_target,
+            _REGISTRATION_STATE_OPTION,
+        ],
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+    return result.returncode == 0 and result.stdout.strip() == RODEX_REGISTRATION_REGISTERED
+
+
 def _stop_child_process(process: subprocess.Popen[bytes]) -> None:
     """Stop one exact child process, escalating only when it does not exit."""
     if process.poll() is not None:
@@ -905,16 +1099,52 @@ def _receive_response(websocket: Any, request_id: int) -> dict[str, Any]:
 
 
 def _prepare_runtime_root(root: Path) -> Path:
-    root.mkdir(mode=0o700, parents=True, exist_ok=True)
-    stat = root.stat()
-    if stat.st_uid != os.getuid():
+    root.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    _require_secure_runtime_parent(root.parent)
+    with suppress(FileExistsError):
+        root.mkdir(mode=0o700)
+    before = root.lstat()
+    if stat_module.S_ISLNK(before.st_mode) or not stat_module.S_ISDIR(before.st_mode):
+        raise RodexRuntimeError(f"runtime path is not a real directory: {root}")
+    if before.st_uid != os.getuid():
         raise RodexRuntimeError(
             f"runtime directory is not owned by uid {os.getuid()}: {root}"
         )
-    if not root.is_dir():
-        raise RodexRuntimeError(f"runtime path is not a directory: {root}")
-    root.chmod(0o700)
+    os.chmod(root, 0o700, follow_symlinks=False)
+    after = root.lstat()
+    if (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino):
+        raise RodexRuntimeError(f"runtime directory changed while securing it: {root}")
     return root
+
+
+def _require_secure_runtime_parent(parent: Path) -> None:
+    state = parent.lstat()
+    if stat_module.S_ISLNK(state.st_mode):
+        raise RodexRuntimeError(f"runtime parent is a symbolic link: {parent}")
+    if not stat_module.S_ISDIR(state.st_mode):
+        raise RodexRuntimeError(f"runtime parent is not a directory: {parent}")
+    if state.st_uid == os.getuid() and state.st_mode & 0o022 == 0:
+        return
+    if state.st_uid == 0 and state.st_mode & stat_module.S_ISVTX:
+        return
+    raise RodexRuntimeError(
+        f"runtime parent is not private or root-owned sticky storage: {parent}"
+    )
+
+
+def _open_private_runtime_log(path: Path) -> BinaryIO:
+    flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags, 0o600)
+    try:
+        state = os.fstat(descriptor)
+        if not stat_module.S_ISREG(state.st_mode) or state.st_uid != os.getuid():
+            raise RodexRuntimeError(f"runtime log is not a private regular file: {path}")
+        os.fchmod(descriptor, 0o600)
+        return os.fdopen(descriptor, "ab", buffering=0)
+    except BaseException:
+        os.close(descriptor)
+        raise
 
 
 def _require_short_unix_socket_path(path: Path) -> None:

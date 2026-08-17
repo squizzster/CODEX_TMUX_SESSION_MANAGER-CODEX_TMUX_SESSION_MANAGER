@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import re
 import sqlite3
+import stat as stat_module
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from pathlib import Path
@@ -21,7 +22,7 @@ def default_rodex_database_path() -> Path:
     """Resolve the durable database path for the current POSIX user."""
     configured = os.environ.get("RODEX_DATABASE_PATH")
     if configured:
-        return Path(configured).expanduser().resolve()
+        return Path(os.path.abspath(Path(configured).expanduser()))
 
     configured_state_home = os.environ.get("XDG_STATE_HOME")
     state_home = (
@@ -29,7 +30,7 @@ def default_rodex_database_path() -> Path:
         if configured_state_home
         else Path.home() / ".local" / "state"
     )
-    return (state_home / "rodex" / "rodex.sqlite3").resolve()
+    return Path(os.path.abspath(state_home / "rodex" / "rodex.sqlite3"))
 
 
 def normalise_rodex_database_path(
@@ -38,7 +39,7 @@ def normalise_rodex_database_path(
     """Resolve an explicit path or the current user's durable default."""
     if database_path is None:
         return default_rodex_database_path()
-    return Path(database_path).expanduser().resolve()
+    return Path(os.path.abspath(Path(database_path).expanduser()))
 
 
 @contextmanager
@@ -46,14 +47,15 @@ def open_rodex_transaction(
     database_path: str | os.PathLike[str],
 ) -> Iterator[sqlite3.Connection]:
     """Open one immediate transaction with foreign-key enforcement enabled."""
-    path = Path(database_path).expanduser().resolve()
-    database_exists = path.exists()
-    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    path = _prepare_private_database_path(database_path)
     connection = sqlite3.connect(path, timeout=10, isolation_level=None)
-    if not database_exists:
-        path.chmod(0o600)
     try:
         connection.execute("PRAGMA foreign_keys = ON")
+        journal_mode = connection.execute("PRAGMA journal_mode").fetchone()
+        if journal_mode != ("wal",):
+            connection.execute("PRAGMA journal_mode = WAL")
+        connection.execute("PRAGMA synchronous = NORMAL")
+        connection.execute("PRAGMA busy_timeout = 10000")
         connection.execute("BEGIN IMMEDIATE")
         yield connection
     except BaseException:
@@ -70,10 +72,11 @@ def open_rodex_read_transaction(
     database_path: str | os.PathLike[str],
 ) -> Iterator[sqlite3.Connection]:
     """Open one deferred, transactionally consistent read without a write lock."""
-    path = Path(database_path).expanduser().resolve()
+    path = _prepare_private_database_path(database_path)
     connection = sqlite3.connect(path, timeout=10, isolation_level=None)
     try:
         connection.execute("PRAGMA foreign_keys = ON")
+        connection.execute("PRAGMA busy_timeout = 10000")
         connection.execute("BEGIN")
         yield connection
     except BaseException:
@@ -83,6 +86,38 @@ def open_rodex_read_transaction(
         connection.commit()
     finally:
         connection.close()
+
+
+def _prepare_private_database_path(database_path: str | os.PathLike[str]) -> Path:
+    path = Path(os.path.abspath(Path(database_path).expanduser()))
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    parent = path.parent.lstat()
+    if stat_module.S_ISLNK(parent.st_mode):
+        raise RodexSQLError(f"database parent is a symbolic link: {path.parent}")
+    private_parent = parent.st_uid == os.getuid() and parent.st_mode & 0o077 == 0
+    sticky_system_parent = parent.st_uid == 0 and parent.st_mode & stat_module.S_ISVTX != 0
+    if not stat_module.S_ISDIR(parent.st_mode) or not (
+        private_parent or sticky_system_parent
+    ):
+        raise RodexSQLError(
+            f"database parent is not private or root-owned sticky storage: {path.parent}"
+        )
+    flags = os.O_RDWR | os.O_CREAT
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags, 0o600)
+    except OSError as error:
+        raise RodexSQLError(f"could not securely open database {path}: {error}") from error
+    try:
+        state = os.fstat(descriptor)
+        if not stat_module.S_ISREG(state.st_mode):
+            raise RodexSQLError(f"database path is not a regular file: {path}")
+        if state.st_uid != os.getuid():
+            raise RodexSQLError(f"database is not owned by uid {os.getuid()}: {path}")
+        os.fchmod(descriptor, 0o600)
+    finally:
+        os.close(descriptor)
+    return path
 
 
 def select_lookup_id(

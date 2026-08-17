@@ -115,6 +115,7 @@ def test_proxy_forwards_both_directions_and_counts_server_tool_items(
     )
     try:
         proxy.start()
+        assert proxy_socket.stat().st_mode & 0o777 == 0o600
         with unix_connect(
             str(proxy_socket), uri="ws://localhost/rpc", compression=None
         ) as tui:
@@ -138,6 +139,7 @@ def test_event_tap_streams_runtime_events_and_removes_its_socket(tmp_path: Path)
 
     try:
         tap.start()
+        assert event_socket.stat().st_mode & 0o777 == 0o600
         with unix_connect(
             str(event_socket), uri="ws://localhost/events", compression=None
         ) as subscriber:

@@ -13,6 +13,7 @@ from websockets.exceptions import ConnectionClosed, InvalidHandshake
 from websockets.sync.client import unix_connect
 
 from .protocol_proxy import EVENT_STREAM_READY_METHOD
+from .version import RODEX_VERSION
 
 Connector = Callable[..., Any]
 Revalidate = Callable[[], None]
@@ -30,6 +31,9 @@ class LiveRodexControl:
     protocol_proxy_socket_path: Path
     protocol_event_socket_path: Path
     codex_session_uuid: uuid.UUID
+    rodex_session_uuid: uuid.UUID | None = None
+    rodex_registry_uuid: uuid.UUID | None = None
+    registration_state: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -214,7 +218,7 @@ class CodexControlClient:
                 "clientInfo": {
                     "name": "rodex-control",
                     "title": "Rodex Control",
-                    "version": "0.4.0",
+                    "version": RODEX_VERSION,
                 }
             },
         )

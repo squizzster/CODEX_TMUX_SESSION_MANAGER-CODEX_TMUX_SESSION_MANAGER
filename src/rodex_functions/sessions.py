@@ -40,6 +40,8 @@ from .statistics_projection import (
 )
 
 RODEX_SESSIONS_TABLE: Final = "rodex_sessions"
+RODEX_REGISTRIES_TABLE: Final = "rodex_registries"
+RODEX_REGISTRIES_UUID_UNIQUE_INDEX: Final = "rodex_registries_uuid_ints_unique"
 RODEX_UUID_UNIQUE_INDEX: Final = "rodex_sessions_uuid_ints_unique"
 RODEX_SESSIONS_USERS_TABLE: Final = "rodex_sessions_users"
 RODEX_SESSIONS_USERS_UNIQUE_INDEX: Final = "rodex_sessions_users_uid_gid_user_name_unique"
@@ -244,6 +246,18 @@ _HALF_SIGN_BIT: Final = 1 << (_HALF_BITS - 1)
 _SIGNED_BIGINT_MIN: Final = -_HALF_SIGN_BIT
 _SIGNED_BIGINT_MAX: Final = _HALF_SIGN_BIT - 1
 
+_CREATE_REGISTRIES_TABLE = f"""
+CREATE TABLE IF NOT EXISTS {RODEX_REGISTRIES_TABLE} (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    uuid_int_1 BIGINT NOT NULL,
+    uuid_int_2 BIGINT NOT NULL,
+    CHECK (id = 1)
+)
+"""
+_CREATE_REGISTRIES_UUID_UNIQUE_INDEX = f"""
+CREATE UNIQUE INDEX IF NOT EXISTS {RODEX_REGISTRIES_UUID_UNIQUE_INDEX}
+ON {RODEX_REGISTRIES_TABLE} (uuid_int_1, uuid_int_2)
+"""
 _CREATE_TABLE = f"""
 CREATE TABLE IF NOT EXISTS {RODEX_SESSIONS_TABLE} (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1082,6 +1096,27 @@ def initialise_rodex_database(database_path: str | os.PathLike[str] | None = Non
     """Create and verify the current Rodex schema in one transaction."""
     path = normalise_rodex_database_path(database_path)
     with open_rodex_transaction(path) as connection:
+        connection.execute(_CREATE_REGISTRIES_TABLE)
+        _verify_registries_table(connection)
+        connection.execute(_CREATE_REGISTRIES_UUID_UNIQUE_INDEX)
+        _verify_unique_index(
+            connection,
+            RODEX_REGISTRIES_TABLE,
+            RODEX_REGISTRIES_UUID_UNIQUE_INDEX,
+            ["uuid_int_1", "uuid_int_2"],
+        )
+        registry_rows = connection.execute(
+            f"SELECT id, uuid_int_1, uuid_int_2 FROM {RODEX_REGISTRIES_TABLE}"
+        ).fetchall()
+        if not registry_rows:
+            registry_halves = split_a_rodex_uuid_into_signed_bigints(uuid.uuid4())
+            connection.execute(
+                f"INSERT INTO {RODEX_REGISTRIES_TABLE} (uuid_int_1, uuid_int_2) "
+                "VALUES (?, ?)",
+                registry_halves,
+            )
+        elif len(registry_rows) != 1 or registry_rows[0][0] != 1:
+            raise RodexSessionError("Rodex registry must contain exactly its id=1 row")
         create_and_verify_cool_names_schema(connection)
         connection.execute(_CREATE_TABLE)
         _verify_sessions_table(connection)
@@ -1234,6 +1269,20 @@ def initialise_rodex_database(database_path: str | os.PathLike[str] | None = Non
             ["rodex_sessions_id"],
         )
     return path
+
+
+def lookup_rodex_registry_uuid(
+    database_path: str | os.PathLike[str] | None = None,
+) -> uuid.UUID:
+    """Return the durable identity of one exact Rodex registry database."""
+    path = initialise_rodex_database(database_path)
+    with open_rodex_read_transaction(path) as connection:
+        row = connection.execute(
+            f"SELECT uuid_int_1, uuid_int_2 FROM {RODEX_REGISTRIES_TABLE} WHERE id = 1"
+        ).fetchone()
+    if row is None:
+        raise RodexSessionError("Rodex registry identity disappeared")
+    return join_signed_bigints_into_a_rodex_uuid(int(row[0]), int(row[1]))
 
 
 def create_a_rodex_session(
@@ -2444,6 +2493,27 @@ def _normalise_tmux_session_name(value: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError("tmux_session_name must be a non-empty string")
     return value.strip()
+
+
+def _verify_registries_table(connection: sqlite3.Connection) -> None:
+    columns = connection.execute(f"PRAGMA table_info({RODEX_REGISTRIES_TABLE})").fetchall()
+    observed = [(row[1], row[2].upper(), row[3], row[5]) for row in columns]
+    if observed != [
+        ("id", "INTEGER", 0, 1),
+        ("uuid_int_1", "BIGINT", 1, 0),
+        ("uuid_int_2", "BIGINT", 1, 0),
+    ]:
+        raise RodexSessionError(f"{RODEX_REGISTRIES_TABLE} schema mismatch: {observed!r}")
+    definition_row = connection.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
+        (RODEX_REGISTRIES_TABLE,),
+    ).fetchone()
+    definition = " ".join(str(definition_row[0]).upper().split())
+    if (
+        "ID INTEGER PRIMARY KEY AUTOINCREMENT" not in definition
+        or "CHECK (ID = 1)" not in definition
+    ):
+        raise RodexSessionError(f"{RODEX_REGISTRIES_TABLE} constraints mismatch")
 
 
 def _verify_sessions_table(connection: sqlite3.Connection) -> None:

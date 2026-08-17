@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sqlite3
 import stat
 import uuid
@@ -18,10 +19,12 @@ from rodex_functions import (
     join_signed_bigints_into_a_rodex_uuid,
     lookup_codex_uuid_from_a_rodex_session_id,
     lookup_id_from_a_rodex_uuid,
+    lookup_rodex_registry_uuid,
     lookup_rodex_uuid_from_an_id,
     split_a_codex_uuid_into_signed_bigints,
     split_a_rodex_uuid_into_signed_bigints,
 )
+from rodex_sql import RodexSQLError
 
 
 def fetch_all(database: Path, query: str) -> list[tuple[object, ...]]:
@@ -40,6 +43,47 @@ def test_initialise_creates_database_parent_directories(tmp_path: Path) -> None:
     assert database.is_file()
     assert stat.S_IMODE(database.parent.stat().st_mode) == 0o700
     assert stat.S_IMODE(database.stat().st_mode) == 0o600
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("PRAGMA journal_mode").fetchone() == ("wal",)
+
+
+def test_each_database_has_one_stable_distinct_registry_identity(tmp_path: Path) -> None:
+    first = tmp_path / "first.sqlite3"
+    second = tmp_path / "second.sqlite3"
+
+    first_uuid = lookup_rodex_registry_uuid(first)
+
+    assert lookup_rodex_registry_uuid(first) == first_uuid
+    assert lookup_rodex_registry_uuid(second) != first_uuid
+
+
+def test_initialise_repairs_an_existing_database_to_private_permissions(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "rodex.sqlite3"
+    database.touch(mode=0o644)
+
+    initialise_rodex_database(database)
+
+    assert stat.S_IMODE(database.stat().st_mode) == 0o600
+
+
+def test_initialise_rejects_a_database_symlink(tmp_path: Path) -> None:
+    target = tmp_path / "target.sqlite3"
+    target.touch()
+    database = tmp_path / "rodex.sqlite3"
+    database.symlink_to(target)
+
+    with pytest.raises(RodexSQLError, match="securely open database"):
+        initialise_rodex_database(database)
+
+
+def test_initialise_rejects_a_nonregular_database_path(tmp_path: Path) -> None:
+    database = tmp_path / "rodex.sqlite3"
+    os.mkfifo(database)
+
+    with pytest.raises(RodexSQLError, match="not a regular file"):
+        initialise_rodex_database(database)
 
 
 def test_rodex_sessions_table_has_the_complete_root_identity(tmp_path: Path) -> None:

@@ -34,10 +34,10 @@ from rodex_registry.identity import (
 
 from .analytics import (
     AnalyticsSubprocessSupervisor,
-    AnalyticsWorkerConfig,
     default_codex_sessions_root,
 )
 from .control import LiveRodexControl
+from .process_contracts import AnalyticsWorkerConfig, SessionHostConfig
 from .protocol_proxy import (
     CodexContextStatusObserver,
     CodexProtocolEventTap,
@@ -413,44 +413,29 @@ class RodexRuntimeLauncher:
         _require_short_unix_socket_path(runtime.protocol_proxy_socket_path)
         _require_short_unix_socket_path(runtime.protocol_event_socket_path)
 
-        host_arguments = [
-            self._python_executable,
-            "-m",
-            "rodex.session_host",
-            "--codex-binary",
-            self._codex_binary,
-            "--app-server-socket",
-            str(runtime.app_server_socket_path),
-            "--app-server-log",
-            str(runtime.app_server_log_path),
-            "--protocol-proxy-socket",
-            str(runtime.protocol_proxy_socket_path),
-            "--protocol-event-socket",
-            str(runtime.protocol_event_socket_path),
-            "--tmux-binary",
-            self._tmux_binary,
-            "--tmux-server-socket",
-            str(runtime.tmux_server_socket_path),
-        ]
+        analytics_config: AnalyticsWorkerConfig | None = None
         if rodex_session_id is not None:
             if rodex_database_path is None or rodex_registry_id is None:
                 raise RodexRuntimeError(
                     "Rodex runtime identity requires a registry ID and database path"
                 )
-            analytics_rodex_database = Path(
-                os.path.abspath(rodex_database_path.expanduser())
+            analytics_config = AnalyticsWorkerConfig(
+                rodex_database_path=rodex_database_path,
+                codex_sessions_root=default_codex_sessions_root(),
+                rodex_session_id=rodex_session_id,
             )
-            host_arguments.extend(
-                [
-                    "--rodex-database",
-                    str(analytics_rodex_database),
-                    "--codex-sessions-root",
-                    str(default_codex_sessions_root()),
-                    "--rodex-session-id",
-                    str(rodex_session_id),
-                ]
-            )
-        host_command = shlex.join([*host_arguments, "--", *codex_arguments])
+        host_config = SessionHostConfig(
+            codex_binary=self._codex_binary,
+            app_server_socket_path=runtime.app_server_socket_path,
+            app_server_log_path=runtime.app_server_log_path,
+            protocol_proxy_socket_path=runtime.protocol_proxy_socket_path,
+            protocol_event_socket_path=runtime.protocol_event_socket_path,
+            tmux_binary=self._tmux_binary,
+            tmux_server_socket_path=runtime.tmux_server_socket_path,
+            codex_arguments=tuple(codex_arguments),
+            analytics=analytics_config,
+        )
+        host_command = shlex.join(host_config.command(self._python_executable))
         self._start_tmux_session(runtime, resolved_workspace, host_command)
         try:
             requested_codex_session_id = _requested_exact_codex_resume(codex_arguments)
@@ -1077,21 +1062,22 @@ def default_runtime_root() -> Path:
 
 
 def run_session_host(
-    codex_binary: str,
-    app_server_socket_path: Path,
-    app_server_log_path: Path,
-    protocol_proxy_socket_path: Path,
-    protocol_event_socket_path: Path,
-    tmux_binary: str,
-    tmux_server_socket_path: Path,
-    codex_arguments: Sequence[str],
+    config: SessionHostConfig,
     *,
-    analytics_config: AnalyticsWorkerConfig | None = None,
     analytics_supervisor_factory: Callable[
         [AnalyticsWorkerConfig], AnalyticsSubprocessSupervisor
     ] = AnalyticsSubprocessSupervisor,
 ) -> int:
     """Supervise the app-server, protocol proxy, and foreground Codex TUI."""
+    codex_binary = config.codex_binary
+    app_server_socket_path = config.app_server_socket_path
+    app_server_log_path = config.app_server_log_path
+    protocol_proxy_socket_path = config.protocol_proxy_socket_path
+    protocol_event_socket_path = config.protocol_event_socket_path
+    tmux_binary = config.tmux_binary
+    tmux_server_socket_path = config.tmux_server_socket_path
+    codex_arguments = config.codex_arguments
+    analytics_config = config.analytics
     app_server_socket_path.unlink(missing_ok=True)
     protocol_proxy_socket_path.unlink(missing_ok=True)
     protocol_event_socket_path.unlink(missing_ok=True)

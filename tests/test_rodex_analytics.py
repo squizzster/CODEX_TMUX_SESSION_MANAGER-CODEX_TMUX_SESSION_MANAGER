@@ -17,11 +17,11 @@ from rodex.analytics import (
     AnalyticsCalculation,
     AnalyticsRolloutWorker,
     AnalyticsSubprocessSupervisor,
-    AnalyticsWorkerConfig,
     CodexProtocolAnalyticsAdapter,
     RodexAnalyticsError,
     locate_verified_rollout,
 )
+from rodex.process_contracts import AnalyticsWorkerConfig
 from rodex_registry import (
     RodexSessionId,
     create_a_rodex_session,

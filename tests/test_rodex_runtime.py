@@ -18,8 +18,8 @@ from typing import BinaryIO, cast
 import pytest
 
 import rodex.runtime as runtime_module
-from rodex.analytics import AnalyticsWorkerConfig
 from rodex.control import LiveRodexControl
+from rodex.process_contracts import AnalyticsWorkerConfig, SessionHostConfig
 from rodex.runtime import (
     RODEX_TMUX_HISTORY_LIMIT_LINES,
     CurrentTmuxPaneContext,
@@ -1668,18 +1668,20 @@ def test_session_host_connects_the_tui_through_the_protocol_proxy(
 
     assert (
         run_session_host(
-            "/usr/bin/codex",
-            app_socket,
-            tmp_path / "app.log",
-            proxy_socket,
-            event_socket,
-            "/usr/bin/tmux",
-            tmux_socket,
-            codex_arguments,
-            analytics_config=AnalyticsWorkerConfig(
-                rodex_database_path=tmp_path / "rodex.sqlite3",
-                codex_sessions_root=tmp_path / "sessions",
-                rodex_session_id=RodexSessionId(1),
+            SessionHostConfig(
+                codex_binary="/usr/bin/codex",
+                app_server_socket_path=app_socket,
+                app_server_log_path=tmp_path / "app.log",
+                protocol_proxy_socket_path=proxy_socket,
+                protocol_event_socket_path=event_socket,
+                tmux_binary="/usr/bin/tmux",
+                tmux_server_socket_path=tmux_socket,
+                codex_arguments=tuple(codex_arguments),
+                analytics=AnalyticsWorkerConfig(
+                    rodex_database_path=tmp_path / "rodex.sqlite3",
+                    codex_sessions_root=tmp_path / "sessions",
+                    rodex_session_id=RodexSessionId(1),
+                ),
             ),
             analytics_supervisor_factory=FailingAnalyticsSupervisor,
         )
@@ -1848,14 +1850,16 @@ def test_session_host_retries_exact_resume_during_active_writer_handoff(
 
     assert (
         run_session_host(
-            "/usr/bin/codex",
-            app_socket,
-            tmp_path / "app.log",
-            tmp_path / "proxy.sock",
-            tmp_path / "events.sock",
-            "/usr/bin/tmux",
-            tmp_path / "tmux.sock",
-            ["resume", str(requested_codex_session_id)],
+            SessionHostConfig(
+                codex_binary="/usr/bin/codex",
+                app_server_socket_path=app_socket,
+                app_server_log_path=tmp_path / "app.log",
+                protocol_proxy_socket_path=tmp_path / "proxy.sock",
+                protocol_event_socket_path=tmp_path / "events.sock",
+                tmux_binary="/usr/bin/tmux",
+                tmux_server_socket_path=tmp_path / "tmux.sock",
+                codex_arguments=("resume", str(requested_codex_session_id)),
+            )
         )
         == 0
     )
@@ -2001,14 +2005,15 @@ def test_session_host_terminates_the_tui_when_runtime_keepalive_fails(
 
     with pytest.raises(RodexRuntimeError, match=r"lost proxy\.sock"):
         run_session_host(
-            "/usr/bin/codex",
-            tmp_path / "app.sock",
-            tmp_path / "app.log",
-            tmp_path / "proxy.sock",
-            tmp_path / "events.sock",
-            "/usr/bin/tmux",
-            tmp_path / "tmux.sock",
-            [],
+            SessionHostConfig(
+                codex_binary="/usr/bin/codex",
+                app_server_socket_path=tmp_path / "app.sock",
+                app_server_log_path=tmp_path / "app.log",
+                protocol_proxy_socket_path=tmp_path / "proxy.sock",
+                protocol_event_socket_path=tmp_path / "events.sock",
+                tmux_binary="/usr/bin/tmux",
+                tmux_server_socket_path=tmp_path / "tmux.sock",
+            )
         )
 
     assert lifecycle == [

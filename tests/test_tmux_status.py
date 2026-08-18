@@ -12,6 +12,7 @@ import pytest
 from rodex.tmux_status import (
     PREFIX_MODE_STATUS_FORMAT,
     RODEX_BASE_STATUS_LEFT_FORMAT,
+    RODEX_CONTEXT_STATUS_OPTION,
     RODEX_STATUS_LEFT_FORMAT,
     STATUS_LEFT_CLAIM_PRIORITY_OPTION,
     STATUS_LEFT_CLAIM_PUBLISHER_OPTION,
@@ -20,6 +21,8 @@ from rodex.tmux_status import (
     STATUS_LEFT_PUBLISHER_SHARED_CTRL_C,
     StatusLeftPriority,
     TmuxStatusLeftPipeline,
+    compacting_status_segment,
+    context_status_segment,
 )
 
 
@@ -160,6 +163,37 @@ def test_base_status_selects_ctrl_b_banner_from_tmux_client_prefix_state() -> No
     assert "#{==:#{prefix},C-b}" in RODEX_STATUS_LEFT_FORMAT
     assert PREFIX_MODE_STATUS_FORMAT in RODEX_STATUS_LEFT_FORMAT
     assert RODEX_BASE_STATUS_LEFT_FORMAT in RODEX_STATUS_LEFT_FORMAT
+    assert RODEX_CONTEXT_STATUS_OPTION in RODEX_BASE_STATUS_LEFT_FORMAT
+
+
+@pytest.mark.parametrize(
+    ("context_percent", "colour"),
+    (
+        (69.9, "green"),
+        (70.0, "colour208"),
+        (74.4, "colour208"),
+        (75.0, "red"),
+        (79.4, "red"),
+        (80.0, "brightred"),
+    ),
+)
+def test_context_status_uses_the_compaction_warning_bands(
+    context_percent: float,
+    colour: str,
+) -> None:
+    rendered = context_status_segment(context_percent)
+
+    assert f"fg={colour}" in rendered
+    assert f"Context: {round(context_percent)}% |" in rendered
+
+
+def test_context_status_has_stable_unavailable_and_compacting_states() -> None:
+    assert "Context: -- |" in context_status_segment(None)
+    assert "Context: 32% |" in context_status_segment(31.5)
+    assert "brightred" in compacting_status_segment(0)
+    assert "COMPACTING    |" in compacting_status_segment(0)
+    assert "COMPACTING... |" in compacting_status_segment(3)
+    assert compacting_status_segment(4) == compacting_status_segment(0)
 
 
 def test_real_tmux_concurrent_publishers_leave_a_matching_atomic_claim(

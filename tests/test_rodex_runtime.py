@@ -1045,6 +1045,7 @@ def test_real_tmux_survives_rename_and_status_configuration(tmp_path: Path) -> N
         )
         assert "Rodex: #S" in shown_status.stdout
         assert "Mouse: #{?mouse,ON,OFF}" in shown_status.stdout
+        assert "@rodex_context_status" in shown_status.stdout
         shown_sharing_status = subprocess.run(
             [
                 tmux_binary,
@@ -1116,6 +1117,7 @@ def test_real_tmux_survives_rename_and_status_configuration(tmp_path: Path) -> N
         rendered_identity_status = tmux_format("#{T:status-left}")
         assert "Rodex: automatic-beluga" in rendered_identity_status
         assert "Mouse: ON" in rendered_identity_status
+        assert "Context: --" in rendered_identity_status
         assert launcher.set_mouse_mode(renamed, "off") == "off"
         assert "Mouse: OFF" in tmux_format("#{T:status-left}")
         assert "[Private session]" in tmux_format("#{E:status-right}")
@@ -1578,6 +1580,13 @@ def test_session_host_connects_the_tui_through_the_protocol_proxy(
         def update(self, count: int) -> None:
             status_updates.append(count)
 
+    class FakeContextStatus:
+        def __init__(self, *args: object) -> None:
+            assert args == ("/usr/bin/tmux", tmux_socket, "%4")
+
+        def update(self, rendered_status: str) -> None:
+            assert "Context: --" in rendered_status
+
     class FakeProxy:
         def __init__(self, *args: object) -> None:
             assert args[:2] == (proxy_socket, app_socket)
@@ -1645,6 +1654,7 @@ def test_session_host_connects_the_tui_through_the_protocol_proxy(
         lambda *_args: app_socket.touch(),
     )
     monkeypatch.setattr(runtime_module, "TmuxToolCallStatus", FakeStatus)
+    monkeypatch.setattr(runtime_module, "TmuxContextStatus", FakeContextStatus)
     monkeypatch.setattr(runtime_module, "CodexProtocolEventTap", FakeEventTap)
     monkeypatch.setattr(runtime_module, "CodexProtocolProxy", FakeProxy)
     monkeypatch.setattr(runtime_module, "_RuntimePathKeepalive", FakeKeepalive)
@@ -1771,6 +1781,13 @@ def test_session_host_retries_exact_resume_during_active_writer_handoff(
         def update(self, count: int) -> None:
             assert count == 0
 
+    class FakeContextStatus:
+        def __init__(self, *args: object) -> None:
+            return None
+
+        def update(self, rendered_status: str) -> None:
+            assert "Context: --" in rendered_status
+
     class FakeEventTap:
         def __init__(self, _path: Path) -> None:
             return None
@@ -1816,6 +1833,7 @@ def test_session_host_retries_exact_resume_during_active_writer_handoff(
         lambda *_args: app_socket.touch(),
     )
     monkeypatch.setattr(runtime_module, "TmuxToolCallStatus", FakeStatus)
+    monkeypatch.setattr(runtime_module, "TmuxContextStatus", FakeContextStatus)
     monkeypatch.setattr(runtime_module, "CodexProtocolEventTap", FakeEventTap)
     monkeypatch.setattr(runtime_module, "CodexProtocolProxy", FakeProxy)
     monkeypatch.setattr(runtime_module, "_RuntimePathKeepalive", FakeKeepalive)
@@ -1917,6 +1935,13 @@ def test_session_host_terminates_the_tui_when_runtime_keepalive_fails(
         def update(self, count: int) -> None:
             assert count == 0
 
+    class FakeContextStatus:
+        def __init__(self, *args: object) -> None:
+            return None
+
+        def update(self, rendered_status: str) -> None:
+            assert "Context: --" in rendered_status
+
     class FakeProxy:
         def __init__(self, *args: object) -> None:
             return None
@@ -1970,6 +1995,7 @@ def test_session_host_terminates_the_tui_when_runtime_keepalive_fails(
         lambda *_args: (tmp_path / "app.sock").touch(),
     )
     monkeypatch.setattr(runtime_module, "TmuxToolCallStatus", FakeStatus)
+    monkeypatch.setattr(runtime_module, "TmuxContextStatus", FakeContextStatus)
     monkeypatch.setattr(runtime_module, "CodexProtocolEventTap", FakeEventTap)
     monkeypatch.setattr(runtime_module, "CodexProtocolProxy", FakeProxy)
     monkeypatch.setattr(runtime_module, "_RuntimePathKeepalive", FailingKeepalive)

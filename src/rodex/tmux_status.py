@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import shlex
 import subprocess
 from collections.abc import Callable
@@ -12,12 +13,24 @@ STATUS_LEFT_CLAIM_PRIORITY_OPTION: Final = "@rodex_status_left_claim_priority"
 STATUS_LEFT_CLAIM_PUBLISHER_OPTION: Final = "@rodex_status_left_claim_publisher"
 STATUS_LEFT_CLAIM_TOKEN_OPTION: Final = "@rodex_status_left_claim_token"
 STATUS_ANIMATION_TOKEN_OPTION: Final = "@rodex_status_animation_token"
+STATUS_ANIMATION_FRAME_INTERVAL_SECONDS: Final = 0.2
+RODEX_CONTEXT_STATUS_OPTION: Final = "@rodex_context_status"
 STATUS_LEFT_PUBLISHER_COMPLETION: Final = "completion"
 STATUS_LEFT_PUBLISHER_SHARED_CTRL_C: Final = "shared-ctrl-c"
+_CONTEXT_COMPACTION_FRAMES: Final = (
+    "COMPACTING   ",
+    "COMPACTING.  ",
+    "COMPACTING.. ",
+    "COMPACTING...",
+)
+_CONTEXT_UNAVAILABLE_STATUS: Final = "#[fg=green]#[bold]| Context: -- | "
 RODEX_BASE_STATUS_LEFT_FORMAT: Final = (
     "#[fg=green]#[bold] Rodex: #S "
     "#[fg=cyan]#[bold]| Tools: #{@rodex_tool_calls} "
-    "#[fg=yellow]#[bold]| Mouse: #{?mouse,ON,OFF} #[default]"
+    "#[fg=yellow]#[bold]| Mouse: #{?mouse,ON,OFF} "
+    f"#{{?#{{{RODEX_CONTEXT_STATUS_OPTION}}},"
+    f"#{{E:{RODEX_CONTEXT_STATUS_OPTION}}},{_CONTEXT_UNAVAILABLE_STATUS}}}"
+    "#[default]"
 )
 PREFIX_MODE_STATUS_FORMAT: Final = "#[bg=colour24]#[fg=white]#[bold] CTRL-B MODE #[default]"
 RODEX_STATUS_LEFT_FORMAT: Final = (
@@ -172,3 +185,35 @@ def _tmux_command_sequence(*commands: tuple[str, ...]) -> str:
 def completion_status_left_format(message: str) -> str:
     """Render a passive Rodex completion hint in the ordinary status line."""
     return f"#[fg=magenta,bold] {message} #[default]"
+
+
+def context_status_segment(context_percent: float | None) -> str:
+    """Render the live context fill using Rodex's compaction-warning bands."""
+    if context_percent is None:
+        return _CONTEXT_UNAVAILABLE_STATUS
+    if (
+        isinstance(context_percent, bool)
+        or not isinstance(context_percent, (int, float))
+        or not math.isfinite(context_percent)
+        or context_percent < 0
+    ):
+        raise ValueError("context percent must be a finite non-negative number or None")
+    exact_percent = float(context_percent)
+    displayed_percent = math.floor(exact_percent + 0.5)
+    if exact_percent >= 80:
+        colour = "brightred"
+    elif exact_percent >= 75:
+        colour = "red"
+    elif exact_percent >= 70:
+        colour = "colour208"
+    else:
+        colour = "green"
+    return f"#[fg={colour}]#[bold]| Context: {displayed_percent}% | "
+
+
+def compacting_status_segment(frame_index: int) -> str:
+    """Render one fixed-width frame of the live compaction indicator."""
+    if isinstance(frame_index, bool) or not isinstance(frame_index, int):
+        raise ValueError("compaction frame index must be an integer")
+    frame = _CONTEXT_COMPACTION_FRAMES[frame_index % len(_CONTEXT_COMPACTION_FRAMES)]
+    return f"#[fg=brightred]#[bold]| {frame} | "

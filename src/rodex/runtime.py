@@ -39,8 +39,10 @@ from .analytics import (
 )
 from .control import LiveRodexControl
 from .protocol_proxy import (
+    CodexContextStatusObserver,
     CodexProtocolEventTap,
     CodexProtocolProxy,
+    TmuxContextStatus,
     TmuxToolCallStatus,
     ToolCallCounter,
 )
@@ -51,6 +53,7 @@ from .tmux_status import (
     STATUS_LEFT_CLAIM_PRIORITY_OPTION,
     STATUS_LEFT_CLAIM_PUBLISHER_OPTION,
     STATUS_LEFT_CLAIM_TOKEN_OPTION,
+    context_status_segment,
 )
 from .version import RODEX_VERSION
 
@@ -1074,6 +1077,7 @@ def run_session_host(
     tui: subprocess.Popen[bytes] | None = None
     protocol_proxy: CodexProtocolProxy | None = None
     protocol_event_tap: CodexProtocolEventTap | None = None
+    context_status_observer: CodexContextStatusObserver | None = None
     runtime_path_keepalive: _RuntimePathKeepalive | None = None
     analytics_supervisor: AnalyticsSubprocessSupervisor | None = None
     registration_deadline = (
@@ -1116,13 +1120,27 @@ def run_session_host(
                 tmux_pane_target,
             )
             tool_call_status.update(0)
+            context_status = TmuxContextStatus(
+                tmux_binary,
+                tmux_server_socket_path,
+                tmux_pane_target,
+            )
+            context_status.update(context_status_segment(None))
+            context_status_observer = CodexContextStatusObserver(context_status.update)
             protocol_event_tap = CodexProtocolEventTap(protocol_event_socket_path)
             protocol_event_tap.start()
+
+            def publish_primary_server_message(message: str | bytes) -> None:
+                assert context_status_observer is not None
+                context_status_observer.observe_server_message(message)
+                assert protocol_event_tap is not None
+                protocol_event_tap.publish(message)
+
             protocol_proxy = CodexProtocolProxy(
                 protocol_proxy_socket_path,
                 app_server_socket_path,
                 ToolCallCounter(tool_call_status.update),
-                protocol_event_tap.publish,
+                publish_primary_server_message,
             )
             protocol_proxy.start()
 
@@ -1257,19 +1275,23 @@ def run_session_host(
                             protocol_proxy.close()
                     finally:
                         try:
-                            if protocol_event_tap is not None:
-                                protocol_event_tap.close()
+                            if context_status_observer is not None:
+                                context_status_observer.close()
                         finally:
-                            if app_server is not None:
-                                _stop_child_process(app_server)
-                            app_server_socket_path.unlink(missing_ok=True)
-                            protocol_proxy_socket_path.unlink(missing_ok=True)
-                            protocol_event_socket_path.unlink(missing_ok=True)
-                            if (
-                                app_server_log_path.exists()
-                                and app_server_log_path.stat().st_size == 0
-                            ):
-                                app_server_log_path.unlink()
+                            try:
+                                if protocol_event_tap is not None:
+                                    protocol_event_tap.close()
+                            finally:
+                                if app_server is not None:
+                                    _stop_child_process(app_server)
+                                app_server_socket_path.unlink(missing_ok=True)
+                                protocol_proxy_socket_path.unlink(missing_ok=True)
+                                protocol_event_socket_path.unlink(missing_ok=True)
+                                if (
+                                    app_server_log_path.exists()
+                                    and app_server_log_path.stat().st_size == 0
+                                ):
+                                    app_server_log_path.unlink()
         finally:
             for signum, handler in previous_handlers.items():
                 signal.signal(signum, handler)

@@ -17,8 +17,8 @@ when needed, and return later using a generated name such as `automatic-beluga`.
 - Reattaches a live session or transparently resumes its saved Codex session.
 - Recovers an empty, unsaved Codex session under the same Rodex identity.
 - Supports an optional user-defined display name without losing the generated name.
-- Shows the Rodex name, tool-call count, effective mouse mode, and live private/shared
-  state in the tmux bar.
+- Shows the Rodex name, tool-call count, effective mouse mode, live context fill, and
+  private/shared state in the tmux bar.
 - Preserves 50,000 lines of conversation scrollback with keyboard copy-mode access.
 - Animates shared arrival and final departure for five seconds without blocking the TUI.
 - Keeps the in-TUI `/rodex` command implementation available but disabled for now.
@@ -62,6 +62,13 @@ mouse preference instead of overriding it. In a shared session, one `Ctrl-C` war
 another press may end the session for everyone and offers `Ctrl-b d` as the detach-only
 route; the same client must press it again within two seconds to pass the key to Codex.
 Custom prefixes and user-owned root `C-b` bindings are left unchanged.
+
+The context indicator shows a rounded whole percentage using the same last-token-usage
+divided by model-context-window calculation as Rodex analytics. It is green below 70%,
+orange from 70%, red from 75%, and bright red from 80%. These are empirical bands rather
+than a claim that Codex compacts at one exact percentage. While the App Server reports
+a live context compaction item, the same slot animates `COMPACTING`; it returns to the
+freshest post-compaction percentage, or `Context: --` until one arrives.
 
 To expose this checkout as a per-user `rodex` command, follow the
 [installation guide](INSTALL.md).

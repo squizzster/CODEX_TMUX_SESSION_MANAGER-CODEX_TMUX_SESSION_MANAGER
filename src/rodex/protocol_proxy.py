@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import queue
 import subprocess
 from collections.abc import Callable
@@ -13,6 +14,13 @@ from typing import Any, Final
 from websockets.exceptions import ConnectionClosed
 from websockets.sync.client import unix_connect
 from websockets.sync.server import unix_serve
+
+from .tmux_status import (
+    RODEX_CONTEXT_STATUS_OPTION,
+    STATUS_ANIMATION_FRAME_INTERVAL_SECONDS,
+    compacting_status_segment,
+    context_status_segment,
+)
 
 TOOL_CALL_ITEM_TYPES: Final = frozenset(
     {
@@ -30,6 +38,7 @@ TOOL_CALL_ITEM_TYPES: Final = frozenset(
 
 ToolCountCallback = Callable[[int], None]
 ProtocolEventCallback = Callable[[str | bytes], None]
+ContextStatusCallback = Callable[[str], None]
 _EVENT_STREAM_CLOSED: Final = object()
 EVENT_STREAM_READY_METHOD: Final = "rodex/event-stream/ready"
 CONTROL_CONNECTION_PATH: Final = "/rodex-control"
@@ -217,6 +226,190 @@ class TmuxToolCallStatus:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
+
+
+class TmuxContextStatus:
+    """Publish proxy-derived context state into one tmux session option."""
+
+    def __init__(
+        self,
+        tmux_binary: str,
+        tmux_server_socket_path: Path,
+        tmux_pane_target: str,
+        *,
+        runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+    ) -> None:
+        if not tmux_pane_target.strip():
+            raise ValueError("tmux_pane_target must be non-empty")
+        self._tmux_binary = tmux_binary
+        self._tmux_server_socket_path = tmux_server_socket_path
+        self._tmux_pane_target = tmux_pane_target
+        self._run = runner
+
+    def update(self, rendered_status: str) -> None:
+        """Set the stable tmux user option consumed by the base status format."""
+        if not isinstance(rendered_status, str) or not rendered_status:
+            raise ValueError("rendered context status must be non-empty")
+        self._run(
+            [
+                self._tmux_binary,
+                "-S",
+                str(self._tmux_server_socket_path),
+                "set-option",
+                "-t",
+                self._tmux_pane_target,
+                RODEX_CONTEXT_STATUS_OPTION,
+                rendered_status,
+            ],
+            check=True,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+
+class CodexContextStatusObserver:
+    """Project live App Server usage and compaction events into tmux status."""
+
+    def __init__(
+        self,
+        on_status_changed: ContextStatusCallback,
+        *,
+        animation_interval_seconds: float = STATUS_ANIMATION_FRAME_INTERVAL_SECONDS,
+    ) -> None:
+        if animation_interval_seconds <= 0 or not math.isfinite(animation_interval_seconds):
+            raise ValueError("animation interval must be finite and positive")
+        self._on_status_changed = on_status_changed
+        self._animation_interval_seconds = animation_interval_seconds
+        self._primary_thread_id: str | None = None
+        self._latest_context_status = context_status_segment(None)
+        self._active_compaction_item_ids: set[str] = set()
+        self._animation_generation = 0
+        self._animation_stop: Event | None = None
+        self._animation_threads: list[Thread] = []
+        self._closed = False
+        self._lock = Lock()
+
+    def observe_server_message(self, message: str | bytes) -> None:
+        """Consume one primary app-server-to-TUI protocol message."""
+        payload = _json_object(message)
+        if payload is None:
+            return
+        method = payload.get("method")
+        params = payload.get("params")
+        if not isinstance(params, dict):
+            return
+        if method == "thread/started":
+            thread_id = _started_thread_id(params)
+            if thread_id is not None:
+                with self._lock:
+                    self._accept_thread_locked(thread_id)
+            return
+        if method == "thread/tokenUsage/updated":
+            context_percent = _context_percent(params)
+            thread_id = _event_thread_id(params)
+            if context_percent is None or thread_id is None:
+                return
+            rendered_status = context_status_segment(context_percent)
+            with self._lock:
+                if self._closed or not self._accept_thread_locked(thread_id):
+                    return
+                self._latest_context_status = rendered_status
+                if not self._active_compaction_item_ids:
+                    self._publish_status_locked(rendered_status)
+            return
+        if method not in {"item/started", "item/completed"}:
+            return
+        item = params.get("item")
+        if not isinstance(item, dict) or item.get("type") != "contextCompaction":
+            return
+        item_id = item.get("id")
+        thread_id = _event_thread_id(params)
+        if not isinstance(item_id, str) or not item_id or thread_id is None:
+            return
+        if method == "item/started":
+            animation_thread: Thread | None = None
+            with self._lock:
+                if self._closed or not self._accept_thread_locked(thread_id):
+                    return
+                if item_id in self._active_compaction_item_ids:
+                    return
+                should_start_animation = not self._active_compaction_item_ids
+                self._active_compaction_item_ids.add(item_id)
+                if should_start_animation:
+                    # The pre-compaction percentage no longer describes the live context.
+                    self._latest_context_status = context_status_segment(None)
+                    animation_thread = self._new_animation_thread_locked()
+            if animation_thread is not None:
+                animation_thread.start()
+            return
+        with self._lock:
+            if self._closed or not self._accept_thread_locked(thread_id):
+                return
+            if item_id not in self._active_compaction_item_ids:
+                return
+            self._active_compaction_item_ids.remove(item_id)
+            if self._active_compaction_item_ids:
+                return
+            if self._animation_stop is not None:
+                self._animation_stop.set()
+                self._animation_stop = None
+            self._animation_generation += 1
+            self._publish_status_locked(self._latest_context_status)
+
+    def close(self) -> None:
+        """Stop any live animation without delaying protocol shutdown."""
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            self._active_compaction_item_ids.clear()
+            self._animation_generation += 1
+            if self._animation_stop is not None:
+                self._animation_stop.set()
+                self._animation_stop = None
+            animation_threads = tuple(self._animation_threads)
+        for animation_thread in animation_threads:
+            animation_thread.join(timeout=1)
+
+    def _accept_thread_locked(self, thread_id: str) -> bool:
+        if self._primary_thread_id is None:
+            self._primary_thread_id = thread_id
+        return self._primary_thread_id == thread_id
+
+    def _new_animation_thread_locked(self) -> Thread:
+        self._animation_generation += 1
+        generation = self._animation_generation
+        stop = Event()
+        self._animation_stop = stop
+        self._animation_threads = [
+            thread for thread in self._animation_threads if thread.is_alive()
+        ]
+        animation_thread = Thread(
+            target=self._animate_compaction,
+            args=(generation, stop),
+            name="rodex-context-compaction-animation",
+            daemon=True,
+        )
+        self._animation_threads.append(animation_thread)
+        return animation_thread
+
+    def _animate_compaction(self, generation: int, stop: Event) -> None:
+        frame_index = 0
+        while not stop.is_set():
+            with self._lock:
+                if self._closed or generation != self._animation_generation:
+                    return
+                self._publish_status_locked(compacting_status_segment(frame_index))
+            frame_index += 1
+            stop.wait(self._animation_interval_seconds)
+
+    def _publish_status_locked(self, rendered_status: str) -> None:
+        try:
+            self._on_status_changed(rendered_status)
+        except (OSError, subprocess.SubprocessError):
+            # Status rendering must never interrupt the Codex protocol stream.
+            return
 
 
 class CodexProtocolProxy:
@@ -441,3 +634,55 @@ def _json_object(message: str | bytes) -> dict[str, Any] | None:
     except (json.JSONDecodeError, TypeError):
         return None
     return payload if isinstance(payload, dict) else None
+
+
+def _started_thread_id(params: dict[str, Any]) -> str | None:
+    thread = params.get("thread")
+    if isinstance(thread, dict):
+        thread_id = thread.get("id")
+        if isinstance(thread_id, str) and thread_id:
+            return thread_id
+    return _event_thread_id(params)
+
+
+def _event_thread_id(params: dict[str, Any]) -> str | None:
+    thread_id = params.get("threadId")
+    return thread_id if isinstance(thread_id, str) and thread_id else None
+
+
+def _context_percent(params: dict[str, Any]) -> float | None:
+    """Use the analyzer-compatible last-usage/context-window calculation."""
+    token_usage = params.get("tokenUsage")
+    if not isinstance(token_usage, dict):
+        return None
+    last_usage: dict[str, Any] | None = None
+    for key in ("last", "lastTokenUsage", "last_token_usage"):
+        candidate = token_usage.get(key)
+        if isinstance(candidate, dict):
+            last_usage = candidate
+            break
+    if last_usage is None:
+        return None
+    total_tokens = _finite_number(last_usage, "totalTokens", "total_tokens")
+    context_window = _finite_number(
+        token_usage,
+        "modelContextWindow",
+        "model_context_window",
+    )
+    if total_tokens is None or context_window is None:
+        return None
+    if total_tokens < 0 or context_window <= 0:
+        return None
+    return 100.0 * total_tokens / context_window
+
+
+def _finite_number(source: dict[str, Any], *keys: str) -> float | None:
+    for key in keys:
+        value = source.get(key)
+        if (
+            not isinstance(value, bool)
+            and isinstance(value, (int, float))
+            and math.isfinite(value)
+        ):
+            return float(value)
+    return None

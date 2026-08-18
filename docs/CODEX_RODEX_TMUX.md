@@ -61,6 +61,9 @@ without the alternate screen so rendered conversation rows reach that history.
 session override without changing any other session or the global configuration.
 
 tmux—not the terminal emulator or WebSocket proxy—owns managed-session scrollback.
+`_head`, `_cat`, and `_tail` read that retained pane output through the same verified
+live-session pipeline. Head and tail default to ten lines and accept familiar line-count
+forms such as `-5`, `-n 5`, and `--lines=5`.
 The proxy continues to forward protocol frames and selected live events without
 screen-scraping, reconstructing terminal rows, or persisting conversation content.
 
@@ -132,7 +135,7 @@ analytics sidecar.
   it. A live effective-name change sends exactly one verified `RODEX_AUTO_INFO`
   prompt to the session's single Codex thread, regardless of how many tmux clients
   are attached. Offline and unchanged names do not send one.
-- `_send`, idle-based `_wait`, and `_tail` remain compatibility commands.
+- `_send` and idle-based `_wait` remain compatibility commands.
 - `_inspect --json` reports the exact active turn. `_start` and `_steer` accept an
   optional caller-owned `--dispatch ID`, while `_dispatch-status` observes that ID in
   exact App Server thread history. Exact `_wait`, `_interrupt`, and `_result` use a

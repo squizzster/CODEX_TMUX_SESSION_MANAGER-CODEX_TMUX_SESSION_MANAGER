@@ -77,6 +77,8 @@ class StubLauncher:
         self.reconciled: list[LiveTmuxSession] = []
         self.refreshed_hooks: list[LiveTmuxSession] = []
         self.attached: list[LiveTmuxSession] = []
+        self.scrollback_captures: list[LiveTmuxSession] = []
+        self.scrollback = tuple(f"line {number}" for number in range(1, 16))
         self.stopped: list[tuple[LiveTmuxSession, bool]] = []
         self.existing_checks: list[LiveTmuxSession] = []
         self.live = True
@@ -138,6 +140,10 @@ class StubLauncher:
 
     def attach(self, runtime: LiveTmuxSession) -> None:
         self.attached.append(runtime)
+
+    def capture_scrollback(self, runtime: LiveTmuxSession) -> tuple[str, ...]:
+        self.scrollback_captures.append(runtime)
+        return self.scrollback
 
     def stop(self, runtime: LiveTmuxSession, *, check: bool = True) -> None:
         self.stopped.append((runtime, check))
@@ -1622,13 +1628,34 @@ def test_mouse_command_targets_only_the_verified_named_runtime(
     assert launcher.attached == []
 
 
-@pytest.mark.parametrize("command", ["_tail"])
-def test_tail_command_streams_json_events_for_the_verified_named_runtime(
+@pytest.mark.parametrize(
+    ("arguments", "expected"),
+    [
+        (["_head", "automatic-beluga"], tuple(f"line {n}" for n in range(1, 11))),
+        (["_head", "-5", "automatic-beluga"], tuple(f"line {n}" for n in range(1, 6))),
+        (["_head", "-n5", "automatic-beluga"], tuple(f"line {n}" for n in range(1, 6))),
+        (["_cat", "automatic-beluga"], tuple(f"line {n}" for n in range(1, 16))),
+        (["_tail", "automatic-beluga"], tuple(f"line {n}" for n in range(6, 16))),
+        (["_tail", "-5", "automatic-beluga"], tuple(f"line {n}" for n in range(11, 16))),
+        (
+            ["_tail", "--lines=5", "automatic-beluga"],
+            tuple(f"line {n}" for n in range(11, 16)),
+        ),
+        (
+            ["_tail", "automatic-beluga", "-n", "5"],
+            tuple(f"line {n}" for n in range(11, 16)),
+        ),
+    ],
+)
+@pytest.mark.evolutionary_regression
+def test_scrollback_commands_read_the_verified_named_runtime_through_one_pipeline(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
-    command: str,
+    arguments: list[str],
+    expected: tuple[str, ...],
 ) -> None:
+    """Shell-like readers should expose tmux history without attaching the caller."""
     database = tmp_path / "rodex.sqlite3"
     monkeypatch.setattr(
         "cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga"
@@ -1636,22 +1663,53 @@ def test_tail_command_streams_json_events_for_the_verified_named_runtime(
     monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
     create_controlled_session(database, tmp_path)
     launcher = StubLauncher(tmp_path)
-    control = StubControlClient()
 
     assert (
         run(
-            [command, "automatic-beluga"],
+            arguments,
             database_path=database,
             launcher=launcher,  # type: ignore[arg-type]
-            control_client=control,  # type: ignore[arg-type]
         )
         == 0
     )
 
     captured = capsys.readouterr()
-    assert control.tailed == [launcher.control]
-    assert captured.out == '{"method":"turn/started"}\n'
-    assert "following live Codex protocol events" in captured.err
+    assert launcher.scrollback_captures == [
+        LiveTmuxSession(tmp_path / "tmux.sock", "automatic-beluga")
+    ]
+    assert captured.out == "".join(f"{line}\n" for line in expected)
+    assert captured.err == ""
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ["_head"],
+        ["_head", "--lines", "automatic-beluga"],
+        ["_head", "--lines=many", "automatic-beluga"],
+        ["_cat", "-5", "automatic-beluga"],
+        ["_cat", "first", "second"],
+        ["_tail", "-n", "5"],
+        ["_tail", "-5", "-n", "6", "automatic-beluga"],
+    ],
+)
+def test_scrollback_commands_reject_invalid_grammar_before_live_resolution(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    arguments: list[str],
+) -> None:
+    monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
+    launcher = StubLauncher(tmp_path)
+
+    with pytest.raises(RodexLaunchError, match=r"^usage: rodex _(head|cat|tail)"):
+        run(
+            arguments,
+            database_path=tmp_path / "rodex.sqlite3",
+            launcher=launcher,  # type: ignore[arg-type]
+        )
+
+    assert launcher.existing_checks == []
+    assert launcher.scrollback_captures == []
 
 
 @pytest.mark.parametrize("arguments", [[], ["_create"]], ids=["bare", "explicit"])

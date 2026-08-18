@@ -25,11 +25,11 @@ private tmux server
     ▼
 session host ─┬► Codex TUI ──► protocol proxy ──► Codex app-server
              │                  ├──► context status ──► tmux base status
-             │                  └──► live event tap ──► tail/wait/send clients
+             │                  └──► live event tap ──► wait/send/control clients
              └► analytics worker ──► in-memory analyzer ──► SQLite projections
 ```
 
-The TUI remains the normal Codex interface and runs inline so rendered output enters tmux's 50,000-line pane history. tmux owns keyboard copy-mode scrollback and derives status privacy from clients attached to that exact session. The proxy forwards WebSocket frames, derives tool and context signals, and fans structured events; it never buffers the screen.
+The TUI remains the normal Codex interface and runs inline so rendered output enters tmux's 50,000-line pane history. tmux owns keyboard copy-mode and `_head`/`_cat`/`_tail` scrollback reads, and derives status privacy from clients attached to that exact session. The proxy forwards WebSocket frames, derives tool and context signals, and fans structured events; it never buffers the screen.
 
 ## Component boundaries
 

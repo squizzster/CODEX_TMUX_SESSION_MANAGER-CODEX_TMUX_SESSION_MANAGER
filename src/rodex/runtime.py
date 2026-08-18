@@ -781,6 +781,19 @@ class RodexRuntimeLauncher:
             return ()
         return tuple(name for line in result.stdout.splitlines() if (name := line.strip()))
 
+    def capture_scrollback(self, runtime: LiveTmuxSession) -> tuple[str, ...]:
+        """Read every retained physical line from one exact tmux pane."""
+        result = self._tmux(
+            runtime,
+            "capture-pane",
+            "-p",
+            "-S",
+            "-",
+            "-t",
+            _exact_tmux_pane_target(runtime.tmux_session_name),
+        )
+        return tuple(result.stdout.rstrip("\n").splitlines())
+
     def discover_current_tmux_pane_context(
         self,
         environment: Mapping[str, str] | None = None,

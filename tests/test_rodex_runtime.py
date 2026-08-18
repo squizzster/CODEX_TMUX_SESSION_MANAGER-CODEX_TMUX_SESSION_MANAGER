@@ -408,6 +408,39 @@ def test_current_tmux_context_requires_an_inherited_tmux_pane(tmp_path: Path) ->
         )
 
 
+def test_scrollback_capture_reads_all_lines_from_the_exact_tmux_pane(
+    tmp_path: Path,
+) -> None:
+    calls: list[list[str]] = []
+
+    def runner(command: list[str], **_options: object) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout="first\nsecond\n\n\n",
+            stderr="",
+        )
+
+    launcher = RodexRuntimeLauncher("codex", "tmux", runner=runner)
+    runtime = LiveTmuxSession(tmp_path / "tmux.sock", "remarkable-aardvark")
+
+    assert launcher.capture_scrollback(runtime) == ("first", "second")
+    assert calls == [
+        [
+            "tmux",
+            "-S",
+            str(tmp_path / "tmux.sock"),
+            "capture-pane",
+            "-p",
+            "-S",
+            "-",
+            "-t",
+            "=remarkable-aardvark:",
+        ]
+    ]
+
+
 @pytest.mark.parametrize(
     "reported_context",
     [

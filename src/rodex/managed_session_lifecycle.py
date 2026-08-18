@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import Path
 
 from cool_name import (
@@ -67,6 +68,24 @@ class OwnedSessionSelection:
 
 
 @dataclass(frozen=True, slots=True)
+class UnregisteredCodexSessionSelection:
+    """One canonical Codex identity not yet affiliated with this Rodex registry."""
+
+    supplied_selector: str
+    codex_session_id: CodexSessionId
+
+
+type SessionSelection = OwnedSessionSelection | UnregisteredCodexSessionSelection
+
+
+class SelectorExecution(StrEnum):
+    """The complete outcome of executing one bare Rodex selector."""
+
+    OPENED = "opened"
+    PASSTHROUGH = "passthrough"
+
+
+@dataclass(frozen=True, slots=True)
 class ManagedSessionLaunchRequest:
     """The launch-domain meaning parsed from one `_create` or `_detach` command."""
 
@@ -88,33 +107,62 @@ class ManagedSessionLifecycle:
 
     def resolve_selector(
         self, selector: str, database_path: Path
-    ) -> OwnedSessionSelection | None:
-        try:
-            session_id = _lookup_owned_rodex_session_selector(selector, database_path)
-        except (CoolNameError, ValueError):
+    ) -> SessionSelection | None:
+        if database_path.exists():
+            try:
+                session_id = _lookup_owned_rodex_session_selector(selector, database_path)
+            except (CoolNameError, ValueError):
+                session_id = None
+            if session_id is not None:
+                return OwnedSessionSelection(selector, session_id)
+        codex_session_id = _parse_canonical_codex_session_selector(selector)
+        if codex_session_id is None:
             return None
-        if session_id is None:
-            return None
-        return OwnedSessionSelection(selector, session_id)
+        return UnregisteredCodexSessionSelection(selector, codex_session_id)
 
     def execute_selector(
         self,
-        selection: OwnedSessionSelection,
+        selection: SessionSelection,
         database_path: Path,
         launcher: RodexRuntimeLauncher,
         *,
         codex_available: bool,
         configured_codex: str,
-    ) -> int:
-        _open_selected_session(
-            selection,
-            database_path,
-            launcher,
-            codex_available=codex_available,
-            configured_codex=configured_codex,
+    ) -> SelectorExecution:
+        if isinstance(selection, OwnedSessionSelection):
+            _open_selected_session(
+                selection,
+                database_path,
+                launcher,
+                codex_available=codex_available,
+                configured_codex=configured_codex,
+                detach=False,
+            )
+            return SelectorExecution.OPENED
+
+        if not codex_available:
+            raise RodexExecutableNotFoundError(
+                f"Codex executable was not found: {configured_codex}"
+            )
+        if not launcher.codex_session_is_persisted(selection.codex_session_id):
+            return SelectorExecution.PASSTHROUGH
+        request = ManagedSessionLaunchRequest(
+            ("resume", str(selection.codex_session_id)),
+            requested_name=None,
             detach=False,
         )
-        return 0
+        try:
+            _create_managed_session(
+                request,
+                database_path,
+                launcher,
+                codex_binary=configured_codex,
+                configured_codex=configured_codex,
+            )
+        except RodexCodexSessionNotFoundError:
+            # The persisted thread can disappear between the read and exact resume.
+            return SelectorExecution.PASSTHROUGH
+        return SelectorExecution.OPENED
 
     def execute_launch(
         self,
@@ -507,7 +555,8 @@ def _resolve_session_arguments(
 ) -> OwnedSessionSelection | None:
     if len(arguments) != 1 or arguments[0].startswith("-"):
         return None
-    return lifecycle.resolve_selector(arguments[0], database_path)
+    selection = lifecycle.resolve_selector(arguments[0], database_path)
+    return selection if isinstance(selection, OwnedSessionSelection) else None
 
 
 def _lookup_owned_rodex_session_selector(

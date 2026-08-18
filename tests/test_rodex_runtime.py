@@ -77,6 +77,67 @@ class RecordingConnector:
         return self.websocket
 
 
+class CatalogWebSocket:
+    def __init__(self, read_response: dict[str, object]) -> None:
+        self.sent: list[dict[str, object]] = []
+        self.responses = iter(
+            [
+                {
+                    "id": 0,
+                    "result": {"userAgent": "rodex-session-catalog/0.147.0 (linux)"},
+                },
+                read_response,
+            ]
+        )
+
+    def __enter__(self) -> CatalogWebSocket:
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        return None
+
+    def send(self, message: str) -> None:
+        self.sent.append(json.loads(message))
+
+    def recv(self, timeout: float) -> str:
+        assert timeout > 0
+        return json.dumps(next(self.responses))
+
+
+class CatalogProcess:
+    def __init__(self) -> None:
+        self.returncode: int | None = None
+        self.terminated = False
+
+    def poll(self) -> int | None:
+        return self.returncode
+
+    def terminate(self) -> None:
+        self.terminated = True
+        self.returncode = 0
+
+    def wait(self, timeout: float) -> int:
+        assert timeout > 0
+        assert self.returncode is not None
+        return self.returncode
+
+    def kill(self) -> None:
+        self.returncode = -9
+
+
+class CatalogProcessSpawner:
+    def __init__(self, process: CatalogProcess) -> None:
+        self.process = process
+        self.calls: list[tuple[tuple[str, ...], dict[str, object]]] = []
+
+    def __call__(self, command: tuple[str, ...], **options: object) -> CatalogProcess:
+        self.calls.append((command, options))
+        socket_argument = command[-1]
+        assert socket_argument.startswith("unix://")
+        Path(socket_argument.removeprefix("unix://")).touch()
+        return self.process
+
+
 class RuntimeRunner:
     def __init__(self, runtime_root: Path) -> None:
         self.runtime_root = runtime_root
@@ -119,6 +180,86 @@ def test_observer_uses_distinct_codex_identity_fields_and_no_compression(
         {"method": "initialized", "params": {}},
         {"method": "thread/loaded/list", "id": 1, "params": {}},
     ]
+
+
+@pytest.mark.parametrize("persisted", [True, False])
+def test_transient_app_server_reads_exact_persisted_codex_identity_and_cleans_up(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    persisted: bool,
+) -> None:
+    codex_session_id = uuid.UUID("01a015f4-f27c-7592-8060-d12313e8d0ce")
+    monkeypatch.setenv("RODEX_RUNTIME_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        runtime_module.secrets, "token_hex", lambda _size: "catalogtoken0001"
+    )
+    read_response: dict[str, object]
+    if persisted:
+        read_response = {
+            "id": 1,
+            "result": {
+                "thread": {
+                    "id": str(codex_session_id),
+                    "ephemeral": False,
+                    "status": {"type": "notLoaded"},
+                }
+            },
+        }
+    else:
+        read_response = {
+            "id": 1,
+            "error": {
+                "code": -32600,
+                "message": f"thread not loaded: {codex_session_id}",
+            },
+        }
+    websocket = CatalogWebSocket(read_response)
+
+    def connector(*_args: object, **_kwargs: object) -> CatalogWebSocket:
+        return websocket
+
+    process = CatalogProcess()
+    spawner = CatalogProcessSpawner(process)
+    launcher = RodexRuntimeLauncher(
+        "/usr/bin/codex",
+        "/usr/bin/tmux",
+        connector=connector,
+        process_spawner=spawner,  # type: ignore[arg-type]
+    )
+
+    assert launcher.codex_session_is_persisted(codex_session_id) is persisted
+
+    assert process.terminated
+    assert spawner.calls[0][0] == (
+        "/usr/bin/codex",
+        "app-server",
+        "--listen",
+        f"unix://{tmp_path / 'catalog-catalogtoken0001.sock'}",
+    )
+    assert websocket.sent == [
+        {
+            "method": "initialize",
+            "id": 0,
+            "params": {
+                "clientInfo": {
+                    "name": "rodex-session-catalog",
+                    "title": "Rodex Session Catalog",
+                    "version": "0.5.0a1",
+                }
+            },
+        },
+        {"method": "initialized", "params": {}},
+        {
+            "method": "thread/read",
+            "id": 1,
+            "params": {
+                "threadId": str(codex_session_id),
+                "includeTurns": False,
+            },
+        },
+    ]
+    assert not (tmp_path / "catalog-catalogtoken0001.sock").exists()
+    assert not (tmp_path / "catalog-catalogtoken0001.log").exists()
 
 
 def test_start_directly_hosts_codex_in_tmux_and_returns_its_session_id(

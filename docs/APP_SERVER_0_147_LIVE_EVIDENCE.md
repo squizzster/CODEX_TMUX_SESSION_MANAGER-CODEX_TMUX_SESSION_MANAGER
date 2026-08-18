@@ -13,8 +13,18 @@ clients, and the [official App Server protocol](https://developers.openai.com/co
   completed normally.
 - `thread/read` did not subscribe B. Reconnecting B likewise received no turn or item
   lifecycle and no approval request.
-- Ephemeral 0.147 threads reject `thread/read(includeTurns=true)`; the opt-in replay uses
-  `includeTurns=false`. Rodex production result reads target persisted TUI threads.
+- A persisted turn started and was then steered with two caller-owned
+  `clientUserMessageId` values. Both emitted `userMessage` items with the corresponding
+  `clientId`, and both survived a direct `thread/read(includeTurns=true)` history read.
+  This is the observed basis for `_dispatch-status`; it is correlation evidence, not a
+  deduplication claim. The replay deletes its exact test-created thread afterward.
+- In a plan-mode read-only case, B started the turn and disconnected. A alone received
+  the exact `item/tool/requestUserInput`, answered one option, received
+  `serverRequest/resolved`, and then received the exact completed turn and final answer.
+  Both clients explicitly opted into 0.147's experimental API capability for this case.
+- Ephemeral 0.147 threads reject `thread/read(includeTurns=true)`, so the correlation
+  replay deliberately uses a persisted, cleanup-scoped thread matching Rodex's
+  production history-read mechanism. The user-input replay remains ephemeral.
 
 The causal conclusion is narrow: the mutation connection may be short-lived while a
 subscribed primary remains continuous. Rodex must therefore preserve and reassign the
@@ -30,6 +40,17 @@ RODEX_RUN_LIVE_TURN_INTEGRATION=1 \
   -k survives_initiator_disconnect -vv
 ```
 
+Replay user-input routing separately (also one authenticated, read-only model turn):
+
+```bash
+RODEX_RUN_LIVE_USER_INPUT_INTEGRATION=1 \
+  uv run pytest tests/test_app_server_unix_integration.py \
+  -k user_input_routes -vv
+```
+
 The approval case remains recorded manual evidence because inducing elevation is
-model-dependent. The replay refuses tool use with `approvalPolicy=never` and read-only
-sandboxing; any unexpected server request is rejected and fails the assertion.
+model-dependent. The ordinary lifecycle replay uses only a harmless `sleep 5` command
+with `approvalPolicy=never` and read-only sandboxing to hold the turn open for steer;
+any unexpected server request is rejected and fails the assertion. The user-input
+replay answers only the expected, exactly scoped request and rejects any other server
+request.

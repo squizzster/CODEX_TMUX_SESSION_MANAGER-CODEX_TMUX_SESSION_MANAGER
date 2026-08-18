@@ -27,11 +27,18 @@ def _characterize_schema(schema_root: Path) -> dict[str, object]:
     turn_start_response = _load_schema(schema_root, "v2/TurnStartResponse.json")
     turn_steer = _load_schema(schema_root, "v2/TurnSteerParams.json")
     turn_interrupt = _load_schema(schema_root, "v2/TurnInterruptParams.json")
+    user_input_request = _load_schema(schema_root, "ToolRequestUserInputParams.json")
+    user_input_response = _load_schema(schema_root, "ToolRequestUserInputResponse.json")
     definitions = thread_read["definitions"]
     agent_message = next(
         option
         for option in definitions["ThreadItem"]["oneOf"]
         if option["title"] == "AgentMessageThreadItem"
+    )
+    user_message = next(
+        option
+        for option in definitions["ThreadItem"]["oneOf"]
+        if option["title"] == "UserMessageThreadItem"
     )
     return {
         "codex_cli_version": SUPPORTED_CODEX_APP_SERVER_VERSION,
@@ -53,8 +60,20 @@ def _characterize_schema(schema_root: Path) -> dict[str, object]:
         ),
         "file_change_statuses": definitions["PatchApplyStatus"]["enum"],
         "turn_start_required_params": turn_start["required"],
+        "turn_start_client_message_id_types": sorted(
+            turn_start["properties"]["clientUserMessageId"]["type"]
+        ),
         "turn_start_response_required_fields": turn_start_response["required"],
         "turn_steer_required_params": turn_steer["required"],
+        "turn_steer_client_message_id_types": sorted(
+            turn_steer["properties"]["clientUserMessageId"]["type"]
+        ),
+        "user_message_client_id_types": sorted(
+            user_message["properties"]["clientId"]["type"]
+        ),
+        "user_message_client_id_required": "clientId" in user_message["required"],
+        "user_input_request_required_params": user_input_request["required"],
+        "user_input_response_required_params": user_input_response["required"],
         "turn_interrupt_required_params": turn_interrupt["required"],
         "server_request_methods": sorted(
             option["properties"]["method"]["enum"][0] for option in server_request["oneOf"]

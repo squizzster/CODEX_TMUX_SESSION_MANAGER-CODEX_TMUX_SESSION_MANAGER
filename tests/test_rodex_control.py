@@ -110,6 +110,7 @@ def test_send_starts_an_idle_turn_after_codex_session_id_verification(
     client = CodexControlClient(
         connector=RoutingConnector(protocol, events),
         request_id_factory=lambda: "rodex:test",
+        dispatch_id_factory=lambda: "rodex:dispatch:test",
     )
     revalidated: list[bool] = []
 
@@ -125,6 +126,7 @@ def test_send_starts_an_idle_turn_after_codex_session_id_verification(
         "params": {
             "threadId": str(CODEX_SESSION_ID),
             "input": [{"type": "text", "text": "run tests"}],
+            "clientUserMessageId": "rodex:dispatch:test",
         },
     }
     assert revalidated == [True]
@@ -334,6 +336,7 @@ def test_exact_start_uses_a_string_request_id_and_returns_both_codex_identities(
     client = CodexControlClient(
         connector=RoutingConnector(protocol, events),
         request_id_factory=lambda: "rodex:request",
+        dispatch_id_factory=lambda: "rodex:dispatch:test",
     )
 
     dispatch = client.start_turn(control(tmp_path), "run tests")
@@ -341,8 +344,10 @@ def test_exact_start_uses_a_string_request_id_and_returns_both_codex_identities(
     assert dispatch.turn_id == "turn-new"
     assert dispatch.thread_id == str(CODEX_SESSION_ID)
     assert dispatch.session_id == str(CODEX_SESSION_ID)
+    assert dispatch.dispatch_id == "rodex:dispatch:test"
     assert protocol.sent[-1]["id"] == "rodex:request"
     assert protocol.sent[-1]["method"] == "turn/start"
+    assert protocol.sent[-1]["params"]["clientUserMessageId"] == "rodex:dispatch:test"
 
 
 def test_exact_start_refuses_to_steer_an_observed_active_turn(tmp_path: Path) -> None:
@@ -503,6 +508,77 @@ def test_exact_result_reads_live_turn_content_without_persisting_it(tmp_path: Pa
     assert result.structured_output == {"ok": True}
     assert result.changed_paths == ("src/a.py", "src/b.py")
     assert protocol.sent[-1]["params"]["includeTurns"] is True
+
+
+@pytest.mark.evolutionary_regression
+def test_dispatch_status_attributes_client_message_id_from_exact_thread_history(
+    tmp_path: Path,
+) -> None:
+    """Current 0.147 evidence: clientUserMessageId is exposed as userMessage.clientId."""
+    turn = {
+        "id": "turn-target",
+        "status": "inProgress",
+        "items": [
+            {
+                "type": "userMessage",
+                "id": "message-target",
+                "clientId": "controller:dispatch:42",
+                "content": [{"type": "text", "text": "run tests"}],
+            }
+        ],
+    }
+    protocol = FakeWebSocket(verified_responses(status="active", turns=[turn]))
+    client = CodexControlClient(connector=RoutingConnector(protocol))
+
+    state, status = client.dispatch_status(
+        control(tmp_path),
+        "controller:dispatch:42",
+    )
+
+    assert state.thread_id == str(CODEX_SESSION_ID)
+    assert status.observation == "accepted"
+    assert status.matches[0].turn_id == "turn-target"
+    assert status.matches[0].turn_status == "inProgress"
+    assert status.matches[0].user_message_item_id == "message-target"
+    assert protocol.sent[-1]["params"]["includeTurns"] is True
+
+
+def test_dispatch_status_keeps_absence_and_duplicate_observations_explicit(
+    tmp_path: Path,
+) -> None:
+    turns = [
+        {
+            "id": f"turn-{index}",
+            "status": "completed",
+            "items": [
+                {
+                    "type": "userMessage",
+                    "id": f"message-{index}",
+                    "clientId": "duplicate-dispatch",
+                    "content": [],
+                }
+            ],
+        }
+        for index in (1, 2)
+    ]
+    ambiguous_protocol = FakeWebSocket(verified_responses(status="idle", turns=turns))
+    ambiguous_client = CodexControlClient(connector=RoutingConnector(ambiguous_protocol))
+
+    _state, ambiguous = ambiguous_client.dispatch_status(
+        control(tmp_path),
+        "duplicate-dispatch",
+    )
+
+    assert ambiguous.observation == "ambiguous"
+    assert [match.turn_id for match in ambiguous.matches] == ["turn-1", "turn-2"]
+
+    absent_protocol = FakeWebSocket(verified_responses(status="idle", turns=turns))
+    absent_client = CodexControlClient(connector=RoutingConnector(absent_protocol))
+
+    _state, absent = absent_client.dispatch_status(control(tmp_path), "not-present")
+
+    assert absent.observation == "not_observed"
+    assert absent.matches == ()
 
 
 @pytest.mark.evolutionary_regression
@@ -772,18 +848,54 @@ def test_exact_wait_accepts_in_progress_thread_before_ready_snapshot_catches_up(
     assert result.status == "completed"
 
 
-def test_lost_mutation_response_is_explicitly_indeterminate(tmp_path: Path) -> None:
+@pytest.mark.evolutionary_regression
+def test_lost_mutation_response_preserves_dispatch_status_hook(tmp_path: Path) -> None:
+    """Current evidence: lost responses keep caller-owned correlation for lookup."""
     protocol = FakeWebSocket(verified_responses(status="idle"))
     events = FakeWebSocket(responses=[json.loads(EVENT_STREAM_READY_MESSAGE)])
     client = CodexControlClient(
         connector=RoutingConnector(protocol, events),
         request_id_factory=lambda: "rodex:request",
+        dispatch_id_factory=lambda: "controller:dispatch:42",
     )
 
-    with pytest.raises(RodexDispatchIndeterminateError, match="acceptance is unknown"):
+    with pytest.raises(
+        RodexDispatchIndeterminateError, match="acceptance is unknown"
+    ) as raised:
         client.start_turn(control(tmp_path), "run tests")
 
+    assert raised.value.dispatch_id == "controller:dispatch:42"
+    assert raised.value.thread_id == str(CODEX_SESSION_ID)
+    assert raised.value.method == "turn/start"
     assert protocol.sent[-1]["method"] == "turn/start"
+
+
+@pytest.mark.evolutionary_regression
+def test_mutation_response_has_a_total_deadline_despite_unrelated_frames(
+    tmp_path: Path,
+) -> None:
+    """Current evidence: legal unrelated frames cannot suppress recovery forever."""
+    protocol = FakeWebSocket(
+        [
+            *verified_responses(status="idle"),
+            {"method": "unrelated/notification", "params": {}},
+        ]
+    )
+    events = FakeWebSocket(responses=[json.loads(EVENT_STREAM_READY_MESSAGE)])
+    clock_values = iter((0.0, 1.0, 6.0))
+    client = CodexControlClient(
+        connector=RoutingConnector(protocol, events),
+        request_id_factory=lambda: "rodex:request",
+        dispatch_id_factory=lambda: "controller:dispatch:deadline",
+        monotonic=lambda: next(clock_values),
+    )
+
+    with pytest.raises(
+        RodexDispatchIndeterminateError, match="acceptance is unknown"
+    ) as raised:
+        client.start_turn(control(tmp_path), "run tests")
+
+    assert raised.value.dispatch_id == "controller:dispatch:deadline"
 
 
 @pytest.mark.evolutionary_regression

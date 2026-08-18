@@ -58,6 +58,10 @@
     "input",
     "threadId"
   ],
+  "turn_start_client_message_id_types": [
+    "null",
+    "string"
+  ],
   "turn_start_response_required_fields": [
     "turn"
   ],
@@ -71,5 +75,24 @@
     "expectedTurnId",
     "input",
     "threadId"
+  ],
+  "turn_steer_client_message_id_types": [
+    "null",
+    "string"
+  ],
+  "user_message_client_id_types": [
+    "null",
+    "string"
+  ],
+  "user_message_client_id_required": false,
+  "user_input_request_required_params": [
+    "isBlocking",
+    "itemId",
+    "questions",
+    "threadId",
+    "turnId"
+  ],
+  "user_input_response_required_params": [
+    "answers"
   ]
 }

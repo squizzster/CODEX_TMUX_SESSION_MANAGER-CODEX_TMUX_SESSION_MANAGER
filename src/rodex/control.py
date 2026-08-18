@@ -29,6 +29,7 @@ Connector = Callable[..., Any]
 Revalidate = Callable[[], None]
 EventWriter = Callable[[str], None]
 _FINAL_AGENT_MESSAGE_BYTE_LIMIT = 64 * 1024
+_MUTATION_RESPONSE_TIMEOUT_SECONDS = 5.0
 
 
 class RodexControlError(RuntimeError):
@@ -37,6 +38,21 @@ class RodexControlError(RuntimeError):
 
 class RodexDispatchIndeterminateError(RodexControlError):
     """A mutating request was sent but its acceptance could not be observed."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        method: str | None = None,
+        dispatch_id: str | None = None,
+        thread_id: str | None = None,
+        turn_id: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.method = method
+        self.dispatch_id = dispatch_id
+        self.thread_id = thread_id
+        self.turn_id = turn_id
 
 
 class RodexWaitTimeoutError(RodexControlError):
@@ -79,8 +95,27 @@ class PromptDispatch:
 
     action: Literal["started", "steered"]
     turn_id: str
+    dispatch_id: str
     thread_id: str | None = None
     session_id: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class CodexDispatchMatch:
+    """One user-message observation attributable to an opaque dispatch ID."""
+
+    turn_id: str
+    turn_status: Literal["completed", "interrupted", "failed", "inProgress"]
+    user_message_item_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class CodexDispatchStatus:
+    """Live evidence for a caller-owned dispatch ID on one exact thread."""
+
+    dispatch_id: str
+    observation: Literal["not_observed", "accepted", "ambiguous"]
+    matches: tuple[CodexDispatchMatch, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -101,6 +136,13 @@ class CodexTurnResult:
     changed_paths_truncated: bool
 
 
+@dataclass(frozen=True, slots=True)
+class _MutationDispatchContext:
+    dispatch_id: str | None
+    thread_id: str
+    turn_id: str | None = None
+
+
 class CodexControlClient:
     """Verify, inspect, steer, wait for, and tail one loaded Codex thread."""
 
@@ -109,10 +151,12 @@ class CodexControlClient:
         *,
         connector: Connector = unix_connect,
         request_id_factory: Callable[[], str] = lambda: f"rodex:{uuid.uuid4()}",
+        dispatch_id_factory: Callable[[], str] = lambda: f"rodex:dispatch:{uuid.uuid4()}",
         monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         self._connect = connector
         self._request_id_factory = request_id_factory
+        self._dispatch_id_factory = dispatch_id_factory
         self._monotonic = monotonic
 
     def inspect(self, control: LiveRodexControl) -> CodexThreadState:
@@ -155,6 +199,7 @@ class CodexControlClient:
         """Start an idle turn or steer the exact active turn with user text."""
         if not isinstance(prompt, str) or not prompt.strip():
             raise ValueError("prompt must be non-empty")
+        dispatch_id = self._new_dispatch_id()
         try:
             with self._open_events(control.protocol_event_socket_path) as events:
                 ready = _expect_event_stream_ready(events)
@@ -181,12 +226,19 @@ class CodexControlClient:
                                 "threadId": str(control.codex_session_id),
                                 "expectedTurnId": state.active_turn_id,
                                 "input": user_input,
+                                "clientUserMessageId": dispatch_id,
                             },
-                            indeterminate_on_connection_loss=True,
+                            indeterminate_context=_MutationDispatchContext(
+                                dispatch_id,
+                                state.thread_id,
+                                state.active_turn_id,
+                            ),
+                            monotonic=self._monotonic,
                         )
                         return PromptDispatch(
                             "steered",
                             _turn_id(result),
+                            dispatch_id,
                             state.thread_id,
                             state.session_id,
                         )
@@ -201,12 +253,18 @@ class CodexControlClient:
                         {
                             "threadId": str(control.codex_session_id),
                             "input": user_input,
+                            "clientUserMessageId": dispatch_id,
                         },
-                        indeterminate_on_connection_loss=True,
+                        indeterminate_context=_MutationDispatchContext(
+                            dispatch_id,
+                            state.thread_id,
+                        ),
+                        monotonic=self._monotonic,
                     )
                     return PromptDispatch(
                         "started",
                         _turn_id(result),
+                        dispatch_id,
                         state.thread_id,
                         state.session_id,
                     )
@@ -218,11 +276,13 @@ class CodexControlClient:
         control: LiveRodexControl,
         prompt: str,
         *,
+        dispatch_id: str | None = None,
         revalidate: Revalidate = lambda: None,
     ) -> PromptDispatch:
         """Start only when the verified thread is observed idle."""
         if not isinstance(prompt, str) or not prompt.strip():
             raise ValueError("prompt must be non-empty")
+        resolved_dispatch_id = self._resolve_dispatch_id(dispatch_id)
         try:
             with self._open_events(control.protocol_event_socket_path) as events:
                 _expect_event_stream_ready(events)
@@ -247,12 +307,18 @@ class CodexControlClient:
                         {
                             "threadId": state.thread_id,
                             "input": [{"type": "text", "text": prompt}],
+                            "clientUserMessageId": resolved_dispatch_id,
                         },
-                        indeterminate_on_connection_loss=True,
+                        indeterminate_context=_MutationDispatchContext(
+                            resolved_dispatch_id,
+                            state.thread_id,
+                        ),
+                        monotonic=self._monotonic,
                     )
                     return PromptDispatch(
                         "started",
                         _turn_id(result),
+                        resolved_dispatch_id,
                         state.thread_id,
                         state.session_id,
                     )
@@ -267,12 +333,14 @@ class CodexControlClient:
         turn_id: str,
         prompt: str,
         *,
+        dispatch_id: str | None = None,
         revalidate: Revalidate = lambda: None,
     ) -> PromptDispatch:
         """Steer only the caller-specified exact active turn."""
         _require_turn_id(turn_id)
         if not isinstance(prompt, str) or not prompt.strip():
             raise ValueError("prompt must be non-empty")
+        resolved_dispatch_id = self._resolve_dispatch_id(dispatch_id)
         try:
             with self._open_events(control.protocol_event_socket_path) as events:
                 _expect_event_stream_ready(events)
@@ -299,12 +367,19 @@ class CodexControlClient:
                             "threadId": state.thread_id,
                             "expectedTurnId": turn_id,
                             "input": [{"type": "text", "text": prompt}],
+                            "clientUserMessageId": resolved_dispatch_id,
                         },
-                        indeterminate_on_connection_loss=True,
+                        indeterminate_context=_MutationDispatchContext(
+                            resolved_dispatch_id,
+                            state.thread_id,
+                            turn_id,
+                        ),
+                        monotonic=self._monotonic,
                     )
                     return PromptDispatch(
                         "steered",
                         _turn_id(result),
+                        resolved_dispatch_id,
                         state.thread_id,
                         state.session_id,
                     )
@@ -343,7 +418,12 @@ class CodexControlClient:
                         self._request_id_factory(),
                         "turn/interrupt",
                         {"threadId": state.thread_id, "turnId": turn_id},
-                        indeterminate_on_connection_loss=True,
+                        indeterminate_context=_MutationDispatchContext(
+                            None,
+                            state.thread_id,
+                            turn_id,
+                        ),
+                        monotonic=self._monotonic,
                     )
                     return state
         except RodexDispatchIndeterminateError:
@@ -373,6 +453,36 @@ class CodexControlClient:
             return _thread_state(thread), _turn_result(turn)
         except (ConnectionClosed, InvalidHandshake, OSError) as error:
             raise RodexControlError(f"Codex control connection ended: {error}") from error
+
+    def dispatch_status(
+        self,
+        control: LiveRodexControl,
+        dispatch_id: str,
+        *,
+        revalidate: Revalidate = lambda: None,
+    ) -> tuple[CodexThreadState, CodexDispatchStatus]:
+        """Observe where one caller-owned dispatch ID appears on the exact thread."""
+        _require_dispatch_id(dispatch_id)
+        try:
+            with self._open_protocol(control.protocol_proxy_socket_path) as websocket:
+                thread = self._verify_and_read_thread(
+                    websocket,
+                    control.codex_session_id,
+                    include_turns=True,
+                    require_compatible=True,
+                )
+            revalidate()
+            return _thread_state(thread), _dispatch_status(thread, dispatch_id)
+        except (ConnectionClosed, InvalidHandshake, OSError) as error:
+            raise RodexControlError(f"Codex control connection ended: {error}") from error
+
+    def _new_dispatch_id(self) -> str:
+        return self._resolve_dispatch_id(None)
+
+    def _resolve_dispatch_id(self, dispatch_id: str | None) -> str:
+        resolved = self._dispatch_id_factory() if dispatch_id is None else dispatch_id
+        _require_dispatch_id(resolved)
+        return resolved
 
     def wait_for_turn(
         self,
@@ -708,10 +818,13 @@ def _request(
     method: str,
     params: dict[str, Any],
     *,
-    indeterminate_on_connection_loss: bool = False,
+    indeterminate_context: _MutationDispatchContext | None = None,
     deadline: float | None = None,
     monotonic: Callable[[], float] = time.monotonic,
 ) -> dict[str, Any]:
+    response_deadline = deadline
+    if response_deadline is None and indeterminate_context is not None:
+        response_deadline = monotonic() + _MUTATION_RESPONSE_TIMEOUT_SECONDS
     try:
         websocket.send(
             json.dumps(
@@ -720,28 +833,52 @@ def _request(
             )
         )
     except (ConnectionClosed, OSError, TimeoutError) as error:
-        if indeterminate_on_connection_loss:
+        if indeterminate_context is not None:
             raise RodexDispatchIndeterminateError(
-                f"{method} dispatch failed before acceptance could be observed"
+                f"{method} dispatch failed before acceptance could be observed",
+                method=method,
+                dispatch_id=indeterminate_context.dispatch_id,
+                thread_id=indeterminate_context.thread_id,
+                turn_id=indeterminate_context.turn_id,
             ) from error
         raise RodexControlError(f"could not send {method}") from error
     while True:
         receive_timeout = 5.0
-        if deadline is not None:
-            remaining = deadline - monotonic()
+        if response_deadline is not None:
+            remaining = response_deadline - monotonic()
             if remaining <= 0:
+                if indeterminate_context is not None:
+                    raise RodexDispatchIndeterminateError(
+                        f"{method} was sent but its acceptance is unknown",
+                        method=method,
+                        dispatch_id=indeterminate_context.dispatch_id,
+                        thread_id=indeterminate_context.thread_id,
+                        turn_id=indeterminate_context.turn_id,
+                    )
                 raise _RodexRequestDeadlineError(f"deadline expired during {method}")
             receive_timeout = min(receive_timeout, remaining)
         try:
             message = websocket.recv(timeout=receive_timeout)
         except (ConnectionClosed, OSError, TimeoutError) as error:
-            if deadline is not None and monotonic() >= deadline:
+            if response_deadline is not None and monotonic() >= response_deadline:
+                if indeterminate_context is not None:
+                    raise RodexDispatchIndeterminateError(
+                        f"{method} was sent but its acceptance is unknown",
+                        method=method,
+                        dispatch_id=indeterminate_context.dispatch_id,
+                        thread_id=indeterminate_context.thread_id,
+                        turn_id=indeterminate_context.turn_id,
+                    ) from error
                 raise _RodexRequestDeadlineError(
                     f"deadline expired during {method}"
                 ) from error
-            if indeterminate_on_connection_loss:
+            if indeterminate_context is not None:
                 raise RodexDispatchIndeterminateError(
-                    f"{method} was sent but its acceptance is unknown"
+                    f"{method} was sent but its acceptance is unknown",
+                    method=method,
+                    dispatch_id=indeterminate_context.dispatch_id,
+                    thread_id=indeterminate_context.thread_id,
+                    turn_id=indeterminate_context.turn_id,
                 ) from error
             raise RodexControlError(f"timed out waiting for {method}") from error
         payload = _protocol_payload(message)
@@ -768,6 +905,52 @@ def _turn_id(result: dict[str, Any]) -> str:
 def _require_turn_id(turn_id: str) -> None:
     if not isinstance(turn_id, str) or not turn_id.strip():
         raise ValueError("turn ID must be non-empty")
+
+
+def _require_dispatch_id(dispatch_id: str) -> None:
+    if not isinstance(dispatch_id, str) or not dispatch_id.strip():
+        raise ValueError("dispatch ID must be non-empty")
+
+
+def _dispatch_status(thread: dict[str, Any], dispatch_id: str) -> CodexDispatchStatus:
+    turns = thread.get("turns")
+    if not isinstance(turns, list):
+        raise RodexControlError("app-server returned invalid thread turns")
+    matches: list[CodexDispatchMatch] = []
+    for turn in turns:
+        if not isinstance(turn, dict):
+            continue
+        turn_id = turn.get("id")
+        turn_status = turn.get("status")
+        items = turn.get("items")
+        if not isinstance(turn_id, str) or turn_status not in {
+            "completed",
+            "interrupted",
+            "failed",
+            "inProgress",
+        }:
+            raise RodexControlError("app-server returned an invalid Codex turn")
+        if not isinstance(items, list):
+            raise RodexControlError("app-server returned invalid Codex turn items")
+        for item in items:
+            if (
+                not isinstance(item, dict)
+                or item.get("type") != "userMessage"
+                or item.get("clientId") != dispatch_id
+            ):
+                continue
+            item_id = item.get("id")
+            if not isinstance(item_id, str) or not item_id:
+                raise RodexControlError("app-server returned an invalid user message item")
+            matches.append(CodexDispatchMatch(turn_id, turn_status, item_id))
+    observation: Literal["not_observed", "accepted", "ambiguous"]
+    if not matches:
+        observation = "not_observed"
+    elif len(matches) == 1:
+        observation = "accepted"
+    else:
+        observation = "ambiguous"
+    return CodexDispatchStatus(dispatch_id, observation, tuple(matches))
 
 
 def _turn_from_thread(thread: dict[str, Any], turn_id: str) -> dict[str, Any]:

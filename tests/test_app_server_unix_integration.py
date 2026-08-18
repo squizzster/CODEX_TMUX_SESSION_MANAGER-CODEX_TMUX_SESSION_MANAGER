@@ -7,6 +7,7 @@ import stat
 import subprocess
 import tempfile
 import time
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -93,12 +94,23 @@ class _LiveTurnLifecycle:
     started: bool
     completed_status: str
     final_text: str | None
+    observed_dispatch_ids: tuple[str, ...]
+    unexpected_server_requests: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _LiveUserInputLifecycle:
+    request_received: bool
+    request_resolved: bool
+    selected_answer: str | None
+    completed_status: str
+    final_text: str | None
     unexpected_server_requests: tuple[str, ...]
 
 
 @pytest.mark.evolutionary_regression
 def test_live_turn_survives_initiator_disconnect_and_streams_to_subscriber() -> None:
-    """Current 0.147 evidence: the subscribed primary owns lifecycle and approvals."""
+    """Current 0.147 evidence: subscriber owns lifecycle and persisted correlation."""
     live_turn_environment = "RODEX_RUN_LIVE_TURN_INTEGRATION"
     if os.environ.get(live_turn_environment) != "1":
         pytest.skip(
@@ -118,6 +130,7 @@ def test_live_turn_survives_initiator_disconnect_and_streams_to_subscriber() -> 
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
+    thread_id: str | None = None
     try:
         _wait_for_socket(process, socket_path)
         with _connect(socket_path) as subscriber:
@@ -128,7 +141,7 @@ def test_live_turn_survives_initiator_disconnect_and_streams_to_subscriber() -> 
                     subscriber,
                     "thread:start",
                     "thread/start",
-                    {"ephemeral": True, "cwd": str(workspace)},
+                    {"ephemeral": False, "cwd": str(workspace)},
                 )
                 thread_id = thread_response["result"]["thread"]["id"]
                 _request(
@@ -147,18 +160,46 @@ def test_live_turn_survives_initiator_disconnect_and_streams_to_subscriber() -> 
                             {
                                 "type": "text",
                                 "text": (
-                                    "Reply exactly RODEX_FIDELITY_OK. Do not use tools."
+                                    "Use the shell tool to run `sleep 5`. After it "
+                                    "finishes, wait for one steering message before "
+                                    "answering. Do not modify files."
                                 ),
                             }
                         ],
                         "approvalPolicy": "never",
                         "sandboxPolicy": {"type": "readOnly"},
+                        "clientUserMessageId": "rodex:live:start-fidelity",
                     },
                     timeout=30,
                 )
                 turn = turn_response["result"]["turn"]
                 assert turn["status"] == "inProgress"
                 turn_id = turn["id"]
+                _wait_for_exact_turn_started(
+                    subscriber,
+                    thread_id=thread_id,
+                    turn_id=turn_id,
+                    timeout=10,
+                )
+                steer_response = _request(
+                    initiator,
+                    "turn:steer",
+                    "turn/steer",
+                    {
+                        "threadId": thread_id,
+                        "expectedTurnId": turn_id,
+                        "input": [
+                            {
+                                "type": "text",
+                                "text": (
+                                    "Reply exactly RODEX_FIDELITY_OK. Do not use tools."
+                                ),
+                            }
+                        ],
+                        "clientUserMessageId": "rodex:live:steer-fidelity",
+                    },
+                )
+                assert steer_response["result"]["turnId"] == turn_id
                 initiator.close()
 
             lifecycle = _exact_turn_lifecycle(
@@ -166,11 +207,172 @@ def test_live_turn_survives_initiator_disconnect_and_streams_to_subscriber() -> 
                 thread_id=thread_id,
                 turn_id=turn_id,
                 timeout=120,
+                already_started=True,
+            )
+            assert lifecycle.started
+            assert lifecycle.completed_status == "completed"
+            assert lifecycle.final_text == "RODEX_FIDELITY_OK"
+            assert set(lifecycle.observed_dispatch_ids) == {
+                "rodex:live:start-fidelity",
+                "rodex:live:steer-fidelity",
+            }
+            assert lifecycle.unexpected_server_requests == ()
+
+            read_response = _request(
+                subscriber,
+                "thread:read:dispatch-history",
+                "thread/read",
+                {"threadId": thread_id, "includeTurns": True},
+            )
+            persisted_thread = read_response["result"]["thread"]
+            persisted_turn = next(
+                candidate
+                for candidate in persisted_thread["turns"]
+                if candidate.get("id") == turn_id
+            )
+            persisted_dispatch_ids = {
+                item.get("clientId")
+                for item in persisted_turn["items"]
+                if item.get("type") == "userMessage"
+            }
+            assert persisted_dispatch_ids == {
+                "rodex:live:start-fidelity",
+                "rodex:live:steer-fidelity",
+            }
+            _request(
+                subscriber,
+                "thread:delete:test-created",
+                "thread/delete",
+                {"threadId": thread_id},
+            )
+            thread_id = None
+    finally:
+        if thread_id is not None and process.poll() is None:
+            with suppress(Exception), _connect(socket_path) as cleanup:
+                _initialize(cleanup, "cleanup")
+                _request(
+                    cleanup,
+                    "thread:delete:test-created",
+                    "thread/delete",
+                    {"threadId": thread_id},
+                )
+        process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=5)
+        shutil.rmtree(integration_root)
+
+
+@pytest.mark.evolutionary_regression
+def test_live_user_input_routes_to_subscriber_after_initiator_disconnect() -> None:
+    """Current 0.147 evidence: subscribed primary owns request_user_input."""
+    live_user_input_environment = "RODEX_RUN_LIVE_USER_INPUT_INTEGRATION"
+    if os.environ.get(live_user_input_environment) != "1":
+        pytest.skip(
+            f"set {live_user_input_environment}=1 to run the authenticated "
+            "model-backed test"
+        )
+    codex_binary = shutil.which("codex")
+    if codex_binary is None:
+        pytest.fail("opted-in live test requires Codex CLI")
+    integration_root = Path(
+        tempfile.mkdtemp(prefix="input-it-", dir=default_runtime_root())
+    )
+    integration_root.chmod(0o700)
+    workspace = integration_root / "workspace"
+    workspace.mkdir(mode=0o700)
+    socket_path = integration_root / "app.sock"
+    process = subprocess.Popen(
+        [codex_binary, "app-server", "--listen", f"unix://{socket_path}"],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        _wait_for_socket(process, socket_path)
+        with _connect(socket_path) as subscriber:
+            _initialize(subscriber, "user-input-subscriber", experimental_api=True)
+            model_response = _request(
+                subscriber,
+                "model:list",
+                "model/list",
+                {},
+            )
+            models = model_response["result"].get("data", [])
+            default_model = next(
+                model["model"]
+                for model in models
+                if isinstance(model, dict) and model.get("isDefault") is True
+            )
+            with _connect(socket_path) as initiator:
+                _initialize(initiator, "user-input-initiator", experimental_api=True)
+                initiator_server_requests: list[str] = []
+                thread_response = _request(
+                    subscriber,
+                    "user-input:thread:start",
+                    "thread/start",
+                    {"ephemeral": True, "cwd": str(workspace)},
+                )
+                thread_id = thread_response["result"]["thread"]["id"]
+                _request(
+                    initiator,
+                    "user-input:thread:read",
+                    "thread/read",
+                    {"threadId": thread_id, "includeTurns": False},
+                )
+                turn_response = _request(
+                    initiator,
+                    "user-input:turn:start",
+                    "turn/start",
+                    {
+                        "threadId": thread_id,
+                        "input": [
+                            {
+                                "type": "text",
+                                "text": (
+                                    "Call request_user_input exactly once before "
+                                    "answering. Ask one question with id fidelity_choice, "
+                                    "header Fidelity, question 'Choose the fidelity "
+                                    "path.', and options Alpha and Beta. After receiving "
+                                    "the answer, reply exactly "
+                                    "RODEX_USER_INPUT_OK:<selected label>. Do not use "
+                                    "other tools."
+                                ),
+                            }
+                        ],
+                        "approvalPolicy": "never",
+                        "sandboxPolicy": {"type": "readOnly"},
+                        "collaborationMode": {
+                            "mode": "plan",
+                            "settings": {
+                                "model": default_model,
+                                "developer_instructions": None,
+                            },
+                        },
+                    },
+                    timeout=30,
+                    observed_server_requests=initiator_server_requests,
+                )
+                turn = turn_response["result"]["turn"]
+                assert turn["status"] == "inProgress"
+                turn_id = turn["id"]
+                initiator.close()
+
+            lifecycle = _answer_exact_user_input(
+                subscriber,
+                thread_id=thread_id,
+                turn_id=turn_id,
+                timeout=120,
             )
 
-        assert lifecycle.started
+        assert lifecycle.request_received
+        assert initiator_server_requests == []
+        assert lifecycle.request_resolved
+        assert lifecycle.selected_answer is not None
         assert lifecycle.completed_status == "completed"
-        assert lifecycle.final_text == "RODEX_FIDELITY_OK"
+        assert lifecycle.final_text == (f"RODEX_USER_INPUT_OK:{lifecycle.selected_answer}")
         assert lifecycle.unexpected_server_requests == ()
     finally:
         process.terminate()
@@ -203,18 +405,26 @@ def _wait_for_socket(process: subprocess.Popen[bytes], socket_path: Path) -> Non
         time.sleep(0.02)
 
 
-def _initialize(websocket: Any, name: str) -> None:
+def _initialize(
+    websocket: Any,
+    name: str,
+    *,
+    experimental_api: bool = False,
+) -> None:
+    params: dict[str, Any] = {
+        "clientInfo": {
+            "name": "rodex-live-integration",
+            "title": name,
+            "version": "1",
+        }
+    }
+    if experimental_api:
+        params["capabilities"] = {"experimentalApi": True}
     response = _request(
         websocket,
         f"{name}:initialize",
         "initialize",
-        {
-            "clientInfo": {
-                "name": "rodex-live-integration",
-                "title": name,
-                "version": "1",
-            }
-        },
+        params,
     )
     require_supported_app_server(response["result"])
     websocket.send(json.dumps({"method": "initialized", "params": {}}))
@@ -227,11 +437,42 @@ def _request(
     params: dict[str, Any],
     *,
     timeout: float = 5,
+    observed_server_requests: list[str] | None = None,
 ) -> dict[str, Any]:
     websocket.send(json.dumps({"id": request_id, "method": method, "params": params}))
-    response = _response_for(websocket, request_id, timeout=timeout)
+    response = _response_for(
+        websocket,
+        request_id,
+        timeout=timeout,
+        observed_server_requests=observed_server_requests,
+    )
     assert "error" not in response, response.get("error")
     return response
+
+
+def _wait_for_exact_turn_started(
+    websocket: Any,
+    *,
+    thread_id: str,
+    turn_id: str,
+    timeout: float,
+) -> None:
+    deadline = time.monotonic() + timeout
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError(f"timed out waiting for exact turn {turn_id} to start")
+        payload = json.loads(websocket.recv(timeout=remaining))
+        params = payload.get("params")
+        if (
+            payload.get("method") != "turn/started"
+            or not isinstance(params, dict)
+            or params.get("threadId") != thread_id
+        ):
+            continue
+        turn = params.get("turn")
+        if isinstance(turn, dict) and turn.get("id") == turn_id:
+            return
 
 
 def _exact_turn_lifecycle(
@@ -240,10 +481,12 @@ def _exact_turn_lifecycle(
     thread_id: str,
     turn_id: str,
     timeout: float,
+    already_started: bool = False,
 ) -> _LiveTurnLifecycle:
     deadline = time.monotonic() + timeout
-    started = False
+    started = already_started
     final_text: str | None = None
+    observed_dispatch_ids: list[str] = []
     unexpected_server_requests: list[str] = []
     while True:
         remaining = deadline - time.monotonic()
@@ -275,7 +518,11 @@ def _exact_turn_lifecycle(
                 started = True
         elif method == "item/completed" and params.get("turnId") == turn_id:
             item = params.get("item", {})
-            if (
+            if isinstance(item, dict) and item.get("type") == "userMessage":
+                client_id = item.get("clientId")
+                if isinstance(client_id, str):
+                    observed_dispatch_ids.append(client_id)
+            elif (
                 isinstance(item, dict)
                 and item.get("type") == "agentMessage"
                 and item.get("phase") == "final_answer"
@@ -289,17 +536,138 @@ def _exact_turn_lifecycle(
                     started,
                     str(turn.get("status")),
                     final_text,
+                    tuple(observed_dispatch_ids),
                     tuple(unexpected_server_requests),
                 )
 
 
-def _response_for(websocket: Any, request_id: str, *, timeout: float = 5) -> dict[str, Any]:
+def _answer_exact_user_input(
+    websocket: Any,
+    *,
+    thread_id: str,
+    turn_id: str,
+    timeout: float,
+) -> _LiveUserInputLifecycle:
+    deadline = time.monotonic() + timeout
+    request_received = False
+    request_resolved = False
+    selected_answer: str | None = None
+    final_text: str | None = None
+    request_id: object | None = None
+    unexpected_server_requests: list[str] = []
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError(f"timed out waiting for exact turn {turn_id}")
+        payload = json.loads(websocket.recv(timeout=remaining))
+        if "method" in payload and "id" in payload:
+            method = str(payload["method"])
+            params = payload.get("params")
+            if method != "item/tool/requestUserInput":
+                unexpected_server_requests.append(method)
+                websocket.send(
+                    json.dumps(
+                        {
+                            "id": payload["id"],
+                            "error": {
+                                "code": -32601,
+                                "message": "unsupported in live user-input test",
+                            },
+                        }
+                    )
+                )
+                continue
+            assert isinstance(params, dict)
+            assert params.get("threadId") == thread_id
+            assert params.get("turnId") == turn_id
+            questions = params.get("questions")
+            assert isinstance(questions, list) and len(questions) == 1
+            question = questions[0]
+            assert isinstance(question, dict)
+            question_id = question.get("id")
+            assert isinstance(question_id, str)
+            options = question.get("options")
+            assert isinstance(options, list) and options
+            first_option = options[0]
+            assert isinstance(first_option, dict)
+            option_label = first_option.get("label")
+            assert isinstance(option_label, str)
+            selected_answer = option_label
+            request_id = payload["id"]
+            request_received = True
+            websocket.send(
+                json.dumps(
+                    {
+                        "id": request_id,
+                        "result": {
+                            "answers": {
+                                question_id: {"answers": [selected_answer]},
+                            }
+                        },
+                    }
+                )
+            )
+            continue
+        method = payload.get("method")
+        params = payload.get("params")
+        if not isinstance(params, dict) or params.get("threadId") != thread_id:
+            continue
+        if method == "serverRequest/resolved" and params.get("requestId") == request_id:
+            request_resolved = True
+        elif method == "item/completed" and params.get("turnId") == turn_id:
+            item = params.get("item", {})
+            if (
+                isinstance(item, dict)
+                and item.get("type") == "agentMessage"
+                and item.get("phase") == "final_answer"
+            ):
+                text = item.get("text")
+                final_text = text if isinstance(text, str) else None
+        elif method == "turn/completed":
+            turn = params.get("turn", {})
+            if isinstance(turn, dict) and turn.get("id") == turn_id:
+                return _LiveUserInputLifecycle(
+                    request_received,
+                    request_resolved,
+                    selected_answer,
+                    str(turn.get("status")),
+                    final_text,
+                    tuple(unexpected_server_requests),
+                )
+
+
+def _response_for(
+    websocket: Any,
+    request_id: str,
+    *,
+    timeout: float = 5,
+    observed_server_requests: list[str] | None = None,
+) -> dict[str, Any]:
     deadline = time.monotonic() + timeout
     while True:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise TimeoutError(f"timed out waiting for App Server request {request_id}")
         payload = json.loads(websocket.recv(timeout=remaining))
+        if (
+            observed_server_requests is not None
+            and isinstance(payload, dict)
+            and isinstance(payload.get("method"), str)
+            and "id" in payload
+        ):
+            observed_server_requests.append(payload["method"])
+            websocket.send(
+                json.dumps(
+                    {
+                        "id": payload["id"],
+                        "error": {
+                            "code": -32601,
+                            "message": "unexpected request on mutation initiator",
+                        },
+                    }
+                )
+            )
+            continue
         if (
             isinstance(payload, dict)
             and payload.get("id") == request_id

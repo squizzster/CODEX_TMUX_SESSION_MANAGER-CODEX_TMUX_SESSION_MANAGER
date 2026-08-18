@@ -130,10 +130,15 @@ analytics sidecar.
   prompt to the session's single Codex thread, regardless of how many tmux clients
   are attached. Offline and unchanged names do not send one.
 - `_send`, idle-based `_wait`, and `_tail` remain compatibility commands.
-- `_inspect --json` reports the exact active turn. `_start`, `_steer`, exact `_wait`,
-  `_interrupt`, and `_result` use stdin and/or a caller-supplied turn ID, emit one
-  schema-v1 envelope, and require the persisted runtime UUID. Results stay App
-  Server-owned rather than becoming a second SQLite conversation store.
+- `_inspect --json` reports the exact active turn. `_start` and `_steer` accept an
+  optional caller-owned `--dispatch ID`, while `_dispatch-status` observes that ID in
+  exact App Server thread history. Exact `_wait`, `_interrupt`, and `_result` use a
+  caller-supplied turn ID. Every machine command emits one schema-v1 envelope and
+  requires the persisted runtime UUID. Results stay App Server-owned rather than
+  becoming a second SQLite conversation store.
+- A resumed runtime intentionally uses the caller's current working directory. This
+  lets a moved home/project/worktree location travel with the human who resumes it;
+  Rodex does not permanently pin session identity to its original workspace path.
 
 ## Lifecycle
 

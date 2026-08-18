@@ -62,7 +62,8 @@ Apply these standards to future schema decisions. These authorative standards ma
 - `rodex_sessions` contains one signed-BIGINT Rodex session ID, the two signed
   halves of the Codex session ID, and permanent/optional display-name links. The public Rodex
   session ID is always serialized as a 16-character lowercase hex string, never a JSON
-  number. The ALPHA schema is stored in `rodex-v3.sqlite3`.
+  number. This incompatible ALPHA schema generation is stored in `rodex-v4.sqlite3`;
+  Rodex leaves earlier generation files untouched.
 - `rodex_runtime_instances` contains the two signed-BIGINT halves of the one current
   random runtime UUID and its start time for a Rodex session. Unique indexes fence both
   session cardinality and the ordered identity pair against UUID reuse.

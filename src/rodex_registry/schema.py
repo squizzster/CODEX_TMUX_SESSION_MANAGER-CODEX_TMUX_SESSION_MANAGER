@@ -44,6 +44,12 @@ RODEX_RUNTIME_INSTANCES_SESSION_UNIQUE_INDEX: Final = (
 RODEX_RUNTIME_INSTANCES_RUNTIME_ID_UNIQUE_INDEX: Final = (
     "rodex_runtime_instances_runtime_id_unique"
 )
+MODEL_NAMES_TABLE: Final = "model_names"
+MODEL_NAMES_NAME_OF_THE_MODEL_UNIQUE_INDEX: Final = "model_names_name_of_the_model_unique"
+REASONING_EFFORT_NAMES_TABLE: Final = "reasoning_effort_names"
+REASONING_EFFORT_NAMES_NAME_OF_THE_REASONING_EFFORT_UNIQUE_INDEX: Final = (
+    "reasoning_effort_names_name_of_the_reasoning_effort_unique"
+)
 RODEX_SESSIONS_STATISTICS_TABLE: Final = "rodex_sessions_statistics"
 RODEX_SESSIONS_STATISTICS_SESSION_UNIQUE_INDEX: Final = (
     "rodex_sessions_statistics_rodex_sessions_id_unique"
@@ -221,6 +227,29 @@ ON {RODEX_RUNTIME_INSTANCES_TABLE} (rodex_sessions_id)
 _CREATE_RUNTIME_INSTANCES_RUNTIME_ID_UNIQUE_INDEX = f"""
 CREATE UNIQUE INDEX IF NOT EXISTS {RODEX_RUNTIME_INSTANCES_RUNTIME_ID_UNIQUE_INDEX}
 ON {RODEX_RUNTIME_INSTANCES_TABLE} (runtime_id_signed_bigint)
+"""
+_CREATE_MODEL_NAMES_TABLE = f"""
+CREATE TABLE IF NOT EXISTS {MODEL_NAMES_TABLE} (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name_of_the_model TEXT NOT NULL CHECK (length(trim(name_of_the_model)) > 0)
+)
+"""
+_CREATE_MODEL_NAMES_NAME_OF_THE_MODEL_UNIQUE_INDEX = f"""
+CREATE UNIQUE INDEX IF NOT EXISTS {MODEL_NAMES_NAME_OF_THE_MODEL_UNIQUE_INDEX}
+ON {MODEL_NAMES_TABLE} (name_of_the_model)
+"""
+_CREATE_REASONING_EFFORT_NAMES_TABLE = f"""
+CREATE TABLE IF NOT EXISTS {REASONING_EFFORT_NAMES_TABLE} (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name_of_the_reasoning_effort TEXT NOT NULL CHECK (
+        length(trim(name_of_the_reasoning_effort)) > 0
+    )
+)
+"""
+_CREATE_REASONING_EFFORT_NAMES_NAME_OF_THE_REASONING_EFFORT_UNIQUE_INDEX = f"""
+CREATE UNIQUE INDEX IF NOT EXISTS
+    {REASONING_EFFORT_NAMES_NAME_OF_THE_REASONING_EFFORT_UNIQUE_INDEX}
+ON {REASONING_EFFORT_NAMES_TABLE} (name_of_the_reasoning_effort)
 """
 _CREATE_STATISTICS_TABLE = f"""
 CREATE TABLE IF NOT EXISTS {RODEX_SESSIONS_STATISTICS_TABLE} (
@@ -445,7 +474,7 @@ CREATE TABLE IF NOT EXISTS {RODEX_SESSIONS_STATISTICS_NAMED_COUNTS_TABLE} (
     ),
     count_kind TEXT NOT NULL CHECK (count_kind IN (
         'command_exit_status', 'command_family', 'model_tool', 'file_change_type',
-        'web_action', 'collaboration_tool', 'model', 'goal_status'
+        'web_action', 'collaboration_tool', 'goal_status'
     )),
     count_name TEXT NOT NULL CHECK (length(count_name) > 0),
     occurrence_count INTEGER NOT NULL CHECK (occurrence_count > 0),
@@ -565,6 +594,8 @@ CREATE TABLE IF NOT EXISTS {RODEX_SESSIONS_STATISTICS_TURNS_TABLE} (
     started_at_utc TEXT DEFAULT NULL,
     terminal_at_utc TEXT DEFAULT NULL,
     outcome TEXT NOT NULL CHECK (outcome IN ('open', 'completed', 'aborted')),
+    model_names_id INTEGER DEFAULT NULL,
+    reasoning_effort_names_id INTEGER DEFAULT NULL,
     duration_ms INTEGER DEFAULT NULL CHECK (duration_ms IS NULL OR duration_ms >= 0),
     time_to_first_token_ms INTEGER DEFAULT NULL CHECK (
         time_to_first_token_ms IS NULL OR time_to_first_token_ms >= 0
@@ -629,7 +660,6 @@ CREATE TABLE IF NOT EXISTS {RODEX_SESSIONS_STATISTICS_TURNS_TABLE} (
     ),
     compactions_count INTEGER NOT NULL CHECK (compactions_count >= 0),
     workspace_digest TEXT DEFAULT NULL,
-    model TEXT DEFAULT NULL,
     local_start_hour INTEGER DEFAULT NULL CHECK (
         local_start_hour IS NULL OR local_start_hour BETWEEN 0 AND 23
     ),
@@ -674,7 +704,10 @@ CREATE TABLE IF NOT EXISTS {RODEX_SESSIONS_STATISTICS_TURNS_TABLE} (
     FOREIGN KEY (rodex_sessions_id, included_statistics_revision)
         REFERENCES {RODEX_SESSIONS_STATISTICS_TABLE}
             (rodex_sessions_id, statistics_revision)
-        DEFERRABLE INITIALLY DEFERRED
+        DEFERRABLE INITIALLY DEFERRED,
+    FOREIGN KEY (model_names_id) REFERENCES {MODEL_NAMES_TABLE} (id),
+    FOREIGN KEY (reasoning_effort_names_id)
+        REFERENCES {REASONING_EFFORT_NAMES_TABLE} (id)
 )
 """
 _CREATE_STATISTICS_TURNS_SOURCE_TURN_UNIQUE_INDEX = f"""
@@ -843,6 +876,26 @@ def initialise_rodex_database(database_path: str | os.PathLike[str] | None = Non
             RODEX_RUNTIME_INSTANCES_TABLE,
             RODEX_RUNTIME_INSTANCES_RUNTIME_ID_UNIQUE_INDEX,
             ["runtime_id_signed_bigint"],
+        )
+        connection.execute(_CREATE_MODEL_NAMES_TABLE)
+        _verify_model_names_table(connection)
+        connection.execute(_CREATE_MODEL_NAMES_NAME_OF_THE_MODEL_UNIQUE_INDEX)
+        _verify_unique_index(
+            connection,
+            MODEL_NAMES_TABLE,
+            MODEL_NAMES_NAME_OF_THE_MODEL_UNIQUE_INDEX,
+            ["name_of_the_model"],
+        )
+        connection.execute(_CREATE_REASONING_EFFORT_NAMES_TABLE)
+        _verify_reasoning_effort_names_table(connection)
+        connection.execute(
+            _CREATE_REASONING_EFFORT_NAMES_NAME_OF_THE_REASONING_EFFORT_UNIQUE_INDEX
+        )
+        _verify_unique_index(
+            connection,
+            REASONING_EFFORT_NAMES_TABLE,
+            REASONING_EFFORT_NAMES_NAME_OF_THE_REASONING_EFFORT_UNIQUE_INDEX,
+            ["name_of_the_reasoning_effort"],
         )
         connection.execute(_CREATE_STATISTICS_TABLE)
         _verify_statistics_table(connection)
@@ -1236,6 +1289,45 @@ def _verify_runtime_instances_table(connection: sqlite3.Connection) -> None:
     )
 
 
+def _verify_model_names_table(connection: sqlite3.Connection) -> None:
+    _verify_lookup_name_table(
+        connection,
+        MODEL_NAMES_TABLE,
+        "name_of_the_model",
+    )
+
+
+def _verify_reasoning_effort_names_table(connection: sqlite3.Connection) -> None:
+    _verify_lookup_name_table(
+        connection,
+        REASONING_EFFORT_NAMES_TABLE,
+        "name_of_the_reasoning_effort",
+    )
+
+
+def _verify_lookup_name_table(
+    connection: sqlite3.Connection,
+    table_name: str,
+    name_column: str,
+) -> None:
+    _verify_table_columns(
+        connection,
+        table_name,
+        [
+            ("id", "INTEGER", 0, 1),
+            (name_column, "TEXT", 1, 0),
+        ],
+    )
+    _verify_table_definition_contains(
+        connection,
+        table_name,
+        (
+            "ID INTEGER PRIMARY KEY AUTOINCREMENT",
+            f"LENGTH(TRIM({name_column.upper()})) > 0",
+        ),
+    )
+
+
 def _verify_statistics_table(connection: sqlite3.Connection) -> None:
     _verify_table_columns(
         connection,
@@ -1422,6 +1514,8 @@ def _verify_statistics_turns_table(connection: sqlite3.Connection) -> None:
             ("started_at_utc", "TEXT", 0, 0),
             ("terminal_at_utc", "TEXT", 0, 0),
             ("outcome", "TEXT", 1, 0),
+            ("model_names_id", "INTEGER", 0, 0),
+            ("reasoning_effort_names_id", "INTEGER", 0, 0),
             *TURN_STATISTICS_SCALARS.schema_columns,
         ],
     )
@@ -1454,6 +1548,12 @@ def _verify_statistics_turns_table(connection: sqlite3.Connection) -> None:
             RODEX_SESSIONS_STATISTICS_TABLE,
             "included_statistics_revision",
             "statistics_revision",
+        ),
+        (MODEL_NAMES_TABLE, "model_names_id", "id"),
+        (
+            REASONING_EFFORT_NAMES_TABLE,
+            "reasoning_effort_names_id",
+            "id",
         ),
     }
     if observed_foreign_keys != expected_foreign_keys:

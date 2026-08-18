@@ -142,7 +142,7 @@ preference. See the current [tmux manual](https://man.openbsd.org/tmux.1) and
 | `./rodex _wait edgar-work --turn TURN_ID --timeout 30m --json` | Wait for one exact turn without interrupting on timeout. |
 | `./rodex _interrupt edgar-work --turn TURN_ID --json` | Interrupt one exact active turn. |
 | `./rodex _result edgar-work --turn TURN_ID --json` | Read bounded live result data without copying it into SQLite. |
-| `./rodex _stats edgar-work` | Show the latest successful aggregate statistics. |
+| `./rodex _stats edgar-work` | Show the latest successful aggregate statistics, including per-turn-derived model and reasoning-effort counts. |
 | `./rodex _stats edgar-work --json` | Emit the snapshot and freshness metadata as JSON. |
 | `./rodex _stats edgar-work --turn TURN_ID` | Show one exact turn from the latest snapshot. |
 | `./rodex _stats edgar-work --turn TURN_ID --source CODEX_SESSION_ID --json` | Qualify a turn ID across resumed Codex sources. |
@@ -221,8 +221,8 @@ codebase for later re-enablement; input currently passes directly to the Codex T
 ## Local data
 
 The durable per-user registry defaults to
-`$XDG_STATE_HOME/rodex/rodex-v5.sqlite3`, or
-`~/.local/state/rodex/rodex-v5.sqlite3` when `XDG_STATE_HOME` is unset. Set
+`$XDG_STATE_HOME/rodex/rodex-v6.sqlite3`, or
+`~/.local/state/rodex/rodex-v6.sqlite3` when `XDG_STATE_HOME` is unset. Set
 `RODEX_DATABASE_PATH` to select another database.
 
 Rodex session IDs are random 64-bit values rendered only as 16 lowercase hex
@@ -236,9 +236,9 @@ pipeline. SQLite stores each Rodex-owned ID losslessly in one signed `BIGINT` an
 enforces its domain uniqueness. Codex session IDs remain Codex-owned 128-bit values and
 are stored losslessly across two `BIGINT` columns.
 
-Version 5 is an incompatible ALPHA schema with no v4 reader or migration path. Rodex
-leaves `rodex-v4.sqlite3` untouched; explicitly selecting a v4 database fails exact
-schema verification rather than falling back or rewriting it.
+Version 6 is an incompatible ALPHA schema with no v5 reader or migration path. Rodex
+leaves `rodex-v5.sqlite3` and earlier generations untouched; explicitly selecting one
+fails exact schema verification rather than falling back or rewriting it.
 
 Short-lived Unix sockets and app-server logs use `$XDG_RUNTIME_DIR/rodex`, normally
 `/run/user/<uid>/rodex`. When `XDG_RUNTIME_DIR` is unset or that socket path would be
@@ -258,11 +258,13 @@ The Rodex registry also stores authenticated rollout provenance, independent ana
 worker health, and the latest successful derived statistics snapshot. Each session host
 runs a low-priority, fail-open sidecar that analyzes complete JSONL record prefixes in a
 fresh in-memory analyzer. Rodex persists typed session/turn columns plus normalized
-distribution and named-count rows, so metrics remain directly queryable and JSON output
-can be rebuilt deterministically. It never stores copied prompts, responses, commands,
-tool output, raw events, or redundant statistics JSON. Canonical rollout paths and
-SHA-256 digests are sensitive local metadata, so the database remains private to its
-POSIX user. Codex remains responsible for raw history.
+distribution and named-count rows. Model and reasoning effort remain separate nullable
+turn facts whose stable integer IDs reference dedicated lookup tables; their session
+counts are derived from those exact turn rows. Metrics therefore remain directly
+queryable and JSON output can be rebuilt deterministically. Rodex never stores copied
+prompts, responses, commands, tool output, raw events, or redundant statistics JSON.
+Canonical rollout paths and SHA-256 digests are sensitive local metadata, so the
+database remains private to its POSIX user. Codex remains responsible for raw history.
 
 ## Documentation
 

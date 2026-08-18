@@ -28,6 +28,8 @@ def test_scalar_layouts_follow_projection_field_order_without_parallel_lists() -
         "started_at_utc",
         "terminal_at_utc",
         "outcome",
+        "model",
+        "reasoning_effort",
         "named_counts",
     }
 

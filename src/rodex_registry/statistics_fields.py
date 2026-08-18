@@ -136,6 +136,8 @@ TURN_STATISTICS_SCALARS: Final = _scalar_layout(
             "started_at_utc",
             "terminal_at_utc",
             "outcome",
+            "model",
+            "reasoning_effort",
             "named_counts",
         }
     ),

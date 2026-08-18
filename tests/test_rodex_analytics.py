@@ -119,6 +119,15 @@ def _rollout(root: Path, codex_session_id: uuid.UUID) -> Path:
         },
         {
             "timestamp": "2026-08-16T12:00:02Z",
+            "type": "turn_context",
+            "payload": {
+                "turn_id": "turn-test",
+                "model": "gpt-test",
+                "effort": "xhigh",
+            },
+        },
+        {
+            "timestamp": "2026-08-16T12:00:03Z",
             "type": "event_msg",
             "payload": {"type": "task_complete", "turn_id": "turn-test"},
         },
@@ -607,6 +616,8 @@ def test_real_adapter_uses_existing_in_memory_analyzer_api(tmp_path: Path) -> No
         == CODEX_SESSION_ID
     )
     assert calculation.statistics_projection.turn_statistics[0].codex_turn_id == "turn-test"
+    assert calculation.statistics_projection.turn_statistics[0].model == "gpt-test"
+    assert calculation.statistics_projection.turn_statistics[0].reasoning_effort == "xhigh"
 
 
 def test_real_worker_publishes_exact_turn_projection_into_rodex_sql(
@@ -620,13 +631,15 @@ def test_real_worker_publishes_exact_turn_projection_into_rodex_sql(
 
     exact = read_rodex_session_turn_statistics(1, "turn-test", config.rodex_database_path)
     assert exact.statistics is not None
-    assert exact.statistics.statistics_projection_schema_version == "rodex-statistics-v3"
+    assert exact.statistics.statistics_projection_schema_version == "rodex-statistics-v4"
     assert exact.worker is not None
     assert exact.worker.worker_state == "up_to_date"
     assert exact.turn is not None
     assert exact.turn.codex_session_id == CODEX_SESSION_ID
     assert exact.turn.included_statistics_revision == exact.statistics.statistics_revision
     assert exact.turn.outcome == "completed"
+    assert exact.turn.projection.model == "gpt-test"
+    assert exact.turn.projection.reasoning_effort == "xhigh"
 
 
 @pytest.mark.parametrize(

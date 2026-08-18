@@ -545,7 +545,7 @@ def test_default_database_path_uses_xdg_state_home(
     state_home = tmp_path / "state"
     monkeypatch.setenv("XDG_STATE_HOME", str(state_home))
 
-    assert default_rodex_database_path() == state_home / "rodex" / "rodex-v5.sqlite3"
+    assert default_rodex_database_path() == state_home / "rodex" / "rodex-v6.sqlite3"
 
 
 def test_default_database_path_uses_home_state_directory_without_xdg_override(
@@ -557,12 +557,12 @@ def test_default_database_path_uses_home_state_directory_without_xdg_override(
     monkeypatch.setattr(Path, "home", lambda: home)
 
     assert default_rodex_database_path() == (
-        home / ".local" / "state" / "rodex" / "rodex-v5.sqlite3"
+        home / ".local" / "state" / "rodex" / "rodex-v6.sqlite3"
     )
 
 
 @pytest.mark.evolutionary_regression
-def test_incompatible_schema_generation_leaves_v4_database_untouched(
+def test_incompatible_schema_generation_leaves_v5_database_untouched(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Current evidence: incompatible ALPHA schemas use a new durable filename.
@@ -574,15 +574,15 @@ def test_incompatible_schema_generation_leaves_v4_database_untouched(
     registry_directory = state_home / "rodex"
     registry_directory.mkdir(mode=0o700, parents=True)
     registry_directory.chmod(0o700)
-    legacy_database = registry_directory / "rodex-v4.sqlite3"
-    legacy_contents = b"legacy-v4-database-sentinel"
+    legacy_database = registry_directory / "rodex-v5.sqlite3"
+    legacy_contents = b"legacy-v5-database-sentinel"
     legacy_database.write_bytes(legacy_contents)
     legacy_database.chmod(0o600)
     monkeypatch.setenv("XDG_STATE_HOME", str(state_home))
 
     current_database = initialise_rodex_database()
 
-    assert current_database == registry_directory / "rodex-v5.sqlite3"
+    assert current_database == registry_directory / "rodex-v6.sqlite3"
     assert current_database.is_file()
     assert legacy_database.read_bytes() == legacy_contents
 

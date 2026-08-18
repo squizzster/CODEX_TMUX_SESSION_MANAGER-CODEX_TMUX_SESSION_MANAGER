@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Final
@@ -12,13 +13,14 @@ CONTEXT_COMMAND: Final = "_context"
 ALIAS_COMMAND: Final = "_alias"
 SEND_COMMAND: Final = "_send"
 WAIT_COMMAND: Final = "_wait"
+CAT_COMMAND: Final = "_cat"
+EVENTS_COMMAND: Final = "_events"
 INSPECT_COMMAND: Final = "_inspect"
 START_COMMAND: Final = "_start"
 STEER_COMMAND: Final = "_steer"
 DISPATCH_STATUS_COMMAND: Final = "_dispatch-status"
 INTERRUPT_COMMAND: Final = "_interrupt"
 RESULT_COMMAND: Final = "_result"
-TAIL_COMMAND: Final = "_tail"
 CREATE_COMMAND: Final = "_create"
 DETACH_COMMAND: Final = "_detach"
 HELP_COMMAND: Final = "_help"
@@ -32,8 +34,10 @@ class CommandRoute(StrEnum):
     HELP = "help"
     LAUNCH = "launch"
     SESSION = "session"
-    CONTROL = "control"
+    MACHINE = "machine"
     STATISTICS = "statistics"
+    SELECTOR = "selector"
+    CODEX = "codex"
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,12 +77,12 @@ COMMAND_SPECS: Final = (
     ),
     CommandSpec(
         SEND_COMMAND,
-        CommandRoute.CONTROL,
+        CommandRoute.SESSION,
         ("_send SESSION PROMPT", "Send work to a running session."),
     ),
     CommandSpec(
         WAIT_COMMAND,
-        CommandRoute.CONTROL,
+        CommandRoute.SESSION,
         (
             "_wait SESSION",
             "Wait until a running session is idle.",
@@ -88,12 +92,12 @@ COMMAND_SPECS: Final = (
     ),
     CommandSpec(
         INSPECT_COMMAND,
-        CommandRoute.CONTROL,
+        CommandRoute.MACHINE,
         ("_inspect SESSION --json", "Inspect one verified live thread."),
     ),
     CommandSpec(
         START_COMMAND,
-        CommandRoute.CONTROL,
+        CommandRoute.MACHINE,
         (
             "_start SESSION [--dispatch ID] --stdin --json",
             "Start work only when the thread is idle.",
@@ -101,7 +105,7 @@ COMMAND_SPECS: Final = (
     ),
     CommandSpec(
         STEER_COMMAND,
-        CommandRoute.CONTROL,
+        CommandRoute.MACHINE,
         (
             "_steer SESSION --turn ID [--dispatch ID] --stdin --json",
             "Steer one exact active turn.",
@@ -109,7 +113,7 @@ COMMAND_SPECS: Final = (
     ),
     CommandSpec(
         DISPATCH_STATUS_COMMAND,
-        CommandRoute.CONTROL,
+        CommandRoute.MACHINE,
         (
             "_dispatch-status SESSION --dispatch ID --json",
             "Observe acceptance evidence for one dispatch.",
@@ -117,18 +121,23 @@ COMMAND_SPECS: Final = (
     ),
     CommandSpec(
         INTERRUPT_COMMAND,
-        CommandRoute.CONTROL,
+        CommandRoute.MACHINE,
         ("_interrupt SESSION --turn ID --json", "Interrupt one exact active turn."),
     ),
     CommandSpec(
         RESULT_COMMAND,
-        CommandRoute.CONTROL,
+        CommandRoute.MACHINE,
         ("_result SESSION --turn ID --json", "Read one exact turn result."),
     ),
     CommandSpec(
-        TAIL_COMMAND,
-        CommandRoute.CONTROL,
-        ("_tail SESSION", "Follow live protocol events as JSON lines."),
+        CAT_COMMAND,
+        CommandRoute.SESSION,
+        ("_cat SESSION", "Print all retained terminal output."),
+    ),
+    CommandSpec(
+        EVENTS_COMMAND,
+        CommandRoute.SESSION,
+        ("_events SESSION", "Stream filtered live protocol events as JSON lines."),
     ),
     CommandSpec(
         STATS_COMMAND,
@@ -169,8 +178,8 @@ def _help_text() -> str:
     lines.extend(
         (
             "",
-            "Use a Rodex session name as the sole argument to attach, resume, "
-            "or recover it.",
+            "Use a Rodex session name or its linked Codex UUID as the sole argument "
+            "to attach, resume, or recover it.",
             "Every other invocation is passed unchanged to Codex.",
             "",
         )
@@ -195,6 +204,15 @@ class MachineCommandSpec:
     allows_dispatch: bool = False
     needs_dispatch: bool = False
     allows_timeout: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class ClassifiedRodexCommand:
+    """One known Rodex command with its application route selected exactly once."""
+
+    command_spec: CommandSpec
+    route: CommandRoute
+    machine_spec: MachineCommandSpec | None
 
 
 MACHINE_COMMAND_SPECS: Final = {
@@ -257,25 +275,31 @@ class MachineInvocation:
     timeout_seconds: float | None
 
 
-def machine_spec_for_arguments(arguments: list[str]) -> MachineCommandSpec | None:
+def classify_rodex_command(
+    arguments: Sequence[str],
+) -> ClassifiedRodexCommand | None:
     if not arguments:
         return None
-    spec = MACHINE_COMMAND_SPECS.get(arguments[0])
-    if spec is None:
+    command = COMMANDS_BY_TOKEN.get(arguments[0])
+    if command is None:
         return None
+    machine = MACHINE_COMMAND_SPECS.get(command.token)
     if (
-        spec.token == WAIT_COMMAND
+        machine is not None
+        and machine.token == WAIT_COMMAND
         and "--turn" not in arguments
         and "--json" not in arguments
     ):
-        return None
-    return spec
+        machine = None
+    route = CommandRoute.MACHINE if machine is not None else command.route
+    return ClassifiedRodexCommand(command, route, machine)
 
 
-def parse_machine_invocation(arguments: list[str]) -> MachineInvocation:
-    spec = machine_spec_for_arguments(arguments)
-    if spec is None:
-        raise MachineUsageError("arguments do not select an exact machine command")
+def parse_machine_invocation(
+    arguments: list[str], spec: MachineCommandSpec
+) -> MachineInvocation:
+    if not arguments or arguments[0] != spec.token:
+        raise MachineUsageError("arguments do not match the classified machine command")
     if len(arguments) < 2 or not arguments[1].strip() or arguments[1].startswith("-"):
         raise MachineUsageError(f"usage: {spec.usage}")
     seen_json = False

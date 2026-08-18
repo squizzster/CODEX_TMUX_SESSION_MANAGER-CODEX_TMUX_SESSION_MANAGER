@@ -87,6 +87,7 @@ def test_registry_readers_use_only_the_existing_database_read_pipeline() -> None
         "lookup_rodex_tmux_session",
         "lookup_rodex_sessions_id_from_a_cool_name",
         "lookup_owned_rodex_sessions_id_from_a_cool_name",
+        "lookup_owned_rodex_sessions_id_from_a_codex_session_id",
         "lookup_rodex_session_names",
         "validate_a_user_defined_cool_name_assignment",
         "list_rodex_session_runtimes_for_a_user",

@@ -26,6 +26,13 @@ than being inferred or adopted. Private proxy/event sockets and runtime logs rem
 implementation details rather than agent context.
 New runtimes also report their UUID and whether it matches the persisted incarnation.
 
+Every process invocation passes through one application control plane. The command
+contract classifies argv once; the selected direct, selector, or runtime preparation
+branch then supplies one domain executor. `rodex.cli` only composes process dependencies
+and maps top-level failures. A matching bare selector becomes one typed owned-session
+identity before lifecycle work, while an exact machine command carries the same
+classified specification through parsing and execution.
+
 ## Basic launch pipeline
 
 1. Bare `./rodex` (or explicit `./rodex _create`) validates the `codex` and `tmux`
@@ -61,6 +68,11 @@ without the alternate screen so rendered conversation rows reach that history.
 session override without changing any other session or the global configuration.
 
 tmux—not the terminal emulator or WebSocket proxy—owns managed-session scrollback.
+`_cat` reads that retained pane output as one finite snapshot through the verified
+live-session read pipeline. Standard tools select from it, for example
+`rodex _cat NAME | head -n 10` or `rodex _cat NAME | tail -n 10`. `_events` uses the
+same resolution pipeline but remains open to emit selected future protocol events as
+JSON lines.
 The proxy continues to forward protocol frames and selected live events without
 screen-scraping, reconstructing terminal rows, or persisting conversation content.
 
@@ -107,7 +119,9 @@ analytics sidecar.
 
 ## Named reattachment
 
-- `./rodex <cool-name>` resolves the name through its integer identity.
+- `./rodex <cool-name-or-codex-uuid>` resolves a canonical Codex UUID first, then a
+  display name, through the same owned integer identity. An unmatched value retains
+  ordinary Codex passthrough.
 - If its stored tmux endpoint is live, Rodex first verifies its registered Rodex session
   ID, registry ID, and Codex session ID. A missing or mismatched marker fails closed
   without attach or rename.
@@ -122,15 +136,15 @@ analytics sidecar.
   Codex runtime and atomically relinks its new ID to the existing Rodex identity.
   Other resume failures and ID mismatches remain hard failures.
 - Both routes preserve the Rodex identity and update `last_accessed_at_utc`.
-- `_detach <cool-name>` follows the same attach, resume, or recovery decision without
-  attaching the caller and prints the active identities as JSON.
+- `_detach <cool-name-or-codex-uuid>` follows the same attach, resume, or recovery
+  decision without attaching the caller and prints the active identities as JSON.
 - `./rodex _running` lists verified runtimes and reports unverified or unregistered
   sessions separately.
 - `./rodex _alias SESSION NAME` sets its portable preferred name; `--force` replaces
   it. A live effective-name change sends exactly one verified `RODEX_AUTO_INFO`
   prompt to the session's single Codex thread, regardless of how many tmux clients
   are attached. Offline and unchanged names do not send one.
-- `_send`, idle-based `_wait`, and `_tail` remain compatibility commands.
+- `_send` and idle-based `_wait` remain compatibility commands.
 - `_inspect --json` reports the exact active turn. `_start` and `_steer` accept an
   optional caller-owned `--dispatch ID`, while `_dispatch-status` observes that ID in
   exact App Server thread history. Exact `_wait`, `_interrupt`, and `_result` use a

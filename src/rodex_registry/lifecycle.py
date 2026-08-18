@@ -880,6 +880,43 @@ def lookup_rodex_sessions_id_from_a_codex_session_id(
     return None if row is None else int(row[0])
 
 
+def lookup_owned_rodex_sessions_id_from_a_codex_session_id(
+    codex_session_id: CodexSessionId | str,
+    database_path: str | os.PathLike[str] | None = None,
+    *,
+    user_identity: RodexSessionsUserIdentity | None = None,
+) -> int | None:
+    """Resolve a Codex identity only when its Rodex session has the selected owner."""
+    identity = _resolve_user_identity(user_identity)
+    codex_session_id_part_1, codex_session_id_part_2 = (
+        split_codex_session_id_into_signed_bigints(codex_session_id)
+    )
+    path = existing_rodex_database_path(database_path)
+    with open_rodex_read_transaction(path) as connection:
+        row = connection.execute(
+            f"SELECT sessions.id, log.rodex_sessions_users_id "
+            f"FROM {RODEX_SESSIONS_TABLE} AS sessions "
+            f"JOIN {RODEX_SESSIONS_LOG_TABLE} AS log "
+            "ON log.rodex_sessions_id = sessions.id "
+            "WHERE sessions.codex_session_id_signed_bigint_1 = ? "
+            "AND sessions.codex_session_id_signed_bigint_2 = ?",
+            (codex_session_id_part_1, codex_session_id_part_2),
+        ).fetchone()
+        if row is None:
+            return None
+        user_id = select_lookup_id(
+            connection,
+            RODEX_SESSIONS_USERS_TABLE,
+            {"uid": identity.uid, "gid": identity.gid, "user_name": identity.user_name},
+        )
+    if user_id is None or int(row[1]) != user_id:
+        raise RodexSessionError(
+            "Rodex session is not owned by the current user: "
+            f"{parse_codex_session_id(codex_session_id)}"
+        )
+    return int(row[0])
+
+
 def _normalise_tmux_link(
     tmux_server_socket_path: str | os.PathLike[str] | None,
     tmux_session_name: str | None,

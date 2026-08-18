@@ -77,6 +77,8 @@ class StubLauncher:
         self.reconciled: list[LiveTmuxSession] = []
         self.refreshed_hooks: list[LiveTmuxSession] = []
         self.attached: list[LiveTmuxSession] = []
+        self.scrollback_captures: list[LiveTmuxSession] = []
+        self.scrollback = tuple(f"line {number}" for number in range(1, 16))
         self.stopped: list[tuple[LiveTmuxSession, bool]] = []
         self.existing_checks: list[LiveTmuxSession] = []
         self.live = True
@@ -138,6 +140,10 @@ class StubLauncher:
 
     def attach(self, runtime: LiveTmuxSession) -> None:
         self.attached.append(runtime)
+
+    def capture_scrollback(self, runtime: LiveTmuxSession) -> tuple[str, ...]:
+        self.scrollback_captures.append(runtime)
+        return self.scrollback
 
     def stop(self, runtime: LiveTmuxSession, *, check: bool = True) -> None:
         self.stopped.append((runtime, check))
@@ -209,7 +215,7 @@ class StubControlClient:
     def __init__(self) -> None:
         self.sent: list[tuple[LiveRodexControl, str]] = []
         self.waited: list[LiveRodexControl] = []
-        self.tailed: list[LiveRodexControl] = []
+        self.event_streams: list[LiveRodexControl] = []
         self.started: list[tuple[LiveRodexControl, str]] = []
         self.steered: list[tuple[LiveRodexControl, str, str]] = []
         self.started_dispatch_ids: list[str | None] = []
@@ -361,7 +367,7 @@ class StubControlClient:
         self.exact_waited.append((control, turn_id, timeout_seconds))
         return self.state, self.turn_result
 
-    def tail(
+    def stream_events(
         self,
         control: LiveRodexControl,
         write_event: Any,
@@ -369,8 +375,13 @@ class StubControlClient:
         revalidate: Any,
     ) -> None:
         revalidate()
-        self.tailed.append(control)
-        write_event('{"method":"turn/started"}')
+        self.event_streams.append(control)
+        for event in (
+            '{"method":"thread/status/changed"}',
+            '{"method":"turn/started"}',
+            '{"method":"item/started"}',
+        ):
+            write_event(event)
 
 
 class RecordingCodexDelegator:
@@ -627,10 +638,14 @@ def test_unknown_bare_name_refuses_a_live_unregistered_tmux_collision(
     socket_path = tmp_path / "tmux.sock"
     socket_path.touch()
     delegator = RecordingCodexDelegator()
-    monkeypatch.setattr("rodex.cli.default_tmux_server_socket_path", lambda: socket_path)
+    monkeypatch.setattr(
+        "rodex.managed_session_lifecycle.default_tmux_server_socket_path",
+        lambda: socket_path,
+    )
     monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
     monkeypatch.setattr(
-        "rodex.cli.RodexRuntimeLauncher.session_exists", lambda *_args: True
+        "rodex.managed_session_lifecycle.RodexRuntimeLauncher.session_exists",
+        lambda *_args: True,
     )
 
     with pytest.raises(RodexLaunchError, match="not registered"):
@@ -1622,13 +1637,45 @@ def test_mouse_command_targets_only_the_verified_named_runtime(
     assert launcher.attached == []
 
 
-@pytest.mark.parametrize("command", ["_tail"])
-def test_tail_command_streams_json_events_for_the_verified_named_runtime(
+@pytest.mark.evolutionary_regression
+def test_cat_prints_the_complete_verified_session_snapshot_and_exits(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
-    command: str,
 ) -> None:
+    """Finite session text remains composable with the system head and tail tools."""
+    database = tmp_path / "rodex.sqlite3"
+    monkeypatch.setattr(
+        "cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga"
+    )
+    monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
+    create_controlled_session(database, tmp_path)
+    launcher = StubLauncher(tmp_path)
+
+    assert (
+        run(
+            ["_cat", "automatic-beluga"],
+            database_path=database,
+            launcher=launcher,  # type: ignore[arg-type]
+        )
+        == 0
+    )
+
+    captured = capsys.readouterr()
+    assert launcher.scrollback_captures == [
+        LiveTmuxSession(tmp_path / "tmux.sock", "automatic-beluga")
+    ]
+    assert captured.out == "".join(f"line {number}\n" for number in range(1, 16))
+    assert captured.err == ""
+
+
+@pytest.mark.evolutionary_regression
+def test_events_continues_the_verified_protocol_stream_without_session_text(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Replacing `_tail` must not turn the live event source into pane scrollback."""
     database = tmp_path / "rodex.sqlite3"
     monkeypatch.setattr(
         "cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga"
@@ -1640,7 +1687,7 @@ def test_tail_command_streams_json_events_for_the_verified_named_runtime(
 
     assert (
         run(
-            [command, "automatic-beluga"],
+            ["_events", "automatic-beluga"],
             database_path=database,
             launcher=launcher,  # type: ignore[arg-type]
             control_client=control,  # type: ignore[arg-type]
@@ -1649,9 +1696,54 @@ def test_tail_command_streams_json_events_for_the_verified_named_runtime(
     )
 
     captured = capsys.readouterr()
-    assert control.tailed == [launcher.control]
-    assert captured.out == '{"method":"turn/started"}\n'
+    assert control.event_streams == [launcher.control]
+    assert captured.out == (
+        '{"method":"thread/status/changed"}\n'
+        '{"method":"turn/started"}\n'
+        '{"method":"item/started"}\n'
+    )
     assert "following live Codex protocol events" in captured.err
+    assert launcher.scrollback_captures == []
+
+
+@pytest.mark.parametrize("command", ["_cat", "_events"])
+def test_session_read_commands_reject_invalid_grammar_before_live_resolution(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    command: str,
+) -> None:
+    monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
+    launcher = StubLauncher(tmp_path)
+
+    with pytest.raises(RodexLaunchError, match=rf"^usage: rodex {command}"):
+        run(
+            [command],
+            database_path=tmp_path / "rodex.sqlite3",
+            launcher=launcher,  # type: ignore[arg-type]
+        )
+
+    assert launcher.existing_checks == []
+    assert launcher.scrollback_captures == []
+
+
+@pytest.mark.parametrize("command", ["_head", "_tail"])
+def test_removed_ambiguous_read_commands_pass_through_to_codex_unchanged(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    command: str,
+) -> None:
+    database = tmp_path / "rodex.sqlite3"
+    delegator = RecordingCodexDelegator(returncode=23)
+    monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
+    arguments = [command, "automatic-beluga"]
+
+    assert (
+        run(arguments, database_path=database, codex_delegator=delegator)
+        == delegator.returncode
+    )
+
+    assert delegator.calls == [("/usr/bin/codex", arguments)]
+    assert not database.exists()
 
 
 @pytest.mark.parametrize("arguments", [[], ["_create"]], ids=["bare", "explicit"])
@@ -2303,6 +2395,119 @@ def test_live_cool_name_argument_renames_configures_and_reattaches_without_start
     assert tmux_link is not None
     assert tmux_link.tmux_session_name == "automatic-beluga"
     assert "Reattaching Rodex automatic-beluga" in capsys.readouterr().out
+
+
+@pytest.mark.evolutionary_regression
+def test_live_codex_uuid_argument_opens_its_registered_rodex_display_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A user may retain only the Codex UUID for a live Rodex-managed session."""
+    database = tmp_path / "rodex.sqlite3"
+    monkeypatch.setattr(
+        "cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga"
+    )
+    monkeypatch.setattr(
+        "rodex_registry.lifecycle.current_rodex_sessions_user_identity", lambda: DNA
+    )
+    monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
+    create_controlled_session(database, tmp_path)
+    assign_a_user_defined_cool_name(
+        "automatic-beluga", "remarkable-aardvark", database, user_identity=DNA
+    )
+    launcher = StubLauncher(tmp_path)
+
+    assert (
+        run(
+            [str(CODEX_SESSION_ID)],
+            database_path=database,
+            launcher=launcher,  # type: ignore[arg-type]
+        )
+        == 0
+    )
+
+    assert launcher.started == []
+    assert launcher.attached == [
+        LiveTmuxSession(tmp_path / "tmux.sock", "remarkable-aardvark")
+    ]
+    assert "Reattaching Rodex remarkable-aardvark" in capsys.readouterr().out
+
+
+def test_ended_codex_uuid_argument_resumes_the_registered_rodex_session(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    database = tmp_path / "rodex.sqlite3"
+    monkeypatch.setattr(
+        "cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga"
+    )
+    monkeypatch.setattr(
+        "rodex_registry.lifecycle.current_rodex_sessions_user_identity", lambda: DNA
+    )
+    monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
+    create_a_rodex_session(
+        database,
+        codex_session_id=CODEX_SESSION_ID,
+        user_identity=DNA,
+        tmux_server_socket_path=tmp_path / "stale.sock",
+        tmux_session_name="automatic-beluga",
+    )
+    launcher = StubLauncher(tmp_path)
+    launcher.live = False
+
+    assert (
+        run(
+            [str(CODEX_SESSION_ID).upper()],
+            database_path=database,
+            launcher=launcher,  # type: ignore[arg-type]
+        )
+        == 0
+    )
+
+    assert launcher.started == [(Path.cwd(), ["resume", str(CODEX_SESSION_ID)])]
+    assert launcher.attached[0].tmux_session_name == "automatic-beluga"
+    assert f"Resumed Rodex automatic-beluga -> Codex {CODEX_SESSION_ID}" in (
+        capsys.readouterr().out
+    )
+
+
+@pytest.mark.parametrize(
+    "session_selector",
+    [str(REPLACEMENT_CODEX_SESSION_ID), CODEX_SESSION_ID.hex],
+    ids=["unknown-canonical-uuid", "noncanonical-uuid-spelling"],
+)
+def test_unmatched_codex_uuid_like_argument_passes_through_unchanged(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    session_selector: str,
+) -> None:
+    database = tmp_path / "rodex.sqlite3"
+    monkeypatch.setattr(
+        "cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga"
+    )
+    monkeypatch.setattr(
+        "rodex_registry.lifecycle.current_rodex_sessions_user_identity", lambda: DNA
+    )
+    monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
+    monkeypatch.setattr(
+        "rodex.managed_session_lifecycle.default_tmux_server_socket_path",
+        lambda: tmp_path / "absent.sock",
+    )
+    create_controlled_session(database, tmp_path)
+    delegator = RecordingCodexDelegator(returncode=23)
+
+    assert (
+        run(
+            [session_selector],
+            database_path=database,
+            codex_delegator=delegator,
+        )
+        == delegator.returncode
+    )
+
+    assert delegator.calls == [("/usr/bin/codex", [session_selector])]
 
 
 def test_ended_cool_name_argument_transparently_resumes_its_codex_session(
@@ -3027,7 +3232,7 @@ def test_new_launch_cleans_up_the_renamed_runtime_when_persistence_fails(
         "cool_name.functions.coolname.generate_slug", lambda _word_count: "safe-name"
     )
     monkeypatch.setattr(
-        "rodex.cli.update_rodex_tmux_session_name",
+        "rodex.managed_session_lifecycle.update_rodex_tmux_session_name",
         lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("persist failed")),
     )
 
@@ -3058,7 +3263,7 @@ def test_live_reattach_restores_the_recorded_name_when_persistence_fails(
     launcher = StubLauncher(tmp_path)
     monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
     monkeypatch.setattr(
-        "rodex.cli.update_rodex_tmux_session_name",
+        "rodex.managed_session_lifecycle.update_rodex_tmux_session_name",
         lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("persist failed")),
     )
 
@@ -3398,7 +3603,7 @@ def test_database_failure_stops_the_unregistered_runtime(
     launcher = StubLauncher(tmp_path)
     monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
     monkeypatch.setattr(
-        "rodex.cli.create_a_rodex_session",
+        "rodex.managed_session_lifecycle.create_a_rodex_session",
         lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("database failed")),
     )
 

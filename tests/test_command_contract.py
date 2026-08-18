@@ -11,7 +11,7 @@ from rodex.command_contract import (
     WAIT_COMMAND,
     CommandRoute,
     MachineUsageError,
-    machine_spec_for_arguments,
+    classify_rodex_command,
     parse_machine_invocation,
 )
 
@@ -22,9 +22,10 @@ def test_command_specs_are_the_complete_unique_rodex_vocabulary() -> None:
     assert len(tokens) == len(set(tokens))
     assert frozenset(tokens) == RODEX_COMMANDS
     assert {spec.token: spec for spec in COMMAND_SPECS} == COMMANDS_BY_TOKEN
-    assert set(MACHINE_COMMAND_SPECS) <= {
-        spec.token for spec in COMMAND_SPECS if spec.route is CommandRoute.CONTROL
+    assert set(MACHINE_COMMAND_SPECS) - {WAIT_COMMAND} == {
+        spec.token for spec in COMMAND_SPECS if spec.route is CommandRoute.MACHINE
     }
+    assert COMMANDS_BY_TOKEN[WAIT_COMMAND].route is CommandRoute.SESSION
 
 
 def test_help_is_generated_from_every_declared_command() -> None:
@@ -36,6 +37,14 @@ def test_help_is_generated_from_every_declared_command() -> None:
         ):
             assert usage in HELP_TEXT
             assert description in HELP_TEXT
+
+
+def test_classifier_returns_the_authoritative_declared_command_object() -> None:
+    for spec in COMMAND_SPECS:
+        classification = classify_rodex_command([spec.token])
+        assert classification is not None
+        assert classification.command_spec is spec
+        assert classification.route is spec.route
 
 
 @pytest.mark.parametrize(
@@ -83,7 +92,10 @@ def test_machine_invocation_parser_owns_the_exact_control_grammar(
     dispatch_id: str | None,
     timeout_seconds: float | None,
 ) -> None:
-    invocation = parse_machine_invocation(arguments)
+    classification = classify_rodex_command(arguments)
+    assert classification is not None
+    assert classification.machine_spec is not None
+    invocation = parse_machine_invocation(arguments, classification.machine_spec)
 
     assert invocation.session_name == "session"
     assert invocation.turn_id == turn_id
@@ -108,13 +120,20 @@ def test_machine_invocation_parser_owns_the_exact_control_grammar(
 def test_machine_invocation_parser_rejects_contract_violations(
     arguments: list[str],
 ) -> None:
+    classification = classify_rodex_command(arguments)
+    assert classification is not None
+    assert classification.machine_spec is not None
     with pytest.raises(MachineUsageError):
-        parse_machine_invocation(arguments)
+        parse_machine_invocation(arguments, classification.machine_spec)
 
 
 def test_wait_route_is_disambiguated_by_exact_control_arguments() -> None:
-    assert machine_spec_for_arguments([WAIT_COMMAND, "session"]) is None
-    assert (
-        machine_spec_for_arguments([WAIT_COMMAND, "session", "--turn", "turn-1", "--json"])
-        is MACHINE_COMMAND_SPECS[WAIT_COMMAND]
-    )
+    legacy = classify_rodex_command([WAIT_COMMAND, "session"])
+    assert legacy is not None
+    assert legacy.route is CommandRoute.SESSION
+    assert legacy.machine_spec is None
+
+    exact = classify_rodex_command([WAIT_COMMAND, "session", "--turn", "turn-1", "--json"])
+    assert exact is not None
+    assert exact.route is CommandRoute.MACHINE
+    assert exact.machine_spec is MACHINE_COMMAND_SPECS[WAIT_COMMAND]

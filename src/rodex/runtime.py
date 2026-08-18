@@ -196,6 +196,26 @@ class LiveTmuxSession:
 
 
 @dataclass(frozen=True, slots=True)
+class TmuxScrollbackSnapshot:
+    """Plain tmux text split between committed history and the visible pane."""
+
+    lines: tuple[str, ...]
+    history_line_count: int
+
+    def __post_init__(self) -> None:
+        if not 0 <= self.history_line_count <= len(self.lines):
+            raise ValueError("history line count must fit the captured pane")
+
+    @property
+    def history_lines(self) -> tuple[str, ...]:
+        return self.lines[: self.history_line_count]
+
+    @property
+    def visible_lines(self) -> tuple[str, ...]:
+        return self.lines[self.history_line_count :]
+
+
+@dataclass(frozen=True, slots=True)
 class CurrentTmuxPaneContext:
     """The live tmux session and attachment snapshot inherited by this process."""
 
@@ -793,6 +813,27 @@ class RodexRuntimeLauncher:
             _exact_tmux_pane_target(runtime.tmux_session_name),
         )
         return tuple(result.stdout.rstrip("\n").splitlines())
+
+    def capture_scrollback_snapshot(
+        self, runtime: LiveTmuxSession
+    ) -> TmuxScrollbackSnapshot:
+        """Capture plain pane text with tmux's committed-history boundary."""
+        history_size_text = self._tmux(
+            runtime,
+            "display-message",
+            "-p",
+            "-t",
+            _exact_tmux_pane_target(runtime.tmux_session_name),
+            "-F",
+            "#{history_size}",
+        ).stdout.strip()
+        if not history_size_text.isdigit():
+            raise RodexRuntimeError("tmux returned an invalid history size")
+        lines = self.capture_scrollback(runtime)
+        history_line_count = int(history_size_text)
+        if len(lines) < history_line_count:
+            lines = (*lines, *("" for _ in range(history_line_count - len(lines))))
+        return TmuxScrollbackSnapshot(lines, history_line_count)
 
     def discover_current_tmux_pane_context(
         self,

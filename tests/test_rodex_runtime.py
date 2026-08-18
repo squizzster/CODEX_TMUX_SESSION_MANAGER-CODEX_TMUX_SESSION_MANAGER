@@ -28,6 +28,7 @@ from rodex.runtime import (
     RodexCodexSessionNotFoundError,
     RodexRuntimeError,
     RodexRuntimeLauncher,
+    TmuxScrollbackSnapshot,
     run_session_host,
 )
 from rodex.tmux_status import (
@@ -439,6 +440,58 @@ def test_scrollback_capture_reads_all_lines_from_the_exact_tmux_pane(
             "=remarkable-aardvark:",
         ]
     ]
+
+
+def test_scrollback_snapshot_marks_tmuxs_committed_history_boundary(
+    tmp_path: Path,
+) -> None:
+    calls: list[list[str]] = []
+
+    def runner(command: list[str], **_options: object) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        stdout = (
+            "2\n"
+            if "display-message" in command
+            else "history one\nhistory two\nvisible\nprompt\n"
+        )
+        return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
+
+    launcher = RodexRuntimeLauncher("codex", "tmux", runner=runner)
+    runtime = LiveTmuxSession(tmp_path / "tmux.sock", "remarkable-aardvark")
+
+    assert launcher.capture_scrollback_snapshot(runtime) == TmuxScrollbackSnapshot(
+        ("history one", "history two", "visible", "prompt"), 2
+    )
+    assert [command[3] for command in calls] == ["display-message", "capture-pane"]
+
+
+def test_scrollback_snapshot_preserves_a_blank_committed_history_row(
+    tmp_path: Path,
+) -> None:
+    def runner(command: list[str], **_options: object) -> subprocess.CompletedProcess[str]:
+        stdout = "2\n" if "display-message" in command else "history one\n\n"
+        return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
+
+    launcher = RodexRuntimeLauncher("codex", "tmux", runner=runner)
+
+    assert launcher.capture_scrollback_snapshot(
+        LiveTmuxSession(tmp_path / "tmux.sock", "remarkable-aardvark")
+    ) == TmuxScrollbackSnapshot(("history one", ""), 2)
+
+
+@pytest.mark.parametrize("history_size", ["", "one", "-1", "1\t2"])
+def test_scrollback_snapshot_rejects_invalid_history_metadata(
+    tmp_path: Path, history_size: str
+) -> None:
+    def runner(command: list[str], **_options: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(command, 0, stdout=history_size, stderr="")
+
+    launcher = RodexRuntimeLauncher("codex", "tmux", runner=runner)
+
+    with pytest.raises(RodexRuntimeError, match="invalid history size"):
+        launcher.capture_scrollback_snapshot(
+            LiveTmuxSession(tmp_path / "tmux.sock", "remarkable-aardvark")
+        )
 
 
 @pytest.mark.parametrize(

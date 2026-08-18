@@ -28,6 +28,9 @@ listener; control endpoints are Unix sockets below a private runtime root.
   session ID and stable complete-record prefix.
 - tmux operations use argv execution and exact `=name` or `=name:` targets. Dynamic hook
   commands are shell-quoted; cleanup and failure handling target one named runtime.
+- `_cat`, `_tail`, and `_events` resolve the same owned, registered live identity before
+  reading. Terminal following emits only tmux's plain text and creates no extra socket,
+  pane pipe, process, or persistent conversation copy.
 - The install shim accepts only root- or current-user-owned, non-group/world-writable
   project code and `uv`. A system command must use an immutable root-owned installation.
 

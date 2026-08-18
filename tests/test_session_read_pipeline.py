@@ -171,3 +171,45 @@ def test_event_pipeline_records_access_before_its_unbounded_stream(
         "event-2",
         "event-3",
     ]
+
+
+def test_scrollback_pipeline_records_access_before_its_unbounded_stream(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database = tmp_path / "rodex.sqlite3"
+    session_id, runtime, control = _resolved_read(tmp_path)
+    observed: list[str] = []
+    launcher = object()
+    monkeypatch.setattr(
+        pipeline_module,
+        "resolve_live_control",
+        lambda *_args: (observed.append("resolve"), (session_id, runtime, control))[1],
+    )
+    monkeypatch.setattr(
+        pipeline_module,
+        "revalidate_live_control",
+        lambda *_args: observed.append("revalidate"),
+    )
+    monkeypatch.setattr(
+        pipeline_module,
+        "record_a_rodex_session_access",
+        lambda *_args: observed.append("record_access"),
+    )
+    pipeline = LiveSessionReadPipeline(database, launcher)  # type: ignore[arg-type]
+
+    def stream(observed_runtime: LiveTmuxSession, revalidate: Any) -> None:
+        assert observed_runtime == runtime
+        observed.append("stream")
+        revalidate()
+        observed.extend(("terminal-1", "terminal-2"))
+
+    pipeline.stream_scrollback("automatic-beluga", stream)
+
+    assert observed == [
+        "resolve",
+        "record_access",
+        "stream",
+        "revalidate",
+        "terminal-1",
+        "terminal-2",
+    ]

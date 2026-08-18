@@ -3,6 +3,10 @@
 Rodex currently runs from its project checkout. The system command is a small shim
 that sends every invocation to that checkout through its `uv` environment.
 
+After installation, `rodex` is intended to replace `codex` in normal terminal use:
+Rodex's exact underscore commands stay local, a managed name opens its durable session,
+and other nonempty invocations are delegated to Codex unchanged.
+
 ## Requirements
 
 Install the requirements listed in [README.md](README.md#requirements), then prepare
@@ -32,6 +36,7 @@ Verify the installation:
 
 ```bash
 command -v rodex
+rodex _help
 rodex _running
 ```
 

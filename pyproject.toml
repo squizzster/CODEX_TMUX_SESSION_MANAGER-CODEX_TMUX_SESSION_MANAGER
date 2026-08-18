@@ -1,7 +1,7 @@
 [project]
 name = "codex-tmux-session-manager"
 version = "0.5.0a1"
-description = "Manage durable Rodex identities and Codex CLI sessions"
+description = "Durable Codex sessions bridging native tmux use and exact local automation"
 readme = "README.md"
 authors = [
     { name = "Mark", email = "squizzster@gmail.com" }

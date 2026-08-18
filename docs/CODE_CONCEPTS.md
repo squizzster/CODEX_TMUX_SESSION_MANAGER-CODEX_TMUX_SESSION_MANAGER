@@ -1,6 +1,7 @@
 # Rodex code concepts
 
-Rodex should make durable session control feel as direct as the original Codex CLI.
+Rodex should first make durable session use feel as direct as the original Codex CLI,
+then let the same verified session bridge human interaction and authorized automation.
 Convenience belongs at the boundary; identity and state remain exact underneath it.
 
 ## Identity
@@ -26,6 +27,10 @@ Convenience belongs at the boundary; identity and state remain exact underneath 
 - Attach and resume enforce that same owner boundary before touching a live runtime.
 - External runtime identities use exact matching rather than prefix or glob semantics.
 - Transparent protocol mediation is preferred to terminal scraping for machine signals.
+- Human-readable terminal observation comes from verified tmux plain text; structured
+  lifecycle observation comes from the App Server protocol. They are not conflated.
+- A terminal follower emits committed rows promptly, settles mutable visible rows, and
+  never treats observation as authoritative turn completion.
 
 ## Change
 
@@ -45,6 +50,8 @@ Convenience belongs at the boundary; identity and state remain exact underneath 
 - Linux and compatible POSIX systems define the platform boundary.
 - ALPHA work keeps changes coherent while broadening boundary and installation checks.
 - Do not preserve accidental compatibility or speculative machinery without evidence.
+- Preserve native user behavior before adding automation; both routes meet at the same
+  verified session identity and domain contracts.
 - Keep public contracts small, descriptive, and close to the data they govern.
 - Tests should protect identity, transaction, ownership, and lifecycle boundaries quickly.
 - Documentation states future-facing standards; source and tests carry implementation facts.

@@ -1,6 +1,8 @@
 # Codex, Rodex, and tmux
 
-Rodex is a match-maker and launcher. Each identity keeps its own meaning:
+Rodex is a local session harness: user-facing Codex compatibility comes first, and the
+same durable runtime then bridges human tmux attachment with authorized observation and
+exact-turn automation. Each identity keeps its own meaning:
 
 - **Rodex session:** a random 64-bit ID rendered as exactly 16 lowercase hex
   characters, plus internal `rodex_sessions.id`.
@@ -70,9 +72,19 @@ session override without changing any other session or the global configuration.
 tmux—not the terminal emulator or WebSocket proxy—owns managed-session scrollback.
 `_cat` reads that retained pane output as one finite snapshot through the verified
 live-session read pipeline. Standard tools select from it, for example
-`rodex _cat NAME | head -n 10` or `rodex _cat NAME | tail -n 10`. `_events` uses the
-same resolution pipeline but remains open to emit selected future protocol events as
-JSON lines.
+`rodex _cat NAME | head -n 10` or `rodex _cat NAME | tail -n 10`. `_tail NAME` uses
+the same verified tmux source but remains open: it prints the selected recent lines,
+emits rows entering committed history immediately, and emits stable visible changes
+after three 0.4-second captures. Its plain-text cursor excludes the current Codex
+`Working`/background status region and live composer, avoiding partial prompt fragments,
+timer duplication, ANSI replay, and screen-clearing side effects. Familiar `-n`,
+`--lines`, and `-NUM` selection forms change the initial output; following is the
+command's default behavior.
+
+`_events` uses the same identity-resolution boundary but reads a genuinely different
+source: it remains open to emit selected future protocol events as JSON lines. `_tail`
+is useful to a person or agent observing readable progress; `_events`, `_inspect`,
+exact `_wait`, and `_result` carry machine lifecycle truth.
 The proxy continues to forward protocol frames and selected live events without
 screen-scraping, reconstructing terminal rows, or persisting conversation content.
 

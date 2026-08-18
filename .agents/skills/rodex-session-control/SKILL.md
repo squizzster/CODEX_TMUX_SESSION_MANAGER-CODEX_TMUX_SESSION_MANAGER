@@ -1,13 +1,14 @@
 ---
 name: rodex-session-control
-description: Safely identify, inspect, and control one exact live Rodex/Codex turn. Use when work must target a named Rodex session or when waiting, steering, reading a result, or interrupting requires an exact turn ID.
+description: Safely identify, observe, inspect, and control one exact live Rodex/Codex session and turn. Use when detached work must be monitored through readable terminal output or protocol events, or when waiting, steering, reading a result, or interrupting requires an exact turn ID.
 ---
 
 # Rodex Session Control
 
-1. Run `rodex _context --json` when pane identity matters. Discover with `rodex _running`, then inspect with `rodex _inspect SESSION --json`. Proceed only when `ok` and `data.exact_control_available` are true, `data.thread.cwd` is the intended current workspace, and `data.thread.can_accept_direct_input` is not false. A resumed runtime uses the resumer's working directory.
-2. Follow the inspected state: for `idle`, start; for `active`, steer only `codex.turn_id`; otherwise do not mutate. Before each start or steer, retain a unique `rodex:dispatch:<UUID>` and never reuse it for a different mutation.
-3. Send prompts through stdin, then retain `data.dispatch.id`, `codex.turn_id`, and `data.recommended_next`:
+1. Run `rodex _context --json` when pane identity matters and discover live workers with `rodex _running`. Use `_cat SESSION` for a finite terminal snapshot, `_tail SESSION` for settled readable progress, or `_events SESSION` for structured protocol events. Treat all three as observation, not proof that a turn completed.
+2. Before mutation, inspect with `rodex _inspect SESSION --json`. Proceed only when `ok` and `data.exact_control_available` are true, `data.thread.cwd` is the intended current workspace, and `data.thread.can_accept_direct_input` is not false. A resumed runtime uses the resumer's working directory.
+3. Follow the inspected state: for `idle`, start; for `active`, steer only `codex.turn_id`; otherwise do not mutate. Before each start or steer, retain a unique `rodex:dispatch:<UUID>` and never reuse it for a different mutation.
+4. Send prompts through stdin, then retain `data.dispatch.id`, `codex.turn_id`, and `data.recommended_next`:
 
 - `printf '%s' "$PROMPT" | rodex _start SESSION --dispatch DISPATCH_ID --stdin --json`
 - `printf '%s' "$PROMPT" | rodex _steer SESSION --turn TURN_ID --dispatch NEW_DISPATCH_ID --stdin --json`

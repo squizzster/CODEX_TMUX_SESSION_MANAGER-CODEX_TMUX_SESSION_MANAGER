@@ -123,11 +123,14 @@ last good view and cannot affect the TUI. Statistics reads need neither Codex no
 All WebSocket transport uses private Unix-domain sockets. The proven legacy `_send` and
 idle-based `_wait` retain their short-lived secondary App Server connection. Additive
 machine commands inspect/start/steer/wait/result/interrupt by exact turn ID and emit a
-schema-v1 envelope. They require a matching persisted/live runtime UUID and the
+schema-v1 envelope. Dispatch start/steer also carry an opaque caller-owned ID;
+`_dispatch-status` maps it to zero, one, or multiple exact thread-history observations
+and returns a structured next-command recommendation. They require a matching persisted/live runtime UUID and the
 characterized App Server version; results are read live and never copied into SQLite.
 Timeout never interrupts. A sent mutation without a reply is explicitly indeterminate
-and non-retryable. Approval and user-input ownership across App Server clients remains
-a Phase II experiment; requests observed in the attached TUI remain user-handled there.
+and never silently retried. Live 0.147 experiments show approval and user-input requests
+route to the subscribed primary after the short-lived mutation client disconnects;
+requests observed in the attached TUI remain user-handled there.
 
 ## Integrity boundaries
 

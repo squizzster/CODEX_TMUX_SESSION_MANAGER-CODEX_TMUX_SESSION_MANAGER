@@ -10,6 +10,7 @@ from websockets.sync.client import unix_connect
 from websockets.sync.server import unix_serve
 
 from rodex.protocol_proxy import (
+    CONTROL_CONNECTION_PATH,
     EVENT_STREAM_READY_MESSAGE,
     TOOL_CALL_ITEM_TYPES,
     CodexProtocolEventTap,
@@ -130,6 +131,61 @@ def test_proxy_forwards_both_directions_and_counts_server_tool_items(
     assert counts == [1]
     assert observed_events == [server_message]
     assert not proxy_socket.exists()
+
+
+@pytest.mark.evolutionary_regression
+def test_proxy_hands_primary_event_ownership_to_a_reconnecting_tui(tmp_path: Path) -> None:
+    """Current evidence: an exact-resume retry must become the event-producing client."""
+    app_socket = tmp_path / "app.sock"
+    proxy_socket = tmp_path / "proxy.sock"
+
+    def app_server(connection: object) -> None:
+        request = json.loads(connection.recv())  # type: ignore[attr-defined]
+        connection.send(  # type: ignore[attr-defined]
+            item_started("commandExecution", request["method"])
+        )
+
+    upstream = unix_serve(app_server, path=str(app_socket), compression=None)
+    upstream_thread = Thread(target=upstream.serve_forever, daemon=True)
+    upstream_thread.start()
+    observed_events: list[str | bytes] = []
+    proxy = CodexProtocolProxy(
+        proxy_socket,
+        app_socket,
+        ToolCallCounter(lambda _count: None),
+        observed_events.append,
+    )
+    try:
+        proxy.start()
+        with unix_connect(
+            str(proxy_socket), uri="ws://localhost/rpc", compression=None
+        ) as first_tui:
+            first_tui.send(json.dumps({"method": "first"}))
+            first_tui.recv(timeout=1)
+        proxy.wait_for_primary_connection_release(1)
+
+        with unix_connect(
+            str(proxy_socket),
+            uri=f"ws://localhost{CONTROL_CONNECTION_PATH}",
+            compression=None,
+        ) as machine_control:
+            machine_control.send(json.dumps({"method": "control"}))
+            machine_control.recv(timeout=1)
+            with unix_connect(
+                str(proxy_socket), uri="ws://localhost/rpc", compression=None
+            ) as retry_tui:
+                retry_tui.send(json.dumps({"method": "retry"}))
+                retry_tui.recv(timeout=1)
+            proxy.wait_for_primary_connection_release(1)
+    finally:
+        proxy.close()
+        upstream.shutdown(close_connections=True)
+        upstream_thread.join(timeout=5)
+
+    assert [json.loads(message)["params"]["item"]["id"] for message in observed_events] == [
+        "first",
+        "retry",
+    ]
 
 
 def test_event_tap_streams_runtime_events_and_removes_its_socket(tmp_path: Path) -> None:

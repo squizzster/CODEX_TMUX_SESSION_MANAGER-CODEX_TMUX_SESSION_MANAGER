@@ -1,22 +1,28 @@
-# Phase II plan — not implemented
+# Phase II evidence and remaining plan
 
-Phase II remains an evidence-gated plan. Phase I deliberately preserves the working
-short-lived App Server control connection and does not claim approval routing or retry
-deduplication that has not been observed.
+Phase II remains evidence-gated. The 0.147 live experiment now proves that a short-lived
+mutation client may disconnect after acceptance: lifecycle events and approval requests
+continue on the subscribed primary connection. See
+[the characterized evidence](APP_SERVER_0_147_LIVE_EVIDENCE.md). User-input requests now
+have the same live routing evidence. Dispatch recovery uses caller-owned correlation and
+read-only observation; it does not assume or implement server-side deduplication.
 
 ## Order
 
-1. Persist workspace identity before adding machine lifecycle: resolved workspace,
-   Git worktree root/common directory, initial branch or detached state, initial HEAD,
-   and Rodex-created base ref/commit. Resume from that workspace, never caller `cwd`.
-2. Run an explicitly authorized live-turn experiment across TUI and second App Server
-   clients. Characterize turn/item fanout, approval and user-input request ownership,
-   initiator disconnect, and TUI reconnect. Change the proxy topology only if this
-   produces a concrete failure or a simpler verified contract.
-3. Decide retry semantics from observed behavior. Treat `clientUserMessageId` as
-   correlation only unless deduplication is demonstrated. If callers need recovery,
-   add a durable request ledger with payload digest, accepted turn, and an explicit
-   indeterminate state; do not store prompts or responses.
+1. Preserve caller-directed relocation. A resumed runtime intentionally adopts the
+   caller's current working directory: moving a user's home/project/worktree and then
+   resuming from its new location carries that location forward. Rodex identity is
+   durable, but it is not a permanent workspace pin. `_inspect` reports the effective
+   App Server `cwd` before mutation.
+2. Keep the live-turn characterizations replayable through opt-in integration tests.
+   Fanout, approval ownership, user-input ownership, dispatch correlation, and initiator
+   disconnect are observed. A real TUI reconnect replay remains useful; the proxy's
+   primary handoff has a deterministic transport-level regression.
+3. Keep dispatch policy at the controller boundary. `_start` and `_steer` accept or
+   generate a `dispatch ID`, pass it as `clientUserMessageId`, and return it even when
+   response loss makes acceptance indeterminate. `_dispatch-status` reports zero, one,
+   or multiple matching `userMessage.clientId` observations and recommends a next
+   command. `not_observed` is not rejection; Rodex never silently retries.
 4. Add machine lifecycle and discovery: resumable `_sessions`, create-only `_spawn`,
    resume-only `_resume`, controlled restart/rehome, and workspace freshness fields.
 5. Broaden compatibility and recovery: `_doctor`, generated-schema checks across each

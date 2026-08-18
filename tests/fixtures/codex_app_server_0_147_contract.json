@@ -1,32 +1,98 @@
 {
+  "agent_message_phase_nullable": true,
+  "agent_message_phase_required": false,
+  "agent_message_phases": [
+    "commentary",
+    "final_answer"
+  ],
   "codex_cli_version": "0.147.0",
-  "initialize_user_agent": "rodex-control/0.147.0 (platform metadata)",
+  "file_change_statuses": [
+    "inProgress",
+    "completed",
+    "failed",
+    "declined"
+  ],
+  "generated_with": "codex app-server generate-json-schema --experimental",
   "request_id_types": [
     "integer",
     "string"
   ],
-  "thread_required_fields": [
-    "id",
-    "sessionId",
-    "status",
-    "turns"
+  "server_request_methods": [
+    "account/chatgptAuthTokens/refresh",
+    "applyPatchApproval",
+    "attestation/generate",
+    "currentTime/read",
+    "execCommandApproval",
+    "item/commandExecution/requestApproval",
+    "item/fileChange/requestApproval",
+    "item/permissions/requestApproval",
+    "item/tool/call",
+    "item/tool/requestUserInput",
+    "mcpServer/elicitation/request"
   ],
-  "turn_statuses": [
-    "completed",
-    "failed",
-    "inProgress",
-    "interrupted"
+  "thread_required_fields": [
+    "cliVersion",
+    "createdAt",
+    "cwd",
+    "ephemeral",
+    "id",
+    "modelProvider",
+    "preview",
+    "sessionId",
+    "source",
+    "status",
+    "turns",
+    "updatedAt"
+  ],
+  "thread_statuses": [
+    "active",
+    "idle",
+    "notLoaded",
+    "systemError"
   ],
   "turn_interrupt_required_params": [
     "threadId",
     "turnId"
+  ],
+  "turn_start_required_params": [
+    "input",
+    "threadId"
+  ],
+  "turn_start_client_message_id_types": [
+    "null",
+    "string"
+  ],
+  "turn_start_response_required_fields": [
+    "turn"
+  ],
+  "turn_statuses": [
+    "completed",
+    "interrupted",
+    "failed",
+    "inProgress"
   ],
   "turn_steer_required_params": [
     "expectedTurnId",
     "input",
     "threadId"
   ],
-  "turn_start_optional_params": [
-    "clientUserMessageId"
+  "turn_steer_client_message_id_types": [
+    "null",
+    "string"
+  ],
+  "user_message_client_id_types": [
+    "null",
+    "string"
+  ],
+  "user_message_client_id_required": false,
+  "user_input_request_required_params": [
+    "isBlocking",
+    "itemId",
+    "questions",
+    "threadId",
+    "turnId"
+  ],
+  "user_input_response_required_params": [
+    "answers"
   ]
 }

@@ -7,7 +7,7 @@ import queue
 import subprocess
 from collections.abc import Callable
 from pathlib import Path
-from threading import Lock, Thread
+from threading import Event, Lock, Thread
 from typing import Any, Final
 
 from websockets.exceptions import ConnectionClosed
@@ -32,6 +32,7 @@ ToolCountCallback = Callable[[int], None]
 ProtocolEventCallback = Callable[[str | bytes], None]
 _EVENT_STREAM_CLOSED: Final = object()
 EVENT_STREAM_READY_METHOD: Final = "rodex/event-stream/ready"
+CONTROL_CONNECTION_PATH: Final = "/rodex-control"
 EVENT_STREAM_READY_MESSAGE: Final = json.dumps(
     {"method": EVENT_STREAM_READY_METHOD, "params": {"activeTurns": {}}},
     separators=(",", ":"),
@@ -234,6 +235,8 @@ class CodexProtocolProxy:
         self._on_primary_server_message = on_primary_server_message
         self._connection_lock = Lock()
         self._primary_connection_claimed = False
+        self._primary_connection_released = Event()
+        self._primary_connection_released.set()
         self._server: Any | None = None
         self._server_thread: Thread | None = None
 
@@ -282,8 +285,20 @@ class CodexProtocolProxy:
     def __exit__(self, *_error: object) -> None:
         self.close()
 
+    def wait_for_primary_connection_release(self, timeout_seconds: float) -> None:
+        """Wait until the event-producing client transport has fully disconnected."""
+        if timeout_seconds <= 0:
+            raise ValueError("timeout must be positive")
+        if not self._primary_connection_released.wait(timeout_seconds):
+            raise RodexProtocolProxyError(
+                "primary Codex protocol connection did not close before retry"
+            )
+
     def _handle_connection(self, tui_connection: Any) -> None:
-        is_primary_connection = self._claim_primary_connection()
+        is_primary_connection = (
+            _connection_path(tui_connection) != CONTROL_CONNECTION_PATH
+            and self._claim_primary_connection()
+        )
         try:
             with unix_connect(
                 str(self._app_server_socket_path),
@@ -315,13 +330,22 @@ class CodexProtocolProxy:
                     tui_to_server.join(timeout=2)
         except (ConnectionClosed, OSError):
             tui_connection.close()
+        finally:
+            if is_primary_connection:
+                self._release_primary_connection()
 
     def _claim_primary_connection(self) -> bool:
         with self._connection_lock:
             if self._primary_connection_claimed:
                 return False
             self._primary_connection_claimed = True
+            self._primary_connection_released.clear()
             return True
+
+    def _release_primary_connection(self) -> None:
+        with self._connection_lock:
+            self._primary_connection_claimed = False
+            self._primary_connection_released.set()
 
 
 def _forward_messages(source: Any, destination: Any) -> None:
@@ -332,6 +356,12 @@ def _forward_messages(source: Any, destination: Any) -> None:
         pass
     finally:
         destination.close()
+
+
+def _connection_path(connection: Any) -> str | None:
+    request = getattr(connection, "request", None)
+    path = getattr(request, "path", None)
+    return path if isinstance(path, str) else None
 
 
 def _close_subscriber_queue(

@@ -104,8 +104,9 @@ preference. See the current [tmux manual](https://man.openbsd.org/tmux.1) and
 | `./rodex _wait edgar-work` | Wait until the running session is idle. |
 | `./rodex _tail edgar-work` | Follow structured live protocol events as JSON lines. |
 | `./rodex _inspect edgar-work --json` | Read live thread state and its exact active turn ID. |
-| `printf '%s' "$PROMPT" \| ./rodex _start edgar-work --stdin --json` | Start only after the thread is observed idle. |
-| `printf '%s' "$PROMPT" \| ./rodex _steer edgar-work --turn TURN_ID --stdin --json` | Steer one exact active turn. |
+| `printf '%s' "$PROMPT" \| ./rodex _start edgar-work --dispatch DISPATCH_ID --stdin --json` | Start an idle thread with caller-owned correlation. |
+| `printf '%s' "$PROMPT" \| ./rodex _steer edgar-work --turn TURN_ID --dispatch DISPATCH_ID --stdin --json` | Steer one exact active turn with caller-owned correlation. |
+| `./rodex _dispatch-status edgar-work --dispatch DISPATCH_ID --json` | Observe where a dispatch ID appears in exact thread history. |
 | `./rodex _wait edgar-work --turn TURN_ID --timeout 30m --json` | Wait for one exact turn without interrupting on timeout. |
 | `./rodex _interrupt edgar-work --turn TURN_ID --json` | Interrupt one exact active turn. |
 | `./rodex _result edgar-work --turn TURN_ID --json` | Read bounded live result data without copying it into SQLite. |
@@ -128,11 +129,25 @@ display name is read on every invocation, so an agent need not cache it.
 New runtimes also expose a random runtime UUID and its durable-match state. The exact
 control commands emit a schema-v1 success/error envelope containing separate Rodex
 session, runtime, Codex thread, Codex session-tree, and turn identities. They require
-stdin prompts and a runtime created by this Rodex version. Exit status `2` means invalid
+stdin prompts and a runtime created by this Rodex version. `_inspect` reports the live
+App Server thread working directory so callers can verify workspace scope before mutation.
+Resuming from a different caller working directory intentionally relocates the runtime;
+session identity follows the human rather than permanently pinning the original path.
+Exact start/steer responses expose `data.dispatch.id` and a structured
+`data.recommended_next.command`. Pipelines should supply `--dispatch` before mutation so
+they retain the ID even if command output is lost; Rodex generates one when omitted.
+`_dispatch-status` reports `accepted`, `not_observed`, or `ambiguous` evidence and
+recommends the next exact wait/result/status command without executing it.
+`_result` caps final-answer text at 64 KiB, reports its original UTF-8 byte count and
+truncation state, and includes at most 100 completed file-change paths.
+Exit status `2` means invalid
 input or unknown session, `3` means runtime/identity/compatibility failure, `4` is a
 non-interrupting wait timeout, `5` an interrupted turn, `6` a failed turn, and `7` a
 control or indeterminate-dispatch failure. `dispatch_indeterminate` is deliberately not
-retryable: inspect before deciding. Legacy `_send` and idle-based `_wait` remain available.
+retryable: execute `data.recommended_next.command`, then let the controller decide. For
+start/steer this queries `_dispatch-status`; an indeterminate interrupt instead
+recommends `_result` for its already-known turn. `not_observed` is not proof of
+rejection. Legacy `_send` and idle-based `_wait` remain available.
 The repository-local [Rodex control skill](.agents/skills/rodex-session-control/SKILL.md)
 keeps agent use on this exact identity-and-turn workflow.
 When `_alias` changes the effective name of a live session, Rodex sends one verified

@@ -16,6 +16,8 @@ import pytest
 from rodex.app_server_contract import RodexAppServerCompatibilityError
 from rodex.cli import RodexExecutableNotFoundError, RodexLaunchError, main, run
 from rodex.control import (
+    CodexDispatchMatch,
+    CodexDispatchStatus,
     CodexThreadState,
     CodexTurnResult,
     LiveRodexControl,
@@ -202,15 +204,29 @@ class StubControlClient:
         self.tailed: list[LiveRodexControl] = []
         self.started: list[tuple[LiveRodexControl, str]] = []
         self.steered: list[tuple[LiveRodexControl, str, str]] = []
+        self.started_dispatch_ids: list[str | None] = []
+        self.steered_dispatch_ids: list[str | None] = []
         self.interrupted: list[tuple[LiveRodexControl, str]] = []
         self.exact_waited: list[tuple[LiveRodexControl, str, float | None]] = []
         self.send_error: RodexControlError | None = None
         self.start_error: RodexControlError | None = None
         self.wait_error: RodexControlError | None = None
         self.compatibility_error: RodexAppServerCompatibilityError | None = None
+        self.dispatch_status_result = CodexDispatchStatus(
+            dispatch_id="rodex:dispatch:test",
+            observation="accepted",
+            matches=(
+                CodexDispatchMatch(
+                    turn_id="turn-1",
+                    turn_status="completed",
+                    user_message_item_id="message-1",
+                ),
+            ),
+        )
         self.state = CodexThreadState(
             thread_id=str(CODEX_SESSION_ID),
             session_id=str(CODEX_SESSION_ID),
+            cwd="/workspace/project",
             status="idle",
             active_flags=(),
             active_turn_id=None,
@@ -220,6 +236,8 @@ class StubControlClient:
             turn_id="turn-1",
             status="completed",
             final_agent_message="done",
+            final_agent_message_bytes=4,
+            final_agent_message_truncated=False,
             structured_output=None,
             error=None,
             started_at=10,
@@ -251,21 +269,31 @@ class StubControlClient:
         if self.send_error is not None:
             raise self.send_error
         self.sent.append((control, prompt))
-        return PromptDispatch("started", "turn-1")
+        return PromptDispatch("started", "turn-1", "rodex:dispatch:legacy")
 
     def wait_until_idle(self, control: LiveRodexControl, *, revalidate: Any) -> None:
         revalidate()
         self.waited.append(control)
 
     def start_turn(
-        self, control: LiveRodexControl, prompt: str, *, revalidate: Any
+        self,
+        control: LiveRodexControl,
+        prompt: str,
+        *,
+        dispatch_id: str | None = None,
+        revalidate: Any,
     ) -> PromptDispatch:
         revalidate()
         if self.start_error is not None:
             raise self.start_error
         self.started.append((control, prompt))
+        self.started_dispatch_ids.append(dispatch_id)
         return PromptDispatch(
-            "started", "turn-1", str(CODEX_SESSION_ID), str(CODEX_SESSION_ID)
+            "started",
+            "turn-1",
+            dispatch_id or "rodex:dispatch:test",
+            str(CODEX_SESSION_ID),
+            str(CODEX_SESSION_ID),
         )
 
     def steer_turn(
@@ -274,13 +302,29 @@ class StubControlClient:
         turn_id: str,
         prompt: str,
         *,
+        dispatch_id: str | None = None,
         revalidate: Any,
     ) -> PromptDispatch:
         revalidate()
         self.steered.append((control, turn_id, prompt))
+        self.steered_dispatch_ids.append(dispatch_id)
         return PromptDispatch(
-            "steered", turn_id, str(CODEX_SESSION_ID), str(CODEX_SESSION_ID)
+            "steered",
+            turn_id,
+            dispatch_id or "rodex:dispatch:test",
+            str(CODEX_SESSION_ID),
+            str(CODEX_SESSION_ID),
         )
+
+    def dispatch_status(
+        self,
+        _control: LiveRodexControl,
+        dispatch_id: str,
+        *,
+        revalidate: Any,
+    ) -> tuple[CodexThreadState, CodexDispatchStatus]:
+        revalidate()
+        return self.state, replace(self.dispatch_status_result, dispatch_id=dispatch_id)
 
     def interrupt_turn(
         self, control: LiveRodexControl, turn_id: str, *, revalidate: Any
@@ -591,6 +635,7 @@ def test_unknown_bare_name_refuses_a_live_unregistered_tmux_collision(
     assert delegator.calls == []
 
 
+@pytest.mark.evolutionary_regression
 def test_pending_runtime_with_exact_durable_identity_is_recovered(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -616,6 +661,9 @@ def test_pending_runtime_with_exact_durable_identity_is_recovered(
         LiveTmuxSession(tmp_path / "tmux.sock", "automatic-beluga")
     ]
     assert launcher.attached
+    persisted_runtime = lookup_rodex_runtime_instance(1, database)
+    assert persisted_runtime is not None
+    assert persisted_runtime.runtime_identifier == RUNTIME_IDENTIFIER
 
 
 def test_named_attach_rejects_a_wrong_live_rodex_identity_without_side_effects(
@@ -933,7 +981,14 @@ def test_machine_start_reads_stdin_and_emits_the_versioned_identity_envelope(
     control = StubControlClient()
 
     status = run(
-        ["_start", "automatic-beluga", "--stdin", "--json"],
+        [
+            "_start",
+            "automatic-beluga",
+            "--dispatch",
+            "controller:dispatch:42",
+            "--stdin",
+            "--json",
+        ],
         database_path=database,
         launcher=launcher,  # type: ignore[arg-type]
         control_client=control,  # type: ignore[arg-type]
@@ -941,6 +996,7 @@ def test_machine_start_reads_stdin_and_emits_the_versioned_identity_envelope(
 
     assert status == 0
     assert control.started == [(launcher.control, "run focused tests\n")]
+    assert control.started_dispatch_ids == ["controller:dispatch:42"]
     payload = json.loads(capsys.readouterr().out)
     assert payload["schema_version"] == 1
     assert payload["operation"] == "turn.start"
@@ -954,6 +1010,94 @@ def test_machine_start_reads_stdin_and_emits_the_versioned_identity_envelope(
         "session_id": str(CODEX_SESSION_ID),
         "turn_id": "turn-1",
     }
+    assert payload["data"]["dispatch"] == {
+        "id": "controller:dispatch:42",
+        "observation": "accepted",
+        "evidence": "mutation_response",
+    }
+    assert payload["data"]["recommended_next"]["command"] == [
+        "rodex",
+        "_wait",
+        "automatic-beluga",
+        "--turn",
+        "turn-1",
+        "--json",
+    ]
+
+
+@pytest.mark.evolutionary_regression
+def test_accepted_machine_mutation_emits_one_success_when_access_bookkeeping_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Current evidence: auxiliary SQL failure cannot reverse an accepted turn start."""
+    database = tmp_path / "rodex.sqlite3"
+    monkeypatch.setattr(
+        "cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga"
+    )
+    monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
+    monkeypatch.setattr(sys, "stdin", io.StringIO("run focused tests\n"))
+    create_exact_controlled_session(database, tmp_path)
+    monkeypatch.setattr(
+        "rodex.cli.record_a_rodex_session_access",
+        lambda *_args: (_ for _ in ()).throw(RodexSessionError("database unavailable")),
+    )
+    launcher = StubLauncher(tmp_path)
+    control = StubControlClient()
+
+    status = run(
+        ["_start", "automatic-beluga", "--stdin", "--json"],
+        database_path=database,
+        launcher=launcher,  # type: ignore[arg-type]
+        control_client=control,  # type: ignore[arg-type]
+    )
+
+    assert status == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is True
+    assert payload["data"] == {
+        "accepted": True,
+        "dispatch": {
+            "evidence": "mutation_response",
+            "id": "rodex:dispatch:test",
+            "observation": "accepted",
+        },
+        "recommended_next": {
+            "action": "wait_for_turn",
+            "command": [
+                "rodex",
+                "_wait",
+                "automatic-beluga",
+                "--turn",
+                "turn-1",
+                "--json",
+            ],
+            "reason": "one exact accepted turn is still in progress",
+        },
+        "warnings": [
+            {
+                "code": "access_record_failed",
+                "message": "database unavailable",
+            }
+        ],
+    }
+
+
+@pytest.mark.evolutionary_regression
+def test_machine_blank_turn_id_is_one_invalid_argument_envelope(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    status = run(
+        ["_result", "automatic-beluga", "--turn", "   ", "--json"],
+        database_path=tmp_path / "rodex.sqlite3",
+    )
+
+    assert status == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is False
+    assert payload["error"]["code"] == "invalid_argument"
 
 
 def test_machine_exact_control_requires_a_persisted_runtime_identifier(
@@ -1007,6 +1151,8 @@ def test_machine_steer_targets_only_the_supplied_turn_and_stdin(
             "automatic-beluga",
             "--turn",
             "turn-active",
+            "--dispatch",
+            "controller:steer:42",
             "--stdin",
             "--json",
         ],
@@ -1017,6 +1163,7 @@ def test_machine_steer_targets_only_the_supplied_turn_and_stdin(
 
     assert status == 0
     assert control.steered == [(launcher.control, "turn-active", "also lint")]
+    assert control.steered_dispatch_ids == ["controller:steer:42"]
     assert json.loads(capsys.readouterr().out)["codex"]["turn_id"] == "turn-active"
 
 
@@ -1113,7 +1260,8 @@ def test_machine_command_reports_missing_tmux_in_its_json_envelope(
     }
 
 
-def test_machine_indeterminate_dispatch_is_explicitly_not_retryable(
+@pytest.mark.evolutionary_regression
+def test_machine_indeterminate_dispatch_returns_status_hook_and_next_command(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -1128,7 +1276,10 @@ def test_machine_indeterminate_dispatch_is_explicitly_not_retryable(
     launcher = StubLauncher(tmp_path)
     control = StubControlClient()
     control.start_error = RodexDispatchIndeterminateError(
-        "turn/start was sent but its acceptance is unknown"
+        "turn/start was sent but its acceptance is unknown",
+        method="turn/start",
+        dispatch_id="controller:dispatch:42",
+        thread_id=str(CODEX_SESSION_ID),
     )
 
     status = run(
@@ -1145,6 +1296,121 @@ def test_machine_indeterminate_dispatch_is_explicitly_not_retryable(
         "message": "turn/start was sent but its acceptance is unknown",
         "retryable": False,
     }
+    assert payload["data"]["dispatch"] == {
+        "id": "controller:dispatch:42",
+        "observation": "indeterminate",
+        "evidence": "mutation_response_unavailable",
+        "method": "turn/start",
+        "thread_id": str(CODEX_SESSION_ID),
+        "turn_id": None,
+    }
+    assert payload["data"]["recommended_next"] == {
+        "action": "query_dispatch_status",
+        "command": [
+            "rodex",
+            "_dispatch-status",
+            "automatic-beluga",
+            "--dispatch",
+            "controller:dispatch:42",
+            "--json",
+        ],
+        "reason": "query exact thread history before the controller decides",
+    }
+
+
+@pytest.mark.evolutionary_regression
+def test_machine_dispatch_status_recommends_the_next_exact_turn_command(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Current evidence: status lookup reports facts and a controller-ready next call."""
+    database = tmp_path / "rodex.sqlite3"
+    monkeypatch.setattr(
+        "cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga"
+    )
+    monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
+    create_exact_controlled_session(database, tmp_path)
+    launcher = StubLauncher(tmp_path)
+    control = StubControlClient()
+
+    status = run(
+        [
+            "_dispatch-status",
+            "automatic-beluga",
+            "--dispatch",
+            "controller:dispatch:42",
+            "--json",
+        ],
+        database_path=database,
+        launcher=launcher,  # type: ignore[arg-type]
+        control_client=control,  # type: ignore[arg-type]
+    )
+
+    assert status == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["operation"] == "dispatch.status"
+    assert payload["codex"]["turn_id"] == "turn-1"
+    assert payload["data"]["dispatch"] == {
+        "id": "controller:dispatch:42",
+        "observation": "accepted",
+        "evidence": "thread_history",
+        "matches": [
+            {
+                "turn_id": "turn-1",
+                "turn_status": "completed",
+                "user_message_item_id": "message-1",
+            }
+        ],
+    }
+    assert payload["data"]["recommended_next"]["command"] == [
+        "rodex",
+        "_result",
+        "automatic-beluga",
+        "--turn",
+        "turn-1",
+        "--json",
+    ]
+
+
+def test_machine_dispatch_status_does_not_treat_absence_as_rejection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    database = tmp_path / "rodex.sqlite3"
+    monkeypatch.setattr(
+        "cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga"
+    )
+    monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
+    create_exact_controlled_session(database, tmp_path)
+    launcher = StubLauncher(tmp_path)
+    control = StubControlClient()
+    control.dispatch_status_result = CodexDispatchStatus(
+        "controller:dispatch:42",
+        "not_observed",
+        (),
+    )
+
+    status = run(
+        [
+            "_dispatch-status",
+            "automatic-beluga",
+            "--dispatch",
+            "controller:dispatch:42",
+            "--json",
+        ],
+        database_path=database,
+        launcher=launcher,  # type: ignore[arg-type]
+        control_client=control,  # type: ignore[arg-type]
+    )
+
+    assert status == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["data"]["dispatch"]["observation"] == "not_observed"
+    recommendation = payload["data"]["recommended_next"]
+    assert recommendation["action"] == "poll_dispatch_status"
+    assert "not evidence that it was rejected" in recommendation["reason"]
 
 
 def test_machine_wait_distinguishes_a_failed_turn_outcome(
@@ -1280,6 +1546,38 @@ def test_machine_result_returns_live_final_message_and_bounded_changes(
         "paths": ["src/rodex/cli.py"],
         "truncated": False,
     }
+
+
+@pytest.mark.evolutionary_regression
+def test_machine_result_maps_failed_turn_outcome_to_exit_six(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    database = tmp_path / "rodex.sqlite3"
+    monkeypatch.setattr(
+        "cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga"
+    )
+    monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
+    create_exact_controlled_session(database, tmp_path)
+    launcher = StubLauncher(tmp_path)
+    control = StubControlClient()
+    control.turn_result = replace(
+        control.turn_result, status="failed", error={"message": "x"}
+    )
+
+    status = run(
+        ["_result", "automatic-beluga", "--turn", "turn-1", "--json"],
+        database_path=database,
+        launcher=launcher,  # type: ignore[arg-type]
+        control_client=control,  # type: ignore[arg-type]
+    )
+
+    assert status == 6
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is False
+    assert payload["error"]["code"] == "turn_failed"
+    assert payload["data"]["turn"]["status"] == "failed"
 
 
 @pytest.mark.parametrize(

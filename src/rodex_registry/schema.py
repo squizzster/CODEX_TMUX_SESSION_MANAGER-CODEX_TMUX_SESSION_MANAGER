@@ -19,6 +19,7 @@ from rodex_sql import (
 
 from .errors import RodexSessionError
 from .identity import RodexRegistryId
+from .statistics_fields import SESSION_STATISTICS_SCALARS, TURN_STATISTICS_SCALARS
 
 RODEX_SESSIONS_TABLE: Final = "rodex_sessions"
 RODEX_REGISTRIES_TABLE: Final = "rodex_registries"
@@ -110,123 +111,6 @@ STATISTICS_TURN_OUTCOMES: Final = frozenset({"open", "completed", "aborted"})
 STATISTICS_WORKER_STATES: Final = frozenset(
     {"starting", "catching_up", "up_to_date", "degraded", "stopped"}
 )
-_SESSION_PROJECTION_SCALAR_COLUMNS: Final = (
-    "analyzer_event_count",
-    "analyzer_source_count",
-    "history_sessions_count",
-    "history_records_count",
-    "history_malformed_records_count",
-    "turns_started_count",
-    "turns_completed_count",
-    "turns_aborted_count",
-    "turns_open_count",
-    "input_tokens",
-    "cached_input_tokens",
-    "cache_write_input_tokens",
-    "output_tokens",
-    "reasoning_output_tokens",
-    "total_tokens",
-    "context_observation_count",
-    "context_latest_session_median_percent",
-    "context_high_water_percent",
-    "commands_executed_count",
-    "model_tool_requests_count",
-    "model_tool_outputs_paired_count",
-    "file_change_operations_count",
-    "file_change_distinct_paths_count",
-    "file_change_occurrences_count",
-    "web_operations_count",
-    "web_queries_count",
-    "web_result_records_count",
-    "web_distinct_result_or_action_urls_count",
-    "collaboration_operations_count",
-    "collaboration_agents_started_count",
-    "compactions_count",
-    "distinct_workspaces_count",
-    "typical_turns_count",
-    "hands_on_turn_count",
-    "hands_on_turn_rate_percent",
-    "turns_with_nonzero_command_count",
-    "turns_subsequently_completed_count",
-    "completed_after_nonzero_command_percent",
-    "command_zero_exit_rate_percent",
-    "exact_command_repeat_rate_percent",
-    "repeated_command_execution_count",
-    "cached_input_share_percent",
-    "reasoning_output_share_percent",
-    "edited_turns_count",
-    "verified_after_edit_count",
-    "edit_then_verify_percent",
-    "web_turns_count",
-    "web_later_command_or_file_work_count",
-    "web_follow_through_percent",
-    "file_revisit_rate_percent",
-    "revisited_distinct_path_count",
-    "busiest_workspace_turn_share_percent",
-    "workspace_tagged_turn_count",
-    "turns_in_busiest_workspace_count",
-    "turns_with_local_hour_count",
-    "busiest_local_hour",
-    "turns_in_busiest_local_hour_count",
-    "goal_updates_count",
-    "audit_privacy",
-    "audit_percentile_method",
-    "audit_token_method",
-    "audit_token_snapshots_count",
-    "audit_repeated_token_snapshots_count",
-    "audit_token_epochs_count",
-    "audit_duplicate_operations_ignored_count",
-    "audit_duplicate_terminals_ignored_count",
-    "audit_terminal_events_without_start_ignored_count",
-    "audit_new_event_type_warnings_count",
-)
-_TURN_PROJECTION_SCALAR_COLUMNS: Final = (
-    "duration_ms",
-    "time_to_first_token_ms",
-    "input_tokens",
-    "cached_input_tokens",
-    "cache_write_input_tokens",
-    "output_tokens",
-    "reasoning_output_tokens",
-    "total_tokens",
-    "context_observation_count",
-    "context_high_water_percent",
-    "commands_executed_count",
-    "model_tool_requests_count",
-    "model_tool_outputs_paired_count",
-    "file_change_operations_count",
-    "file_change_distinct_paths_count",
-    "file_change_occurrences_count",
-    "web_operations_count",
-    "web_queries_count",
-    "web_result_records_count",
-    "web_distinct_result_or_action_urls_count",
-    "collaboration_operations_count",
-    "collaboration_agents_started_count",
-    "compactions_count",
-    "workspace_digest",
-    "model",
-    "local_start_hour",
-    "hands_on",
-    "completed_after_nonzero_command",
-    "cached_input_share_percent",
-    "reasoning_output_share_percent",
-    "edited_then_verified",
-    "web_research_followed_by_command_or_file_work",
-    "goal_updates_count",
-)
-_TURN_DATABASE_SCALAR_COLUMNS: Final = (
-    *_TURN_PROJECTION_SCALAR_COLUMNS[:11],
-    "command_duration_observation_count",
-    "command_duration_total_ms",
-    "command_duration_median_ms",
-    "command_duration_p75_ms",
-    "command_duration_p90_ms",
-    "command_duration_p95_ms",
-    "command_duration_maximum_ms",
-    *_TURN_PROJECTION_SCALAR_COLUMNS[11:],
-)
-
 _CREATE_REGISTRIES_TABLE = f"""
 CREATE TABLE IF NOT EXISTS {RODEX_REGISTRIES_TABLE} (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -426,13 +310,13 @@ CREATE TABLE IF NOT EXISTS {RODEX_SESSIONS_STATISTICS_TABLE} (
         command_zero_exit_rate_percent IS NULL
         OR command_zero_exit_rate_percent BETWEEN 0 AND 100
     ),
-    exact_command_repeat_rate_percent REAL DEFAULT NULL CHECK (
-        exact_command_repeat_rate_percent IS NULL
-        OR exact_command_repeat_rate_percent BETWEEN 0 AND 100
-    ),
     repeated_command_execution_count INTEGER NOT NULL CHECK (
         repeated_command_execution_count >= 0
         AND repeated_command_execution_count <= commands_executed_count
+    ),
+    exact_command_repeat_rate_percent REAL DEFAULT NULL CHECK (
+        exact_command_repeat_rate_percent IS NULL
+        OR exact_command_repeat_rate_percent BETWEEN 0 AND 100
     ),
     cached_input_share_percent REAL DEFAULT NULL CHECK (
         cached_input_share_percent IS NULL OR cached_input_share_percent BETWEEN 0 AND 100
@@ -456,21 +340,21 @@ CREATE TABLE IF NOT EXISTS {RODEX_SESSIONS_STATISTICS_TABLE} (
     web_follow_through_percent REAL DEFAULT NULL CHECK (
         web_follow_through_percent IS NULL OR web_follow_through_percent BETWEEN 0 AND 100
     ),
-    file_revisit_rate_percent REAL DEFAULT NULL CHECK (
-        file_revisit_rate_percent IS NULL OR file_revisit_rate_percent BETWEEN 0 AND 100
-    ),
     revisited_distinct_path_count INTEGER NOT NULL CHECK (
         revisited_distinct_path_count >= 0
         AND revisited_distinct_path_count <= file_change_distinct_paths_count
     ),
-    busiest_workspace_turn_share_percent REAL DEFAULT NULL CHECK (
-        busiest_workspace_turn_share_percent IS NULL
-        OR busiest_workspace_turn_share_percent BETWEEN 0 AND 100
+    file_revisit_rate_percent REAL DEFAULT NULL CHECK (
+        file_revisit_rate_percent IS NULL OR file_revisit_rate_percent BETWEEN 0 AND 100
     ),
     workspace_tagged_turn_count INTEGER NOT NULL CHECK (workspace_tagged_turn_count >= 0),
     turns_in_busiest_workspace_count INTEGER NOT NULL CHECK (
         turns_in_busiest_workspace_count >= 0
         AND turns_in_busiest_workspace_count <= workspace_tagged_turn_count
+    ),
+    busiest_workspace_turn_share_percent REAL DEFAULT NULL CHECK (
+        busiest_workspace_turn_share_percent IS NULL
+        OR busiest_workspace_turn_share_percent BETWEEN 0 AND 100
     ),
     turns_with_local_hour_count INTEGER NOT NULL CHECK (turns_with_local_hour_count >= 0),
     busiest_local_hour INTEGER DEFAULT NULL CHECK (
@@ -1371,79 +1255,7 @@ def _verify_statistics_table(connection: sqlite3.Connection) -> None:
             ("statistics_projection_schema_version", "TEXT", 1, 0),
             ("calculated_at_utc", "TEXT", 1, 0),
             ("coverage_state", "TEXT", 1, 0),
-            ("analyzer_event_count", "INTEGER", 1, 0),
-            ("analyzer_source_count", "INTEGER", 1, 0),
-            ("history_sessions_count", "INTEGER", 1, 0),
-            ("history_records_count", "INTEGER", 1, 0),
-            ("history_malformed_records_count", "INTEGER", 1, 0),
-            ("turns_started_count", "INTEGER", 1, 0),
-            ("turns_completed_count", "INTEGER", 1, 0),
-            ("turns_aborted_count", "INTEGER", 1, 0),
-            ("turns_open_count", "INTEGER", 1, 0),
-            ("input_tokens", "INTEGER", 1, 0),
-            ("cached_input_tokens", "INTEGER", 1, 0),
-            ("cache_write_input_tokens", "INTEGER", 1, 0),
-            ("output_tokens", "INTEGER", 1, 0),
-            ("reasoning_output_tokens", "INTEGER", 1, 0),
-            ("total_tokens", "INTEGER", 1, 0),
-            ("context_observation_count", "INTEGER", 1, 0),
-            ("context_latest_session_median_percent", "REAL", 0, 0),
-            ("context_high_water_percent", "REAL", 1, 0),
-            ("commands_executed_count", "INTEGER", 1, 0),
-            ("model_tool_requests_count", "INTEGER", 1, 0),
-            ("model_tool_outputs_paired_count", "INTEGER", 1, 0),
-            ("file_change_operations_count", "INTEGER", 1, 0),
-            ("file_change_distinct_paths_count", "INTEGER", 1, 0),
-            ("file_change_occurrences_count", "INTEGER", 1, 0),
-            ("web_operations_count", "INTEGER", 1, 0),
-            ("web_queries_count", "INTEGER", 1, 0),
-            ("web_result_records_count", "INTEGER", 1, 0),
-            ("web_distinct_result_or_action_urls_count", "INTEGER", 1, 0),
-            ("collaboration_operations_count", "INTEGER", 1, 0),
-            ("collaboration_agents_started_count", "INTEGER", 1, 0),
-            ("compactions_count", "INTEGER", 1, 0),
-            ("distinct_workspaces_count", "INTEGER", 1, 0),
-            ("typical_turns_count", "INTEGER", 1, 0),
-            ("hands_on_turn_count", "INTEGER", 1, 0),
-            ("hands_on_turn_rate_percent", "REAL", 0, 0),
-            ("turns_with_nonzero_command_count", "INTEGER", 1, 0),
-            ("turns_subsequently_completed_count", "INTEGER", 1, 0),
-            ("completed_after_nonzero_command_percent", "REAL", 0, 0),
-            ("command_zero_exit_rate_percent", "REAL", 0, 0),
-            ("exact_command_repeat_rate_percent", "REAL", 0, 0),
-            ("repeated_command_execution_count", "INTEGER", 1, 0),
-            ("cached_input_share_percent", "REAL", 0, 0),
-            ("reasoning_output_share_percent", "REAL", 0, 0),
-            ("edited_turns_count", "INTEGER", 1, 0),
-            ("verified_after_edit_count", "INTEGER", 1, 0),
-            ("edit_then_verify_percent", "REAL", 0, 0),
-            ("web_turns_count", "INTEGER", 1, 0),
-            ("web_later_command_or_file_work_count", "INTEGER", 1, 0),
-            ("web_follow_through_percent", "REAL", 0, 0),
-            ("file_revisit_rate_percent", "REAL", 0, 0),
-            ("revisited_distinct_path_count", "INTEGER", 1, 0),
-            ("busiest_workspace_turn_share_percent", "REAL", 0, 0),
-            ("workspace_tagged_turn_count", "INTEGER", 1, 0),
-            ("turns_in_busiest_workspace_count", "INTEGER", 1, 0),
-            ("turns_with_local_hour_count", "INTEGER", 1, 0),
-            ("busiest_local_hour", "INTEGER", 0, 0),
-            ("turns_in_busiest_local_hour_count", "INTEGER", 1, 0),
-            ("goal_updates_count", "INTEGER", 1, 0),
-            ("audit_privacy", "TEXT", 1, 0),
-            ("audit_percentile_method", "TEXT", 1, 0),
-            ("audit_token_method", "TEXT", 1, 0),
-            ("audit_token_snapshots_count", "INTEGER", 1, 0),
-            ("audit_repeated_token_snapshots_count", "INTEGER", 1, 0),
-            ("audit_token_epochs_count", "INTEGER", 1, 0),
-            ("audit_duplicate_operations_ignored_count", "INTEGER", 1, 0),
-            ("audit_duplicate_terminals_ignored_count", "INTEGER", 1, 0),
-            (
-                "audit_terminal_events_without_start_ignored_count",
-                "INTEGER",
-                1,
-                0,
-            ),
-            ("audit_new_event_type_warnings_count", "INTEGER", 1, 0),
+            *SESSION_STATISTICS_SCALARS.schema_columns,
         ],
     )
     _verify_single_foreign_key(
@@ -1618,51 +1430,7 @@ def _verify_statistics_turns_table(connection: sqlite3.Connection) -> None:
             ("started_at_utc", "TEXT", 0, 0),
             ("terminal_at_utc", "TEXT", 0, 0),
             ("outcome", "TEXT", 1, 0),
-            ("duration_ms", "INTEGER", 0, 0),
-            ("time_to_first_token_ms", "INTEGER", 0, 0),
-            ("input_tokens", "INTEGER", 1, 0),
-            ("cached_input_tokens", "INTEGER", 1, 0),
-            ("cache_write_input_tokens", "INTEGER", 1, 0),
-            ("output_tokens", "INTEGER", 1, 0),
-            ("reasoning_output_tokens", "INTEGER", 1, 0),
-            ("total_tokens", "INTEGER", 1, 0),
-            ("context_observation_count", "INTEGER", 1, 0),
-            ("context_high_water_percent", "REAL", 1, 0),
-            ("commands_executed_count", "INTEGER", 1, 0),
-            ("command_duration_observation_count", "INTEGER", 1, 0),
-            ("command_duration_total_ms", "INTEGER", 1, 0),
-            ("command_duration_median_ms", "REAL", 0, 0),
-            ("command_duration_p75_ms", "INTEGER", 0, 0),
-            ("command_duration_p90_ms", "INTEGER", 0, 0),
-            ("command_duration_p95_ms", "INTEGER", 0, 0),
-            ("command_duration_maximum_ms", "INTEGER", 0, 0),
-            ("model_tool_requests_count", "INTEGER", 1, 0),
-            ("model_tool_outputs_paired_count", "INTEGER", 1, 0),
-            ("file_change_operations_count", "INTEGER", 1, 0),
-            ("file_change_distinct_paths_count", "INTEGER", 1, 0),
-            ("file_change_occurrences_count", "INTEGER", 1, 0),
-            ("web_operations_count", "INTEGER", 1, 0),
-            ("web_queries_count", "INTEGER", 1, 0),
-            ("web_result_records_count", "INTEGER", 1, 0),
-            ("web_distinct_result_or_action_urls_count", "INTEGER", 1, 0),
-            ("collaboration_operations_count", "INTEGER", 1, 0),
-            ("collaboration_agents_started_count", "INTEGER", 1, 0),
-            ("compactions_count", "INTEGER", 1, 0),
-            ("workspace_digest", "TEXT", 0, 0),
-            ("model", "TEXT", 0, 0),
-            ("local_start_hour", "INTEGER", 0, 0),
-            ("hands_on", "INTEGER", 1, 0),
-            ("completed_after_nonzero_command", "INTEGER", 1, 0),
-            ("cached_input_share_percent", "REAL", 0, 0),
-            ("reasoning_output_share_percent", "REAL", 0, 0),
-            ("edited_then_verified", "INTEGER", 1, 0),
-            (
-                "web_research_followed_by_command_or_file_work",
-                "INTEGER",
-                1,
-                0,
-            ),
-            ("goal_updates_count", "INTEGER", 1, 0),
+            *TURN_STATISTICS_SCALARS.schema_columns,
         ],
     )
     foreign_keys = connection.execute(

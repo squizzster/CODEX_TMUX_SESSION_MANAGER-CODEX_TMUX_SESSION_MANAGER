@@ -36,14 +36,16 @@ def test_registry_has_one_way_domain_dependencies_without_the_old_monolith() -> 
     assert _relative_imports("identity") == set()
     assert _relative_imports("errors") == set()
     assert _relative_imports("validation") == set()
-    assert _relative_imports("schema") == {"errors", "identity"}
+    assert _relative_imports("schema") == {"errors", "identity", "statistics_fields"}
     assert _relative_imports("statistics") == {
         "errors",
         "identity",
         "schema",
+        "statistics_fields",
         "statistics_projection",
         "validation",
     }
+    assert _relative_imports("statistics_fields") == {"statistics_projection"}
     assert _relative_imports("lifecycle") == {
         "errors",
         "identity",
@@ -60,6 +62,7 @@ def test_registry_modules_do_not_import_their_public_facade() -> None:
         "lifecycle",
         "schema",
         "statistics",
+        "statistics_fields",
         "statistics_projection",
         "validation",
     ):

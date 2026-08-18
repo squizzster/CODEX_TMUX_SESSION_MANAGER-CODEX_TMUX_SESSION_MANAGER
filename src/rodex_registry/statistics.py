@@ -23,9 +23,6 @@ from .identity import (
     split_codex_session_id_into_signed_bigints,
 )
 from .schema import (
-    _SESSION_PROJECTION_SCALAR_COLUMNS,
-    _TURN_DATABASE_SCALAR_COLUMNS,
-    _TURN_PROJECTION_SCALAR_COLUMNS,
     RODEX_SESSIONS_STATISTICS_AUDIT_LIMITS_TABLE,
     RODEX_SESSIONS_STATISTICS_DISTRIBUTIONS_TABLE,
     RODEX_SESSIONS_STATISTICS_NAMED_COUNTS_TABLE,
@@ -40,6 +37,7 @@ from .schema import (
     existing_rodex_database_path,
     initialise_rodex_database,
 )
+from .statistics_fields import SESSION_STATISTICS_SCALARS, TURN_STATISTICS_SCALARS
 from .statistics_projection import (
     SessionStatisticsProjection,
     StatisticsDistribution,
@@ -259,34 +257,26 @@ def publish_rodex_session_statistics(
             "WHERE rodex_sessions_id = ?",
             (session_id,),
         )
-        scalar_columns_sql = ", ".join(_SESSION_PROJECTION_SCALAR_COLUMNS)
-        scalar_placeholders = ", ".join("?" for _ in _SESSION_PROJECTION_SCALAR_COLUMNS)
-        scalar_updates = ", ".join(
-            f"{column} = excluded.{column}" for column in _SESSION_PROJECTION_SCALAR_COLUMNS
-        )
         connection.execute(
             f"INSERT INTO {RODEX_SESSIONS_STATISTICS_TABLE} "
             "(rodex_sessions_id, statistics_revision, "
             "statistics_projection_schema_version, calculated_at_utc, "
-            f"coverage_state, {scalar_columns_sql}) "
-            f"VALUES (?, ?, ?, ?, ?, {scalar_placeholders}) "
+            f"coverage_state, {SESSION_STATISTICS_SCALARS.columns_sql}) "
+            f"VALUES (?, ?, ?, ?, ?, {SESSION_STATISTICS_SCALARS.placeholders_sql}) "
             "ON CONFLICT(rodex_sessions_id) DO UPDATE SET "
             "statistics_revision = excluded.statistics_revision, "
             "statistics_projection_schema_version = "
             "excluded.statistics_projection_schema_version, "
             "calculated_at_utc = excluded.calculated_at_utc, "
             "coverage_state = excluded.coverage_state, "
-            f"{scalar_updates}",
+            f"{SESSION_STATISTICS_SCALARS.excluded_updates_sql}",
             (
                 session_id,
                 new_revision,
                 schema_version,
                 calculated,
                 coverage,
-                *(
-                    getattr(statistics_projection, column)
-                    for column in _SESSION_PROJECTION_SCALAR_COLUMNS
-                ),
+                *SESSION_STATISTICS_SCALARS.write_values(statistics_projection),
             ),
         )
         for table in (
@@ -370,11 +360,6 @@ def publish_rodex_session_statistics(
             "WHERE rodex_sessions_id = ?",
             (session_id,),
         )
-        turn_scalar_columns_sql = ", ".join(_TURN_DATABASE_SCALAR_COLUMNS)
-        turn_scalar_placeholders = ", ".join("?" for _ in _TURN_DATABASE_SCALAR_COLUMNS)
-        turn_scalar_updates = ", ".join(
-            f"{column} = excluded.{column}" for column in _TURN_DATABASE_SCALAR_COLUMNS
-        )
         for item in turns:
             source_halves = split_codex_session_id_into_signed_bigints(
                 item.codex_session_id
@@ -401,9 +386,9 @@ def publish_rodex_session_statistics(
                 "codex_turn_id_sha256_int_1, codex_turn_id_sha256_int_2, "
                 "codex_turn_id_sha256_int_3, codex_turn_id_sha256_int_4, "
                 "codex_turn_id, included_statistics_revision, started_at_utc, "
-                f"terminal_at_utc, outcome, {turn_scalar_columns_sql}) "
+                f"terminal_at_utc, outcome, {TURN_STATISTICS_SCALARS.columns_sql}) "
                 f"VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
-                f"{turn_scalar_placeholders}) "
+                f"{TURN_STATISTICS_SCALARS.placeholders_sql}) "
                 "ON CONFLICT(rodex_sessions_statistics_sources_id, "
                 "codex_turn_id_sha256_int_1, codex_turn_id_sha256_int_2, "
                 "codex_turn_id_sha256_int_3, codex_turn_id_sha256_int_4) "
@@ -412,7 +397,7 @@ def publish_rodex_session_statistics(
                 "started_at_utc = excluded.started_at_utc, "
                 "terminal_at_utc = excluded.terminal_at_utc, "
                 "outcome = excluded.outcome, "
-                f"{turn_scalar_updates} "
+                f"{TURN_STATISTICS_SCALARS.excluded_updates_sql} "
                 "RETURNING id",
                 (
                     session_id,
@@ -423,7 +408,7 @@ def publish_rodex_session_statistics(
                     item.started_at_utc,
                     item.terminal_at_utc,
                     item.outcome,
-                    *_turn_database_scalar_values(item),
+                    *TURN_STATISTICS_SCALARS.write_values(item),
                 ),
             ).fetchone()
             if row is None:
@@ -602,7 +587,7 @@ def read_rodex_session_turn_statistics(
         worker_row = _select_statistics_worker(connection, session_id)
         source_rows = _select_statistics_sources(connection, session_id)
         turn_scalar_columns = ", ".join(
-            f"turns.{column}" for column in _TURN_DATABASE_SCALAR_COLUMNS
+            f"turns.{column}" for column in TURN_STATISTICS_SCALARS.columns
         )
         query = (
             f"SELECT turns.id, turns.rodex_sessions_id, "
@@ -704,23 +689,6 @@ def register_codex_statistics_source_in_transaction(
         )
 
 
-def _turn_database_scalar_values(
-    projection: TurnStatisticsProjection,
-) -> tuple[object, ...]:
-    command_duration = projection.command_duration
-    return (
-        *(getattr(projection, name) for name in _TURN_PROJECTION_SCALAR_COLUMNS[:11]),
-        command_duration.observation_count,
-        command_duration.total,
-        command_duration.median,
-        command_duration.p75,
-        command_duration.p90,
-        command_duration.p95,
-        command_duration.maximum,
-        *(getattr(projection, name) for name in _TURN_PROJECTION_SCALAR_COLUMNS[11:]),
-    )
-
-
 def _turn_id_sha256_signed_bigints(turn_id: str) -> tuple[int, int, int, int]:
     normalized = _normalise_required_text(turn_id, "codex_turn_id")
     digest = hashlib.sha256(normalized.encode("utf-8")).digest()
@@ -768,11 +736,11 @@ def _validate_source_observation(
 def _select_statistics(
     connection: sqlite3.Connection, session_id: int
 ) -> tuple[object, ...] | None:
-    scalar_columns = ", ".join(_SESSION_PROJECTION_SCALAR_COLUMNS)
     return connection.execute(
         f"SELECT id, rodex_sessions_id, statistics_revision, "
         "statistics_projection_schema_version, calculated_at_utc, coverage_state, "
-        f"{scalar_columns} FROM {RODEX_SESSIONS_STATISTICS_TABLE} "
+        f"{SESSION_STATISTICS_SCALARS.columns_sql} "
+        f"FROM {RODEX_SESSIONS_STATISTICS_TABLE} "
         "WHERE rodex_sessions_id = ?",
         (session_id,),
     ).fetchone()
@@ -886,7 +854,7 @@ def _session_statistics_from_rows(
     named_count_rows: Sequence[tuple[object, ...]],
     audit_limit_rows: Sequence[tuple[object, ...]],
 ) -> RodexSessionStatistics:
-    scalar_values = dict(zip(_SESSION_PROJECTION_SCALAR_COLUMNS, row[6:], strict=True))
+    scalar_values = SESSION_STATISTICS_SCALARS.read_values(row[6:])
     distributions = tuple(
         StatisticsDistribution(
             distribution_kind=str(item[0]),
@@ -944,14 +912,7 @@ def _turn_statistics_from_rows(
     row: tuple[object, ...],
     named_count_rows: Sequence[tuple[object, ...]],
 ) -> RodexSessionTurnStatistics:
-    values = dict(zip(_TURN_DATABASE_SCALAR_COLUMNS, row[10:], strict=True))
-    for key in (
-        "hands_on",
-        "completed_after_nonzero_command",
-        "edited_then_verified",
-        "web_research_followed_by_command_or_file_work",
-    ):
-        values[key] = bool(values[key])
+    values = TURN_STATISTICS_SCALARS.read_values(row[10:])
     projection = TurnStatisticsProjection(
         codex_session_id=join_signed_bigints_into_a_codex_session_id(row[3], row[4]),
         codex_turn_id=str(row[5]),

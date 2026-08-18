@@ -23,7 +23,7 @@ _CONTEXT_COMPACTION_FRAMES: Final = (
     "COMPACTING.. ",
     "COMPACTING...",
 )
-_CONTEXT_UNAVAILABLE_STATUS: Final = "#[fg=green]#[bold]| Context: -- "
+_CONTEXT_UNAVAILABLE_STATUS: Final = "#[fg=green]#[bold]| Context: -- | "
 RODEX_BASE_STATUS_LEFT_FORMAT: Final = (
     "#[fg=green]#[bold] Rodex: #S "
     "#[fg=cyan]#[bold]| Tools: #{@rodex_tool_calls} "
@@ -198,16 +198,17 @@ def context_status_segment(context_percent: float | None) -> str:
         or context_percent < 0
     ):
         raise ValueError("context percent must be a finite non-negative number or None")
-    displayed_percent = round(float(context_percent), 1)
-    if displayed_percent >= 80:
+    exact_percent = float(context_percent)
+    displayed_percent = math.floor(exact_percent + 0.5)
+    if exact_percent >= 80:
         colour = "brightred"
-    elif displayed_percent >= 75:
+    elif exact_percent >= 75:
         colour = "red"
-    elif displayed_percent >= 70:
+    elif exact_percent >= 70:
         colour = "colour208"
     else:
         colour = "green"
-    return f"#[fg={colour}]#[bold]| Context: {displayed_percent:.1f}% "
+    return f"#[fg={colour}]#[bold]| Context: {displayed_percent}% | "
 
 
 def compacting_status_segment(frame_index: int) -> str:
@@ -215,4 +216,4 @@ def compacting_status_segment(frame_index: int) -> str:
     if isinstance(frame_index, bool) or not isinstance(frame_index, int):
         raise ValueError("compaction frame index must be an integer")
     frame = _CONTEXT_COMPACTION_FRAMES[frame_index % len(_CONTEXT_COMPACTION_FRAMES)]
-    return f"#[fg=brightred]#[bold]| {frame} "
+    return f"#[fg=brightred]#[bold]| {frame} | "

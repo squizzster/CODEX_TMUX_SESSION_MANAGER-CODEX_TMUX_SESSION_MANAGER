@@ -171,9 +171,9 @@ def test_base_status_selects_ctrl_b_banner_from_tmux_client_prefix_state() -> No
     (
         (69.9, "green"),
         (70.0, "colour208"),
-        (74.9, "colour208"),
+        (74.4, "colour208"),
         (75.0, "red"),
-        (79.9, "red"),
+        (79.4, "red"),
         (80.0, "brightred"),
     ),
 )
@@ -184,14 +184,15 @@ def test_context_status_uses_the_compaction_warning_bands(
     rendered = context_status_segment(context_percent)
 
     assert f"fg={colour}" in rendered
-    assert f"Context: {context_percent:.1f}%" in rendered
+    assert f"Context: {round(context_percent)}% |" in rendered
 
 
 def test_context_status_has_stable_unavailable_and_compacting_states() -> None:
-    assert "Context: --" in context_status_segment(None)
+    assert "Context: -- |" in context_status_segment(None)
+    assert "Context: 32% |" in context_status_segment(31.5)
     assert "brightred" in compacting_status_segment(0)
-    assert "COMPACTING   " in compacting_status_segment(0)
-    assert "COMPACTING..." in compacting_status_segment(3)
+    assert "COMPACTING    |" in compacting_status_segment(0)
+    assert "COMPACTING... |" in compacting_status_segment(3)
     assert compacting_status_segment(4) == compacting_status_segment(0)
 
 

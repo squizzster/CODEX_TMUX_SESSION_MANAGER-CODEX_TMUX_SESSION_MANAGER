@@ -125,7 +125,7 @@ def test_tmux_context_status_uses_the_same_stable_pane_boundary(tmp_path: Path) 
         runner=runner,
     )
 
-    status.update("#[fg=red]| Context: 75.0% ")
+    status.update("#[fg=red]| Context: 75% | ")
 
     assert calls[0][0] == [
         "/usr/bin/tmux",
@@ -135,7 +135,7 @@ def test_tmux_context_status_uses_the_same_stable_pane_boundary(tmp_path: Path) 
         "-t",
         "%7",
         "@rodex_context_status",
-        "#[fg=red]| Context: 75.0% ",
+        "#[fg=red]| Context: 75% | ",
     ]
     assert calls[0][1]["check"] is True
 
@@ -159,7 +159,7 @@ def test_context_observer_projects_last_usage_for_only_the_primary_thread() -> N
 
     assert len(observed) == 1
     assert "colour208" in observed[0]
-    assert "Context: 70.0%" in observed[0]
+    assert "Context: 70% |" in observed[0]
 
 
 def test_context_observer_animates_compaction_then_restores_fresh_usage() -> None:
@@ -187,7 +187,7 @@ def test_context_observer_animates_compaction_then_restores_fresh_usage() -> Non
                 '"item/completed"',
             )
         )
-        assert "Context: 10.0%" in observed[-1]
+        assert "Context: 10% |" in observed[-1]
     finally:
         observer.close()
 

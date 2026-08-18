@@ -12,7 +12,7 @@ import subprocess
 import sys
 import time
 from collections.abc import Callable, Mapping, Sequence
-from contextlib import suppress
+from contextlib import ExitStack, suppress
 from dataclasses import dataclass, replace
 from pathlib import Path
 from threading import Event, Thread
@@ -416,23 +416,20 @@ class RodexRuntimeLauncher:
         socket_path = runtime_root / f"catalog-{token}.sock"
         log_path = runtime_root / f"catalog-{token}.log"
         _require_short_unix_socket_path(socket_path)
-        process: subprocess.Popen[bytes] | None = None
-        log = _open_private_runtime_log(log_path)
-        try:
+        with ExitStack() as cleanup:
+            cleanup.callback(log_path.unlink, missing_ok=True)
+            cleanup.callback(socket_path.unlink, missing_ok=True)
+            log = _open_private_runtime_log(log_path)
+            cleanup.callback(log.close)
             process = self._spawn_process(
                 CODEX_APP_SERVER.command(self._codex_binary, socket_path),
                 stdin=subprocess.DEVNULL,
                 stdout=log,
                 stderr=log,
             )
+            cleanup.callback(_stop_child_process, process)
             _wait_for_app_server_socket(process, socket_path)
             return self._read_persisted_codex_session(socket_path, codex_session_id)
-        finally:
-            if process is not None:
-                _stop_child_process(process)
-            log.close()
-            socket_path.unlink(missing_ok=True)
-            log_path.unlink(missing_ok=True)
 
     def _read_persisted_codex_session(
         self,

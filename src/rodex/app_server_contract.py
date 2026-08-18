@@ -117,3 +117,8 @@ RODEX_RUNTIME_APP_SERVER_CLIENT: Final = AppServerClientInfo(
     title="Rodex",
     version=RODEX_VERSION,
 )
+RODEX_SESSION_CATALOG_APP_SERVER_CLIENT: Final = AppServerClientInfo(
+    name="rodex-session-catalog",
+    title="Rodex Session Catalog",
+    version=RODEX_VERSION,
+)

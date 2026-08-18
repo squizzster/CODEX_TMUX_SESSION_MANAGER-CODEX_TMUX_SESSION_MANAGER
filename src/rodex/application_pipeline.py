@@ -20,7 +20,8 @@ from .control import CodexControlClient
 from .errors import RodexExecutableNotFoundError, RodexLaunchError
 from .machine_commands import execute_machine_command, print_machine_error
 from .managed_session_lifecycle import (
-    OwnedSessionSelection,
+    SelectorExecution,
+    SessionSelection,
 )
 from .runtime import RodexRuntimeLauncher
 from .session_commands import execute_session_command
@@ -57,17 +58,17 @@ class SessionLifecycle(Protocol):
         self,
         selector: str,
         database_path: Path,
-    ) -> OwnedSessionSelection | None: ...
+    ) -> SessionSelection | None: ...
 
     def execute_selector(
         self,
-        selection: OwnedSessionSelection,
+        selection: SessionSelection,
         database_path: Path,
         launcher: RodexRuntimeLauncher,
         *,
         codex_available: bool,
         configured_codex: str,
-    ) -> int: ...
+    ) -> SelectorExecution: ...
 
     def execute_launch(
         self,
@@ -115,7 +116,7 @@ class PreparedRodexInvocation:
 
     invocation: RodexInvocation
     runtime: RuntimeServices | None
-    selected_session: OwnedSessionSelection | None = None
+    selected_session: SessionSelection | None = None
 
 
 def select_rodex_invocation(arguments: Sequence[str]) -> RodexInvocation:
@@ -190,23 +191,20 @@ class UnifiedRodexApplicationPipeline:
             selector = argv[0]
             selection = prepared.selected_session
             if selection is None:
-                self._session_lifecycle.guard_unregistered_selector_collision(
-                    selector,
-                    configured_codex=self._configured_codex,
-                    configured_tmux=self._configured_tmux,
-                    resolve_executable=self._resolve_executable,
-                    runtime_launcher_factory=self._runtime_launcher_factory,
-                )
-                return self._execute_codex(argv)
+                return self._execute_codex_selector(selector, argv)
             services = prepared.runtime
             assert services is not None
-            return self._session_lifecycle.execute_selector(
+            outcome = self._session_lifecycle.execute_selector(
                 selection,
                 self._database_path,
                 services.launcher,
                 codex_available=services.codex_binary is not None,
                 configured_codex=self._configured_codex,
             )
+            if outcome is SelectorExecution.OPENED:
+                return 0
+            assert outcome is SelectorExecution.PASSTHROUGH
+            return self._execute_codex_selector(selector, argv)
 
         services = prepared.runtime
         assert services is not None
@@ -247,10 +245,8 @@ class UnifiedRodexApplicationPipeline:
         if invocation.preparation is PipelinePreparation.SELECTOR:
             assert invocation.route is CommandRoute.SELECTOR
             selector = invocation.arguments[0]
-            selection = (
-                None
-                if not self._database_path.exists()
-                else self._session_lifecycle.resolve_selector(selector, self._database_path)
+            selection = self._session_lifecycle.resolve_selector(
+                selector, self._database_path
             )
             if selection is None:
                 return PreparedRodexInvocation(invocation, None)
@@ -294,6 +290,17 @@ class UnifiedRodexApplicationPipeline:
                 f"Codex executable was not found: {self._configured_codex}"
             )
         return self._codex_delegator(codex_binary, arguments)
+
+    def _execute_codex_selector(self, selector: str, arguments: list[str]) -> int:
+        """Preserve one unmatched selector through the ordinary Codex route."""
+        self._session_lifecycle.guard_unregistered_selector_collision(
+            selector,
+            configured_codex=self._configured_codex,
+            configured_tmux=self._configured_tmux,
+            resolve_executable=self._resolve_executable,
+            runtime_launcher_factory=self._runtime_launcher_factory,
+        )
+        return self._execute_codex(arguments)
 
     def _acquire_runtime(self) -> RuntimeServices:
         tmux_binary = self._resolve_executable(self._configured_tmux)

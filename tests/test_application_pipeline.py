@@ -19,7 +19,13 @@ from rodex.command_contract import (
     CommandRoute,
 )
 from rodex.errors import RodexExecutableNotFoundError
-from rodex.managed_session_lifecycle import OwnedSessionSelection
+from rodex.managed_session_lifecycle import (
+    OwnedSessionSelection,
+    SelectorExecution,
+    SessionSelection,
+    UnregisteredCodexSessionSelection,
+)
+from rodex_registry import parse_codex_session_id
 
 
 @pytest.mark.parametrize(
@@ -90,7 +96,8 @@ def _pipeline(
     tmp_path: Path,
     trace: list[object],
     *,
-    selector_resolves: bool = False,
+    selected_session: SessionSelection | None = None,
+    selector_outcome: SelectorExecution = SelectorExecution.OPENED,
     available: dict[str, str | None] | None = None,
 ) -> UnifiedRodexApplicationPipeline:
     executables = (
@@ -108,21 +115,19 @@ def _pipeline(
     class FakeSessionLifecycle:
         def resolve_selector(
             self, selector: str, database_path: Path
-        ) -> OwnedSessionSelection | None:
+        ) -> SessionSelection | None:
             trace.append(("selector_resolver", selector, database_path))
-            if not selector_resolves:
-                return None
-            return OwnedSessionSelection(selector, 41)
+            return selected_session
 
         def execute_selector(
             self,
-            selection: OwnedSessionSelection,
+            selection: SessionSelection,
             database_path: Path,
             launcher: Any,
             *,
             codex_available: bool,
             configured_codex: str,
-        ) -> int:
+        ) -> SelectorExecution:
             trace.append(
                 (
                     "selector",
@@ -133,7 +138,7 @@ def _pipeline(
                     configured_codex,
                 )
             )
-            return 18
+            return selector_outcome
 
         def execute_launch(
             self,
@@ -253,14 +258,16 @@ def test_selector_resolves_before_runtime_and_never_probes_another_domain(
     database.touch()
     trace: list[object] = []
 
-    assert _pipeline(tmp_path, trace, selector_resolves=True).execute(["worker"]) == 18
+    selection = OwnedSessionSelection("worker", 41)
+
+    assert _pipeline(tmp_path, trace, selected_session=selection).execute(["worker"]) == 0
     assert trace == [
         ("selector_resolver", "worker", database),
         ("resolve_executable", "tmux"),
         ("resolve_executable", "codex"),
         (
             "selector",
-            OwnedSessionSelection("worker", 41),
+            selection,
             database,
             "launcher",
             True,
@@ -282,6 +289,44 @@ def test_unmatched_selector_returns_to_the_codex_route_without_tmux(
         ("collision_guard", "worker", "codex", "tmux"),
         ("resolve_executable", "codex"),
         ("codex", "/bin/codex", ("worker",)),
+    ]
+
+
+def test_unregistered_codex_uuid_can_return_to_passthrough_after_runtime_probe(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "rodex.sqlite3"
+    trace: list[object] = []
+    selector = "01a015f4-f27c-7592-8060-d12313e8d0ce"
+    selection = UnregisteredCodexSessionSelection(
+        selector, parse_codex_session_id(selector)
+    )
+
+    assert (
+        _pipeline(
+            tmp_path,
+            trace,
+            selected_session=selection,
+            selector_outcome=SelectorExecution.PASSTHROUGH,
+        ).execute([selector])
+        == 17
+    )
+
+    assert trace == [
+        ("selector_resolver", selector, database),
+        ("resolve_executable", "tmux"),
+        ("resolve_executable", "codex"),
+        (
+            "selector",
+            selection,
+            database,
+            "launcher",
+            True,
+            "codex",
+        ),
+        ("collision_guard", selector, "codex", "tmux"),
+        ("resolve_executable", "codex"),
+        ("codex", "/bin/codex", (selector,)),
     ]
 
 

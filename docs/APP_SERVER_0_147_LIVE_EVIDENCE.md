@@ -25,6 +25,11 @@ clients, and the [official App Server protocol](https://developers.openai.com/co
 - Ephemeral 0.147 threads reject `thread/read(includeTurns=true)`, so the correlation
   replay deliberately uses a persisted, cleanup-scoped thread matching Rodex's
   production history-read mechanism. The user-input replay remains ephemeral.
+- A separate transient App Server successfully read an exact persisted, non-ephemeral
+  standalone CLI thread with `thread/read(includeTurns=false)` while reporting it
+  `notLoaded`. A guaranteed-absent canonical UUID returned JSON-RPC code `-32600` with
+  `thread not loaded: <UUID>`. No turn or TUI was started. Rodex uses these two observed
+  outcomes as the read-only gate before adopting a standalone Codex UUID.
 
 The causal conclusion is narrow: the mutation connection may be short-lived while a
 subscribed primary remains continuous. Rodex must therefore preserve and reassign the

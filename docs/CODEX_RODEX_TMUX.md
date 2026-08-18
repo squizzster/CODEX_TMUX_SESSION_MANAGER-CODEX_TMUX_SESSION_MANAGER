@@ -33,8 +33,9 @@ Every process invocation passes through one application control plane. The comma
 contract classifies argv once; the selected direct, selector, or runtime preparation
 branch then supplies one domain executor. `rodex.cli` only composes process dependencies
 and maps top-level failures. A matching bare selector becomes one typed owned-session
-identity before lifecycle work, while an exact machine command carries the same
-classified specification through parsing and execution.
+identity before lifecycle work; an unregistered canonical Codex UUID becomes a distinct
+typed candidate and must pass a transient App Server persistence check. An exact machine
+command carries the same classified specification through parsing and execution.
 
 ## Basic launch pipeline
 
@@ -53,10 +54,11 @@ classified specification through parsing and execution.
    work.
 
 The empty invocation is the default managed-create command. Every nonempty invocation
-outside the exact underscore Rodex command namespace is handed to Codex unchanged,
-with one exception: a single existing Rodex name follows the reattachment pipeline
-below. Direct passthrough uses process replacement so Codex retains native stdin,
-stdout, stderr, signals, and exit status.
+outside the exact underscore Rodex command namespace is handed to Codex unchanged, with
+two single-selector exceptions: an existing Rodex name follows the reattachment pipeline,
+and a canonical Codex UUID opens its existing link or attempts persisted-thread adoption.
+Direct passthrough uses process replacement so Codex retains native stdin, stdout,
+stderr, signals, and exit status.
 
 `./rodex _help` prints the Rodex command namespace locally. It does not resolve Codex,
 tmux, or the session database.
@@ -132,9 +134,15 @@ analytics sidecar.
 
 ## Named reattachment
 
-- `./rodex <cool-name-or-codex-uuid>` resolves a canonical Codex UUID first, then a
-  display name, through the same owned integer identity. An unmatched value retains
-  ordinary Codex passthrough.
+- `./rodex <cool-name-or-codex-uuid>` resolves an existing canonical Codex UUID link
+  first, then a display name, through the same owned integer identity.
+- An unregistered canonical UUID is checked with a short-lived App Server
+  `thread/read(includeTurns=false)`. An exact persisted, non-ephemeral result enters the
+  ordinary new-session pipeline with `resume <UUID>`, receives Rodex's normal 64-bit
+  session/runtime identities and unique two-word name, and must load the same UUID before
+  its affiliation commits.
+- An exact missing-thread response cleans up the catalog process/socket/log and retains
+  ordinary Codex passthrough without creating a Rodex database row or tmux session.
 - If its stored tmux endpoint is live, Rodex first verifies its registered Rodex session
   ID, registry ID, and Codex session ID. A missing or mismatched marker fails closed
   without attach or rename.
@@ -149,8 +157,9 @@ analytics sidecar.
   Codex runtime and atomically relinks its new ID to the existing Rodex identity.
   Other resume failures and ID mismatches remain hard failures.
 - Both routes preserve the Rodex identity and update `last_accessed_at_utc`.
-- `_detach <cool-name-or-codex-uuid>` follows the same attach, resume, or recovery
-  decision without attaching the caller and prints the active identities as JSON.
+- `_detach <cool-name-or-linked-codex-uuid>` follows the same existing-session attach,
+  resume, or recovery decision without attaching the caller and prints the active
+  identities as JSON. Bare UUID adoption is the attaching selector route.
 - `./rodex _running` lists verified runtimes and reports unverified or unregistered
   sessions separately.
 - `./rodex _alias SESSION NAME` sets its portable preferred name; `--force` replaces

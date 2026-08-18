@@ -12,7 +12,7 @@ import subprocess
 import sys
 import time
 from collections.abc import Callable, Mapping, Sequence
-from contextlib import suppress
+from contextlib import ExitStack, suppress
 from dataclasses import dataclass, replace
 from pathlib import Path
 from threading import Event, Thread
@@ -35,7 +35,11 @@ from .analytics import (
     AnalyticsSubprocessSupervisor,
     default_codex_sessions_root,
 )
-from .app_server_contract import CODEX_APP_SERVER, RODEX_RUNTIME_APP_SERVER_CLIENT
+from .app_server_contract import (
+    CODEX_APP_SERVER,
+    RODEX_RUNTIME_APP_SERVER_CLIENT,
+    RODEX_SESSION_CATALOG_APP_SERVER_CLIENT,
+)
 from .control import LiveRodexControl
 from .process_contracts import AnalyticsWorkerConfig, SessionHostConfig
 from .protocol_proxy import (
@@ -83,6 +87,7 @@ RODEX_REGISTRATION_REGISTERED: Final = "registered"
 RODEX_TMUX_SLASH_ENABLED: Final = False
 Runner = Callable[..., subprocess.CompletedProcess[str]]
 Connector = Callable[..., Any]
+ProcessSpawner = Callable[..., subprocess.Popen[bytes]]
 
 
 class RodexRuntimeError(RuntimeError):
@@ -388,6 +393,7 @@ class RodexRuntimeLauncher:
         *,
         runner: Runner = subprocess.run,
         connector: Connector = unix_connect,
+        process_spawner: ProcessSpawner = subprocess.Popen,
         python_executable: str = sys.executable,
         monotonic: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
@@ -397,10 +403,96 @@ class RodexRuntimeLauncher:
         self._tmux_binary = tmux_binary
         self._run = runner
         self._connect = connector
+        self._spawn_process = process_spawner
         self._python_executable = python_executable
         self._monotonic = monotonic
         self._sleep = sleep
         self._startup_timeout_seconds = startup_timeout_seconds
+
+    def codex_session_is_persisted(self, codex_session_id: CodexSessionId) -> bool:
+        """Ask a transient App Server whether an exact thread is resumable."""
+        runtime_root = default_runtime_root()
+        token = secrets.token_hex(8)
+        socket_path = runtime_root / f"catalog-{token}.sock"
+        log_path = runtime_root / f"catalog-{token}.log"
+        _require_short_unix_socket_path(socket_path)
+        with ExitStack() as cleanup:
+            cleanup.callback(log_path.unlink, missing_ok=True)
+            cleanup.callback(socket_path.unlink, missing_ok=True)
+            log = _open_private_runtime_log(log_path)
+            cleanup.callback(log.close)
+            process = self._spawn_process(
+                CODEX_APP_SERVER.command(self._codex_binary, socket_path),
+                stdin=subprocess.DEVNULL,
+                stdout=log,
+                stderr=log,
+            )
+            cleanup.callback(_stop_child_process, process)
+            _wait_for_app_server_socket(process, socket_path)
+            return self._read_persisted_codex_session(socket_path, codex_session_id)
+
+    def _read_persisted_codex_session(
+        self,
+        socket_path: Path,
+        codex_session_id: CodexSessionId,
+    ) -> bool:
+        with self._connect(
+            str(socket_path),
+            uri=f"ws://localhost{CODEX_APP_SERVER.rpc_connection_path}",
+            compression=None,
+            open_timeout=1,
+            close_timeout=1,
+            max_size=None,
+        ) as websocket:
+            websocket.send(
+                json.dumps(
+                    CODEX_APP_SERVER.initialize_request(
+                        0, RODEX_SESSION_CATALOG_APP_SERVER_CLIENT
+                    )
+                )
+            )
+            initialized = _receive_response(websocket, 0)
+            CODEX_APP_SERVER.require_supported_version(initialized)
+            websocket.send(json.dumps(CODEX_APP_SERVER.initialized_notification()))
+            websocket.send(
+                json.dumps(
+                    CODEX_APP_SERVER.request(
+                        1,
+                        CODEX_APP_SERVER.thread_read_method,
+                        {
+                            "threadId": str(codex_session_id),
+                            "includeTurns": False,
+                        },
+                    )
+                )
+            )
+            response = _receive_message_for_request(websocket, 1)
+
+        error = response.get("error")
+        if error is not None:
+            if _is_missing_persisted_codex_session(error, codex_session_id):
+                return False
+            raise RodexRuntimeError(f"app-server request failed: {error}")
+        result = response.get("result")
+        if not isinstance(result, dict):
+            raise RodexRuntimeError("app-server response did not contain a result")
+        thread = result.get("thread")
+        if not isinstance(thread, dict):
+            raise RodexRuntimeError("thread/read returned no Codex thread")
+        try:
+            observed_id = parse_codex_session_id(thread.get("id"))
+        except (TypeError, ValueError) as error:
+            raise RodexRuntimeError(
+                "thread/read returned an invalid Codex thread ID"
+            ) from error
+        if observed_id != codex_session_id:
+            raise RodexRuntimeError(
+                "thread/read returned an unexpected Codex identity: "
+                f"requested {codex_session_id}, observed {observed_id}"
+            )
+        if thread.get("ephemeral") is not False:
+            raise RodexRuntimeError(f"Codex thread {codex_session_id} is not persisted")
+        return True
 
     def start(
         self,
@@ -1375,18 +1467,35 @@ def _stop_child_process(process: subprocess.Popen[bytes]) -> None:
 
 
 def _receive_response(websocket: Any, request_id: int) -> dict[str, Any]:
+    message = _receive_message_for_request(websocket, request_id)
+    if "error" in message:
+        raise RodexRuntimeError(f"app-server request failed: {message['error']}")
+    result = message.get("result")
+    if not isinstance(result, dict):
+        raise RodexRuntimeError("app-server response did not contain a result")
+    return result
+
+
+def _receive_message_for_request(websocket: Any, request_id: int) -> dict[str, Any]:
     deadline = time.monotonic() + 3
     while time.monotonic() < deadline:
         message = json.loads(websocket.recv(timeout=max(0.01, deadline - time.monotonic())))
+        if not isinstance(message, dict):
+            raise RodexRuntimeError("app-server response was not an object")
         if message.get("id") != request_id:
             continue
-        if "error" in message:
-            raise RodexRuntimeError(f"app-server request failed: {message['error']}")
-        result = message.get("result")
-        if not isinstance(result, dict):
-            raise RodexRuntimeError("app-server response did not contain a result")
-        return result
+        return message
     raise TimeoutError(f"timed out waiting for app-server response {request_id}")
+
+
+def _is_missing_persisted_codex_session(
+    error: object, codex_session_id: CodexSessionId
+) -> bool:
+    return (
+        isinstance(error, dict)
+        and error.get("code") == -32600
+        and error.get("message") == f"thread not loaded: {codex_session_id}"
+    )
 
 
 def _prepare_runtime_root(root: Path) -> Path:

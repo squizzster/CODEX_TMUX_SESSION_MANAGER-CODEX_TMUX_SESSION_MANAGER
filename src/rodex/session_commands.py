@@ -30,6 +30,7 @@ from .command_contract import (
     MOUSE_COMMAND,
     RUNNING_COMMAND,
     SEND_COMMAND,
+    TAIL_COMMAND,
     WAIT_COMMAND,
 )
 from .control import CodexControlClient, LiveRodexControl, RodexControlError
@@ -48,6 +49,7 @@ from .runtime import (
     default_tmux_server_socket_path,
 )
 from .session_read_pipeline import LiveSessionReadPipeline
+from .session_tail import follow_session_tail, parse_session_tail_request
 
 
 def execute_session_command(
@@ -128,6 +130,18 @@ def execute_session_command(
         if scrollback:
             sys.stdout.write("\n".join(scrollback) + "\n")
             sys.stdout.flush()
+        return
+    if command == TAIL_COMMAND:
+        request = parse_session_tail_request(arguments)
+        LiveSessionReadPipeline(database_path, launcher).stream_scrollback(
+            request.session_name,
+            lambda runtime, revalidate: follow_session_tail(
+                request,
+                runtime,
+                launcher.capture_scrollback,
+                revalidate,
+            ),
+        )
         return
     if command == EVENTS_COMMAND:
         if len(arguments) != 2:

@@ -29,6 +29,7 @@ from rodex.managed_session_lifecycle import OwnedSessionSelection
         (["_help"], ("_help",), CommandRoute.HELP, PipelinePreparation.DIRECT),
         (["_stats"], ("_stats",), CommandRoute.STATISTICS, PipelinePreparation.DIRECT),
         (["_cat"], ("_cat",), CommandRoute.SESSION, PipelinePreparation.RUNTIME),
+        (["_tail"], ("_tail",), CommandRoute.SESSION, PipelinePreparation.RUNTIME),
         (
             ["_wait", "worker"],
             ("_wait", "worker"),

@@ -14,6 +14,7 @@ ALIAS_COMMAND: Final = "_alias"
 SEND_COMMAND: Final = "_send"
 WAIT_COMMAND: Final = "_wait"
 CAT_COMMAND: Final = "_cat"
+TAIL_COMMAND: Final = "_tail"
 EVENTS_COMMAND: Final = "_events"
 INSPECT_COMMAND: Final = "_inspect"
 START_COMMAND: Final = "_start"
@@ -133,6 +134,14 @@ COMMAND_SPECS: Final = (
         CAT_COMMAND,
         CommandRoute.SESSION,
         ("_cat SESSION", "Print all retained terminal output."),
+    ),
+    CommandSpec(
+        TAIL_COMMAND,
+        CommandRoute.SESSION,
+        (
+            "_tail [-f] [-n NUM] SESSION",
+            "Print recent terminal output and follow rendered session changes.",
+        ),
     ),
     CommandSpec(
         EVENTS_COMMAND,

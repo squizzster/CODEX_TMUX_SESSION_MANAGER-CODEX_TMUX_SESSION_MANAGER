@@ -13,6 +13,7 @@ from typing import Any
 
 import pytest
 
+import rodex.session_commands as session_commands_module
 from rodex.app_server_contract import RodexAppServerCompatibilityError
 from rodex.cli import RodexExecutableNotFoundError, RodexLaunchError, main, run
 from rodex.control import (
@@ -33,6 +34,7 @@ from rodex.runtime import (
     RodexCodexSessionNotFoundError,
     RodexRuntimeError,
 )
+from rodex.session_tail import SessionTailRequest
 from rodex_registry import (
     RodexRegistryId,
     RodexSessionError,
@@ -1706,7 +1708,51 @@ def test_events_continues_the_verified_protocol_stream_without_session_text(
     assert launcher.scrollback_captures == []
 
 
-@pytest.mark.parametrize("command", ["_cat", "_events"])
+@pytest.mark.evolutionary_regression
+def test_tail_follows_verified_session_text_without_protocol_events(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database = tmp_path / "rodex.sqlite3"
+    monkeypatch.setattr(
+        "cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga"
+    )
+    monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
+    create_controlled_session(database, tmp_path)
+    launcher = StubLauncher(tmp_path)
+    control = StubControlClient()
+    observed: list[object] = []
+
+    def follow(
+        request: SessionTailRequest,
+        runtime: LiveTmuxSession,
+        capture: object,
+        revalidate: object,
+    ) -> None:
+        observed.extend((request, runtime, capture, revalidate))
+
+    monkeypatch.setattr(session_commands_module, "follow_session_tail", follow)
+
+    assert (
+        run(
+            ["_tail", "-5", "automatic-beluga", "--follow"],
+            database_path=database,
+            launcher=launcher,  # type: ignore[arg-type]
+            control_client=control,  # type: ignore[arg-type]
+        )
+        == 0
+    )
+
+    assert observed[:2] == [
+        SessionTailRequest("automatic-beluga", 5),
+        LiveTmuxSession(tmp_path / "tmux.sock", "automatic-beluga"),
+    ]
+    assert observed[2] == launcher.capture_scrollback
+    assert callable(observed[3])
+    assert control.event_streams == []
+
+
+@pytest.mark.parametrize("command", ["_cat", "_tail", "_events"])
 def test_session_read_commands_reject_invalid_grammar_before_live_resolution(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1726,15 +1772,14 @@ def test_session_read_commands_reject_invalid_grammar_before_live_resolution(
     assert launcher.scrollback_captures == []
 
 
-@pytest.mark.parametrize("command", ["_head", "_tail"])
-def test_removed_ambiguous_read_commands_pass_through_to_codex_unchanged(
+def test_removed_ambiguous_head_command_passes_through_to_codex_unchanged(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    command: str,
 ) -> None:
     database = tmp_path / "rodex.sqlite3"
     delegator = RecordingCodexDelegator(returncode=23)
     monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
+    command = "_head"
     arguments = [command, "automatic-beluga"]
 
     assert (

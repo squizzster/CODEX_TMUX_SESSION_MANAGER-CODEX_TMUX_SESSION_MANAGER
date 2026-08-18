@@ -12,11 +12,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, Literal
 
-from .tmux_status import STATUS_ANIMATION_TOKEN_OPTION
+from .tmux_status import (
+    STATUS_ANIMATION_FRAME_INTERVAL_SECONDS,
+    STATUS_ANIMATION_TOKEN_OPTION,
+)
 
 StatusEvent = Literal["attached", "detached"]
 
-FRAME_INTERVAL_SECONDS: Final = 0.2
+FRAME_INTERVAL_SECONDS: Final = STATUS_ANIMATION_FRAME_INTERVAL_SECONDS
 _CLIENT_NAME_FORMAT: Final = "#{client_name}"
 _ATTACHED_COUNT_FORMAT: Final = "#{session_attached}"
 

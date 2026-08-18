@@ -2,8 +2,8 @@
 
 Retain these standards when architecture changes. This is a compact current blueprint,
 not a change log. Amend a standard only after an agent suggestion and user agreement.
-Consider one independent reviewing agent, critically assess its advice, and retain
-ownership of the result. Keep this file within 150 lines and 10,240 bytes.
+Consider one independent reviewing agent, critically assess its advice, retain ownership,
+and keep this file within 150 lines and 10,240 bytes.
 
 # Rodex architecture
 
@@ -24,13 +24,14 @@ private tmux server
     │  └── advertises sockets, Rodex/registry/runtime/Codex IDs and registration state
     ▼
 session host ─┬► Codex TUI ──► protocol proxy ──► Codex app-server
+             │                  ├──► context status ──► tmux base status
              │                  └──► live event tap ──► tail/wait/send clients
              └► analytics worker ──► in-memory analyzer ──► SQLite projections
 ```
 
-The TUI remains the normal Codex interface and runs inline so rendered output enters tmux's 50,000-line pane history. tmux owns keyboard copy-mode scrollback and derives the
-status privacy state from clients attached to that exact session. The proxy forwards
-WebSocket frames, counts tools, and fans structured events; it never buffers the screen.
+The TUI remains the normal Codex interface and runs inline so rendered output enters tmux's 50,000-line pane history. tmux owns keyboard copy-mode scrollback and derives status
+privacy from clients attached to that exact session. The proxy forwards WebSocket frames,
+derives tool and context signals, and fans structured events; it never buffers the screen.
 
 ## Component boundaries
 
@@ -43,7 +44,7 @@ WebSocket frames, counts tools, and fans structured events; it never buffers the
 | `rodex.analytics` | Authenticate rollout prefixes and supervise fail-open analysis. |
 | `rodex.control` | Verify and control one exact loaded Codex thread. |
 | `rodex.app_server_contract` | Fail exact control closed outside the characterized App Server version. |
-| `rodex.protocol_proxy` | Forward traffic and fan out bounded live event streams. |
+| `rodex.protocol_proxy` | Forward traffic and derive bounded live tool/context signals and event streams. |
 | `rodex_registry.identity` | Own distinct Rodex ID domains and lossless signed-BIGINT codecs. |
 | `rodex_registry.schema` | Create and exactly verify the complete SQLite schema and registry ID. |
 | `rodex_registry.lifecycle` | Own session creation, ownership, naming, and runtime transitions. |
@@ -53,62 +54,60 @@ WebSocket frames, counts tools, and fans structured events; it never buffers the
 
 ## Identity and data model
 
-`rodex_sessions.id` is the private relational key. The public Rodex session identity is
-a random unsigned 64-bit value with one canonical 16-character lowercase hexadecimal
-wire form. SQLite stores all of its bits in one signed `BIGINT` using a lossless
-two's-complement mapping. The Codex session ID remains on the owning row as two signed 64-bit
-integers. The full registry ID remains a separate database-instance identity.
+`rodex_sessions.id` is the private relational key. The public Rodex session identity is a
+random unsigned 64-bit value with one canonical 16-character lowercase hexadecimal wire
+form. SQLite stores all bits in one signed `BIGINT` using lossless two's-complement mapping.
+The Codex session ID uses two signed 64-bit integers; registry identity remains separate.
 
-Separate tables hold the registry ID, tmux endpoint, current runtime UUID, POSIX
-owner/log, names, statistics/worker health, and retained Codex rollout lineage.
-A display alias never replaces the permanent generated name. Detailed rules live in
-[SQL_SCHEMA.md](SQL_SCHEMA.md).
+Separate tables hold registry ID, tmux endpoint, runtime UUID, POSIX owner/log, names,
+statistics/worker health, and retained Codex rollout lineage. A display alias never
+replaces the permanent generated name. Detailed rules live in [SQL_SCHEMA.md](SQL_SCHEMA.md).
 
 ## Authoritative lifecycle
 
 ### New session (bare `rodex`, `_create`, or `_detach`)
 
 1. Allocate an unregistered 64-bit Rodex session ID and random runtime UUID.
-2. Set the shared tmux server's 50,000-line history before creating the detached
-   session and its first pane; mouse configuration remains user-owned.
-3. Start one private Codex app-server and connect an inline (`--no-alt-screen`) TUI
-   through the proxy so rendered conversation rows enter tmux history.
+2. Set the shared tmux server's 50,000-line history before creating the detached session
+   and its first pane; mouse configuration remains user-owned.
+3. Start one private Codex app-server and connect an inline (`--no-alt-screen`) TUI through
+   the proxy so rendered conversation rows enter tmux history.
 4. Refresh live paths and supervise analytics without blocking the TUI.
 5. Observe the single real Codex session ID from that app-server.
 6. Advertise Rodex session, registry, runtime, and Codex thread IDs with `pending` state.
-7. Transactionally register those identities, analytics source, name, user/log, and
-   tmux link, then mark the runtime `registered`.
+7. Transactionally register those identities, analytics source, name, user/log, and tmux
+   link, then mark the runtime `registered`.
 8. Rename tmux to the display name, configure status, and attach the terminal.
 
 ### Existing name
 
 1. Resolve either generated or user-defined name to `rodex_sessions.id`.
 2. Enforce ownership using the effective POSIX identity.
-3. Attach only when the exact stored tmux endpoint advertises the matching registered
-   Rodex session, registry, and Codex identities. An exact pending tuple completes
-   interrupted registration.
+3. Attach only when the exact stored tmux endpoint advertises matching registered Rodex,
+   registry, and Codex identities. An exact pending tuple completes interrupted registration.
 4. Otherwise ask Codex to resume the stored Codex session ID and verify the observed ID.
-5. If Codex explicitly says that ID was never saved, start empty and atomically
-   relink the new Codex session ID; every other resume failure remains fatal.
+5. If Codex says that ID was never saved, start empty and atomically relink the new Codex
+   session ID; every other resume failure remains fatal.
 6. Replace the tmux endpoint before attaching.
 
-Named opens hold one private, per-session advisory transition lock only across live
-resolution, resume, and durable endpoint replacement; the lock is released before the
-blocking tmux attach. Concurrent shells therefore converge on the first verified
-runtime instead of launching duplicate writers. An exact relocated `pending` runtime
-repairs an interrupted launch. During ordinary shutdown, the new session host retries
-only the exact Codex `active writer` handoff conflict for a bounded interval while
-keeping its single tmux runtime alive. Persistent or mismatched writers still fail.
+Named opens hold one private, per-session advisory transition lock across live resolution,
+resume, and durable endpoint replacement; it is released before blocking tmux attach.
+Concurrent shells converge on the first verified runtime. An exact relocated `pending`
+runtime repairs interrupted launch. During shutdown, the host retries only the exact Codex
+`active writer` conflict for a bounded interval; persistent or mismatched writers fail.
 
 `_running` follows the same ownership and live-endpoint rules. `_alias` changes use the
 same naming pipeline and compensate a tmux rename if the database transition fails.
 
-Sharing animations and transient left-status claims run out of process but publish and
-restore atomically through `TmuxStatusLeftPipeline`. The base format reads per-client
-`client_prefix`, so `CTRL-B MODE` never intercepts a fast key sequence. The guarded
-shared `Ctrl-C` binding requires same-client confirmation; private input is unchanged.
-User-owned root bindings are preserved. `/rodex` input interception remains implemented,
-tested, and disabled at `RODEX_TMUX_SLASH_ENABLED`.
+Sharing animations and transient left-status claims publish and restore atomically through
+`TmuxStatusLeftPipeline`. Per-client `client_prefix` ensures `CTRL-B MODE` never intercepts
+a fast key sequence. Shared `Ctrl-C` requires same-client confirmation; private input and
+user root bindings stay unchanged. `/rodex` interception is tested but currently disabled.
+
+The same base status reads a pane-stable context option written by the primary protocol
+proxy observer. Token usage divided by model window supplies context fill; compaction item
+lifecycle animates that slot. Durable analytics remain downstream. Transient restoration
+returns to the one base format and its current option without parallel context logic.
 
 ## Persistent analytics
 
@@ -147,6 +146,5 @@ requests observed in the attached TUI remain user-handled there.
 - Private runtime/database paths validate owner, type, mode, and symlink boundaries.
 
 Mocked tests carry domain invariants quickly. Real SQLite, tmux, proxy, and launch-path
-checks protect the external boundaries where command grammar and lifecycle are part of
-correctness. See [CODE_CONCEPTS.md](CODE_CONCEPTS.md) for the forward design ethos and
-[CODEX_RODEX_TMUX.md](CODEX_RODEX_TMUX.md) for the focused identity/runtime contract.
+checks protect external grammar and lifecycle boundaries. See [CODE_CONCEPTS.md](CODE_CONCEPTS.md)
+and [CODEX_RODEX_TMUX.md](CODEX_RODEX_TMUX.md) for design and runtime contracts.

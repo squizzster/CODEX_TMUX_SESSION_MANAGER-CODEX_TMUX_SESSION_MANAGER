@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import shlex
 from collections.abc import Sequence
 from itertools import pairwise
 from pathlib import Path
@@ -13,31 +14,62 @@ from rodex.status_animation import (
     animate_status,
     status_frames,
 )
-from rodex.tmux_status import STATUS_ANIMATION_TOKEN_OPTION
+from rodex.tmux_status import (
+    STATUS_CLAIM_PRIORITY_OPTION,
+    STATUS_CLAIM_PUBLISHER_OPTION,
+    STATUS_CLAIM_TOKEN_OPTION,
+)
 
 
 class FakeTmux:
     def __init__(self, attached_count: int) -> None:
         self.attached_count = attached_count
-        self.animation_token = ""
+        self.options: dict[str, str] = {}
         self.commands: list[list[str]] = []
+
+    @property
+    def animation_token(self) -> str:
+        return self.options.get(STATUS_CLAIM_TOKEN_OPTION, "")
+
+    @animation_token.setter
+    def animation_token(self, token: str) -> None:
+        if token:
+            self.options[STATUS_CLAIM_TOKEN_OPTION] = token
+        else:
+            self.options.pop(STATUS_CLAIM_TOKEN_OPTION, None)
 
     async def __call__(self, command: Sequence[str]) -> AsyncCommandResult:
         recorded = list(command)
         self.commands.append(recorded)
         if "display-message" in recorded:
             return AsyncCommandResult(0, f"{self.attached_count}\n")
-        if recorded[-2:-1] == [STATUS_ANIMATION_TOKEN_OPTION]:
-            self.animation_token = recorded[-1]
         if "show-options" in recorded:
-            return AsyncCommandResult(0, f"{self.animation_token}\n")
+            value = self.options.get(recorded[-1], "")
+            return AsyncCommandResult(0 if value else 1, f"{value}\n")
         if "list-clients" in recorded:
             return AsyncCommandResult(0, "/dev/pts/10\n/dev/pts/11\n")
-        if "if-shell" in recorded:
-            tmux_commands = recorded[-1]
-            if "status-format[0]" not in tmux_commands:
-                self.animation_token = ""
+        if "if-shell" in recorded and self._condition_is_true(recorded[-2]):
+            for tmux_command in recorded[-1].split(" ; "):
+                self._apply(shlex.split(tmux_command))
         return AsyncCommandResult(0)
+
+    def _condition_is_true(self, condition: str) -> bool:
+        if condition.startswith("#{<=:"):
+            current = int(self.options.get(STATUS_CLAIM_PRIORITY_OPTION, "0"))
+            requested = int(condition.rsplit(",", maxsplit=1)[1].removesuffix("}"))
+            return current <= requested
+        expected = condition.rsplit(",", maxsplit=1)[1].removesuffix("}")
+        if STATUS_CLAIM_TOKEN_OPTION in condition:
+            return self.options.get(STATUS_CLAIM_TOKEN_OPTION) == expected
+        if STATUS_CLAIM_PUBLISHER_OPTION in condition:
+            return self.options.get(STATUS_CLAIM_PUBLISHER_OPTION) == expected
+        raise AssertionError(f"unexpected tmux condition: {condition}")
+
+    def _apply(self, command: list[str]) -> None:
+        if command[:2] == ["set-option", "-u"]:
+            self.options.pop(command[-1], None)
+        elif command[:1] == ["set-option"]:
+            self.options[command[-2]] = command[-1]
 
 
 def test_status_frames_only_cover_shared_arrival_and_final_private_departure() -> None:

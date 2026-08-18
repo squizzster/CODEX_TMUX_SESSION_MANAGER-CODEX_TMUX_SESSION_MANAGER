@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import re
+from pathlib import Path
+
 import pytest
 
 from rodex.status_bar import (
@@ -8,6 +11,7 @@ from rodex.status_bar import (
     RODEX_CONTEXT_STATUS_OPTION,
     RODEX_STATUS_COLOURS,
     RODEX_STATUS_LEFT_FORMAT,
+    RODEX_STATUS_RIGHT_FORMAT,
     StatusBarPart,
     StatusBarSegment,
     TmuxStatusBar,
@@ -29,6 +33,8 @@ def test_status_palette_has_one_authoritative_value_per_colour_role() -> None:
     assert RODEX_STATUS_COLOURS.primary_blue == "#1402D8"
     assert RODEX_STATUS_COLOURS.tool_count == "cyan"
     assert RODEX_STATUS_COLOURS.mouse_mode == "yellow"
+    assert f"fg={RODEX_STATUS_COLOURS.sharing_shared}" in RODEX_STATUS_RIGHT_FORMAT
+    assert f"fg={RODEX_STATUS_COLOURS.sharing_private}" in RODEX_STATUS_RIGHT_FORMAT
 
 
 @pytest.mark.evolutionary_regression
@@ -69,6 +75,24 @@ def test_status_bar_library_updates_only_the_named_part() -> None:
     assert status_bar.render_part(StatusBarPart.RODEX_IDENTITY) == (
         "#[fg=blue]#[bold] Rodex "
     )
+    assert status_bar.render() == ("#[fg=blue]#[bold] Rodex #[fg=yellow]#[bold]| Mouse ")
+
+
+def test_status_renderers_do_not_define_raw_tmux_colours_outside_the_theme() -> None:
+    source_root = Path(__file__).parents[1] / "src" / "rodex"
+    themed_modules = (
+        "runtime.py",
+        "status_animation.py",
+        "tmux_shared_ctrl_c.py",
+        "tmux_status.py",
+    )
+    raw_tmux_colour = re.compile(r"#\[(?:fg|bg)=(?!\{)")
+    assert {
+        module_name: raw_tmux_colour.findall(
+            (source_root / module_name).read_text(encoding="utf-8")
+        )
+        for module_name in themed_modules
+    } == {module_name: [] for module_name in themed_modules}
 
 
 @pytest.mark.evolutionary_regression

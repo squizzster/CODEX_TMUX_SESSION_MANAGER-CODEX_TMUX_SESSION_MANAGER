@@ -32,9 +32,9 @@ from rodex.runtime import (
 )
 from rodex.tmux_status import (
     RODEX_STATUS_LEFT_FORMAT,
-    STATUS_LEFT_CLAIM_PRIORITY_OPTION,
-    STATUS_LEFT_CLAIM_PUBLISHER_OPTION,
-    STATUS_LEFT_CLAIM_TOKEN_OPTION,
+    STATUS_CLAIM_PRIORITY_OPTION,
+    STATUS_CLAIM_PUBLISHER_OPTION,
+    STATUS_CLAIM_TOKEN_OPTION,
 )
 from rodex_registry import RodexRegistryId, RodexSessionId
 
@@ -457,7 +457,7 @@ def test_current_tmux_context_rejects_an_invalid_attached_client_count(
         )
 
 
-def test_rename_and_status_configuration_use_the_real_tmux_session_name(
+def test_rename_and_session_ui_initialisation_use_the_real_tmux_session_name(
     tmp_path: Path,
 ) -> None:
     runner = RuntimeRunner(tmp_path)
@@ -467,7 +467,7 @@ def test_rename_and_status_configuration_use_the_real_tmux_session_name(
     original = LiveTmuxSession(tmp_path / "tmux.sock", "rodex-token")
 
     renamed = launcher.rename(original, "automatic-beluga")
-    launcher.configure_identity_status(renamed)
+    launcher.initialise_session_ui(renamed)
 
     assert renamed == LiveTmuxSession(tmp_path / "tmux.sock", "automatic-beluga")
     assert runner.calls[0][-4:] == [
@@ -477,63 +477,31 @@ def test_rename_and_status_configuration_use_the_real_tmux_session_name(
         "automatic-beluga",
     ]
     status_commands = [command[3:] for command in runner.calls[1:]]
-    assert status_commands[0:11] == [
-        [
-            "set-option",
-            "-u",
-            "-t",
-            "=automatic-beluga:",
-            "@rodex_status_animation_token",
-        ],
-        [
-            "set-option",
-            "-u",
-            "-t",
-            "=automatic-beluga:",
-            STATUS_LEFT_CLAIM_PUBLISHER_OPTION,
-        ],
-        [
-            "set-option",
-            "-u",
-            "-t",
-            "=automatic-beluga:",
-            STATUS_LEFT_CLAIM_TOKEN_OPTION,
-        ],
-        [
-            "set-option",
-            "-u",
-            "-t",
-            "=automatic-beluga:",
-            STATUS_LEFT_CLAIM_PRIORITY_OPTION,
-        ],
-        ["set-option", "-u", "-t", "=automatic-beluga:", "status-format"],
-        ["set-option", "-u", "-t", "=automatic-beluga:", "status-style"],
-        ["set-option", "-t", "=automatic-beluga:", "status", "on"],
-        [
-            "set-option",
-            "-t",
-            "=automatic-beluga:",
-            "status-left",
-            RODEX_STATUS_LEFT_FORMAT,
-        ],
-        ["set-option", "-t", "=automatic-beluga:", "status-left-length", "160"],
-        [
-            "set-option",
-            "-t",
-            "=automatic-beluga:",
-            "status-right",
-            "#{?session_many_attached,"
-            "#[fg=yellow]#[bold] [Shared with #{e|-:#{session_attached},1} "
-            "#{?#{==:#{session_attached},2},other,others}] #[default],"
-            "#[fg=green]#[bold] [Private session] #[default]}"
-            " | %H:%M %d-%b-%y",
-        ],
-        ["set-option", "-t", "=automatic-beluga:", "status-right-length", "64"],
-    ]
-    assert len(status_commands) == 15
-    for event, hook_command in zip(
-        ("attached", "detached"), status_commands[11:13], strict=True
-    ):
+    unset_options = {
+        command[-1] for command in status_commands if command[:2] == ["set-option", "-u"]
+    }
+    assert unset_options == {
+        STATUS_CLAIM_PUBLISHER_OPTION,
+        STATUS_CLAIM_TOKEN_OPTION,
+        STATUS_CLAIM_PRIORITY_OPTION,
+        "status-format",
+        "status-style",
+    }
+    assert [
+        "set-option",
+        "-t",
+        "=automatic-beluga:",
+        "status-left",
+        RODEX_STATUS_LEFT_FORMAT,
+    ] in status_commands
+    assert ["set-option", "-t", "=automatic-beluga:", "status-left-length", "160"] in (
+        status_commands
+    )
+    assert ["set-option", "-t", "=automatic-beluga:", "status-right-length", "64"] in (
+        status_commands
+    )
+    hook_commands = [command for command in status_commands if command[:1] == ["set-hook"]]
+    for event, hook_command in zip(("attached", "detached"), hook_commands, strict=True):
         assert hook_command[:4] == [
             "set-hook",
             "-t",
@@ -544,8 +512,8 @@ def test_rename_and_status_configuration_use_the_real_tmux_session_name(
         assert "/venv/bin/python -m rodex.status_animation" in hook_command[4]
         assert f"--event {event}" in hook_command[4]
         assert hook_command[4].endswith(">/dev/null 2>&1'")
-    assert status_commands[13] == ["list-keys", "-T", "root", "C-c"]
-    shared_ctrl_c_binding = status_commands[14]
+    shared_ctrl_c_index = status_commands.index(["list-keys", "-T", "root", "C-c"])
+    shared_ctrl_c_binding = status_commands[shared_ctrl_c_index + 1]
     assert shared_ctrl_c_binding[:3] == ["bind-key", "-n", "C-c"]
     assert shared_ctrl_c_binding[3].startswith("run-shell -b ")
     assert "/venv/bin/python -m rodex.tmux_shared_ctrl_c" in shared_ctrl_c_binding[3]
@@ -556,6 +524,37 @@ def test_rename_and_status_configuration_use_the_real_tmux_session_name(
     ):
         assert option in shared_ctrl_c_binding[3]
         assert tmux_format in shared_ctrl_c_binding[3]
+
+
+@pytest.mark.evolutionary_regression
+def test_name_bound_hook_refresh_does_not_clear_or_replace_status_claims(
+    tmp_path: Path,
+) -> None:
+    """Current evidence: renaming preserves a live warning; supersede by contract."""
+    runner = RuntimeRunner(tmp_path)
+    launcher = RodexRuntimeLauncher(
+        "codex", "tmux", runner=runner, python_executable="/venv/bin/python"
+    )
+
+    launcher.refresh_name_bound_hooks(
+        LiveTmuxSession(tmp_path / "tmux.sock", "renamed-beluga")
+    )
+
+    status_commands = [command[3:] for command in runner.calls]
+    assert len(status_commands) == 2
+    assert all(command[:1] == ["set-hook"] for command in status_commands)
+    assert not any(
+        option in command
+        for command in status_commands
+        for option in (
+            STATUS_CLAIM_PUBLISHER_OPTION,
+            STATUS_CLAIM_TOKEN_OPTION,
+            STATUS_CLAIM_PRIORITY_OPTION,
+            "status-left",
+            "status-format",
+            "status-style",
+        )
+    )
 
 
 def test_tmux_slash_switch_reinstalls_retained_bindings(
@@ -569,7 +568,7 @@ def test_tmux_slash_switch_reinstalls_retained_bindings(
     )
     runtime = LiveTmuxSession(tmp_path / "tmux.sock", "automatic-beluga")
 
-    launcher.configure_identity_status(runtime)
+    launcher.initialise_session_ui(runtime)
 
     status_commands = [command[3:] for command in runner.calls]
     completion_pipe = next(
@@ -606,7 +605,7 @@ def test_shared_ctrl_c_guard_preserves_a_user_owned_binding(tmp_path: Path) -> N
         return subprocess.CompletedProcess(command, 0, stdout=output, stderr="")
 
     launcher = RodexRuntimeLauncher("codex", "tmux", runner=runner)
-    launcher.configure_identity_status(
+    launcher.initialise_session_ui(
         LiveTmuxSession(tmp_path / "tmux.sock", "automatic-beluga")
     )
 
@@ -640,7 +639,7 @@ def test_real_tmux_fast_ctrl_b_d_detaches_without_ending_session(
         launcher = RodexRuntimeLauncher(
             "codex", tmux_binary, python_executable=sys.executable
         )
-        launcher.configure_identity_status(LiveTmuxSession(socket_path, session_name))
+        launcher.initialise_session_ui(LiveTmuxSession(socket_path, session_name))
         binding = tmux("list-keys", "-T", "root", "C-b", check=False)
         assert "rodex.tmux_status" not in binding.stdout
 
@@ -727,7 +726,7 @@ def test_real_tmux_ctrl_b_banner_tracks_the_waiting_prefix_state(
 
     tmux("new-session", "-d", "-s", session_name, "sleep 30")
     try:
-        RodexRuntimeLauncher("codex", tmux_binary).configure_identity_status(
+        RodexRuntimeLauncher("codex", tmux_binary).initialise_session_ui(
             LiveTmuxSession(socket_path, session_name)
         )
         client_pid, terminal_master = pty.fork()
@@ -799,7 +798,7 @@ def test_rodex_does_not_override_user_mouse_preferences(tmp_path: Path) -> None:
     runtime = LiveTmuxSession(tmp_path / "tmux.sock", "automatic-beluga")
 
     launcher._start_tmux_session(runtime, tmp_path, "sleep 30")
-    launcher.configure_identity_status(runtime)
+    launcher.initialise_session_ui(runtime)
 
     assert not any("mouse" in command for command in runner.calls)
 
@@ -986,7 +985,7 @@ def test_real_tmux_survives_rename_and_status_configuration(tmp_path: Path) -> N
             capture_output=True,
         )
         renamed = launcher.rename(original, "automatic-beluga")
-        launcher.configure_identity_status(renamed)
+        launcher.initialise_session_ui(renamed)
 
         assert launcher.session_exists(renamed)
         assert session_option("mouse") == ""

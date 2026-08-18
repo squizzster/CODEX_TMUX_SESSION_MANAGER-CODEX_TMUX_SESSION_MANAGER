@@ -49,13 +49,15 @@ from .protocol_proxy import (
 from .status_bar import (
     RODEX_STATUS_LEFT_FORMAT,
     RODEX_STATUS_LEFT_LENGTH,
+    RODEX_STATUS_RIGHT_FORMAT,
+    RODEX_STATUS_RIGHT_LENGTH,
     context_status_segment,
 )
 from .tmux_status import (
-    STATUS_ANIMATION_TOKEN_OPTION,
-    STATUS_LEFT_CLAIM_PRIORITY_OPTION,
-    STATUS_LEFT_CLAIM_PUBLISHER_OPTION,
-    STATUS_LEFT_CLAIM_TOKEN_OPTION,
+    STATUS_CLAIM_PRIORITY_OPTION,
+    STATUS_CLAIM_PUBLISHER_OPTION,
+    STATUS_CLAIM_TOKEN_OPTION,
+    TmuxStatusPipeline,
 )
 from .version import RODEX_VERSION
 
@@ -80,14 +82,6 @@ RODEX_REGISTRATION_PENDING: Final = "pending"
 RODEX_REGISTRATION_REGISTERED: Final = "registered"
 # One switch owns installation of the tmux `/rodex` bindings and completion pipe.
 RODEX_TMUX_SLASH_ENABLED: Final = False
-_SHARING_STATUS_FORMAT: Final = (
-    "#{?session_many_attached,"
-    "#[fg=yellow]#[bold] [Shared with #{e|-:#{session_attached},1} "
-    "#{?#{==:#{session_attached},2},other,others}] #[default],"
-    "#[fg=green]#[bold] [Private session] #[default]}"
-    " | %H:%M %d-%b-%y"
-)
-
 Runner = Callable[..., subprocess.CompletedProcess[str]]
 Connector = Callable[..., Any]
 
@@ -620,14 +614,13 @@ class RodexRuntimeLauncher:
         )
         return replace(runtime, tmux_session_name=session_name)
 
-    def configure_identity_status(self, runtime: LiveTmuxSession) -> None:
-        """Configure Rodex-owned interaction and status for one live session."""
+    def initialise_session_ui(self, runtime: LiveTmuxSession) -> None:
+        """Install a fresh Rodex UI after creating one new tmux runtime."""
         target = _exact_tmux_pane_target(runtime.tmux_session_name)
         for transient_option in (
-            STATUS_ANIMATION_TOKEN_OPTION,
-            STATUS_LEFT_CLAIM_PUBLISHER_OPTION,
-            STATUS_LEFT_CLAIM_TOKEN_OPTION,
-            STATUS_LEFT_CLAIM_PRIORITY_OPTION,
+            STATUS_CLAIM_PUBLISHER_OPTION,
+            STATUS_CLAIM_TOKEN_OPTION,
+            STATUS_CLAIM_PRIORITY_OPTION,
             "status-format",
             "status-style",
         ):
@@ -639,39 +632,19 @@ class RodexRuntimeLauncher:
                 target,
                 transient_option,
             )
-        self._tmux(runtime, "set-option", "-t", target, "status", "on")
-        self._tmux(
-            runtime,
-            "set-option",
-            "-t",
-            target,
-            "status-left",
-            RODEX_STATUS_LEFT_FORMAT,
-        )
-        self._tmux(
-            runtime,
-            "set-option",
-            "-t",
-            target,
-            "status-left-length",
-            RODEX_STATUS_LEFT_LENGTH,
-        )
-        self._tmux(
-            runtime,
-            "set-option",
-            "-t",
-            target,
-            "status-right",
-            _SHARING_STATUS_FORMAT,
-        )
-        self._tmux(
-            runtime,
-            "set-option",
-            "-t",
-            target,
-            "status-right-length",
-            "64",
-        )
+        self._configure_static_status(runtime, publish_base_status=True)
+        self.refresh_name_bound_hooks(runtime)
+        self._install_input_guards(runtime)
+
+    def reconcile_session_ui(self, runtime: LiveTmuxSession) -> None:
+        """Refresh static UI configuration without replacing a transient claim."""
+        self._configure_static_status(runtime, publish_base_status=False)
+        self.refresh_name_bound_hooks(runtime)
+        self._install_input_guards(runtime)
+
+    def refresh_name_bound_hooks(self, runtime: LiveTmuxSession) -> None:
+        """Refresh only hooks whose command embeds the current tmux session name."""
+        target = _exact_tmux_pane_target(runtime.tmux_session_name)
         for event in ("attached", "detached"):
             self._tmux(
                 runtime,
@@ -686,6 +659,54 @@ class RodexRuntimeLauncher:
                     event,
                 ),
             )
+
+    def _configure_static_status(
+        self,
+        runtime: LiveTmuxSession,
+        *,
+        publish_base_status: bool,
+    ) -> None:
+        target = _exact_tmux_pane_target(runtime.tmux_session_name)
+        self._tmux(runtime, "set-option", "-t", target, "status", "on")
+        status = TmuxStatusPipeline(lambda *args: self._tmux(runtime, *args), target)
+        if publish_base_status:
+            self._tmux(
+                runtime,
+                "set-option",
+                "-t",
+                target,
+                "status-left",
+                RODEX_STATUS_LEFT_FORMAT,
+            )
+        else:
+            status.reconcile_base_status()
+        self._tmux(
+            runtime,
+            "set-option",
+            "-t",
+            target,
+            "status-left-length",
+            RODEX_STATUS_LEFT_LENGTH,
+        )
+        self._tmux(
+            runtime,
+            "set-option",
+            "-t",
+            target,
+            "status-right",
+            RODEX_STATUS_RIGHT_FORMAT,
+        )
+        self._tmux(
+            runtime,
+            "set-option",
+            "-t",
+            target,
+            "status-right-length",
+            RODEX_STATUS_RIGHT_LENGTH,
+        )
+
+    def _install_input_guards(self, runtime: LiveTmuxSession) -> None:
+        target = _exact_tmux_pane_target(runtime.tmux_session_name)
         self._install_shared_ctrl_c_guard(runtime)
         if RODEX_TMUX_SLASH_ENABLED:
             self._tmux(

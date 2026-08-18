@@ -319,7 +319,7 @@ def run(
                 )
                 assignment.renamed_tmux_session_name = active_tmux.tmux_session_name
             display_name = assignment.names.display_name
-        runtime_launcher.configure_identity_status(active_tmux)
+        runtime_launcher.initialise_session_ui(active_tmux)
     except BaseException:
         runtime_launcher.stop(active_tmux, check=False)
         raise
@@ -522,7 +522,7 @@ def _prepare_named_session(
             runtime_identifier=resumed_runtime.runtime_identifier,
         )
         launcher.confirm_runtime_registration(active_tmux)
-        launcher.configure_identity_status(active_tmux)
+        launcher.initialise_session_ui(active_tmux)
     except BaseException:
         launcher.stop(active_tmux, check=False)
         raise
@@ -1552,7 +1552,7 @@ def _run_reserved_command(
                 _restore_tmux_identity(launcher, active_tmux, recorded_tmux)
             raise
         if active_tmux is not None:
-            launcher.configure_identity_status(active_tmux)
+            launcher.refresh_name_bound_hooks(active_tmux)
         if (
             active_tmux is not None
             and verified_control is not None
@@ -2105,7 +2105,10 @@ def _prepare_existing_tmux_identity(
         except BaseException:
             _restore_tmux_identity(launcher, active_tmux, recorded_tmux)
             raise
-    launcher.configure_identity_status(active_tmux)
+    if active_tmux.tmux_session_name != recorded_tmux.tmux_session_name:
+        launcher.refresh_name_bound_hooks(active_tmux)
+    else:
+        launcher.reconcile_session_ui(active_tmux)
     return active_tmux
 
 

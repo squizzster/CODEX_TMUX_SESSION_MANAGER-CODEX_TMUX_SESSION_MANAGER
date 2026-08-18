@@ -13,9 +13,9 @@ from rodex.tmux_completion_observer import (
 )
 from rodex.tmux_status import (
     RODEX_STATUS_LEFT_FORMAT,
-    STATUS_LEFT_CLAIM_PRIORITY_OPTION,
-    STATUS_LEFT_CLAIM_PUBLISHER_OPTION,
-    STATUS_LEFT_CLAIM_TOKEN_OPTION,
+    STATUS_CLAIM_PRIORITY_OPTION,
+    STATUS_CLAIM_PUBLISHER_OPTION,
+    STATUS_CLAIM_TOKEN_OPTION,
 )
 
 PROMPT = "\N{SINGLE RIGHT-POINTING ANGLE QUOTATION MARK} "
@@ -63,15 +63,13 @@ class RecordingRunner:
             condition = command[-2]
             should_apply = False
             if condition.startswith("#{<=:"):
-                current = int(
-                    self.status_options.get(STATUS_LEFT_CLAIM_PRIORITY_OPTION, "0")
-                )
+                current = int(self.status_options.get(STATUS_CLAIM_PRIORITY_OPTION, "0"))
                 requested = int(condition.rsplit(",", 1)[1].removesuffix("}"))
                 should_apply = current <= requested
-            elif STATUS_LEFT_CLAIM_TOKEN_OPTION in condition:
+            elif STATUS_CLAIM_TOKEN_OPTION in condition:
                 expected = condition.rsplit(",", 1)[1].removesuffix("}")
                 should_apply = (
-                    self.status_options.get(STATUS_LEFT_CLAIM_TOKEN_OPTION) == expected
+                    self.status_options.get(STATUS_CLAIM_TOKEN_OPTION) == expected
                 )
             if should_apply:
                 for action in command[-1].split(" ; "):
@@ -123,7 +121,7 @@ def test_observer_displays_completion_for_the_target_pane(tmp_path: Path) -> Non
     status_update = runner.commands[2]
     assert status_update[3:7] == ["if-shell", "-t", "%4", "-F"]
     assert "Rodex completion: /rodex  [Tab to complete]" in status_update[-1]
-    assert runner.commands[3][-1] == STATUS_LEFT_CLAIM_TOKEN_OPTION
+    assert runner.commands[3][-1] == STATUS_CLAIM_TOKEN_OPTION
     assert not any(
         "display-message" in command and "-p" not in command for command in runner.commands
     )
@@ -163,16 +161,16 @@ def test_stale_observer_does_not_clear_a_newer_publisher_claim(tmp_path: Path) -
     observer.inspect_redraw()
     runner.commands.clear()
     runner.status_options = {
-        STATUS_LEFT_CLAIM_PRIORITY_OPTION: "100",
-        STATUS_LEFT_CLAIM_PUBLISHER_OPTION: "newer",
-        STATUS_LEFT_CLAIM_TOKEN_OPTION: "newer-message-token",
+        STATUS_CLAIM_PRIORITY_OPTION: "100",
+        STATUS_CLAIM_PUBLISHER_OPTION: "newer",
+        STATUS_CLAIM_TOKEN_OPTION: "newer-message-token",
     }
     runner.screen_text = f"{PROMPT}/model\n"
 
     observer.inspect_redraw()
 
     assert not observer.completion_visible
-    assert runner.status_options[STATUS_LEFT_CLAIM_TOKEN_OPTION] == "newer-message-token"
+    assert runner.status_options[STATUS_CLAIM_TOKEN_OPTION] == "newer-message-token"
     assert not any("status-left" in command for command in runner.commands)
 
 

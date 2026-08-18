@@ -5,16 +5,20 @@ from __future__ import annotations
 import argparse
 import asyncio
 import secrets
-import shlex
 import subprocess
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, Literal
 
+from .status_bar import RODEX_STATUS_COLOURS
 from .tmux_status import (
     STATUS_ANIMATION_FRAME_INTERVAL_SECONDS,
-    STATUS_ANIMATION_TOKEN_OPTION,
+    STATUS_CLAIM_TOKEN_OPTION,
+    STATUS_PUBLISHER_SHARING_ANIMATION,
+    StatusPriority,
+    TmuxStatusClaimCommands,
+    TmuxStatusPresentation,
 )
 
 StatusEvent = Literal["attached", "detached"]
@@ -66,33 +70,7 @@ _ARRIVAL_TEXT: Final = (
     "·    ✦       SHARED REALITY       ✦    ·",
     "[ {shared_title} ]",
 )
-_ARRIVAL_BACKGROUNDS: Final = (
-    "colour17",
-    "colour18",
-    "colour19",
-    "colour54",
-    "colour55",
-    "colour56",
-    "colour57",
-    "colour93",
-    "colour129",
-    "colour165",
-    "colour201",
-    "colour198",
-    "colour165",
-    "colour129",
-    "colour93",
-    "colour57",
-    "colour45",
-    "colour51",
-    "colour45",
-    "colour87",
-    "colour45",
-    "colour39",
-    "colour33",
-    "colour24",
-    "colour22",
-)
+_ARRIVAL_BACKGROUNDS: Final = RODEX_STATUS_COLOURS.animation_arrival_backgrounds
 
 _DEPARTURE_TEXT: Final = (
     "◉          SHARED CHANNEL ACTIVE          ◉",
@@ -121,33 +99,7 @@ _DEPARTURE_TEXT: Final = (
     "           PRIVATE SESSION",
     "[ Private session ]",
 )
-_DEPARTURE_BACKGROUNDS: Final = (
-    "colour93",
-    "colour129",
-    "colour165",
-    "colour201",
-    "colour198",
-    "colour165",
-    "colour129",
-    "colour93",
-    "colour57",
-    "colour56",
-    "colour55",
-    "colour54",
-    "colour19",
-    "colour18",
-    "colour17",
-    "colour22",
-    "colour28",
-    "colour34",
-    "colour40",
-    "colour46",
-    "colour40",
-    "colour34",
-    "colour28",
-    "colour22",
-    "colour22",
-)
+_DEPARTURE_BACKGROUNDS: Final = RODEX_STATUS_COLOURS.animation_departure_backgrounds
 
 
 def status_frames(event: StatusEvent, attached_count: int) -> tuple[StatusFrame, ...]:
@@ -187,6 +139,7 @@ async def animate_status(
     tmux_prefix = (tmux_binary, "-S", str(tmux_server_socket_path))
     pane_target = f"={tmux_session_name}:"
     session_target = f"={tmux_session_name}"
+    status_commands = TmuxStatusClaimCommands(pane_target)
 
     async def tmux(*arguments: str) -> AsyncCommandResult:
         return await command_runner((*tmux_prefix, *arguments))
@@ -206,21 +159,41 @@ async def animate_status(
     if count_result.returncode != 0 or attached_count < 0:
         return
 
-    token = token_factory()
-    token_result = await tmux(
-        "set-option", "-t", pane_target, STATUS_ANIMATION_TOKEN_OPTION, token
-    )
-    if token_result.returncode != 0:
-        return
-
     frames = status_frames(event, attached_count)
     if not frames:
-        await _restore_normal_status(tmux, pane_target, session_target, token)
+        await tmux(
+            "if-shell",
+            "-t",
+            pane_target,
+            "-F",
+            status_commands.publisher_matches(STATUS_PUBLISHER_SHARING_ANIMATION),
+            status_commands.restore_base(),
+        )
+        return
+
+    token = token_factory()
+    claim_result = await tmux(
+        "if-shell",
+        "-t",
+        pane_target,
+        "-F",
+        status_commands.priority_allows(StatusPriority.SHARING_ANIMATION),
+        status_commands.claim_and_present(
+            publisher=STATUS_PUBLISHER_SHARING_ANIMATION,
+            token=token,
+            priority=StatusPriority.SHARING_ANIMATION,
+            presentation=_frame_presentation(frames[0]),
+        ),
+    )
+    if claim_result.returncode != 0 or not await _animation_token_matches(
+        tmux, pane_target, token
+    ):
         return
 
     loop = asyncio.get_running_loop()
-    next_frame_at = loop.time()
-    for frame in frames:
+    next_frame_at = loop.time() + FRAME_INTERVAL_SECONDS
+    await frame_waiter(next_frame_at)
+    for frame in frames[1:]:
         if not await _animation_token_matches(tmux, pane_target, token):
             return
         apply_result = await tmux(
@@ -228,15 +201,21 @@ async def animate_status(
             "-t",
             pane_target,
             "-F",
-            _animation_token_condition(token),
-            _frame_command(pane_target, frame),
+            status_commands.token_matches(token),
+            status_commands.present(_frame_presentation(frame)),
         )
         if apply_result.returncode != 0:
             break
         next_frame_at += FRAME_INTERVAL_SECONDS
         await frame_waiter(next_frame_at)
 
-    await _restore_normal_status(tmux, pane_target, session_target, token)
+    await _restore_normal_status(
+        tmux,
+        pane_target,
+        session_target,
+        token,
+        status_commands,
+    )
 
 
 async def _run_command(command: Sequence[str]) -> AsyncCommandResult:
@@ -271,9 +250,7 @@ async def _animation_token_matches(
     pane_target: str,
     token: str,
 ) -> bool:
-    result = await tmux(
-        "show-options", "-v", "-t", pane_target, STATUS_ANIMATION_TOKEN_OPTION
-    )
+    result = await tmux("show-options", "-v", "-t", pane_target, STATUS_CLAIM_TOKEN_OPTION)
     return result.returncode == 0 and result.stdout.strip() == token
 
 
@@ -282,28 +259,15 @@ async def _restore_normal_status(
     pane_target: str,
     session_target: str,
     token: str,
+    status_commands: TmuxStatusClaimCommands,
 ) -> None:
     await tmux(
         "if-shell",
         "-t",
         pane_target,
         "-F",
-        _animation_token_condition(token),
-        " ; ".join(
-            (
-                shlex.join(("set-option", "-u", "-t", pane_target, "status-format")),
-                shlex.join(("set-option", "-u", "-t", pane_target, "status-style")),
-                shlex.join(
-                    (
-                        "set-option",
-                        "-u",
-                        "-t",
-                        pane_target,
-                        STATUS_ANIMATION_TOKEN_OPTION,
-                    )
-                ),
-            )
-        ),
+        status_commands.token_matches(token),
+        status_commands.restore_base(),
     )
     clients = await tmux("list-clients", "-t", session_target, "-F", _CLIENT_NAME_FORMAT)
     if clients.returncode != 0:
@@ -313,32 +277,12 @@ async def _restore_normal_status(
             await tmux("refresh-client", "-S", "-t", client_name)
 
 
-def _animation_token_condition(token: str) -> str:
-    return f"#{{==:#{{{STATUS_ANIMATION_TOKEN_OPTION}}},{token}}}"
-
-
-def _frame_command(pane_target: str, frame: StatusFrame) -> str:
-    return " ; ".join(
-        (
-            shlex.join(
-                (
-                    "set-option",
-                    "-t",
-                    pane_target,
-                    "status-style",
-                    f"bg={frame.background},fg=colour231,bold",
-                )
-            ),
-            shlex.join(
-                (
-                    "set-option",
-                    "-t",
-                    pane_target,
-                    "status-format[0]",
-                    f"#[align=centre]{frame.text}",
-                )
-            ),
-        )
+def _frame_presentation(frame: StatusFrame) -> TmuxStatusPresentation:
+    return TmuxStatusPresentation(
+        status_style=(
+            f"bg={frame.background},fg={RODEX_STATUS_COLOURS.animation_foreground},bold"
+        ),
+        status_format=f"#[align=centre]{frame.text}",
     )
 
 

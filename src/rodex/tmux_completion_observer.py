@@ -17,9 +17,10 @@ from .tmux_input_proxy import (
     native_popup_confirms_no_match,
 )
 from .tmux_status import (
-    STATUS_LEFT_PUBLISHER_COMPLETION,
-    StatusLeftPriority,
-    TmuxStatusLeftPipeline,
+    STATUS_PUBLISHER_COMPLETION,
+    StatusPriority,
+    TmuxStatusPipeline,
+    TmuxStatusPresentation,
     completion_status_left_format,
 )
 
@@ -66,7 +67,7 @@ class TmuxCompletionObserver:
         self._run = runner
         self._token_factory = token_factory
         self._token: str | None = None
-        self._status = TmuxStatusLeftPipeline(self._tmux, pane_id)
+        self._status = TmuxStatusPipeline(self._tmux, pane_id)
         self.completion_visible = False
 
     def inspect_redraw(self) -> None:
@@ -101,10 +102,12 @@ class TmuxCompletionObserver:
             return
         token = self._token_factory()
         if not self._status.publish_transient(
-            publisher=STATUS_LEFT_PUBLISHER_COMPLETION,
+            publisher=STATUS_PUBLISHER_COMPLETION,
             token=token,
-            priority=StatusLeftPriority.COMPLETION,
-            status_format=completion_status_left_format(message),
+            priority=StatusPriority.COMPLETION,
+            presentation=TmuxStatusPresentation(
+                status_left=completion_status_left_format(message)
+            ),
         ):
             self.completion_visible = False
             self._token = None

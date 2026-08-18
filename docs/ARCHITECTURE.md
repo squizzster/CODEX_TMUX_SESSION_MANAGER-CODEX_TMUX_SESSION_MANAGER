@@ -99,10 +99,10 @@ runtime repairs interrupted launch. During shutdown, the host retries only the e
 `_running` follows the same ownership and live-endpoint rules. `_alias` changes use the
 same naming pipeline and compensate a tmux rename if the database transition fails.
 
-Sharing animations and transient left-status claims publish and restore atomically through
-`TmuxStatusLeftPipeline`. Per-client `client_prefix` ensures `CTRL-B MODE` never intercepts
-a fast key sequence. Shared `Ctrl-C` requires same-client confirmation; private input and
-user root bindings stay unchanged. `/rodex` interception is tested but currently disabled.
+Named immutable segments own ordinary left-status colour and content. Sharing animations
+and transient claims publish and restore through `TmuxStatusLeftPipeline`. Per-client
+`client_prefix` preserves fast key sequences. Shared `Ctrl-C` requires same-client
+confirmation; private input and user root bindings stay unchanged. `/rodex` is disabled.
 
 The same base status reads a pane-stable context option written by the primary protocol
 proxy observer. Token usage divided by model window supplies context fill; compaction item

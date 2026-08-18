@@ -17,7 +17,9 @@ from websockets.sync.server import unix_serve
 
 from .tmux_status import (
     RODEX_CONTEXT_STATUS_OPTION,
+    RODEX_TOOL_CALL_STATUS_OPTION,
     STATUS_ANIMATION_FRAME_INTERVAL_SECONDS,
+    TmuxStatusOption,
     compacting_status_segment,
     context_status_segment,
 )
@@ -199,33 +201,19 @@ class TmuxToolCallStatus:
         *,
         runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
     ) -> None:
-        if not tmux_pane_target.strip():
-            raise ValueError("tmux_pane_target must be non-empty")
-        self._tmux_binary = tmux_binary
-        self._tmux_server_socket_path = tmux_server_socket_path
-        self._tmux_pane_target = tmux_pane_target
-        self._run = runner
+        self._option = TmuxStatusOption(
+            tmux_binary,
+            tmux_server_socket_path,
+            tmux_pane_target,
+            RODEX_TOOL_CALL_STATUS_OPTION,
+            runner=runner,
+        )
 
     def update(self, count: int) -> None:
         """Set the stable tmux user option consumed by the status format."""
         if isinstance(count, bool) or not isinstance(count, int) or count < 0:
             raise ValueError("tool-call count must be a non-negative integer")
-        self._run(
-            [
-                self._tmux_binary,
-                "-S",
-                str(self._tmux_server_socket_path),
-                "set-option",
-                "-t",
-                self._tmux_pane_target,
-                "@rodex_tool_calls",
-                str(count),
-            ],
-            check=True,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
+        self._option.publish(str(count))
 
 
 class TmuxContextStatus:
@@ -239,33 +227,19 @@ class TmuxContextStatus:
         *,
         runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
     ) -> None:
-        if not tmux_pane_target.strip():
-            raise ValueError("tmux_pane_target must be non-empty")
-        self._tmux_binary = tmux_binary
-        self._tmux_server_socket_path = tmux_server_socket_path
-        self._tmux_pane_target = tmux_pane_target
-        self._run = runner
+        self._option = TmuxStatusOption(
+            tmux_binary,
+            tmux_server_socket_path,
+            tmux_pane_target,
+            RODEX_CONTEXT_STATUS_OPTION,
+            runner=runner,
+        )
 
     def update(self, rendered_status: str) -> None:
         """Set the stable tmux user option consumed by the base status format."""
         if not isinstance(rendered_status, str) or not rendered_status:
             raise ValueError("rendered context status must be non-empty")
-        self._run(
-            [
-                self._tmux_binary,
-                "-S",
-                str(self._tmux_server_socket_path),
-                "set-option",
-                "-t",
-                self._tmux_pane_target,
-                RODEX_CONTEXT_STATUS_OPTION,
-                rendered_status,
-            ],
-            check=True,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
+        self._option.publish(rendered_status)
 
 
 class CodexContextStatusObserver:

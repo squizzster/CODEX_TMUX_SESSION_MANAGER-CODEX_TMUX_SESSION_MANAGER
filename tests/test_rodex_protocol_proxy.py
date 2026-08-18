@@ -20,6 +20,7 @@ from rodex.protocol_proxy import (
     TmuxToolCallStatus,
     ToolCallCounter,
 )
+from rodex.status_bar import RODEX_STATUS_COLOURS
 
 
 def item_started(item_type: str, item_id: str = "item-1") -> str:
@@ -158,7 +159,7 @@ def test_context_observer_projects_last_usage_for_only_the_primary_thread() -> N
     observer.close()
 
     assert len(observed) == 1
-    assert "#E6FF47" in observed[0]
+    assert RODEX_STATUS_COLOURS.context_warning in observed[0]
     assert "Context: 70% |" in observed[0]
 
 

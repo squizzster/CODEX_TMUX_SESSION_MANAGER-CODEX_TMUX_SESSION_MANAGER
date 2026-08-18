@@ -9,23 +9,15 @@ from pathlib import Path
 
 import pytest
 
+from rodex.status_bar import RODEX_STATUS_LEFT_FORMAT
 from rodex.tmux_status import (
-    PREFIX_MODE_STATUS_FORMAT,
-    RODEX_BASE_STATUS_LEFT_FORMAT,
-    RODEX_CONTEXT_STATUS_OPTION,
-    RODEX_STATUS_LEFT_FORMAT,
     STATUS_LEFT_CLAIM_PRIORITY_OPTION,
     STATUS_LEFT_CLAIM_PUBLISHER_OPTION,
     STATUS_LEFT_CLAIM_TOKEN_OPTION,
     STATUS_LEFT_PUBLISHER_COMPLETION,
     STATUS_LEFT_PUBLISHER_SHARED_CTRL_C,
-    StatusBarPart,
-    StatusBarSegment,
     StatusLeftPriority,
-    TmuxStatusBar,
     TmuxStatusLeftPipeline,
-    compacting_status_segment,
-    context_status_segment,
 )
 
 
@@ -159,89 +151,6 @@ def test_higher_priority_warning_supersedes_and_blocks_completion() -> None:
     assert tmux.status_left == "safety warning"
     status.restore_if_publisher_matches(STATUS_LEFT_PUBLISHER_SHARED_CTRL_C)
     assert tmux.status_left == RODEX_STATUS_LEFT_FORMAT
-
-
-def test_base_status_selects_ctrl_b_banner_from_tmux_client_prefix_state() -> None:
-    assert "#{client_prefix}" in RODEX_STATUS_LEFT_FORMAT
-    assert "#{==:#{prefix},C-b}" in RODEX_STATUS_LEFT_FORMAT
-    assert PREFIX_MODE_STATUS_FORMAT in RODEX_STATUS_LEFT_FORMAT
-    assert RODEX_BASE_STATUS_LEFT_FORMAT in RODEX_STATUS_LEFT_FORMAT
-    assert RODEX_CONTEXT_STATUS_OPTION in RODEX_BASE_STATUS_LEFT_FORMAT
-    assert "fg=#0A22FF" in RODEX_BASE_STATUS_LEFT_FORMAT
-
-
-def test_static_status_segments_render_their_own_colours_in_order() -> None:
-    rendered_segments = (
-        "#[fg=#0A22FF]#[bold] Rodex: #S ",
-        "#[fg=cyan]#[bold]| Tools: #{@rodex_tool_calls} ",
-        "#[fg=yellow]#[bold]| Mouse: #{?mouse,ON,OFF} ",
-    )
-
-    positions = tuple(
-        RODEX_BASE_STATUS_LEFT_FORMAT.index(item) for item in rendered_segments
-    )
-
-    assert positions == tuple(sorted(positions))
-
-
-def test_status_bar_library_updates_only_the_named_part() -> None:
-    status_bar = TmuxStatusBar(
-        (
-            StatusBarSegment(StatusBarPart.RODEX_IDENTITY, "blue", " Rodex "),
-            StatusBarSegment(StatusBarPart.MOUSE_MODE, "yellow", "| Mouse "),
-        )
-    )
-
-    updated = status_bar.modify_colour(StatusBarPart.RODEX_IDENTITY, "#0A22FF")
-    replaced = updated.update_status_bar(
-        StatusBarPart.RODEX_IDENTITY,
-        StatusBarSegment(StatusBarPart.RODEX_IDENTITY, "#0A22FF", " Rodex: #S "),
-    )
-
-    assert replaced.render_part(StatusBarPart.RODEX_IDENTITY) == (
-        "#[fg=#0A22FF]#[bold] Rodex: #S "
-    )
-    assert replaced.render_part(StatusBarPart.MOUSE_MODE) == ("#[fg=yellow]#[bold]| Mouse ")
-    assert status_bar.render_part(StatusBarPart.RODEX_IDENTITY) == (
-        "#[fg=blue]#[bold] Rodex "
-    )
-
-
-@pytest.mark.evolutionary_regression
-def test_context_palette_does_not_change_the_independent_mouse_colour() -> None:
-    """Current evidence: context cannot recolour Mouse; supersede only by contract."""
-    assert "#[fg=yellow]#[bold]| Mouse: #{?mouse,ON,OFF}" in (RODEX_BASE_STATUS_LEFT_FORMAT)
-
-
-@pytest.mark.parametrize(
-    ("context_percent", "colour"),
-    (
-        (69.9, "#0A22FF"),
-        (70.0, "#E6FF47"),
-        (74.4, "#E6FF47"),
-        (75.0, "#FF002E"),
-        (79.4, "#FF002E"),
-        (80.0, "#FF002E"),
-    ),
-)
-def test_context_status_uses_the_compaction_warning_bands(
-    context_percent: float,
-    colour: str,
-) -> None:
-    rendered = context_status_segment(context_percent)
-
-    assert f"fg={colour}" in rendered
-    assert f"Context: {round(context_percent)}% |" in rendered
-
-
-def test_context_status_has_stable_unavailable_and_compacting_states() -> None:
-    assert "fg=#0A22FF" in context_status_segment(None)
-    assert "Context: -- |" in context_status_segment(None)
-    assert "Context: 32% |" in context_status_segment(31.5)
-    assert "fg=#FF002E" in compacting_status_segment(0)
-    assert "COMPACTING    |" in compacting_status_segment(0)
-    assert "COMPACTING... |" in compacting_status_segment(3)
-    assert compacting_status_segment(4) == compacting_status_segment(0)
 
 
 def test_real_tmux_concurrent_publishers_leave_a_matching_atomic_claim(

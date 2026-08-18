@@ -46,14 +46,16 @@ from .protocol_proxy import (
     TmuxToolCallStatus,
     ToolCallCounter,
 )
-from .tmux_status import (
+from .status_bar import (
     RODEX_STATUS_LEFT_FORMAT,
     RODEX_STATUS_LEFT_LENGTH,
+    context_status_segment,
+)
+from .tmux_status import (
     STATUS_ANIMATION_TOKEN_OPTION,
     STATUS_LEFT_CLAIM_PRIORITY_OPTION,
     STATUS_LEFT_CLAIM_PUBLISHER_OPTION,
     STATUS_LEFT_CLAIM_TOKEN_OPTION,
-    context_status_segment,
 )
 from .version import RODEX_VERSION
 

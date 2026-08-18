@@ -400,6 +400,8 @@ def _prepare_named_session(
         _verify_live_runtime_identity(
             launcher,
             recorded_tmux,
+            session_id=session_id,
+            database_path=database_path,
             expected_rodex_session_id=rodex_session_id,
             expected_registry_id=registry_id,
             expected_codex_session_id=codex_session_id,
@@ -753,15 +755,11 @@ def _run_machine_command(
                     prompt,
                     revalidate=revalidate,
                 )
-            _print_machine_success(
-                operation,
-                display_name,
-                control,
-                turn_id=dispatch.turn_id,
-                thread_id=dispatch.thread_id,
-                codex_session_id=dispatch.session_id,
-                data={"accepted": True},
-            )
+            success_state = None
+            success_turn_id = dispatch.turn_id
+            success_thread_id = dispatch.thread_id
+            success_codex_session_id = dispatch.session_id
+            success_data: dict[str, object] = {"accepted": True}
         elif command == _STEER_COMMAND:
             assert isinstance(turn_id, str)
             prompt = _read_machine_prompt()
@@ -772,15 +770,11 @@ def _run_machine_command(
                     prompt,
                     revalidate=revalidate,
                 )
-            _print_machine_success(
-                operation,
-                display_name,
-                control,
-                turn_id=dispatch.turn_id,
-                thread_id=dispatch.thread_id,
-                codex_session_id=dispatch.session_id,
-                data={"accepted": True},
-            )
+            success_state = None
+            success_turn_id = dispatch.turn_id
+            success_thread_id = dispatch.thread_id
+            success_codex_session_id = dispatch.session_id
+            success_data = {"accepted": True}
         elif command == _INTERRUPT_COMMAND:
             assert isinstance(turn_id, str)
             with _open_named_session_transition_lock(database_path, session_id):
@@ -789,25 +783,34 @@ def _run_machine_command(
                     turn_id,
                     revalidate=revalidate,
                 )
-            _print_machine_success(
-                operation,
-                display_name,
-                control,
-                state=state,
-                turn_id=turn_id,
-                data={"interrupt_requested": True},
-            )
+            success_state = state
+            success_turn_id = turn_id
+            success_thread_id = None
+            success_codex_session_id = None
+            success_data = {"interrupt_requested": True}
         elif command == _RESULT_COMMAND:
             assert isinstance(turn_id, str)
             state, result = control_client.result(control, turn_id, revalidate=revalidate)
-            _print_machine_success(
-                operation,
-                display_name,
-                control,
-                state=state,
-                turn_id=turn_id,
-                data={"turn": _turn_result_payload(result)},
-            )
+            if result.status in {"failed", "interrupted"}:
+                code = "turn_failed" if result.status == "failed" else "turn_interrupted"
+                exit_code = 6 if result.status == "failed" else 5
+                _print_machine_error(
+                    operation,
+                    code,
+                    f"Codex turn ended with status {result.status}",
+                    retryable=False,
+                    session_name=display_name,
+                    control=control,
+                    state=state,
+                    turn_id=turn_id,
+                    data={"turn": _turn_result_payload(result)},
+                )
+                return exit_code
+            success_state = state
+            success_turn_id = turn_id
+            success_thread_id = None
+            success_codex_session_id = None
+            success_data = {"turn": _turn_result_payload(result)}
         elif command == _WAIT_COMMAND:
             assert isinstance(turn_id, str)
             state, result = control_client.wait_for_turn(
@@ -831,17 +834,32 @@ def _run_machine_command(
                     data={"turn": _turn_result_payload(result)},
                 )
                 return exit_code
-            _print_machine_success(
-                operation,
-                display_name,
-                control,
-                state=state,
-                turn_id=turn_id,
-                data={"turn": _turn_result_payload(result)},
-            )
+            success_state = state
+            success_turn_id = turn_id
+            success_thread_id = None
+            success_codex_session_id = None
+            success_data = {"turn": _turn_result_payload(result)}
         else:  # pragma: no cover - the command map and branches are one contract.
             raise AssertionError(f"unhandled machine command: {command}")
-        record_a_rodex_session_access(session_id, database_path)
+        try:
+            record_a_rodex_session_access(session_id, database_path)
+        except (OSError, RodexSQLError, RodexSessionError, sqlite3.Error) as error:
+            success_data["warnings"] = [
+                {
+                    "code": "access_record_failed",
+                    "message": str(error),
+                }
+            ]
+        _print_machine_success(
+            operation,
+            display_name,
+            control,
+            state=success_state,
+            turn_id=success_turn_id,
+            thread_id=success_thread_id,
+            codex_session_id=success_codex_session_id,
+            data=success_data,
+        )
         return 0
     except (
         CoolNameError,
@@ -878,7 +896,7 @@ def _parse_machine_arguments(arguments: list[str]) -> dict[str, object]:
         _INTERRUPT_COMMAND: "rodex _interrupt SESSION --turn TURN_ID --json",
         _RESULT_COMMAND: "rodex _result SESSION --turn TURN_ID --json",
     }[command]
-    if len(arguments) < 2 or not arguments[1] or arguments[1].startswith("-"):
+    if len(arguments) < 2 or not arguments[1].strip() or arguments[1].startswith("-"):
         raise _MachineUsageError(f"usage: {usage}")
     result: dict[str, object] = {"session_name": arguments[1]}
     seen_json = False
@@ -911,6 +929,8 @@ def _parse_machine_arguments(arguments: list[str]) -> dict[str, object]:
         _RESULT_COMMAND,
     }
     needs_stdin = command in {_START_COMMAND, _STEER_COMMAND}
+    if turn_id is not None and not turn_id.strip():
+        raise _MachineUsageError("turn ID must be non-empty")
     if (
         not seen_json
         or seen_stdin != needs_stdin
@@ -967,6 +987,7 @@ def _require_exact_runtime_instance(
 
 def _thread_state_payload(state: CodexThreadState) -> dict[str, object]:
     return {
+        "cwd": state.cwd,
         "status": state.status,
         "active_flags": list(state.active_flags),
         "active_turn_id": state.active_turn_id,
@@ -979,6 +1000,8 @@ def _turn_result_payload(result: CodexTurnResult) -> dict[str, object]:
         "turn_id": result.turn_id,
         "status": result.status,
         "final_agent_message": result.final_agent_message,
+        "final_agent_message_bytes": result.final_agent_message_bytes,
+        "final_agent_message_truncated": result.final_agent_message_truncated,
         "structured_output": result.structured_output,
         "error": result.error,
         "started_at": result.started_at,
@@ -1064,6 +1087,7 @@ def _print_machine_success(
                 data=data,
             ),
             indent=2,
+            allow_nan=False,
             sort_keys=True,
         ),
         flush=True,
@@ -1095,6 +1119,7 @@ def _print_machine_error(
                 error={"code": code, "message": message, "retryable": retryable},
             ),
             indent=2,
+            allow_nan=False,
             sort_keys=True,
         ),
         flush=True,
@@ -1267,6 +1292,8 @@ def _run_reserved_command(
                     verified_control = _verify_live_runtime_identity(
                         launcher,
                         recorded_tmux,
+                        session_id=alias_session_id,
+                        database_path=database_path,
                         expected_rodex_session_id=expected_rodex_session_id,
                         expected_registry_id=expected_registry_id,
                         expected_codex_session_id=expected_codex_session_id,
@@ -1508,6 +1535,8 @@ def _resolve_live_control(
     control = _verify_live_runtime_identity(
         launcher,
         runtime,
+        session_id=session_id,
+        database_path=database_path,
         expected_rodex_session_id=expected_rodex_session_id,
         expected_registry_id=expected_registry_id,
         expected_codex_session_id=expected_codex_session_id,
@@ -1519,6 +1548,8 @@ def _verify_live_runtime_identity(
     launcher: RodexRuntimeLauncher,
     runtime: LiveTmuxSession,
     *,
+    session_id: int,
+    database_path: Path,
     expected_rodex_session_id: RodexSessionId,
     expected_registry_id: RodexRegistryId,
     expected_codex_session_id: CodexSessionId,
@@ -1530,6 +1561,17 @@ def _verify_live_runtime_identity(
         and control.rodex_registry_id == expected_registry_id
         and control.codex_session_id == expected_codex_session_id
     ):
+        if control.runtime_identifier is None:
+            raise RodexLaunchError(
+                "pending live runtime did not advertise its exact runtime identity"
+            )
+        record_a_rodex_session_runtime_resume(
+            session_id,
+            runtime.tmux_server_socket_path,
+            runtime.tmux_session_name,
+            database_path,
+            runtime_identifier=control.runtime_identifier,
+        )
         launcher.confirm_runtime_registration(runtime)
         control = launcher.discover_runtime_control(runtime)
     _require_live_runtime_identity(
@@ -1692,6 +1734,8 @@ def _print_current_rodex_context(
     control = _verify_live_runtime_identity(
         launcher,
         live_tmux,
+        session_id=session_id,
+        database_path=database_path,
         expected_rodex_session_id=advertised.rodex_session_id,
         expected_registry_id=registry_id,
         expected_codex_session_id=persisted.codex_session_id,
@@ -1769,6 +1813,8 @@ def _print_running_sessions(
             _verify_live_runtime_identity(
                 launcher,
                 live,
+                session_id=runtime.rodex_sessions_id,
+                database_path=database_path,
                 expected_rodex_session_id=expected_rodex_session_id,
                 expected_registry_id=registry_id,
                 expected_codex_session_id=runtime.codex_session_id,

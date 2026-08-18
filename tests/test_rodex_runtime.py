@@ -1736,6 +1736,7 @@ def test_session_host_retries_exact_resume_during_active_writer_handoff(
     app_socket = tmp_path / "app.sock"
     tui_launches = 0
     retry_waits: list[float] = []
+    primary_release_waits: list[float] = []
 
     class FakeProcess:
         def __init__(self, kind: str, returncode: int | None) -> None:
@@ -1790,6 +1791,9 @@ def test_session_host_retries_exact_resume_during_active_writer_handoff(
         def start(self) -> None:
             return None
 
+        def wait_for_primary_connection_release(self, timeout_seconds: float) -> None:
+            primary_release_waits.append(timeout_seconds)
+
         def close(self) -> None:
             return None
 
@@ -1840,6 +1844,9 @@ def test_session_host_retries_exact_resume_during_active_writer_handoff(
     )
 
     assert tui_launches == 2
+    assert primary_release_waits == [
+        runtime_module.CODEX_PRIMARY_CONNECTION_RELEASE_TIMEOUT_SECONDS
+    ]
     assert retry_waits == [runtime_module.CODEX_ACTIVE_WRITER_RETRY_INTERVAL_SECONDS]
 
 

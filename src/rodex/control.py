@@ -22,12 +22,13 @@ from rodex_registry.identity import (
 )
 
 from .app_server_contract import require_supported_app_server
-from .protocol_proxy import EVENT_STREAM_READY_METHOD
+from .protocol_proxy import CONTROL_CONNECTION_PATH, EVENT_STREAM_READY_METHOD
 from .version import RODEX_VERSION
 
 Connector = Callable[..., Any]
 Revalidate = Callable[[], None]
 EventWriter = Callable[[str], None]
+_FINAL_AGENT_MESSAGE_BYTE_LIMIT = 64 * 1024
 
 
 class RodexControlError(RuntimeError):
@@ -40,6 +41,10 @@ class RodexDispatchIndeterminateError(RodexControlError):
 
 class RodexWaitTimeoutError(RodexControlError):
     """An exact wait timed out without interrupting its target turn."""
+
+
+class _RodexRequestDeadlineError(RodexControlError):
+    """An internal App Server request exhausted its caller's total deadline."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,6 +66,7 @@ class CodexThreadState:
 
     thread_id: str
     session_id: str
+    cwd: str
     status: str
     active_flags: tuple[str, ...]
     active_turn_id: str | None
@@ -84,6 +90,8 @@ class CodexTurnResult:
     turn_id: str
     status: Literal["completed", "interrupted", "failed", "inProgress"]
     final_agent_message: str | None
+    final_agent_message_bytes: int
+    final_agent_message_truncated: bool
     structured_output: object | None
     error: object | None
     started_at: int | None
@@ -217,16 +225,15 @@ class CodexControlClient:
             raise ValueError("prompt must be non-empty")
         try:
             with self._open_events(control.protocol_event_socket_path) as events:
-                ready = _expect_event_stream_ready(events)
-                active_turn_id = _ready_active_turn_id(ready, control.codex_session_id)
+                _expect_event_stream_ready(events)
                 with self._open_protocol(control.protocol_proxy_socket_path) as websocket:
                     thread = self._verify_and_read_thread(
                         websocket,
                         control.codex_session_id,
                         require_compatible=True,
                     )
-                    state = _thread_state(thread, active_turn_id=active_turn_id)
-                    if state.status != "idle" or state.active_turn_id is not None:
+                    state = _thread_state(thread)
+                    if state.status != "idle":
                         raise RodexControlError(
                             "Codex thread is not idle; use _steer with the exact turn ID"
                         )
@@ -268,20 +275,18 @@ class CodexControlClient:
             raise ValueError("prompt must be non-empty")
         try:
             with self._open_events(control.protocol_event_socket_path) as events:
-                ready = _expect_event_stream_ready(events)
-                active_turn_id = _ready_active_turn_id(ready, control.codex_session_id)
+                _expect_event_stream_ready(events)
                 with self._open_protocol(control.protocol_proxy_socket_path) as websocket:
                     thread = self._verify_and_read_thread(
                         websocket,
                         control.codex_session_id,
                         require_compatible=True,
                     )
-                    state = _thread_state(thread, active_turn_id=active_turn_id)
-                    if state.status != "active" or state.active_turn_id != turn_id:
-                        observed = state.active_turn_id or state.status
+                    state = _thread_state(thread, active_turn_id=turn_id)
+                    if state.status != "active":
                         raise RodexControlError(
                             f"exact Codex turn is not active: expected {turn_id}, "
-                            f"observed {observed}"
+                            f"observed thread {state.status}"
                         )
                     if state.can_accept_direct_input is False:
                         raise RodexControlError("Codex thread does not accept direct input")
@@ -319,20 +324,18 @@ class CodexControlClient:
         _require_turn_id(turn_id)
         try:
             with self._open_events(control.protocol_event_socket_path) as events:
-                ready = _expect_event_stream_ready(events)
-                active_turn_id = _ready_active_turn_id(ready, control.codex_session_id)
+                _expect_event_stream_ready(events)
                 with self._open_protocol(control.protocol_proxy_socket_path) as websocket:
                     thread = self._verify_and_read_thread(
                         websocket,
                         control.codex_session_id,
                         require_compatible=True,
                     )
-                    state = _thread_state(thread, active_turn_id=active_turn_id)
-                    if state.status != "active" or state.active_turn_id != turn_id:
-                        observed = state.active_turn_id or state.status
+                    state = _thread_state(thread, active_turn_id=turn_id)
+                    if state.status != "active":
                         raise RodexControlError(
                             f"exact Codex turn is not active: expected {turn_id}, "
-                            f"observed {observed}"
+                            f"observed thread {state.status}"
                         )
                     revalidate()
                     _request(
@@ -385,14 +388,25 @@ class CodexControlClient:
             raise ValueError("timeout must be positive")
         deadline = None if timeout_seconds is None else self._monotonic() + timeout_seconds
         try:
-            with self._open_events(control.protocol_event_socket_path) as events:
-                ready = _expect_event_stream_ready(events)
-                with self._open_protocol(control.protocol_proxy_socket_path) as websocket:
+            with self._open_events(
+                control.protocol_event_socket_path,
+                open_timeout=_wait_remaining(deadline, self._monotonic, turn_id, 2),
+            ) as events:
+                ready = _expect_event_stream_ready(
+                    events,
+                    timeout_seconds=_wait_remaining(deadline, self._monotonic, turn_id, 2),
+                    preserve_timeout=True,
+                )
+                with self._open_protocol(
+                    control.protocol_proxy_socket_path,
+                    open_timeout=_wait_remaining(deadline, self._monotonic, turn_id, 2),
+                ) as websocket:
                     thread = self._verify_and_read_thread(
                         websocket,
                         control.codex_session_id,
                         include_turns=True,
                         require_compatible=True,
+                        deadline=deadline,
                     )
                 state = _thread_state(
                     thread,
@@ -401,13 +415,13 @@ class CodexControlClient:
                 turn = _turn_from_thread(thread, turn_id)
                 result = _turn_result(turn)
                 revalidate()
+                _wait_remaining(deadline, self._monotonic, turn_id)
                 if result.status != "inProgress":
                     return state, result
-                if state.active_turn_id != turn_id:
-                    observed = state.active_turn_id or state.status
+                if state.status != "active":
                     raise RodexControlError(
                         f"exact Codex turn is not active: expected {turn_id}, "
-                        f"observed {observed}"
+                        f"observed thread {state.status}"
                     )
                 while True:
                     remaining = None if deadline is None else deadline - self._monotonic()
@@ -432,13 +446,15 @@ class CodexControlClient:
                     if not isinstance(completed, dict) or completed.get("id") != turn_id:
                         continue
                     with self._open_protocol(
-                        control.protocol_proxy_socket_path
+                        control.protocol_proxy_socket_path,
+                        open_timeout=_wait_remaining(deadline, self._monotonic, turn_id, 2),
                     ) as websocket:
                         terminal_thread = self._verify_and_read_thread(
                             websocket,
                             control.codex_session_id,
                             include_turns=True,
                             require_compatible=True,
+                            deadline=deadline,
                         )
                     terminal_result = _turn_result(
                         _turn_from_thread(terminal_thread, turn_id)
@@ -448,9 +464,20 @@ class CodexControlClient:
                             "Codex completion event preceded terminal turn state"
                         )
                     revalidate()
+                    _wait_remaining(deadline, self._monotonic, turn_id)
                     return _thread_state(terminal_thread), terminal_result
         except RodexWaitTimeoutError:
             raise
+        except _RodexRequestDeadlineError as error:
+            raise RodexWaitTimeoutError(
+                f"timed out waiting for exact Codex turn {turn_id}"
+            ) from error
+        except TimeoutError as error:
+            if deadline is not None and self._monotonic() >= deadline:
+                raise RodexWaitTimeoutError(
+                    f"timed out waiting for exact Codex turn {turn_id}"
+                ) from error
+            raise RodexControlError("timed out opening Codex event stream") from error
         except (ConnectionClosed, InvalidHandshake, OSError) as error:
             raise RodexControlError(f"Codex event stream ended: {error}") from error
         raise RodexControlError("Codex event stream ended before the turn completed")
@@ -520,22 +547,22 @@ class CodexControlClient:
         except (ConnectionClosed, InvalidHandshake, OSError) as error:
             raise RodexControlError(f"Codex event stream ended: {error}") from error
 
-    def _open_protocol(self, socket_path: Path) -> Any:
+    def _open_protocol(self, socket_path: Path, *, open_timeout: float = 2) -> Any:
         return self._connect(
             str(socket_path),
-            uri="ws://localhost/rpc",
+            uri=f"ws://localhost{CONTROL_CONNECTION_PATH}",
             compression=None,
-            open_timeout=2,
+            open_timeout=open_timeout,
             close_timeout=1,
             max_size=None,
         )
 
-    def _open_events(self, socket_path: Path) -> Any:
+    def _open_events(self, socket_path: Path, *, open_timeout: float = 2) -> Any:
         return self._connect(
             str(socket_path),
             uri="ws://localhost/events",
             compression=None,
-            open_timeout=2,
+            open_timeout=open_timeout,
             close_timeout=1,
             max_size=None,
         )
@@ -547,9 +574,21 @@ class CodexControlClient:
         *,
         include_turns: bool = False,
         require_compatible: bool = False,
+        deadline: float | None = None,
     ) -> dict[str, Any]:
-        self._initialize_protocol(websocket, require_compatible=require_compatible)
-        loaded = _request(websocket, 1, "thread/loaded/list", {})
+        self._initialize_protocol(
+            websocket,
+            require_compatible=require_compatible,
+            deadline=deadline,
+        )
+        loaded = _request(
+            websocket,
+            1,
+            "thread/loaded/list",
+            {},
+            deadline=deadline,
+            monotonic=self._monotonic,
+        )
         loaded_ids = loaded.get("data")
         expected = str(expected_codex_session_id)
         if not isinstance(loaded_ids, list) or expected not in loaded_ids:
@@ -561,6 +600,8 @@ class CodexControlClient:
             2,
             "thread/read",
             {"threadId": expected, "includeTurns": include_turns},
+            deadline=deadline,
+            monotonic=self._monotonic,
         )
         thread = result.get("thread")
         if (
@@ -571,7 +612,13 @@ class CodexControlClient:
             raise RodexControlError("app-server returned an unexpected Codex thread")
         return thread
 
-    def _initialize_protocol(self, websocket: Any, *, require_compatible: bool) -> str:
+    def _initialize_protocol(
+        self,
+        websocket: Any,
+        *,
+        require_compatible: bool,
+        deadline: float | None = None,
+    ) -> str:
         initialize_result = _request(
             websocket,
             0,
@@ -583,6 +630,8 @@ class CodexControlClient:
                     "version": RODEX_VERSION,
                 }
             },
+            deadline=deadline,
+            monotonic=self._monotonic,
         )
         version = (
             require_supported_app_server(initialize_result)
@@ -637,9 +686,15 @@ def _thread_state(
     can_accept = thread.get("canAcceptDirectInput")
     if can_accept is not None and not isinstance(can_accept, bool):
         raise RodexControlError("app-server returned invalid direct-input capability")
+    cwd = thread.get("cwd")
+    if not isinstance(cwd, str) or not Path(cwd).is_absolute():
+        raise RodexControlError("app-server returned an invalid thread working directory")
+    if status != "active":
+        active_turn_id = None
     return CodexThreadState(
         thread_id=str(thread["id"]),
         session_id=str(thread["sessionId"]),
+        cwd=cwd,
         status=status,
         active_flags=tuple(raw_flags),
         active_turn_id=active_turn_id,
@@ -654,17 +709,36 @@ def _request(
     params: dict[str, Any],
     *,
     indeterminate_on_connection_loss: bool = False,
+    deadline: float | None = None,
+    monotonic: Callable[[], float] = time.monotonic,
 ) -> dict[str, Any]:
-    websocket.send(
-        json.dumps(
-            {"method": method, "id": request_id, "params": params},
-            separators=(",", ":"),
+    try:
+        websocket.send(
+            json.dumps(
+                {"method": method, "id": request_id, "params": params},
+                separators=(",", ":"),
+            )
         )
-    )
+    except (ConnectionClosed, OSError, TimeoutError) as error:
+        if indeterminate_on_connection_loss:
+            raise RodexDispatchIndeterminateError(
+                f"{method} dispatch failed before acceptance could be observed"
+            ) from error
+        raise RodexControlError(f"could not send {method}") from error
     while True:
+        receive_timeout = 5.0
+        if deadline is not None:
+            remaining = deadline - monotonic()
+            if remaining <= 0:
+                raise _RodexRequestDeadlineError(f"deadline expired during {method}")
+            receive_timeout = min(receive_timeout, remaining)
         try:
-            message = websocket.recv(timeout=5)
+            message = websocket.recv(timeout=receive_timeout)
         except (ConnectionClosed, OSError, TimeoutError) as error:
+            if deadline is not None and monotonic() >= deadline:
+                raise _RodexRequestDeadlineError(
+                    f"deadline expired during {method}"
+                ) from error
             if indeterminate_on_connection_loss:
                 raise RodexDispatchIndeterminateError(
                     f"{method} was sent but its acceptance is unknown"
@@ -721,23 +795,48 @@ def _turn_result(turn: dict[str, Any]) -> CodexTurnResult:
     items = turn.get("items")
     if not isinstance(items, list):
         raise RodexControlError("app-server returned invalid Codex turn items")
-    agent_messages = [
+    explicit_final_messages = [
         item.get("text")
         for item in items
         if isinstance(item, dict)
         and item.get("type") == "agentMessage"
+        and item.get("phase") == "final_answer"
         and isinstance(item.get("text"), str)
     ]
-    final_agent_message = agent_messages[-1] if agent_messages else None
+    phase_unknown_messages = [
+        item.get("text")
+        for item in items
+        if isinstance(item, dict)
+        and item.get("type") == "agentMessage"
+        and item.get("phase") is None
+        and isinstance(item.get("text"), str)
+    ]
+    full_final_agent_message = (
+        explicit_final_messages[-1]
+        if explicit_final_messages
+        else phase_unknown_messages[-1]
+        if phase_unknown_messages
+        else None
+    )
+    final_agent_message, final_agent_message_bytes, final_agent_message_truncated = (
+        _bounded_utf8_text(full_final_agent_message, _FINAL_AGENT_MESSAGE_BYTE_LIMIT)
+    )
     structured_output: object | None = None
-    if final_agent_message is not None:
-        with suppress(json.JSONDecodeError):
-            structured_output = json.loads(final_agent_message)
+    if final_agent_message is not None and not final_agent_message_truncated:
+        with suppress(json.JSONDecodeError, ValueError):
+            structured_output = json.loads(
+                final_agent_message,
+                parse_constant=lambda value: (_ for _ in ()).throw(
+                    ValueError(f"non-standard JSON constant: {value}")
+                ),
+            )
     all_paths = sorted(
         {
             str(change["path"])
             for item in items
-            if isinstance(item, dict) and item.get("type") == "fileChange"
+            if isinstance(item, dict)
+            and item.get("type") == "fileChange"
+            and item.get("status") == "completed"
             for change in item.get("changes", [])
             if isinstance(change, dict)
             and isinstance(change.get("path"), str)
@@ -749,6 +848,8 @@ def _turn_result(turn: dict[str, Any]) -> CodexTurnResult:
         turn_id=turn_id,
         status=status,
         final_agent_message=final_agent_message,
+        final_agent_message_bytes=final_agent_message_bytes,
+        final_agent_message_truncated=final_agent_message_truncated,
         structured_output=structured_output,
         error=turn.get("error"),
         started_at=_optional_int(turn.get("startedAt"), "startedAt"),
@@ -757,6 +858,15 @@ def _turn_result(turn: dict[str, Any]) -> CodexTurnResult:
         changed_paths=tuple(all_paths[:path_limit]),
         changed_paths_truncated=len(all_paths) > path_limit,
     )
+
+
+def _bounded_utf8_text(text: str | None, limit: int) -> tuple[str | None, int, bool]:
+    if text is None:
+        return None, 0, False
+    encoded = text.encode("utf-8")
+    if len(encoded) <= limit:
+        return text, len(encoded), False
+    return encoded[:limit].decode("utf-8", errors="ignore"), len(encoded), True
 
 
 def _optional_int(value: object, field_name: str) -> int | None:
@@ -794,15 +904,33 @@ def _nested(payload: dict[str, Any], *keys: str) -> Any:
     return value
 
 
-def _expect_event_stream_ready(events: Any) -> dict[str, Any]:
+def _expect_event_stream_ready(
+    events: Any, *, timeout_seconds: float = 2, preserve_timeout: bool = False
+) -> dict[str, Any]:
     try:
-        message = events.recv(timeout=2)
+        message = events.recv(timeout=timeout_seconds)
     except TimeoutError as error:
+        if preserve_timeout:
+            raise
         raise RodexControlError("timed out opening Codex event stream") from error
     payload = _protocol_payload(message)
     if payload is None or payload.get("method") != EVENT_STREAM_READY_METHOD:
         raise RodexControlError("Codex event stream did not send its ready signal")
     return payload
+
+
+def _wait_remaining(
+    deadline: float | None,
+    monotonic: Callable[[], float],
+    turn_id: str,
+    cap: float | None = None,
+) -> float:
+    if deadline is None:
+        return 2 if cap is None else cap
+    remaining = deadline - monotonic()
+    if remaining <= 0:
+        raise RodexWaitTimeoutError(f"timed out waiting for exact Codex turn {turn_id}")
+    return remaining if cap is None else min(remaining, cap)
 
 
 def _ready_active_turn_id(

@@ -31,6 +31,9 @@ dev = [
 [tool.pytest.ini_options]
 addopts = "--strict-markers --strict-config"
 testpaths = ["tests"]
+markers = [
+    "evolutionary_regression: guards a production fix based on current best evidence; deliberately replace it when broader evidence supersedes the model",
+]
 
 [tool.coverage.run]
 branch = true

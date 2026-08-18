@@ -1,18 +1,21 @@
-# Phase II plan — not implemented
+# Phase II evidence and remaining plan
 
-Phase II remains an evidence-gated plan. Phase I deliberately preserves the working
-short-lived App Server control connection and does not claim approval routing or retry
-deduplication that has not been observed.
+Phase II remains evidence-gated. The 0.147 live experiment now proves that a short-lived
+mutation client may disconnect after acceptance: lifecycle events and approval requests
+continue on the subscribed primary connection. See
+[the characterized evidence](APP_SERVER_0_147_LIVE_EVIDENCE.md). Retry deduplication and
+durable workspace identity remain unproven and unimplemented.
 
 ## Order
 
-1. Persist workspace identity before adding machine lifecycle: resolved workspace,
-   Git worktree root/common directory, initial branch or detached state, initial HEAD,
-   and Rodex-created base ref/commit. Resume from that workspace, never caller `cwd`.
-2. Run an explicitly authorized live-turn experiment across TUI and second App Server
-   clients. Characterize turn/item fanout, approval and user-input request ownership,
-   initiator disconnect, and TUI reconnect. Change the proxy topology only if this
-   produces a concrete failure or a simpler verified contract.
+1. Persist durable workspace identity and make resume use it: resolved workspace, Git
+   worktree root/common directory, initial branch or detached state, initial HEAD, and
+   Rodex-created base ref/commit. `_inspect` now exposes App Server's live `cwd`, but
+   resume still uses caller `cwd` and therefore remains an explicit fidelity boundary.
+2. Keep the live-turn characterization replayable through the opt-in integration test.
+   Fanout, approval ownership, and initiator disconnect are observed. A real TUI
+   reconnect replay remains useful; the proxy's primary handoff has a deterministic
+   transport-level regression.
 3. Decide retry semantics from observed behavior. Treat `clientUserMessageId` as
    correlation only unless deduplication is demonstrated. If callers need recovery,
    add a durable request ledger with payload digest, accepted turn, and an explicit

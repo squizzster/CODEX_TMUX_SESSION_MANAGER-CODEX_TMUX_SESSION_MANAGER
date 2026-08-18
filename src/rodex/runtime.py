@@ -58,6 +58,7 @@ SUN_PATH_MAX_BYTES: Final = 107
 DEFAULT_STARTUP_TIMEOUT_SECONDS: Final = 15.0
 CODEX_ACTIVE_WRITER_HANDOFF_TIMEOUT_SECONDS: Final = 10.0
 CODEX_ACTIVE_WRITER_RETRY_INTERVAL_SECONDS: Final = 0.25
+CODEX_PRIMARY_CONNECTION_RELEASE_TIMEOUT_SECONDS: Final = 2.5
 RUNTIME_PATH_KEEPALIVE_INTERVAL_SECONDS: Final = 60.0 * 60.0
 RODEX_REGISTRATION_TIMEOUT_SECONDS: Final = 60.0
 RODEX_TMUX_HISTORY_LIMIT_LINES: Final = 50_000
@@ -1220,6 +1221,9 @@ def run_session_host(
                     )
                 ):
                     break
+                protocol_proxy.wait_for_primary_connection_release(
+                    CODEX_PRIMARY_CONNECTION_RELEASE_TIMEOUT_SECONDS
+                )
                 time.sleep(CODEX_ACTIVE_WRITER_RETRY_INTERVAL_SECONDS)
             try:
                 runtime_path_keepalive.close()

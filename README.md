@@ -128,7 +128,11 @@ display name is read on every invocation, so an agent need not cache it.
 New runtimes also expose a random runtime UUID and its durable-match state. The exact
 control commands emit a schema-v1 success/error envelope containing separate Rodex
 session, runtime, Codex thread, Codex session-tree, and turn identities. They require
-stdin prompts and a runtime created by this Rodex version. Exit status `2` means invalid
+stdin prompts and a runtime created by this Rodex version. `_inspect` reports the live
+App Server thread working directory so callers can verify workspace scope before mutation.
+`_result` caps final-answer text at 64 KiB, reports its original UTF-8 byte count and
+truncation state, and includes at most 100 completed file-change paths.
+Exit status `2` means invalid
 input or unknown session, `3` means runtime/identity/compatibility failure, `4` is a
 non-interrupting wait timeout, `5` an interrupted turn, `6` a failed turn, and `7` a
 control or indeterminate-dispatch failure. `dispatch_indeterminate` is deliberately not

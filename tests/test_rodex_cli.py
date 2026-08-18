@@ -211,6 +211,7 @@ class StubControlClient:
         self.state = CodexThreadState(
             thread_id=str(CODEX_SESSION_ID),
             session_id=str(CODEX_SESSION_ID),
+            cwd="/workspace/project",
             status="idle",
             active_flags=(),
             active_turn_id=None,
@@ -220,6 +221,8 @@ class StubControlClient:
             turn_id="turn-1",
             status="completed",
             final_agent_message="done",
+            final_agent_message_bytes=4,
+            final_agent_message_truncated=False,
             structured_output=None,
             error=None,
             started_at=10,
@@ -591,6 +594,7 @@ def test_unknown_bare_name_refuses_a_live_unregistered_tmux_collision(
     assert delegator.calls == []
 
 
+@pytest.mark.evolutionary_regression
 def test_pending_runtime_with_exact_durable_identity_is_recovered(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -616,6 +620,9 @@ def test_pending_runtime_with_exact_durable_identity_is_recovered(
         LiveTmuxSession(tmp_path / "tmux.sock", "automatic-beluga")
     ]
     assert launcher.attached
+    persisted_runtime = lookup_rodex_runtime_instance(1, database)
+    assert persisted_runtime is not None
+    assert persisted_runtime.runtime_identifier == RUNTIME_IDENTIFIER
 
 
 def test_named_attach_rejects_a_wrong_live_rodex_identity_without_side_effects(
@@ -956,6 +963,64 @@ def test_machine_start_reads_stdin_and_emits_the_versioned_identity_envelope(
     }
 
 
+@pytest.mark.evolutionary_regression
+def test_accepted_machine_mutation_emits_one_success_when_access_bookkeeping_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Current evidence: auxiliary SQL failure cannot reverse an accepted turn start."""
+    database = tmp_path / "rodex.sqlite3"
+    monkeypatch.setattr(
+        "cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga"
+    )
+    monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
+    monkeypatch.setattr(sys, "stdin", io.StringIO("run focused tests\n"))
+    create_exact_controlled_session(database, tmp_path)
+    monkeypatch.setattr(
+        "rodex.cli.record_a_rodex_session_access",
+        lambda *_args: (_ for _ in ()).throw(RodexSessionError("database unavailable")),
+    )
+    launcher = StubLauncher(tmp_path)
+    control = StubControlClient()
+
+    status = run(
+        ["_start", "automatic-beluga", "--stdin", "--json"],
+        database_path=database,
+        launcher=launcher,  # type: ignore[arg-type]
+        control_client=control,  # type: ignore[arg-type]
+    )
+
+    assert status == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is True
+    assert payload["data"] == {
+        "accepted": True,
+        "warnings": [
+            {
+                "code": "access_record_failed",
+                "message": "database unavailable",
+            }
+        ],
+    }
+
+
+@pytest.mark.evolutionary_regression
+def test_machine_blank_turn_id_is_one_invalid_argument_envelope(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    status = run(
+        ["_result", "automatic-beluga", "--turn", "   ", "--json"],
+        database_path=tmp_path / "rodex.sqlite3",
+    )
+
+    assert status == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is False
+    assert payload["error"]["code"] == "invalid_argument"
+
+
 def test_machine_exact_control_requires_a_persisted_runtime_identifier(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1280,6 +1345,38 @@ def test_machine_result_returns_live_final_message_and_bounded_changes(
         "paths": ["src/rodex/cli.py"],
         "truncated": False,
     }
+
+
+@pytest.mark.evolutionary_regression
+def test_machine_result_maps_failed_turn_outcome_to_exit_six(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    database = tmp_path / "rodex.sqlite3"
+    monkeypatch.setattr(
+        "cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga"
+    )
+    monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
+    create_exact_controlled_session(database, tmp_path)
+    launcher = StubLauncher(tmp_path)
+    control = StubControlClient()
+    control.turn_result = replace(
+        control.turn_result, status="failed", error={"message": "x"}
+    )
+
+    status = run(
+        ["_result", "automatic-beluga", "--turn", "turn-1", "--json"],
+        database_path=database,
+        launcher=launcher,  # type: ignore[arg-type]
+        control_client=control,  # type: ignore[arg-type]
+    )
+
+    assert status == 6
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is False
+    assert payload["error"]["code"] == "turn_failed"
+    assert payload["data"]["turn"]["status"] == "failed"
 
 
 @pytest.mark.parametrize(

@@ -15,7 +15,7 @@ from typing import Any
 import pytest
 from websockets.sync.client import unix_connect
 
-from rodex.app_server_contract import require_supported_app_server
+from rodex.app_server_contract import CODEX_APP_SERVER, AppServerClientInfo
 from rodex.runtime import default_runtime_root
 
 
@@ -28,7 +28,7 @@ def test_real_app_server_accepts_string_ids_on_a_private_unix_socket() -> None:
     integration_root.chmod(0o700)
     socket_path = integration_root / "app.sock"
     process = subprocess.Popen(
-        [codex_binary, "app-server", "--listen", f"unix://{socket_path}"],
+        CODEX_APP_SERVER.command(codex_binary, socket_path),
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
@@ -44,7 +44,7 @@ def test_real_app_server_accepts_string_ids_on_a_private_unix_socket() -> None:
         assert stat.S_IMODE(socket_path.stat().st_mode) == 0o600
         with unix_connect(
             str(socket_path),
-            uri="ws://localhost/rpc",
+            uri=f"ws://localhost{CODEX_APP_SERVER.rpc_connection_path}",
             compression=None,
             open_timeout=2,
             close_timeout=1,
@@ -53,27 +53,24 @@ def test_real_app_server_accepts_string_ids_on_a_private_unix_socket() -> None:
             initialize_id = "rodex:integration:initialize"
             websocket.send(
                 json.dumps(
-                    {
-                        "id": initialize_id,
-                        "method": "initialize",
-                        "params": {
-                            "clientInfo": {
-                                "name": "rodex-integration",
-                                "title": "Rodex Integration",
-                                "version": "1",
-                            }
-                        },
-                    }
+                    CODEX_APP_SERVER.initialize_request(
+                        initialize_id,
+                        AppServerClientInfo("rodex-integration", "Rodex Integration", "1"),
+                    )
                 )
             )
             initialized = _response_for(websocket, initialize_id)
             assert initialized["id"] == initialize_id
-            require_supported_app_server(initialized["result"])
-            websocket.send(json.dumps({"method": "initialized", "params": {}}))
+            CODEX_APP_SERVER.require_supported_version(initialized["result"])
+            websocket.send(json.dumps(CODEX_APP_SERVER.initialized_notification()))
 
             loaded_id = "rodex:integration:loaded"
             websocket.send(
-                json.dumps({"id": loaded_id, "method": "thread/loaded/list", "params": {}})
+                json.dumps(
+                    CODEX_APP_SERVER.request(
+                        loaded_id, CODEX_APP_SERVER.thread_loaded_list_method, {}
+                    )
+                )
             )
             loaded = _response_for(websocket, loaded_id)
             assert isinstance(loaded["result"]["data"], list)
@@ -125,7 +122,7 @@ def test_live_turn_survives_initiator_disconnect_and_streams_to_subscriber() -> 
     workspace.mkdir(mode=0o700)
     socket_path = integration_root / "app.sock"
     process = subprocess.Popen(
-        [codex_binary, "app-server", "--listen", f"unix://{socket_path}"],
+        CODEX_APP_SERVER.command(codex_binary, socket_path),
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
@@ -285,7 +282,7 @@ def test_live_user_input_routes_to_subscriber_after_initiator_disconnect() -> No
     workspace.mkdir(mode=0o700)
     socket_path = integration_root / "app.sock"
     process = subprocess.Popen(
-        [codex_binary, "app-server", "--listen", f"unix://{socket_path}"],
+        CODEX_APP_SERVER.command(codex_binary, socket_path),
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
@@ -387,7 +384,7 @@ def test_live_user_input_routes_to_subscriber_after_initiator_disconnect() -> No
 def _connect(socket_path: Path) -> Any:
     return unix_connect(
         str(socket_path),
-        uri="ws://localhost/rpc",
+        uri=f"ws://localhost{CODEX_APP_SERVER.rpc_connection_path}",
         compression=None,
         open_timeout=2,
         close_timeout=1,
@@ -411,23 +408,18 @@ def _initialize(
     *,
     experimental_api: bool = False,
 ) -> None:
-    params: dict[str, Any] = {
-        "clientInfo": {
-            "name": "rodex-live-integration",
-            "title": name,
-            "version": "1",
-        }
-    }
-    if experimental_api:
-        params["capabilities"] = {"experimentalApi": True}
+    client = AppServerClientInfo("rodex-live-integration", name, "1")
     response = _request(
         websocket,
         f"{name}:initialize",
-        "initialize",
-        params,
+        CODEX_APP_SERVER.initialize_method,
+        CODEX_APP_SERVER.initialize_params(
+            client,
+            experimental_api=experimental_api,
+        ),
     )
-    require_supported_app_server(response["result"])
-    websocket.send(json.dumps({"method": "initialized", "params": {}}))
+    CODEX_APP_SERVER.require_supported_version(response["result"])
+    websocket.send(json.dumps(CODEX_APP_SERVER.initialized_notification()))
 
 
 def _request(
@@ -439,7 +431,7 @@ def _request(
     timeout: float = 5,
     observed_server_requests: list[str] | None = None,
 ) -> dict[str, Any]:
-    websocket.send(json.dumps({"id": request_id, "method": method, "params": params}))
+    websocket.send(json.dumps(CODEX_APP_SERVER.request(request_id, method, params)))
     response = _response_for(
         websocket,
         request_id,

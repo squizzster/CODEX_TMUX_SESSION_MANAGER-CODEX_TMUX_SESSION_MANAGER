@@ -21,9 +21,8 @@ from rodex_registry.identity import (
     RodexSessionId,
 )
 
-from .app_server_contract import require_supported_app_server
+from .app_server_contract import CODEX_APP_SERVER, RODEX_CONTROL_APP_SERVER_CLIENT
 from .protocol_proxy import CONTROL_CONNECTION_PATH, EVENT_STREAM_READY_METHOD
-from .version import RODEX_VERSION
 
 Connector = Callable[..., Any]
 Revalidate = Callable[[], None]
@@ -221,7 +220,7 @@ class CodexControlClient:
                         result = _request(
                             websocket,
                             self._request_id_factory(),
-                            "turn/steer",
+                            CODEX_APP_SERVER.turn_steer_method,
                             {
                                 "threadId": str(control.codex_session_id),
                                 "expectedTurnId": state.active_turn_id,
@@ -249,7 +248,7 @@ class CodexControlClient:
                     result = _request(
                         websocket,
                         self._request_id_factory(),
-                        "turn/start",
+                        CODEX_APP_SERVER.turn_start_method,
                         {
                             "threadId": str(control.codex_session_id),
                             "input": user_input,
@@ -303,7 +302,7 @@ class CodexControlClient:
                     result = _request(
                         websocket,
                         self._request_id_factory(),
-                        "turn/start",
+                        CODEX_APP_SERVER.turn_start_method,
                         {
                             "threadId": state.thread_id,
                             "input": [{"type": "text", "text": prompt}],
@@ -362,7 +361,7 @@ class CodexControlClient:
                     result = _request(
                         websocket,
                         self._request_id_factory(),
-                        "turn/steer",
+                        CODEX_APP_SERVER.turn_steer_method,
                         {
                             "threadId": state.thread_id,
                             "expectedTurnId": turn_id,
@@ -416,7 +415,7 @@ class CodexControlClient:
                     _request(
                         websocket,
                         self._request_id_factory(),
-                        "turn/interrupt",
+                        CODEX_APP_SERVER.turn_interrupt_method,
                         {"threadId": state.thread_id, "turnId": turn_id},
                         indeterminate_context=_MutationDispatchContext(
                             None,
@@ -550,7 +549,7 @@ class CodexControlClient:
                         payload, control.codex_session_id
                     ):
                         continue
-                    if payload.get("method") != "turn/completed":
+                    if payload.get("method") != CODEX_APP_SERVER.turn_completed_method:
                         continue
                     completed = _nested(payload, "params", "turn")
                     if not isinstance(completed, dict) or completed.get("id") != turn_id:
@@ -618,8 +617,9 @@ class CodexControlClient:
                         continue
                     method = payload.get("method")
                     status = _nested(payload, "params", "status", "type")
-                    if method == "turn/completed" or (
-                        method == "thread/status/changed" and status == "idle"
+                    if method == CODEX_APP_SERVER.turn_completed_method or (
+                        method == CODEX_APP_SERVER.thread_status_changed_method
+                        and status == "idle"
                     ):
                         current = self.inspect(control)
                         revalidate()
@@ -694,7 +694,7 @@ class CodexControlClient:
         loaded = _request(
             websocket,
             1,
-            "thread/loaded/list",
+            CODEX_APP_SERVER.thread_loaded_list_method,
             {},
             deadline=deadline,
             monotonic=self._monotonic,
@@ -708,7 +708,7 @@ class CodexControlClient:
         result = _request(
             websocket,
             2,
-            "thread/read",
+            CODEX_APP_SERVER.thread_read_method,
             {"threadId": expected, "includeTurns": include_turns},
             deadline=deadline,
             monotonic=self._monotonic,
@@ -732,23 +732,17 @@ class CodexControlClient:
         initialize_result = _request(
             websocket,
             0,
-            "initialize",
-            {
-                "clientInfo": {
-                    "name": "rodex-control",
-                    "title": "Rodex Control",
-                    "version": RODEX_VERSION,
-                }
-            },
+            CODEX_APP_SERVER.initialize_method,
+            CODEX_APP_SERVER.initialize_params(RODEX_CONTROL_APP_SERVER_CLIENT),
             deadline=deadline,
             monotonic=self._monotonic,
         )
         version = (
-            require_supported_app_server(initialize_result)
+            CODEX_APP_SERVER.require_supported_version(initialize_result)
             if require_compatible
-            else _app_server_version(initialize_result)
+            else CODEX_APP_SERVER.version(initialize_result)
         )
-        websocket.send(json.dumps({"method": "initialized", "params": {}}))
+        websocket.send(json.dumps(CODEX_APP_SERVER.initialized_notification()))
         return version
 
 
@@ -762,20 +756,11 @@ def format_protocol_log_event(payload: dict[str, Any]) -> str | None:
     if not (
         method.startswith("item/")
         or method.startswith("turn/")
-        or method == "thread/status/changed"
+        or method == CODEX_APP_SERVER.thread_status_changed_method
         or method == "error"
     ):
         return None
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
-
-
-def _app_server_version(initialize_result: dict[str, Any]) -> str:
-    user_agent = initialize_result.get("userAgent")
-    if not isinstance(user_agent, str):
-        return "unknown"
-    product = user_agent.split(" ", 1)[0]
-    _client_name, separator, version = product.rpartition("/")
-    return version if separator and version else "unknown"
 
 
 def _thread_state(
@@ -828,7 +813,7 @@ def _request(
     try:
         websocket.send(
             json.dumps(
-                {"method": method, "id": request_id, "params": params},
+                CODEX_APP_SERVER.request(request_id, method, params),
                 separators=(",", ":"),
             )
         )

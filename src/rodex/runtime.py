@@ -36,6 +36,7 @@ from .analytics import (
     AnalyticsSubprocessSupervisor,
     default_codex_sessions_root,
 )
+from .app_server_contract import CODEX_APP_SERVER, RODEX_RUNTIME_APP_SERVER_CLIENT
 from .control import LiveRodexControl
 from .process_contracts import AnalyticsWorkerConfig, SessionHostConfig
 from .protocol_proxy import (
@@ -59,7 +60,6 @@ from .tmux_status import (
     STATUS_CLAIM_TOKEN_OPTION,
     TmuxStatusPipeline,
 )
-from .version import RODEX_VERSION
 
 SUN_PATH_MAX_BYTES: Final = 107
 DEFAULT_STARTUP_TIMEOUT_SECONDS: Final = 15.0
@@ -912,30 +912,24 @@ class RodexRuntimeLauncher:
     def _list_loaded_codex_threads(self, socket_path: Path) -> list[str]:
         with self._connect(
             str(socket_path),
-            uri="ws://localhost/rpc",
+            uri=f"ws://localhost{CODEX_APP_SERVER.rpc_connection_path}",
             compression=None,
             open_timeout=1,
             close_timeout=1,
         ) as websocket:
             websocket.send(
                 json.dumps(
-                    {
-                        "method": "initialize",
-                        "id": 0,
-                        "params": {
-                            "clientInfo": {
-                                "name": "rodex",
-                                "title": "Rodex",
-                                "version": RODEX_VERSION,
-                            }
-                        },
-                    }
+                    CODEX_APP_SERVER.initialize_request(0, RODEX_RUNTIME_APP_SERVER_CLIENT)
                 )
             )
             _receive_response(websocket, 0)
-            websocket.send(json.dumps({"method": "initialized", "params": {}}))
+            websocket.send(json.dumps(CODEX_APP_SERVER.initialized_notification()))
             websocket.send(
-                json.dumps({"method": "thread/loaded/list", "id": 1, "params": {}})
+                json.dumps(
+                    CODEX_APP_SERVER.request(
+                        1, CODEX_APP_SERVER.thread_loaded_list_method, {}
+                    )
+                )
             )
             result = _receive_response(websocket, 1)
         data = result.get("data")
@@ -1110,12 +1104,7 @@ def run_session_host(
     try:
         with _open_private_runtime_log(app_server_log_path) as log:
             app_server = subprocess.Popen(
-                [
-                    codex_binary,
-                    "app-server",
-                    "--listen",
-                    f"unix://{app_server_socket_path}",
-                ],
+                CODEX_APP_SERVER.command(codex_binary, app_server_socket_path),
                 stdin=subprocess.DEVNULL,
                 stdout=log,
                 stderr=subprocess.STDOUT,

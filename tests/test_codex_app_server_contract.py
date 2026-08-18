@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import json
 import shutil
 import subprocess
@@ -9,9 +10,11 @@ from typing import Any
 import pytest
 
 from rodex.app_server_contract import (
-    SUPPORTED_CODEX_APP_SERVER_VERSION,
+    CODEX_APP_SERVER,
+    RODEX_CONTROL_APP_SERVER_CLIENT,
+    RODEX_RUNTIME_APP_SERVER_CLIENT,
+    AppServerClientInfo,
     RodexAppServerCompatibilityError,
-    require_supported_app_server,
 )
 
 
@@ -41,7 +44,7 @@ def _characterize_schema(schema_root: Path) -> dict[str, object]:
         if option["title"] == "UserMessageThreadItem"
     )
     return {
-        "codex_cli_version": SUPPORTED_CODEX_APP_SERVER_VERSION,
+        "codex_cli_version": CODEX_APP_SERVER.supported_version,
         "generated_with": "codex app-server generate-json-schema --experimental",
         "request_id_types": sorted(option["type"] for option in request_id["anyOf"]),
         "thread_required_fields": definitions["Thread"]["required"],
@@ -95,7 +98,7 @@ def test_checked_in_contract_is_generated_from_the_installed_supported_cli(
         capture_output=True,
         text=True,
     ).stdout.strip()
-    if version != f"codex-cli {SUPPORTED_CODEX_APP_SERVER_VERSION}":
+    if version != f"codex-cli {CODEX_APP_SERVER.supported_version}":
         pytest.skip(f"installed CLI is outside this contract: {version}")
     schema_root = tmp_path / "schema"
     subprocess.run(
@@ -121,12 +124,84 @@ def test_checked_in_contract_is_generated_from_the_installed_supported_cli(
 
 def test_live_initialize_metadata_is_the_exact_control_compatibility_gate() -> None:
     assert (
-        require_supported_app_server({"userAgent": "rodex-control/0.147.0 (Linux; x86_64)"})
+        CODEX_APP_SERVER.require_supported_version(
+            {"userAgent": "rodex-control/0.147.0 (Linux; x86_64)"}
+        )
         == "0.147.0"
     )
 
     with pytest.raises(RodexAppServerCompatibilityError, match=r"live server is 0\.148\.0"):
-        require_supported_app_server({"userAgent": "rodex-control/0.148.0 (Linux)"})
+        CODEX_APP_SERVER.require_supported_version(
+            {"userAgent": "rodex-control/0.148.0 (Linux)"}
+        )
 
     with pytest.raises(RodexAppServerCompatibilityError, match="no recognized"):
-        require_supported_app_server({})
+        CODEX_APP_SERVER.require_supported_version({})
+
+
+def test_contract_owns_process_and_handshake_messages(tmp_path: Path) -> None:
+    socket_path = tmp_path / "app.sock"
+
+    assert CODEX_APP_SERVER.command("codex", socket_path) == (
+        "codex",
+        "app-server",
+        "--listen",
+        f"unix://{socket_path}",
+    )
+    assert CODEX_APP_SERVER.initialize_request(
+        "request-1", RODEX_CONTROL_APP_SERVER_CLIENT
+    ) == {
+        "method": CODEX_APP_SERVER.initialize_method,
+        "id": "request-1",
+        "params": {
+            "clientInfo": {
+                "name": "rodex-control",
+                "title": "Rodex Control",
+                "version": RODEX_CONTROL_APP_SERVER_CLIENT.version,
+            }
+        },
+    }
+    assert CODEX_APP_SERVER.initialized_notification() == {
+        "method": CODEX_APP_SERVER.initialized_method,
+        "params": {},
+    }
+    assert RODEX_RUNTIME_APP_SERVER_CLIENT.name == "rodex"
+
+
+def test_contract_adds_experimental_capability_in_one_place() -> None:
+    client = AppServerClientInfo("test", "Test", "1")
+
+    assert CODEX_APP_SERVER.initialize_params(client, experimental_api=True) == {
+        "clientInfo": {"name": "test", "title": "Test", "version": "1"},
+        "capabilities": {"experimentalApi": True},
+    }
+
+
+def test_app_server_method_vocabulary_has_one_production_owner() -> None:
+    source_root = Path(__file__).parents[1] / "src" / "rodex"
+    owned_methods = {
+        CODEX_APP_SERVER.initialize_method,
+        CODEX_APP_SERVER.initialized_method,
+        CODEX_APP_SERVER.thread_loaded_list_method,
+        CODEX_APP_SERVER.thread_read_method,
+        CODEX_APP_SERVER.thread_status_changed_method,
+        CODEX_APP_SERVER.turn_start_method,
+        CODEX_APP_SERVER.turn_started_method,
+        CODEX_APP_SERVER.turn_steer_method,
+        CODEX_APP_SERVER.turn_interrupt_method,
+        CODEX_APP_SERVER.turn_completed_method,
+    }
+    duplicates: list[tuple[str, str]] = []
+    for path in source_root.glob("*.py"):
+        if path.name == "app_server_contract.py":
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        duplicates.extend(
+            (path.name, node.value)
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Constant)
+            and isinstance(node.value, str)
+            and node.value in owned_methods
+        )
+
+    assert duplicates == []

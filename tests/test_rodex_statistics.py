@@ -4,6 +4,7 @@ import hashlib
 import json
 import sqlite3
 import uuid
+from collections import Counter
 from dataclasses import replace
 from pathlib import Path
 
@@ -18,6 +19,7 @@ from rodex_registry import (
     RodexSessionStatisticsSourceObservation,
     RodexSessionTurnStatisticsAmbiguousError,
     SessionStatisticsProjection,
+    StatisticsNamedCount,
     StatisticsProjectionError,
     TurnStatisticsProjection,
     create_a_rodex_session,
@@ -91,8 +93,30 @@ def _projection(
     completed = sum(turn.outcome == "completed" for turn in selected)
     aborted = sum(turn.outcome == "aborted" for turn in selected)
     open_turns = sum(turn.outcome == "open" for turn in selected)
-    workspace_turns = sum(turn.workspace_digest is not None for turn in selected)
+    workspace_counts = Counter(
+        turn.workspace_digest for turn in selected if turn.workspace_digest is not None
+    )
+    workspace_turns = sum(workspace_counts.values())
+    distinct_workspaces = len(workspace_counts)
     hour_turns = sum(turn.local_start_hour is not None for turn in selected)
+    lookup_counts = (
+        *(
+            StatisticsNamedCount("model", name, count)
+            for name, count in sorted(
+                Counter(turn.model for turn in selected if turn.model is not None).items()
+            )
+        ),
+        *(
+            StatisticsNamedCount("reasoning_effort", name, count)
+            for name, count in sorted(
+                Counter(
+                    turn.reasoning_effort
+                    for turn in selected
+                    if turn.reasoning_effort is not None
+                ).items()
+            )
+        ),
+    )
     return replace(
         base,
         turns_started_count=len(selected),
@@ -101,11 +125,18 @@ def _projection(
         turns_open_count=open_turns,
         typical_turns_count=len(selected),
         hands_on_turn_count=sum(turn.hands_on for turn in selected),
+        distinct_workspaces_count=distinct_workspaces,
         workspace_tagged_turn_count=workspace_turns,
-        turns_in_busiest_workspace_count=workspace_turns,
+        turns_in_busiest_workspace_count=max(workspace_counts.values(), default=0),
         turns_with_local_hour_count=hour_turns,
         busiest_local_hour=(selected[0].local_start_hour if hour_turns else None),
         turns_in_busiest_local_hour_count=hour_turns,
+        named_counts=tuple(
+            count
+            for count in base.named_counts
+            if count.count_kind not in {"model", "reasoning_effort"}
+        )
+        + lookup_counts,
         turn_statistics=selected,
     )
 
@@ -125,7 +156,7 @@ def _publish(
         database,
         expected_current_codex_session_id=expected_codex_session_id,
         based_on_statistics_revision=based_on,
-        statistics_projection_schema_version="rodex-statistics-v3",
+        statistics_projection_schema_version="rodex-statistics-v4",
         calculated_at_utc="2026-08-16T12:00:00Z",
         coverage_state="complete",
         statistics_projection=replace(
@@ -147,6 +178,8 @@ def test_schema_is_relational_queryable_and_contains_no_json_columns(
     create_a_rodex_session(database, codex_session_id=CODEX_SESSION_ID)
 
     table_names = (
+        "model_names",
+        "reasoning_effort_names",
         "rodex_sessions_statistics",
         "rodex_sessions_statistics_distributions",
         "rodex_sessions_statistics_named_counts",
@@ -162,6 +195,33 @@ def test_schema_is_relational_queryable_and_contains_no_json_columns(
     )
     assert "total_tokens" in all_columns["rodex_sessions_statistics"]
     assert "total_tokens" in all_columns["rodex_sessions_statistics_turns"]
+    assert all_columns["model_names"] == ["id", "name_of_the_model"]
+    assert all_columns["reasoning_effort_names"] == [
+        "id",
+        "name_of_the_reasoning_effort",
+    ]
+    assert "model" not in all_columns["rodex_sessions_statistics_turns"]
+    assert "reasoning_effort" not in all_columns["rodex_sessions_statistics_turns"]
+    assert "model_names_id" in all_columns["rodex_sessions_statistics_turns"]
+    assert "reasoning_effort_names_id" in all_columns["rodex_sessions_statistics_turns"]
+    assert _index_columns(database, "model_names_name_of_the_model_unique") == [
+        "name_of_the_model"
+    ]
+    assert _index_columns(
+        database,
+        "reasoning_effort_names_name_of_the_reasoning_effort_unique",
+    ) == ["name_of_the_reasoning_effort"]
+    with sqlite3.connect(database) as connection:
+        lookup_definitions = {
+            str(row[0]): str(row[1])
+            for row in connection.execute(
+                "SELECT name, sql FROM sqlite_master "
+                "WHERE type = 'table' AND name IN ('model_names', 'reasoning_effort_names')"
+            )
+        }
+    assert all(
+        "INTEGER PRIMARY KEY AUTOINCREMENT" in sql for sql in lookup_definitions.values()
+    )
     assert all_columns["rodex_sessions_statistics_distributions"][3:6] == [
         "distribution_kind",
         "observation_count",
@@ -212,6 +272,77 @@ def test_full_projection_round_trips_through_relational_rows(tmp_path: Path) -> 
     )
     assert view.worker is not None and view.worker.worker_state == "up_to_date"
     assert view.sources[0].included_statistics_revision == 1
+
+
+def test_turn_model_and_effort_use_cached_independent_lookup_ids(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database = tmp_path / "rodex.sqlite3"
+    create_a_rodex_session(database, codex_session_id=CODEX_SESSION_ID)
+    projection = _projection(
+        (
+            replace(_turn("turn-a"), model="gpt-a", reasoning_effort="xhigh"),
+            replace(_turn("turn-b"), model="gpt-a", reasoning_effort="xhigh"),
+            replace(_turn("turn-c"), model=None, reasoning_effort="medium"),
+        )
+    )
+    resolutions: list[tuple[str, str]] = []
+    original_resolver = statistics_module.select_or_insert_lookup_id
+
+    def recording_resolver(
+        connection: sqlite3.Connection,
+        table_name: str,
+        lookup_values: dict[str, object],
+    ) -> int:
+        resolutions.append((table_name, str(next(iter(lookup_values.values())))))
+        return original_resolver(connection, table_name, lookup_values)
+
+    monkeypatch.setattr(
+        statistics_module,
+        "select_or_insert_lookup_id",
+        recording_resolver,
+    )
+
+    _publish(database, tmp_path, projection=projection)
+
+    assert resolutions == [
+        ("model_names", "gpt-a"),
+        ("reasoning_effort_names", "xhigh"),
+        ("reasoning_effort_names", "medium"),
+    ]
+    with sqlite3.connect(database) as connection:
+        assert connection.execute(
+            "SELECT id, name_of_the_model FROM model_names"
+        ).fetchall() == [(1, "gpt-a")]
+        assert connection.execute(
+            "SELECT id, name_of_the_reasoning_effort "
+            "FROM reasoning_effort_names ORDER BY id"
+        ).fetchall() == [(1, "xhigh"), (2, "medium")]
+        assert connection.execute(
+            "SELECT turns.codex_turn_id, models.name_of_the_model, "
+            "efforts.name_of_the_reasoning_effort "
+            "FROM rodex_sessions_statistics_turns AS turns "
+            "LEFT JOIN model_names AS models ON models.id = turns.model_names_id "
+            "LEFT JOIN reasoning_effort_names AS efforts "
+            "ON efforts.id = turns.reasoning_effort_names_id "
+            "ORDER BY turns.codex_turn_id"
+        ).fetchall() == [
+            ("turn-a", "gpt-a", "xhigh"),
+            ("turn-b", "gpt-a", "xhigh"),
+            ("turn-c", None, "medium"),
+        ]
+        assert connection.execute(
+            "SELECT COUNT(*) FROM rodex_sessions_statistics_named_counts "
+            "WHERE count_kind IN ('model', 'reasoning_effort')"
+        ).fetchone() == (0,)
+    view = read_rodex_session_statistics(1, database)
+    assert view.statistics is not None
+    rollups = session_statistics_as_dict(view.statistics.projection)[
+        "must_have_basic_stats"
+    ]["workspaces_and_models"]
+    assert rollups["models"] == {"gpt-a": 2}
+    assert rollups["reasoning_efforts"] == {"medium": 1, "xhigh": 2}
 
 
 def test_turn_identity_bigints_reject_non_integer_storage(tmp_path: Path) -> None:
@@ -280,19 +411,19 @@ def test_revision_mark_and_sweep_preserves_identity_and_replaces_children(
     first_a = read_rodex_session_turn_statistics(1, "a", database).turn
     assert first_a is not None
 
-    second_projection = replace(
-        _projection((_turn("a", total_tokens=99), _turn("c"))),
-        named_counts=tuple(
-            count
-            for count in _base_projection().named_counts
-            if not (count.count_kind == "model" and count.count_name == "gpt-5")
-        ),
+    changed_a = replace(
+        _turn("a", total_tokens=99),
+        model="gpt-next",
+        reasoning_effort="medium",
     )
+    second_projection = _projection((changed_a, _turn("c")))
     _publish(database, tmp_path, based_on=1, projection=second_projection)
 
     second_a = read_rodex_session_turn_statistics(1, "a", database).turn
     assert second_a is not None and second_a.id == first_a.id
     assert second_a.projection.total_tokens == 99
+    assert second_a.projection.model == "gpt-next"
+    assert second_a.projection.reasoning_effort == "medium"
     assert second_a.included_statistics_revision == 2
     assert read_rodex_session_turn_statistics(1, "b", database).turn is None
     with sqlite3.connect(database) as connection:
@@ -314,12 +445,17 @@ def test_publication_failure_rolls_back_every_relational_fact(
         raise RuntimeError("forced publication failure")
 
     monkeypatch.setattr(statistics_module, "_upsert_statistics_worker", fail_health)
+    changed = replace(
+        _turn("stable", total_tokens=999),
+        model="gpt-new",
+        reasoning_effort="ultra",
+    )
     with pytest.raises(RuntimeError, match="forced publication failure"):
         _publish(
             database,
             tmp_path,
             based_on=before.statistics_revision,
-            projection=_projection((_turn("stable", total_tokens=999), _turn("new"))),
+            projection=_projection((changed, _turn("new"))),
         )
 
     current = read_rodex_session_statistics(1, database).statistics
@@ -327,6 +463,14 @@ def test_publication_failure_rolls_back_every_relational_fact(
     assert current == before
     assert stable is not None and stable.projection.total_tokens == 10
     assert read_rodex_session_turn_statistics(1, "new", database).turn is None
+    with sqlite3.connect(database) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM model_names WHERE name_of_the_model = 'gpt-new'"
+        ).fetchone() == (0,)
+        assert connection.execute(
+            "SELECT COUNT(*) FROM reasoning_effort_names "
+            "WHERE name_of_the_reasoning_effort = 'ultra'"
+        ).fetchone() == (0,)
     assert database.read_bytes() == before_bytes
 
 
@@ -501,7 +645,11 @@ def test_foreign_keys_and_checks_reject_detached_relational_facts(tmp_path: Path
         "UPDATE rodex_sessions_statistics_sources SET included_statistics_revision = NULL",
         "UPDATE rodex_sessions_statistics_turns SET included_statistics_revision = 999",
         "UPDATE rodex_sessions_statistics_turns SET cached_input_tokens = input_tokens + 1",
+        "UPDATE rodex_sessions_statistics_turns SET model_names_id = 999",
+        "UPDATE rodex_sessions_statistics_turns SET reasoning_effort_names_id = 999",
         "UPDATE rodex_sessions_statistics_named_counts SET occurrence_count = 0",
+        "INSERT INTO model_names (name_of_the_model) VALUES ('   ')",
+        "INSERT INTO reasoning_effort_names (name_of_the_reasoning_effort) VALUES ('')",
     )
     for statement in statements:
         connection = sqlite3.connect(database)
@@ -534,6 +682,11 @@ def test_cli_reconstructs_json_from_sql_without_runtime_dependencies(
         aggregate["statistics"]["must_have_basic_stats"]["token_usage"]["total_tokens"]
         == _base_projection().total_tokens
     )
+    assert aggregate["statistics"]["must_have_basic_stats"]["workspaces_and_models"] == {
+        "distinct_workspaces": 1,
+        "models": {"gpt-test": 1},
+        "reasoning_efforts": {"xhigh": 1},
+    }
     assert (
         run(
             ["_stats", created.cool_name, "--turn", "turn-exact", "--json"],
@@ -543,6 +696,12 @@ def test_cli_reconstructs_json_from_sql_without_runtime_dependencies(
     )
     exact = json.loads(capsys.readouterr().out)
     assert exact["statistics"]["must_have_basic_stats"]["token_usage"]["total_tokens"] == 42
+    assert exact["statistics"]["must_have_basic_stats"]["workspace_and_model"] == {
+        "workspace_digest": "a" * 64,
+        "model": "gpt-test",
+        "reasoning_effort": "xhigh",
+        "local_start_hour": 13,
+    }
     with pytest.raises(RodexLaunchError, match="not present in the latest"):
         run(["_stats", created.cool_name, "--turn", "missing"], database_path=database)
 

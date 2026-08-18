@@ -9,7 +9,11 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from rodex_sql import open_rodex_read_transaction, open_rodex_transaction
+from rodex_sql import (
+    open_rodex_read_transaction,
+    open_rodex_transaction,
+    select_or_insert_lookup_id,
+)
 
 from .errors import (
     RodexSessionError,
@@ -23,6 +27,8 @@ from .identity import (
     split_codex_session_id_into_signed_bigints,
 )
 from .schema import (
+    MODEL_NAMES_TABLE,
+    REASONING_EFFORT_NAMES_TABLE,
     RODEX_SESSIONS_STATISTICS_AUDIT_LIMITS_TABLE,
     RODEX_SESSIONS_STATISTICS_DISTRIBUTIONS_TABLE,
     RODEX_SESSIONS_STATISTICS_NAMED_COUNTS_TABLE,
@@ -51,6 +57,8 @@ from .validation import (
     _validate_positive_id,
     _validate_session_id,
 )
+
+_TURN_LOOKUP_COUNT_KINDS = frozenset({"model", "reasoning_effort"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -321,6 +329,7 @@ def publish_rodex_session_statistics(
                     item.occurrence_count,
                 )
                 for item in statistics_projection.named_counts
+                if item.count_kind not in _TURN_LOOKUP_COUNT_KINDS
             ),
         )
         connection.executemany(
@@ -360,12 +369,28 @@ def publish_rodex_session_statistics(
             "WHERE rodex_sessions_id = ?",
             (session_id,),
         )
+        model_name_ids: dict[str, int] = {}
+        reasoning_effort_name_ids: dict[str, int] = {}
         for item in turns:
             source_halves = split_codex_session_id_into_signed_bigints(
                 item.codex_session_id
             )
             source_id = source_ids[source_halves]
             turn_hash = _turn_id_sha256_signed_bigints(item.codex_turn_id)
+            model_names_id = _lookup_or_insert_cached_name_id(
+                connection,
+                model_name_ids,
+                MODEL_NAMES_TABLE,
+                "name_of_the_model",
+                item.model,
+            )
+            reasoning_effort_names_id = _lookup_or_insert_cached_name_id(
+                connection,
+                reasoning_effort_name_ids,
+                REASONING_EFFORT_NAMES_TABLE,
+                "name_of_the_reasoning_effort",
+                item.reasoning_effort,
+            )
             existing = connection.execute(
                 f"SELECT id, codex_turn_id FROM "
                 f"{RODEX_SESSIONS_STATISTICS_TURNS_TABLE} "
@@ -386,8 +411,10 @@ def publish_rodex_session_statistics(
                 "codex_turn_id_sha256_int_1, codex_turn_id_sha256_int_2, "
                 "codex_turn_id_sha256_int_3, codex_turn_id_sha256_int_4, "
                 "codex_turn_id, included_statistics_revision, started_at_utc, "
-                f"terminal_at_utc, outcome, {TURN_STATISTICS_SCALARS.columns_sql}) "
-                f"VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
+                "terminal_at_utc, outcome, model_names_id, "
+                "reasoning_effort_names_id, "
+                f"{TURN_STATISTICS_SCALARS.columns_sql}) "
+                f"VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
                 f"{TURN_STATISTICS_SCALARS.placeholders_sql}) "
                 "ON CONFLICT(rodex_sessions_statistics_sources_id, "
                 "codex_turn_id_sha256_int_1, codex_turn_id_sha256_int_2, "
@@ -397,6 +424,8 @@ def publish_rodex_session_statistics(
                 "started_at_utc = excluded.started_at_utc, "
                 "terminal_at_utc = excluded.terminal_at_utc, "
                 "outcome = excluded.outcome, "
+                "model_names_id = excluded.model_names_id, "
+                "reasoning_effort_names_id = excluded.reasoning_effort_names_id, "
                 f"{TURN_STATISTICS_SCALARS.excluded_updates_sql} "
                 "RETURNING id",
                 (
@@ -408,6 +437,8 @@ def publish_rodex_session_statistics(
                     item.started_at_utc,
                     item.terminal_at_utc,
                     item.outcome,
+                    model_names_id,
+                    reasoning_effort_names_id,
                     *TURN_STATISTICS_SCALARS.write_values(item),
                 ),
             ).fetchone()
@@ -542,7 +573,10 @@ def read_rodex_session_statistics(
     with open_rodex_read_transaction(path) as connection:
         statistics_row = _select_statistics(connection, session_id)
         distribution_rows = _select_statistics_distributions(connection, session_id)
-        named_count_rows = _select_statistics_named_counts(connection, session_id)
+        named_count_rows = [
+            *_select_statistics_named_counts(connection, session_id),
+            *_select_statistics_turn_lookup_counts(connection, session_id),
+        ]
         audit_limit_rows = _select_statistics_audit_limits(connection, session_id)
         worker_row = _select_statistics_worker(connection, session_id)
         source_rows = _select_statistics_sources(connection, session_id)
@@ -582,7 +616,10 @@ def read_rodex_session_turn_statistics(
     with open_rodex_read_transaction(path) as connection:
         statistics_row = _select_statistics(connection, session_id)
         distribution_rows = _select_statistics_distributions(connection, session_id)
-        named_count_rows = _select_statistics_named_counts(connection, session_id)
+        named_count_rows = [
+            *_select_statistics_named_counts(connection, session_id),
+            *_select_statistics_turn_lookup_counts(connection, session_id),
+        ]
         audit_limit_rows = _select_statistics_audit_limits(connection, session_id)
         worker_row = _select_statistics_worker(connection, session_id)
         source_rows = _select_statistics_sources(connection, session_id)
@@ -595,10 +632,17 @@ def read_rodex_session_turn_statistics(
             "sources.codex_session_id_signed_bigint_1, "
             "sources.codex_session_id_signed_bigint_2, turns.codex_turn_id, "
             "turns.included_statistics_revision, turns.started_at_utc, "
-            f"turns.terminal_at_utc, turns.outcome, {turn_scalar_columns} "
+            "turns.terminal_at_utc, turns.outcome, "
+            "models.name_of_the_model, "
+            "efforts.name_of_the_reasoning_effort, "
+            f"{turn_scalar_columns} "
             f"FROM {RODEX_SESSIONS_STATISTICS_TURNS_TABLE} AS turns "
             f"JOIN {RODEX_SESSIONS_STATISTICS_SOURCES_TABLE} AS sources "
             "ON sources.id = turns.rodex_sessions_statistics_sources_id "
+            f"LEFT JOIN {MODEL_NAMES_TABLE} AS models "
+            "ON models.id = turns.model_names_id "
+            f"LEFT JOIN {REASONING_EFFORT_NAMES_TABLE} AS efforts "
+            "ON efforts.id = turns.reasoning_effort_names_id "
             "WHERE turns.rodex_sessions_id = ? "
             "AND turns.codex_turn_id_sha256_int_1 = ? "
             "AND turns.codex_turn_id_sha256_int_2 = ? "
@@ -699,6 +743,28 @@ def _turn_id_sha256_signed_bigints(turn_id: str) -> tuple[int, int, int, int]:
     return pieces[0], pieces[1], pieces[2], pieces[3]
 
 
+def _lookup_or_insert_cached_name_id(
+    connection: sqlite3.Connection,
+    cache: dict[str, int],
+    table_name: str,
+    name_column: str,
+    name: str | None,
+) -> int | None:
+    """Resolve one append-only lookup name once within a publication transaction."""
+    if name is None:
+        return None
+    cached = cache.get(name)
+    if cached is not None:
+        return cached
+    lookup_id = select_or_insert_lookup_id(
+        connection,
+        table_name,
+        {name_column: name},
+    )
+    cache[name] = lookup_id
+    return lookup_id
+
+
 def _validate_source_observation(
     observation: RodexSessionStatisticsSourceObservation,
 ) -> RodexSessionStatisticsSourceObservation:
@@ -766,6 +832,34 @@ def _select_statistics_named_counts(
         "WHERE rodex_sessions_id = ? ORDER BY count_kind, count_name",
         (session_id,),
     ).fetchall()
+
+
+def _select_statistics_turn_lookup_counts(
+    connection: sqlite3.Connection,
+    session_id: int,
+) -> list[tuple[object, ...]]:
+    rows: list[tuple[object, ...]] = []
+    for count_kind, table_name, foreign_key, name_column in (
+        ("model", MODEL_NAMES_TABLE, "model_names_id", "name_of_the_model"),
+        (
+            "reasoning_effort",
+            REASONING_EFFORT_NAMES_TABLE,
+            "reasoning_effort_names_id",
+            "name_of_the_reasoning_effort",
+        ),
+    ):
+        rows.extend(
+            connection.execute(
+                f"SELECT ?, names.{name_column}, COUNT(*) "
+                f"FROM {RODEX_SESSIONS_STATISTICS_TURNS_TABLE} AS turns "
+                f"JOIN {table_name} AS names ON names.id = turns.{foreign_key} "
+                "WHERE turns.rodex_sessions_id = ? "
+                f"GROUP BY names.id, names.{name_column} "
+                f"ORDER BY names.{name_column}",
+                (count_kind, session_id),
+            ).fetchall()
+        )
+    return rows
 
 
 def _select_statistics_audit_limits(
@@ -912,13 +1006,15 @@ def _turn_statistics_from_rows(
     row: tuple[object, ...],
     named_count_rows: Sequence[tuple[object, ...]],
 ) -> RodexSessionTurnStatistics:
-    values = TURN_STATISTICS_SCALARS.read_values(row[10:])
+    values = TURN_STATISTICS_SCALARS.read_values(row[12:])
     projection = TurnStatisticsProjection(
         codex_session_id=join_signed_bigints_into_a_codex_session_id(row[3], row[4]),
         codex_turn_id=str(row[5]),
         started_at_utc=None if row[7] is None else str(row[7]),
         terminal_at_utc=None if row[8] is None else str(row[8]),
         outcome=str(row[9]),
+        model=None if row[10] is None else str(row[10]),
+        reasoning_effort=None if row[11] is None else str(row[11]),
         **values,
         named_counts=_named_counts_from_rows(named_count_rows),
     )

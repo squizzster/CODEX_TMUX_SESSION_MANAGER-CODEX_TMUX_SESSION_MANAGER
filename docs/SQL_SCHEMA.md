@@ -64,8 +64,8 @@ Apply these standards to future schema decisions. These authorative standards ma
 - `rodex_sessions` contains one signed-BIGINT Rodex session ID, the two signed
   halves of the Codex session ID, and permanent/optional display-name links. The public Rodex
   session ID is always serialized as a 16-character lowercase hex string, never a JSON
-  number. This incompatible ALPHA schema generation is stored in `rodex-v5.sqlite3`;
-  Rodex leaves v4 and earlier generation files untouched and does not read or migrate
+  number. This incompatible ALPHA schema generation is stored in `rodex-v6.sqlite3`;
+  Rodex leaves v5 and earlier generation files untouched and does not read or migrate
   their schemas.
 - `rodex_runtime_instances` contains one signed-`BIGINT` random 64-bit `runtime_id` and
   its start time for a Rodex session. Unique indexes fence both session cardinality and
@@ -83,6 +83,10 @@ Apply these standards to future schema decisions. These authorative standards ma
   category/name/count facts. Its `(session, category, name)` key supports deterministic
   reconstruction and direct aggregation. `rodex_sessions_statistics_audit_limits`
   retains limitation order with `(session, ordinal)`.
+- `model_names` and `reasoning_effort_names` are independent append-only dimensions.
+  Each has an `AUTOINCREMENT` integer primary key and a unique exact source name. A
+  publication resolves each distinct name once in its transaction by selecting before
+  inserting; database-local caches never cross a rollback or database boundary.
 - `rodex_sessions_statistics_sources` retains every Codex session ID linked to the Rodex
   lineage. A Codex session ID is globally unique to one lineage. Nullable rollout provenance
   represents a registered source not yet authenticated; included provenance carries an
@@ -91,7 +95,11 @@ Apply these standards to future schema decisions. These authorative standards ma
   exact `(Codex source, turn_id)` in the current revision. Four signed 64-bit SHA-256
   pieces provide indexed lookup while retained text verifies exact identity. Deferred
   foreign keys bind every turn to both the included source revision and session snapshot.
-  `rodex_sessions_statistics_turn_named_counts` normalizes its dynamic category maps.
+  Nullable `model_names_id` and `reasoning_effort_names_id` fields preserve the two
+  separate turn-scoped facts. Aggregate model and reasoning-effort maps are grouped from
+  these exact relationships rather than stored as redundant named counts.
+  `rodex_sessions_statistics_turn_named_counts` normalizes the remaining dynamic
+  category maps.
 - `rodex_sessions_statistics_workers` is independent one-to-one health. Its bounded
   diagnostic code cannot contain free-form errors or paths. Failure never fabricates or
   overwrites a statistics snapshot.

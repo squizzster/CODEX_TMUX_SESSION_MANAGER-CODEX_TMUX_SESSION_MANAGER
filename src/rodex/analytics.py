@@ -42,7 +42,7 @@ from .process_contracts import AnalyticsWorkerConfig
 
 ANALYTICS_POLL_INTERVAL_SECONDS = 0.5
 ANALYTICS_RESTART_DELAY_SECONDS = 2.0
-STATISTICS_PROJECTION_SCHEMA_VERSION = "rodex-statistics-v3"
+STATISTICS_PROJECTION_SCHEMA_VERSION = "rodex-statistics-v4"
 
 
 class RodexAnalyticsError(RuntimeError):

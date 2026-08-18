@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -91,6 +92,7 @@ class TurnStatisticsProjection:
     compactions_count: int
     workspace_digest: str | None
     model: str | None
+    reasoning_effort: str | None
     local_start_hour: int | None
     hands_on: bool
     completed_after_nonzero_command: bool
@@ -266,6 +268,9 @@ def session_statistics_as_dict(
             "workspaces_and_models": {
                 "distinct_workspaces": projection.distinct_workspaces_count,
                 "models": _count_map(projection.named_counts, "model"),
+                "reasoning_efforts": _count_map(
+                    projection.named_counts, "reasoning_effort"
+                ),
             },
         },
         "recommended_insight_stats": {
@@ -392,6 +397,7 @@ def turn_statistics_as_dict(projection: TurnStatisticsProjection) -> dict[str, o
             "workspace_and_model": {
                 "workspace_digest": projection.workspace_digest,
                 "model": projection.model,
+                "reasoning_effort": projection.reasoning_effort,
                 "local_start_hour": projection.local_start_hour,
             },
         },
@@ -672,7 +678,7 @@ def parse_session_statistics_snapshot(
     )
     workspaces = _exact_mapping(
         basic["workspaces_and_models"],
-        {"distinct_workspaces", "models"},
+        {"distinct_workspaces", "models", "reasoning_efforts"},
         "snapshot.must_have_basic_stats.workspaces_and_models",
     )
     anatomy = _exact_mapping(
@@ -755,6 +761,11 @@ def parse_session_statistics_snapshot(
             "collaboration_tool", collaboration["by_tool"], "collaboration.by_tool"
         ),
         *_named_counts("model", workspaces["models"], "workspaces_and_models.models"),
+        *_named_counts(
+            "reasoning_effort",
+            workspaces["reasoning_efforts"],
+            "workspaces_and_models.reasoning_efforts",
+        ),
         *_named_counts("goal_status", goals["statuses"], "goal_tracking.statuses"),
     )
     turn_statistics = _turns(snapshot["turn_statistics"])
@@ -791,6 +802,33 @@ def parse_session_statistics_snapshot(
     if observed_outcomes != expected_outcomes:
         raise StatisticsProjectionError(
             "turn_statistics outcomes must equal aggregate turn outcomes"
+        )
+    observed_models = Counter(
+        item.model for item in turn_statistics if item.model is not None
+    )
+    if _count_map(named_counts, "model") != dict(observed_models):
+        raise StatisticsProjectionError(
+            "aggregate model counts must equal final turn model values"
+        )
+    observed_reasoning_efforts = Counter(
+        item.reasoning_effort
+        for item in turn_statistics
+        if item.reasoning_effort is not None
+    )
+    if _count_map(named_counts, "reasoning_effort") != dict(observed_reasoning_efforts):
+        raise StatisticsProjectionError(
+            "aggregate reasoning effort counts must equal final turn values"
+        )
+    observed_workspaces = {
+        item.workspace_digest
+        for item in turn_statistics
+        if item.workspace_digest is not None
+    }
+    if _nonnegative_int(
+        workspaces["distinct_workspaces"], "workspaces.distinct_workspaces"
+    ) != len(observed_workspaces):
+        raise StatisticsProjectionError(
+            "distinct workspace count must equal final turn workspace values"
         )
 
     input_tokens = _nonnegative_int(token_usage["input_tokens"], "token_usage.input_tokens")
@@ -1105,7 +1143,7 @@ def _turn(value: object, index: int) -> TurnStatisticsProjection:
     )
     workspace = _exact_mapping(
         basic["workspace_and_model"],
-        {"workspace_digest", "model", "local_start_hour"},
+        {"workspace_digest", "model", "reasoning_effort", "local_start_hour"},
         f"{path}.workspace_and_model",
     )
     goals = _exact_mapping(
@@ -1216,6 +1254,9 @@ def _turn(value: object, index: int) -> TurnStatisticsProjection:
         compactions_count=_nonnegative_int(basic["compactions"], f"{path}.compactions"),
         workspace_digest=digest,
         model=_optional_text(workspace["model"], f"{path}.model"),
+        reasoning_effort=_optional_text(
+            workspace["reasoning_effort"], f"{path}.reasoning_effort"
+        ),
         local_start_hour=_optional_hour(
             workspace["local_start_hour"], f"{path}.local_start_hour"
         ),

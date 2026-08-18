@@ -96,6 +96,7 @@ def _turn() -> dict[str, object]:
             "workspace_and_model": {
                 "workspace_digest": "a" * 64,
                 "model": "gpt-test",
+                "reasoning_effort": "xhigh",
                 "local_start_hour": 13,
             },
         },
@@ -171,6 +172,7 @@ def _snapshot() -> dict[str, object]:
             "workspaces_and_models": {
                 "distinct_workspaces": 1,
                 "models": {"gpt-test": 1},
+                "reasoning_efforts": {"xhigh": 1},
             },
         },
         "recommended_insight_stats": {
@@ -396,6 +398,19 @@ def test_empty_distributions_and_null_rates_remain_explicit() -> None:
     assert projection.command_zero_exit_rate_percent is None
 
 
+def test_model_and_reasoning_effort_are_independently_nullable_turn_facts() -> None:
+    snapshot = _snapshot()
+    snapshot["must_have_basic_stats"]["workspaces_and_models"]["reasoning_efforts"] = {}
+    snapshot["turn_statistics"][0]["must_have_basic_stats"]["workspace_and_model"][
+        "reasoning_effort"
+    ] = None
+
+    projection = parse_session_statistics_snapshot(snapshot)
+
+    assert projection.turn_statistics[0].model == "gpt-test"
+    assert projection.turn_statistics[0].reasoning_effort is None
+
+
 def test_duplicate_turn_identity_is_rejected() -> None:
     snapshot = _snapshot()
     snapshot["turn_statistics"].append(copy.deepcopy(snapshot["turn_statistics"][0]))
@@ -414,3 +429,26 @@ def test_turn_collection_must_match_aggregate_count_and_outcomes() -> None:
     wrong_outcome["turn_statistics"][0]["outcome"] = "aborted"
     with pytest.raises(StatisticsProjectionError, match="aggregate turn outcomes"):
         parse_session_statistics_snapshot(wrong_outcome)
+
+
+def test_turn_context_rollups_must_match_final_exact_turn_facts() -> None:
+    wrong_models = _snapshot()
+    wrong_models["must_have_basic_stats"]["workspaces_and_models"]["models"] = {
+        "other-model": 1
+    }
+    with pytest.raises(StatisticsProjectionError, match="aggregate model counts"):
+        parse_session_statistics_snapshot(wrong_models)
+
+    wrong_efforts = _snapshot()
+    wrong_efforts["must_have_basic_stats"]["workspaces_and_models"]["reasoning_efforts"] = {
+        "medium": 1
+    }
+    with pytest.raises(StatisticsProjectionError, match="reasoning effort counts"):
+        parse_session_statistics_snapshot(wrong_efforts)
+
+    wrong_workspaces = _snapshot()
+    wrong_workspaces["must_have_basic_stats"]["workspaces_and_models"][
+        "distinct_workspaces"
+    ] = 2
+    with pytest.raises(StatisticsProjectionError, match="distinct workspace count"):
+        parse_session_statistics_snapshot(wrong_workspaces)

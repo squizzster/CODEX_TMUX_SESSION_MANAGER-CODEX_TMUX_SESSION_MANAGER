@@ -12,7 +12,7 @@ classifiers = [
     "Operating System :: POSIX",
 ]
 dependencies = [
-    "codex-protocol-log-analyzer @ git+https://github.com/squizzster/CODEX_PROTOCOL_LOG_ANALYZER-CODEX_PROTOCOL_LOG_ANALYZER.git@ce3468083b1ae42ddbb7d0f65dffc5a62f13b4cc",
+    "codex-protocol-log-analyzer @ git+https://github.com/squizzster/CODEX_PROTOCOL_LOG_ANALYZER-CODEX_PROTOCOL_LOG_ANALYZER.git@13d23b296222e40c18cfc3b45d02c2adef45cce2",
     "coolname>=5.0.0",
     "websockets>=15,<18",
 ]

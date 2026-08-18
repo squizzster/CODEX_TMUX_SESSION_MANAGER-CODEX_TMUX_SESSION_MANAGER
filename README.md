@@ -26,7 +26,8 @@ Both sides retain the same Rodex, runtime, Codex, and workspace context.
 
 - Opens the ordinary interactive Codex TUI inside a private tmux runtime.
 - Keeps Rodex and Codex session identities distinct and linked.
-- Gives each Rodex session one exact 16-character lowercase hexadecimal ID.
+- Gives each Rodex session and runtime incarnation its own exact 16-character
+  lowercase hexadecimal ID.
 - Assigns every session a permanent, unique two-word name.
 - Reattaches a live session or transparently resumes its saved Codex session.
 - Recovers an empty, unsaved Codex session under the same Rodex identity.
@@ -155,8 +156,8 @@ against the current user's database row, and fails closed outside a matching man
 session. Its JSON includes registry/database provenance, permanent and user-defined
 names, the complete tmux socket/session/window/pane address, and sharing state. The
 display name is read on every invocation, so an agent need not cache it.
-New runtimes also expose a random runtime UUID and its durable-match state. The exact
-control commands emit a schema-v1 success/error envelope containing separate Rodex
+New runtimes also expose a random 64-bit `runtime_id` and its durable-match state. The
+exact control commands emit a schema-v2 success/error envelope containing separate Rodex
 session, runtime, Codex thread, Codex session-tree, and turn identities. They require
 stdin prompts and a runtime created by this Rodex version. `_inspect` reports the live
 App Server thread working directory so callers can verify workspace scope before mutation.
@@ -214,19 +215,24 @@ codebase for later re-enablement; input currently passes directly to the Codex T
 ## Local data
 
 The durable per-user registry defaults to
-`$XDG_STATE_HOME/rodex/rodex-v4.sqlite3`, or
-`~/.local/state/rodex/rodex-v4.sqlite3` when `XDG_STATE_HOME` is unset. Set
+`$XDG_STATE_HOME/rodex/rodex-v5.sqlite3`, or
+`~/.local/state/rodex/rodex-v5.sqlite3` when `XDG_STATE_HOME` is unset. Set
 `RODEX_DATABASE_PATH` to select another database.
 
 Rodex session IDs are random 64-bit values rendered only as 16 lowercase hex
 characters, including leading zeroes. Rodex registry IDs use the same 64-bit wire form
-as a separate identity domain. Both are compact integrity discriminators for
-agents and operators, not bearer secrets. SQLite enforces uniqueness and allocation
-tries at most ten independent candidates before failing explicitly. Codex session IDs
-remain 128-bit values and are stored losslessly across two BIGINT columns.
-Each current runtime incarnation has a separate random UUID, stored losslessly as its
-ordered signed-`BIGINT` halves and used only as control identity metadata; prompts,
-responses, and App Server results remain Codex-owned.
+as a separate identity domain. Every current runtime incarnation has a third, distinct
+64-bit `runtime_id` in the same wire form. These compact values are intentional
+agent-facing integrity discriminators, not bearer secrets: the 16-character form halves
+the transcription burden of a UUID while retaining the full `2^64` candidate space.
+Session and runtime allocation use the same bounded ten-candidate indexed-selection
+pipeline. SQLite stores each Rodex-owned ID losslessly in one signed `BIGINT` and
+enforces its domain uniqueness. Codex session IDs remain Codex-owned 128-bit values and
+are stored losslessly across two `BIGINT` columns.
+
+Version 5 is an incompatible ALPHA schema with no v4 reader or migration path. Rodex
+leaves `rodex-v4.sqlite3` untouched; explicitly selecting a v4 database fails exact
+schema verification rather than falling back or rewriting it.
 
 Short-lived Unix sockets and app-server logs use `$XDG_RUNTIME_DIR/rodex`, normally
 `/run/user/<uid>/rodex`. When `XDG_RUNTIME_DIR` is unset or that socket path would be

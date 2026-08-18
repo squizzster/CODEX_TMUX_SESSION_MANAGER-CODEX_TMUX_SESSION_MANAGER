@@ -9,8 +9,8 @@ listener; control endpoints are Unix sockets below a private runtime root.
 
 - A live attach or control action requires the durable SQL row and matching advertised
   Rodex session, registry, Codex thread, and `registered` state. Exact machine control
-  additionally requires the current persisted/runtime UUID and characterized App Server
-  version. Missing, duplicated, or conflicting identity fails closed.
+  additionally requires the current persisted/live 64-bit runtime ID and characterized
+  App Server version. Missing, duplicated, or conflicting identity fails closed.
 - New runtimes begin `pending`, become usable after the SQL identity commits, and exit
   if confirmation never arrives. An exact committed/pending pair is recoverable.
 - Runtime roots are real, current-user-owned directories at mode `0700`, below either a
@@ -41,4 +41,6 @@ less harmful than attaching to or destroying the wrong runtime.
 The 16-hex Rodex session ID is an integrity discriminator, not a credential.
 Authorization comes from the current-uid filesystem boundary plus the exact durable and
 live identity tuple. Do not expose the ID later as a bearer-authentication token.
-The runtime UUID has the same role: incarnation fencing, not authentication.
+The 16-hex runtime ID has the same role: incarnation fencing, not authentication. Its
+compact form is chosen for reliable agent transcription; authorization still comes from
+the current-user boundary and the complete durable/live identity tuple.

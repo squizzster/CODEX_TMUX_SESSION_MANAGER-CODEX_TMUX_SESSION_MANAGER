@@ -368,16 +368,10 @@ def _print_current_rodex_context(
     )
     persisted_runtime = lookup_rodex_runtime_instance(session_id, database_path)
     runtime_identity_persisted = (
-        persisted_runtime is not None
-        and control.runtime_identifier == persisted_runtime.runtime_identifier
+        persisted_runtime is not None and control.runtime_id == persisted_runtime.runtime_id
     )
-    if (
-        persisted_runtime is not None
-        and control.runtime_identifier != persisted_runtime.runtime_identifier
-    ):
-        raise RodexLaunchError(
-            "the current tmux pane advertises an unexpected runtime identifier"
-        )
+    if persisted_runtime is not None and control.runtime_id != persisted_runtime.runtime_id:
+        raise RodexLaunchError("the current tmux pane advertises an unexpected runtime ID")
     print(
         json.dumps(
             {
@@ -395,10 +389,8 @@ def _print_current_rodex_context(
                 "tmux_window_id": tmux_context.tmux_window_id,
                 "tmux_pane_id": tmux_context.tmux_pane_id,
                 "registration_state": control.registration_state,
-                "runtime_identifier": (
-                    None
-                    if control.runtime_identifier is None
-                    else str(control.runtime_identifier)
+                "runtime_id": (
+                    None if control.runtime_id is None else str(control.runtime_id)
                 ),
                 "runtime_identity_persisted": runtime_identity_persisted,
                 "attached_clients": tmux_context.attached_client_count,

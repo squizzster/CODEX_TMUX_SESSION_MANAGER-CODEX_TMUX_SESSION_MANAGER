@@ -38,6 +38,7 @@ from rodex.runtime import (
 from rodex.session_tail import SessionTailRequest
 from rodex_registry import (
     RodexRegistryId,
+    RodexRuntimeId,
     RodexSessionError,
     RodexSessionId,
     RodexSessionsUserIdentity,
@@ -58,7 +59,7 @@ from rodex_sql import RodexSQLError
 CODEX_SESSION_ID = uuid.UUID("01a00654-f2bc-7a30-834a-a5f886a65f82")
 REPLACEMENT_CODEX_SESSION_ID = uuid.UUID(int=CODEX_SESSION_ID.int + 1)
 DNA = RodexSessionsUserIdentity(1009, 1010, "dna")
-RUNTIME_IDENTIFIER = uuid.UUID("0c01ee2e-ad72-40e1-b337-7202e099c2fe")
+RUNTIME_ID = RodexRuntimeId.parse("0c01ee2ead7240e1")
 
 
 class StubLauncher:
@@ -70,9 +71,10 @@ class StubLauncher:
             app_server_log_path=tmp_path / "app.log",
             protocol_proxy_socket_path=tmp_path / "proxy.sock",
             protocol_event_socket_path=tmp_path / "events.sock",
-            runtime_identifier=RUNTIME_IDENTIFIER,
+            runtime_id=RUNTIME_ID,
         )
         self.started: list[tuple[Path, list[str]]] = []
+        self.started_runtime_ids: list[RodexRuntimeId] = []
         self.analytics_identities: list[tuple[RodexSessionId | None, Path | None]] = []
         self.registry_identities: list[RodexRegistryId | None] = []
         self.renamed: list[tuple[LiveTmuxSession, str]] = []
@@ -92,7 +94,7 @@ class StubLauncher:
             tmp_path / "proxy.sock",
             tmp_path / "events.sock",
             CODEX_SESSION_ID,
-            runtime_identifier=RUNTIME_IDENTIFIER,
+            runtime_id=RUNTIME_ID,
         )
         self.control_discoveries: list[LiveTmuxSession] = []
         self.confirmed: list[LiveTmuxSession] = []
@@ -109,11 +111,14 @@ class StubLauncher:
         workspace: Path,
         arguments: list[str],
         *,
+        runtime_id: RodexRuntimeId,
         rodex_session_id: RodexSessionId | None = None,
         rodex_registry_id: RodexRegistryId | None = None,
         rodex_database_path: Path | None = None,
     ) -> tuple[LiveRodexRuntime, uuid.UUID]:
         self.started.append((workspace, arguments))
+        self.started_runtime_ids.append(runtime_id)
+        self.runtime = replace(self.runtime, runtime_id=runtime_id)
         self.analytics_identities.append((rodex_session_id, rodex_database_path))
         self.registry_identities.append(rodex_registry_id)
         if self.start_errors:
@@ -425,7 +430,7 @@ def create_exact_controlled_session(database: Path, tmp_path: Path) -> None:
         user_identity=DNA,
         tmux_server_socket_path=tmp_path / "tmux.sock",
         tmux_session_name="automatic-beluga",
-        runtime_identifier=RUNTIME_IDENTIFIER,
+        runtime_id=RUNTIME_ID,
     )
 
 
@@ -503,7 +508,7 @@ def test_context_reports_the_verified_current_rodex_session_as_json(
         "tmux_window_id": "@0",
         "tmux_pane_id": "%4",
         "registration_state": "registered",
-        "runtime_identifier": str(RUNTIME_IDENTIFIER),
+        "runtime_id": str(RUNTIME_ID),
         "runtime_identity_persisted": False,
         "attached_clients": 2,
         "shared": True,
@@ -696,7 +701,7 @@ def test_pending_runtime_with_exact_durable_identity_is_recovered(
     assert launcher.attached
     persisted_runtime = lookup_rodex_runtime_instance(1, database)
     assert persisted_runtime is not None
-    assert persisted_runtime.runtime_identifier == RUNTIME_IDENTIFIER
+    assert persisted_runtime.runtime_id == RUNTIME_ID
 
 
 def test_named_attach_rejects_a_wrong_live_rodex_identity_without_side_effects(
@@ -886,7 +891,7 @@ def test_named_attach_recovers_one_relocated_pending_runtime(
     ]
     persisted_runtime = lookup_rodex_runtime_instance(1, database)
     assert persisted_runtime is not None
-    assert persisted_runtime.runtime_identifier == RUNTIME_IDENTIFIER
+    assert persisted_runtime.runtime_id == RUNTIME_ID
 
 
 def test_named_attach_refuses_multiple_relocated_exact_runtimes(
@@ -1033,11 +1038,11 @@ def test_machine_start_reads_stdin_and_emits_the_versioned_identity_envelope(
     assert control.started == [(launcher.control, "run focused tests\n")]
     assert control.started_dispatch_ids == ["controller:dispatch:42"]
     payload = json.loads(capsys.readouterr().out)
-    assert payload["schema_version"] == 1
+    assert payload["schema_version"] == 2
     assert payload["operation"] == "turn.start"
     assert payload["ok"] is True
     assert payload["runtime"] == {
-        "identifier": str(RUNTIME_IDENTIFIER),
+        "runtime_id": str(RUNTIME_ID),
         "state": "running",
     }
     assert payload["codex"] == {
@@ -1135,7 +1140,7 @@ def test_machine_blank_turn_id_is_one_invalid_argument_envelope(
     assert payload["error"]["code"] == "invalid_argument"
 
 
-def test_machine_exact_control_requires_a_persisted_runtime_identifier(
+def test_machine_exact_control_requires_a_persisted_runtime_id(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],

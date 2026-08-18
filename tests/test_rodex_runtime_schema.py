@@ -8,9 +8,12 @@ from pathlib import Path
 import pytest
 
 from rodex_registry import (
+    RodexRuntimeId,
+    RodexRuntimeIdCollisionError,
     RodexSessionError,
     RodexSessionsUserIdentity,
     create_a_rodex_session,
+    generate_an_unregistered_rodex_runtime_id_candidate,
     initialise_rodex_database,
     lookup_codex_session_id_from_a_rodex_sessions_id,
     lookup_owned_rodex_sessions_id_from_a_codex_session_id,
@@ -91,77 +94,95 @@ def test_runtime_instance_table_identifies_one_exact_current_incarnation(
     assert [(row[1], row[2], row[3], row[5]) for row in columns] == [
         ("id", "INTEGER", 0, 1),
         ("rodex_sessions_id", "INTEGER", 1, 0),
-        ("runtime_identifier_signed_bigint_1", "BIGINT", 1, 0),
-        ("runtime_identifier_signed_bigint_2", "BIGINT", 1, 0),
+        ("runtime_id_signed_bigint", "BIGINT", 1, 0),
         ("started_at_utc", "TEXT", 1, 0),
     ]
     assert {(row[1], row[2]) for row in indexes} == {
-        ("rodex_runtime_instances_identifier_unique", 1),
+        ("rodex_runtime_instances_runtime_id_unique", 1),
         ("rodex_runtime_instances_rodex_sessions_id_unique", 1),
     }
     assert [
         row[2]
         for row in fetch_all(
             database,
-            "PRAGMA index_info(rodex_runtime_instances_identifier_unique)",
+            "PRAGMA index_info(rodex_runtime_instances_runtime_id_unique)",
         )
+    ] == ["runtime_id_signed_bigint"]
+
+
+@pytest.mark.evolutionary_regression
+def test_v4_runtime_uuid_schema_is_rejected_without_migration(tmp_path: Path) -> None:
+    database = initialise_rodex_database(tmp_path / "rodex-v4.sqlite3")
+    with sqlite3.connect(database) as connection:
+        connection.execute("DROP TABLE rodex_runtime_instances")
+        connection.execute(
+            "CREATE TABLE rodex_runtime_instances ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "rodex_sessions_id INTEGER NOT NULL, "
+            "runtime_identifier_signed_bigint_1 BIGINT NOT NULL, "
+            "runtime_identifier_signed_bigint_2 BIGINT NOT NULL, "
+            "started_at_utc TEXT NOT NULL, "
+            "FOREIGN KEY (rodex_sessions_id) REFERENCES rodex_sessions (id))"
+        )
+
+    with pytest.raises(RodexSessionError, match="schema mismatch"):
+        initialise_rodex_database(database)
+
+    assert [
+        row[1] for row in fetch_all(database, "PRAGMA table_info(rodex_runtime_instances)")
     ] == [
+        "id",
+        "rodex_sessions_id",
         "runtime_identifier_signed_bigint_1",
         "runtime_identifier_signed_bigint_2",
+        "started_at_utc",
     ]
 
 
-def test_create_and_resume_persist_the_exact_current_runtime_identifier(
+def test_create_and_resume_persist_the_exact_current_runtime_id(
     tmp_path: Path,
 ) -> None:
     database = tmp_path / "rodex.sqlite3"
-    first_runtime = uuid.UUID("0c01ee2e-ad72-40e1-b337-7202e099c2fe")
-    second_runtime = uuid.UUID("e6877350-da74-4e32-a4a5-7174e245f9a5")
+    first_runtime = RodexRuntimeId.parse("0c01ee2ead7240e1")
+    second_runtime = RodexRuntimeId.parse("e6877350da744e32")
     session = create_a_rodex_session(
         database,
         codex_session_id=CODEX_SESSION_ID,
         tmux_server_socket_path="/tmp/rodex/tmux.sock",
         tmux_session_name="automatic-beluga",
-        runtime_identifier=first_runtime,
+        runtime_id=first_runtime,
     )
 
     initial = lookup_rodex_runtime_instance(session.rodex_sessions_id, database)
     assert initial is not None
-    assert initial.runtime_identifier == first_runtime
+    assert initial.runtime_id == first_runtime
 
     record_a_rodex_session_runtime_resume(
         session.rodex_sessions_id,
         "/tmp/rodex/tmux.sock",
         "automatic-beluga",
         database,
-        runtime_identifier=second_runtime,
+        runtime_id=second_runtime,
         accessed_at_utc=datetime(2026, 8, 15, 18, 30, tzinfo=UTC),
     )
 
     resumed = lookup_rodex_runtime_instance(session.rodex_sessions_id, database)
     assert resumed is not None
     assert resumed.id == initial.id
-    assert resumed.runtime_identifier == second_runtime
+    assert resumed.runtime_id == second_runtime
     assert resumed.started_at_utc == "2026-08-15T18:30:00.000000Z"
 
 
-@pytest.mark.parametrize(
-    "column_name",
-    [
-        "runtime_identifier_signed_bigint_1",
-        "runtime_identifier_signed_bigint_2",
-    ],
-)
-def test_runtime_identifier_bigints_reject_non_integer_storage(
-    tmp_path: Path, column_name: str
+def test_runtime_id_bigints_reject_non_integer_storage(
+    tmp_path: Path,
 ) -> None:
-    database = tmp_path / f"{column_name}.sqlite3"
+    database = tmp_path / "rodex.sqlite3"
     session = create_a_rodex_session(
         database,
         codex_session_id=CODEX_SESSION_ID,
         tmux_server_socket_path="/tmp/rodex/tmux.sock",
         tmux_session_name="automatic-beluga",
-        runtime_identifier=uuid.UUID("0c01ee2e-ad72-40e1-b337-7202e099c2fe"),
+        runtime_id=RodexRuntimeId.parse("0c01ee2ead7240e1"),
     )
 
     with (
@@ -169,13 +190,13 @@ def test_runtime_identifier_bigints_reject_non_integer_storage(
         pytest.raises(sqlite3.IntegrityError, match="CHECK constraint failed"),
     ):
         connection.execute(
-            f"UPDATE rodex_runtime_instances SET {column_name} = 1.5 "
+            "UPDATE rodex_runtime_instances SET runtime_id_signed_bigint = 1.5 "
             "WHERE rodex_sessions_id = ?",
             (session.rodex_sessions_id,),
         )
 
 
-def test_runtime_identifier_reader_does_not_coerce_corrupt_storage(
+def test_runtime_id_reader_does_not_coerce_corrupt_storage(
     tmp_path: Path,
 ) -> None:
     database = tmp_path / "rodex.sqlite3"
@@ -184,19 +205,63 @@ def test_runtime_identifier_reader_does_not_coerce_corrupt_storage(
         codex_session_id=CODEX_SESSION_ID,
         tmux_server_socket_path="/tmp/rodex/tmux.sock",
         tmux_session_name="automatic-beluga",
-        runtime_identifier=uuid.UUID("0c01ee2e-ad72-40e1-b337-7202e099c2fe"),
+        runtime_id=RodexRuntimeId.parse("0c01ee2ead7240e1"),
     )
     with sqlite3.connect(database) as connection:
         connection.execute("PRAGMA ignore_check_constraints = ON")
         connection.execute(
             "UPDATE rodex_runtime_instances "
-            "SET runtime_identifier_signed_bigint_1 = 1.5 "
+            "SET runtime_id_signed_bigint = 1.5 "
             "WHERE rodex_sessions_id = ?",
             (session.rodex_sessions_id,),
         )
 
     with pytest.raises(ValueError, match="signed 64-bit"):
         lookup_rodex_runtime_instance(session.rodex_sessions_id, database)
+
+
+def test_pending_runtime_id_candidate_succeeds_on_the_tenth_indexed_selection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database = tmp_path / "rodex.sqlite3"
+    create_a_rodex_session(
+        database,
+        codex_session_id=CODEX_SESSION_ID,
+        tmux_server_socket_path="/tmp/rodex/tmux.sock",
+        tmux_session_name="automatic-beluga",
+        runtime_id=RodexRuntimeId(100),
+    )
+    candidates = iter([RodexRuntimeId(100)] * 9 + [RodexRuntimeId(200)])
+    monkeypatch.setattr(
+        RodexRuntimeId,
+        "generate",
+        classmethod(lambda cls: next(candidates)),
+    )
+
+    candidate = generate_an_unregistered_rodex_runtime_id_candidate(database)
+
+    assert candidate == RodexRuntimeId(200)
+
+
+def test_pending_runtime_id_candidate_exhaustion_is_fatal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database = tmp_path / "rodex.sqlite3"
+    create_a_rodex_session(
+        database,
+        codex_session_id=CODEX_SESSION_ID,
+        tmux_server_socket_path="/tmp/rodex/tmux.sock",
+        tmux_session_name="automatic-beluga",
+        runtime_id=RodexRuntimeId(100),
+    )
+    monkeypatch.setattr(
+        RodexRuntimeId,
+        "generate",
+        classmethod(lambda cls: RodexRuntimeId(100)),
+    )
+
+    with pytest.raises(RodexRuntimeIdCollisionError, match="10 attempts"):
+        generate_an_unregistered_rodex_runtime_id_candidate(database)
 
 
 def test_one_transaction_matches_rodex_codex_and_tmux_without_mixing_ids(

@@ -17,7 +17,7 @@ from websockets.sync.client import unix_connect
 from rodex_registry.identity import (
     CodexSessionId,
     RodexRegistryId,
-    RodexRuntimeIdentifier,
+    RodexRuntimeId,
     RodexSessionId,
 )
 
@@ -72,7 +72,7 @@ class LiveRodexControl:
     rodex_session_id: RodexSessionId | None = None
     rodex_registry_id: RodexRegistryId | None = None
     registration_state: str | None = None
-    runtime_identifier: RodexRuntimeIdentifier | None = None
+    runtime_id: RodexRuntimeId | None = None
 
 
 @dataclass(frozen=True, slots=True)

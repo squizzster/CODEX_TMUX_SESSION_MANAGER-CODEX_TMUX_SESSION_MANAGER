@@ -461,7 +461,8 @@ def test_help_prints_rodex_commands_without_codex_tmux_or_database(
     assert "_create" in output.out
     assert "_running" in output.out
     assert "_context" in output.out
-    assert "Every other invocation is passed unchanged to Codex." in output.out
+    assert "Every unmatched invocation is passed unchanged to Codex." in output.out
+    assert "canonical Codex UUID" in output.out
     assert delegator.calls == []
     assert not database.exists()
 

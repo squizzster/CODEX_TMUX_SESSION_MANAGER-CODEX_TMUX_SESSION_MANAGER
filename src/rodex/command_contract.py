@@ -187,9 +187,9 @@ def _help_text() -> str:
     lines.extend(
         (
             "",
-            "Use a Rodex session name or its linked Codex UUID as the sole argument "
-            "to attach, resume, or recover it.",
-            "Every other invocation is passed unchanged to Codex.",
+            "Use a Rodex session name or canonical Codex UUID as the sole argument "
+            "to attach, resume, recover, or adopt it.",
+            "Every unmatched invocation is passed unchanged to Codex.",
             "",
         )
     )

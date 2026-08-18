@@ -30,6 +30,7 @@ Both sides retain the same Rodex, runtime, Codex, and workspace context.
   lowercase hexadecimal ID.
 - Assigns every session a permanent, unique two-word name.
 - Reattaches a live session or transparently resumes its saved Codex session.
+- Adopts a persisted standalone Codex UUID into a newly named Rodex session.
 - Recovers an empty, unsaved Codex session under the same Rodex identity.
 - Supports an optional user-defined display name without losing the generated name.
 - Shows the Rodex name, tool-call count, effective mouse mode, live context fill, and
@@ -47,11 +48,12 @@ Both sides retain the same Rodex, runtime, Codex, and workspace context.
 - Serializes concurrent opens of one ended name and tolerates the bounded Codex-writer
   shutdown handoff without creating duplicate runtimes.
 
-Rodex does not reinterpret ordinary nonempty Codex CLI invocations. With no arguments
-it creates and attaches to a managed session. Exact underscore Rodex commands stay
-local, an existing Rodex name opens that session, and every other nonempty invocation
-replaces itself with Codex while preserving arguments, terminal streams, signals, and
-exit status.
+Rodex does not generally reinterpret ordinary nonempty Codex CLI invocations. With no
+arguments it creates and attaches to a managed session. Exact underscore Rodex commands
+stay local, an existing Rodex name opens that session, and a canonical Codex UUID opens
+its linked Rodex session or adopts the persisted standalone thread. Every other nonempty
+invocation replaces itself with Codex while preserving arguments, terminal streams,
+signals, and exit status.
 
 ## Requirements
 
@@ -121,7 +123,7 @@ preference. See the current [tmux manual](https://man.openbsd.org/tmux.1) and
 | `./rodex _create project_1234` | Create a session with a preferred display name. |
 | `./rodex _detach` | Create without attaching and print expanded identity JSON. |
 | `./rodex automatic-beluga` | Attach if live; otherwise resume or recover its Codex session. |
-| `./rodex 01a015f4-f27c-7592-8060-d12313e8d0ce` | Open the Rodex session linked to this Codex UUID; pass through if none is registered. |
+| `./rodex 01a015f4-f27c-7592-8060-d12313e8d0ce` | Open its linked Rodex session, or verify and adopt the persisted standalone Codex thread. |
 | `./rodex _running` | List this POSIX user's running Rodex sessions. |
 | `./rodex _context` | Emit this pane's verified Rodex, Codex, tmux, and sharing context as JSON. |
 | `./rodex _alias automatic-beluga edgar-work` | Assign a preferred display name. |
@@ -201,12 +203,16 @@ existing reserved-name vocabulary remains case-insensitive and includes Codex
 top-level commands and aliases.
 
 No arguments is the default managed-create route and is equivalent to `_create`. A
-single argument is the other exception to ordinary Codex passthrough: if it matches an
-existing Rodex name or linked Codex session UUID, Rodex opens that session. Otherwise
-it—and every other non-Rodex invocation—is passed unchanged to Codex, unless that bare name collides with an
-unregistered session on Rodex's private tmux server. Such a collision fails explicitly
-and is shown by `_running`; Rodex never adopts or deletes it automatically. An existing Rodex name wins even if a later
-Codex release introduces a command with the same spelling.
+single argument is the other exception to ordinary Codex passthrough. An existing Rodex
+name or linked Codex UUID opens that session. An unregistered canonical Codex UUID is
+checked through a short-lived App Server `thread/read`; a persisted, non-ephemeral thread
+is resumed exactly, verified, assigned normal Rodex session/runtime IDs and a unique
+two-word name, registered, and attached. A missing UUID and every other unmatched
+invocation pass unchanged to Codex without creating a Rodex database row or tmux session.
+A bare name colliding with an unregistered session on Rodex's private tmux server instead
+fails explicitly and is shown by `_running`; Rodex never adopts or deletes that tmux
+session automatically. An existing Rodex name wins even if a later Codex release
+introduces a command with the same spelling.
 
 The in-TUI `/rodex` command and its completion ribbon are temporarily disabled through
 `RODEX_TMUX_SLASH_ENABLED` in `rodex.runtime`. The implementation remains in the

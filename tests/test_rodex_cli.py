@@ -901,7 +901,9 @@ def test_running_reports_an_unregistered_live_tmux_session(
     socket_path.touch()
     launcher = StubLauncher(tmp_path)
     launcher.session_names = ("orphan-name",)
-    monkeypatch.setattr("rodex.cli.default_tmux_server_socket_path", lambda: socket_path)
+    monkeypatch.setattr(
+        "rodex.session_commands.default_tmux_server_socket_path", lambda: socket_path
+    )
     monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
 
     assert (
@@ -1048,7 +1050,7 @@ def test_accepted_machine_mutation_emits_one_success_when_access_bookkeeping_fai
     monkeypatch.setattr(sys, "stdin", io.StringIO("run focused tests\n"))
     create_exact_controlled_session(database, tmp_path)
     monkeypatch.setattr(
-        "rodex.cli.record_a_rodex_session_access",
+        "rodex.machine_commands.record_a_rodex_session_access",
         lambda *_args: (_ for _ in ()).throw(RodexSessionError("database unavailable")),
     )
     launcher = StubLauncher(tmp_path)
@@ -3268,7 +3270,7 @@ def test_concurrent_alias_commands_serialize_across_tmux_and_database(
         return open_a_user_defined_cool_name_assignment(*args, **kwargs)
 
     monkeypatch.setattr(
-        "rodex.cli.open_a_user_defined_cool_name_assignment",
+        "rodex.session_commands.open_a_user_defined_cool_name_assignment",
         observe_assignment_attempt,
     )
     first_thread.start()

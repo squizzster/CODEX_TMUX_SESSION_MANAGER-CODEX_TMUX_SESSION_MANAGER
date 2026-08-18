@@ -1,12 +1,26 @@
 # Rodex - whenever you type `codex` try instead `rodex`
 
-Rodex creates a durable tmux-hosted Codex session when invoked with no arguments and
-gives its own commands an underscore namespace. Start normally with `./rodex`, detach
-when needed, and return later using a generated name such as `automatic-beluga`.
+Rodex makes a durable tmux-hosted Codex session feel like Codex itself. Start normally
+with `./rodex`, work in the ordinary Codex TUI, detach when needed, and return later by
+a memorable name such as `automatic-beluga`. Rodex-specific commands live in an
+underscore namespace; other nonempty invocations pass to Codex unchanged.
 
 > **Development status: ALPHA.** Rodex is a Linux/POSIX pre-release under active
 > validation. Interfaces may still change, but identity, lifecycle, installation,
 > security, and primary workflows have automated boundary coverage.
+
+## Why Rodex
+
+Rodex's first job is to accommodate the person at the terminal: replacing `codex` with
+`rodex` should preserve the familiar interface, arguments, input, output, signals, and
+exit status. Durability is added around that experience rather than in place of it.
+
+That user-first foundation also creates the direction of travel: one managed session
+becomes a local bridge between an interactive Codex worker and authorized automation.
+The human can attach through tmux, handle approvals, and intervene directly; another
+shell or agent can discover the same verified runtime, observe readable terminal output
+or structured protocol events, and control one exact turn without typing into the TUI.
+Both sides retain the same Rodex, runtime, Codex, and workspace context.
 
 ## What Rodex does
 
@@ -23,6 +37,8 @@ when needed, and return later using a generated name such as `automatic-beluga`.
 - Animates shared arrival and final departure for five seconds without blocking the TUI.
 - Keeps the in-TUI `/rodex` command implementation available but disabled for now.
 - Sends work to, waits for, or reads a running session from another shell.
+- Streams settled, readable terminal output without replaying terminal clear-screen or
+  transient composer redraws.
 - Starts, steers, waits for, interrupts, and reads results by exact Codex turn ID.
 - Maintains queryable session and exact-turn statistics from authenticated rollouts.
 - Refuses unregistered tmux name collisions and verifies Rodex and Codex identities
@@ -30,11 +46,11 @@ when needed, and return later using a generated name such as `automatic-beluga`.
 - Serializes concurrent opens of one ended name and tolerates the bounded Codex-writer
   shutdown handoff without creating duplicate runtimes.
 
-Rodex does not replace or reinterpret nonempty Codex CLI invocations. With no
-arguments it creates and attaches to a managed session. Exact underscore Rodex
-commands stay local, an existing Rodex name opens that session, and every other
-nonempty invocation replaces itself with Codex while preserving arguments, terminal
-streams, signals, and exit status.
+Rodex does not reinterpret ordinary nonempty Codex CLI invocations. With no arguments
+it creates and attaches to a managed session. Exact underscore Rodex commands stay
+local, an existing Rodex name opens that session, and every other nonempty invocation
+replaces itself with Codex while preserving arguments, terminal streams, signals, and
+exit status.
 
 ## Requirements
 
@@ -113,6 +129,8 @@ preference. See the current [tmux manual](https://man.openbsd.org/tmux.1) and
 | `./rodex _wait edgar-work` | Wait until the running session is idle. |
 | `./rodex _cat edgar-work` | Print all retained terminal output for use directly or in a Unix pipeline. |
 | `./rodex _cat edgar-work \| tail -n 10` | Print the last ten retained terminal lines. |
+| `./rodex _tail edgar-work` | Print the latest ten terminal lines, then follow settled readable output. |
+| `./rodex _tail -n 25 edgar-work` | Select a different initial line count and continue following. |
 | `./rodex _events edgar-work` | Stream filtered live protocol events as JSON lines. |
 | `./rodex _inspect edgar-work --json` | Read live thread state and its exact active turn ID. |
 | `printf '%s' "$PROMPT" \| ./rodex _start edgar-work --dispatch DISPATCH_ID --stdin --json` | Start an idle thread with caller-owned correlation. |
@@ -170,8 +188,13 @@ without rolling back the already committed name change.
 Arguments after `_create` or
 `_detach` are forwarded to the managed Codex TUI; use `--` when an explicit boundary
 improves clarity. `_cat` is a finite snapshot, so standard tools such as `head`, `tail`,
-and `grep` compose with it normally. `_events` remains open and emits selected future
-protocol events until interrupted. Names use 1–80
+and `grep` compose with it normally. `_tail` prints a familiar initial line selection
+and then remains open. It publishes rows as soon as they enter tmux history and publishes
+stable visible-pane changes after three 0.4-second observations. The live `Working`
+status region and composer are excluded so timer frames and partially typed prompts do
+not become duplicate transcript lines. `_events` is the distinct machine-readable
+stream: it remains open and emits selected future protocol events as JSON lines until
+interrupted. Names use 1–80
 ASCII letters, digits, underscores, or hyphens and begin with a letter or digit. The
 existing reserved-name vocabulary remains case-insensitive and includes Codex
 top-level commands and aliases.
@@ -237,7 +260,8 @@ POSIX user. Codex remains responsible for raw history.
 - [Security model](docs/SECURITY.md)
 - [Code concepts](docs/CODE_CONCEPTS.md)
 - [SQL schema methodology](docs/SQL_SCHEMA.md)
-- [Phase II plan (planning only)](docs/PHASE_II_PLAN.md)
+- [Codex App Server 0.147 live evidence](docs/APP_SERVER_0_147_LIVE_EVIDENCE.md)
+- [Phase II candidates for review](docs/PHASE_II_PLAN.md)
 
 ## Development
 
@@ -250,5 +274,5 @@ uv build
 
 The alpha coverage floor is 70%. Tests lock the exhaustive application route/preparation
 matrix and thin CLI boundary, with real App Server Unix-socket and real-tmux coverage for
-scrollback retention, inherited mouse configuration, rename, identity markers, and status
-configuration.
+scrollback retention and following, inherited mouse configuration, rename, identity
+markers, and status configuration.

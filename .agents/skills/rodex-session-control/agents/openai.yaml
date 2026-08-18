@@ -1,4 +1,4 @@
 interface:
   display_name: "Rodex Session Control"
-  short_description: "Control exact live Rodex turns safely"
-  default_prompt: "Use $rodex-session-control to inspect and control this Rodex session safely."
+  short_description: "Observe and control exact Rodex turns"
+  default_prompt: "Use $rodex-session-control to observe and control this Rodex session safely."

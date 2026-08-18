@@ -138,7 +138,7 @@ def execute_session_command(
             lambda runtime, revalidate: follow_session_tail(
                 request,
                 runtime,
-                launcher.capture_scrollback,
+                launcher.capture_scrollback_snapshot,
                 revalidate,
             ),
         )

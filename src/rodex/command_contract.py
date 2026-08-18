@@ -140,7 +140,7 @@ COMMAND_SPECS: Final = (
         CommandRoute.SESSION,
         (
             "_tail [-f] [-n NUM] SESSION",
-            "Print recent terminal output and follow rendered session changes.",
+            "Print recent terminal output and follow settled plain-text changes.",
         ),
     ),
     CommandSpec(

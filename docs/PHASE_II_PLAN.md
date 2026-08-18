@@ -1,5 +1,9 @@
 # Phase II evidence and remaining plan
 
+This document is a review surface, not a committed roadmap. The implemented evidence
+and current boundaries are factual; every remaining capability, priority, and ordering
+below remains subject to review and explicit user agreement before implementation.
+
 Phase II remains evidence-gated. The 0.147 live experiment now proves that a short-lived
 mutation client may disconnect after acceptance: lifecycle events and approval requests
 continue on the subscribed primary connection. See
@@ -7,7 +11,15 @@ continue on the subscribed primary connection. See
 have the same live routing evidence. Dispatch recovery uses caller-owned correlation and
 read-only observation; it does not assume or implement server-side deduplication.
 
-## Order
+The product order is deliberate. Rodex first accommodates the user by keeping ordinary
+Codex invocation and TUI behavior intact inside a durable, named tmux runtime. That
+foundation now forms a working local bridge: a person may attach and intervene while an
+authorized agent observes readable progress with `_tail`, observes protocol activity
+with `_events`, and uses exact-turn control without terminal keystroke injection. Future
+multi-agent orchestration should extend this bridge rather than create a second runtime
+or conversation model.
+
+## Candidate order for review
 
 1. Preserve caller-directed relocation. A resumed runtime intentionally adopts the
    caller's current working directory: moving a user's home/project/worktree and then

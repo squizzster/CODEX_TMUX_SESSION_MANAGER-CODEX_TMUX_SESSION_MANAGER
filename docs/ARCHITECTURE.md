@@ -7,8 +7,8 @@ and keep this file within 150 lines and 10,240 bytes.
 
 # Rodex architecture
 
-Rodex is a local match-maker between a durable Rodex session, one current runtime UUID,
-the Codex thread/session tree it represents, and the tmux endpoint hosting it.
+Rodex is a harness and bridge. It matches a durable Rodex session and runtime UUID
+to its Codex thread/session tree and tmux endpoint while preserving Codex's interface.
 
 ## Runtime shape
 
@@ -21,7 +21,8 @@ Rodex CLI ───────────────► SQLite registry
     │                         │ durable identity
     ▼
 private tmux server
-    │  └── advertises sockets, Rodex/registry/runtime/Codex IDs and registration state
+    │  ├── advertises sockets, Rodex/registry/runtime/Codex IDs and registration state
+    │  └──► verified snapshots/following ──► _cat / _tail
     ▼
 session host ─┬► Codex TUI ──► protocol proxy ──► Codex app-server
              │                  ├──► context status ──► tmux base status
@@ -29,7 +30,7 @@ session host ─┬► Codex TUI ──► protocol proxy ──► Codex app-se
              └► analytics worker ──► in-memory analyzer ──► SQLite projections
 ```
 
-The TUI remains the normal Codex interface and runs inline so rendered output enters tmux's 50,000-line pane history. tmux owns keyboard copy-mode and `_cat` scrollback snapshots, and derives status privacy from clients attached to that exact session. The proxy forwards WebSocket frames, derives tool and context signals, and fans structured events; it never buffers the screen.
+The TUI remains the normal Codex interface and runs inline so rendered output enters tmux's 50,000-line pane history. tmux owns keyboard copy-mode, `_cat` snapshots, and `_tail`'s plain-text source; it also derives status privacy from clients attached to that exact session. The proxy forwards WebSocket frames, derives tool and context signals, and fans structured events; it never buffers the screen.
 
 ## Application control plane
 
@@ -58,6 +59,7 @@ read; for example, direct statistics still reads SQLite without acquiring a live
 | `rodex.managed_session_lifecycle` | Own selector resolution, create, attach, resume, recovery, and collision policy. |
 | `rodex.session_commands` / `statistics_commands` / `machine_commands` | Execute the three command domains behind the shared CLI contract. |
 | `rodex.session_read_pipeline` | Own resolve/read-or-stream/revalidate/access order for live session reads. |
+| `rodex.session_tail` | Parse tail-compatible selection and follow committed or settled terminal rows. |
 | `rodex.runtime` | Own tmux scrollback, app-server discovery, attachment, and supervision. |
 | `rodex.process_contracts` | Own typed subprocess configurations and their lossless argv wire forms. |
 | `rodex.status_bar` / `tmux_status` / `status_animation` | Own base status, palette, arbitration, and cancellable transitions. |
@@ -104,6 +106,14 @@ Managed opens hold one per-session lock through live resolution, resume, and end
 same naming pipeline and compensate a tmux rename if the database transition fails.
 
 Named segments own base status. `TmuxStatusPipeline` arbitrates animations and transient claims so refreshes cannot clear higher-priority warnings. Per-client prefix state preserves fast keys; shared `Ctrl-C` requires same-client confirmation; `/rodex` remains disabled. Context usage and compaction signals come from the primary protocol observer, while durable analytics remains downstream.
+
+## Live observation
+
+Live reads share one verified session-read pipeline. `_cat` returns a tmux snapshot;
+`_tail` emits committed history immediately and settled visible changes after 1.2
+seconds, excluding the active status/composer region. `_events` streams structured App
+Server events. Observation is not turn completion; controllers use `_inspect`, `_wait`,
+and `_result`.
 
 ## Persistent analytics
 

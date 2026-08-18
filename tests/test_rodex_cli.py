@@ -33,6 +33,7 @@ from rodex.runtime import (
     LiveTmuxSession,
     RodexCodexSessionNotFoundError,
     RodexRuntimeError,
+    TmuxScrollbackSnapshot,
 )
 from rodex.session_tail import SessionTailRequest
 from rodex_registry import (
@@ -146,6 +147,13 @@ class StubLauncher:
     def capture_scrollback(self, runtime: LiveTmuxSession) -> tuple[str, ...]:
         self.scrollback_captures.append(runtime)
         return self.scrollback
+
+    def capture_scrollback_snapshot(
+        self, runtime: LiveTmuxSession
+    ) -> TmuxScrollbackSnapshot:
+        return TmuxScrollbackSnapshot(
+            self.capture_scrollback(runtime), max(len(self.scrollback) - 2, 0)
+        )
 
     def stop(self, runtime: LiveTmuxSession, *, check: bool = True) -> None:
         self.stopped.append((runtime, check))
@@ -1747,7 +1755,7 @@ def test_tail_follows_verified_session_text_without_protocol_events(
         SessionTailRequest("automatic-beluga", 5),
         LiveTmuxSession(tmp_path / "tmux.sock", "automatic-beluga"),
     ]
-    assert observed[2] == launcher.capture_scrollback
+    assert observed[2] == launcher.capture_scrollback_snapshot
     assert callable(observed[3])
     assert control.event_streams == []
 

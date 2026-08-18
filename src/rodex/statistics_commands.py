@@ -20,10 +20,10 @@ from .command_contract import STATS_COMMAND, STATS_STATUS_COMMAND
 from .errors import RodexLaunchError
 
 
-def run_statistics_command(arguments: list[str], database_path: Path) -> bool:
-    """Serve persistent statistics without requiring Codex, tmux, or analysis."""
+def execute_statistics_command(arguments: list[str], database_path: Path) -> None:
+    """Execute the statistics route selected by the application pipeline."""
     if not arguments or arguments[0] not in {STATS_COMMAND, STATS_STATUS_COMMAND}:
-        return False
+        raise AssertionError("application pipeline selected an invalid statistics command")
     command = arguments[0]
     if command == STATS_STATUS_COMMAND:
         if len(arguments) != 2:
@@ -115,7 +115,7 @@ def run_statistics_command(arguments: list[str], database_path: Path) -> bool:
     }
     if command == STATS_STATUS_COMMAND:
         print(json.dumps(payload, indent=2, sort_keys=True), flush=True)
-        return True
+        return
     if snapshot is None:
         raise RodexLaunchError(
             f"Rodex session has no analytics snapshot yet: {session_name}"
@@ -141,7 +141,7 @@ def run_statistics_command(arguments: list[str], database_path: Path) -> bool:
         print(json.dumps(payload, indent=2, sort_keys=True), flush=True)
     else:
         _print_human_statistics(payload)
-    return True
+    return
 
 
 def _print_human_statistics(payload: dict[str, object]) -> None:

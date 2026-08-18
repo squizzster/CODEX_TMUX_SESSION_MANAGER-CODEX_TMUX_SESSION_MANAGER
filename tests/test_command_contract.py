@@ -22,9 +22,10 @@ def test_command_specs_are_the_complete_unique_rodex_vocabulary() -> None:
     assert len(tokens) == len(set(tokens))
     assert frozenset(tokens) == RODEX_COMMANDS
     assert {spec.token: spec for spec in COMMAND_SPECS} == COMMANDS_BY_TOKEN
-    assert set(MACHINE_COMMAND_SPECS) <= {
-        spec.token for spec in COMMAND_SPECS if spec.route is CommandRoute.CONTROL
+    assert set(MACHINE_COMMAND_SPECS) - {WAIT_COMMAND} == {
+        spec.token for spec in COMMAND_SPECS if spec.route is CommandRoute.MACHINE
     }
+    assert COMMANDS_BY_TOKEN[WAIT_COMMAND].route is CommandRoute.SESSION
 
 
 def test_help_is_generated_from_every_declared_command() -> None:

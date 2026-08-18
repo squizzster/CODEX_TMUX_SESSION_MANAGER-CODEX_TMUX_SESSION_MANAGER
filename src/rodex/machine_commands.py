@@ -52,16 +52,16 @@ class _RuntimeUpgradeRequiredError(RodexLaunchError):
     """A legacy live runtime lacks Phase I's exact incarnation identity."""
 
 
-def run_machine_command(
+def execute_machine_command(
     arguments: list[str],
     database_path: Path,
     launcher: RodexRuntimeLauncher,
     control_client: CodexControlClient,
-) -> int | None:
-    """Run the schema-v1 exact-control surface when selected."""
+) -> int:
+    """Execute the exact-control command selected by the application pipeline."""
     spec = machine_spec_for_arguments(arguments)
     if spec is None:
-        return None
+        raise AssertionError("application pipeline selected an invalid machine command")
     command = spec.token
     operation = spec.operation
     session_name = arguments[1] if len(arguments) > 1 else None

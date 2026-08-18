@@ -50,14 +50,14 @@ from .runtime import (
 from .session_read_pipeline import LiveSessionReadPipeline
 
 
-def run_session_command(
+def execute_session_command(
     arguments: list[str],
     database_path: Path,
     launcher: RodexRuntimeLauncher,
     control_client: CodexControlClient,
-) -> bool:
+) -> None:
     if not arguments:
-        return False
+        raise AssertionError("application pipeline selected an empty session command")
     command = arguments[0]
     if command == CONTEXT_COMMAND:
         if tuple(arguments) not in {
@@ -66,12 +66,12 @@ def run_session_command(
         }:
             raise RodexLaunchError("usage: rodex _context [--json]")
         _print_current_rodex_context(database_path, launcher)
-        return True
+        return
     if command == RUNNING_COMMAND:
         if len(arguments) != 1:
             raise RodexLaunchError("usage: rodex _running")
         _print_running_sessions(database_path, launcher)
-        return True
+        return
     if command == MOUSE_COMMAND:
         if len(arguments) not in {2, 3}:
             raise RodexLaunchError(
@@ -86,7 +86,7 @@ def run_session_command(
         mouse_state = launcher.set_mouse_mode(runtime, mode)
         record_a_rodex_session_access(session_id, database_path)
         print(f"Rodex {arguments[1]} mouse: {mouse_state}", flush=True)
-        return True
+        return
     if command == SEND_COMMAND:
         if len(arguments) < 3:
             raise RodexLaunchError("usage: rodex _send SESSION_NAME PROMPT")
@@ -105,7 +105,7 @@ def run_session_command(
             f"Rodex {session_name}: {dispatch.action} Codex turn {dispatch.turn_id}",
             flush=True,
         )
-        return True
+        return
     if command == WAIT_COMMAND:
         if len(arguments) != 2:
             raise RodexLaunchError("usage: rodex _wait SESSION_NAME")
@@ -118,7 +118,7 @@ def run_session_command(
         )
         record_a_rodex_session_access(session_id, database_path)
         print(f"Rodex {arguments[1]}: Codex turn complete", flush=True)
-        return True
+        return
     if command == CAT_COMMAND:
         if len(arguments) != 2:
             raise RodexLaunchError("usage: rodex _cat SESSION_NAME")
@@ -128,7 +128,7 @@ def run_session_command(
         if scrollback:
             sys.stdout.write("\n".join(scrollback) + "\n")
             sys.stdout.flush()
-        return True
+        return
     if command == EVENTS_COMMAND:
         if len(arguments) != 2:
             raise RodexLaunchError("usage: rodex _events SESSION_NAME")
@@ -141,7 +141,7 @@ def run_session_command(
                 revalidate,
             ),
         )
-        return True
+        return
     if command == ALIAS_COMMAND:
         force, operands = _parse_alias_arguments(arguments[1:])
         if len(operands) != 2:
@@ -256,8 +256,10 @@ def run_session_command(
                     f"RODEX_AUTO_INFO delivery failed: {error}"
                 ) from error
         print(f"Rodex name: {assignment.names.display_name}", flush=True)
-        return True
-    return False
+        return
+    raise AssertionError(
+        f"application pipeline selected unknown session command: {command}"
+    )
 
 
 def _parse_alias_arguments(arguments: list[str]) -> tuple[bool, list[str]]:

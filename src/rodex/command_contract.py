@@ -33,8 +33,10 @@ class CommandRoute(StrEnum):
     HELP = "help"
     LAUNCH = "launch"
     SESSION = "session"
-    CONTROL = "control"
+    MACHINE = "machine"
     STATISTICS = "statistics"
+    SELECTOR = "selector"
+    CODEX = "codex"
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,12 +76,12 @@ COMMAND_SPECS: Final = (
     ),
     CommandSpec(
         SEND_COMMAND,
-        CommandRoute.CONTROL,
+        CommandRoute.SESSION,
         ("_send SESSION PROMPT", "Send work to a running session."),
     ),
     CommandSpec(
         WAIT_COMMAND,
-        CommandRoute.CONTROL,
+        CommandRoute.SESSION,
         (
             "_wait SESSION",
             "Wait until a running session is idle.",
@@ -89,12 +91,12 @@ COMMAND_SPECS: Final = (
     ),
     CommandSpec(
         INSPECT_COMMAND,
-        CommandRoute.CONTROL,
+        CommandRoute.MACHINE,
         ("_inspect SESSION --json", "Inspect one verified live thread."),
     ),
     CommandSpec(
         START_COMMAND,
-        CommandRoute.CONTROL,
+        CommandRoute.MACHINE,
         (
             "_start SESSION [--dispatch ID] --stdin --json",
             "Start work only when the thread is idle.",
@@ -102,7 +104,7 @@ COMMAND_SPECS: Final = (
     ),
     CommandSpec(
         STEER_COMMAND,
-        CommandRoute.CONTROL,
+        CommandRoute.MACHINE,
         (
             "_steer SESSION --turn ID [--dispatch ID] --stdin --json",
             "Steer one exact active turn.",
@@ -110,7 +112,7 @@ COMMAND_SPECS: Final = (
     ),
     CommandSpec(
         DISPATCH_STATUS_COMMAND,
-        CommandRoute.CONTROL,
+        CommandRoute.MACHINE,
         (
             "_dispatch-status SESSION --dispatch ID --json",
             "Observe acceptance evidence for one dispatch.",
@@ -118,12 +120,12 @@ COMMAND_SPECS: Final = (
     ),
     CommandSpec(
         INTERRUPT_COMMAND,
-        CommandRoute.CONTROL,
+        CommandRoute.MACHINE,
         ("_interrupt SESSION --turn ID --json", "Interrupt one exact active turn."),
     ),
     CommandSpec(
         RESULT_COMMAND,
-        CommandRoute.CONTROL,
+        CommandRoute.MACHINE,
         ("_result SESSION --turn ID --json", "Read one exact turn result."),
     ),
     CommandSpec(
@@ -133,7 +135,7 @@ COMMAND_SPECS: Final = (
     ),
     CommandSpec(
         EVENTS_COMMAND,
-        CommandRoute.CONTROL,
+        CommandRoute.SESSION,
         ("_events SESSION", "Stream filtered live protocol events as JSON lines."),
     ),
     CommandSpec(

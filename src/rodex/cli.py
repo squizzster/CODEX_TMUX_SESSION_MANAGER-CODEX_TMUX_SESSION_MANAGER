@@ -7,7 +7,7 @@ import os
 import shutil
 import sqlite3
 import sys
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -38,14 +38,8 @@ from rodex_registry import (
 )
 from rodex_sql import RodexSQLError
 
-from .command_contract import (
-    CREATE_COMMAND,
-    DETACH_COMMAND,
-    HELP_COMMAND,
-    HELP_TEXT,
-    RODEX_COMMANDS,
-    machine_spec_for_arguments,
-)
+from .application_pipeline import CodexDelegator, UnifiedRodexApplicationPipeline
+from .command_contract import CREATE_COMMAND, DETACH_COMMAND
 from .control import (
     CodexControlClient,
     RodexControlError,
@@ -59,7 +53,6 @@ from .live_runtime import (
     session_transition_lock,
     verify_live_runtime_identity,
 )
-from .machine_commands import print_machine_error, run_machine_command
 from .runtime import (
     RODEX_REGISTRATION_PENDING,
     LiveTmuxSession,
@@ -68,8 +61,6 @@ from .runtime import (
     RodexRuntimeLauncher,
     default_tmux_server_socket_path,
 )
-from .session_commands import run_session_command
-from .statistics_commands import run_statistics_command
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,9 +69,6 @@ class _PreparedSelectedSession:
     display_name: str
     active_tmux: LiveTmuxSession
     attach_message: str
-
-
-CodexDelegator = Callable[[str, Sequence[str]], int]
 
 
 def _exec_codex(codex_binary: str, arguments: Sequence[str]) -> int:
@@ -97,75 +85,57 @@ def run(
     control_client: CodexControlClient | None = None,
     codex_delegator: CodexDelegator = _exec_codex,
 ) -> int:
-    """Route explicit Rodex commands and pass every other invocation to Codex."""
+    """Adapt process inputs to the one unified Rodex application pipeline."""
     arguments = list(sys.argv[1:] if argv is None else argv)
-    if arguments[:1] == [HELP_COMMAND]:
-        if len(arguments) != 1:
-            raise RodexLaunchError("usage: rodex _help")
-        print(HELP_TEXT, end="")
-        return 0
-    if not arguments:
-        arguments = [CREATE_COMMAND]
-
     configured_codex = os.environ.get("RODEX_CODEX_BINARY", "codex")
+    configured_tmux = os.environ.get("RODEX_TMUX_BINARY", "tmux")
     resolved_database = (
         Path(os.path.abspath(Path(database_path).expanduser()))
         if database_path is not None
         else default_rodex_database_path()
     )
-    rodex_command = (
-        arguments[0] if arguments[:1] and arguments[0] in RODEX_COMMANDS else None
-    )
-    possible_existing_session = _possible_existing_session_selector(
-        arguments, resolved_database
-    )
-    if rodex_command is None and not possible_existing_session:
-        _reject_live_unregistered_name_collision(
-            arguments,
-            configured_codex,
-        )
-        return _delegate_to_codex(configured_codex, arguments, codex_delegator)
-    if run_statistics_command(arguments, resolved_database):
-        return 0
+    return UnifiedRodexApplicationPipeline(
+        database_path=resolved_database,
+        configured_codex=configured_codex,
+        configured_tmux=configured_tmux,
+        launcher=launcher,
+        control_client=control_client,
+        codex_delegator=codex_delegator,
+        resolve_executable=shutil.which,
+        collision_guard=_reject_live_unregistered_name_collision,
+        selector_resolver=_session_selector_exists,
+        selector_executor=_execute_selector_route,
+        launch_executor=_execute_launch_route,
+    ).execute(arguments)
 
-    configured_tmux = os.environ.get("RODEX_TMUX_BINARY", "tmux")
-    tmux_binary = shutil.which(configured_tmux)
-    if tmux_binary is None:
-        machine_spec = machine_spec_for_arguments(arguments)
-        if machine_spec is not None:
-            print_machine_error(
-                machine_spec.operation,
-                "runtime_unavailable",
-                f"tmux executable was not found: {configured_tmux}",
-                retryable=True,
-                session_name=arguments[1] if len(arguments) > 1 else None,
-                control=None,
-            )
-            return 3
-        raise RodexExecutableNotFoundError(
-            f"tmux executable was not found: {configured_tmux}"
-        )
 
-    codex_binary = shutil.which(configured_codex)
-    runtime_launcher = launcher or RodexRuntimeLauncher(
-        codex_binary or configured_codex, tmux_binary
-    )
-    runtime_control = control_client or CodexControlClient()
-    machine_status = run_machine_command(
-        arguments,
-        resolved_database,
-        runtime_launcher,
-        runtime_control,
-    )
-    if machine_status is not None:
-        return machine_status
-    if run_session_command(
-        arguments,
-        resolved_database,
-        runtime_launcher,
-        runtime_control,
+def _execute_selector_route(
+    selector: str,
+    database_path: Path,
+    launcher: RodexRuntimeLauncher,
+    *,
+    codex_available: bool,
+) -> int:
+    """Attach or resume the selector already resolved by the application pipeline."""
+    if not _open_selected_session(
+        [selector],
+        database_path,
+        launcher,
+        codex_available=codex_available,
+        detach=False,
     ):
-        return 0
+        raise RodexLaunchError(f"Rodex session disappeared: {selector}")
+    return 0
+
+
+def _execute_launch_route(
+    arguments: list[str],
+    resolved_database: Path,
+    runtime_launcher: RodexRuntimeLauncher,
+    *,
+    codex_binary: str | None,
+) -> int:
+    """Execute the create/detach mechanism selected by the application pipeline."""
     codex_arguments, requested_name, detach = _parse_launch_arguments(arguments)
     if _open_selected_session(
         codex_arguments,
@@ -175,9 +145,8 @@ def run(
         detach=detach,
     ):
         return 0
-    if rodex_command not in {CREATE_COMMAND, DETACH_COMMAND}:
-        return _delegate_to_codex(configured_codex, arguments, codex_delegator)
     if codex_binary is None:
+        configured_codex = os.environ.get("RODEX_CODEX_BINARY", "codex")
         raise RodexExecutableNotFoundError(
             f"Codex executable was not found: {configured_codex}"
         )
@@ -466,14 +435,10 @@ def _without_separator(arguments: list[str]) -> list[str]:
     return arguments[1:] if arguments[:1] == ["--"] else arguments
 
 
-def _possible_existing_session_selector(arguments: list[str], database_path: Path) -> bool:
-    """Recognize the one bare persisted-session exception to Codex passthrough."""
-    if len(arguments) != 1 or arguments[0].startswith(("-", "_")):
-        return False
-    if not database_path.exists():
-        return False
+def _session_selector_exists(selector: str, database_path: Path) -> bool:
+    """Resolve the typed selector route against this user's persisted sessions."""
     try:
-        return _lookup_owned_rodex_session_selector(arguments[0], database_path) is not None
+        return _lookup_owned_rodex_session_selector(selector, database_path) is not None
     except (CoolNameError, ValueError):
         return False
 
@@ -528,19 +493,6 @@ def _reject_live_unregistered_name_collision(
             "but is not registered in this Rodex database; refusing Codex "
             "passthrough and unsafe adoption"
         )
-
-
-def _delegate_to_codex(
-    configured_codex: str,
-    arguments: Sequence[str],
-    codex_delegator: CodexDelegator,
-) -> int:
-    codex_binary = shutil.which(configured_codex)
-    if codex_binary is None:
-        raise RodexExecutableNotFoundError(
-            f"Codex executable was not found: {configured_codex}"
-        )
-    return codex_delegator(codex_binary, arguments)
 
 
 def _print_existing_detached_runtime(

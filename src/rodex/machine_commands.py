@@ -25,8 +25,8 @@ from .command_contract import (
     START_COMMAND,
     STEER_COMMAND,
     WAIT_COMMAND,
+    MachineCommandSpec,
     MachineUsageError,
-    machine_spec_for_arguments,
     parse_machine_invocation,
 )
 from .control import (
@@ -54,13 +54,13 @@ class _RuntimeUpgradeRequiredError(RodexLaunchError):
 
 def execute_machine_command(
     arguments: list[str],
+    spec: MachineCommandSpec,
     database_path: Path,
     launcher: RodexRuntimeLauncher,
     control_client: CodexControlClient,
 ) -> int:
     """Execute the exact-control command selected by the application pipeline."""
-    spec = machine_spec_for_arguments(arguments)
-    if spec is None:
+    if not arguments or arguments[0] != spec.token:
         raise AssertionError("application pipeline selected an invalid machine command")
     command = spec.token
     operation = spec.operation
@@ -71,7 +71,7 @@ def execute_machine_command(
     dispatch_id: str | None = None
     display_name: str | None = None
     try:
-        invocation = parse_machine_invocation(arguments)
+        invocation = parse_machine_invocation(arguments, spec)
         session_name = invocation.session_name
         turn_id = invocation.turn_id
         dispatch_id = invocation.dispatch_id

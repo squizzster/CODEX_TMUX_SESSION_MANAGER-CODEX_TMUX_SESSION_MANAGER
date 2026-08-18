@@ -14,7 +14,10 @@ Convenience belongs at the boundary; identity and state remain exact underneath 
 
 ## Behaviour
 
-- Equivalent intent enters one authoritative domain pipeline regardless of CLI spelling.
+- Every invocation is classified once, enters one authoritative application pipeline,
+  and executes exactly one domain mechanism regardless of CLI spelling.
+- Preparation branches state real control flow; handler-specific dependencies remain
+  explicit rather than being implied by inert pipeline metadata.
 - Common actions may use bare words; their `--` forms must behave identically.
 - Command vocabulary is centralized and excluded from every name-allocation route.
 - The effective name remains consistent across tmux, status, and user communication.
@@ -33,6 +36,8 @@ Convenience belongs at the boundary; identity and state remain exact underneath 
 - Failure cleanup targets only resources created by the failed operation.
 - Cross-system transitions compensate external changes when durable commit fails.
 - CLI code adapts arguments and output; domain libraries own rules and state transitions.
+- Resolved identities and exact command specifications travel forward as typed context;
+  later stages do not rediscover them from display text or argv.
 - Errors name the failed contract and the next valid action; commands fail on stderr.
 
 ## Evolution

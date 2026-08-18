@@ -26,6 +26,13 @@ than being inferred or adopted. Private proxy/event sockets and runtime logs rem
 implementation details rather than agent context.
 New runtimes also report their UUID and whether it matches the persisted incarnation.
 
+Every process invocation passes through one application control plane. The command
+contract classifies argv once; the selected direct, selector, or runtime preparation
+branch then supplies one domain executor. `rodex.cli` only composes process dependencies
+and maps top-level failures. A matching bare selector becomes one typed owned-session
+identity before lifecycle work, while an exact machine command carries the same
+classified specification through parsing and execution.
+
 ## Basic launch pipeline
 
 1. Bare `./rodex` (or explicit `./rodex _create`) validates the `codex` and `tmux`

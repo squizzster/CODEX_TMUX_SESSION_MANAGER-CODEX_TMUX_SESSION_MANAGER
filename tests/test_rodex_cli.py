@@ -638,10 +638,14 @@ def test_unknown_bare_name_refuses_a_live_unregistered_tmux_collision(
     socket_path = tmp_path / "tmux.sock"
     socket_path.touch()
     delegator = RecordingCodexDelegator()
-    monkeypatch.setattr("rodex.cli.default_tmux_server_socket_path", lambda: socket_path)
+    monkeypatch.setattr(
+        "rodex.managed_session_lifecycle.default_tmux_server_socket_path",
+        lambda: socket_path,
+    )
     monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
     monkeypatch.setattr(
-        "rodex.cli.RodexRuntimeLauncher.session_exists", lambda *_args: True
+        "rodex.managed_session_lifecycle.RodexRuntimeLauncher.session_exists",
+        lambda *_args: True,
     )
 
     with pytest.raises(RodexLaunchError, match="not registered"):
@@ -2488,7 +2492,8 @@ def test_unmatched_codex_uuid_like_argument_passes_through_unchanged(
     )
     monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
     monkeypatch.setattr(
-        "rodex.cli.default_tmux_server_socket_path", lambda: tmp_path / "absent.sock"
+        "rodex.managed_session_lifecycle.default_tmux_server_socket_path",
+        lambda: tmp_path / "absent.sock",
     )
     create_controlled_session(database, tmp_path)
     delegator = RecordingCodexDelegator(returncode=23)
@@ -3227,7 +3232,7 @@ def test_new_launch_cleans_up_the_renamed_runtime_when_persistence_fails(
         "cool_name.functions.coolname.generate_slug", lambda _word_count: "safe-name"
     )
     monkeypatch.setattr(
-        "rodex.cli.update_rodex_tmux_session_name",
+        "rodex.managed_session_lifecycle.update_rodex_tmux_session_name",
         lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("persist failed")),
     )
 
@@ -3258,7 +3263,7 @@ def test_live_reattach_restores_the_recorded_name_when_persistence_fails(
     launcher = StubLauncher(tmp_path)
     monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
     monkeypatch.setattr(
-        "rodex.cli.update_rodex_tmux_session_name",
+        "rodex.managed_session_lifecycle.update_rodex_tmux_session_name",
         lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("persist failed")),
     )
 
@@ -3598,7 +3603,7 @@ def test_database_failure_stops_the_unregistered_runtime(
     launcher = StubLauncher(tmp_path)
     monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
     monkeypatch.setattr(
-        "rodex.cli.create_a_rodex_session",
+        "rodex.managed_session_lifecycle.create_a_rodex_session",
         lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("database failed")),
     )
 

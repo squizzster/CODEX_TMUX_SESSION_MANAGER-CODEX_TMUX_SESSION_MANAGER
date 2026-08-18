@@ -7,82 +7,89 @@ import pytest
 
 import rodex.application_pipeline as pipeline_module
 from rodex.application_pipeline import (
-    ROUTE_REQUIREMENTS,
-    PipelineRequirement,
+    ROUTE_PREPARATIONS,
+    PipelinePreparation,
     UnifiedRodexApplicationPipeline,
     select_rodex_invocation,
 )
 from rodex.command_contract import (
     COMMAND_SPECS,
     WAIT_COMMAND,
+    ClassifiedRodexCommand,
     CommandRoute,
 )
 from rodex.errors import RodexExecutableNotFoundError
+from rodex.managed_session_lifecycle import OwnedSessionSelection
 
 
 @pytest.mark.parametrize(
-    ("arguments", "normalized", "route", "requirement"),
+    ("arguments", "normalized", "route", "preparation"),
     [
-        ([], ("_create",), CommandRoute.LAUNCH, PipelineRequirement.RUNTIME),
-        (["_help"], ("_help",), CommandRoute.HELP, PipelineRequirement.NONE),
-        (["_stats"], ("_stats",), CommandRoute.STATISTICS, PipelineRequirement.DATABASE),
-        (["_cat"], ("_cat",), CommandRoute.SESSION, PipelineRequirement.RUNTIME),
+        ([], ("_create",), CommandRoute.LAUNCH, PipelinePreparation.RUNTIME),
+        (["_help"], ("_help",), CommandRoute.HELP, PipelinePreparation.DIRECT),
+        (["_stats"], ("_stats",), CommandRoute.STATISTICS, PipelinePreparation.DIRECT),
+        (["_cat"], ("_cat",), CommandRoute.SESSION, PipelinePreparation.RUNTIME),
         (
             ["_wait", "worker"],
             ("_wait", "worker"),
             CommandRoute.SESSION,
-            PipelineRequirement.RUNTIME,
+            PipelinePreparation.RUNTIME,
         ),
         (
             ["_wait", "worker", "--turn", "turn-1", "--json"],
             ("_wait", "worker", "--turn", "turn-1", "--json"),
             CommandRoute.MACHINE,
-            PipelineRequirement.RUNTIME,
+            PipelinePreparation.RUNTIME,
         ),
-        (["_inspect"], ("_inspect",), CommandRoute.MACHINE, PipelineRequirement.RUNTIME),
-        (["worker"], ("worker",), CommandRoute.SELECTOR, PipelineRequirement.DATABASE),
+        (["_inspect"], ("_inspect",), CommandRoute.MACHINE, PipelinePreparation.RUNTIME),
+        (
+            ["worker"],
+            ("worker",),
+            CommandRoute.SELECTOR,
+            PipelinePreparation.SELECTOR,
+        ),
         (
             ["_head", "worker"],
             ("_head", "worker"),
             CommandRoute.CODEX,
-            PipelineRequirement.NONE,
+            PipelinePreparation.DIRECT,
         ),
-        (["--version"], ("--version",), CommandRoute.CODEX, PipelineRequirement.NONE),
+        (["--version"], ("--version",), CommandRoute.CODEX, PipelinePreparation.DIRECT),
     ],
 )
 def test_invocation_selection_is_single_typed_and_exhaustive(
     arguments: list[str],
     normalized: tuple[str, ...],
     route: CommandRoute,
-    requirement: PipelineRequirement,
+    preparation: PipelinePreparation,
 ) -> None:
     invocation = select_rodex_invocation(arguments)
 
     assert invocation.arguments == normalized
     assert invocation.route is route
-    assert invocation.requirement is requirement
+    assert invocation.preparation is preparation
 
 
-def test_every_declared_route_has_one_requirement_and_every_command_uses_it() -> None:
-    assert set(ROUTE_REQUIREMENTS) == set(CommandRoute)
+def test_every_declared_route_has_one_preparation_and_every_command_uses_it() -> None:
+    assert set(ROUTE_PREPARATIONS) == set(CommandRoute)
 
     for spec in COMMAND_SPECS:
         invocation = select_rodex_invocation([spec.token])
         assert invocation.route is spec.route
-        assert invocation.requirement is ROUTE_REQUIREMENTS[spec.route]
+        assert invocation.preparation is ROUTE_PREPARATIONS[spec.route]
 
     exact_wait = select_rodex_invocation(
         [WAIT_COMMAND, "worker", "--turn", "turn-1", "--json"]
     )
     assert exact_wait.route is CommandRoute.MACHINE
-    assert exact_wait.requirement is PipelineRequirement.RUNTIME
+    assert exact_wait.preparation is PipelinePreparation.RUNTIME
 
 
 def _pipeline(
     tmp_path: Path,
     trace: list[object],
     *,
-    selector_exists: bool = False,
+    selector_resolves: bool = False,
     available: dict[str, str | None] | None = None,
 ) -> UnifiedRodexApplicationPipeline:
     executables = (
@@ -97,40 +104,74 @@ def _pipeline(
         trace.append(("codex", binary, tuple(arguments)))
         return 17
 
-    def guard(arguments: list[str], configured_codex: str) -> None:
-        trace.append(("collision_guard", tuple(arguments), configured_codex))
+    class FakeSessionLifecycle:
+        def resolve_selector(
+            self, selector: str, database_path: Path
+        ) -> OwnedSessionSelection | None:
+            trace.append(("selector_resolver", selector, database_path))
+            if not selector_resolves:
+                return None
+            return OwnedSessionSelection(selector, 41)
 
-    def resolve_selector(selector: str, database_path: Path) -> bool:
-        trace.append(("selector_resolver", selector, database_path))
-        return selector_exists
-
-    def execute_selector(
-        selector: str,
-        database_path: Path,
-        launcher: Any,
-        *,
-        codex_available: bool,
-    ) -> int:
-        trace.append(
-            (
-                "selector",
-                selector,
-                database_path,
-                launcher,
-                codex_available,
+        def execute_selector(
+            self,
+            selection: OwnedSessionSelection,
+            database_path: Path,
+            launcher: Any,
+            *,
+            codex_available: bool,
+            configured_codex: str,
+        ) -> int:
+            trace.append(
+                (
+                    "selector",
+                    selection,
+                    database_path,
+                    launcher,
+                    codex_available,
+                    configured_codex,
+                )
             )
-        )
-        return 18
+            return 18
 
-    def execute_launch(
-        arguments: list[str],
-        database_path: Path,
-        launcher: Any,
-        *,
-        codex_binary: str | None,
-    ) -> int:
-        trace.append(("launch", tuple(arguments), database_path, launcher, codex_binary))
-        return 19
+        def execute_launch(
+            self,
+            arguments: list[str],
+            database_path: Path,
+            launcher: Any,
+            *,
+            codex_binary: str | None,
+            configured_codex: str,
+        ) -> int:
+            trace.append(
+                (
+                    "launch",
+                    tuple(arguments),
+                    database_path,
+                    launcher,
+                    codex_binary,
+                    configured_codex,
+                )
+            )
+            return 19
+
+        def guard_unregistered_selector_collision(
+            self,
+            selector: str,
+            *,
+            configured_codex: str,
+            configured_tmux: str,
+            resolve_executable: object,
+            runtime_launcher_factory: object,
+        ) -> None:
+            trace.append(
+                (
+                    "collision_guard",
+                    selector,
+                    configured_codex,
+                    configured_tmux,
+                )
+            )
 
     return UnifiedRodexApplicationPipeline(
         database_path=tmp_path / "rodex.sqlite3",
@@ -140,14 +181,12 @@ def _pipeline(
         control_client="control",  # type: ignore[arg-type]
         codex_delegator=delegate,
         resolve_executable=resolve_executable,
-        collision_guard=guard,
-        selector_resolver=resolve_selector,
-        selector_executor=execute_selector,
-        launch_executor=execute_launch,
+        runtime_launcher_factory=lambda _codex, _tmux: "new launcher",  # type: ignore[return-value]
+        session_lifecycle=FakeSessionLifecycle(),
     )
 
 
-def test_database_route_does_not_acquire_runtime(
+def test_statistics_route_uses_database_context_without_acquiring_runtime(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     trace: list[object] = []
@@ -213,12 +252,19 @@ def test_selector_resolves_before_runtime_and_never_probes_another_domain(
     database.touch()
     trace: list[object] = []
 
-    assert _pipeline(tmp_path, trace, selector_exists=True).execute(["worker"]) == 18
+    assert _pipeline(tmp_path, trace, selector_resolves=True).execute(["worker"]) == 18
     assert trace == [
         ("selector_resolver", "worker", database),
         ("resolve_executable", "tmux"),
         ("resolve_executable", "codex"),
-        ("selector", "worker", database, "launcher", True),
+        (
+            "selector",
+            OwnedSessionSelection("worker", 41),
+            database,
+            "launcher",
+            True,
+            "codex",
+        ),
     ]
 
 
@@ -232,7 +278,7 @@ def test_unmatched_selector_returns_to_the_codex_route_without_tmux(
     assert _pipeline(tmp_path, trace).execute(["worker"]) == 17
     assert trace == [
         ("selector_resolver", "worker", database),
-        ("collision_guard", ("worker",), "codex"),
+        ("collision_guard", "worker", "codex", "tmux"),
         ("resolve_executable", "codex"),
         ("codex", "/bin/codex", ("worker",)),
     ]
@@ -243,7 +289,6 @@ def test_codex_passthrough_never_touches_database_or_tmux(tmp_path: Path) -> Non
 
     assert _pipeline(tmp_path, trace).execute(["--version"]) == 17
     assert trace == [
-        ("collision_guard", ("--version",), "codex"),
         ("resolve_executable", "codex"),
         ("codex", "/bin/codex", ("--version",)),
     ]
@@ -285,6 +330,38 @@ def test_missing_codex_fails_passthrough_without_consulting_tmux(tmp_path: Path)
         _pipeline(tmp_path, trace, available={"tmux": "/bin/tmux"}).execute(["--version"])
 
     assert trace == [
-        ("collision_guard", ("--version",), "codex"),
         ("resolve_executable", "codex"),
     ]
+
+
+def test_machine_execution_receives_the_single_classified_spec(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    trace: list[object] = []
+    classifications: list[ClassifiedRodexCommand | None] = []
+    executed_specs: list[object] = []
+    real_classifier = pipeline_module.classify_rodex_command
+
+    def classify(arguments: tuple[str, ...]) -> ClassifiedRodexCommand | None:
+        result = real_classifier(arguments)
+        classifications.append(result)
+        return result
+
+    def execute_machine(
+        arguments: list[str],
+        spec: object,
+        database_path: Path,
+        launcher: object,
+        control_client: object,
+    ) -> int:
+        executed_specs.append(spec)
+        return 0
+
+    monkeypatch.setattr(pipeline_module, "classify_rodex_command", classify)
+    monkeypatch.setattr(pipeline_module, "execute_machine_command", execute_machine)
+
+    assert _pipeline(tmp_path, trace).execute(["_inspect", "worker", "--json"]) == 0
+    assert len(classifications) == 1
+    classification = classifications[0]
+    assert classification is not None
+    assert executed_specs == [classification.machine_spec]

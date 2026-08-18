@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Final
@@ -205,6 +206,15 @@ class MachineCommandSpec:
     allows_timeout: bool = False
 
 
+@dataclass(frozen=True, slots=True)
+class ClassifiedRodexCommand:
+    """One known Rodex command with its application route selected exactly once."""
+
+    command_spec: CommandSpec
+    route: CommandRoute
+    machine_spec: MachineCommandSpec | None
+
+
 MACHINE_COMMAND_SPECS: Final = {
     spec.token: spec
     for spec in (
@@ -265,25 +275,31 @@ class MachineInvocation:
     timeout_seconds: float | None
 
 
-def machine_spec_for_arguments(arguments: list[str]) -> MachineCommandSpec | None:
+def classify_rodex_command(
+    arguments: Sequence[str],
+) -> ClassifiedRodexCommand | None:
     if not arguments:
         return None
-    spec = MACHINE_COMMAND_SPECS.get(arguments[0])
-    if spec is None:
+    command = COMMANDS_BY_TOKEN.get(arguments[0])
+    if command is None:
         return None
+    machine = MACHINE_COMMAND_SPECS.get(command.token)
     if (
-        spec.token == WAIT_COMMAND
+        machine is not None
+        and machine.token == WAIT_COMMAND
         and "--turn" not in arguments
         and "--json" not in arguments
     ):
-        return None
-    return spec
+        machine = None
+    route = CommandRoute.MACHINE if machine is not None else command.route
+    return ClassifiedRodexCommand(command, route, machine)
 
 
-def parse_machine_invocation(arguments: list[str]) -> MachineInvocation:
-    spec = machine_spec_for_arguments(arguments)
-    if spec is None:
-        raise MachineUsageError("arguments do not select an exact machine command")
+def parse_machine_invocation(
+    arguments: list[str], spec: MachineCommandSpec
+) -> MachineInvocation:
+    if not arguments or arguments[0] != spec.token:
+        raise MachineUsageError("arguments do not match the classified machine command")
     if len(arguments) < 2 or not arguments[1].strip() or arguments[1].startswith("-"):
         raise MachineUsageError(f"usage: {spec.usage}")
     seen_json = False

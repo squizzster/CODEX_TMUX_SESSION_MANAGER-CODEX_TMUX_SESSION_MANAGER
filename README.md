@@ -248,7 +248,7 @@ uv run pytest --cov --cov-report=term-missing
 uv build
 ```
 
-The alpha coverage floor is 70%. Tests include real App Server Unix-socket and real-tmux
-boundary coverage for
-scrollback retention, inherited mouse configuration, rename, identity markers, and
-status configuration.
+The alpha coverage floor is 70%. Tests lock the exhaustive application route/preparation
+matrix and thin CLI boundary, with real App Server Unix-socket and real-tmux coverage for
+scrollback retention, inherited mouse configuration, rename, identity markers, and status
+configuration.

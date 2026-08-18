@@ -65,11 +65,12 @@ The proxy continues to forward protocol frames and selected live events without
 screen-scraping, reconstructing terminal rows, or persisting conversation content.
 
 The proxy forwards protocol frames unchanged in both directions, counts unique tool
-starts, and fans structured TUI events to bounded live subscribers. The TUI and each
-short-lived Rodex control client receive separate upstream App Server connections over
-private Unix sockets. This is the working Phase I topology; approval ownership across
-clients remains deliberately unclaimed until a live-turn Phase II experiment. tmux user
-options advertise the sockets and live identities. Tool counts cover one runtime.
+starts, and fans structured TUI events to bounded live subscribers. The subscribed
+primary connection, normally the managed TUI, receives lifecycle, approval, and
+user-input requests; short-lived control clients do not become subscribers by reading or
+mutating. Each uses a separate upstream App Server connection over private Unix sockets.
+tmux user options advertise the sockets and live identities. Tool counts cover one
+runtime.
 
 The separate tmux input proxy and completion observer for `/rodex` are retained but
 temporarily disabled by `RODEX_TMUX_SLASH_ENABLED`. Runtime status setup removes their

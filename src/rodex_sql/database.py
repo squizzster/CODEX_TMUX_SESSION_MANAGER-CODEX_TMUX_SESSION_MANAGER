@@ -9,9 +9,12 @@ import stat as stat_module
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from pathlib import Path
+from typing import Final
 
 SQLValue = int | float | str | bytes | None
 _SQL_IDENTIFIER = re.compile(r"^[a-z][a-z0-9_]*$")
+RODEX_DATABASE_SCHEMA_GENERATION: Final = 4
+RODEX_DATABASE_FILENAME: Final = f"rodex-v{RODEX_DATABASE_SCHEMA_GENERATION}.sqlite3"
 
 
 class RodexSQLError(RuntimeError):
@@ -34,7 +37,7 @@ def default_rodex_database_path() -> Path:
         if configured_state_home
         else Path.home() / ".local" / "state"
     )
-    return Path(os.path.abspath(state_home / "rodex" / "rodex-v3.sqlite3"))
+    return Path(os.path.abspath(state_home / "rodex" / RODEX_DATABASE_FILENAME))
 
 
 def normalise_rodex_database_path(

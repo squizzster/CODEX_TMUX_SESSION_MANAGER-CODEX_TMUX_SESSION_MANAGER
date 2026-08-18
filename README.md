@@ -186,8 +186,8 @@ codebase for later re-enablement; input currently passes directly to the Codex T
 ## Local data
 
 The durable per-user registry defaults to
-`$XDG_STATE_HOME/rodex/rodex-v3.sqlite3`, or
-`~/.local/state/rodex/rodex-v3.sqlite3` when `XDG_STATE_HOME` is unset. Set
+`$XDG_STATE_HOME/rodex/rodex-v4.sqlite3`, or
+`~/.local/state/rodex/rodex-v4.sqlite3` when `XDG_STATE_HOME` is unset. Set
 `RODEX_DATABASE_PATH` to select another database.
 
 Rodex session IDs are random 64-bit values rendered only as 16 lowercase hex

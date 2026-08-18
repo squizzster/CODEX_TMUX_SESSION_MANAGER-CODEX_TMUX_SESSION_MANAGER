@@ -61,9 +61,11 @@ without the alternate screen so rendered conversation rows reach that history.
 session override without changing any other session or the global configuration.
 
 tmux—not the terminal emulator or WebSocket proxy—owns managed-session scrollback.
-`_head`, `_cat`, and `_tail` read that retained pane output through the same verified
-live-session pipeline. Head and tail default to ten lines and accept familiar line-count
-forms such as `-5`, `-n 5`, and `--lines=5`.
+`_cat` reads that retained pane output as one finite snapshot through the verified
+live-session read pipeline. Standard tools select from it, for example
+`rodex _cat NAME | head -n 10` or `rodex _cat NAME | tail -n 10`. `_events` uses the
+same resolution pipeline but remains open to emit selected future protocol events as
+JSON lines.
 The proxy continues to forward protocol frames and selected live events without
 screen-scraping, reconstructing terminal rows, or persisting conversation content.
 

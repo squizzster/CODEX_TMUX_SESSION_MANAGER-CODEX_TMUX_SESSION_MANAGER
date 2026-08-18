@@ -281,7 +281,7 @@ def test_wait_does_not_accept_a_queued_completion_from_the_previous_turn(
     assert [message["method"] for message in protocol.sent].count("thread/read") == 3
 
 
-def test_tail_emits_structured_collaboration_events_but_not_token_deltas(
+def test_event_stream_emits_structured_collaboration_events_but_not_token_deltas(
     tmp_path: Path,
 ) -> None:
     protocol = FakeWebSocket(verified_responses(status="idle"))
@@ -310,7 +310,7 @@ def test_tail_emits_structured_collaboration_events_but_not_token_deltas(
     client = CodexControlClient(connector=RoutingConnector(protocol, events))
     observed: list[str] = []
 
-    client.tail(control(tmp_path), observed.append)
+    client.stream_events(control(tmp_path), observed.append)
 
     assert observed == [
         json.dumps(

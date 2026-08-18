@@ -632,7 +632,7 @@ class CodexControlClient:
             raise RodexControlError(f"Codex event stream ended: {error}") from error
         raise RodexControlError("Codex event stream ended before the turn completed")
 
-    def tail(
+    def stream_events(
         self,
         control: LiveRodexControl,
         write_event: EventWriter,

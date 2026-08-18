@@ -12,15 +12,14 @@ CONTEXT_COMMAND: Final = "_context"
 ALIAS_COMMAND: Final = "_alias"
 SEND_COMMAND: Final = "_send"
 WAIT_COMMAND: Final = "_wait"
-HEAD_COMMAND: Final = "_head"
 CAT_COMMAND: Final = "_cat"
+EVENTS_COMMAND: Final = "_events"
 INSPECT_COMMAND: Final = "_inspect"
 START_COMMAND: Final = "_start"
 STEER_COMMAND: Final = "_steer"
 DISPATCH_STATUS_COMMAND: Final = "_dispatch-status"
 INTERRUPT_COMMAND: Final = "_interrupt"
 RESULT_COMMAND: Final = "_result"
-TAIL_COMMAND: Final = "_tail"
 CREATE_COMMAND: Final = "_create"
 DETACH_COMMAND: Final = "_detach"
 HELP_COMMAND: Final = "_help"
@@ -128,19 +127,14 @@ COMMAND_SPECS: Final = (
         ("_result SESSION --turn ID --json", "Read one exact turn result."),
     ),
     CommandSpec(
-        HEAD_COMMAND,
-        CommandRoute.SESSION,
-        ("_head [-n NUM] SESSION", "Print the first retained terminal lines."),
-    ),
-    CommandSpec(
         CAT_COMMAND,
         CommandRoute.SESSION,
         ("_cat SESSION", "Print all retained terminal output."),
     ),
     CommandSpec(
-        TAIL_COMMAND,
-        CommandRoute.SESSION,
-        ("_tail [-n NUM] SESSION", "Print the last retained terminal lines."),
+        EVENTS_COMMAND,
+        CommandRoute.CONTROL,
+        ("_events SESSION", "Stream filtered live protocol events as JSON lines."),
     ),
     CommandSpec(
         STATS_COMMAND,

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 from rodex_registry import (
@@ -24,12 +25,11 @@ from .command_contract import (
     ALIAS_COMMAND,
     CAT_COMMAND,
     CONTEXT_COMMAND,
+    EVENTS_COMMAND,
     FORCE_FLAG,
-    HEAD_COMMAND,
     MOUSE_COMMAND,
     RUNNING_COMMAND,
     SEND_COMMAND,
-    TAIL_COMMAND,
     WAIT_COMMAND,
 )
 from .control import CodexControlClient, LiveRodexControl, RodexControlError
@@ -47,6 +47,7 @@ from .runtime import (
     RodexRuntimeLauncher,
     default_tmux_server_socket_path,
 )
+from .session_read_pipeline import LiveSessionReadPipeline
 
 
 def run_session_command(
@@ -118,18 +119,28 @@ def run_session_command(
         record_a_rodex_session_access(session_id, database_path)
         print(f"Rodex {arguments[1]}: Codex turn complete", flush=True)
         return True
-    if command in {HEAD_COMMAND, CAT_COMMAND, TAIL_COMMAND}:
-        session_name, line_count = _parse_scrollback_arguments(command, arguments[1:])
-        session_id, runtime, control = resolve_live_control(
-            session_name, database_path, launcher
+    if command == CAT_COMMAND:
+        if len(arguments) != 2:
+            raise RodexLaunchError("usage: rodex _cat SESSION_NAME")
+        scrollback = LiveSessionReadPipeline(database_path, launcher).snapshot(
+            arguments[1], launcher.capture_scrollback
         )
-        scrollback = launcher.capture_scrollback(runtime)
-        revalidate_live_control(launcher, runtime, control)
-        record_a_rodex_session_access(session_id, database_path)
-        selected_lines = _select_scrollback_lines(command, scrollback, line_count)
-        if selected_lines:
-            sys.stdout.write("\n".join(selected_lines) + "\n")
+        if scrollback:
+            sys.stdout.write("\n".join(scrollback) + "\n")
             sys.stdout.flush()
+        return True
+    if command == EVENTS_COMMAND:
+        if len(arguments) != 2:
+            raise RodexLaunchError("usage: rodex _events SESSION_NAME")
+        LiveSessionReadPipeline(database_path, launcher).stream_events(
+            arguments[1],
+            lambda control, revalidate: _stream_protocol_events(
+                arguments[1],
+                control_client,
+                control,
+                revalidate,
+            ),
+        )
         return True
     if command == ALIAS_COMMAND:
         force, operands = _parse_alias_arguments(arguments[1:])
@@ -262,63 +273,22 @@ def _parse_alias_arguments(arguments: list[str]) -> tuple[bool, list[str]]:
     return force, operands
 
 
-def _parse_scrollback_arguments(
-    command: str, arguments: list[str]
-) -> tuple[str, int | None]:
-    usage = _scrollback_usage(command)
-    if command == CAT_COMMAND:
-        if len(arguments) != 1:
-            raise RodexLaunchError(usage)
-        return arguments[0], None
-
-    line_count: int | None = None
-    operands: list[str] = []
-    index = 0
-    while index < len(arguments):
-        argument = arguments[index]
-        count_text: str | None = None
-        if argument in {"-n", "--lines"}:
-            index += 1
-            if index >= len(arguments):
-                raise RodexLaunchError(usage)
-            count_text = arguments[index]
-        elif argument.startswith("--lines="):
-            count_text = argument.removeprefix("--lines=")
-        elif argument.startswith("-n") and argument != "-n":
-            count_text = argument[2:]
-        elif argument.startswith("-") and argument[1:].isdigit():
-            count_text = argument[1:]
-        elif argument.startswith("-"):
-            raise RodexLaunchError(usage)
-        else:
-            operands.append(argument)
-
-        if count_text is not None:
-            if line_count is not None or not count_text.isdigit():
-                raise RodexLaunchError(usage)
-            line_count = int(count_text)
-        index += 1
-
-    if len(operands) != 1:
-        raise RodexLaunchError(usage)
-    return operands[0], 10 if line_count is None else line_count
-
-
-def _scrollback_usage(command: str) -> str:
-    if command == CAT_COMMAND:
-        return "usage: rodex _cat SESSION_NAME"
-    return f"usage: rodex {command} [-n NUM|--lines=NUM|-NUM] SESSION_NAME"
-
-
-def _select_scrollback_lines(
-    command: str, scrollback: tuple[str, ...], line_count: int | None
-) -> tuple[str, ...]:
-    if command == CAT_COMMAND:
-        return scrollback
-    assert line_count is not None
-    if command == HEAD_COMMAND:
-        return scrollback[:line_count]
-    return scrollback[-line_count:] if line_count else ()
+def _stream_protocol_events(
+    session_name: str,
+    control_client: CodexControlClient,
+    control: LiveRodexControl,
+    revalidate: Callable[[], None],
+) -> None:
+    print(
+        f"Rodex {session_name}: following live Codex protocol events",
+        file=sys.stderr,
+        flush=True,
+    )
+    control_client.stream_events(
+        control,
+        lambda event: print(event, flush=True),
+        revalidate=revalidate,
+    )
 
 
 def _print_current_rodex_context(

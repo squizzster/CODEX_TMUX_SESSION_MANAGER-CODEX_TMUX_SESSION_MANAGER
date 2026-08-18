@@ -69,7 +69,7 @@ class CodexProtocolEventTap:
         self._server_thread: Thread | None = None
 
     def start(self) -> None:
-        """Bind the runtime-only event socket and accept tail subscribers."""
+        """Bind the runtime-only event socket and accept event subscribers."""
         if self._server is not None:
             raise RodexProtocolProxyError("Codex protocol event tap is already running")
         self._event_socket_path.unlink(missing_ok=True)

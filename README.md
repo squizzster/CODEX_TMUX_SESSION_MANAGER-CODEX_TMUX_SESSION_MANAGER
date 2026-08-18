@@ -111,9 +111,9 @@ preference. See the current [tmux manual](https://man.openbsd.org/tmux.1) and
 | `./rodex _alias --force automatic-beluga new-name` | Replace an existing display name. |
 | `./rodex _send edgar-work "Run the tests"` | Start or steer work in a running session. |
 | `./rodex _wait edgar-work` | Wait until the running session is idle. |
-| `./rodex _head -5 edgar-work` | Print the first five retained terminal lines. |
-| `./rodex _cat edgar-work` | Print all retained terminal output. |
-| `./rodex _tail -5 edgar-work` | Print the last five retained terminal lines. |
+| `./rodex _cat edgar-work` | Print all retained terminal output for use directly or in a Unix pipeline. |
+| `./rodex _cat edgar-work \| tail -n 10` | Print the last ten retained terminal lines. |
+| `./rodex _events edgar-work` | Stream filtered live protocol events as JSON lines. |
 | `./rodex _inspect edgar-work --json` | Read live thread state and its exact active turn ID. |
 | `printf '%s' "$PROMPT" \| ./rodex _start edgar-work --dispatch DISPATCH_ID --stdin --json` | Start an idle thread with caller-owned correlation. |
 | `printf '%s' "$PROMPT" \| ./rodex _steer edgar-work --turn TURN_ID --dispatch DISPATCH_ID --stdin --json` | Steer one exact active turn with caller-owned correlation. |
@@ -169,8 +169,9 @@ and unchanged names produce no prompt. If delivery fails, Rodex reports the fail
 without rolling back the already committed name change.
 Arguments after `_create` or
 `_detach` are forwarded to the managed Codex TUI; use `--` when an explicit boundary
-improves clarity. `_head` and `_tail` default to ten lines and also accept `-n NUM`,
-`-nNUM`, and `--lines=NUM`. Names use 1–80
+improves clarity. `_cat` is a finite snapshot, so standard tools such as `head`, `tail`,
+and `grep` compose with it normally. `_events` remains open and emits selected future
+protocol events until interrupted. Names use 1–80
 ASCII letters, digits, underscores, or hyphens and begin with a letter or digit. The
 existing reserved-name vocabulary remains case-insensitive and includes Codex
 top-level commands and aliases.

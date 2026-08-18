@@ -49,8 +49,8 @@ def test_initialise_creates_database_parent_directories(tmp_path: Path) -> None:
 
 
 def test_each_database_has_one_stable_distinct_64_bit_registry_id(tmp_path: Path) -> None:
-    first = tmp_path / "first.sqlite3"
-    second = tmp_path / "second.sqlite3"
+    first = initialise_rodex_database(tmp_path / "first.sqlite3")
+    second = initialise_rodex_database(tmp_path / "second.sqlite3")
 
     first_registry_id = lookup_rodex_registry_id(first)
 
@@ -58,6 +58,20 @@ def test_each_database_has_one_stable_distinct_64_bit_registry_id(tmp_path: Path
     assert len(str(first_registry_id)) == 16
     assert lookup_rodex_registry_id(first) == first_registry_id
     assert lookup_rodex_registry_id(second) != first_registry_id
+
+
+@pytest.mark.evolutionary_regression
+def test_registry_identity_read_does_not_bootstrap_an_absent_database(
+    tmp_path: Path,
+) -> None:
+    """Current evidence: registry creation belongs only to explicit write paths."""
+    database = tmp_path / "absent" / "rodex.sqlite3"
+
+    with pytest.raises(RodexSQLError, match="database does not exist"):
+        lookup_rodex_registry_id(database)
+
+    assert not database.parent.exists()
+    assert not database.exists()
 
 
 def test_registry_id_has_one_bigint_column_and_named_unique_index(
@@ -479,7 +493,7 @@ def test_lookup_id_finds_a_canonical_session_id_string(tmp_path: Path) -> None:
 
 
 def test_lookup_id_returns_none_for_an_unknown_session_id(tmp_path: Path) -> None:
-    database = tmp_path / "rodex.sqlite3"
+    database = initialise_rodex_database(tmp_path / "rodex.sqlite3")
 
     assert (
         lookup_rodex_sessions_id_from_a_rodex_session_id("000000000000002a", database)
@@ -511,7 +525,7 @@ def test_codex_session_id_is_looked_up_directly_from_the_root_session(
 
 
 def test_lookup_session_id_returns_none_for_an_unknown_id(tmp_path: Path) -> None:
-    database = tmp_path / "rodex.sqlite3"
+    database = initialise_rodex_database(tmp_path / "rodex.sqlite3")
 
     assert lookup_rodex_session_id_from_a_rodex_sessions_id(999, database) is None
 

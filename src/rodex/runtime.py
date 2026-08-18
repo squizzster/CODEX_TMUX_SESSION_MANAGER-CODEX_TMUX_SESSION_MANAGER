@@ -34,10 +34,11 @@ from rodex_registry.identity import (
 
 from .analytics import (
     AnalyticsSubprocessSupervisor,
-    AnalyticsWorkerConfig,
     default_codex_sessions_root,
 )
+from .app_server_contract import CODEX_APP_SERVER, RODEX_RUNTIME_APP_SERVER_CLIENT
 from .control import LiveRodexControl
+from .process_contracts import AnalyticsWorkerConfig, SessionHostConfig
 from .protocol_proxy import (
     CodexContextStatusObserver,
     CodexProtocolEventTap,
@@ -49,15 +50,16 @@ from .protocol_proxy import (
 from .status_bar import (
     RODEX_STATUS_LEFT_FORMAT,
     RODEX_STATUS_LEFT_LENGTH,
+    RODEX_STATUS_RIGHT_FORMAT,
+    RODEX_STATUS_RIGHT_LENGTH,
     context_status_segment,
 )
 from .tmux_status import (
-    STATUS_ANIMATION_TOKEN_OPTION,
-    STATUS_LEFT_CLAIM_PRIORITY_OPTION,
-    STATUS_LEFT_CLAIM_PUBLISHER_OPTION,
-    STATUS_LEFT_CLAIM_TOKEN_OPTION,
+    STATUS_CLAIM_PRIORITY_OPTION,
+    STATUS_CLAIM_PUBLISHER_OPTION,
+    STATUS_CLAIM_TOKEN_OPTION,
+    TmuxStatusPipeline,
 )
-from .version import RODEX_VERSION
 
 SUN_PATH_MAX_BYTES: Final = 107
 DEFAULT_STARTUP_TIMEOUT_SECONDS: Final = 15.0
@@ -80,14 +82,6 @@ RODEX_REGISTRATION_PENDING: Final = "pending"
 RODEX_REGISTRATION_REGISTERED: Final = "registered"
 # One switch owns installation of the tmux `/rodex` bindings and completion pipe.
 RODEX_TMUX_SLASH_ENABLED: Final = False
-_SHARING_STATUS_FORMAT: Final = (
-    "#{?session_many_attached,"
-    "#[fg=yellow]#[bold] [Shared with #{e|-:#{session_attached},1} "
-    "#{?#{==:#{session_attached},2},other,others}] #[default],"
-    "#[fg=green]#[bold] [Private session] #[default]}"
-    " | %H:%M %d-%b-%y"
-)
-
 Runner = Callable[..., subprocess.CompletedProcess[str]]
 Connector = Callable[..., Any]
 
@@ -419,44 +413,29 @@ class RodexRuntimeLauncher:
         _require_short_unix_socket_path(runtime.protocol_proxy_socket_path)
         _require_short_unix_socket_path(runtime.protocol_event_socket_path)
 
-        host_arguments = [
-            self._python_executable,
-            "-m",
-            "rodex.session_host",
-            "--codex-binary",
-            self._codex_binary,
-            "--app-server-socket",
-            str(runtime.app_server_socket_path),
-            "--app-server-log",
-            str(runtime.app_server_log_path),
-            "--protocol-proxy-socket",
-            str(runtime.protocol_proxy_socket_path),
-            "--protocol-event-socket",
-            str(runtime.protocol_event_socket_path),
-            "--tmux-binary",
-            self._tmux_binary,
-            "--tmux-server-socket",
-            str(runtime.tmux_server_socket_path),
-        ]
+        analytics_config: AnalyticsWorkerConfig | None = None
         if rodex_session_id is not None:
             if rodex_database_path is None or rodex_registry_id is None:
                 raise RodexRuntimeError(
                     "Rodex runtime identity requires a registry ID and database path"
                 )
-            analytics_rodex_database = Path(
-                os.path.abspath(rodex_database_path.expanduser())
+            analytics_config = AnalyticsWorkerConfig(
+                rodex_database_path=rodex_database_path,
+                codex_sessions_root=default_codex_sessions_root(),
+                rodex_session_id=rodex_session_id,
             )
-            host_arguments.extend(
-                [
-                    "--rodex-database",
-                    str(analytics_rodex_database),
-                    "--codex-sessions-root",
-                    str(default_codex_sessions_root()),
-                    "--rodex-session-id",
-                    str(rodex_session_id),
-                ]
-            )
-        host_command = shlex.join([*host_arguments, "--", *codex_arguments])
+        host_config = SessionHostConfig(
+            codex_binary=self._codex_binary,
+            app_server_socket_path=runtime.app_server_socket_path,
+            app_server_log_path=runtime.app_server_log_path,
+            protocol_proxy_socket_path=runtime.protocol_proxy_socket_path,
+            protocol_event_socket_path=runtime.protocol_event_socket_path,
+            tmux_binary=self._tmux_binary,
+            tmux_server_socket_path=runtime.tmux_server_socket_path,
+            codex_arguments=tuple(codex_arguments),
+            analytics=analytics_config,
+        )
+        host_command = shlex.join(host_config.command(self._python_executable))
         self._start_tmux_session(runtime, resolved_workspace, host_command)
         try:
             requested_codex_session_id = _requested_exact_codex_resume(codex_arguments)
@@ -620,14 +599,13 @@ class RodexRuntimeLauncher:
         )
         return replace(runtime, tmux_session_name=session_name)
 
-    def configure_identity_status(self, runtime: LiveTmuxSession) -> None:
-        """Configure Rodex-owned interaction and status for one live session."""
+    def initialise_session_ui(self, runtime: LiveTmuxSession) -> None:
+        """Install a fresh Rodex UI after creating one new tmux runtime."""
         target = _exact_tmux_pane_target(runtime.tmux_session_name)
         for transient_option in (
-            STATUS_ANIMATION_TOKEN_OPTION,
-            STATUS_LEFT_CLAIM_PUBLISHER_OPTION,
-            STATUS_LEFT_CLAIM_TOKEN_OPTION,
-            STATUS_LEFT_CLAIM_PRIORITY_OPTION,
+            STATUS_CLAIM_PUBLISHER_OPTION,
+            STATUS_CLAIM_TOKEN_OPTION,
+            STATUS_CLAIM_PRIORITY_OPTION,
             "status-format",
             "status-style",
         ):
@@ -639,39 +617,19 @@ class RodexRuntimeLauncher:
                 target,
                 transient_option,
             )
-        self._tmux(runtime, "set-option", "-t", target, "status", "on")
-        self._tmux(
-            runtime,
-            "set-option",
-            "-t",
-            target,
-            "status-left",
-            RODEX_STATUS_LEFT_FORMAT,
-        )
-        self._tmux(
-            runtime,
-            "set-option",
-            "-t",
-            target,
-            "status-left-length",
-            RODEX_STATUS_LEFT_LENGTH,
-        )
-        self._tmux(
-            runtime,
-            "set-option",
-            "-t",
-            target,
-            "status-right",
-            _SHARING_STATUS_FORMAT,
-        )
-        self._tmux(
-            runtime,
-            "set-option",
-            "-t",
-            target,
-            "status-right-length",
-            "64",
-        )
+        self._configure_static_status(runtime, publish_base_status=True)
+        self.refresh_name_bound_hooks(runtime)
+        self._install_input_guards(runtime)
+
+    def reconcile_session_ui(self, runtime: LiveTmuxSession) -> None:
+        """Refresh static UI configuration without replacing a transient claim."""
+        self._configure_static_status(runtime, publish_base_status=False)
+        self.refresh_name_bound_hooks(runtime)
+        self._install_input_guards(runtime)
+
+    def refresh_name_bound_hooks(self, runtime: LiveTmuxSession) -> None:
+        """Refresh only hooks whose command embeds the current tmux session name."""
+        target = _exact_tmux_pane_target(runtime.tmux_session_name)
         for event in ("attached", "detached"):
             self._tmux(
                 runtime,
@@ -686,6 +644,54 @@ class RodexRuntimeLauncher:
                     event,
                 ),
             )
+
+    def _configure_static_status(
+        self,
+        runtime: LiveTmuxSession,
+        *,
+        publish_base_status: bool,
+    ) -> None:
+        target = _exact_tmux_pane_target(runtime.tmux_session_name)
+        self._tmux(runtime, "set-option", "-t", target, "status", "on")
+        status = TmuxStatusPipeline(lambda *args: self._tmux(runtime, *args), target)
+        if publish_base_status:
+            self._tmux(
+                runtime,
+                "set-option",
+                "-t",
+                target,
+                "status-left",
+                RODEX_STATUS_LEFT_FORMAT,
+            )
+        else:
+            status.reconcile_base_status()
+        self._tmux(
+            runtime,
+            "set-option",
+            "-t",
+            target,
+            "status-left-length",
+            RODEX_STATUS_LEFT_LENGTH,
+        )
+        self._tmux(
+            runtime,
+            "set-option",
+            "-t",
+            target,
+            "status-right",
+            RODEX_STATUS_RIGHT_FORMAT,
+        )
+        self._tmux(
+            runtime,
+            "set-option",
+            "-t",
+            target,
+            "status-right-length",
+            RODEX_STATUS_RIGHT_LENGTH,
+        )
+
+    def _install_input_guards(self, runtime: LiveTmuxSession) -> None:
+        target = _exact_tmux_pane_target(runtime.tmux_session_name)
         self._install_shared_ctrl_c_guard(runtime)
         if RODEX_TMUX_SLASH_ENABLED:
             self._tmux(
@@ -906,30 +912,24 @@ class RodexRuntimeLauncher:
     def _list_loaded_codex_threads(self, socket_path: Path) -> list[str]:
         with self._connect(
             str(socket_path),
-            uri="ws://localhost/rpc",
+            uri=f"ws://localhost{CODEX_APP_SERVER.rpc_connection_path}",
             compression=None,
             open_timeout=1,
             close_timeout=1,
         ) as websocket:
             websocket.send(
                 json.dumps(
-                    {
-                        "method": "initialize",
-                        "id": 0,
-                        "params": {
-                            "clientInfo": {
-                                "name": "rodex",
-                                "title": "Rodex",
-                                "version": RODEX_VERSION,
-                            }
-                        },
-                    }
+                    CODEX_APP_SERVER.initialize_request(0, RODEX_RUNTIME_APP_SERVER_CLIENT)
                 )
             )
             _receive_response(websocket, 0)
-            websocket.send(json.dumps({"method": "initialized", "params": {}}))
+            websocket.send(json.dumps(CODEX_APP_SERVER.initialized_notification()))
             websocket.send(
-                json.dumps({"method": "thread/loaded/list", "id": 1, "params": {}})
+                json.dumps(
+                    CODEX_APP_SERVER.request(
+                        1, CODEX_APP_SERVER.thread_loaded_list_method, {}
+                    )
+                )
             )
             result = _receive_response(websocket, 1)
         data = result.get("data")
@@ -1056,21 +1056,22 @@ def default_runtime_root() -> Path:
 
 
 def run_session_host(
-    codex_binary: str,
-    app_server_socket_path: Path,
-    app_server_log_path: Path,
-    protocol_proxy_socket_path: Path,
-    protocol_event_socket_path: Path,
-    tmux_binary: str,
-    tmux_server_socket_path: Path,
-    codex_arguments: Sequence[str],
+    config: SessionHostConfig,
     *,
-    analytics_config: AnalyticsWorkerConfig | None = None,
     analytics_supervisor_factory: Callable[
         [AnalyticsWorkerConfig], AnalyticsSubprocessSupervisor
     ] = AnalyticsSubprocessSupervisor,
 ) -> int:
     """Supervise the app-server, protocol proxy, and foreground Codex TUI."""
+    codex_binary = config.codex_binary
+    app_server_socket_path = config.app_server_socket_path
+    app_server_log_path = config.app_server_log_path
+    protocol_proxy_socket_path = config.protocol_proxy_socket_path
+    protocol_event_socket_path = config.protocol_event_socket_path
+    tmux_binary = config.tmux_binary
+    tmux_server_socket_path = config.tmux_server_socket_path
+    codex_arguments = config.codex_arguments
+    analytics_config = config.analytics
     app_server_socket_path.unlink(missing_ok=True)
     protocol_proxy_socket_path.unlink(missing_ok=True)
     protocol_event_socket_path.unlink(missing_ok=True)
@@ -1103,12 +1104,7 @@ def run_session_host(
     try:
         with _open_private_runtime_log(app_server_log_path) as log:
             app_server = subprocess.Popen(
-                [
-                    codex_binary,
-                    "app-server",
-                    "--listen",
-                    f"unix://{app_server_socket_path}",
-                ],
+                CODEX_APP_SERVER.command(codex_binary, app_server_socket_path),
                 stdin=subprocess.DEVNULL,
                 stdout=log,
                 stderr=subprocess.STDOUT,

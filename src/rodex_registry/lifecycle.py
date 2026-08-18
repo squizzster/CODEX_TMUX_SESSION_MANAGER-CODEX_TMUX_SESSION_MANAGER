@@ -19,6 +19,7 @@ from cool_name.functions import (
 from rodex_sql import (
     INDEX_RE_TRY_ATTEMPTS,
     index_re_try_attempt_numbers,
+    open_rodex_read_transaction,
     open_rodex_transaction,
     select_lookup_id,
     select_or_insert_lookup_id,
@@ -46,6 +47,7 @@ from .schema import (
     RODEX_SESSIONS_TABLE,
     RODEX_SESSIONS_USERS_TABLE,
     RODEX_TMUX_SESSIONS_TABLE,
+    existing_rodex_database_path,
     initialise_rodex_database,
 )
 from .statistics import register_codex_statistics_source_in_transaction
@@ -369,8 +371,8 @@ def lookup_rodex_sessions_user(
 ) -> RodexSessionsUser | None:
     """Return one normalized user by internal id, or ``None`` when absent."""
     _validate_positive_id(user_id, "user_id")
-    path = initialise_rodex_database(database_path)
-    with open_rodex_transaction(path) as connection:
+    path = existing_rodex_database_path(database_path)
+    with open_rodex_read_transaction(path) as connection:
         row = connection.execute(
             f"SELECT id, uid, gid, user_name FROM {RODEX_SESSIONS_USERS_TABLE} "
             "WHERE id = ?",
@@ -388,9 +390,9 @@ def lookup_rodex_sessions_id_from_a_rodex_session_id(
     database_path: str | os.PathLike[str] | None = None,
 ) -> int | None:
     """Return the internal id for a Rodex session ID, or ``None``."""
-    path = initialise_rodex_database(database_path)
+    path = existing_rodex_database_path(database_path)
     parsed_session_id = parse_rodex_session_id(rodex_session_id)
-    with open_rodex_transaction(path) as connection:
+    with open_rodex_read_transaction(path) as connection:
         row = connection.execute(
             f"SELECT id FROM {RODEX_SESSIONS_TABLE} "
             "WHERE rodex_session_id_signed_bigint = ?",
@@ -405,8 +407,8 @@ def lookup_rodex_session_id_from_a_rodex_sessions_id(
 ) -> RodexSessionId | None:
     """Return the public Rodex session ID for an internal ID, or ``None``."""
     _validate_positive_id(session_id, "session_id")
-    path = initialise_rodex_database(database_path)
-    with open_rodex_transaction(path) as connection:
+    path = existing_rodex_database_path(database_path)
+    with open_rodex_read_transaction(path) as connection:
         row = connection.execute(
             f"SELECT rodex_session_id_signed_bigint "
             f"FROM {RODEX_SESSIONS_TABLE} WHERE id = ?",
@@ -423,8 +425,8 @@ def lookup_rodex_session_log(
 ) -> RodexSessionLog | None:
     """Return the one log row belonging to a session, or ``None`` when absent."""
     _validate_session_id(session_id)
-    path = initialise_rodex_database(database_path)
-    with open_rodex_transaction(path) as connection:
+    path = existing_rodex_database_path(database_path)
+    with open_rodex_read_transaction(path) as connection:
         row = connection.execute(
             f"SELECT id, rodex_sessions_id, created_at_utc, rodex_sessions_users_id, "
             f"last_accessed_at_utc FROM {RODEX_SESSIONS_LOG_TABLE} "
@@ -566,8 +568,8 @@ def lookup_rodex_runtime_instance(
 ) -> RodexRuntimeInstance | None:
     """Return the exact persisted current runtime incarnation, when recorded."""
     _validate_session_id(session_id)
-    path = initialise_rodex_database(database_path)
-    with open_rodex_transaction(path) as connection:
+    path = existing_rodex_database_path(database_path)
+    with open_rodex_read_transaction(path) as connection:
         row = connection.execute(
             f"SELECT id, rodex_sessions_id, runtime_identifier_signed_bigint_1, "
             "runtime_identifier_signed_bigint_2, started_at_utc "
@@ -592,8 +594,8 @@ def lookup_codex_session_id_from_a_rodex_sessions_id(
 ) -> CodexSessionId | None:
     """Return the Codex session ID stored on one Rodex session."""
     _validate_session_id(session_id)
-    path = initialise_rodex_database(database_path)
-    with open_rodex_transaction(path) as connection:
+    path = existing_rodex_database_path(database_path)
+    with open_rodex_read_transaction(path) as connection:
         row = connection.execute(
             f"SELECT codex_session_id_signed_bigint_1, codex_session_id_signed_bigint_2 "
             f"FROM {RODEX_SESSIONS_TABLE} WHERE id = ?",
@@ -610,8 +612,8 @@ def lookup_rodex_tmux_session(
 ) -> RodexTmuxSession | None:
     """Return the tmux endpoint linked to one Rodex session."""
     _validate_session_id(session_id)
-    path = initialise_rodex_database(database_path)
-    with open_rodex_transaction(path) as connection:
+    path = existing_rodex_database_path(database_path)
+    with open_rodex_read_transaction(path) as connection:
         return _select_rodex_tmux_session(connection, session_id)
 
 
@@ -620,8 +622,8 @@ def lookup_rodex_sessions_id_from_a_cool_name(
     database_path: str | os.PathLike[str] | None = None,
 ) -> int | None:
     """Resolve a permanent or user-defined cool name through integer identities."""
-    path = initialise_rodex_database(database_path)
-    with open_rodex_transaction(path) as connection:
+    path = existing_rodex_database_path(database_path)
+    with open_rodex_read_transaction(path) as connection:
         allocated_name = lookup_cool_name(connection, cool_name)
         if allocated_name is None:
             return None
@@ -644,8 +646,8 @@ def lookup_owned_rodex_sessions_id_from_a_cool_name(
 ) -> int | None:
     """Resolve a name only when its session belongs to the selected POSIX user."""
     identity = _resolve_user_identity(user_identity)
-    path = initialise_rodex_database(database_path)
-    with open_rodex_transaction(path) as connection:
+    path = existing_rodex_database_path(database_path)
+    with open_rodex_read_transaction(path) as connection:
         allocated_name = lookup_cool_name(connection, cool_name)
         if allocated_name is None:
             return None
@@ -668,8 +670,8 @@ def lookup_rodex_session_names(
 ) -> RodexSessionNames | None:
     """Return the permanent and optional user-defined names for one session."""
     _validate_session_id(session_id)
-    path = initialise_rodex_database(database_path)
-    with open_rodex_transaction(path) as connection:
+    path = existing_rodex_database_path(database_path)
+    with open_rodex_read_transaction(path) as connection:
         row = _select_rodex_session_names(connection, session_id)
     return None if row is None else _session_names_from_row(row)
 
@@ -717,8 +719,8 @@ def validate_a_user_defined_cool_name_assignment(
     if not isinstance(force, bool):
         raise TypeError("force must be a boolean")
     identity = _resolve_user_identity(user_identity)
-    path = initialise_rodex_database(database_path)
-    with open_rodex_transaction(path) as connection:
+    path = existing_rodex_database_path(database_path)
+    with open_rodex_read_transaction(path) as connection:
         return _apply_user_defined_cool_name_assignment(
             connection,
             session_cool_name,
@@ -788,8 +790,8 @@ def list_rodex_session_runtimes_for_a_user(
         if user_identity is None
         else _validate_user_identity(user_identity)
     )
-    path = initialise_rodex_database(database_path)
-    with open_rodex_transaction(path) as connection:
+    path = existing_rodex_database_path(database_path)
+    with open_rodex_read_transaction(path) as connection:
         user_id = select_lookup_id(
             connection,
             RODEX_SESSIONS_USERS_TABLE,
@@ -867,8 +869,8 @@ def lookup_rodex_sessions_id_from_a_codex_session_id(
     codex_session_id_part_1, codex_session_id_part_2 = (
         split_codex_session_id_into_signed_bigints(codex_session_id)
     )
-    path = initialise_rodex_database(database_path)
-    with open_rodex_transaction(path) as connection:
+    path = existing_rodex_database_path(database_path)
+    with open_rodex_read_transaction(path) as connection:
         row = connection.execute(
             f"SELECT id FROM {RODEX_SESSIONS_TABLE} "
             "WHERE codex_session_id_signed_bigint_1 = ? "

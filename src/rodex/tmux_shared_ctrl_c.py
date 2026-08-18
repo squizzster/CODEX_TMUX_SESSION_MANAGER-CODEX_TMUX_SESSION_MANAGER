@@ -11,17 +11,21 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Final
 
+from .status_bar import RODEX_STATUS_COLOURS
 from .tmux_status import (
-    STATUS_LEFT_PUBLISHER_SHARED_CTRL_C,
-    StatusLeftPriority,
-    TmuxStatusLeftPipeline,
+    STATUS_PUBLISHER_SHARED_CTRL_C,
+    StatusPriority,
+    TmuxStatusPipeline,
+    TmuxStatusPresentation,
 )
 
 _CONFIRMATION_OPTION: Final = "@rodex_shared_ctrl_c_confirmation"
 _CONFIRMATION_WINDOW_NANOSECONDS: Final = 2_000_000_000
 _CONFIRMATION_WINDOW_SECONDS: Final = 2.0
 _CONFIRMATION_STATUS: Final = (
-    "#[bg=yellow]#[fg=black]#[bold] CTRL-C ARMED: SHARED session — "
+    f"#[bg={RODEX_STATUS_COLOURS.safety_background}]"
+    f"#[fg={RODEX_STATUS_COLOURS.safety_foreground}]"
+    "#[bold] CTRL-C ARMED: SHARED session — "
     "CTRL-C again within 2s may END it for everyone; "
     "CTRL-B d detaches only you. #[default]"
 )
@@ -63,7 +67,7 @@ def handle_shared_ctrl_c(
     def clear_confirmation() -> None:
         tmux("set-option", "-u", "-t", pane_id, _CONFIRMATION_OPTION)
 
-    status = TmuxStatusLeftPipeline(tmux, pane_id)
+    status = TmuxStatusPipeline(tmux, pane_id)
 
     advertised = tmux(
         "show-options",
@@ -110,10 +114,10 @@ def handle_shared_ctrl_c(
     if armed.returncode != 0:
         return armed.returncode
     if not status.publish_transient(
-        publisher=STATUS_LEFT_PUBLISHER_SHARED_CTRL_C,
+        publisher=STATUS_PUBLISHER_SHARED_CTRL_C,
         token=status_token,
-        priority=StatusLeftPriority.SAFETY_WARNING,
-        status_format=_CONFIRMATION_STATUS,
+        priority=StatusPriority.SAFETY_WARNING,
+        presentation=TmuxStatusPresentation(status_left=_CONFIRMATION_STATUS),
     ):
         clear_confirmation()
         return 1

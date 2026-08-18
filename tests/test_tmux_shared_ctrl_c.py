@@ -18,9 +18,9 @@ from rodex.runtime import LiveTmuxSession, RodexRuntimeLauncher
 from rodex.tmux_shared_ctrl_c import handle_shared_ctrl_c
 from rodex.tmux_status import (
     RODEX_STATUS_LEFT_FORMAT,
-    STATUS_LEFT_CLAIM_PRIORITY_OPTION,
-    STATUS_LEFT_CLAIM_PUBLISHER_OPTION,
-    STATUS_LEFT_CLAIM_TOKEN_OPTION,
+    STATUS_CLAIM_PRIORITY_OPTION,
+    STATUS_CLAIM_PUBLISHER_OPTION,
+    STATUS_CLAIM_TOKEN_OPTION,
 )
 
 
@@ -63,12 +63,12 @@ class RecordingTmux:
 
     def _condition_is_true(self, condition: str) -> bool:
         if condition.startswith("#{<=:"):
-            current = int(self.status_options.get(STATUS_LEFT_CLAIM_PRIORITY_OPTION, "0"))
+            current = int(self.status_options.get(STATUS_CLAIM_PRIORITY_OPTION, "0"))
             requested = int(condition.rsplit(",", maxsplit=1)[1].removesuffix("}"))
             return current <= requested
-        if STATUS_LEFT_CLAIM_TOKEN_OPTION in condition:
+        if STATUS_CLAIM_TOKEN_OPTION in condition:
             expected = condition.rsplit(",", maxsplit=1)[1].removesuffix("}")
-            return self.status_options.get(STATUS_LEFT_CLAIM_TOKEN_OPTION) == expected
+            return self.status_options.get(STATUS_CLAIM_TOKEN_OPTION) == expected
         raise AssertionError(f"unexpected condition: {condition}")
 
     def _apply(self, arguments: list[str]) -> None:
@@ -130,9 +130,9 @@ def test_first_shared_ctrl_c_publishes_a_temporary_status_warning(tmp_path: Path
     assert "may END it for everyone" in runner.status_left
     assert "CTRL-B d detaches only you" in runner.status_left
     assert runner.status_options == {
-        STATUS_LEFT_CLAIM_PRIORITY_OPTION: "100",
-        STATUS_LEFT_CLAIM_PUBLISHER_OPTION: "shared-ctrl-c",
-        STATUS_LEFT_CLAIM_TOKEN_OPTION: "warning-token",
+        STATUS_CLAIM_PRIORITY_OPTION: "100",
+        STATUS_CLAIM_PUBLISHER_OPTION: "shared-ctrl-c",
+        STATUS_CLAIM_TOKEN_OPTION: "warning-token",
     }
 
     expiry_callbacks[0]()
@@ -259,7 +259,7 @@ def test_real_tmux_first_shared_ctrl_c_keeps_both_clients_attached(
             "codex",
             tmux_binary,
             python_executable=sys.executable,
-        ).configure_identity_status(LiveTmuxSession(socket_path, session_name))
+        ).initialise_session_ui(LiveTmuxSession(socket_path, session_name))
         interactive_client_pid, terminal_master = pty.fork()
         interactive_environment = os.environ.copy()
         interactive_environment["TERM"] = "xterm-256color"

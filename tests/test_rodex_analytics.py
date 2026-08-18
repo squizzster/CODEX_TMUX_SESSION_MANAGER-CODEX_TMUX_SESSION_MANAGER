@@ -17,11 +17,11 @@ from rodex.analytics import (
     AnalyticsCalculation,
     AnalyticsRolloutWorker,
     AnalyticsSubprocessSupervisor,
-    AnalyticsWorkerConfig,
     CodexProtocolAnalyticsAdapter,
     RodexAnalyticsError,
     locate_verified_rollout,
 )
+from rodex.process_contracts import AnalyticsWorkerConfig
 from rodex_registry import (
     RodexSessionId,
     create_a_rodex_session,
@@ -147,9 +147,14 @@ def _create(
     )
 
 
+@pytest.mark.evolutionary_regression
 def test_worker_waits_for_unregistered_identity_without_opening_analyzer(
     tmp_path: Path,
 ) -> None:
+    """Current evidence: a pre-registration worker waits without creating storage.
+
+    Deliberately supersede this guard if runtime launch ordering later removes that state.
+    """
     config = _config(tmp_path)
     adapters: list[FakeAnalyticsAdapter] = []
 
@@ -162,6 +167,7 @@ def test_worker_waits_for_unregistered_identity_without_opening_analyzer(
 
     assert state == "catching_up"
     assert adapters == []
+    assert not config.rodex_database_path.exists()
 
 
 def test_worker_with_the_wrong_session_id_cannot_publish_for_an_existing_session(

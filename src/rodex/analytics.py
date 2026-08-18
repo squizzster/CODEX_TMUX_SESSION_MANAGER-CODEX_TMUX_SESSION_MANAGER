@@ -23,7 +23,6 @@ from typing import Any, Protocol
 
 from rodex_registry import (
     CodexSessionId,
-    RodexSessionId,
     RodexSessionStatistics,
     RodexSessionStatisticsSource,
     RodexSessionStatisticsSourceObservation,
@@ -37,6 +36,9 @@ from rodex_registry import (
     read_rodex_session_statistics,
     record_rodex_session_statistics_worker_health,
 )
+from rodex_sql import RodexDatabaseNotFoundError
+
+from .process_contracts import AnalyticsWorkerConfig
 
 ANALYTICS_POLL_INTERVAL_SECONDS = 0.5
 ANALYTICS_RESTART_DELAY_SECONDS = 2.0
@@ -66,15 +68,6 @@ class AnalyticsBoundary(Protocol):
 
 
 AnalyticsBoundaryFactory = Callable[[], AnalyticsBoundary]
-
-
-@dataclass(frozen=True, slots=True)
-class AnalyticsWorkerConfig:
-    """Stable identity and source inputs for one runtime's analytics worker."""
-
-    rodex_database_path: Path
-    codex_sessions_root: Path
-    rodex_session_id: RodexSessionId
 
 
 @dataclass(frozen=True, slots=True)
@@ -250,6 +243,8 @@ class AnalyticsRolloutWorker:
                     )
                 }
             return "up_to_date"
+        except RodexDatabaseNotFoundError:
+            return "catching_up"
         except Exception as error:
             self._project_health(
                 "degraded",
@@ -446,7 +441,7 @@ class AnalyticsSubprocessSupervisor:
             return
         try:
             self._process = self._popen(
-                analytics_worker_command(self._python_executable, self._config),
+                self._config.command(self._python_executable),
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
@@ -467,22 +462,6 @@ class AnalyticsSubprocessSupervisor:
             with suppress(OSError, subprocess.SubprocessError):
                 process.kill()
                 process.wait(timeout=1)
-
-
-def analytics_worker_command(
-    python_executable: str, config: AnalyticsWorkerConfig
-) -> list[str]:
-    return [
-        python_executable,
-        "-m",
-        "rodex.analytics_worker",
-        "--rodex-database",
-        str(config.rodex_database_path),
-        "--codex-sessions-root",
-        str(config.codex_sessions_root),
-        "--rodex-session-id",
-        str(config.rodex_session_id),
-    ]
 
 
 def default_codex_sessions_root() -> Path:
@@ -514,17 +493,7 @@ def locate_verified_rollout(
 
 
 def analytics_worker_main(arguments: list[str] | None = None) -> int:
-    import argparse
-
-    parser = argparse.ArgumentParser(prog="python -m rodex.analytics_worker")
-    parser.add_argument("--rodex-database", required=True, type=Path)
-    parser.add_argument("--codex-sessions-root", required=True, type=Path)
-    parser.add_argument(
-        "--rodex-session-id",
-        required=True,
-        type=RodexSessionId.parse,
-    )
-    options = parser.parse_args(arguments)
+    config = AnalyticsWorkerConfig.parse(arguments)
     _lower_process_priority()
     stop = Event()
 
@@ -533,13 +502,7 @@ def analytics_worker_main(arguments: list[str] | None = None) -> int:
 
     for signum in (signal.SIGTERM, signal.SIGHUP):
         signal.signal(signum, request_stop)
-    worker = AnalyticsRolloutWorker(
-        AnalyticsWorkerConfig(
-            rodex_database_path=Path(os.path.abspath(options.rodex_database.expanduser())),
-            codex_sessions_root=options.codex_sessions_root.expanduser().resolve(),
-            rodex_session_id=options.rodex_session_id,
-        )
-    )
+    worker = AnalyticsRolloutWorker(config)
     try:
         worker.run_until_stopped(stop)
     finally:

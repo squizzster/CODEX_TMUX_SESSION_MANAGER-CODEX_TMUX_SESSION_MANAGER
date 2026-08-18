@@ -15,6 +15,7 @@ from websockets.exceptions import ConnectionClosed
 from websockets.sync.client import unix_connect
 from websockets.sync.server import unix_serve
 
+from .app_server_contract import CODEX_APP_SERVER
 from .status_bar import (
     RODEX_CONTEXT_STATUS_OPTION,
     RODEX_TOOL_CALL_STATUS_OPTION,
@@ -578,19 +579,19 @@ def _update_active_turns(active_turns: dict[str, str], message: str | bytes) -> 
     thread_id = params.get("threadId")
     if not isinstance(thread_id, str) or not thread_id:
         return
-    if method == "turn/started":
+    if method == CODEX_APP_SERVER.turn_started_method:
         turn = params.get("turn")
         turn_id = turn.get("id") if isinstance(turn, dict) else None
         if isinstance(turn_id, str) and turn_id:
             active_turns[thread_id] = turn_id
         return
-    if method == "turn/completed":
+    if method == CODEX_APP_SERVER.turn_completed_method:
         turn = params.get("turn")
         turn_id = turn.get("id") if isinstance(turn, dict) else None
         if active_turns.get(thread_id) == turn_id:
             active_turns.pop(thread_id, None)
         return
-    if method == "thread/status/changed":
+    if method == CODEX_APP_SERVER.thread_status_changed_method:
         status = params.get("status")
         if isinstance(status, dict) and status.get("type") != "active":
             active_turns.pop(thread_id, None)

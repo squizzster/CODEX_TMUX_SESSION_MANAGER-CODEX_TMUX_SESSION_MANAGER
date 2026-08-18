@@ -19,24 +19,45 @@ class StatusBarPart(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class StatusBarColours:
-    """One authoritative palette for every independently owned status colour."""
+    """One authoritative palette for every Rodex-owned status colour role."""
 
     primary_blue: str
     tool_count: str
     mouse_mode: str
     context_warning: str
     context_danger: str
+    sharing_shared: str
+    sharing_private: str
+    completion: str
+    safety_foreground: str
+    safety_background: str
+    prefix_foreground: str
+    prefix_background: str
+    animation_foreground: str
+    animation_arrival_backgrounds: tuple[str, ...]
+    animation_departure_backgrounds: tuple[str, ...]
 
     def __post_init__(self) -> None:
-        if not all(
-            (
-                self.primary_blue,
-                self.tool_count,
-                self.mouse_mode,
-                self.context_warning,
-                self.context_danger,
-            )
-        ):
+        scalar_colours = (
+            self.primary_blue,
+            self.tool_count,
+            self.mouse_mode,
+            self.context_warning,
+            self.context_danger,
+            self.sharing_shared,
+            self.sharing_private,
+            self.completion,
+            self.safety_foreground,
+            self.safety_background,
+            self.prefix_foreground,
+            self.prefix_background,
+            self.animation_foreground,
+        )
+        animation_colours = (
+            *self.animation_arrival_backgrounds,
+            *self.animation_departure_backgrounds,
+        )
+        if not all((*scalar_colours, *animation_colours)):
             raise ValueError("status-bar colours must be non-empty")
 
 
@@ -120,6 +141,10 @@ class TmuxStatusBar:
         """Render one selected segment."""
         return self.segment(which_part).render()
 
+    def render(self) -> str:
+        """Render every segment once in the authoritative tuple order."""
+        return "".join(segment.render() for segment in self.segments)
+
 
 @dataclass(frozen=True, slots=True)
 class _ContextColourBand:
@@ -135,8 +160,75 @@ RODEX_STATUS_COLOURS: Final = StatusBarColours(
     mouse_mode="yellow",
     context_warning="yellow",
     context_danger="red",
+    sharing_shared="yellow",
+    sharing_private="green",
+    completion="magenta",
+    safety_foreground="black",
+    safety_background="yellow",
+    prefix_foreground="white",
+    prefix_background="colour24",
+    animation_foreground="colour231",
+    animation_arrival_backgrounds=(
+        "colour17",
+        "colour18",
+        "colour19",
+        "colour54",
+        "colour55",
+        "colour56",
+        "colour57",
+        "colour93",
+        "colour129",
+        "colour165",
+        "colour201",
+        "colour198",
+        "colour165",
+        "colour129",
+        "colour93",
+        "colour57",
+        "colour45",
+        "colour51",
+        "colour45",
+        "colour87",
+        "colour45",
+        "colour39",
+        "colour33",
+        "colour24",
+        "colour22",
+    ),
+    animation_departure_backgrounds=(
+        "colour93",
+        "colour129",
+        "colour165",
+        "colour201",
+        "colour198",
+        "colour165",
+        "colour129",
+        "colour93",
+        "colour57",
+        "colour56",
+        "colour55",
+        "colour54",
+        "colour19",
+        "colour18",
+        "colour17",
+        "colour22",
+        "colour28",
+        "colour34",
+        "colour40",
+        "colour46",
+        "colour40",
+        "colour34",
+        "colour28",
+        "colour22",
+        "colour22",
+    ),
 )
 
+_CONTEXT_FALLBACK_SEGMENT: Final = StatusBarSegment(
+    part=StatusBarPart.CONTEXT,
+    foreground=RODEX_STATUS_COLOURS.primary_blue,
+    content_format="| Context: -- | ",
+)
 _BASE_STATUS_BAR: Final = TmuxStatusBar(
     (
         StatusBarSegment(
@@ -157,7 +249,11 @@ _BASE_STATUS_BAR: Final = TmuxStatusBar(
         StatusBarSegment(
             part=StatusBarPart.CONTEXT,
             foreground=RODEX_STATUS_COLOURS.primary_blue,
-            content_format="| Context: -- | ",
+            content_format=(
+                f"#{{?#{{{RODEX_CONTEXT_STATUS_OPTION}}},"
+                f"#{{E:{RODEX_CONTEXT_STATUS_OPTION}}},"
+                f"{_CONTEXT_FALLBACK_SEGMENT.content_format}}}"
+            ),
         ),
     )
 )
@@ -184,16 +280,12 @@ _CONTEXT_COMPACTION_FRAMES: Final = (
     "COMPACTING...",
 )
 
-RODEX_BASE_STATUS_LEFT_FORMAT: Final = (
-    f"{_BASE_STATUS_BAR.render_part(StatusBarPart.RODEX_IDENTITY)}"
-    f"{_BASE_STATUS_BAR.render_part(StatusBarPart.TOOL_COUNT)}"
-    f"{_BASE_STATUS_BAR.render_part(StatusBarPart.MOUSE_MODE)}"
-    f"#{{?#{{{RODEX_CONTEXT_STATUS_OPTION}}},"
-    f"#{{E:{RODEX_CONTEXT_STATUS_OPTION}}},"
-    f"{_BASE_STATUS_BAR.render_part(StatusBarPart.CONTEXT)}}}"
-    "#[default]"
+RODEX_BASE_STATUS_LEFT_FORMAT: Final = f"{_BASE_STATUS_BAR.render()}#[default]"
+PREFIX_MODE_STATUS_FORMAT: Final = (
+    f"#[bg={RODEX_STATUS_COLOURS.prefix_background}]"
+    f"#[fg={RODEX_STATUS_COLOURS.prefix_foreground}]"
+    "#[bold] CTRL-B MODE #[default]"
 )
-PREFIX_MODE_STATUS_FORMAT: Final = "#[bg=colour24]#[fg=white]#[bold] CTRL-B MODE #[default]"
 RODEX_STATUS_LEFT_FORMAT: Final = (
     "#{?#{&&:#{client_prefix},#{==:#{prefix},C-b}},"
     f"{PREFIX_MODE_STATUS_FORMAT},"
@@ -201,12 +293,22 @@ RODEX_STATUS_LEFT_FORMAT: Final = (
     "}"
 )
 RODEX_STATUS_LEFT_LENGTH: Final = "160"
+RODEX_STATUS_RIGHT_FORMAT: Final = (
+    "#{?session_many_attached,"
+    f"#[fg={RODEX_STATUS_COLOURS.sharing_shared}]#[bold] "
+    "[Shared with #{e|-:#{session_attached},1} "
+    "#{?#{==:#{session_attached},2},other,others}] #[default],"
+    f"#[fg={RODEX_STATUS_COLOURS.sharing_private}]#[bold] "
+    "[Private session] #[default]}"
+    " | %H:%M %d-%b-%y"
+)
+RODEX_STATUS_RIGHT_LENGTH: Final = "64"
 
 
 def context_status_segment(context_percent: float | None) -> str:
     """Render the live context fill using the authoritative context palette."""
     if context_percent is None:
-        return _BASE_STATUS_BAR.render_part(StatusBarPart.CONTEXT)
+        return _CONTEXT_FALLBACK_SEGMENT.render()
     if (
         isinstance(context_percent, bool)
         or not isinstance(context_percent, (int, float))
@@ -221,14 +323,11 @@ def context_status_segment(context_percent: float | None) -> str:
         for band in _CONTEXT_COLOUR_BANDS
         if exact_percent >= band.minimum_percent
     )
-    return (
-        _BASE_STATUS_BAR.modify_colour(StatusBarPart.CONTEXT, foreground)
-        .modify_content(
-            StatusBarPart.CONTEXT,
-            f"| Context: {displayed_percent}% | ",
-        )
-        .render_part(StatusBarPart.CONTEXT)
-    )
+    return replace(
+        _CONTEXT_FALLBACK_SEGMENT,
+        foreground=foreground,
+        content_format=f"| Context: {displayed_percent}% | ",
+    ).render()
 
 
 def compacting_status_segment(frame_index: int) -> str:
@@ -236,11 +335,8 @@ def compacting_status_segment(frame_index: int) -> str:
     if isinstance(frame_index, bool) or not isinstance(frame_index, int):
         raise ValueError("compaction frame index must be an integer")
     frame = _CONTEXT_COMPACTION_FRAMES[frame_index % len(_CONTEXT_COMPACTION_FRAMES)]
-    return (
-        _BASE_STATUS_BAR.modify_colour(
-            StatusBarPart.CONTEXT,
-            _CONTEXT_DANGER_BAND.foreground,
-        )
-        .modify_content(StatusBarPart.CONTEXT, f"| {frame} | ")
-        .render_part(StatusBarPart.CONTEXT)
-    )
+    return replace(
+        _CONTEXT_FALLBACK_SEGMENT,
+        foreground=_CONTEXT_DANGER_BAND.foreground,
+        content_format=f"| {frame} | ",
+    ).render()

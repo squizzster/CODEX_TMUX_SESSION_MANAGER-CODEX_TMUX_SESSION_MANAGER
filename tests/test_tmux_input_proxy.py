@@ -19,10 +19,10 @@ from rodex.tmux_input_proxy import (
 )
 from rodex.tmux_status import (
     RODEX_STATUS_LEFT_FORMAT,
-    STATUS_LEFT_CLAIM_PRIORITY_OPTION,
-    STATUS_LEFT_CLAIM_PUBLISHER_OPTION,
-    STATUS_LEFT_CLAIM_TOKEN_OPTION,
-    STATUS_LEFT_PUBLISHER_COMPLETION,
+    STATUS_CLAIM_PRIORITY_OPTION,
+    STATUS_CLAIM_PUBLISHER_OPTION,
+    STATUS_CLAIM_TOKEN_OPTION,
+    STATUS_PUBLISHER_COMPLETION,
 )
 
 PROMPT = "\N{SINGLE RIGHT-POINTING ANGLE QUOTATION MARK} "
@@ -41,9 +41,9 @@ class RecordingRunner:
         self.cursor_text = cursor_text
         self.commands: list[list[str]] = []
         self.status_options = {
-            STATUS_LEFT_CLAIM_PRIORITY_OPTION: "10",
-            STATUS_LEFT_CLAIM_PUBLISHER_OPTION: STATUS_LEFT_PUBLISHER_COMPLETION,
-            STATUS_LEFT_CLAIM_TOKEN_OPTION: "completion-token",
+            STATUS_CLAIM_PRIORITY_OPTION: "010",
+            STATUS_CLAIM_PUBLISHER_OPTION: STATUS_PUBLISHER_COMPLETION,
+            STATUS_CLAIM_TOKEN_OPTION: "completion-token",
         }
         self.status_left = "completion status"
 
@@ -75,10 +75,10 @@ class RecordingRunner:
         if "if-shell" in command:
             condition = command[-2]
             should_apply = False
-            if STATUS_LEFT_CLAIM_PUBLISHER_OPTION in condition:
+            if STATUS_CLAIM_PUBLISHER_OPTION in condition:
                 expected = condition.rsplit(",", maxsplit=1)[1].removesuffix("}")
                 should_apply = (
-                    self.status_options.get(STATUS_LEFT_CLAIM_PUBLISHER_OPTION) == expected
+                    self.status_options.get(STATUS_CLAIM_PUBLISHER_OPTION) == expected
                 )
             if should_apply:
                 for action in command[-1].split(" ; "):
@@ -306,8 +306,8 @@ def test_rodex_hi_is_cleared_and_acknowledged_in_tmux(tmp_path: Path) -> None:
     assert runner.commands[2][-4:] == ["send-keys", "-t", "%4", "C-c"]
     status_restore = runner.commands[3]
     assert status_restore[3:7] == ["if-shell", "-t", "%4", "-F"]
-    assert STATUS_LEFT_CLAIM_PUBLISHER_OPTION in status_restore[-2]
-    assert STATUS_LEFT_PUBLISHER_COMPLETION in status_restore[-2]
+    assert STATUS_CLAIM_PUBLISHER_OPTION in status_restore[-2]
+    assert STATUS_PUBLISHER_COMPLETION in status_restore[-2]
     assert RODEX_STATUS_LEFT_FORMAT in status_restore[-1]
     assert runner.status_options == {}
     assert runner.status_left == RODEX_STATUS_LEFT_FORMAT

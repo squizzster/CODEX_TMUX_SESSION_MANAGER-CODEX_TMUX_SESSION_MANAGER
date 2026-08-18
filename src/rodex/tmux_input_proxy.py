@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
-from .tmux_status import STATUS_LEFT_PUBLISHER_COMPLETION, TmuxStatusLeftPipeline
+from .tmux_status import STATUS_PUBLISHER_COMPLETION, TmuxStatusPipeline
 
 _RODEX_COMMAND: Final = "/rodex"
 _PROMPT_PREFIX: Final = "\N{SINGLE RIGHT-POINTING ANGLE QUOTATION MARK} "
@@ -203,8 +203,8 @@ def _dispatch_rodex_input_command(
     client_name: str,
     tmux: Callable[..., subprocess.CompletedProcess[str]],
 ) -> int:
-    TmuxStatusLeftPipeline(tmux, pane_id).restore_if_publisher_matches(
-        STATUS_LEFT_PUBLISHER_COMPLETION
+    TmuxStatusPipeline(tmux, pane_id).restore_if_publisher_matches(
+        STATUS_PUBLISHER_COMPLETION
     )
     arguments = command.arguments
     if command.parse_error:

@@ -74,6 +74,8 @@ class StubLauncher:
         self.registry_identities: list[RodexRegistryId | None] = []
         self.renamed: list[tuple[LiveTmuxSession, str]] = []
         self.configured: list[LiveTmuxSession] = []
+        self.reconciled: list[LiveTmuxSession] = []
+        self.refreshed_hooks: list[LiveTmuxSession] = []
         self.attached: list[LiveTmuxSession] = []
         self.stopped: list[tuple[LiveTmuxSession, bool]] = []
         self.existing_checks: list[LiveTmuxSession] = []
@@ -125,8 +127,14 @@ class StubLauncher:
         self.renamed.append((runtime, tmux_session_name))
         return replace(runtime, tmux_session_name=tmux_session_name)
 
-    def configure_identity_status(self, runtime: LiveTmuxSession) -> None:
+    def initialise_session_ui(self, runtime: LiveTmuxSession) -> None:
         self.configured.append(runtime)
+
+    def reconcile_session_ui(self, runtime: LiveTmuxSession) -> None:
+        self.reconciled.append(runtime)
+
+    def refresh_name_bound_hooks(self, runtime: LiveTmuxSession) -> None:
+        self.refreshed_hooks.append(runtime)
 
     def attach(self, runtime: LiveTmuxSession) -> None:
         self.attached.append(runtime)
@@ -893,7 +901,9 @@ def test_running_reports_an_unregistered_live_tmux_session(
     socket_path.touch()
     launcher = StubLauncher(tmp_path)
     launcher.session_names = ("orphan-name",)
-    monkeypatch.setattr("rodex.cli.default_tmux_server_socket_path", lambda: socket_path)
+    monkeypatch.setattr(
+        "rodex.session_commands.default_tmux_server_socket_path", lambda: socket_path
+    )
     monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
 
     assert (
@@ -1040,7 +1050,7 @@ def test_accepted_machine_mutation_emits_one_success_when_access_bookkeeping_fai
     monkeypatch.setattr(sys, "stdin", io.StringIO("run focused tests\n"))
     create_exact_controlled_session(database, tmp_path)
     monkeypatch.setattr(
-        "rodex.cli.record_a_rodex_session_access",
+        "rodex.machine_commands.record_a_rodex_session_access",
         lambda *_args: (_ for _ in ()).throw(RodexSessionError("database unavailable")),
     )
     launcher = StubLauncher(tmp_path)
@@ -1676,6 +1686,7 @@ def test_default_and_explicit_create_link_identities_before_attach(
     assert planned_database == database
     assert launcher.registry_identities == [lookup_rodex_registry_id(database)]
     assert launcher.renamed == [(launcher.runtime, "automatic-beluga")]
+    assert len(launcher.configured) == 1
     assert launcher.configured[0].tmux_session_name == "automatic-beluga"
     assert launcher.attached == launcher.configured
     tmux_link = lookup_rodex_tmux_session(1, database)
@@ -2284,8 +2295,10 @@ def test_live_cool_name_argument_renames_configures_and_reattaches_without_start
     assert len(launcher.renamed) == 1
     assert launcher.renamed[0][0].tmux_session_name == "rodex-token"
     assert launcher.renamed[0][1] == "automatic-beluga"
-    assert launcher.configured[0].tmux_session_name == "automatic-beluga"
-    assert launcher.attached == launcher.configured
+    assert launcher.refreshed_hooks == [
+        LiveTmuxSession(tmp_path / "tmux.sock", "automatic-beluga")
+    ]
+    assert launcher.attached == launcher.refreshed_hooks
     tmux_link = lookup_rodex_tmux_session(1, database)
     assert tmux_link is not None
     assert tmux_link.tmux_session_name == "automatic-beluga"
@@ -2644,7 +2657,7 @@ def test_either_name_route_displays_the_user_defined_name(
     assert launcher.renamed == [
         (LiveTmuxSession(tmp_path / "tmux.sock", "black-sawfly"), "work")
     ]
-    assert launcher.configured == [LiveTmuxSession(tmp_path / "tmux.sock", "work")]
+    assert launcher.refreshed_hooks == [LiveTmuxSession(tmp_path / "tmux.sock", "work")]
     tmux_link = lookup_rodex_tmux_session(1, database)
     assert tmux_link is not None
     assert tmux_link.tmux_session_name == "work"
@@ -2703,7 +2716,7 @@ def test_alias_command_accepts_force_without_starting_codex(
 
     assert launcher.started == []
     assert [name for _, name in launcher.renamed] == ["first", "replacement"]
-    assert launcher.configured[-1].tmux_session_name == "replacement"
+    assert launcher.refreshed_hooks[-1].tmux_session_name == "replacement"
     tmux_link = lookup_rodex_tmux_session(1, database)
     assert tmux_link is not None
     assert tmux_link.tmux_session_name == "replacement"
@@ -3198,7 +3211,10 @@ def test_concurrent_alias_commands_serialize_across_tmux_and_database(
                 assert allow_first_commit.wait(5)
             return replace(runtime, tmux_session_name=tmux_session_name)
 
-        def configure_identity_status(self, runtime: LiveTmuxSession) -> None:
+        def initialise_session_ui(self, runtime: LiveTmuxSession) -> None:
+            return None
+
+        def refresh_name_bound_hooks(self, runtime: LiveTmuxSession) -> None:
             return None
 
         def discover_runtime_control(self, _runtime: LiveTmuxSession) -> LiveRodexControl:
@@ -3254,7 +3270,7 @@ def test_concurrent_alias_commands_serialize_across_tmux_and_database(
         return open_a_user_defined_cool_name_assignment(*args, **kwargs)
 
     monkeypatch.setattr(
-        "rodex.cli.open_a_user_defined_cool_name_assignment",
+        "rodex.session_commands.open_a_user_defined_cool_name_assignment",
         observe_assignment_attempt,
     )
     first_thread.start()

@@ -7,8 +7,10 @@ import pytest
 
 from rodex_sql import (
     INDEX_RE_TRY_ATTEMPTS,
+    RodexDatabaseNotFoundError,
     RodexSQLError,
     index_re_try_attempt_numbers,
+    open_rodex_read_transaction,
     open_rodex_transaction,
     select_lookup_id,
     select_or_insert_lookup_id,
@@ -52,6 +54,36 @@ def test_transaction_rolls_back_all_work_on_failure(tmp_path: Path) -> None:
     ):
         select_or_insert_lookup_id(connection, "example_lookup", {"code": "one"})
         raise RuntimeError("abort transaction")
+
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM example_lookup").fetchone() == (0,)
+
+
+@pytest.mark.evolutionary_regression
+def test_read_transaction_cannot_create_database_storage(tmp_path: Path) -> None:
+    """Current evidence: a read path must never bootstrap durable state."""
+    database = tmp_path / "absent" / "database.sqlite3"
+
+    with (
+        pytest.raises(RodexDatabaseNotFoundError, match="database does not exist"),
+        open_rodex_read_transaction(database),
+    ):
+        pass
+
+    assert not database.parent.exists()
+    assert not database.exists()
+
+
+@pytest.mark.evolutionary_regression
+def test_read_transaction_rejects_sql_writes(tmp_path: Path) -> None:
+    """Current evidence: every declared read transaction is SQLite read-only."""
+    database = tmp_path / "database.sqlite3"
+    create_lookup_table(database)
+
+    with open_rodex_read_transaction(database) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM example_lookup").fetchone() == (0,)
+        with pytest.raises(sqlite3.OperationalError, match="readonly"):
+            connection.execute("INSERT INTO example_lookup (code) VALUES ('forbidden')")
 
     with sqlite3.connect(database) as connection:
         assert connection.execute("SELECT COUNT(*) FROM example_lookup").fetchone() == (0,)

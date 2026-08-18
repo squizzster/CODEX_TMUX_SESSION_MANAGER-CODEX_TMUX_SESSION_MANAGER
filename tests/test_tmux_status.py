@@ -11,13 +11,15 @@ import pytest
 
 from rodex.status_bar import RODEX_STATUS_LEFT_FORMAT
 from rodex.tmux_status import (
-    STATUS_LEFT_CLAIM_PRIORITY_OPTION,
-    STATUS_LEFT_CLAIM_PUBLISHER_OPTION,
-    STATUS_LEFT_CLAIM_TOKEN_OPTION,
-    STATUS_LEFT_PUBLISHER_COMPLETION,
-    STATUS_LEFT_PUBLISHER_SHARED_CTRL_C,
-    StatusLeftPriority,
-    TmuxStatusLeftPipeline,
+    STATUS_CLAIM_PRIORITY_OPTION,
+    STATUS_CLAIM_PUBLISHER_OPTION,
+    STATUS_CLAIM_TOKEN_OPTION,
+    STATUS_PUBLISHER_COMPLETION,
+    STATUS_PUBLISHER_SHARED_CTRL_C,
+    STATUS_PUBLISHER_SHARING_ANIMATION,
+    StatusPriority,
+    TmuxStatusPipeline,
+    TmuxStatusPresentation,
 )
 
 
@@ -51,21 +53,25 @@ class FakeTmux:
     def _condition_is_true(self, condition: str) -> bool:
         if condition == "1":
             return True
+        if condition == f"#{{?{STATUS_CLAIM_TOKEN_OPTION},0,1}}":
+            return STATUS_CLAIM_TOKEN_OPTION not in self.options
         if condition.startswith("#{<=:"):
-            current = int(self.options.get(STATUS_LEFT_CLAIM_PRIORITY_OPTION, "0"))
+            current = int(self.options.get(STATUS_CLAIM_PRIORITY_OPTION, "0"))
             requested = int(condition.rsplit(",", maxsplit=1)[1].removesuffix("}"))
             return current <= requested
-        if STATUS_LEFT_CLAIM_TOKEN_OPTION in condition:
+        if STATUS_CLAIM_TOKEN_OPTION in condition:
             expected = condition.rsplit(",", maxsplit=1)[1].removesuffix("}")
-            return self.options.get(STATUS_LEFT_CLAIM_TOKEN_OPTION) == expected
-        if STATUS_LEFT_CLAIM_PUBLISHER_OPTION in condition:
+            return self.options.get(STATUS_CLAIM_TOKEN_OPTION) == expected
+        if STATUS_CLAIM_PUBLISHER_OPTION in condition:
             expected = condition.rsplit(",", maxsplit=1)[1].removesuffix("}")
-            return self.options.get(STATUS_LEFT_CLAIM_PUBLISHER_OPTION) == expected
+            return self.options.get(STATUS_CLAIM_PUBLISHER_OPTION) == expected
         raise AssertionError(f"unexpected tmux condition: {condition}")
 
     def _apply(self, command: list[str]) -> None:
         if command[:2] == ["set-option", "-u"]:
             self.options.pop(command[-1], None)
+            if command[-1] == "status-format":
+                self.options.pop("status-format[0]", None)
         elif command[:1] == ["set-option"] and command[-2] == "status-left":
             self.status_left = command[-1]
         elif command[:1] == ["set-option"]:
@@ -73,36 +79,36 @@ class FakeTmux:
 
 
 def publish(
-    status: TmuxStatusLeftPipeline,
+    status: TmuxStatusPipeline,
     *,
     publisher: str,
     token: str,
-    priority: StatusLeftPriority,
+    priority: StatusPriority,
     message: str,
 ) -> bool:
     return status.publish_transient(
         publisher=publisher,
         token=token,
         priority=priority,
-        status_format=message,
+        presentation=TmuxStatusPresentation(status_left=message),
     )
 
 
 def test_status_pipeline_publishes_and_exact_token_restores_atomically() -> None:
     tmux = FakeTmux()
-    status = TmuxStatusLeftPipeline(tmux, "%4")
+    status = TmuxStatusPipeline(tmux, "%4")
 
     assert publish(
         status,
-        publisher=STATUS_LEFT_PUBLISHER_COMPLETION,
+        publisher=STATUS_PUBLISHER_COMPLETION,
         token="completion-1",
-        priority=StatusLeftPriority.COMPLETION,
+        priority=StatusPriority.COMPLETION,
         message="completion message",
     )
     assert tmux.options == {
-        STATUS_LEFT_CLAIM_PRIORITY_OPTION: "10",
-        STATUS_LEFT_CLAIM_PUBLISHER_OPTION: "completion",
-        STATUS_LEFT_CLAIM_TOKEN_OPTION: "completion-1",
+        STATUS_CLAIM_PRIORITY_OPTION: "010",
+        STATUS_CLAIM_PUBLISHER_OPTION: "completion",
+        STATUS_CLAIM_TOKEN_OPTION: "completion-1",
     }
     assert tmux.status_left == "completion message"
     assert tmux.commands[0][:5] == [
@@ -110,7 +116,7 @@ def test_status_pipeline_publishes_and_exact_token_restores_atomically() -> None
         "-t",
         "%4",
         "-F",
-        "#{<=:#{@rodex_status_left_claim_priority},10}",
+        "#{<=:#{@rodex_status_claim_priority},010}",
     ]
 
     status.restore_if_token_matches("stale-token")
@@ -122,34 +128,67 @@ def test_status_pipeline_publishes_and_exact_token_restores_atomically() -> None
 
 def test_higher_priority_warning_supersedes_and_blocks_completion() -> None:
     tmux = FakeTmux()
-    status = TmuxStatusLeftPipeline(tmux, "%4")
+    status = TmuxStatusPipeline(tmux, "%4")
     assert publish(
         status,
-        publisher=STATUS_LEFT_PUBLISHER_COMPLETION,
+        publisher=STATUS_PUBLISHER_COMPLETION,
         token="completion-1",
-        priority=StatusLeftPriority.COMPLETION,
+        priority=StatusPriority.COMPLETION,
         message="completion message",
     )
     assert publish(
         status,
-        publisher=STATUS_LEFT_PUBLISHER_SHARED_CTRL_C,
+        publisher=STATUS_PUBLISHER_SHARED_CTRL_C,
         token="warning-1",
-        priority=StatusLeftPriority.SAFETY_WARNING,
+        priority=StatusPriority.SAFETY_WARNING,
         message="safety warning",
     )
     assert not publish(
         status,
-        publisher=STATUS_LEFT_PUBLISHER_COMPLETION,
+        publisher=STATUS_PUBLISHER_COMPLETION,
         token="completion-2",
-        priority=StatusLeftPriority.COMPLETION,
+        priority=StatusPriority.COMPLETION,
         message="new completion",
     )
-    assert tmux.options[STATUS_LEFT_CLAIM_TOKEN_OPTION] == "warning-1"
+    assert tmux.options[STATUS_CLAIM_TOKEN_OPTION] == "warning-1"
     assert tmux.status_left == "safety warning"
 
     status.restore_if_token_matches("completion-1")
     assert tmux.status_left == "safety warning"
-    status.restore_if_publisher_matches(STATUS_LEFT_PUBLISHER_SHARED_CTRL_C)
+    status.restore_if_publisher_matches(STATUS_PUBLISHER_SHARED_CTRL_C)
+    assert tmux.status_left == RODEX_STATUS_LEFT_FORMAT
+
+
+@pytest.mark.evolutionary_regression
+def test_safety_warning_preempts_full_line_animation_and_owns_restoration() -> None:
+    """Current evidence: safety outranks animation; supersede only by UI contract."""
+    tmux = FakeTmux()
+    status = TmuxStatusPipeline(tmux, "%4")
+    assert status.publish_transient(
+        publisher=STATUS_PUBLISHER_SHARING_ANIMATION,
+        token="animation-1",
+        priority=StatusPriority.SHARING_ANIMATION,
+        presentation=TmuxStatusPresentation(
+            status_style="bg=colour24,fg=white,bold",
+            status_format="#[align=centre]SHARING",
+        ),
+    )
+
+    assert publish(
+        status,
+        publisher=STATUS_PUBLISHER_SHARED_CTRL_C,
+        token="warning-1",
+        priority=StatusPriority.SAFETY_WARNING,
+        message="safety warning",
+    )
+
+    assert tmux.options[STATUS_CLAIM_TOKEN_OPTION] == "warning-1"
+    assert "status-format[0]" not in tmux.options
+    assert "status-style" not in tmux.options
+    assert tmux.status_left == "safety warning"
+    status.restore_if_token_matches("animation-1")
+    assert tmux.status_left == "safety warning"
+    status.restore_if_token_matches("warning-1")
     assert tmux.status_left == RODEX_STATUS_LEFT_FORMAT
 
 
@@ -191,9 +230,9 @@ def test_real_tmux_concurrent_publishers_leave_a_matching_atomic_claim(
         capture_output=True,
     )
     for option, value in (
-        (STATUS_LEFT_CLAIM_PUBLISHER_OPTION, "decoy"),
-        (STATUS_LEFT_CLAIM_TOKEN_OPTION, "decoy-token"),
-        (STATUS_LEFT_CLAIM_PRIORITY_OPTION, "100"),
+        (STATUS_CLAIM_PUBLISHER_OPTION, "decoy"),
+        (STATUS_CLAIM_TOKEN_OPTION, "decoy-token"),
+        (STATUS_CLAIM_PRIORITY_OPTION, "100"),
         ("status-left", "decoy message"),
     ):
         subprocess.run(
@@ -216,7 +255,7 @@ def test_real_tmux_concurrent_publishers_leave_a_matching_atomic_claim(
     def publish_after_barrier(
         publisher: str,
         token: str,
-        priority: StatusLeftPriority,
+        priority: StatusPriority,
         message: str,
     ) -> None:
         def tmux(*arguments: str) -> subprocess.CompletedProcess[str]:
@@ -228,11 +267,11 @@ def test_real_tmux_concurrent_publishers_leave_a_matching_atomic_claim(
             )
 
         barrier.wait()
-        TmuxStatusLeftPipeline(tmux, "=status:").publish_transient(
+        TmuxStatusPipeline(tmux, "=status:").publish_transient(
             publisher=publisher,
             token=token,
             priority=priority,
-            status_format=message,
+            presentation=TmuxStatusPresentation(status_left=message),
         )
 
     try:
@@ -240,16 +279,16 @@ def test_real_tmux_concurrent_publishers_leave_a_matching_atomic_claim(
             futures = (
                 executor.submit(
                     publish_after_barrier,
-                    STATUS_LEFT_PUBLISHER_COMPLETION,
+                    STATUS_PUBLISHER_COMPLETION,
                     "completion-token",
-                    StatusLeftPriority.COMPLETION,
+                    StatusPriority.COMPLETION,
                     "completion message",
                 ),
                 executor.submit(
                     publish_after_barrier,
-                    STATUS_LEFT_PUBLISHER_SHARED_CTRL_C,
+                    STATUS_PUBLISHER_SHARED_CTRL_C,
                     "warning-token",
-                    StatusLeftPriority.SAFETY_WARNING,
+                    StatusPriority.SAFETY_WARNING,
                     "safety warning",
                 ),
             )
@@ -273,11 +312,9 @@ def test_real_tmux_concurrent_publishers_leave_a_matching_atomic_claim(
                 capture_output=True,
             ).stdout.strip()
 
-        assert (
-            show(STATUS_LEFT_CLAIM_PUBLISHER_OPTION) == STATUS_LEFT_PUBLISHER_SHARED_CTRL_C
-        )
-        assert show(STATUS_LEFT_CLAIM_TOKEN_OPTION) == "warning-token"
-        assert show(STATUS_LEFT_CLAIM_PRIORITY_OPTION) == "100"
+        assert show(STATUS_CLAIM_PUBLISHER_OPTION) == STATUS_PUBLISHER_SHARED_CTRL_C
+        assert show(STATUS_CLAIM_TOKEN_OPTION) == "warning-token"
+        assert show(STATUS_CLAIM_PRIORITY_OPTION) == "100"
         assert show("status-left") == "safety warning"
 
         def show_decoy(option: str) -> str:
@@ -297,7 +334,7 @@ def test_real_tmux_concurrent_publishers_leave_a_matching_atomic_claim(
                 capture_output=True,
             ).stdout.strip()
 
-        assert show_decoy(STATUS_LEFT_CLAIM_TOKEN_OPTION) == "decoy-token"
+        assert show_decoy(STATUS_CLAIM_TOKEN_OPTION) == "decoy-token"
         assert show_decoy("status-left") == "decoy message"
     finally:
         subprocess.run(

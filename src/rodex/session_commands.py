@@ -372,8 +372,12 @@ def _print_running_sessions(
     database_path: Path,
     launcher: RodexRuntimeLauncher,
 ) -> None:
-    persisted = list_rodex_session_runtimes_for_a_user(database_path)
-    registry_id = lookup_rodex_registry_id(database_path)
+    persisted = (
+        list_rodex_session_runtimes_for_a_user(database_path)
+        if database_path.exists()
+        else []
+    )
+    registry_id = lookup_rodex_registry_id(database_path) if persisted else None
     running = []
     identity_failures: list[tuple[str, str]] = []
     registered_endpoints: set[tuple[Path, str]] = set()
@@ -393,6 +397,7 @@ def _print_running_sessions(
                 (runtime.display_name, "missing durable Rodex session ID")
             )
             continue
+        assert registry_id is not None
         try:
             verify_live_runtime_identity(
                 launcher,

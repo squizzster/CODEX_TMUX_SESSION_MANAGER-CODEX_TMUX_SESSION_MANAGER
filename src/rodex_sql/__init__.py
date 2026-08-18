@@ -6,6 +6,7 @@ from .database import (
     normalise_rodex_database_path,
     open_rodex_read_transaction,
     open_rodex_transaction,
+    require_existing_rodex_database_path,
     select_lookup_id,
     select_or_insert_lookup_id,
 )
@@ -19,6 +20,7 @@ __all__ = [
     "normalise_rodex_database_path",
     "open_rodex_read_transaction",
     "open_rodex_transaction",
+    "require_existing_rodex_database_path",
     "select_lookup_id",
     "select_or_insert_lookup_id",
 ]

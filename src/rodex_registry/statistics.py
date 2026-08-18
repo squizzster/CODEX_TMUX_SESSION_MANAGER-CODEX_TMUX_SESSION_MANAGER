@@ -37,6 +37,7 @@ from .schema import (
     RODEX_SESSIONS_TABLE,
     STATISTICS_COVERAGE_STATES,
     STATISTICS_WORKER_STATES,
+    existing_rodex_database_path,
     initialise_rodex_database,
 )
 from .statistics_projection import (
@@ -552,7 +553,7 @@ def read_rodex_session_statistics(
 ) -> RodexSessionStatisticsView:
     """Read last-good statistics, worker health, and sources in one transaction."""
     _validate_session_id(session_id)
-    path = initialise_rodex_database(database_path)
+    path = existing_rodex_database_path(database_path)
     with open_rodex_read_transaction(path) as connection:
         statistics_row = _select_statistics(connection, session_id)
         distribution_rows = _select_statistics_distributions(connection, session_id)
@@ -592,7 +593,7 @@ def read_rodex_session_turn_statistics(
         if codex_session_id is None
         else split_codex_session_id_into_signed_bigints(codex_session_id)
     )
-    path = initialise_rodex_database(database_path)
+    path = existing_rodex_database_path(database_path)
     with open_rodex_read_transaction(path) as connection:
         statistics_row = _select_statistics(connection, session_id)
         distribution_rows = _select_statistics_distributions(connection, session_id)

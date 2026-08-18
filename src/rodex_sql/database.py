@@ -71,12 +71,18 @@ def open_rodex_transaction(
 def open_rodex_read_transaction(
     database_path: str | os.PathLike[str],
 ) -> Iterator[sqlite3.Connection]:
-    """Open one deferred, transactionally consistent read without a write lock."""
-    path = _prepare_private_database_path(database_path)
-    connection = sqlite3.connect(path, timeout=10, isolation_level=None)
+    """Open one strict read-only transaction against an existing private database."""
+    path = require_existing_rodex_database_path(database_path)
+    connection = sqlite3.connect(
+        f"{path.as_uri()}?mode=ro",
+        timeout=10,
+        isolation_level=None,
+        uri=True,
+    )
     try:
         connection.execute("PRAGMA foreign_keys = ON")
         connection.execute("PRAGMA busy_timeout = 10000")
+        connection.execute("PRAGMA query_only = ON")
         connection.execute("BEGIN")
         yield connection
     except BaseException:
@@ -88,10 +94,54 @@ def open_rodex_read_transaction(
         connection.close()
 
 
+def require_existing_rodex_database_path(
+    database_path: str | os.PathLike[str],
+) -> Path:
+    """Resolve and validate existing private storage without creating or repairing it."""
+    path = Path(os.path.abspath(Path(database_path).expanduser()))
+    try:
+        parent = path.parent.lstat()
+    except FileNotFoundError as error:
+        raise RodexSQLError(f"database does not exist: {path}") from error
+    _validate_private_database_parent(path, parent)
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except FileNotFoundError as error:
+        raise RodexSQLError(f"database does not exist: {path}") from error
+    except OSError as error:
+        raise RodexSQLError(f"could not securely open database {path}: {error}") from error
+    try:
+        state = os.fstat(descriptor)
+        _validate_database_descriptor(path, state)
+        if state.st_mode & 0o077:
+            raise RodexSQLError(f"database is not private: {path}")
+    finally:
+        os.close(descriptor)
+    return path
+
+
 def _prepare_private_database_path(database_path: str | os.PathLike[str]) -> Path:
     path = Path(os.path.abspath(Path(database_path).expanduser()))
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     parent = path.parent.lstat()
+    _validate_private_database_parent(path, parent)
+    flags = os.O_RDWR | os.O_CREAT
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags, 0o600)
+    except OSError as error:
+        raise RodexSQLError(f"could not securely open database {path}: {error}") from error
+    try:
+        state = os.fstat(descriptor)
+        _validate_database_descriptor(path, state)
+        os.fchmod(descriptor, 0o600)
+    finally:
+        os.close(descriptor)
+    return path
+
+
+def _validate_private_database_parent(path: Path, parent: os.stat_result) -> None:
     if stat_module.S_ISLNK(parent.st_mode):
         raise RodexSQLError(f"database parent is a symbolic link: {path.parent}")
     private_parent = parent.st_uid == os.getuid() and parent.st_mode & 0o077 == 0
@@ -102,22 +152,13 @@ def _prepare_private_database_path(database_path: str | os.PathLike[str]) -> Pat
         raise RodexSQLError(
             f"database parent is not private or root-owned sticky storage: {path.parent}"
         )
-    flags = os.O_RDWR | os.O_CREAT
-    flags |= getattr(os, "O_NOFOLLOW", 0)
-    try:
-        descriptor = os.open(path, flags, 0o600)
-    except OSError as error:
-        raise RodexSQLError(f"could not securely open database {path}: {error}") from error
-    try:
-        state = os.fstat(descriptor)
-        if not stat_module.S_ISREG(state.st_mode):
-            raise RodexSQLError(f"database path is not a regular file: {path}")
-        if state.st_uid != os.getuid():
-            raise RodexSQLError(f"database is not owned by uid {os.getuid()}: {path}")
-        os.fchmod(descriptor, 0o600)
-    finally:
-        os.close(descriptor)
-    return path
+
+
+def _validate_database_descriptor(path: Path, state: os.stat_result) -> None:
+    if not stat_module.S_ISREG(state.st_mode):
+        raise RodexSQLError(f"database path is not a regular file: {path}")
+    if state.st_uid != os.getuid():
+        raise RodexSQLError(f"database is not owned by uid {os.getuid()}: {path}")
 
 
 def select_lookup_id(

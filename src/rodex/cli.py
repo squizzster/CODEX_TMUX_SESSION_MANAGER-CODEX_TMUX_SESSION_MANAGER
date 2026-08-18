@@ -178,6 +178,9 @@ def run(
             f"Codex executable was not found: {configured_codex}"
         )
 
+    planned_rodex_session_id = generate_an_unregistered_rodex_session_id_candidate(
+        resolved_database
+    )
     if requested_name is not None:
         requested_name = normalise_rodex_display_name(requested_name)
         if (
@@ -186,9 +189,6 @@ def run(
         ):
             raise RodexLaunchError(f"Rodex session name already exists: {requested_name}")
 
-    planned_rodex_session_id = generate_an_unregistered_rodex_session_id_candidate(
-        resolved_database
-    )
     registry_id = lookup_rodex_registry_id(resolved_database)
     live_runtime, codex_session_id = runtime_launcher.start(
         Path.cwd(),

@@ -14,6 +14,7 @@ from rodex_sql import (
     normalise_rodex_database_path,
     open_rodex_read_transaction,
     open_rodex_transaction,
+    require_existing_rodex_database_path,
 )
 
 from .errors import RodexSessionError
@@ -892,6 +893,15 @@ def default_rodex_database_path() -> Path:
     return _default_rodex_database_path()
 
 
+def existing_rodex_database_path(
+    database_path: str | os.PathLike[str] | None = None,
+) -> Path:
+    """Resolve an existing private registry without bootstrapping or repairing it."""
+    return require_existing_rodex_database_path(
+        normalise_rodex_database_path(database_path)
+    )
+
+
 def initialise_rodex_database(database_path: str | os.PathLike[str] | None = None) -> Path:
     """Create and verify the current Rodex schema in one transaction."""
     path = normalise_rodex_database_path(database_path)
@@ -1093,7 +1103,7 @@ def lookup_rodex_registry_id(
     database_path: str | os.PathLike[str] | None = None,
 ) -> RodexRegistryId:
     """Return the durable identity of one exact Rodex registry database."""
-    path = initialise_rodex_database(database_path)
+    path = existing_rodex_database_path(database_path)
     with open_rodex_read_transaction(path) as connection:
         row = connection.execute(
             f"SELECT rodex_registry_id_signed_bigint "

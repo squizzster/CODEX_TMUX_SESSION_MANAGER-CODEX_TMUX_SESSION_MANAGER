@@ -1126,15 +1126,15 @@ def run_session_host(
                 tmux_pane_target,
             )
             context_status.update(context_status_segment(None))
-            context_status_observer = CodexContextStatusObserver(context_status.update)
-            protocol_event_tap = CodexProtocolEventTap(protocol_event_socket_path)
-            protocol_event_tap.start()
+            live_context_observer = CodexContextStatusObserver(context_status.update)
+            context_status_observer = live_context_observer
+            live_event_tap = CodexProtocolEventTap(protocol_event_socket_path)
+            protocol_event_tap = live_event_tap
+            live_event_tap.start()
 
             def publish_primary_server_message(message: str | bytes) -> None:
-                assert context_status_observer is not None
-                context_status_observer.observe_server_message(message)
-                assert protocol_event_tap is not None
-                protocol_event_tap.publish(message)
+                live_context_observer.observe_server_message(message)
+                live_event_tap.publish(message)
 
             protocol_proxy = CodexProtocolProxy(
                 protocol_proxy_socket_path,

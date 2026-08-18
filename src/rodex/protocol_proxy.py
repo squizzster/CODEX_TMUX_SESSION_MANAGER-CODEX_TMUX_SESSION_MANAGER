@@ -15,14 +15,13 @@ from websockets.exceptions import ConnectionClosed
 from websockets.sync.client import unix_connect
 from websockets.sync.server import unix_serve
 
-from .tmux_status import (
+from .status_bar import (
     RODEX_CONTEXT_STATUS_OPTION,
     RODEX_TOOL_CALL_STATUS_OPTION,
-    STATUS_ANIMATION_FRAME_INTERVAL_SECONDS,
-    TmuxStatusOption,
     compacting_status_segment,
     context_status_segment,
 )
+from .tmux_status import STATUS_ANIMATION_FRAME_INTERVAL_SECONDS, TmuxStatusOption
 
 TOOL_CALL_ITEM_TYPES: Final = frozenset(
     {

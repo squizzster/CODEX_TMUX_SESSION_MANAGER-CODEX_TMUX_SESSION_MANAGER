@@ -39,6 +39,7 @@ derives tool and context signals, and fans structured events; it never buffers t
 |---|---|
 | `rodex.cli` | Pass through to Codex or route exact underscore commands and stored names. |
 | `rodex.runtime` | Own tmux scrollback, app-server discovery, attachment, and supervision. |
+| `rodex.status_bar` | Own named segments, the authoritative palette, layout updates, and context rendering. |
 | `rodex.status_animation` | Render cancellable, one-shot sharing transitions. |
 | `rodex.session_host` | Keep one app-server, proxy, foreground TUI, and its runtime paths together. |
 | `rodex.analytics` | Authenticate rollout prefixes and supervise fail-open analysis. |
@@ -99,15 +100,14 @@ runtime repairs interrupted launch. During shutdown, the host retries only the e
 `_running` follows the same ownership and live-endpoint rules. `_alias` changes use the
 same naming pipeline and compensate a tmux rename if the database transition fails.
 
-Named immutable segments own ordinary left-status colour and content. Sharing animations
-and transient claims publish and restore through `TmuxStatusLeftPipeline`. Per-client
-`client_prefix` preserves fast key sequences. Shared `Ctrl-C` requires same-client
-confirmation; private input and user root bindings stay unchanged. `/rodex` is disabled.
+Named immutable segments own ordinary left-status colour and content. Sharing animations and
+transient claims use `TmuxStatusLeftPipeline`; per-client `client_prefix` preserves fast keys.
+Shared `Ctrl-C` requires same-client confirmation; private input and root bindings stay
+unchanged; `/rodex` remains disabled.
 
-The same base status reads a pane-stable context option written by the primary protocol
-proxy observer. Token usage divided by model window supplies context fill; compaction item
-lifecycle animates that slot. Durable analytics remain downstream. Transient restoration
-returns to the one base format and its current option without parallel context logic.
+The base status reads a pane-stable context option from the primary protocol observer.
+Usage divided by model window supplies context fill; compaction lifecycle animates it.
+Durable analytics remain downstream; transient restoration returns to the one base format.
 
 ## Persistent analytics
 

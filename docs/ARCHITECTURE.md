@@ -25,11 +25,11 @@ private tmux server
     ▼
 session host ─┬► Codex TUI ──► protocol proxy ──► Codex app-server
              │                  ├──► context status ──► tmux base status
-             │                  └──► live event tap ──► tail/wait/send clients
+             │                  └──► live event tap ──► events/wait/control clients
              └► analytics worker ──► in-memory analyzer ──► SQLite projections
 ```
 
-The TUI remains the normal Codex interface and runs inline so rendered output enters tmux's 50,000-line pane history. tmux owns keyboard copy-mode scrollback and derives status privacy from clients attached to that exact session. The proxy forwards WebSocket frames, derives tool and context signals, and fans structured events; it never buffers the screen.
+The TUI remains the normal Codex interface and runs inline so rendered output enters tmux's 50,000-line pane history. tmux owns keyboard copy-mode and `_cat` scrollback snapshots, and derives status privacy from clients attached to that exact session. The proxy forwards WebSocket frames, derives tool and context signals, and fans structured events; it never buffers the screen.
 
 ## Component boundaries
 
@@ -38,6 +38,7 @@ The TUI remains the normal Codex interface and runs inline so rendered output en
 | `rodex.cli` | Adapt process arguments/output and orchestrate launch, attach, or Codex passthrough. |
 | `rodex.command_contract` | Own command vocabulary, routes, generated help, and machine-command grammar. |
 | `rodex.session_commands` / `statistics_commands` / `machine_commands` | Execute the three command domains behind the shared CLI contract. |
+| `rodex.session_read_pipeline` | Own resolve/read-or-stream/revalidate/access order for live session reads. |
 | `rodex.runtime` | Own tmux scrollback, app-server discovery, attachment, and supervision. |
 | `rodex.process_contracts` | Own typed subprocess configurations and their lossless argv wire forms. |
 | `rodex.status_bar` | Own named segments, the authoritative palette, order, and base rendering. |
@@ -64,8 +65,7 @@ form. SQLite stores all bits in one signed `BIGINT` using lossless two's-complem
 The Codex session ID uses two signed 64-bit integers; registry identity remains separate.
 
 Separate tables hold registry ID, tmux endpoint, runtime UUID, POSIX owner/log, names,
-statistics/worker health, and retained Codex rollout lineage. A display alias never
-replaces the permanent generated name. Detailed rules live in [SQL_SCHEMA.md](SQL_SCHEMA.md).
+statistics/worker health, and retained Codex rollout lineage. A display alias never replaces the permanent generated name. Detailed rules live in [SQL_SCHEMA.md](SQL_SCHEMA.md).
 
 ## Authoritative lifecycle
 

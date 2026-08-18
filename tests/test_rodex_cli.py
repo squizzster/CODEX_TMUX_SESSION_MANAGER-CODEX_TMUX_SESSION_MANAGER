@@ -77,6 +77,8 @@ class StubLauncher:
         self.reconciled: list[LiveTmuxSession] = []
         self.refreshed_hooks: list[LiveTmuxSession] = []
         self.attached: list[LiveTmuxSession] = []
+        self.scrollback_captures: list[LiveTmuxSession] = []
+        self.scrollback = tuple(f"line {number}" for number in range(1, 16))
         self.stopped: list[tuple[LiveTmuxSession, bool]] = []
         self.existing_checks: list[LiveTmuxSession] = []
         self.live = True
@@ -138,6 +140,10 @@ class StubLauncher:
 
     def attach(self, runtime: LiveTmuxSession) -> None:
         self.attached.append(runtime)
+
+    def capture_scrollback(self, runtime: LiveTmuxSession) -> tuple[str, ...]:
+        self.scrollback_captures.append(runtime)
+        return self.scrollback
 
     def stop(self, runtime: LiveTmuxSession, *, check: bool = True) -> None:
         self.stopped.append((runtime, check))
@@ -209,7 +215,7 @@ class StubControlClient:
     def __init__(self) -> None:
         self.sent: list[tuple[LiveRodexControl, str]] = []
         self.waited: list[LiveRodexControl] = []
-        self.tailed: list[LiveRodexControl] = []
+        self.event_streams: list[LiveRodexControl] = []
         self.started: list[tuple[LiveRodexControl, str]] = []
         self.steered: list[tuple[LiveRodexControl, str, str]] = []
         self.started_dispatch_ids: list[str | None] = []
@@ -361,7 +367,7 @@ class StubControlClient:
         self.exact_waited.append((control, turn_id, timeout_seconds))
         return self.state, self.turn_result
 
-    def tail(
+    def stream_events(
         self,
         control: LiveRodexControl,
         write_event: Any,
@@ -369,8 +375,13 @@ class StubControlClient:
         revalidate: Any,
     ) -> None:
         revalidate()
-        self.tailed.append(control)
-        write_event('{"method":"turn/started"}')
+        self.event_streams.append(control)
+        for event in (
+            '{"method":"thread/status/changed"}',
+            '{"method":"turn/started"}',
+            '{"method":"item/started"}',
+        ):
+            write_event(event)
 
 
 class RecordingCodexDelegator:
@@ -1622,13 +1633,45 @@ def test_mouse_command_targets_only_the_verified_named_runtime(
     assert launcher.attached == []
 
 
-@pytest.mark.parametrize("command", ["_tail"])
-def test_tail_command_streams_json_events_for_the_verified_named_runtime(
+@pytest.mark.evolutionary_regression
+def test_cat_prints_the_complete_verified_session_snapshot_and_exits(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
-    command: str,
 ) -> None:
+    """Finite session text remains composable with the system head and tail tools."""
+    database = tmp_path / "rodex.sqlite3"
+    monkeypatch.setattr(
+        "cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga"
+    )
+    monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
+    create_controlled_session(database, tmp_path)
+    launcher = StubLauncher(tmp_path)
+
+    assert (
+        run(
+            ["_cat", "automatic-beluga"],
+            database_path=database,
+            launcher=launcher,  # type: ignore[arg-type]
+        )
+        == 0
+    )
+
+    captured = capsys.readouterr()
+    assert launcher.scrollback_captures == [
+        LiveTmuxSession(tmp_path / "tmux.sock", "automatic-beluga")
+    ]
+    assert captured.out == "".join(f"line {number}\n" for number in range(1, 16))
+    assert captured.err == ""
+
+
+@pytest.mark.evolutionary_regression
+def test_events_continues_the_verified_protocol_stream_without_session_text(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Replacing `_tail` must not turn the live event source into pane scrollback."""
     database = tmp_path / "rodex.sqlite3"
     monkeypatch.setattr(
         "cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga"
@@ -1640,7 +1683,7 @@ def test_tail_command_streams_json_events_for_the_verified_named_runtime(
 
     assert (
         run(
-            [command, "automatic-beluga"],
+            ["_events", "automatic-beluga"],
             database_path=database,
             launcher=launcher,  # type: ignore[arg-type]
             control_client=control,  # type: ignore[arg-type]
@@ -1649,9 +1692,54 @@ def test_tail_command_streams_json_events_for_the_verified_named_runtime(
     )
 
     captured = capsys.readouterr()
-    assert control.tailed == [launcher.control]
-    assert captured.out == '{"method":"turn/started"}\n'
+    assert control.event_streams == [launcher.control]
+    assert captured.out == (
+        '{"method":"thread/status/changed"}\n'
+        '{"method":"turn/started"}\n'
+        '{"method":"item/started"}\n'
+    )
     assert "following live Codex protocol events" in captured.err
+    assert launcher.scrollback_captures == []
+
+
+@pytest.mark.parametrize("command", ["_cat", "_events"])
+def test_session_read_commands_reject_invalid_grammar_before_live_resolution(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    command: str,
+) -> None:
+    monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
+    launcher = StubLauncher(tmp_path)
+
+    with pytest.raises(RodexLaunchError, match=rf"^usage: rodex {command}"):
+        run(
+            [command],
+            database_path=tmp_path / "rodex.sqlite3",
+            launcher=launcher,  # type: ignore[arg-type]
+        )
+
+    assert launcher.existing_checks == []
+    assert launcher.scrollback_captures == []
+
+
+@pytest.mark.parametrize("command", ["_head", "_tail"])
+def test_removed_ambiguous_read_commands_pass_through_to_codex_unchanged(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    command: str,
+) -> None:
+    database = tmp_path / "rodex.sqlite3"
+    delegator = RecordingCodexDelegator(returncode=23)
+    monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
+    arguments = [command, "automatic-beluga"]
+
+    assert (
+        run(arguments, database_path=database, codex_delegator=delegator)
+        == delegator.returncode
+    )
+
+    assert delegator.calls == [("/usr/bin/codex", arguments)]
+    assert not database.exists()
 
 
 @pytest.mark.parametrize("arguments", [[], ["_create"]], ids=["bare", "explicit"])

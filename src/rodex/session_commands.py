@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 from rodex_registry import (
@@ -22,12 +23,13 @@ from rodex_registry import (
 
 from .command_contract import (
     ALIAS_COMMAND,
+    CAT_COMMAND,
     CONTEXT_COMMAND,
+    EVENTS_COMMAND,
     FORCE_FLAG,
     MOUSE_COMMAND,
     RUNNING_COMMAND,
     SEND_COMMAND,
-    TAIL_COMMAND,
     WAIT_COMMAND,
 )
 from .control import CodexControlClient, LiveRodexControl, RodexControlError
@@ -45,6 +47,7 @@ from .runtime import (
     RodexRuntimeLauncher,
     default_tmux_server_socket_path,
 )
+from .session_read_pipeline import LiveSessionReadPipeline
 
 
 def run_session_command(
@@ -116,22 +119,27 @@ def run_session_command(
         record_a_rodex_session_access(session_id, database_path)
         print(f"Rodex {arguments[1]}: Codex turn complete", flush=True)
         return True
-    if command == TAIL_COMMAND:
+    if command == CAT_COMMAND:
         if len(arguments) != 2:
-            raise RodexLaunchError("usage: rodex _tail SESSION_NAME")
-        session_id, runtime, control = resolve_live_control(
-            arguments[1], database_path, launcher
+            raise RodexLaunchError("usage: rodex _cat SESSION_NAME")
+        scrollback = LiveSessionReadPipeline(database_path, launcher).snapshot(
+            arguments[1], launcher.capture_scrollback
         )
-        record_a_rodex_session_access(session_id, database_path)
-        print(
-            f"Rodex {arguments[1]}: following live Codex protocol events",
-            file=sys.stderr,
-            flush=True,
-        )
-        control_client.tail(
-            control,
-            lambda event: print(event, flush=True),
-            revalidate=lambda: revalidate_live_control(launcher, runtime, control),
+        if scrollback:
+            sys.stdout.write("\n".join(scrollback) + "\n")
+            sys.stdout.flush()
+        return True
+    if command == EVENTS_COMMAND:
+        if len(arguments) != 2:
+            raise RodexLaunchError("usage: rodex _events SESSION_NAME")
+        LiveSessionReadPipeline(database_path, launcher).stream_events(
+            arguments[1],
+            lambda control, revalidate: _stream_protocol_events(
+                arguments[1],
+                control_client,
+                control,
+                revalidate,
+            ),
         )
         return True
     if command == ALIAS_COMMAND:
@@ -263,6 +271,24 @@ def _parse_alias_arguments(arguments: list[str]) -> tuple[bool, list[str]]:
         else:
             operands.append(argument)
     return force, operands
+
+
+def _stream_protocol_events(
+    session_name: str,
+    control_client: CodexControlClient,
+    control: LiveRodexControl,
+    revalidate: Callable[[], None],
+) -> None:
+    print(
+        f"Rodex {session_name}: following live Codex protocol events",
+        file=sys.stderr,
+        flush=True,
+    )
+    control_client.stream_events(
+        control,
+        lambda event: print(event, flush=True),
+        revalidate=revalidate,
+    )
 
 
 def _print_current_rodex_context(

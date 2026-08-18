@@ -18,6 +18,10 @@ class RodexSQLError(RuntimeError):
     """A Rodex SQL operation violated its transaction or lookup contract."""
 
 
+class RodexDatabaseNotFoundError(RodexSQLError):
+    """A read-only operation required registry storage that does not yet exist."""
+
+
 def default_rodex_database_path() -> Path:
     """Resolve the durable database path for the current POSIX user."""
     configured = os.environ.get("RODEX_DATABASE_PATH")
@@ -102,13 +106,13 @@ def require_existing_rodex_database_path(
     try:
         parent = path.parent.lstat()
     except FileNotFoundError as error:
-        raise RodexSQLError(f"database does not exist: {path}") from error
+        raise RodexDatabaseNotFoundError(f"database does not exist: {path}") from error
     _validate_private_database_parent(path, parent)
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
     try:
         descriptor = os.open(path, flags)
     except FileNotFoundError as error:
-        raise RodexSQLError(f"database does not exist: {path}") from error
+        raise RodexDatabaseNotFoundError(f"database does not exist: {path}") from error
     except OSError as error:
         raise RodexSQLError(f"could not securely open database {path}: {error}") from error
     try:

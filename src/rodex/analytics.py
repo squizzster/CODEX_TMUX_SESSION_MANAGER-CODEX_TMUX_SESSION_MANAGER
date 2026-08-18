@@ -36,6 +36,7 @@ from rodex_registry import (
     read_rodex_session_statistics,
     record_rodex_session_statistics_worker_health,
 )
+from rodex_sql import RodexDatabaseNotFoundError
 
 from .process_contracts import AnalyticsWorkerConfig
 
@@ -242,6 +243,8 @@ class AnalyticsRolloutWorker:
                     )
                 }
             return "up_to_date"
+        except RodexDatabaseNotFoundError:
+            return "catching_up"
         except Exception as error:
             self._project_health(
                 "degraded",

@@ -29,28 +29,31 @@ session host ─┬► Codex TUI ──► protocol proxy ──► Codex app-se
              └► analytics worker ──► in-memory analyzer ──► SQLite projections
 ```
 
-The TUI remains the normal Codex interface and runs inline so rendered output enters tmux's 50,000-line pane history. tmux owns keyboard copy-mode scrollback and derives status
-privacy from clients attached to that exact session. The proxy forwards WebSocket frames,
-derives tool and context signals, and fans structured events; it never buffers the screen.
+The TUI remains the normal Codex interface and runs inline so rendered output enters tmux's 50,000-line pane history. tmux owns keyboard copy-mode scrollback and derives status privacy from clients attached to that exact session. The proxy forwards WebSocket frames, derives tool and context signals, and fans structured events; it never buffers the screen.
 
 ## Component boundaries
 
 | Component | Responsibility |
 |---|---|
-| `rodex.cli` | Pass through to Codex or route exact underscore commands and stored names. |
+| `rodex.cli` | Adapt process arguments/output and orchestrate launch, attach, or Codex passthrough. |
+| `rodex.command_contract` | Own command vocabulary, routes, generated help, and machine-command grammar. |
+| `rodex.session_commands` / `statistics_commands` / `machine_commands` | Execute the three command domains behind the shared CLI contract. |
 | `rodex.runtime` | Own tmux scrollback, app-server discovery, attachment, and supervision. |
-| `rodex.status_bar` | Own named segments, the authoritative palette, layout updates, and context rendering. |
+| `rodex.process_contracts` | Own typed subprocess configurations and their lossless argv wire forms. |
+| `rodex.status_bar` | Own named segments, the authoritative palette, order, and base rendering. |
+| `rodex.tmux_status` | Arbitrate base status, animations, and priority-ordered transient claims. |
 | `rodex.status_animation` | Render cancellable, one-shot sharing transitions. |
 | `rodex.session_host` | Keep one app-server, proxy, foreground TUI, and its runtime paths together. |
 | `rodex.analytics` | Authenticate rollout prefixes and supervise fail-open analysis. |
 | `rodex.control` | Verify and control one exact loaded Codex thread. |
-| `rodex.app_server_contract` | Fail exact control closed outside the characterized App Server version. |
+| `rodex.app_server_contract` | Own App Server command, clients, RPC vocabulary, lifecycle messages, and version gate. |
 | `rodex.protocol_proxy` | Forward traffic and derive bounded live tool/context signals and event streams. |
 | `rodex_registry.identity` | Own distinct Rodex ID domains and lossless signed-BIGINT codecs. |
 | `rodex_registry.schema` | Create and exactly verify the complete SQLite schema and registry ID. |
 | `rodex_registry.lifecycle` | Own session creation, ownership, naming, and runtime transitions. |
 | `rodex_registry.statistics` | Publish and read relational statistics behind identity fences. |
-| `rodex_sql` | Provide transactional SQLite initialization and access. |
+| `rodex_registry.statistics_fields` | Derive scalar SQL layout and codecs from typed statistics records. |
+| `rodex_sql` | Separate fail-closed read-only transactions from explicit bootstrap/write transactions. |
 | `cool_name` | Allocate and resolve collision-resistant session names. |
 
 ## Identity and data model
@@ -69,23 +72,19 @@ replaces the permanent generated name. Detailed rules live in [SQL_SCHEMA.md](SQ
 ### New session (bare `rodex`, `_create`, or `_detach`)
 
 1. Allocate an unregistered 64-bit Rodex session ID and random runtime UUID.
-2. Set the shared tmux server's 50,000-line history before creating the detached session
-   and its first pane; mouse configuration remains user-owned.
-3. Start one private Codex app-server and connect an inline (`--no-alt-screen`) TUI through
-   the proxy so rendered conversation rows enter tmux history.
+2. Set the shared tmux server's 50,000-line history before creating the detached session and its first pane; mouse configuration remains user-owned.
+3. Start one private Codex app-server and connect an inline (`--no-alt-screen`) TUI through the proxy so rendered conversation rows enter tmux history.
 4. Refresh live paths and supervise analytics without blocking the TUI.
 5. Observe the single real Codex session ID from that app-server.
 6. Advertise Rodex session, registry, runtime, and Codex thread IDs with `pending` state.
-7. Transactionally register those identities, analytics source, name, user/log, and tmux
-   link, then mark the runtime `registered`.
+7. Transactionally register those identities, analytics source, name, user/log, and tmux link, then mark the runtime `registered`.
 8. Rename tmux to the display name, configure status, and attach the terminal.
 
 ### Existing name
 
 1. Resolve either generated or user-defined name to `rodex_sessions.id`.
 2. Enforce ownership using the effective POSIX identity.
-3. Attach only when the exact stored tmux endpoint advertises matching registered Rodex,
-   registry, and Codex identities. An exact pending tuple completes interrupted registration.
+3. Attach only when the exact stored tmux endpoint advertises matching registered Rodex, registry, and Codex identities. An exact pending tuple completes interrupted registration.
 4. Otherwise ask Codex to resume the stored Codex session ID and verify the observed ID.
 5. If Codex says that ID was never saved, start empty and atomically relink the new Codex
    session ID; every other resume failure remains fatal.
@@ -101,13 +100,12 @@ runtime repairs interrupted launch. During shutdown, the host retries only the e
 same naming pipeline and compensate a tmux rename if the database transition fails.
 
 Named immutable segments own ordinary left-status colour and content. Sharing animations and
-transient claims use `TmuxStatusLeftPipeline`; per-client `client_prefix` preserves fast keys.
+transient claims use `TmuxStatusPipeline`; priority arbitration prevents a lower-priority
+refresh from clearing an active warning. Per-client `client_prefix` preserves fast keys.
 Shared `Ctrl-C` requires same-client confirmation; private input and root bindings stay
 unchanged; `/rodex` remains disabled.
 
-The base status reads a pane-stable context option from the primary protocol observer.
-Usage divided by model window supplies context fill; compaction lifecycle animates it.
-Durable analytics remain downstream; transient restoration returns to the one base format.
+The base status reads a pane-stable context option from the primary protocol observer. Usage divided by model window supplies context fill; compaction lifecycle animates it. Durable analytics remain downstream; transient restoration returns to the one base format.
 
 ## Persistent analytics
 
@@ -137,6 +135,8 @@ requests observed in the attached TUI remain user-handled there.
 - SQLite relationships, natural keys, and cardinality are enforced by constraints.
 - Related database changes use `BEGIN IMMEDIATE` and commit as one unit; WAL mode and
   a busy timeout allow consistent readers to coexist with ordinary analytics writes.
+- Read paths require an existing private database and use SQLite read-only/query-only mode;
+  only explicit bootstrap or mutation paths may create or repair storage.
 - Multi-table statistics reads use one deferred transaction for a consistent view.
 - Analytics paths are low-priority, short-transaction, derived-only, and fail-open.
 - External tmux changes use exact targets and compensating transitions where needed.

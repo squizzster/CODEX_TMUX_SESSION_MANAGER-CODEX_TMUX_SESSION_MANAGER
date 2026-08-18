@@ -7,6 +7,7 @@ import pytest
 
 from rodex_sql import (
     INDEX_RE_TRY_ATTEMPTS,
+    RodexDatabaseNotFoundError,
     RodexSQLError,
     index_re_try_attempt_numbers,
     open_rodex_read_transaction,
@@ -64,7 +65,7 @@ def test_read_transaction_cannot_create_database_storage(tmp_path: Path) -> None
     database = tmp_path / "absent" / "database.sqlite3"
 
     with (
-        pytest.raises(RodexSQLError, match="database does not exist"),
+        pytest.raises(RodexDatabaseNotFoundError, match="database does not exist"),
         open_rodex_read_transaction(database),
     ):
         pass

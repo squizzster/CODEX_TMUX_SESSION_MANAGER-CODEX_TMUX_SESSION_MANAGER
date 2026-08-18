@@ -133,8 +133,8 @@ RODEX_STATUS_COLOURS: Final = StatusBarColours(
     primary_blue="#1402D8",
     tool_count="cyan",
     mouse_mode="yellow",
-    context_warning="#E6FF47",
-    context_danger="#FF002E",
+    context_warning="yellow",
+    context_danger="red",
 )
 
 _BASE_STATUS_BAR: Final = TmuxStatusBar(

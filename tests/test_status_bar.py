@@ -29,8 +29,13 @@ def test_status_palette_has_one_authoritative_value_per_colour_role() -> None:
     assert RODEX_STATUS_COLOURS.primary_blue == "#1402D8"
     assert RODEX_STATUS_COLOURS.tool_count == "cyan"
     assert RODEX_STATUS_COLOURS.mouse_mode == "yellow"
-    assert RODEX_STATUS_COLOURS.context_warning == "#E6FF47"
-    assert RODEX_STATUS_COLOURS.context_danger == "#FF002E"
+
+
+@pytest.mark.evolutionary_regression
+def test_context_alert_colours_render_without_rgb_terminal_support() -> None:
+    """Current evidence: named alerts work without RGB; supersede with capability proof."""
+    assert RODEX_STATUS_COLOURS.context_warning == "yellow"
+    assert RODEX_STATUS_COLOURS.context_danger == "red"
 
 
 def test_static_status_segments_render_their_own_colours_in_order() -> None:

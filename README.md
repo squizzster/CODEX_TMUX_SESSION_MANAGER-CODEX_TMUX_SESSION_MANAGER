@@ -65,8 +65,8 @@ Custom prefixes and user-owned root `C-b` bindings are left unchanged.
 
 The Rodex identity is blue (`#1402D8`). The context indicator shows a rounded whole
 percentage using the same last-token-usage divided by model-context-window calculation as
-Rodex analytics. It is blue below 70%, yellow (`#E6FF47`) from 70%, and red (`#FF002E`)
-from 75%. These are empirical bands rather than a claim that Codex compacts at one exact
+Rodex analytics. It is blue below 70%, tmux yellow from 70%, and tmux red from 75%.
+These are empirical bands rather than a claim that Codex compacts at one exact
 percentage. While the App Server reports
 a live context compaction item, the same slot animates `COMPACTING`; it returns to the
 freshest post-compaction percentage, or `Context: --` until one arrives.

@@ -1,4 +1,4 @@
-"""Exact-control machine command execution and schema-v1 envelopes."""
+"""Exact-control machine command execution and versioned envelopes."""
 
 from __future__ import annotations
 
@@ -47,6 +47,8 @@ from .live_runtime import (
 )
 from .runtime import RodexRuntimeError, RodexRuntimeLauncher
 
+MACHINE_ENVELOPE_SCHEMA_VERSION = 2
+
 
 class _RuntimeUpgradeRequiredError(RodexLaunchError):
     """A legacy live runtime lacks Phase I's exact incarnation identity."""
@@ -92,7 +94,7 @@ def execute_machine_command(
             persisted_runtime = lookup_rodex_runtime_instance(session_id, database_path)
             runtime_matches = (
                 persisted_runtime is not None
-                and control.runtime_identifier == persisted_runtime.runtime_identifier
+                and control.runtime_id == persisted_runtime.runtime_id
             )
             compatibility_error: str | None = None
             compatible_version: str | None = None
@@ -329,15 +331,13 @@ def _require_exact_runtime_instance(
     control: LiveRodexControl,
 ) -> None:
     persisted = lookup_rodex_runtime_instance(session_id, database_path)
-    if persisted is None or control.runtime_identifier is None:
+    if persisted is None or control.runtime_id is None:
         raise _RuntimeUpgradeRequiredError(
             "live runtime predates exact runtime identity; restart it with this "
             "Rodex version"
         )
-    if persisted.runtime_identifier != control.runtime_identifier:
-        raise RodexLaunchError(
-            "live runtime identifier does not match its durable Rodex identity"
-        )
+    if persisted.runtime_id != control.runtime_id:
+        raise RodexLaunchError("live runtime ID does not match its durable Rodex identity")
 
 
 def _thread_state_payload(state: CodexThreadState) -> dict[str, object]:
@@ -525,7 +525,7 @@ def _machine_envelope(
     error: dict[str, object] | None = None,
 ) -> dict[str, object]:
     return {
-        "schema_version": 1,
+        "schema_version": MACHINE_ENVELOPE_SCHEMA_VERSION,
         "operation": operation,
         "ok": ok,
         "rodex": {
@@ -537,10 +537,10 @@ def _machine_envelope(
             "display_name": session_name,
         },
         "runtime": {
-            "identifier": (
+            "runtime_id": (
                 None
-                if control is None or control.runtime_identifier is None
-                else str(control.runtime_identifier)
+                if control is None or control.runtime_id is None
+                else str(control.runtime_id)
             ),
             "state": None if control is None else "running",
         },

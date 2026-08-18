@@ -114,7 +114,7 @@ def verify_live_runtime_identity(
         and control.rodex_registry_id == expected_registry_id
         and control.codex_session_id == expected_codex_session_id
     ):
-        if control.runtime_identifier is None:
+        if control.runtime_id is None:
             raise RodexLaunchError(
                 "pending live runtime did not advertise its exact runtime identity"
             )
@@ -123,7 +123,7 @@ def verify_live_runtime_identity(
             runtime.tmux_server_socket_path,
             runtime.tmux_session_name,
             database_path,
-            runtime_identifier=control.runtime_identifier,
+            runtime_id=control.runtime_id,
         )
         launcher.confirm_runtime_registration(runtime)
         control = launcher.discover_runtime_control(runtime)

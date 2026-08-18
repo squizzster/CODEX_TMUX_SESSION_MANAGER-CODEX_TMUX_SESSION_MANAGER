@@ -13,8 +13,11 @@ from cool_name import (
 )
 from rodex_registry import (
     CodexSessionId,
+    RodexRegistryId,
+    RodexRuntimeId,
     RodexSessionId,
     create_a_rodex_session,
+    generate_an_unregistered_rodex_runtime_id_candidate,
     generate_an_unregistered_rodex_session_id_candidate,
     lookup_codex_session_id_from_a_rodex_sessions_id,
     lookup_owned_rodex_sessions_id_from_a_codex_session_id,
@@ -43,6 +46,7 @@ from .live_runtime import (
 )
 from .runtime import (
     RODEX_REGISTRATION_PENDING,
+    LiveRodexRuntime,
     LiveTmuxSession,
     RodexCodexSessionNotFoundError,
     RodexRuntimeError,
@@ -196,12 +200,13 @@ def _create_managed_session(
             raise RodexLaunchError(f"Rodex session name already exists: {requested_name}")
 
     registry_id = lookup_rodex_registry_id(resolved_database)
-    live_runtime, codex_session_id = runtime_launcher.start(
+    live_runtime, codex_session_id = _start_managed_runtime(
+        runtime_launcher,
+        resolved_database,
         Path.cwd(),
         list(request.codex_arguments),
         rodex_session_id=planned_rodex_session_id,
         rodex_registry_id=registry_id,
-        rodex_database_path=resolved_database,
     )
     active_tmux: LiveTmuxSession = live_runtime
     try:
@@ -211,7 +216,7 @@ def _create_managed_session(
             rodex_session_id=planned_rodex_session_id,
             tmux_server_socket_path=live_runtime.tmux_server_socket_path,
             tmux_session_name=live_runtime.tmux_session_name,
-            runtime_identifier=live_runtime.runtime_identifier,
+            runtime_id=live_runtime.runtime_id,
         )
         runtime_launcher.confirm_runtime_registration(active_tmux)
         display_name = session.cool_name
@@ -350,7 +355,7 @@ def _prepare_selected_session(
             relocated.tmux_server_socket_path,
             relocated.tmux_session_name,
             database_path,
-            runtime_identifier=relocated_control.runtime_identifier,
+            runtime_id=relocated_control.runtime_id,
         )
         if relocated_control.registration_state == RODEX_REGISTRATION_PENDING:
             launcher.confirm_runtime_registration(relocated)
@@ -380,21 +385,23 @@ def _prepare_selected_session(
         )
     replaced_unsaved_codex_identity = False
     try:
-        resumed_runtime, observed_codex_session_id = launcher.start(
+        resumed_runtime, observed_codex_session_id = _start_managed_runtime(
+            launcher,
+            database_path,
             Path.cwd(),
             ["resume", str(codex_session_id)],
             rodex_session_id=rodex_session_id,
             rodex_registry_id=registry_id,
-            rodex_database_path=database_path,
         )
     except RodexCodexSessionNotFoundError:
         try:
-            resumed_runtime, observed_codex_session_id = launcher.start(
+            resumed_runtime, observed_codex_session_id = _start_managed_runtime(
+                launcher,
+                database_path,
                 Path.cwd(),
                 [],
                 rodex_session_id=rodex_session_id,
                 rodex_registry_id=registry_id,
-                rodex_database_path=database_path,
             )
         except RodexRuntimeError as error:
             raise RodexLaunchError(
@@ -427,7 +434,7 @@ def _prepare_selected_session(
             codex_session_id=(
                 observed_codex_session_id if replaced_unsaved_codex_identity else None
             ),
-            runtime_identifier=resumed_runtime.runtime_identifier,
+            runtime_id=resumed_runtime.runtime_id,
         )
         launcher.confirm_runtime_registration(active_tmux)
         launcher.initialise_session_ui(active_tmux)
@@ -442,6 +449,29 @@ def _prepare_selected_session(
         active_tmux,
         f"{action} Rodex {display_name} -> Codex {observed_codex_session_id} "
         f"({active_tmux.tmux_session_name})",
+    )
+
+
+def _start_managed_runtime(
+    launcher: RodexRuntimeLauncher,
+    database_path: Path,
+    workspace: Path,
+    codex_arguments: list[str],
+    *,
+    rodex_session_id: RodexSessionId,
+    rodex_registry_id: RodexRegistryId,
+) -> tuple[LiveRodexRuntime, CodexSessionId]:
+    """Allocate then launch one exact runtime through the registry ID pipeline."""
+    runtime_id: RodexRuntimeId = generate_an_unregistered_rodex_runtime_id_candidate(
+        database_path
+    )
+    return launcher.start(
+        workspace,
+        codex_arguments,
+        runtime_id=runtime_id,
+        rodex_session_id=rodex_session_id,
+        rodex_registry_id=rodex_registry_id,
+        rodex_database_path=database_path,
     )
 
 

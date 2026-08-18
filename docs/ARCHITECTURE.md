@@ -7,8 +7,8 @@ and keep this file within 150 lines and 10,240 bytes.
 
 # Rodex architecture
 
-Rodex is a harness and bridge. It matches a durable Rodex session and runtime UUID
-to its Codex thread/session tree and tmux endpoint while preserving Codex's interface.
+Rodex matches a durable session and 64-bit runtime ID to its Codex thread/session tree
+and tmux endpoint.
 
 ## Runtime shape
 
@@ -74,15 +74,22 @@ read; for example, direct statistics still reads SQLite without acquiring a live
 
 ## Identity and data model
 
-`rodex_sessions.id` is the private relational key. The public Rodex session identity is a random unsigned 64-bit value with one canonical 16-character lowercase hexadecimal wire form. SQLite stores all bits in one signed `BIGINT` using lossless two's-complement mapping. The Codex session ID uses two signed 64-bit integers; registry identity remains separate.
+`rodex_sessions.id` is the private relational key. Rodex session, registry, and runtime
+IDs are distinct random 64-bit domains with one 16-character lowercase hex wire form.
+SQLite stores every Rodex-owned ID losslessly in one
+signed `BIGINT`. The Codex session ID remains a Codex-owned 128-bit value stored in two
+signed 64-bit integers.
 
-Separate tables hold registry ID, tmux endpoint, runtime UUID, POSIX owner/log, names, statistics/worker health, and retained Codex rollout lineage. A display alias never replaces the permanent generated name. Detailed rules live in [SQL_SCHEMA.md](SQL_SCHEMA.md).
+Separate tables hold registry ID, tmux endpoint, runtime ID, owner/log, names,
+statistics/worker health, and retained Codex lineage. A display alias never replaces
+the permanent name. Detailed rules live in [SQL_SCHEMA.md](SQL_SCHEMA.md).
 
 ## Authoritative lifecycle
 
 ### New session (bare `rodex`, `_create`, or `_detach`)
 
-1. Allocate an unregistered Rodex session ID and runtime UUID.
+1. Allocate unregistered Rodex session and runtime IDs through the same bounded,
+   indexed ten-candidate pipeline.
 2. Configure tmux history, then create the detached session; mouse remains user-owned.
 3. Start one private app-server, proxy, and inline (`--no-alt-screen`) Codex TUI.
 4. Supervise runtime-path freshness and fail-open analytics beside the TUI.
@@ -121,7 +128,7 @@ The worker authenticates complete rollout prefixes and analyzes private copies i
 
 ## Live control
 
-WebSocket transport uses private Unix sockets. Legacy `_send` and idle `_wait` retain short-lived secondary connections. Machine commands operate by exact turn ID and emit schema-v1 envelopes; start/steer carry caller-owned dispatch IDs that `_dispatch-status` observes in thread history. Control requires matching runtime identity and App Server compatibility; results stay live. Timeout never interrupts, and reply loss is indeterminate rather than silently retried. Approval and user-input requests remain routed to the subscribed TUI.
+WebSocket transport uses private Unix sockets. Legacy `_send` and idle `_wait` retain short-lived secondary connections. Machine commands operate by exact turn ID and emit schema-v2 envelopes with `runtime.runtime_id`; start/steer carry caller-owned dispatch IDs that `_dispatch-status` observes in thread history. Control requires matching runtime identity and App Server compatibility; results stay live. Timeout never interrupts, and reply loss is indeterminate rather than silently retried. Approval and user-input requests remain routed to the subscribed TUI.
 
 ## Integrity boundaries
 

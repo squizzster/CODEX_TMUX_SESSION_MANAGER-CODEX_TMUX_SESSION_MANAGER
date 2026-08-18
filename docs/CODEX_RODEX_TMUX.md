@@ -7,7 +7,8 @@ exact-turn automation. Each identity keeps its own meaning:
 - **Rodex session:** a random 64-bit ID rendered as exactly 16 lowercase hex
   characters, plus internal `rodex_sessions.id`.
 - **Rodex registry:** a separate random 64-bit ID for one database.
-- **Rodex runtime:** a random UUID for one current live incarnation.
+- **Rodex runtime:** a distinct random 64-bit ID, rendered as exactly 16 lowercase hex
+  characters, for one current live incarnation.
 - **Codex thread/session tree:** separate App Server `thread.id` and `thread.sessionId`;
   they are equal for the managed root thread but must not be conflated for forks.
 - **tmux session:** the exact tmux server socket path plus tmux session name.
@@ -26,7 +27,7 @@ exact tmux socket/session/window/pane address, registration state, and attached-
 snapshot as JSON. Missing, foreign, stale, or mismatched identity fails closed rather
 than being inferred or adopted. Private proxy/event sockets and runtime logs remain
 implementation details rather than agent context.
-New runtimes also report their UUID and whether it matches the persisted incarnation.
+New runtimes also report `runtime_id` and whether it matches the persisted incarnation.
 
 Every process invocation passes through one application control plane. The command
 contract classifies argv once; the selected direct, selector, or runtime preparation
@@ -160,9 +161,9 @@ analytics sidecar.
 - `_inspect --json` reports the exact active turn. `_start` and `_steer` accept an
   optional caller-owned `--dispatch ID`, while `_dispatch-status` observes that ID in
   exact App Server thread history. Exact `_wait`, `_interrupt`, and `_result` use a
-  caller-supplied turn ID. Every machine command emits one schema-v1 envelope and
-  requires the persisted runtime UUID. Results stay App Server-owned rather than
-  becoming a second SQLite conversation store.
+  caller-supplied turn ID. Every machine command emits one schema-v2 envelope with
+  `runtime.runtime_id` and requires the persisted runtime ID. Results stay App
+  Server-owned rather than becoming a second SQLite conversation store.
 - A resumed runtime intentionally uses the caller's current working directory. This
   lets a moved home/project/worktree location travel with the human who resumes it;
   Rodex does not permanently pin session identity to its original workspace path.

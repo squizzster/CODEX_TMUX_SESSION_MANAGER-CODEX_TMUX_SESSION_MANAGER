@@ -41,8 +41,8 @@ RODEX_RUNTIME_INSTANCES_TABLE: Final = "rodex_runtime_instances"
 RODEX_RUNTIME_INSTANCES_SESSION_UNIQUE_INDEX: Final = (
     "rodex_runtime_instances_rodex_sessions_id_unique"
 )
-RODEX_RUNTIME_INSTANCES_IDENTIFIER_UNIQUE_INDEX: Final = (
-    "rodex_runtime_instances_identifier_unique"
+RODEX_RUNTIME_INSTANCES_RUNTIME_ID_UNIQUE_INDEX: Final = (
+    "rodex_runtime_instances_runtime_id_unique"
 )
 RODEX_SESSIONS_STATISTICS_TABLE: Final = "rodex_sessions_statistics"
 RODEX_SESSIONS_STATISTICS_SESSION_UNIQUE_INDEX: Final = (
@@ -207,11 +207,8 @@ _CREATE_RUNTIME_INSTANCES_TABLE = f"""
 CREATE TABLE IF NOT EXISTS {RODEX_RUNTIME_INSTANCES_TABLE} (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     rodex_sessions_id INTEGER NOT NULL,
-    runtime_identifier_signed_bigint_1 BIGINT NOT NULL CHECK (
-        typeof(runtime_identifier_signed_bigint_1) = 'integer'
-    ),
-    runtime_identifier_signed_bigint_2 BIGINT NOT NULL CHECK (
-        typeof(runtime_identifier_signed_bigint_2) = 'integer'
+    runtime_id_signed_bigint BIGINT NOT NULL CHECK (
+        typeof(runtime_id_signed_bigint) = 'integer'
     ),
     started_at_utc TEXT NOT NULL,
     FOREIGN KEY (rodex_sessions_id) REFERENCES {RODEX_SESSIONS_TABLE} (id)
@@ -221,10 +218,9 @@ _CREATE_RUNTIME_INSTANCES_SESSION_UNIQUE_INDEX = f"""
 CREATE UNIQUE INDEX IF NOT EXISTS {RODEX_RUNTIME_INSTANCES_SESSION_UNIQUE_INDEX}
 ON {RODEX_RUNTIME_INSTANCES_TABLE} (rodex_sessions_id)
 """
-_CREATE_RUNTIME_INSTANCES_IDENTIFIER_UNIQUE_INDEX = f"""
-CREATE UNIQUE INDEX IF NOT EXISTS {RODEX_RUNTIME_INSTANCES_IDENTIFIER_UNIQUE_INDEX}
-ON {RODEX_RUNTIME_INSTANCES_TABLE}
-    (runtime_identifier_signed_bigint_1, runtime_identifier_signed_bigint_2)
+_CREATE_RUNTIME_INSTANCES_RUNTIME_ID_UNIQUE_INDEX = f"""
+CREATE UNIQUE INDEX IF NOT EXISTS {RODEX_RUNTIME_INSTANCES_RUNTIME_ID_UNIQUE_INDEX}
+ON {RODEX_RUNTIME_INSTANCES_TABLE} (runtime_id_signed_bigint)
 """
 _CREATE_STATISTICS_TABLE = f"""
 CREATE TABLE IF NOT EXISTS {RODEX_SESSIONS_STATISTICS_TABLE} (
@@ -835,7 +831,7 @@ def initialise_rodex_database(database_path: str | os.PathLike[str] | None = Non
         connection.execute(_CREATE_RUNTIME_INSTANCES_TABLE)
         _verify_runtime_instances_table(connection)
         connection.execute(_CREATE_RUNTIME_INSTANCES_SESSION_UNIQUE_INDEX)
-        connection.execute(_CREATE_RUNTIME_INSTANCES_IDENTIFIER_UNIQUE_INDEX)
+        connection.execute(_CREATE_RUNTIME_INSTANCES_RUNTIME_ID_UNIQUE_INDEX)
         _verify_unique_index(
             connection,
             RODEX_RUNTIME_INSTANCES_TABLE,
@@ -845,11 +841,8 @@ def initialise_rodex_database(database_path: str | os.PathLike[str] | None = Non
         _verify_unique_index(
             connection,
             RODEX_RUNTIME_INSTANCES_TABLE,
-            RODEX_RUNTIME_INSTANCES_IDENTIFIER_UNIQUE_INDEX,
-            [
-                "runtime_identifier_signed_bigint_1",
-                "runtime_identifier_signed_bigint_2",
-            ],
+            RODEX_RUNTIME_INSTANCES_RUNTIME_ID_UNIQUE_INDEX,
+            ["runtime_id_signed_bigint"],
         )
         connection.execute(_CREATE_STATISTICS_TABLE)
         _verify_statistics_table(connection)
@@ -1232,8 +1225,7 @@ def _verify_runtime_instances_table(connection: sqlite3.Connection) -> None:
         [
             ("id", "INTEGER", 0, 1),
             ("rodex_sessions_id", "INTEGER", 1, 0),
-            ("runtime_identifier_signed_bigint_1", "BIGINT", 1, 0),
-            ("runtime_identifier_signed_bigint_2", "BIGINT", 1, 0),
+            ("runtime_id_signed_bigint", "BIGINT", 1, 0),
             ("started_at_utc", "TEXT", 1, 0),
         ],
     )

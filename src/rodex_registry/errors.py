@@ -9,6 +9,10 @@ class RodexSessionIdCollisionError(RodexSessionError):
     """All permitted 64-bit session ID candidates were occupied."""
 
 
+class RodexRuntimeIdCollisionError(RodexSessionError):
+    """All permitted 64-bit runtime ID candidates were occupied."""
+
+
 class RodexSessionStatisticsConflictError(RodexSessionError):
     """A statistics publication lost its identity or revision fence."""
 

@@ -50,6 +50,8 @@ Apply these standards to future schema decisions. These authorative standards ma
   A matching derived integer identity is occupied; do not fall back to a text lookup.
 - Random Rodex IDs use exactly 64 bits, one unique index, and ten bounded
   candidates before failing explicitly. They never change representation or width.
+  This includes runtime IDs: their compact form is an intentional agent-legibility
+  boundary, while the unique index and incarnation check carry the integrity contract.
   Generated cool names try ten candidates at each approved word count before escalating
   to the next word count, then fail explicitly.
 - In ALPHA, schema changes may reset a disposable database only after an explicit
@@ -62,11 +64,13 @@ Apply these standards to future schema decisions. These authorative standards ma
 - `rodex_sessions` contains one signed-BIGINT Rodex session ID, the two signed
   halves of the Codex session ID, and permanent/optional display-name links. The public Rodex
   session ID is always serialized as a 16-character lowercase hex string, never a JSON
-  number. This incompatible ALPHA schema generation is stored in `rodex-v4.sqlite3`;
-  Rodex leaves earlier generation files untouched.
-- `rodex_runtime_instances` contains the two signed-BIGINT halves of the one current
-  random runtime UUID and its start time for a Rodex session. Unique indexes fence both
-  session cardinality and the ordered identity pair against UUID reuse.
+  number. This incompatible ALPHA schema generation is stored in `rodex-v5.sqlite3`;
+  Rodex leaves v4 and earlier generation files untouched and does not read or migrate
+  their schemas.
+- `rodex_runtime_instances` contains one signed-`BIGINT` random 64-bit `runtime_id` and
+  its start time for a Rodex session. Unique indexes fence both session cardinality and
+  runtime ID reuse. Allocation uses the same ten-candidate indexed-selection pipeline
+  as the public Rodex session ID.
   Resume replaces this control identity; the table contains no conversation content.
 - `rodex_sessions_statistics` is the latest successful aggregate snapshot, one row per
   Rodex session. Every fixed aggregate and its available base count is a typed scalar

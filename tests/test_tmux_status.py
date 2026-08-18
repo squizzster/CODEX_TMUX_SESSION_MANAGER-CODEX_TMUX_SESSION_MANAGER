@@ -164,17 +164,19 @@ def test_base_status_selects_ctrl_b_banner_from_tmux_client_prefix_state() -> No
     assert PREFIX_MODE_STATUS_FORMAT in RODEX_STATUS_LEFT_FORMAT
     assert RODEX_BASE_STATUS_LEFT_FORMAT in RODEX_STATUS_LEFT_FORMAT
     assert RODEX_CONTEXT_STATUS_OPTION in RODEX_BASE_STATUS_LEFT_FORMAT
+    assert "fg=#0A22FF" in RODEX_BASE_STATUS_LEFT_FORMAT
+    assert "fg=#E6FF47" in RODEX_BASE_STATUS_LEFT_FORMAT
 
 
 @pytest.mark.parametrize(
     ("context_percent", "colour"),
     (
-        (69.9, "green"),
-        (70.0, "colour208"),
-        (74.4, "colour208"),
-        (75.0, "red"),
-        (79.4, "red"),
-        (80.0, "brightred"),
+        (69.9, "#0A22FF"),
+        (70.0, "#E6FF47"),
+        (74.4, "#E6FF47"),
+        (75.0, "#FF002E"),
+        (79.4, "#FF002E"),
+        (80.0, "#FF002E"),
     ),
 )
 def test_context_status_uses_the_compaction_warning_bands(
@@ -188,9 +190,10 @@ def test_context_status_uses_the_compaction_warning_bands(
 
 
 def test_context_status_has_stable_unavailable_and_compacting_states() -> None:
+    assert "fg=#0A22FF" in context_status_segment(None)
     assert "Context: -- |" in context_status_segment(None)
     assert "Context: 32% |" in context_status_segment(31.5)
-    assert "brightred" in compacting_status_segment(0)
+    assert "fg=#FF002E" in compacting_status_segment(0)
     assert "COMPACTING    |" in compacting_status_segment(0)
     assert "COMPACTING... |" in compacting_status_segment(3)
     assert compacting_status_segment(4) == compacting_status_segment(0)

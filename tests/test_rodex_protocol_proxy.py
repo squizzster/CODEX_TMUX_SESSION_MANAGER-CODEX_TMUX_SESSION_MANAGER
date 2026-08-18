@@ -158,7 +158,7 @@ def test_context_observer_projects_last_usage_for_only_the_primary_thread() -> N
     observer.close()
 
     assert len(observed) == 1
-    assert "colour208" in observed[0]
+    assert "#E6FF47" in observed[0]
     assert "Context: 70% |" in observed[0]
 
 

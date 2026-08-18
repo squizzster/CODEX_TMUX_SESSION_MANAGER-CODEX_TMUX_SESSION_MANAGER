@@ -23,6 +23,7 @@ from rodex_registry import (
     default_rodex_database_path,
     generate_an_unregistered_rodex_session_id_candidate,
     lookup_codex_session_id_from_a_rodex_sessions_id,
+    lookup_owned_rodex_sessions_id_from_a_codex_session_id,
     lookup_owned_rodex_sessions_id_from_a_cool_name,
     lookup_rodex_registry_id,
     lookup_rodex_session_id_from_a_rodex_sessions_id,
@@ -30,6 +31,7 @@ from rodex_registry import (
     lookup_rodex_sessions_id_from_a_cool_name,
     lookup_rodex_tmux_session,
     open_a_user_defined_cool_name_assignment,
+    parse_codex_session_id,
     record_a_rodex_session_access,
     record_a_rodex_session_runtime_resume,
     update_rodex_tmux_session_name,
@@ -71,7 +73,7 @@ from .statistics_commands import run_statistics_command
 
 
 @dataclass(frozen=True, slots=True)
-class _PreparedNamedSession:
+class _PreparedSelectedSession:
     session_id: int
     display_name: str
     active_tmux: LiveTmuxSession
@@ -114,8 +116,10 @@ def run(
     rodex_command = (
         arguments[0] if arguments[:1] and arguments[0] in RODEX_COMMANDS else None
     )
-    possible_existing_name = _possible_existing_rodex_name(arguments, resolved_database)
-    if rodex_command is None and not possible_existing_name:
+    possible_existing_session = _possible_existing_session_selector(
+        arguments, resolved_database
+    )
+    if rodex_command is None and not possible_existing_session:
         _reject_live_unregistered_name_collision(
             arguments,
             configured_codex,
@@ -163,7 +167,7 @@ def run(
     ):
         return 0
     codex_arguments, requested_name, detach = _parse_launch_arguments(arguments)
-    if _open_named_session(
+    if _open_selected_session(
         codex_arguments,
         resolved_database,
         runtime_launcher,
@@ -243,7 +247,7 @@ def run(
     return 0
 
 
-def _open_named_session(
+def _open_selected_session(
     arguments: list[str],
     database_path: Path,
     launcher: RodexRuntimeLauncher,
@@ -253,14 +257,14 @@ def _open_named_session(
 ) -> bool:
     if len(arguments) != 1 or arguments[0].startswith("-"):
         return False
-    cool_name = arguments[0]
-    session_id = lookup_owned_rodex_sessions_id_from_a_cool_name(cool_name, database_path)
+    session_selector = arguments[0]
+    session_id = _lookup_owned_rodex_session_selector(session_selector, database_path)
     if session_id is None:
         return False
     with session_transition_lock(database_path, session_id):
-        prepared = _prepare_named_session(
+        prepared = _prepare_selected_session(
             session_id,
-            cool_name,
+            session_selector,
             database_path,
             launcher,
             codex_available=codex_available,
@@ -277,22 +281,22 @@ def _open_named_session(
     return True
 
 
-def _prepare_named_session(
+def _prepare_selected_session(
     session_id: int,
-    cool_name: str,
+    session_selector: str,
     database_path: Path,
     launcher: RodexRuntimeLauncher,
     *,
     codex_available: bool,
-) -> _PreparedNamedSession:
+) -> _PreparedSelectedSession:
     """Resolve or resume one identity while its cross-process transition is locked."""
     names = lookup_rodex_session_names(session_id, database_path)
     if names is None:
-        raise RodexLaunchError(f"Rodex session disappeared: {cool_name}")
+        raise RodexLaunchError(f"Rodex session disappeared: {session_selector}")
     display_name = names.display_name
     tmux_link = lookup_rodex_tmux_session(session_id, database_path)
     if tmux_link is None:
-        raise RodexLaunchError(f"Rodex session has no tmux endpoint: {cool_name}")
+        raise RodexLaunchError(f"Rodex session has no tmux endpoint: {session_selector}")
     recorded_tmux = LiveTmuxSession(
         tmux_server_socket_path=Path(tmux_link.tmux_server_socket_path),
         tmux_session_name=tmux_link.tmux_session_name,
@@ -301,12 +305,12 @@ def _prepare_named_session(
         session_id, database_path
     )
     if codex_session_id is None:
-        raise RodexLaunchError(f"Rodex session has no Codex identity: {cool_name}")
+        raise RodexLaunchError(f"Rodex session has no Codex identity: {session_selector}")
     rodex_session_id = lookup_rodex_session_id_from_a_rodex_sessions_id(
         session_id, database_path
     )
     if rodex_session_id is None:
-        raise RodexLaunchError(f"Rodex session has no Rodex identity: {cool_name}")
+        raise RodexLaunchError(f"Rodex session has no Rodex identity: {session_selector}")
     registry_id = lookup_rodex_registry_id(database_path)
     if launcher.session_exists(recorded_tmux):
         verify_live_runtime_identity(
@@ -326,7 +330,7 @@ def _prepare_named_session(
             database_path,
         )
         record_a_rodex_session_access(session_id, database_path)
-        return _PreparedNamedSession(
+        return _PreparedSelectedSession(
             session_id,
             display_name,
             active_tmux,
@@ -364,7 +368,7 @@ def _prepare_named_session(
             session_id,
             database_path,
         )
-        return _PreparedNamedSession(
+        return _PreparedSelectedSession(
             session_id,
             display_name,
             active_tmux,
@@ -434,7 +438,7 @@ def _prepare_named_session(
         raise
 
     action = "Recovered" if replaced_unsaved_codex_identity else "Resumed"
-    return _PreparedNamedSession(
+    return _PreparedSelectedSession(
         session_id,
         display_name,
         active_tmux,
@@ -462,19 +466,44 @@ def _without_separator(arguments: list[str]) -> list[str]:
     return arguments[1:] if arguments[:1] == ["--"] else arguments
 
 
-def _possible_existing_rodex_name(arguments: list[str], database_path: Path) -> bool:
-    """Recognize only the one bare-name exception to explicit Rodex commands."""
+def _possible_existing_session_selector(arguments: list[str], database_path: Path) -> bool:
+    """Recognize the one bare persisted-session exception to Codex passthrough."""
     if len(arguments) != 1 or arguments[0].startswith(("-", "_")):
         return False
     if not database_path.exists():
         return False
     try:
-        return (
-            lookup_owned_rodex_sessions_id_from_a_cool_name(arguments[0], database_path)
-            is not None
-        )
+        return _lookup_owned_rodex_session_selector(arguments[0], database_path) is not None
     except (CoolNameError, ValueError):
         return False
+
+
+def _lookup_owned_rodex_session_selector(
+    session_selector: str, database_path: Path
+) -> int | None:
+    """Resolve a canonical Codex session UUID first, then an owned display name."""
+    codex_session_id = _parse_canonical_codex_session_selector(session_selector)
+    if codex_session_id is not None:
+        session_id = lookup_owned_rodex_sessions_id_from_a_codex_session_id(
+            codex_session_id, database_path
+        )
+        if session_id is not None:
+            return session_id
+    try:
+        return lookup_owned_rodex_sessions_id_from_a_cool_name(
+            session_selector, database_path
+        )
+    except CoolNameError:
+        return None
+
+
+def _parse_canonical_codex_session_selector(value: str) -> CodexSessionId | None:
+    """Accept the hyphenated, case-insensitive UUID spelling used by Codex."""
+    try:
+        parsed = parse_codex_session_id(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if str(parsed) == value.lower() else None
 
 
 def _reject_live_unregistered_name_collision(

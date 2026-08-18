@@ -2305,6 +2305,118 @@ def test_live_cool_name_argument_renames_configures_and_reattaches_without_start
     assert "Reattaching Rodex automatic-beluga" in capsys.readouterr().out
 
 
+@pytest.mark.evolutionary_regression
+def test_live_codex_uuid_argument_opens_its_registered_rodex_display_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A user may retain only the Codex UUID for a live Rodex-managed session."""
+    database = tmp_path / "rodex.sqlite3"
+    monkeypatch.setattr(
+        "cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga"
+    )
+    monkeypatch.setattr(
+        "rodex_registry.lifecycle.current_rodex_sessions_user_identity", lambda: DNA
+    )
+    monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
+    create_controlled_session(database, tmp_path)
+    assign_a_user_defined_cool_name(
+        "automatic-beluga", "remarkable-aardvark", database, user_identity=DNA
+    )
+    launcher = StubLauncher(tmp_path)
+
+    assert (
+        run(
+            [str(CODEX_SESSION_ID)],
+            database_path=database,
+            launcher=launcher,  # type: ignore[arg-type]
+        )
+        == 0
+    )
+
+    assert launcher.started == []
+    assert launcher.attached == [
+        LiveTmuxSession(tmp_path / "tmux.sock", "remarkable-aardvark")
+    ]
+    assert "Reattaching Rodex remarkable-aardvark" in capsys.readouterr().out
+
+
+def test_ended_codex_uuid_argument_resumes_the_registered_rodex_session(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    database = tmp_path / "rodex.sqlite3"
+    monkeypatch.setattr(
+        "cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga"
+    )
+    monkeypatch.setattr(
+        "rodex_registry.lifecycle.current_rodex_sessions_user_identity", lambda: DNA
+    )
+    monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
+    create_a_rodex_session(
+        database,
+        codex_session_id=CODEX_SESSION_ID,
+        user_identity=DNA,
+        tmux_server_socket_path=tmp_path / "stale.sock",
+        tmux_session_name="automatic-beluga",
+    )
+    launcher = StubLauncher(tmp_path)
+    launcher.live = False
+
+    assert (
+        run(
+            [str(CODEX_SESSION_ID).upper()],
+            database_path=database,
+            launcher=launcher,  # type: ignore[arg-type]
+        )
+        == 0
+    )
+
+    assert launcher.started == [(Path.cwd(), ["resume", str(CODEX_SESSION_ID)])]
+    assert launcher.attached[0].tmux_session_name == "automatic-beluga"
+    assert f"Resumed Rodex automatic-beluga -> Codex {CODEX_SESSION_ID}" in (
+        capsys.readouterr().out
+    )
+
+
+@pytest.mark.parametrize(
+    "session_selector",
+    [str(REPLACEMENT_CODEX_SESSION_ID), CODEX_SESSION_ID.hex],
+    ids=["unknown-canonical-uuid", "noncanonical-uuid-spelling"],
+)
+def test_unmatched_codex_uuid_like_argument_passes_through_unchanged(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    session_selector: str,
+) -> None:
+    database = tmp_path / "rodex.sqlite3"
+    monkeypatch.setattr(
+        "cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga"
+    )
+    monkeypatch.setattr(
+        "rodex_registry.lifecycle.current_rodex_sessions_user_identity", lambda: DNA
+    )
+    monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
+    monkeypatch.setattr(
+        "rodex.cli.default_tmux_server_socket_path", lambda: tmp_path / "absent.sock"
+    )
+    create_controlled_session(database, tmp_path)
+    delegator = RecordingCodexDelegator(returncode=23)
+
+    assert (
+        run(
+            [session_selector],
+            database_path=database,
+            codex_delegator=delegator,
+        )
+        == delegator.returncode
+    )
+
+    assert delegator.calls == [("/usr/bin/codex", [session_selector])]
+
+
 def test_ended_cool_name_argument_transparently_resumes_its_codex_session(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

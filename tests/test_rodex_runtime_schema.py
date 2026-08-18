@@ -13,6 +13,7 @@ from rodex_registry import (
     create_a_rodex_session,
     initialise_rodex_database,
     lookup_codex_session_id_from_a_rodex_sessions_id,
+    lookup_owned_rodex_sessions_id_from_a_codex_session_id,
     lookup_rodex_runtime_instance,
     lookup_rodex_session_log,
     lookup_rodex_sessions_id_from_a_codex_session_id,
@@ -226,6 +227,38 @@ def test_one_transaction_matches_rodex_codex_and_tmux_without_mixing_ids(
     assert tmux_link is not None
     assert tmux_link.rodex_sessions_id == session.rodex_sessions_id
     assert tmux_link.tmux_session_name == "rodex-example"
+
+
+def test_codex_identity_lookup_enforces_the_complete_posix_owner(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "rodex.sqlite3"
+    owner = RodexSessionsUserIdentity(1009, 1010, "dna")
+    other_user = RodexSessionsUserIdentity(2001, 2002, "other")
+    session = create_a_rodex_session(
+        database,
+        user_identity=owner,
+        codex_session_id=CODEX_SESSION_ID,
+        tmux_server_socket_path="/run/user/1009/rodex/tmux.sock",
+        tmux_session_name="rodex-example",
+    )
+
+    assert (
+        lookup_owned_rodex_sessions_id_from_a_codex_session_id(
+            CODEX_SESSION_ID, database, user_identity=owner
+        )
+        == session.rodex_sessions_id
+    )
+    with pytest.raises(RodexSessionError, match="not owned"):
+        lookup_owned_rodex_sessions_id_from_a_codex_session_id(
+            CODEX_SESSION_ID, database, user_identity=other_user
+        )
+    assert (
+        lookup_owned_rodex_sessions_id_from_a_codex_session_id(
+            REPLACEMENT_CODEX_SESSION_ID, database, user_identity=owner
+        )
+        is None
+    )
 
 
 def test_runtime_link_fields_are_all_required_together(tmp_path: Path) -> None:

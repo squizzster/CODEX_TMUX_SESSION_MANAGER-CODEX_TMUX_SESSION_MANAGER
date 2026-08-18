@@ -104,6 +104,7 @@ preference. See the current [tmux manual](https://man.openbsd.org/tmux.1) and
 | `./rodex _create project_1234` | Create a session with a preferred display name. |
 | `./rodex _detach` | Create without attaching and print expanded identity JSON. |
 | `./rodex automatic-beluga` | Attach if live; otherwise resume or recover its Codex session. |
+| `./rodex 01a015f4-f27c-7592-8060-d12313e8d0ce` | Open the Rodex session linked to this Codex UUID; pass through if none is registered. |
 | `./rodex _running` | List this POSIX user's running Rodex sessions. |
 | `./rodex _context` | Emit this pane's verified Rodex, Codex, tmux, and sharing context as JSON. |
 | `./rodex _alias automatic-beluga edgar-work` | Assign a preferred display name. |
@@ -173,8 +174,8 @@ top-level commands and aliases.
 
 No arguments is the default managed-create route and is equivalent to `_create`. A
 single argument is the other exception to ordinary Codex passthrough: if it matches an
-existing Rodex name, Rodex opens that session. Otherwise it—and every other non-Rodex
-invocation—is passed unchanged to Codex, unless that bare name collides with an
+existing Rodex name or linked Codex session UUID, Rodex opens that session. Otherwise
+it—and every other non-Rodex invocation—is passed unchanged to Codex, unless that bare name collides with an
 unregistered session on Rodex's private tmux server. Such a collision fails explicitly
 and is shown by `_running`; Rodex never adopts or deletes it automatically. An existing Rodex name wins even if a later
 Codex release introduces a command with the same spelling.

@@ -107,7 +107,9 @@ analytics sidecar.
 
 ## Named reattachment
 
-- `./rodex <cool-name>` resolves the name through its integer identity.
+- `./rodex <cool-name-or-codex-uuid>` resolves a canonical Codex UUID first, then a
+  display name, through the same owned integer identity. An unmatched value retains
+  ordinary Codex passthrough.
 - If its stored tmux endpoint is live, Rodex first verifies its registered Rodex session
   ID, registry ID, and Codex session ID. A missing or mismatched marker fails closed
   without attach or rename.
@@ -122,8 +124,8 @@ analytics sidecar.
   Codex runtime and atomically relinks its new ID to the existing Rodex identity.
   Other resume failures and ID mismatches remain hard failures.
 - Both routes preserve the Rodex identity and update `last_accessed_at_utc`.
-- `_detach <cool-name>` follows the same attach, resume, or recovery decision without
-  attaching the caller and prints the active identities as JSON.
+- `_detach <cool-name-or-codex-uuid>` follows the same attach, resume, or recovery
+  decision without attaching the caller and prints the active identities as JSON.
 - `./rodex _running` lists verified runtimes and reports unverified or unregistered
   sessions separately.
 - `./rodex _alias SESSION NAME` sets its portable preferred name; `--force` replaces

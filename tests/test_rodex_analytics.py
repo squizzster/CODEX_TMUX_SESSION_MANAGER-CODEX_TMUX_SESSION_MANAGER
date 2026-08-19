@@ -237,7 +237,7 @@ def test_worker_backfills_verified_rollout_and_projects_only_aggregates(
     assert source.analyzed_prefix_sha256 is not None
     view = read_rodex_session_statistics(1, config.rodex_database_path)
     assert view.statistics is not None
-    assert view.statistics.statistics_revision == 1
+    assert view.statistics.statistics_publication_sequence == 1
     assert view.worker is not None
     assert view.worker.worker_state == "up_to_date"
     assert view.statistics.projection.audit_privacy
@@ -263,7 +263,7 @@ def test_unchanged_rollout_does_not_recalculate_but_append_does(tmp_path: Path) 
     assert len(adapter.analyses) == 2
     view = read_rodex_session_statistics(1, config.rodex_database_path)
     assert view.statistics is not None
-    assert view.statistics.statistics_revision == 2
+    assert view.statistics.statistics_publication_sequence == 2
 
 
 def test_worker_analyzes_only_through_final_complete_newline(tmp_path: Path) -> None:
@@ -310,7 +310,7 @@ def test_same_size_rewrite_with_restored_mtime_is_reauthenticated(
     assert len(adapter.analyses) == 2
     view = read_rodex_session_statistics(1, config.rodex_database_path)
     assert view.statistics is not None
-    assert view.statistics.statistics_revision == 2
+    assert view.statistics.statistics_publication_sequence == 2
 
 
 def test_replacement_retains_old_source_and_analyzes_full_history(
@@ -345,7 +345,7 @@ def test_replacement_retains_old_source_and_analyzes_full_history(
         CODEX_SESSION_ID,
         REPLACEMENT_CODEX_SESSION_ID,
     ]
-    assert all(source.included_statistics_revision == 2 for source in sources)
+    assert all(source.included_statistics_publication_sequence == 2 for source in sources)
 
 
 def test_analyzer_failure_preserves_last_good_aggregate_and_increments_health(
@@ -365,7 +365,7 @@ def test_analyzer_failure_preserves_last_good_aggregate_and_increments_health(
 
     view = read_rodex_session_statistics(1, config.rodex_database_path)
     assert view.statistics is not None
-    assert view.statistics.statistics_revision == 1
+    assert view.statistics.statistics_publication_sequence == 1
     assert view.statistics.projection.audit_privacy
     assert view.worker is not None
     assert view.worker.worker_state == "degraded"
@@ -636,7 +636,10 @@ def test_real_worker_publishes_exact_turn_projection_into_rodex_sql(
     assert exact.worker.worker_state == "up_to_date"
     assert exact.turn is not None
     assert exact.turn.codex_session_id == CODEX_SESSION_ID
-    assert exact.turn.included_statistics_revision == exact.statistics.statistics_revision
+    assert (
+        exact.turn.included_statistics_publication_sequence
+        == exact.statistics.statistics_publication_sequence
+    )
     assert exact.turn.outcome == "completed"
     assert exact.turn.projection.model == "gpt-test"
     assert exact.turn.projection.reasoning_effort == "xhigh"

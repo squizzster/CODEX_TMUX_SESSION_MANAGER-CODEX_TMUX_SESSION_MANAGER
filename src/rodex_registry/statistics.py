@@ -67,7 +67,7 @@ class RodexSessionStatistics:
 
     id: int
     rodex_sessions_id: int
-    statistics_revision: int
+    statistics_publication_sequence: int
     statistics_projection_schema_version: str
     calculated_at_utc: str
     coverage_state: str
@@ -87,7 +87,7 @@ class RodexSessionStatisticsSource:
     analyzed_mtime_ns: int | None
     analyzed_prefix_sha256: str | None
     verified_at_utc: str | None
-    included_statistics_revision: int | None
+    included_statistics_publication_sequence: int | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,7 +109,7 @@ class RodexSessionTurnStatistics:
     id: int
     rodex_sessions_id: int
     rodex_sessions_statistics_sources_id: int
-    included_statistics_revision: int
+    included_statistics_publication_sequence: int
     projection: TurnStatisticsProjection
 
     @property
@@ -170,7 +170,7 @@ def publish_rodex_session_statistics(
     database_path: str | os.PathLike[str] | None = None,
     *,
     expected_current_codex_session_id: CodexSessionId | str,
-    based_on_statistics_revision: int | None,
+    based_on_statistics_publication_sequence: int | None,
     statistics_projection_schema_version: str,
     calculated_at_utc: str,
     coverage_state: str,
@@ -182,8 +182,11 @@ def publish_rodex_session_statistics(
     expected_halves = split_codex_session_id_into_signed_bigints(
         expected_current_codex_session_id
     )
-    if based_on_statistics_revision is not None:
-        _validate_positive_id(based_on_statistics_revision, "based_on_statistics_revision")
+    if based_on_statistics_publication_sequence is not None:
+        _validate_positive_id(
+            based_on_statistics_publication_sequence,
+            "based_on_statistics_publication_sequence",
+        )
     schema_version = _normalise_required_text(
         statistics_projection_schema_version,
         "statistics_projection_schema_version",
@@ -219,16 +222,23 @@ def publish_rodex_session_statistics(
                 "current Codex session ID changed during statistics calculation"
             )
         previous_row = connection.execute(
-            f"SELECT statistics_revision FROM {RODEX_SESSIONS_STATISTICS_TABLE} "
+            f"SELECT statistics_publication_sequence "
+            f"FROM {RODEX_SESSIONS_STATISTICS_TABLE} "
             "WHERE rodex_sessions_id = ?",
             (session_id,),
         ).fetchone()
-        previous_revision = None if previous_row is None else int(previous_row[0])
-        if previous_revision != based_on_statistics_revision:
+        previous_publication_sequence = (
+            None if previous_row is None else int(previous_row[0])
+        )
+        if previous_publication_sequence != based_on_statistics_publication_sequence:
             raise RodexSessionStatisticsConflictError(
-                "statistics revision changed during calculation"
+                "statistics publication sequence changed during calculation"
             )
-        new_revision = 1 if previous_revision is None else previous_revision + 1
+        new_publication_sequence = (
+            1
+            if previous_publication_sequence is None
+            else previous_publication_sequence + 1
+        )
         registered_rows = connection.execute(
             f"SELECT id, codex_session_id_signed_bigint_1, "
             "codex_session_id_signed_bigint_2 "
@@ -261,18 +271,19 @@ def publish_rodex_session_statistics(
 
         connection.execute(
             f"UPDATE {RODEX_SESSIONS_STATISTICS_SOURCES_TABLE} "
-            "SET included_statistics_revision = NULL "
+            "SET included_statistics_publication_sequence = NULL "
             "WHERE rodex_sessions_id = ?",
             (session_id,),
         )
         connection.execute(
             f"INSERT INTO {RODEX_SESSIONS_STATISTICS_TABLE} "
-            "(rodex_sessions_id, statistics_revision, "
+            "(rodex_sessions_id, statistics_publication_sequence, "
             "statistics_projection_schema_version, calculated_at_utc, "
             f"coverage_state, {SESSION_STATISTICS_SCALARS.columns_sql}) "
             f"VALUES (?, ?, ?, ?, ?, {SESSION_STATISTICS_SCALARS.placeholders_sql}) "
             "ON CONFLICT(rodex_sessions_id) DO UPDATE SET "
-            "statistics_revision = excluded.statistics_revision, "
+            "statistics_publication_sequence = "
+            "excluded.statistics_publication_sequence, "
             "statistics_projection_schema_version = "
             "excluded.statistics_projection_schema_version, "
             "calculated_at_utc = excluded.calculated_at_utc, "
@@ -280,7 +291,7 @@ def publish_rodex_session_statistics(
             f"{SESSION_STATISTICS_SCALARS.excluded_updates_sql}",
             (
                 session_id,
-                new_revision,
+                new_publication_sequence,
                 schema_version,
                 calculated,
                 coverage,
@@ -297,13 +308,14 @@ def publish_rodex_session_statistics(
             )
         connection.executemany(
             f"INSERT INTO {RODEX_SESSIONS_STATISTICS_DISTRIBUTIONS_TABLE} "
-            "(rodex_sessions_id, included_statistics_revision, distribution_kind, "
+            "(rodex_sessions_id, included_statistics_publication_sequence, "
+            "distribution_kind, "
             "observation_count, total, median, p75, p90, p95, maximum) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 (
                     session_id,
-                    new_revision,
+                    new_publication_sequence,
                     item.distribution_kind,
                     item.observation_count,
                     item.total,
@@ -318,12 +330,12 @@ def publish_rodex_session_statistics(
         )
         connection.executemany(
             f"INSERT INTO {RODEX_SESSIONS_STATISTICS_NAMED_COUNTS_TABLE} "
-            "(rodex_sessions_id, included_statistics_revision, count_kind, "
+            "(rodex_sessions_id, included_statistics_publication_sequence, count_kind, "
             "count_name, occurrence_count) VALUES (?, ?, ?, ?, ?)",
             (
                 (
                     session_id,
-                    new_revision,
+                    new_publication_sequence,
                     item.count_kind,
                     item.count_name,
                     item.occurrence_count,
@@ -334,10 +346,11 @@ def publish_rodex_session_statistics(
         )
         connection.executemany(
             f"INSERT INTO {RODEX_SESSIONS_STATISTICS_AUDIT_LIMITS_TABLE} "
-            "(rodex_sessions_id, included_statistics_revision, limit_ordinal, "
+            "(rodex_sessions_id, included_statistics_publication_sequence, "
+            "limit_ordinal, "
             "limitation) VALUES (?, ?, ?, ?)",
             (
-                (session_id, new_revision, ordinal, limitation)
+                (session_id, new_publication_sequence, ordinal, limitation)
                 for ordinal, limitation in enumerate(statistics_projection.audit_limits)
             ),
         )
@@ -346,7 +359,7 @@ def publish_rodex_session_statistics(
                 f"UPDATE {RODEX_SESSIONS_STATISTICS_SOURCES_TABLE} SET "
                 "rollout_file_path = ?, analyzed_size_bytes = ?, "
                 "analyzed_mtime_ns = ?, analyzed_prefix_sha256 = ?, "
-                "verified_at_utc = ?, included_statistics_revision = ? "
+                "verified_at_utc = ?, included_statistics_publication_sequence = ? "
                 "WHERE rodex_sessions_id = ? AND codex_session_id_signed_bigint_1 = ? "
                 "AND codex_session_id_signed_bigint_2 = ?",
                 (
@@ -355,7 +368,7 @@ def publish_rodex_session_statistics(
                     item.analyzed_mtime_ns,
                     item.analyzed_prefix_sha256,
                     item.verified_at_utc,
-                    new_revision,
+                    new_publication_sequence,
                     session_id,
                     *split_codex_session_id_into_signed_bigints(item.codex_session_id),
                 ),
@@ -410,7 +423,8 @@ def publish_rodex_session_statistics(
                 "(rodex_sessions_id, rodex_sessions_statistics_sources_id, "
                 "codex_turn_id_sha256_int_1, codex_turn_id_sha256_int_2, "
                 "codex_turn_id_sha256_int_3, codex_turn_id_sha256_int_4, "
-                "codex_turn_id, included_statistics_revision, started_at_utc, "
+                "codex_turn_id, included_statistics_publication_sequence, "
+                "started_at_utc, "
                 "terminal_at_utc, outcome, model_names_id, "
                 "reasoning_effort_names_id, "
                 f"{TURN_STATISTICS_SCALARS.columns_sql}) "
@@ -419,8 +433,8 @@ def publish_rodex_session_statistics(
                 "ON CONFLICT(rodex_sessions_statistics_sources_id, "
                 "codex_turn_id_sha256_int_1, codex_turn_id_sha256_int_2, "
                 "codex_turn_id_sha256_int_3, codex_turn_id_sha256_int_4) "
-                "DO UPDATE SET included_statistics_revision = "
-                "excluded.included_statistics_revision, "
+                "DO UPDATE SET included_statistics_publication_sequence = "
+                "excluded.included_statistics_publication_sequence, "
                 "started_at_utc = excluded.started_at_utc, "
                 "terminal_at_utc = excluded.terminal_at_utc, "
                 "outcome = excluded.outcome, "
@@ -433,7 +447,7 @@ def publish_rodex_session_statistics(
                     source_id,
                     *turn_hash,
                     item.codex_turn_id,
-                    new_revision,
+                    new_publication_sequence,
                     item.started_at_utc,
                     item.terminal_at_utc,
                     item.outcome,
@@ -448,13 +462,13 @@ def publish_rodex_session_statistics(
             connection.executemany(
                 f"INSERT INTO {RODEX_SESSIONS_STATISTICS_TURN_NAMED_COUNTS_TABLE} "
                 "(rodex_sessions_id, rodex_sessions_statistics_turns_id, "
-                "included_statistics_revision, count_kind, count_name, "
+                "included_statistics_publication_sequence, count_kind, count_name, "
                 "occurrence_count) VALUES (?, ?, ?, ?, ?, ?)",
                 (
                     (
                         session_id,
                         turn_row_id,
-                        new_revision,
+                        new_publication_sequence,
                         count.count_kind,
                         count.count_name,
                         count.occurrence_count,
@@ -464,8 +478,9 @@ def publish_rodex_session_statistics(
             )
         connection.execute(
             f"DELETE FROM {RODEX_SESSIONS_STATISTICS_TURNS_TABLE} "
-            "WHERE rodex_sessions_id = ? AND included_statistics_revision != ?",
-            (session_id, new_revision),
+            "WHERE rodex_sessions_id = ? "
+            "AND included_statistics_publication_sequence != ?",
+            (session_id, new_publication_sequence),
         )
         _upsert_statistics_worker(
             connection,
@@ -631,7 +646,7 @@ def read_rodex_session_turn_statistics(
             "turns.rodex_sessions_statistics_sources_id, "
             "sources.codex_session_id_signed_bigint_1, "
             "sources.codex_session_id_signed_bigint_2, turns.codex_turn_id, "
-            "turns.included_statistics_revision, turns.started_at_utc, "
+            "turns.included_statistics_publication_sequence, turns.started_at_utc, "
             "turns.terminal_at_utc, turns.outcome, "
             "models.name_of_the_model, "
             "efforts.name_of_the_reasoning_effort, "
@@ -803,7 +818,7 @@ def _select_statistics(
     connection: sqlite3.Connection, session_id: int
 ) -> tuple[object, ...] | None:
     return connection.execute(
-        f"SELECT id, rodex_sessions_id, statistics_revision, "
+        f"SELECT id, rodex_sessions_id, statistics_publication_sequence, "
         "statistics_projection_schema_version, calculated_at_utc, coverage_state, "
         f"{SESSION_STATISTICS_SCALARS.columns_sql} "
         f"FROM {RODEX_SESSIONS_STATISTICS_TABLE} "
@@ -904,7 +919,7 @@ def _select_statistics_sources(
         f"SELECT id, rodex_sessions_id, codex_session_id_signed_bigint_1, "
         "codex_session_id_signed_bigint_2, first_linked_at_utc, rollout_file_path, "
         "analyzed_size_bytes, analyzed_mtime_ns, analyzed_prefix_sha256, "
-        "verified_at_utc, included_statistics_revision "
+        "verified_at_utc, included_statistics_publication_sequence "
         f"FROM {RODEX_SESSIONS_STATISTICS_SOURCES_TABLE} "
         "WHERE rodex_sessions_id = ? ORDER BY id",
         (session_id,),
@@ -977,7 +992,7 @@ def _session_statistics_from_rows(
     return RodexSessionStatistics(
         id=int(row[0]),
         rodex_sessions_id=int(row[1]),
-        statistics_revision=int(row[2]),
+        statistics_publication_sequence=int(row[2]),
         statistics_projection_schema_version=str(row[3]),
         calculated_at_utc=str(row[4]),
         coverage_state=str(row[5]),
@@ -998,7 +1013,9 @@ def _statistics_source_from_row(
         analyzed_mtime_ns=None if row[7] is None else int(row[7]),
         analyzed_prefix_sha256=None if row[8] is None else str(row[8]),
         verified_at_utc=None if row[9] is None else str(row[9]),
-        included_statistics_revision=None if row[10] is None else int(row[10]),
+        included_statistics_publication_sequence=(
+            None if row[10] is None else int(row[10])
+        ),
     )
 
 
@@ -1022,7 +1039,7 @@ def _turn_statistics_from_rows(
         id=int(row[0]),
         rodex_sessions_id=int(row[1]),
         rodex_sessions_statistics_sources_id=int(row[2]),
-        included_statistics_revision=int(row[6]),
+        included_statistics_publication_sequence=int(row[6]),
         projection=projection,
     )
 

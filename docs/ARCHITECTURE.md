@@ -126,7 +126,13 @@ and `_result`.
 
 ## Persistent analytics
 
-The worker authenticates complete rollout prefixes and analyzes private copies in memory. Typed relational projections retain source provenance and worker health without raw events or JSON blobs. Publication is atomic behind source/revision fences; failures preserve the last good view and cannot affect the TUI. Statistics reads need neither Codex nor tmux.
+The worker authenticates complete rollout prefixes and analyzes private copies in
+memory. Typed relational projections retain source provenance and worker health without
+raw events or JSON blobs. Publication is atomic behind
+source/publication-sequence fences; failures preserve the last good view and cannot
+affect the TUI. Statistics reads need neither Codex nor tmux. The session-local sequence
+advances for every successfully published changed prefix and binds the current
+relational snapshot; it is neither a turn count nor retained history.
 Model and reasoning effort enter through the same exact-turn projection as independent,
 nullable `turn_context` facts. Publication resolves each distinct name once per
 transaction into its dedicated lookup table, stores only those integer relationships on

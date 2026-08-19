@@ -155,7 +155,7 @@ def _publish(
         1,
         database,
         expected_current_codex_session_id=expected_codex_session_id,
-        based_on_statistics_revision=based_on,
+        based_on_statistics_publication_sequence=based_on,
         statistics_projection_schema_version="rodex-statistics-v4",
         calculated_at_utc="2026-08-16T12:00:00Z",
         coverage_state="complete",
@@ -195,6 +195,11 @@ def test_schema_is_relational_queryable_and_contains_no_json_columns(
     )
     assert "total_tokens" in all_columns["rodex_sessions_statistics"]
     assert "total_tokens" in all_columns["rodex_sessions_statistics_turns"]
+    assert "statistics_publication_sequence" in all_columns["rodex_sessions_statistics"]
+    assert "statistics_revision" not in all_columns["rodex_sessions_statistics"]
+    for child_table in table_names[3:9]:
+        assert "included_statistics_publication_sequence" in all_columns[child_table]
+        assert "included_statistics_revision" not in all_columns[child_table]
     assert all_columns["model_names"] == ["id", "name_of_the_model"]
     assert all_columns["reasoning_effort_names"] == [
         "id",
@@ -245,8 +250,9 @@ def test_schema_is_relational_queryable_and_contains_no_json_columns(
         database, "rodex_sessions_statistics_turn_named_counts_key_unique"
     ) == ["rodex_sessions_statistics_turns_id", "count_kind", "count_name"]
     assert _index_columns(
-        database, "rodex_sessions_statistics_turns_session_id_revision_unique"
-    ) == ["rodex_sessions_id", "id", "included_statistics_revision"]
+        database,
+        "rodex_sessions_statistics_turns_session_id_publication_sequence_unique",
+    ) == ["rodex_sessions_id", "id", "included_statistics_publication_sequence"]
     assert _index_columns(
         database, "rodex_sessions_statistics_turn_named_counts_session_kind"
     ) == ["rodex_sessions_id", "count_kind", "count_name"]
@@ -261,7 +267,7 @@ def test_full_projection_round_trips_through_relational_rows(tmp_path: Path) -> 
     view = read_rodex_session_statistics(1, database)
     exact = read_rodex_session_turn_statistics(1, "turn-exact", database).turn
 
-    assert published.statistics_revision == 1
+    assert published.statistics_publication_sequence == 1
     assert view.statistics is not None
     assert session_statistics_as_dict(
         view.statistics.projection
@@ -271,7 +277,7 @@ def test_full_projection_round_trips_through_relational_rows(tmp_path: Path) -> 
         projection.turn_statistics[0]
     )
     assert view.worker is not None and view.worker.worker_state == "up_to_date"
-    assert view.sources[0].included_statistics_revision == 1
+    assert view.sources[0].included_statistics_publication_sequence == 1
 
 
 def test_turn_model_and_effort_use_cached_independent_lookup_ids(
@@ -402,7 +408,7 @@ def test_sql_can_sum_group_and_filter_base_statistics(tmp_path: Path) -> None:
         assert tool_total == 4
 
 
-def test_revision_mark_and_sweep_preserves_identity_and_replaces_children(
+def test_publication_sequence_mark_and_sweep_preserves_identity_and_replaces_children(
     tmp_path: Path,
 ) -> None:
     database = tmp_path / "rodex.sqlite3"
@@ -424,7 +430,7 @@ def test_revision_mark_and_sweep_preserves_identity_and_replaces_children(
     assert second_a.projection.total_tokens == 99
     assert second_a.projection.model == "gpt-next"
     assert second_a.projection.reasoning_effort == "medium"
-    assert second_a.included_statistics_revision == 2
+    assert second_a.included_statistics_publication_sequence == 2
     assert read_rodex_session_turn_statistics(1, "b", database).turn is None
     with sqlite3.connect(database) as connection:
         assert connection.execute(
@@ -454,7 +460,7 @@ def test_publication_failure_rolls_back_every_relational_fact(
         _publish(
             database,
             tmp_path,
-            based_on=before.statistics_revision,
+            based_on=before.statistics_publication_sequence,
             projection=_projection((changed, _turn("new"))),
         )
 
@@ -580,12 +586,13 @@ def test_turn_mark_and_sweep_scales_beyond_sqlite_bind_limit(tmp_path: Path) -> 
     _publish(database, tmp_path, based_on=1, projection=projection)
     with sqlite3.connect(database) as connection:
         assert connection.execute(
-            "SELECT COUNT(*), MIN(included_statistics_revision), "
-            "MAX(included_statistics_revision) FROM rodex_sessions_statistics_turns"
+            "SELECT COUNT(*), MIN(included_statistics_publication_sequence), "
+            "MAX(included_statistics_publication_sequence) "
+            "FROM rodex_sessions_statistics_turns"
         ).fetchone() == (1_100, 2, 2)
 
 
-def test_stale_codex_session_id_and_revision_fences_preserve_last_good_rows(
+def test_stale_codex_session_id_and_publication_sequence_fences_preserve_rows(
     tmp_path: Path,
 ) -> None:
     database = tmp_path / "rodex.sqlite3"
@@ -602,7 +609,10 @@ def test_stale_codex_session_id_and_revision_fences_preserve_last_good_rows(
         based_on=1,
         projection=_projection((_turn("stable", total_tokens=20),)),
     )
-    with pytest.raises(RodexSessionStatisticsConflictError, match="revision changed"):
+    with pytest.raises(
+        RodexSessionStatisticsConflictError,
+        match="publication sequence changed",
+    ):
         _publish(database, tmp_path, based_on=1, projection=_projection((_turn("new"),)))
     assert read_rodex_session_statistics(1, database).statistics == second
 
@@ -614,7 +624,7 @@ def test_stale_codex_session_id_and_revision_fences_preserve_last_good_rows(
         codex_session_id=REPLACEMENT_CODEX_SESSION_ID,
     )
     with pytest.raises(RodexSessionStatisticsConflictError, match="Codex session ID"):
-        _publish(database, tmp_path, based_on=first.statistics_revision)
+        _publish(database, tmp_path, based_on=first.statistics_publication_sequence)
 
 
 def test_health_is_separate_and_preserves_last_good_statistics(tmp_path: Path) -> None:
@@ -642,8 +652,10 @@ def test_foreign_keys_and_checks_reject_detached_relational_facts(tmp_path: Path
     _publish(database, tmp_path, projection=_projection((_turn("turn-a"),)))
 
     statements = (
-        "UPDATE rodex_sessions_statistics_sources SET included_statistics_revision = NULL",
-        "UPDATE rodex_sessions_statistics_turns SET included_statistics_revision = 999",
+        "UPDATE rodex_sessions_statistics_sources "
+        "SET included_statistics_publication_sequence = NULL",
+        "UPDATE rodex_sessions_statistics_turns "
+        "SET included_statistics_publication_sequence = 999",
         "UPDATE rodex_sessions_statistics_turns SET cached_input_tokens = input_tokens + 1",
         "UPDATE rodex_sessions_statistics_turns SET model_names_id = 999",
         "UPDATE rodex_sessions_statistics_turns SET reasoning_effort_names_id = 999",
@@ -678,6 +690,8 @@ def test_cli_reconstructs_json_from_sql_without_runtime_dependencies(
 
     assert run(["_stats", created.cool_name, "--json"], database_path=database) == 0
     aggregate = json.loads(capsys.readouterr().out)
+    assert aggregate["statistics_publication_sequence"] == 1
+    assert "statistics_revision" not in aggregate
     assert (
         aggregate["statistics"]["must_have_basic_stats"]["token_usage"]["total_tokens"]
         == _base_projection().total_tokens
@@ -695,6 +709,9 @@ def test_cli_reconstructs_json_from_sql_without_runtime_dependencies(
         == 0
     )
     exact = json.loads(capsys.readouterr().out)
+    assert exact["statistics_publication_sequence"] == 1
+    assert exact["turn"]["included_statistics_publication_sequence"] == 1
+    assert "included_statistics_revision" not in exact["turn"]
     assert exact["statistics"]["must_have_basic_stats"]["token_usage"]["total_tokens"] == 42
     assert exact["statistics"]["must_have_basic_stats"]["workspace_and_model"] == {
         "workspace_digest": "a" * 64,

@@ -92,7 +92,9 @@ def execute_statistics_command(arguments: list[str], database_path: Path) -> Non
     worker = view.worker
     payload = {
         "rodex_session_name": session_name,
-        "statistics_revision": (None if snapshot is None else snapshot.statistics_revision),
+        "statistics_publication_sequence": (
+            None if snapshot is None else snapshot.statistics_publication_sequence
+        ),
         "statistics_projection_schema_version": (
             None if snapshot is None else snapshot.statistics_projection_schema_version
         ),
@@ -108,7 +110,8 @@ def execute_statistics_command(arguments: list[str], database_path: Path) -> Non
             0
             if snapshot is None
             else sum(
-                source.included_statistics_revision == snapshot.statistics_revision
+                source.included_statistics_publication_sequence
+                == snapshot.statistics_publication_sequence
                 for source in view.sources
             )
         ),
@@ -134,7 +137,9 @@ def execute_statistics_command(arguments: list[str], database_path: Path) -> Non
             "started_at_utc": turn.started_at_utc,
             "terminal_at_utc": turn.terminal_at_utc,
             "outcome": turn.outcome,
-            "included_statistics_revision": turn.included_statistics_revision,
+            "included_statistics_publication_sequence": (
+                turn.included_statistics_publication_sequence
+            ),
         }
         payload["statistics"] = turn_statistics_as_dict(turn.projection)
     if as_json:
@@ -154,7 +159,8 @@ def _print_human_statistics(payload: dict[str, object]) -> None:
         subject = f" turn {turn.get('turn_id')}"
     print(
         f"Rodex {payload['rodex_session_name']}{subject} statistics "
-        f"(revision {payload['statistics_revision']}, {payload['worker_state']})",
+        f"(publication sequence {payload['statistics_publication_sequence']}, "
+        f"{payload['worker_state']})",
         flush=True,
     )
     for category in ("must_have_basic_stats", "recommended_insight_stats"):

@@ -114,10 +114,12 @@ prefix to a private 0600 temporary file and reauthenticates its SHA-256 before p
 The worker creates a fresh in-memory `CodexProtocolLibrary`, loads the authenticated
 copies, calculates statistics, then closes it. The analyzer owns calculation only;
 Rodex owns watching, scheduling, source provenance, retries, health, and persistence.
-One transaction publishes a Rodex-owned monotonic revision, the session projection,
-the complete `(Codex source, turn_id)` projection set, and exact source descriptors.
-Codex-session-ID and prior-revision fences reject stale workers. Health failures commit
-separately and never overwrite the last good snapshot.
+One transaction publishes a Rodex-owned, session-local publication sequence, the
+session projection, the complete `(Codex source, turn_id)` projection set, and exact
+source descriptors. Codex-session-ID and prior-publication-sequence fences reject stale
+workers. Health failures commit separately and never overwrite the last good snapshot.
+The sequence advances for each successfully published changed rollout prefix; it does
+not count turns or retain prior snapshots.
 
 Fixed statistics are typed scalar columns. The genuinely repeating values are normalized
 as seven distribution rows, bounded category/name/count rows, and ordered audit-limit

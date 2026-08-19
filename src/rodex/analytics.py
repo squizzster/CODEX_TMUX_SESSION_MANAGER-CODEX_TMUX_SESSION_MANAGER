@@ -223,10 +223,10 @@ class AnalyticsRolloutWorker:
                     session_id,
                     self._config.rodex_database_path,
                     expected_current_codex_session_id=codex_session_id,
-                    based_on_statistics_revision=(
+                    based_on_statistics_publication_sequence=(
                         None
                         if view.statistics is None
-                        else view.statistics.statistics_revision
+                        else view.statistics.statistics_publication_sequence
                     ),
                     statistics_projection_schema_version=(
                         STATISTICS_PROJECTION_SCHEMA_VERSION
@@ -313,10 +313,10 @@ class AnalyticsRolloutWorker:
             or not sources
         ):
             return False
-        revision = statistics.statistics_revision
+        publication_sequence = statistics.statistics_publication_sequence
         for source in sources:
             if (
-                source.included_statistics_revision != revision
+                source.included_statistics_publication_sequence != publication_sequence
                 or source.rollout_file_path is None
                 or source.analyzed_size_bytes is None
                 or source.analyzed_mtime_ns is None

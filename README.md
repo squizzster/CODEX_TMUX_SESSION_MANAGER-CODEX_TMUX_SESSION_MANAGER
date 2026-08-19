@@ -221,8 +221,8 @@ codebase for later re-enablement; input currently passes directly to the Codex T
 ## Local data
 
 The durable per-user registry defaults to
-`$XDG_STATE_HOME/rodex/rodex-v6.sqlite3`, or
-`~/.local/state/rodex/rodex-v6.sqlite3` when `XDG_STATE_HOME` is unset. Set
+`$XDG_STATE_HOME/rodex/rodex-v7.sqlite3`, or
+`~/.local/state/rodex/rodex-v7.sqlite3` when `XDG_STATE_HOME` is unset. Set
 `RODEX_DATABASE_PATH` to select another database.
 
 Rodex session IDs are random 64-bit values rendered only as 16 lowercase hex
@@ -236,8 +236,8 @@ pipeline. SQLite stores each Rodex-owned ID losslessly in one signed `BIGINT` an
 enforces its domain uniqueness. Codex session IDs remain Codex-owned 128-bit values and
 are stored losslessly across two `BIGINT` columns.
 
-Version 6 is an incompatible ALPHA schema with no v5 reader or migration path. Rodex
-leaves `rodex-v5.sqlite3` and earlier generations untouched; explicitly selecting one
+Version 7 is an incompatible ALPHA schema with no v6 reader or migration path. Rodex
+leaves `rodex-v6.sqlite3` and earlier generations untouched; explicitly selecting one
 fails exact schema verification rather than falling back or rewriting it.
 
 Short-lived Unix sockets and app-server logs use `$XDG_RUNTIME_DIR/rodex`, normally
@@ -265,6 +265,10 @@ queryable and JSON output can be rebuilt deterministically. Rodex never stores c
 prompts, responses, commands, tool output, raw events, or redundant statistics JSON.
 Canonical rollout paths and SHA-256 digests are sensitive local metadata, so the
 database remains private to its POSIX user. Codex remains responsible for raw history.
+Each session's `statistics_publication_sequence` starts at one and advances whenever a
+changed authenticated rollout prefix is successfully published. It is a consistency
+and concurrency token, not a turn count or retained history; only the latest successful
+snapshot remains in Rodex SQL.
 
 ## Documentation
 

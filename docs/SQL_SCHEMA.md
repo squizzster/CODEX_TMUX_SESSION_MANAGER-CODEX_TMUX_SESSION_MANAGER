@@ -64,8 +64,8 @@ Apply these standards to future schema decisions. These authorative standards ma
 - `rodex_sessions` contains one signed-BIGINT Rodex session ID, the two signed
   halves of the Codex session ID, and permanent/optional display-name links. The public Rodex
   session ID is always serialized as a 16-character lowercase hex string, never a JSON
-  number. This incompatible ALPHA schema generation is stored in `rodex-v6.sqlite3`;
-  Rodex leaves v5 and earlier generation files untouched and does not read or migrate
+  number. This incompatible ALPHA schema generation is stored in `rodex-v7.sqlite3`;
+  Rodex leaves v6 and earlier generation files untouched and does not read or migrate
   their schemas.
 - `rodex_runtime_instances` contains one signed-`BIGINT` random 64-bit `runtime_id` and
   its start time for a Rodex session. Unique indexes fence both session cardinality and
@@ -74,8 +74,11 @@ Apply these standards to future schema decisions. These authorative standards ma
   Resume replaces this control identity; the table contains no conversation content.
 - `rodex_sessions_statistics` is the latest successful aggregate snapshot, one row per
   Rodex session. Every fixed aggregate and its available base count is a typed scalar
-  column. Rodex allocates its monotonic `statistics_revision`; temporary analyzer
-  identities, revisions, and redundant JSON documents are excluded.
+  column. Rodex allocates its session-local monotonic
+  `statistics_publication_sequence` whenever a changed authenticated rollout prefix is
+  successfully published. The sequence is a compare-and-set and relational consistency
+  token, not a turn count or retained history; temporary analyzer dataset identities,
+  dataset revisions, prior Rodex snapshots, and redundant JSON documents are excluded.
 - `rodex_sessions_statistics_distributions` stores the seven bounded distribution kinds
   as `n`, total, median, p75, p90, p95, and maximum fields. Empty and nonempty shapes are
   constrained in SQL.
@@ -90,11 +93,13 @@ Apply these standards to future schema decisions. These authorative standards ma
 - `rodex_sessions_statistics_sources` retains every Codex session ID linked to the Rodex
   lineage. A Codex session ID is globally unique to one lineage. Nullable rollout provenance
   represents a registered source not yet authenticated; included provenance carries an
-  absolute canonical path, complete-prefix byte count, mtime, SHA-256, and revision.
+  absolute canonical path, complete-prefix byte count, mtime, SHA-256, and publication
+  sequence.
 - `rodex_sessions_statistics_turns` stores one typed, privacy-filtered projection per
-  exact `(Codex source, turn_id)` in the current revision. Four signed 64-bit SHA-256
-  pieces provide indexed lookup while retained text verifies exact identity. Deferred
-  foreign keys bind every turn to both the included source revision and session snapshot.
+  exact `(Codex source, turn_id)` in the current publication sequence. Four signed
+  64-bit SHA-256 pieces provide indexed lookup while retained text verifies exact
+  identity. Deferred foreign keys bind every turn to both the included source
+  publication sequence and session snapshot.
   Nullable `model_names_id` and `reasoning_effort_names_id` fields preserve the two
   separate turn-scoped facts. Aggregate model and reasoning-effort maps are grouped from
   these exact relationships rather than stored as redundant named counts.
@@ -104,10 +109,11 @@ Apply these standards to future schema decisions. These authorative standards ma
   diagnostic code cannot contain free-form errors or paths. Failure never fabricates or
   overwrites a statistics snapshot.
 - Publishing a session projection, complete turn set, exact included sources, and
-  healthy state is one Codex-session-ID- and prior-revision-fenced transaction. Revision
-  mark-and-sweep updates existing turn identities and removes obsolete turns without a
-  variable-length SQL key list. Health-only failure publication uses the ID fence but
-  does not mutate last-good statistics, turns, or source analysis.
+  healthy state is one Codex-session-ID- and prior-publication-sequence-fenced
+  transaction. Publication-sequence mark-and-sweep updates existing turn identities and
+  removes obsolete turns without a variable-length SQL key list. Health-only failure
+  publication uses the ID fence but does not mutate last-good statistics, turns, or
+  source analysis.
 - Strict typed projection parsing rejects missing, unknown, or wrongly typed analyzer
   fields before SQL begins. Reads select root and child rows in one transaction; the CLI
   presentation layer can reconstruct every analyzer statistic without stored JSON.

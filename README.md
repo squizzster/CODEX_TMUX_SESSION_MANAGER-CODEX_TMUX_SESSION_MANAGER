@@ -142,16 +142,16 @@ preference. See the current [tmux manual](https://man.openbsd.org/tmux.1) and
 | `./rodex _wait edgar-work --turn TURN_ID --timeout 30m --json` | Wait for one exact turn without interrupting on timeout. |
 | `./rodex _interrupt edgar-work --turn TURN_ID --json` | Interrupt one exact active turn. |
 | `./rodex _result edgar-work --turn TURN_ID --json` | Read bounded live result data without copying it into SQLite. |
-| `./rodex _stats edgar-work` | Show the latest successful aggregate statistics, including per-turn-derived model and reasoning-effort counts. |
+| `./rodex _stats edgar-work` | Show team statistics plus SQL-derived root/sub-agent lifecycle and resource totals. |
 | `./rodex _stats edgar-work --json` | Emit the snapshot and freshness metadata as JSON. |
 | `./rodex _stats edgar-work --turn TURN_ID` | Show one exact turn from the latest snapshot. |
-| `./rodex _stats edgar-work --turn TURN_ID --source CODEX_SESSION_ID --json` | Qualify a turn ID across resumed Codex sources. |
+| `./rodex _stats edgar-work --turn TURN_ID --thread CODEX_THREAD_ID --json` | Qualify a turn ID across exact root or sub-agent threads. |
 | `./rodex _stats-status edgar-work` | Show source coverage and analytics worker health. |
 | `./rodex _mouse edgar-work toggle` | Toggle mouse handling for one verified live session. |
 | `./rodex _mouse edgar-work inherit` | Remove the session override and inherit the tmux global value. |
 
 Rodex flags include `_alias --force` and
-`_stats NAME --turn ID --source CODEX_SESSION_ID --json`.
+`_stats NAME --turn ID --thread CODEX_THREAD_ID --json`.
 `_context` is the machine-facing self-identification route for Codex and local tooling.
 It resolves the inherited tmux pane, verifies its live Rodex, registry, and Codex markers
 against the current user's database row, and fails closed outside a matching managed
@@ -221,8 +221,8 @@ codebase for later re-enablement; input currently passes directly to the Codex T
 ## Local data
 
 The durable per-user registry defaults to
-`$XDG_STATE_HOME/rodex/rodex-v7.sqlite3`, or
-`~/.local/state/rodex/rodex-v7.sqlite3` when `XDG_STATE_HOME` is unset. Set
+`$XDG_STATE_HOME/rodex/rodex-v8.sqlite3`, or
+`~/.local/state/rodex/rodex-v8.sqlite3` when `XDG_STATE_HOME` is unset. Set
 `RODEX_DATABASE_PATH` to select another database.
 
 Rodex session IDs are random 64-bit values rendered only as 16 lowercase hex
@@ -236,8 +236,8 @@ pipeline. SQLite stores each Rodex-owned ID losslessly in one signed `BIGINT` an
 enforces its domain uniqueness. Codex session IDs remain Codex-owned 128-bit values and
 are stored losslessly across two `BIGINT` columns.
 
-Version 7 is an incompatible ALPHA schema with no v6 reader or migration path. Rodex
-leaves `rodex-v6.sqlite3` and earlier generations untouched; explicitly selecting one
+Version 8 is an incompatible ALPHA schema with no v7 reader or migration path. Rodex
+leaves `rodex-v7.sqlite3` and earlier generations untouched; explicitly selecting one
 fails exact schema verification rather than falling back or rewriting it.
 
 Short-lived Unix sockets and app-server logs use `$XDG_RUNTIME_DIR/rodex`, normally

@@ -9,9 +9,10 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Final
 
-from .identity import CodexSessionId, parse_codex_session_id
+from .identity import CodexThreadId, parse_codex_thread_id
 
 __all__ = [
+    "COLLABORATION_MODEL_TOOL_NAMES",
     "SessionStatisticsProjection",
     "StatisticsDistribution",
     "StatisticsNamedCount",
@@ -22,6 +23,17 @@ __all__ = [
     "turn_statistics_as_dict",
     "validate_session_statistics_projection",
 ]
+
+COLLABORATION_MODEL_TOOL_NAMES: Final = frozenset(
+    {
+        "spawn_agent",
+        "followup_task",
+        "send_message",
+        "list_agents",
+        "wait_agent",
+        "interrupt_agent",
+    }
+)
 
 
 class StatisticsProjectionError(ValueError):
@@ -55,7 +67,7 @@ class StatisticsNamedCount:
 class TurnStatisticsProjection:
     """All current derived values for one exact Codex turn."""
 
-    codex_session_id: CodexSessionId
+    codex_thread_id: CodexThreadId
     codex_turn_id: str
     started_at_utc: str | None
     terminal_at_utc: str | None
@@ -428,7 +440,7 @@ def validate_session_statistics_projection(
         aggregate = session_statistics_as_dict(projection)
         turns = [
             {
-                "session_id": str(turn.codex_session_id),
+                "session_id": str(turn.codex_thread_id),
                 "turn_id": turn.codex_turn_id,
                 "started_at": turn.started_at_utc,
                 "terminal_at": turn.terminal_at_utc,
@@ -1067,7 +1079,7 @@ def _turns(value: object) -> tuple[TurnStatisticsProjection, ...]:
     if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
         raise StatisticsProjectionError("snapshot.turn_statistics must be a sequence")
     parsed = tuple(_turn(item, index) for index, item in enumerate(value))
-    identities = {(item.codex_session_id, item.codex_turn_id) for item in parsed}
+    identities = {(item.codex_thread_id, item.codex_turn_id) for item in parsed}
     if len(identities) != len(parsed):
         raise StatisticsProjectionError(
             "snapshot.turn_statistics contains a duplicate identity"
@@ -1079,12 +1091,12 @@ def _turn(value: object, index: int) -> TurnStatisticsProjection:
     path = f"snapshot.turn_statistics[{index}]"
     turn = _exact_mapping(value, _TURN_KEYS, path)
     try:
-        codex_session_id = parse_codex_session_id(
+        codex_thread_id = parse_codex_thread_id(
             _required_text(turn["session_id"], f"{path}.session_id")
         )
     except ValueError as error:
         raise StatisticsProjectionError(
-            f"{path}.session_id must be a valid Codex session ID"
+            f"{path}.session_id must be a valid Codex thread ID"
         ) from error
     turn_id = _required_text(turn["turn_id"], f"{path}.turn_id")
     started_at = _optional_timestamp(turn["started_at"], f"{path}.started_at")
@@ -1193,7 +1205,7 @@ def _turn(value: object, index: int) -> TurnStatisticsProjection:
         )
 
     return TurnStatisticsProjection(
-        codex_session_id=codex_session_id,
+        codex_thread_id=codex_thread_id,
         codex_turn_id=turn_id,
         started_at_utc=started_at,
         terminal_at_utc=terminal_at,

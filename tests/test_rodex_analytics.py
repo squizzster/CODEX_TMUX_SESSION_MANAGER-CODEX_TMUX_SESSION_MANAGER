@@ -110,7 +110,12 @@ def _rollout(root: Path, codex_session_id: uuid.UUID) -> Path:
         {
             "timestamp": "2026-08-16T12:00:00Z",
             "type": "session_meta",
-            "payload": {"id": str(codex_session_id)},
+            "payload": {
+                "session_id": str(codex_session_id),
+                "id": str(codex_session_id),
+                "timestamp": "2026-08-16T12:00:00Z",
+                "thread_source": "user",
+            },
         },
         {
             "timestamp": "2026-08-16T12:00:01Z",
@@ -131,6 +136,47 @@ def _rollout(root: Path, codex_session_id: uuid.UUID) -> Path:
             "type": "event_msg",
             "payload": {"type": "task_complete", "turn_id": "turn-test"},
         },
+    ]
+    path.write_text(
+        "".join(json.dumps(record) + "\n" for record in records), encoding="utf-8"
+    )
+    return path
+
+
+def _subagent_rollout(
+    root: Path,
+    root_thread_id: uuid.UUID,
+    child_thread_id: uuid.UUID,
+) -> Path:
+    path = root / "2026" / "08" / "16" / f"rollout-child-{child_thread_id}.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    spawn = {
+        "parent_thread_id": str(root_thread_id),
+        "depth": 1,
+        "agent_path": "/root/review",
+        "agent_nickname": "Curie",
+    }
+    records = [
+        {
+            "timestamp": "2026-08-16T12:01:00Z",
+            "ordinal": 0,
+            "type": "session_meta",
+            "payload": {
+                "session_id": str(root_thread_id),
+                "id": str(child_thread_id),
+                "forked_from_id": str(root_thread_id),
+                "parent_thread_id": str(root_thread_id),
+                "timestamp": "2026-08-16T12:01:00Z",
+                "source": {"subagent": {"thread_spawn": spawn}},
+                "thread_source": "subagent",
+                "agent_path": "/root/review",
+                "agent_nickname": "Curie",
+                "subagent_history_start_ordinal": 2,
+            },
+        },
+        {"ordinal": 1, "type": "event_msg", "payload": {"inherited": True}},
+        {"ordinal": 2, "type": "event_msg", "payload": {"inherited": True}},
+        {"ordinal": 3, "type": "event_msg", "payload": {"child": True}},
     ]
     path.write_text(
         "".join(json.dumps(record) + "\n" for record in records), encoding="utf-8"
@@ -232,9 +278,38 @@ def test_worker_backfills_verified_rollout_and_projects_only_aggregates(
     assert adapter.analyses[0][0] == (rollout.read_bytes(),)
     assert adapter.analyses[0][1].startswith("posix:")
     source = list_rodex_session_statistics_sources(1, config.rodex_database_path)[0]
-    assert source.codex_session_id == CODEX_SESSION_ID
+    assert source.codex_thread_id == CODEX_SESSION_ID
     assert source.rollout_file_path == str(rollout.resolve())
     assert source.analyzed_prefix_sha256 is not None
+
+
+def test_worker_discovers_subagent_and_removes_inherited_parent_history(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    _rollout(config.codex_sessions_root, CODEX_SESSION_ID)
+    child_thread_id = uuid.UUID(int=CODEX_SESSION_ID.int + 100)
+    _subagent_rollout(config.codex_sessions_root, CODEX_SESSION_ID, child_thread_id)
+    _create(config)
+    adapter = FakeAnalyticsAdapter()
+
+    assert (
+        AnalyticsRolloutWorker(config, adapter_factory=lambda: adapter).poll_once()
+        == "up_to_date"
+    )
+
+    analyzed = adapter.analyses[0][0]
+    assert len(analyzed) == 2
+    child_records = [json.loads(line) for line in analyzed[1].splitlines()]
+    assert [record.get("ordinal") for record in child_records] == [0, 3]
+    view = read_rodex_session_statistics(1, config.rodex_database_path)
+    assert view.statistics is not None
+    assert view.statistics.projection.collaboration_agents_started_count == 1
+    root, child = sorted(view.sources, key=lambda source: source.thread_depth)
+    assert child.codex_thread_id == child_thread_id
+    assert child.parent_rodex_sessions_statistics_sources_id == root.id
+    assert child.agent_path == "/root/review"
+    assert child.subagent_history_start_ordinal == 2
     view = read_rodex_session_statistics(1, config.rodex_database_path)
     assert view.statistics is not None
     assert view.statistics.statistics_publication_sequence == 1
@@ -341,7 +416,7 @@ def test_replacement_retains_old_source_and_analyzes_full_history(
 
     assert adapter.analyses[-1][0] == (first.read_bytes(), replacement.read_bytes())
     sources = list_rodex_session_statistics_sources(1, config.rodex_database_path)
-    assert [source.codex_session_id for source in sources] == [
+    assert [source.codex_thread_id for source in sources] == [
         CODEX_SESSION_ID,
         REPLACEMENT_CODEX_SESSION_ID,
     ]
@@ -612,7 +687,7 @@ def test_real_adapter_uses_existing_in_memory_analyzer_api(tmp_path: Path) -> No
     assert calculation.statistics_projection.analyzer_source_count == 1
     assert len(calculation.statistics_projection.turn_statistics) == 1
     assert (
-        calculation.statistics_projection.turn_statistics[0].codex_session_id
+        calculation.statistics_projection.turn_statistics[0].codex_thread_id
         == CODEX_SESSION_ID
     )
     assert calculation.statistics_projection.turn_statistics[0].codex_turn_id == "turn-test"
@@ -631,11 +706,11 @@ def test_real_worker_publishes_exact_turn_projection_into_rodex_sql(
 
     exact = read_rodex_session_turn_statistics(1, "turn-test", config.rodex_database_path)
     assert exact.statistics is not None
-    assert exact.statistics.statistics_projection_schema_version == "rodex-statistics-v4"
+    assert exact.statistics.statistics_projection_schema_version == "rodex-statistics-v5"
     assert exact.worker is not None
     assert exact.worker.worker_state == "up_to_date"
     assert exact.turn is not None
-    assert exact.turn.codex_session_id == CODEX_SESSION_ID
+    assert exact.turn.codex_thread_id == CODEX_SESSION_ID
     assert (
         exact.turn.included_statistics_publication_sequence
         == exact.statistics.statistics_publication_sequence

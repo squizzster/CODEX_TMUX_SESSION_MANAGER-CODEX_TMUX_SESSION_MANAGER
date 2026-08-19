@@ -17,6 +17,7 @@ _SIGNED_64_MAX: Final = _SIGNED_64_SIGN_BIT - 1
 _CANONICAL_RODEX_ID = re.compile(r"^[0-9a-f]{16}$")
 
 type CodexSessionId = uuid.UUID
+type CodexThreadId = uuid.UUID
 
 
 class RodexIdError(ValueError):
@@ -119,6 +120,13 @@ def split_codex_session_id_into_signed_bigints(
     return _split_128_bit_id_into_signed_bigints(parse_codex_session_id(value))
 
 
+def split_codex_thread_id_into_signed_bigints(
+    value: CodexThreadId | str,
+) -> tuple[int, int]:
+    """Map one 128-bit Codex thread ID into two lossless signed BIGINTs."""
+    return _split_128_bit_id_into_signed_bigints(parse_codex_thread_id(value))
+
+
 def parse_codex_session_id(value: CodexSessionId | str) -> CodexSessionId:
     """Parse the exact 128-bit Codex-owned session ID domain."""
     if isinstance(value, uuid.UUID):
@@ -131,10 +139,31 @@ def parse_codex_session_id(value: CodexSessionId | str) -> CodexSessionId:
         raise ValueError("Codex session ID must be a valid 128-bit ID") from error
 
 
+def parse_codex_thread_id(value: CodexThreadId | str) -> CodexThreadId:
+    """Parse the exact 128-bit Codex-owned thread ID domain."""
+    if isinstance(value, uuid.UUID):
+        return value
+    if not isinstance(value, str):
+        raise TypeError("Codex thread ID must be a 128-bit ID or string")
+    try:
+        return uuid.UUID(value)
+    except ValueError as error:
+        raise ValueError("Codex thread ID must be a valid 128-bit ID") from error
+
+
 def join_signed_bigints_into_a_codex_session_id(
     high_signed: int, low_signed: int
 ) -> CodexSessionId:
     """Restore one 128-bit Codex session ID from two signed BIGINTs."""
+    return uuid.UUID(
+        int=(_signed_64_to_unsigned(high_signed) << 64) | _signed_64_to_unsigned(low_signed)
+    )
+
+
+def join_signed_bigints_into_a_codex_thread_id(
+    high_signed: int, low_signed: int
+) -> CodexThreadId:
+    """Restore one 128-bit Codex thread ID from two signed BIGINTs."""
     return uuid.UUID(
         int=(_signed_64_to_unsigned(high_signed) << 64) | _signed_64_to_unsigned(low_signed)
     )

@@ -265,7 +265,7 @@ def test_complete_snapshot_becomes_typed_immutable_relational_values() -> None:
 
     turn = projection.turn_statistics[0]
     assert isinstance(turn, TurnStatisticsProjection)
-    assert turn.codex_session_id == uuid.UUID(CODEX_SESSION_ID)
+    assert turn.codex_thread_id == uuid.UUID(CODEX_SESSION_ID)
     assert turn.started_at_utc == "2026-08-16T12:00:00.000000Z"
     assert turn.command_duration.median == 150.0
     with pytest.raises(FrozenInstanceError):

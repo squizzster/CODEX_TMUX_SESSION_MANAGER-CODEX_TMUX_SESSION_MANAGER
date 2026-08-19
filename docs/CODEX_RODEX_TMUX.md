@@ -107,16 +107,17 @@ Enter/Tab bindings and pane pipe, so all input currently passes directly to Code
 
 Each session host supervises one low-priority analytics subprocess keyed by the Rodex
 session ID allocated for that launch. The worker waits for SQL registration,
-discovers every Codex session ID retained in that Rodex lineage, and authenticates each
-rollout's internal `session_meta` identity. It copies only the final newline-complete
-prefix to a private 0600 temporary file and reauthenticates its SHA-256 before publishing.
+discovers every retained root plus the authenticated sub-agent descendant closure from
+rollout `session_meta`. It copies only the final newline-complete prefix to a private
+0600 temporary file, removes inherited parent history from child copies, and
+reauthenticates each SHA-256 before publishing.
 
 The worker creates a fresh in-memory `CodexProtocolLibrary`, loads the authenticated
 copies, calculates statistics, then closes it. The analyzer owns calculation only;
 Rodex owns watching, scheduling, source provenance, retries, health, and persistence.
 One transaction publishes a Rodex-owned, session-local publication sequence, the
-session projection, the complete `(Codex source, turn_id)` projection set, and exact
-source descriptors. Codex-session-ID and prior-publication-sequence fences reject stale
+team projection, the complete `(Codex thread, turn_id)` projection set, and exact
+thread descriptors. Codex-session-ID and prior-publication-sequence fences reject stale
 workers. Health failures commit separately and never overwrite the last good snapshot.
 The sequence advances for each successfully published changed rollout prefix; it does
 not count turns or retain prior snapshots.
@@ -126,10 +127,12 @@ as seven distribution rows, bounded category/name/count rows, and ordered audit-
 rows at session or turn scope. No JSON statistics document is persisted: `_stats --json`
 reconstructs the analyzer shape deterministically from indexed SQL rows. This keeps every
 base count directly available to `SUM`, `GROUP BY`, filtering, and joins.
+The same command includes per-thread lifecycle and additive resource totals grouped by
+the existing source-row ID; parentage is the source table's self-foreign key.
 
 Analytics is fail-open: import, parsing, calculation, process, or database failure
 cannot change the Codex TUI's behavior or exit status. `_stats NAME [--json]`, `_stats
-NAME --turn TURN_ID [--source CODEX_SESSION_ID] [--json]`, and `_stats-status NAME` enforce
+NAME --turn TURN_ID [--thread CODEX_THREAD_ID] [--json]`, and `_stats-status NAME` enforce
 normal ownership but query SQLite without requiring live Codex, tmux, or analyzer
 processes. A runtime started before this feature must end and resume before it has an
 analytics sidecar.

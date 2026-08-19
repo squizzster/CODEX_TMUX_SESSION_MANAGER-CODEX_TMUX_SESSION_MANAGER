@@ -152,7 +152,7 @@ COMMAND_SPECS: Final = (
         STATS_COMMAND,
         CommandRoute.STATISTICS,
         (
-            "_stats SESSION [--turn ID] [--source CODEX_SESSION_ID] [--json]",
+            "_stats SESSION [--turn ID] [--thread CODEX_THREAD_ID] [--json]",
             "Show persistent session or exact-turn statistics.",
         ),
     ),

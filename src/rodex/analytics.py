@@ -15,22 +15,26 @@ import tempfile
 import time
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from threading import Event
 from typing import Any, Protocol
 
 from rodex_registry import (
+    COLLABORATION_MODEL_TOOL_NAMES,
     CodexSessionId,
+    CodexThreadId,
     RodexSessionStatistics,
     RodexSessionStatisticsSource,
     RodexSessionStatisticsSourceObservation,
     SessionStatisticsProjection,
+    StatisticsNamedCount,
     StatisticsProjectionError,
     current_rodex_sessions_user_identity,
     lookup_codex_session_id_from_a_rodex_sessions_id,
     lookup_rodex_sessions_id_from_a_rodex_session_id,
+    parse_codex_thread_id,
     parse_session_statistics_snapshot,
     publish_rodex_session_statistics,
     read_rodex_session_statistics,
@@ -42,7 +46,7 @@ from .process_contracts import AnalyticsWorkerConfig
 
 ANALYTICS_POLL_INTERVAL_SECONDS = 0.5
 ANALYTICS_RESTART_DELAY_SECONDS = 2.0
-STATISTICS_PROJECTION_SCHEMA_VERSION = "rodex-statistics-v4"
+STATISTICS_PROJECTION_SCHEMA_VERSION = "rodex-statistics-v5"
 
 
 class RodexAnalyticsError(RuntimeError):
@@ -72,11 +76,19 @@ AnalyticsBoundaryFactory = Callable[[], AnalyticsBoundary]
 
 @dataclass(frozen=True, slots=True)
 class VerifiedRollout:
-    """A rollout whose internal session metadata matches the requested Codex session ID."""
+    """An exact root or sub-agent rollout authenticated from its own metadata."""
 
     path: Path
     size_bytes: int
     modified_at_ns: int
+    codex_thread_id: CodexThreadId
+    source_kind: str
+    parent_codex_thread_id: CodexThreadId | None
+    thread_depth: int
+    agent_path: str | None
+    agent_nickname: str | None
+    subagent_history_start_ordinal: int | None
+    first_linked_at_utc: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -178,7 +190,7 @@ class AnalyticsRolloutWorker:
         self._now = now
         self._session_id: int | None = None
         self._expected_codex_session_id: CodexSessionId | None = None
-        self._source_authentication: dict[CodexSessionId, AuthenticatedRolloutPrefix] = {}
+        self._source_authentication: dict[CodexThreadId, AuthenticatedRolloutPrefix] = {}
 
     def poll_once(self) -> str:
         """Perform one reconciliation; no analytics failure is allowed to escape."""
@@ -219,6 +231,12 @@ class AnalyticsRolloutWorker:
                 authenticated_sources = [
                     _verify_source_unchanged(item) for item in stable_copies
                 ]
+                projection = _project_verified_collaboration(
+                    calculation.statistics_projection,
+                    descendant_count=sum(
+                        item.observation.source_kind == "subagent" for item in stable_copies
+                    ),
+                )
                 publish_rodex_session_statistics(
                     session_id,
                     self._config.rodex_database_path,
@@ -233,11 +251,11 @@ class AnalyticsRolloutWorker:
                     ),
                     calculated_at_utc=self._timestamp(),
                     coverage_state=calculation.coverage_state,
-                    statistics_projection=calculation.statistics_projection,
+                    statistics_projection=projection,
                     analyzed_sources=[item.observation for item in stable_copies],
                 )
                 self._source_authentication = {
-                    item.observation.codex_session_id: authenticated
+                    item.observation.codex_thread_id: authenticated
                     for item, authenticated in zip(
                         stable_copies, authenticated_sources, strict=True
                     )
@@ -273,28 +291,17 @@ class AnalyticsRolloutWorker:
         sources: Sequence[RodexSessionStatisticsSource],
         temporary_root: Path,
     ) -> list[StableRolloutCopy] | None:
+        verified_sources = _discover_verified_thread_rollouts(
+            self._config.codex_sessions_root,
+            sources,
+        )
+        if verified_sources is None:
+            return None
         copies: list[StableRolloutCopy] = []
-        for index, source in enumerate(sources):
-            verified = (
-                None
-                if source.rollout_file_path is None
-                else _verify_recorded_source(
-                    source.rollout_file_path,
-                    source.codex_session_id,
-                    allowed_root=self._config.codex_sessions_root,
-                )
-            )
-            if verified is None:
-                verified = locate_verified_rollout(
-                    self._config.codex_sessions_root,
-                    source.codex_session_id,
-                )
-            if verified is None:
-                return None
+        for index, verified in enumerate(verified_sources):
             copies.append(
                 _copy_complete_rollout_prefix(
-                    verified.path,
-                    source.codex_session_id,
+                    verified,
                     temporary_root / f"source-{index}.jsonl",
                     self._timestamp(),
                 )
@@ -328,7 +335,7 @@ class AnalyticsRolloutWorker:
                 stat = path.stat()
             except OSError:
                 return False
-            authenticated = self._source_authentication.get(source.codex_session_id)
+            authenticated = self._source_authentication.get(source.codex_thread_id)
             if authenticated is None or (
                 authenticated.path,
                 authenticated.source_device,
@@ -347,12 +354,12 @@ class AnalyticsRolloutWorker:
                 try:
                     authenticated, _ = _authenticate_rollout_prefix(
                         path,
-                        source.codex_session_id,
+                        source.codex_thread_id,
                         allowed_root=self._config.codex_sessions_root,
                     )
                 except RodexAnalyticsError:
                     return False
-                self._source_authentication[source.codex_session_id] = authenticated
+                self._source_authentication[source.codex_thread_id] = authenticated
             if (
                 authenticated.analyzed_size_bytes != source.analyzed_size_bytes
                 or authenticated.analyzed_prefix_sha256 != source.analyzed_prefix_sha256
@@ -482,7 +489,7 @@ def locate_verified_rollout(
     verified = [
         source
         for path in sorted(root.rglob(f"*{codex_session_id}*.jsonl"))
-        if (source := _verify_recorded_source(path, codex_session_id, allowed_root=root))
+        if (source := _verify_root_rollout(path, codex_session_id, allowed_root=root))
         is not None
     ]
     if len(verified) > 1:
@@ -510,9 +517,9 @@ def analytics_worker_main(arguments: list[str] | None = None) -> int:
     return 0
 
 
-def _verify_recorded_source(
+def _verify_root_rollout(
     path: str | Path,
-    expected: CodexSessionId,
+    expected: CodexThreadId,
     *,
     allowed_root: Path | None = None,
 ) -> VerifiedRollout | None:
@@ -529,22 +536,286 @@ def _verify_recorded_source(
                 if not isinstance(record, dict) or record.get("type") != "session_meta":
                     continue
                 payload = record.get("payload")
-                if not isinstance(payload, dict) or payload.get("id") != str(expected):
+                if (
+                    not isinstance(payload, dict)
+                    or payload.get("id") != str(expected)
+                    or payload.get("session_id") != str(expected)
+                    or payload.get("thread_source") == "subagent"
+                ):
                     return None
-                return VerifiedRollout(source_path, state.st_size, state.st_mtime_ns)
+                timestamp = payload.get("timestamp") or record.get("timestamp")
+                if not isinstance(timestamp, str) or not timestamp:
+                    return None
+                return VerifiedRollout(
+                    source_path,
+                    state.st_size,
+                    state.st_mtime_ns,
+                    parse_codex_thread_id(expected),
+                    "root",
+                    None,
+                    0,
+                    None,
+                    None,
+                    None,
+                    timestamp,
+                )
     except (OSError, UnicodeError, RodexAnalyticsError):
         return None
     return None
 
 
+def _verify_subagent_rollout(
+    path: str | Path,
+    root_thread_ids: frozenset[CodexThreadId],
+    *,
+    allowed_root: Path,
+) -> VerifiedRollout | None:
+    """Authenticate the self-describing hierarchy metadata of one child rollout."""
+    try:
+        source_path = _resolve_rollout_path(path, allowed_root=allowed_root)
+        descriptor = _open_rollout_descriptor(source_path)
+        with os.fdopen(descriptor, encoding="utf-8") as records:
+            state = os.fstat(records.fileno())
+            line = next(records)
+        record = json.loads(line)
+        payload = record.get("payload") if isinstance(record, dict) else None
+        if (
+            not isinstance(record, dict)
+            or record.get("type") != "session_meta"
+            or not isinstance(payload, dict)
+            or payload.get("thread_source") != "subagent"
+        ):
+            return None
+        root_thread_id = parse_codex_thread_id(payload.get("session_id"))
+        if root_thread_id not in root_thread_ids:
+            return None
+        thread_id = parse_codex_thread_id(payload.get("id"))
+        parent_thread_id = parse_codex_thread_id(payload.get("parent_thread_id"))
+        if payload.get("forked_from_id") != str(parent_thread_id):
+            return None
+        source = payload.get("source")
+        subagent = source.get("subagent") if isinstance(source, dict) else None
+        spawn = subagent.get("thread_spawn") if isinstance(subagent, dict) else None
+        if not isinstance(spawn, dict):
+            return None
+        depth = spawn.get("depth")
+        agent_path = payload.get("agent_path")
+        nickname = payload.get("agent_nickname")
+        cutoff = payload.get("subagent_history_start_ordinal")
+        timestamp = payload.get("timestamp") or record.get("timestamp")
+        if (
+            not isinstance(depth, int)
+            or isinstance(depth, bool)
+            or depth <= 0
+            or not isinstance(agent_path, str)
+            or not agent_path
+            or (nickname is not None and (not isinstance(nickname, str) or not nickname))
+            or not isinstance(cutoff, int)
+            or isinstance(cutoff, bool)
+            or cutoff < 0
+            or not isinstance(timestamp, str)
+            or not timestamp
+            or spawn.get("parent_thread_id") != str(parent_thread_id)
+            or spawn.get("agent_path") != agent_path
+            or spawn.get("agent_nickname") != nickname
+        ):
+            return None
+        return VerifiedRollout(
+            source_path,
+            state.st_size,
+            state.st_mtime_ns,
+            thread_id,
+            "subagent",
+            parent_thread_id,
+            depth,
+            agent_path,
+            nickname,
+            cutoff,
+            timestamp,
+        )
+    except (
+        OSError,
+        StopIteration,
+        TypeError,
+        UnicodeError,
+        ValueError,
+        RodexAnalyticsError,
+    ):
+        return None
+
+
+def _discover_verified_thread_rollouts(
+    root: Path,
+    registered_sources: Sequence[RodexSessionStatisticsSource],
+) -> list[VerifiedRollout] | None:
+    """Discover the authenticated descendant closure for registered root history."""
+    registered = {source.codex_thread_id: source for source in registered_sources}
+    root_sources = tuple(
+        source for source in registered_sources if source.source_kind == "root"
+    )
+    if not root_sources:
+        return None
+    closure: dict[CodexThreadId, VerifiedRollout] = {}
+    for root_source in root_sources:
+        root_verified = (
+            None
+            if root_source.rollout_file_path is None
+            else _verify_root_rollout(
+                root_source.rollout_file_path,
+                root_source.codex_thread_id,
+                allowed_root=root,
+            )
+        )
+        if root_verified is None:
+            root_verified = locate_verified_rollout(root, root_source.codex_thread_id)
+        if root_verified is None:
+            return None
+        closure[root_source.codex_thread_id] = replace(
+            root_verified, first_linked_at_utc=root_source.first_linked_at_utc
+        )
+    candidates: dict[CodexThreadId, VerifiedRollout] = {}
+    if not root.is_dir():
+        return None
+    paths = tuple(sorted(root.rglob("*.jsonl")))
+    root_thread_ids = frozenset(source.codex_thread_id for source in root_sources)
+    for path in paths:
+        candidate = _verify_subagent_rollout(path, root_thread_ids, allowed_root=root)
+        if candidate is None:
+            continue
+        prior = candidates.get(candidate.codex_thread_id)
+        if prior is not None and prior.path != candidate.path:
+            raise RodexAnalyticsError(
+                f"multiple rollout files declare Codex thread {candidate.codex_thread_id}"
+            )
+        candidates[candidate.codex_thread_id] = candidate
+    pending = dict(candidates)
+    while pending:
+        added = False
+        for thread_id, candidate in tuple(pending.items()):
+            parent = closure.get(candidate.parent_codex_thread_id)
+            if parent is None:
+                continue
+            if candidate.thread_depth != parent.thread_depth + 1:
+                raise RodexAnalyticsError(
+                    f"sub-agent thread depth disagrees with parent: {thread_id}"
+                )
+            closure[thread_id] = candidate
+            del pending[thread_id]
+            added = True
+        if not added:
+            break
+
+    if not set(registered).issubset(closure):
+        return None
+    for thread_id, source in registered.items():
+        candidate = closure[thread_id]
+        candidate_metadata = (
+            candidate.source_kind,
+            candidate.parent_codex_thread_id,
+            candidate.thread_depth,
+            candidate.agent_path,
+            candidate.agent_nickname,
+            candidate.subagent_history_start_ordinal,
+        )
+        parent_source = (
+            None
+            if source.parent_rodex_sessions_statistics_sources_id is None
+            else next(
+                (
+                    item
+                    for item in registered_sources
+                    if item.id == source.parent_rodex_sessions_statistics_sources_id
+                ),
+                None,
+            )
+        )
+        stored_metadata = (
+            source.source_kind,
+            None if parent_source is None else parent_source.codex_thread_id,
+            source.thread_depth,
+            source.agent_path,
+            source.agent_nickname,
+            source.subagent_history_start_ordinal,
+        )
+        if candidate_metadata != stored_metadata:
+            raise RodexAnalyticsError(
+                f"stored hierarchy disagrees with rollout thread {thread_id}"
+            )
+        closure[thread_id] = replace(
+            candidate, first_linked_at_utc=source.first_linked_at_utc
+        )
+    return sorted(
+        closure.values(), key=lambda item: (item.thread_depth, str(item.codex_thread_id))
+    )
+
+
+def _subagent_only_rollout_content(content: bytes, cutoff: int | None) -> bytes:
+    """Remove the inherited parent prefix while retaining child session metadata."""
+    if cutoff is None:
+        raise RodexAnalyticsError("sub-agent rollout has no history cutoff")
+    retained: list[bytes] = []
+    for index, line in enumerate(content.splitlines(keepends=True)):
+        if index == 0:
+            retained.append(line)
+            continue
+        try:
+            record = json.loads(line)
+        except (json.JSONDecodeError, UnicodeError):
+            continue
+        ordinal = record.get("ordinal") if isinstance(record, dict) else None
+        if isinstance(ordinal, int) and not isinstance(ordinal, bool) and ordinal > cutoff:
+            retained.append(line)
+    if len(retained) == 1:
+        raise RodexAnalyticsError("sub-agent rollout contains no child history records")
+    return b"".join(retained)
+
+
+def _project_verified_collaboration(
+    projection: SessionStatisticsProjection,
+    *,
+    descendant_count: int,
+) -> SessionStatisticsProjection:
+    """Derive team operations from canonical model tools and verified child sources."""
+    by_tool = tuple(
+        StatisticsNamedCount(
+            count_kind="collaboration_tool",
+            count_name=item.count_name,
+            occurrence_count=item.occurrence_count,
+        )
+        for item in projection.named_counts
+        if item.count_kind == "model_tool"
+        and item.count_name in COLLABORATION_MODEL_TOOL_NAMES
+    )
+    named_counts = (
+        tuple(
+            item
+            for item in projection.named_counts
+            if item.count_kind != "collaboration_tool"
+        )
+        + by_tool
+    )
+    return replace(
+        projection,
+        collaboration_operations_count=sum(item.occurrence_count for item in by_tool),
+        collaboration_agents_started_count=descendant_count,
+        named_counts=named_counts,
+    )
+
+
 def _copy_complete_rollout_prefix(
-    source_path: Path,
-    expected_codex_session_id: CodexSessionId,
+    verified: VerifiedRollout,
     temporary_path: Path,
     verified_at_utc: str,
 ) -> StableRolloutCopy:
     authenticated, analyzed = _authenticate_rollout_prefix(
-        source_path, expected_codex_session_id
+        verified.path, verified.codex_thread_id
+    )
+    staged = (
+        analyzed
+        if verified.source_kind == "root"
+        else _subagent_only_rollout_content(
+            analyzed, verified.subagent_history_start_ordinal
+        )
     )
     try:
         output_descriptor = os.open(
@@ -553,13 +824,20 @@ def _copy_complete_rollout_prefix(
             0o600,
         )
         with os.fdopen(output_descriptor, "wb") as output:
-            output.write(analyzed)
+            output.write(staged)
     except OSError as error:
         raise RodexAnalyticsError(f"could not stage rollout prefix: {error}") from error
     return StableRolloutCopy(
         temporary_path=temporary_path,
         observation=RodexSessionStatisticsSourceObservation(
-            codex_session_id=expected_codex_session_id,
+            codex_thread_id=verified.codex_thread_id,
+            source_kind=verified.source_kind,
+            parent_codex_thread_id=verified.parent_codex_thread_id,
+            thread_depth=verified.thread_depth,
+            agent_path=verified.agent_path,
+            agent_nickname=verified.agent_nickname,
+            subagent_history_start_ordinal=(verified.subagent_history_start_ordinal),
+            first_linked_at_utc=verified.first_linked_at_utc,
             rollout_file_path=authenticated.path,
             analyzed_size_bytes=authenticated.analyzed_size_bytes,
             analyzed_mtime_ns=authenticated.source_mtime_ns,
@@ -572,7 +850,7 @@ def _copy_complete_rollout_prefix(
 
 def _authenticate_rollout_prefix(
     source_path: Path,
-    expected_codex_session_id: CodexSessionId,
+    expected_codex_thread_id: CodexThreadId,
     *,
     allowed_root: Path | None = None,
 ) -> tuple[AuthenticatedRolloutPrefix, bytes]:
@@ -596,7 +874,7 @@ def _authenticate_rollout_prefix(
     if final_newline < 0:
         raise RodexAnalyticsError("rollout contains no complete newline-terminated record")
     analyzed = content[: final_newline + 1]
-    if not _rollout_content_declares_codex_session_id(analyzed, expected_codex_session_id):
+    if not _rollout_content_declares_codex_thread_id(analyzed, expected_codex_thread_id):
         raise RodexAnalyticsError("rollout has an unexpected Codex identity")
     return (
         AuthenticatedRolloutPrefix(
@@ -647,8 +925,8 @@ def _open_rollout_descriptor(path: Path) -> int:
         raise
 
 
-def _rollout_content_declares_codex_session_id(
-    content: bytes, expected: CodexSessionId
+def _rollout_content_declares_codex_thread_id(
+    content: bytes, expected: CodexThreadId
 ) -> bool:
     for line in content.splitlines()[:32]:
         try:
@@ -667,7 +945,7 @@ def _verify_source_unchanged(
 ) -> AuthenticatedRolloutPrefix:
     current, _ = _authenticate_rollout_prefix(
         source.observation.rollout_file_path,
-        source.observation.codex_session_id,
+        source.observation.codex_thread_id,
     )
     original = source.authenticated_source
     if (

@@ -28,6 +28,7 @@ from rodex_registry import (
     parse_session_statistics_snapshot,
     publish_rodex_session_statistics,
     read_rodex_session_statistics,
+    read_rodex_session_statistics_source_summaries,
     read_rodex_session_turn_statistics,
     record_a_rodex_session_runtime_resume,
     record_rodex_session_statistics_worker_health,
@@ -53,12 +54,39 @@ def _observation(root: Path, codex_session_id: uuid.UUID, marker: str = "a"):
     path = (root / f"rollout-{codex_session_id}.jsonl").resolve()
     content = marker.encode()
     return RodexSessionStatisticsSourceObservation(
-        codex_session_id=codex_session_id,
+        codex_thread_id=codex_session_id,
+        source_kind="root",
+        parent_codex_thread_id=None,
+        thread_depth=0,
+        agent_path=None,
+        agent_nickname=None,
+        subagent_history_start_ordinal=None,
+        first_linked_at_utc="2026-08-16T12:00:00Z",
         rollout_file_path=path,
         analyzed_size_bytes=len(content),
         analyzed_mtime_ns=123,
         analyzed_prefix_sha256=hashlib.sha256(content).hexdigest(),
         verified_at_utc="2026-08-16T12:00:00Z",
+    )
+
+
+def _child_observation(root: Path, child_thread_id: uuid.UUID):
+    path = (root / f"rollout-{child_thread_id}.jsonl").resolve()
+    content = b"child"
+    return RodexSessionStatisticsSourceObservation(
+        codex_thread_id=child_thread_id,
+        source_kind="subagent",
+        parent_codex_thread_id=CODEX_SESSION_ID,
+        thread_depth=1,
+        agent_path="/root/review",
+        agent_nickname="Curie",
+        subagent_history_start_ordinal=12,
+        first_linked_at_utc="2026-08-16T12:01:00Z",
+        rollout_file_path=path,
+        analyzed_size_bytes=len(content),
+        analyzed_mtime_ns=456,
+        analyzed_prefix_sha256=hashlib.sha256(content).hexdigest(),
+        verified_at_utc="2026-08-16T12:01:01Z",
     )
 
 
@@ -77,7 +105,7 @@ def _turn(
     base = _base_projection().turn_statistics[0]
     return replace(
         base,
-        codex_session_id=codex_session_id,
+        codex_thread_id=codex_session_id,
         codex_turn_id=turn_id,
         outcome=outcome,
         terminal_at_utc=terminal_at,
@@ -374,7 +402,7 @@ def test_statistics_reader_does_not_coerce_corrupt_source_identity(
         connection.execute("PRAGMA ignore_check_constraints = ON")
         connection.execute(
             "UPDATE rodex_sessions_statistics_sources "
-            "SET codex_session_id_signed_bigint_1 = 1.5"
+            "SET codex_thread_id_signed_bigint_1 = 1.5"
         )
 
     with pytest.raises(ValueError, match="signed 64-bit"):
@@ -406,6 +434,67 @@ def test_sql_can_sum_group_and_filter_base_statistics(tmp_path: Path) -> None:
             "WHERE count_kind = 'model_tool'"
         ).fetchone()[0]
         assert tool_total == 4
+
+
+def test_source_id_groups_subagent_lifecycle_and_resource_totals(tmp_path: Path) -> None:
+    database = tmp_path / "rodex.sqlite3"
+    child_thread_id = uuid.UUID(int=CODEX_SESSION_ID.int + 100)
+    create_a_rodex_session(database, codex_session_id=CODEX_SESSION_ID)
+    turns = (
+        _turn("root", total_tokens=40),
+        _turn("child-a", codex_session_id=child_thread_id, total_tokens=60),
+        _turn(
+            "child-b",
+            codex_session_id=child_thread_id,
+            total_tokens=20,
+            outcome="aborted",
+        ),
+    )
+    projection = replace(
+        _projection(turns), analyzer_source_count=2, history_sessions_count=2
+    )
+
+    publish_rodex_session_statistics(
+        1,
+        database,
+        expected_current_codex_session_id=CODEX_SESSION_ID,
+        based_on_statistics_publication_sequence=None,
+        statistics_projection_schema_version="rodex-statistics-v5",
+        calculated_at_utc="2026-08-16T12:02:00Z",
+        coverage_state="complete",
+        statistics_projection=projection,
+        analyzed_sources=(
+            _observation(tmp_path, CODEX_SESSION_ID),
+            _child_observation(tmp_path, child_thread_id),
+        ),
+    )
+
+    root, child = read_rodex_session_statistics_source_summaries(
+        1, database, expected_statistics_publication_sequence=1
+    )
+    assert child.source.parent_rodex_sessions_statistics_sources_id == root.source.id
+    assert child.turns_started_count == 2
+    assert child.turns_completed_count == 1
+    assert child.turns_aborted_count == 1
+    assert child.total_tokens == 80
+    assert child.web_queries_count == 2
+    with pytest.raises(
+        RodexSessionStatisticsConflictError,
+        match="omit a registered Codex thread source",
+    ):
+        publish_rodex_session_statistics(
+            1,
+            database,
+            expected_current_codex_session_id=CODEX_SESSION_ID,
+            based_on_statistics_publication_sequence=1,
+            statistics_projection_schema_version="rodex-statistics-v5",
+            calculated_at_utc="2026-08-16T12:03:00Z",
+            coverage_state="complete",
+            statistics_projection=replace(
+                _projection((_turn("root"),)), analyzer_source_count=1
+            ),
+            analyzed_sources=(_observation(tmp_path, CODEX_SESSION_ID),),
+        )
 
 
 def test_publication_sequence_mark_and_sweep_preserves_identity_and_replaces_children(
@@ -525,7 +614,7 @@ def test_same_turn_id_in_two_sources_requires_exact_source(tmp_path: Path) -> No
     with pytest.raises(RodexSessionTurnStatisticsAmbiguousError):
         read_rodex_session_turn_statistics(1, "shared", database)
     exact = read_rodex_session_turn_statistics(
-        1, "shared", database, codex_session_id=REPLACEMENT_CODEX_SESSION_ID
+        1, "shared", database, codex_thread_id=REPLACEMENT_CODEX_SESSION_ID
     ).turn
     assert exact is not None and exact.projection.total_tokens == 20
 
@@ -701,6 +790,12 @@ def test_cli_reconstructs_json_from_sql_without_runtime_dependencies(
         "models": {"gpt-test": 1},
         "reasoning_efforts": {"xhigh": 1},
     }
+    assert aggregate["registered_thread_count"] == 1
+    assert aggregate["included_thread_count"] == 1
+    assert aggregate["threads"][0]["rodex_sessions_statistics_sources_id"] == 1
+    assert aggregate["threads"][0]["source_kind"] == "root"
+    assert aggregate["threads"][0]["lifecycle"]["turns_started"] == 1
+    assert aggregate["threads"][0]["token_usage"]["total_tokens"] == 42
     assert (
         run(
             ["_stats", created.cool_name, "--turn", "turn-exact", "--json"],
@@ -751,7 +846,7 @@ def test_historical_source_cannot_move_to_another_lineage(tmp_path: Path) -> Non
     with pytest.raises(RodexSessionError, match="statistics lineage"):
         create_a_rodex_session(database, codex_session_id=CODEX_SESSION_ID)
     assert [
-        item.codex_session_id for item in list_rodex_session_statistics_sources(1, database)
+        item.codex_thread_id for item in list_rodex_session_statistics_sources(1, database)
     ] == [CODEX_SESSION_ID, REPLACEMENT_CODEX_SESSION_ID]
 
 

@@ -77,10 +77,13 @@ RODEX_SESSIONS_STATISTICS_AUDIT_LIMITS_UNIQUE_INDEX: Final = (
 )
 RODEX_SESSIONS_STATISTICS_SOURCES_TABLE: Final = "rodex_sessions_statistics_sources"
 RODEX_SESSIONS_STATISTICS_SOURCES_UNIQUE_INDEX: Final = (
-    "rodex_sessions_statistics_sources_codex_session_id_unique"
+    "rodex_sessions_statistics_sources_codex_thread_id_unique"
 )
-RODEX_SESSIONS_STATISTICS_SOURCES_SESSION_INDEX: Final = (
-    "rodex_sessions_statistics_sources_session"
+RODEX_SESSIONS_STATISTICS_SOURCES_SESSION_ID_UNIQUE_INDEX: Final = (
+    "rodex_sessions_statistics_sources_session_id_unique"
+)
+RODEX_SESSIONS_STATISTICS_SOURCES_PARENT_INDEX: Final = (
+    "rodex_sessions_statistics_sources_parent"
 )
 RODEX_SESSIONS_STATISTICS_SOURCES_SESSION_ID_PUBLICATION_SEQUENCE_UNIQUE_INDEX: Final = (
     "rodex_sessions_statistics_sources_session_id_publication_sequence_unique"
@@ -518,11 +521,18 @@ _CREATE_STATISTICS_SOURCES_TABLE = f"""
 CREATE TABLE IF NOT EXISTS {RODEX_SESSIONS_STATISTICS_SOURCES_TABLE} (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     rodex_sessions_id INTEGER NOT NULL,
-    codex_session_id_signed_bigint_1 BIGINT NOT NULL CHECK (
-        typeof(codex_session_id_signed_bigint_1) = 'integer'
+    codex_thread_id_signed_bigint_1 BIGINT NOT NULL CHECK (
+        typeof(codex_thread_id_signed_bigint_1) = 'integer'
     ),
-    codex_session_id_signed_bigint_2 BIGINT NOT NULL CHECK (
-        typeof(codex_session_id_signed_bigint_2) = 'integer'
+    codex_thread_id_signed_bigint_2 BIGINT NOT NULL CHECK (
+        typeof(codex_thread_id_signed_bigint_2) = 'integer'
+    ),
+    parent_rodex_sessions_statistics_sources_id INTEGER DEFAULT NULL,
+    agent_path TEXT DEFAULT NULL,
+    agent_nickname TEXT DEFAULT NULL,
+    subagent_history_start_ordinal INTEGER DEFAULT NULL CHECK (
+        subagent_history_start_ordinal IS NULL
+        OR subagent_history_start_ordinal >= 0
     ),
     first_linked_at_utc TEXT NOT NULL,
     rollout_file_path TEXT DEFAULT NULL,
@@ -553,7 +563,21 @@ CREATE TABLE IF NOT EXISTS {RODEX_SESSIONS_STATISTICS_SOURCES_TABLE} (
             AND analyzed_mtime_ns IS NOT NULL AND analyzed_prefix_sha256 IS NOT NULL
             AND verified_at_utc IS NOT NULL)
     ),
+    CHECK (
+        (parent_rodex_sessions_statistics_sources_id IS NULL
+            AND agent_path IS NULL
+            AND agent_nickname IS NULL
+            AND subagent_history_start_ordinal IS NULL)
+        OR
+        (parent_rodex_sessions_statistics_sources_id IS NOT NULL
+            AND agent_path IS NOT NULL
+            AND length(agent_path) > 0
+            AND subagent_history_start_ordinal IS NOT NULL)
+    ),
     FOREIGN KEY (rodex_sessions_id) REFERENCES {RODEX_SESSIONS_TABLE} (id),
+    FOREIGN KEY (rodex_sessions_id, parent_rodex_sessions_statistics_sources_id)
+        REFERENCES {RODEX_SESSIONS_STATISTICS_SOURCES_TABLE} (rodex_sessions_id, id)
+        DEFERRABLE INITIALLY DEFERRED,
     FOREIGN KEY (rodex_sessions_id, included_statistics_publication_sequence)
         REFERENCES {RODEX_SESSIONS_STATISTICS_TABLE}
             (rodex_sessions_id, statistics_publication_sequence)
@@ -563,11 +587,17 @@ CREATE TABLE IF NOT EXISTS {RODEX_SESSIONS_STATISTICS_SOURCES_TABLE} (
 _CREATE_STATISTICS_SOURCES_UNIQUE_INDEX = f"""
 CREATE UNIQUE INDEX IF NOT EXISTS {RODEX_SESSIONS_STATISTICS_SOURCES_UNIQUE_INDEX}
 ON {RODEX_SESSIONS_STATISTICS_SOURCES_TABLE}
-    (codex_session_id_signed_bigint_1, codex_session_id_signed_bigint_2)
+    (codex_thread_id_signed_bigint_1, codex_thread_id_signed_bigint_2)
 """
-_CREATE_STATISTICS_SOURCES_SESSION_INDEX = f"""
-CREATE INDEX IF NOT EXISTS {RODEX_SESSIONS_STATISTICS_SOURCES_SESSION_INDEX}
-ON {RODEX_SESSIONS_STATISTICS_SOURCES_TABLE} (rodex_sessions_id)
+_CREATE_STATISTICS_SOURCES_SESSION_ID_UNIQUE_INDEX = f"""
+CREATE UNIQUE INDEX IF NOT EXISTS
+    {RODEX_SESSIONS_STATISTICS_SOURCES_SESSION_ID_UNIQUE_INDEX}
+ON {RODEX_SESSIONS_STATISTICS_SOURCES_TABLE} (rodex_sessions_id, id)
+"""
+_CREATE_STATISTICS_SOURCES_PARENT_INDEX = f"""
+CREATE INDEX IF NOT EXISTS {RODEX_SESSIONS_STATISTICS_SOURCES_PARENT_INDEX}
+ON {RODEX_SESSIONS_STATISTICS_SOURCES_TABLE}
+    (parent_rodex_sessions_statistics_sources_id)
 """
 _CREATE_STATISTICS_SOURCES_SESSION_ID_PUBLICATION_SEQUENCE_UNIQUE_INDEX = f"""
 CREATE UNIQUE INDEX IF NOT EXISTS
@@ -952,14 +982,21 @@ def initialise_rodex_database(database_path: str | os.PathLike[str] | None = Non
             connection,
             RODEX_SESSIONS_STATISTICS_SOURCES_TABLE,
             RODEX_SESSIONS_STATISTICS_SOURCES_UNIQUE_INDEX,
-            ["codex_session_id_signed_bigint_1", "codex_session_id_signed_bigint_2"],
+            ["codex_thread_id_signed_bigint_1", "codex_thread_id_signed_bigint_2"],
         )
-        connection.execute(_CREATE_STATISTICS_SOURCES_SESSION_INDEX)
+        connection.execute(_CREATE_STATISTICS_SOURCES_SESSION_ID_UNIQUE_INDEX)
+        _verify_unique_index(
+            connection,
+            RODEX_SESSIONS_STATISTICS_SOURCES_TABLE,
+            RODEX_SESSIONS_STATISTICS_SOURCES_SESSION_ID_UNIQUE_INDEX,
+            ["rodex_sessions_id", "id"],
+        )
+        connection.execute(_CREATE_STATISTICS_SOURCES_PARENT_INDEX)
         _verify_index(
             connection,
             RODEX_SESSIONS_STATISTICS_SOURCES_TABLE,
-            RODEX_SESSIONS_STATISTICS_SOURCES_SESSION_INDEX,
-            ["rodex_sessions_id"],
+            RODEX_SESSIONS_STATISTICS_SOURCES_PARENT_INDEX,
+            ["parent_rodex_sessions_statistics_sources_id"],
             unique=False,
         )
         connection.execute(
@@ -1466,8 +1503,12 @@ def _verify_statistics_sources_table(connection: sqlite3.Connection) -> None:
         [
             ("id", "INTEGER", 0, 1),
             ("rodex_sessions_id", "INTEGER", 1, 0),
-            ("codex_session_id_signed_bigint_1", "BIGINT", 1, 0),
-            ("codex_session_id_signed_bigint_2", "BIGINT", 1, 0),
+            ("codex_thread_id_signed_bigint_1", "BIGINT", 1, 0),
+            ("codex_thread_id_signed_bigint_2", "BIGINT", 1, 0),
+            ("parent_rodex_sessions_statistics_sources_id", "INTEGER", 0, 0),
+            ("agent_path", "TEXT", 0, 0),
+            ("agent_nickname", "TEXT", 0, 0),
+            ("subagent_history_start_ordinal", "INTEGER", 0, 0),
             ("first_linked_at_utc", "TEXT", 1, 0),
             ("rollout_file_path", "TEXT", 0, 0),
             ("analyzed_size_bytes", "INTEGER", 0, 0),
@@ -1483,6 +1524,16 @@ def _verify_statistics_sources_table(connection: sqlite3.Connection) -> None:
     observed_foreign_keys = {(row[2], row[3], row[4]) for row in foreign_keys}
     expected_foreign_keys = {
         (RODEX_SESSIONS_TABLE, "rodex_sessions_id", "id"),
+        (
+            RODEX_SESSIONS_STATISTICS_SOURCES_TABLE,
+            "rodex_sessions_id",
+            "rodex_sessions_id",
+        ),
+        (
+            RODEX_SESSIONS_STATISTICS_SOURCES_TABLE,
+            "parent_rodex_sessions_statistics_sources_id",
+            "id",
+        ),
         (
             RODEX_SESSIONS_STATISTICS_TABLE,
             "rodex_sessions_id",
@@ -1503,8 +1554,8 @@ def _verify_statistics_sources_table(connection: sqlite3.Connection) -> None:
         connection,
         RODEX_SESSIONS_STATISTICS_SOURCES_TABLE,
         (
-            "TYPEOF(CODEX_SESSION_ID_SIGNED_BIGINT_1) = 'INTEGER'",
-            "TYPEOF(CODEX_SESSION_ID_SIGNED_BIGINT_2) = 'INTEGER'",
+            "TYPEOF(CODEX_THREAD_ID_SIGNED_BIGINT_1) = 'INTEGER'",
+            "TYPEOF(CODEX_THREAD_ID_SIGNED_BIGINT_2) = 'INTEGER'",
             "ANALYZED_SIZE_BYTES IS NULL OR ANALYZED_SIZE_BYTES >= 0",
             "ANALYZED_MTIME_NS IS NULL OR ANALYZED_MTIME_NS >= 0",
             "INCLUDED_STATISTICS_PUBLICATION_SEQUENCE IS NULL "

@@ -64,8 +64,8 @@ Apply these standards to future schema decisions. These authorative standards ma
 - `rodex_sessions` contains one signed-BIGINT Rodex session ID, the two signed
   halves of the Codex session ID, and permanent/optional display-name links. The public Rodex
   session ID is always serialized as a 16-character lowercase hex string, never a JSON
-  number. This incompatible ALPHA schema generation is stored in `rodex-v7.sqlite3`;
-  Rodex leaves v6 and earlier generation files untouched and does not read or migrate
+  number. This incompatible ALPHA schema generation is stored in `rodex-v8.sqlite3`;
+  Rodex leaves v7 and earlier generation files untouched and does not read or migrate
   their schemas.
 - `rodex_runtime_instances` contains one signed-`BIGINT` random 64-bit `runtime_id` and
   its start time for a Rodex session. Unique indexes fence both session cardinality and
@@ -90,13 +90,16 @@ Apply these standards to future schema decisions. These authorative standards ma
   Each has an `AUTOINCREMENT` integer primary key and a unique exact source name. A
   publication resolves each distinct name once in its transaction by selecting before
   inserting; database-local caches never cross a rollback or database boundary.
-- `rodex_sessions_statistics_sources` retains every Codex session ID linked to the Rodex
-  lineage. A Codex session ID is globally unique to one lineage. Nullable rollout provenance
-  represents a registered source not yet authenticated; included provenance carries an
-  absolute canonical path, complete-prefix byte count, mtime, SHA-256, and publication
-  sequence.
+- `rodex_sessions_statistics_sources` owns each exact root or sub-agent Codex thread.
+  The external 128-bit thread identity is stored only on this owner row; turns and child
+  threads use its integer `id`. A nullable self-foreign key records the parent source ID,
+  alongside agent path/nickname and the inherited-history cutoff. Root/sub-agent kind and
+  depth are derived from that hierarchy instead of stored twice; both row shapes are
+  constrained. Nullable rollout provenance represents a
+  registered root not yet authenticated; included provenance carries an absolute canonical
+  path, complete-prefix byte count, mtime, SHA-256, and publication sequence.
 - `rodex_sessions_statistics_turns` stores one typed, privacy-filtered projection per
-  exact `(Codex source, turn_id)` in the current publication sequence. Four signed
+  exact `(Codex thread source, turn_id)` in the current publication sequence. Four signed
   64-bit SHA-256 pieces provide indexed lookup while retained text verifies exact
   identity. Deferred foreign keys bind every turn to both the included source
   publication sequence and session snapshot.
@@ -108,12 +111,19 @@ Apply these standards to future schema decisions. These authorative standards ma
 - `rodex_sessions_statistics_workers` is independent one-to-one health. Its bounded
   diagnostic code cannot contain free-form errors or paths. Failure never fabricates or
   overwrites a statistics snapshot.
-- Publishing a session projection, complete turn set, exact included sources, and
+- Per-thread lifecycle, token, command, tool, file, web, collaboration, and compaction
+  summaries are grouped from the existing turn and named-count rows by
+  `rodex_sessions_statistics_sources_id`; no redundant agent-summary table is stored.
+- Publishing a team projection, complete turn set, exact included thread closure, and
   healthy state is one Codex-session-ID- and prior-publication-sequence-fenced
   transaction. Publication-sequence mark-and-sweep updates existing turn identities and
   removes obsolete turns without a variable-length SQL key list. Health-only failure
   publication uses the ID fence but does not mutate last-good statistics, turns, or
   source analysis.
+- Child rollout staging retains its own `session_meta` and records after
+  `subagent_history_start_ordinal`; inherited parent history is excluded before analysis.
+  Collaboration operations derive from canonical model-tool counts, while verified child
+  source rows determine agents started.
 - Strict typed projection parsing rejects missing, unknown, or wrongly typed analyzer
   fields before SQL begins. Reads select root and child rows in one transaction; the CLI
   presentation layer can reconstruct every analyzer statistic without stored JSON.

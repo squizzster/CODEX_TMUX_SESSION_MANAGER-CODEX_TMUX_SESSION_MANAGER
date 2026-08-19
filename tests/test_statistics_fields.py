@@ -23,7 +23,7 @@ def test_scalar_layouts_follow_projection_field_order_without_parallel_lists() -
         "turn_statistics",
     }
     turn_identity_and_structured = {
-        "codex_session_id",
+        "codex_thread_id",
         "codex_turn_id",
         "started_at_utc",
         "terminal_at_utc",

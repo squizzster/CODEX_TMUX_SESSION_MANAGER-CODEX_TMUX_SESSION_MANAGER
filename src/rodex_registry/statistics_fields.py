@@ -131,7 +131,7 @@ TURN_STATISTICS_SCALARS: Final = _scalar_layout(
     TurnStatisticsProjection,
     excluded=frozenset(
         {
-            "codex_session_id",
+            "codex_thread_id",
             "codex_turn_id",
             "started_at_utc",
             "terminal_at_utc",

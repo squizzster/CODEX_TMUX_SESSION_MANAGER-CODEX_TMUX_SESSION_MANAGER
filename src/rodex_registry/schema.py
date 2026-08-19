@@ -54,8 +54,8 @@ RODEX_SESSIONS_STATISTICS_TABLE: Final = "rodex_sessions_statistics"
 RODEX_SESSIONS_STATISTICS_SESSION_UNIQUE_INDEX: Final = (
     "rodex_sessions_statistics_rodex_sessions_id_unique"
 )
-RODEX_SESSIONS_STATISTICS_SESSION_REVISION_UNIQUE_INDEX: Final = (
-    "rodex_sessions_statistics_session_revision_unique"
+RODEX_SESSIONS_STATISTICS_SESSION_PUBLICATION_SEQUENCE_UNIQUE_INDEX: Final = (
+    "rodex_sessions_statistics_session_publication_sequence_unique"
 )
 RODEX_SESSIONS_STATISTICS_DISTRIBUTIONS_TABLE: Final = (
     "rodex_sessions_statistics_distributions"
@@ -82,8 +82,8 @@ RODEX_SESSIONS_STATISTICS_SOURCES_UNIQUE_INDEX: Final = (
 RODEX_SESSIONS_STATISTICS_SOURCES_SESSION_INDEX: Final = (
     "rodex_sessions_statistics_sources_session"
 )
-RODEX_SESSIONS_STATISTICS_SOURCES_SESSION_ID_REVISION_UNIQUE_INDEX: Final = (
-    "rodex_sessions_statistics_sources_session_id_revision_unique"
+RODEX_SESSIONS_STATISTICS_SOURCES_SESSION_ID_PUBLICATION_SEQUENCE_UNIQUE_INDEX: Final = (
+    "rodex_sessions_statistics_sources_session_id_publication_sequence_unique"
 )
 RODEX_SESSIONS_STATISTICS_TURNS_TABLE: Final = "rodex_sessions_statistics_turns"
 RODEX_SESSIONS_STATISTICS_TURNS_SOURCE_TURN_UNIQUE_INDEX: Final = (
@@ -92,8 +92,8 @@ RODEX_SESSIONS_STATISTICS_TURNS_SOURCE_TURN_UNIQUE_INDEX: Final = (
 RODEX_SESSIONS_STATISTICS_TURNS_SESSION_TURN_INDEX: Final = (
     "rodex_sessions_statistics_turns_session_turn"
 )
-RODEX_SESSIONS_STATISTICS_TURNS_SESSION_ID_REVISION_UNIQUE_INDEX: Final = (
-    "rodex_sessions_statistics_turns_session_id_revision_unique"
+RODEX_SESSIONS_STATISTICS_TURNS_SESSION_ID_PUBLICATION_SEQUENCE_UNIQUE_INDEX: Final = (
+    "rodex_sessions_statistics_turns_session_id_publication_sequence_unique"
 )
 RODEX_SESSIONS_STATISTICS_TURN_NAMED_COUNTS_TABLE: Final = (
     "rodex_sessions_statistics_turn_named_counts"
@@ -255,7 +255,9 @@ _CREATE_STATISTICS_TABLE = f"""
 CREATE TABLE IF NOT EXISTS {RODEX_SESSIONS_STATISTICS_TABLE} (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     rodex_sessions_id INTEGER NOT NULL,
-    statistics_revision INTEGER NOT NULL CHECK (statistics_revision >= 1),
+    statistics_publication_sequence INTEGER NOT NULL CHECK (
+        statistics_publication_sequence >= 1
+    ),
     statistics_projection_schema_version TEXT NOT NULL,
     calculated_at_utc TEXT NOT NULL,
     coverage_state TEXT NOT NULL CHECK (coverage_state IN ('complete', 'gapped')),
@@ -421,17 +423,18 @@ _CREATE_STATISTICS_SESSION_UNIQUE_INDEX = f"""
 CREATE UNIQUE INDEX IF NOT EXISTS {RODEX_SESSIONS_STATISTICS_SESSION_UNIQUE_INDEX}
 ON {RODEX_SESSIONS_STATISTICS_TABLE} (rodex_sessions_id)
 """
-_CREATE_STATISTICS_SESSION_REVISION_UNIQUE_INDEX = f"""
+_CREATE_STATISTICS_SESSION_PUBLICATION_SEQUENCE_UNIQUE_INDEX = f"""
 CREATE UNIQUE INDEX IF NOT EXISTS
-    {RODEX_SESSIONS_STATISTICS_SESSION_REVISION_UNIQUE_INDEX}
-ON {RODEX_SESSIONS_STATISTICS_TABLE} (rodex_sessions_id, statistics_revision)
+    {RODEX_SESSIONS_STATISTICS_SESSION_PUBLICATION_SEQUENCE_UNIQUE_INDEX}
+ON {RODEX_SESSIONS_STATISTICS_TABLE}
+    (rodex_sessions_id, statistics_publication_sequence)
 """
 _CREATE_STATISTICS_DISTRIBUTIONS_TABLE = f"""
 CREATE TABLE IF NOT EXISTS {RODEX_SESSIONS_STATISTICS_DISTRIBUTIONS_TABLE} (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     rodex_sessions_id INTEGER NOT NULL,
-    included_statistics_revision INTEGER NOT NULL CHECK (
-        included_statistics_revision >= 1
+    included_statistics_publication_sequence INTEGER NOT NULL CHECK (
+        included_statistics_publication_sequence >= 1
     ),
     distribution_kind TEXT NOT NULL CHECK (distribution_kind IN (
         'completed_turn_duration_ms', 'time_to_first_token_ms',
@@ -453,9 +456,9 @@ CREATE TABLE IF NOT EXISTS {RODEX_SESSIONS_STATISTICS_DISTRIBUTIONS_TABLE} (
             AND p90 IS NOT NULL AND p95 IS NOT NULL AND maximum IS NOT NULL
             AND p75 <= p90 AND p90 <= p95 AND p95 <= maximum)
     ),
-    FOREIGN KEY (rodex_sessions_id, included_statistics_revision)
+    FOREIGN KEY (rodex_sessions_id, included_statistics_publication_sequence)
         REFERENCES {RODEX_SESSIONS_STATISTICS_TABLE}
-            (rodex_sessions_id, statistics_revision)
+            (rodex_sessions_id, statistics_publication_sequence)
         DEFERRABLE INITIALLY DEFERRED
 )
 """
@@ -469,8 +472,8 @@ _CREATE_STATISTICS_NAMED_COUNTS_TABLE = f"""
 CREATE TABLE IF NOT EXISTS {RODEX_SESSIONS_STATISTICS_NAMED_COUNTS_TABLE} (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     rodex_sessions_id INTEGER NOT NULL,
-    included_statistics_revision INTEGER NOT NULL CHECK (
-        included_statistics_revision >= 1
+    included_statistics_publication_sequence INTEGER NOT NULL CHECK (
+        included_statistics_publication_sequence >= 1
     ),
     count_kind TEXT NOT NULL CHECK (count_kind IN (
         'command_exit_status', 'command_family', 'model_tool', 'file_change_type',
@@ -478,9 +481,9 @@ CREATE TABLE IF NOT EXISTS {RODEX_SESSIONS_STATISTICS_NAMED_COUNTS_TABLE} (
     )),
     count_name TEXT NOT NULL CHECK (length(count_name) > 0),
     occurrence_count INTEGER NOT NULL CHECK (occurrence_count > 0),
-    FOREIGN KEY (rodex_sessions_id, included_statistics_revision)
+    FOREIGN KEY (rodex_sessions_id, included_statistics_publication_sequence)
         REFERENCES {RODEX_SESSIONS_STATISTICS_TABLE}
-            (rodex_sessions_id, statistics_revision)
+            (rodex_sessions_id, statistics_publication_sequence)
         DEFERRABLE INITIALLY DEFERRED
 )
 """
@@ -494,14 +497,14 @@ _CREATE_STATISTICS_AUDIT_LIMITS_TABLE = f"""
 CREATE TABLE IF NOT EXISTS {RODEX_SESSIONS_STATISTICS_AUDIT_LIMITS_TABLE} (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     rodex_sessions_id INTEGER NOT NULL,
-    included_statistics_revision INTEGER NOT NULL CHECK (
-        included_statistics_revision >= 1
+    included_statistics_publication_sequence INTEGER NOT NULL CHECK (
+        included_statistics_publication_sequence >= 1
     ),
     limit_ordinal INTEGER NOT NULL CHECK (limit_ordinal >= 0),
     limitation TEXT NOT NULL CHECK (length(limitation) > 0),
-    FOREIGN KEY (rodex_sessions_id, included_statistics_revision)
+    FOREIGN KEY (rodex_sessions_id, included_statistics_publication_sequence)
         REFERENCES {RODEX_SESSIONS_STATISTICS_TABLE}
-            (rodex_sessions_id, statistics_revision)
+            (rodex_sessions_id, statistics_publication_sequence)
         DEFERRABLE INITIALLY DEFERRED
 )
 """
@@ -533,11 +536,13 @@ CREATE TABLE IF NOT EXISTS {RODEX_SESSIONS_STATISTICS_SOURCES_TABLE} (
         analyzed_prefix_sha256 IS NULL OR length(analyzed_prefix_sha256) = 64
     ),
     verified_at_utc TEXT DEFAULT NULL,
-    included_statistics_revision INTEGER DEFAULT NULL CHECK (
-        included_statistics_revision IS NULL OR included_statistics_revision >= 1
+    included_statistics_publication_sequence INTEGER DEFAULT NULL CHECK (
+        included_statistics_publication_sequence IS NULL
+        OR included_statistics_publication_sequence >= 1
     ),
     CHECK (
-        included_statistics_revision IS NULL OR rollout_file_path IS NOT NULL
+        included_statistics_publication_sequence IS NULL
+        OR rollout_file_path IS NOT NULL
     ),
     CHECK (
         (rollout_file_path IS NULL AND analyzed_size_bytes IS NULL
@@ -549,9 +554,9 @@ CREATE TABLE IF NOT EXISTS {RODEX_SESSIONS_STATISTICS_SOURCES_TABLE} (
             AND verified_at_utc IS NOT NULL)
     ),
     FOREIGN KEY (rodex_sessions_id) REFERENCES {RODEX_SESSIONS_TABLE} (id),
-    FOREIGN KEY (rodex_sessions_id, included_statistics_revision)
+    FOREIGN KEY (rodex_sessions_id, included_statistics_publication_sequence)
         REFERENCES {RODEX_SESSIONS_STATISTICS_TABLE}
-            (rodex_sessions_id, statistics_revision)
+            (rodex_sessions_id, statistics_publication_sequence)
         DEFERRABLE INITIALLY DEFERRED
 )
 """
@@ -564,11 +569,11 @@ _CREATE_STATISTICS_SOURCES_SESSION_INDEX = f"""
 CREATE INDEX IF NOT EXISTS {RODEX_SESSIONS_STATISTICS_SOURCES_SESSION_INDEX}
 ON {RODEX_SESSIONS_STATISTICS_SOURCES_TABLE} (rodex_sessions_id)
 """
-_CREATE_STATISTICS_SOURCES_SESSION_ID_REVISION_UNIQUE_INDEX = f"""
+_CREATE_STATISTICS_SOURCES_SESSION_ID_PUBLICATION_SEQUENCE_UNIQUE_INDEX = f"""
 CREATE UNIQUE INDEX IF NOT EXISTS
-    {RODEX_SESSIONS_STATISTICS_SOURCES_SESSION_ID_REVISION_UNIQUE_INDEX}
+    {RODEX_SESSIONS_STATISTICS_SOURCES_SESSION_ID_PUBLICATION_SEQUENCE_UNIQUE_INDEX}
 ON {RODEX_SESSIONS_STATISTICS_SOURCES_TABLE}
-    (rodex_sessions_id, id, included_statistics_revision)
+    (rodex_sessions_id, id, included_statistics_publication_sequence)
 """
 _CREATE_STATISTICS_TURNS_TABLE = f"""
 CREATE TABLE IF NOT EXISTS {RODEX_SESSIONS_STATISTICS_TURNS_TABLE} (
@@ -588,8 +593,8 @@ CREATE TABLE IF NOT EXISTS {RODEX_SESSIONS_STATISTICS_TURNS_TABLE} (
         typeof(codex_turn_id_sha256_int_4) = 'integer'
     ),
     codex_turn_id TEXT NOT NULL,
-    included_statistics_revision INTEGER NOT NULL CHECK (
-        included_statistics_revision >= 1
+    included_statistics_publication_sequence INTEGER NOT NULL CHECK (
+        included_statistics_publication_sequence >= 1
     ),
     started_at_utc TEXT DEFAULT NULL,
     terminal_at_utc TEXT DEFAULT NULL,
@@ -697,13 +702,13 @@ CREATE TABLE IF NOT EXISTS {RODEX_SESSIONS_STATISTICS_TURNS_TABLE} (
             AND command_duration_p95_ms <= command_duration_maximum_ms)
     ),
     FOREIGN KEY (rodex_sessions_id, rodex_sessions_statistics_sources_id,
-        included_statistics_revision)
+        included_statistics_publication_sequence)
         REFERENCES {RODEX_SESSIONS_STATISTICS_SOURCES_TABLE}
-            (rodex_sessions_id, id, included_statistics_revision)
+            (rodex_sessions_id, id, included_statistics_publication_sequence)
         DEFERRABLE INITIALLY DEFERRED,
-    FOREIGN KEY (rodex_sessions_id, included_statistics_revision)
+    FOREIGN KEY (rodex_sessions_id, included_statistics_publication_sequence)
         REFERENCES {RODEX_SESSIONS_STATISTICS_TABLE}
-            (rodex_sessions_id, statistics_revision)
+            (rodex_sessions_id, statistics_publication_sequence)
         DEFERRABLE INITIALLY DEFERRED,
     FOREIGN KEY (model_names_id) REFERENCES {MODEL_NAMES_TABLE} (id),
     FOREIGN KEY (reasoning_effort_names_id)
@@ -731,19 +736,19 @@ ON {RODEX_SESSIONS_STATISTICS_TURNS_TABLE} (
     codex_turn_id_sha256_int_4
 )
 """
-_CREATE_STATISTICS_TURNS_SESSION_ID_REVISION_UNIQUE_INDEX = f"""
+_CREATE_STATISTICS_TURNS_SESSION_ID_PUBLICATION_SEQUENCE_UNIQUE_INDEX = f"""
 CREATE UNIQUE INDEX IF NOT EXISTS
-    {RODEX_SESSIONS_STATISTICS_TURNS_SESSION_ID_REVISION_UNIQUE_INDEX}
+    {RODEX_SESSIONS_STATISTICS_TURNS_SESSION_ID_PUBLICATION_SEQUENCE_UNIQUE_INDEX}
 ON {RODEX_SESSIONS_STATISTICS_TURNS_TABLE}
-    (rodex_sessions_id, id, included_statistics_revision)
+    (rodex_sessions_id, id, included_statistics_publication_sequence)
 """
 _CREATE_STATISTICS_TURN_NAMED_COUNTS_TABLE = f"""
 CREATE TABLE IF NOT EXISTS {RODEX_SESSIONS_STATISTICS_TURN_NAMED_COUNTS_TABLE} (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     rodex_sessions_id INTEGER NOT NULL,
     rodex_sessions_statistics_turns_id INTEGER NOT NULL,
-    included_statistics_revision INTEGER NOT NULL CHECK (
-        included_statistics_revision >= 1
+    included_statistics_publication_sequence INTEGER NOT NULL CHECK (
+        included_statistics_publication_sequence >= 1
     ),
     count_kind TEXT NOT NULL CHECK (count_kind IN (
         'command_exit_status', 'command_family', 'model_tool', 'file_change_type',
@@ -752,9 +757,9 @@ CREATE TABLE IF NOT EXISTS {RODEX_SESSIONS_STATISTICS_TURN_NAMED_COUNTS_TABLE} (
     count_name TEXT NOT NULL CHECK (length(count_name) > 0),
     occurrence_count INTEGER NOT NULL CHECK (occurrence_count > 0),
     FOREIGN KEY (rodex_sessions_id, rodex_sessions_statistics_turns_id,
-        included_statistics_revision)
+        included_statistics_publication_sequence)
         REFERENCES {RODEX_SESSIONS_STATISTICS_TURNS_TABLE}
-            (rodex_sessions_id, id, included_statistics_revision)
+            (rodex_sessions_id, id, included_statistics_publication_sequence)
         DEFERRABLE INITIALLY DEFERRED
 )
 """
@@ -906,12 +911,12 @@ def initialise_rodex_database(database_path: str | os.PathLike[str] | None = Non
             RODEX_SESSIONS_STATISTICS_SESSION_UNIQUE_INDEX,
             ["rodex_sessions_id"],
         )
-        connection.execute(_CREATE_STATISTICS_SESSION_REVISION_UNIQUE_INDEX)
+        connection.execute(_CREATE_STATISTICS_SESSION_PUBLICATION_SEQUENCE_UNIQUE_INDEX)
         _verify_unique_index(
             connection,
             RODEX_SESSIONS_STATISTICS_TABLE,
-            RODEX_SESSIONS_STATISTICS_SESSION_REVISION_UNIQUE_INDEX,
-            ["rodex_sessions_id", "statistics_revision"],
+            RODEX_SESSIONS_STATISTICS_SESSION_PUBLICATION_SEQUENCE_UNIQUE_INDEX,
+            ["rodex_sessions_id", "statistics_publication_sequence"],
         )
         connection.execute(_CREATE_STATISTICS_DISTRIBUTIONS_TABLE)
         _verify_statistics_distributions_table(connection)
@@ -957,12 +962,18 @@ def initialise_rodex_database(database_path: str | os.PathLike[str] | None = Non
             ["rodex_sessions_id"],
             unique=False,
         )
-        connection.execute(_CREATE_STATISTICS_SOURCES_SESSION_ID_REVISION_UNIQUE_INDEX)
+        connection.execute(
+            _CREATE_STATISTICS_SOURCES_SESSION_ID_PUBLICATION_SEQUENCE_UNIQUE_INDEX
+        )
         _verify_unique_index(
             connection,
             RODEX_SESSIONS_STATISTICS_SOURCES_TABLE,
-            RODEX_SESSIONS_STATISTICS_SOURCES_SESSION_ID_REVISION_UNIQUE_INDEX,
-            ["rodex_sessions_id", "id", "included_statistics_revision"],
+            RODEX_SESSIONS_STATISTICS_SOURCES_SESSION_ID_PUBLICATION_SEQUENCE_UNIQUE_INDEX,
+            [
+                "rodex_sessions_id",
+                "id",
+                "included_statistics_publication_sequence",
+            ],
         )
         connection.execute(_CREATE_STATISTICS_TURNS_TABLE)
         _verify_statistics_turns_table(connection)
@@ -993,12 +1004,18 @@ def initialise_rodex_database(database_path: str | os.PathLike[str] | None = Non
             ],
             unique=False,
         )
-        connection.execute(_CREATE_STATISTICS_TURNS_SESSION_ID_REVISION_UNIQUE_INDEX)
+        connection.execute(
+            _CREATE_STATISTICS_TURNS_SESSION_ID_PUBLICATION_SEQUENCE_UNIQUE_INDEX
+        )
         _verify_unique_index(
             connection,
             RODEX_SESSIONS_STATISTICS_TURNS_TABLE,
-            RODEX_SESSIONS_STATISTICS_TURNS_SESSION_ID_REVISION_UNIQUE_INDEX,
-            ["rodex_sessions_id", "id", "included_statistics_revision"],
+            RODEX_SESSIONS_STATISTICS_TURNS_SESSION_ID_PUBLICATION_SEQUENCE_UNIQUE_INDEX,
+            [
+                "rodex_sessions_id",
+                "id",
+                "included_statistics_publication_sequence",
+            ],
         )
         connection.execute(_CREATE_STATISTICS_TURN_NAMED_COUNTS_TABLE)
         _verify_statistics_turn_named_counts_table(connection)
@@ -1335,7 +1352,7 @@ def _verify_statistics_table(connection: sqlite3.Connection) -> None:
         [
             ("id", "INTEGER", 0, 1),
             ("rodex_sessions_id", "INTEGER", 1, 0),
-            ("statistics_revision", "INTEGER", 1, 0),
+            ("statistics_publication_sequence", "INTEGER", 1, 0),
             ("statistics_projection_schema_version", "TEXT", 1, 0),
             ("calculated_at_utc", "TEXT", 1, 0),
             ("coverage_state", "TEXT", 1, 0),
@@ -1351,7 +1368,7 @@ def _verify_statistics_table(connection: sqlite3.Connection) -> None:
         connection,
         RODEX_SESSIONS_STATISTICS_TABLE,
         (
-            "CHECK (STATISTICS_REVISION >= 1)",
+            "CHECK ( STATISTICS_PUBLICATION_SEQUENCE >= 1 )",
             "CHECK (COVERAGE_STATE IN ('COMPLETE', 'GAPPED'))",
             "TURNS_STARTED_COUNT = TURNS_COMPLETED_COUNT + TURNS_ABORTED_COUNT "
             "+ TURNS_OPEN_COUNT",
@@ -1367,7 +1384,7 @@ def _verify_statistics_distributions_table(connection: sqlite3.Connection) -> No
         [
             ("id", "INTEGER", 0, 1),
             ("rodex_sessions_id", "INTEGER", 1, 0),
-            ("included_statistics_revision", "INTEGER", 1, 0),
+            ("included_statistics_publication_sequence", "INTEGER", 1, 0),
             ("distribution_kind", "TEXT", 1, 0),
             ("observation_count", "INTEGER", 1, 0),
             ("total", "INTEGER", 1, 0),
@@ -1378,7 +1395,7 @@ def _verify_statistics_distributions_table(connection: sqlite3.Connection) -> No
             ("maximum", "INTEGER", 0, 0),
         ],
     )
-    _verify_statistics_revision_foreign_key(
+    _verify_statistics_publication_sequence_foreign_key(
         connection, RODEX_SESSIONS_STATISTICS_DISTRIBUTIONS_TABLE
     )
 
@@ -1390,13 +1407,13 @@ def _verify_statistics_named_counts_table(connection: sqlite3.Connection) -> Non
         [
             ("id", "INTEGER", 0, 1),
             ("rodex_sessions_id", "INTEGER", 1, 0),
-            ("included_statistics_revision", "INTEGER", 1, 0),
+            ("included_statistics_publication_sequence", "INTEGER", 1, 0),
             ("count_kind", "TEXT", 1, 0),
             ("count_name", "TEXT", 1, 0),
             ("occurrence_count", "INTEGER", 1, 0),
         ],
     )
-    _verify_statistics_revision_foreign_key(
+    _verify_statistics_publication_sequence_foreign_key(
         connection, RODEX_SESSIONS_STATISTICS_NAMED_COUNTS_TABLE
     )
 
@@ -1408,17 +1425,17 @@ def _verify_statistics_audit_limits_table(connection: sqlite3.Connection) -> Non
         [
             ("id", "INTEGER", 0, 1),
             ("rodex_sessions_id", "INTEGER", 1, 0),
-            ("included_statistics_revision", "INTEGER", 1, 0),
+            ("included_statistics_publication_sequence", "INTEGER", 1, 0),
             ("limit_ordinal", "INTEGER", 1, 0),
             ("limitation", "TEXT", 1, 0),
         ],
     )
-    _verify_statistics_revision_foreign_key(
+    _verify_statistics_publication_sequence_foreign_key(
         connection, RODEX_SESSIONS_STATISTICS_AUDIT_LIMITS_TABLE
     )
 
 
-def _verify_statistics_revision_foreign_key(
+def _verify_statistics_publication_sequence_foreign_key(
     connection: sqlite3.Connection, table_name: str
 ) -> None:
     foreign_keys = connection.execute(f"PRAGMA foreign_key_list({table_name})").fetchall()
@@ -1431,8 +1448,8 @@ def _verify_statistics_revision_foreign_key(
         ),
         (
             RODEX_SESSIONS_STATISTICS_TABLE,
-            "included_statistics_revision",
-            "statistics_revision",
+            "included_statistics_publication_sequence",
+            "statistics_publication_sequence",
         ),
     }
     if observed != expected:
@@ -1457,7 +1474,7 @@ def _verify_statistics_sources_table(connection: sqlite3.Connection) -> None:
             ("analyzed_mtime_ns", "INTEGER", 0, 0),
             ("analyzed_prefix_sha256", "TEXT", 0, 0),
             ("verified_at_utc", "TEXT", 0, 0),
-            ("included_statistics_revision", "INTEGER", 0, 0),
+            ("included_statistics_publication_sequence", "INTEGER", 0, 0),
         ],
     )
     foreign_keys = connection.execute(
@@ -1473,8 +1490,8 @@ def _verify_statistics_sources_table(connection: sqlite3.Connection) -> None:
         ),
         (
             RODEX_SESSIONS_STATISTICS_TABLE,
-            "included_statistics_revision",
-            "statistics_revision",
+            "included_statistics_publication_sequence",
+            "statistics_publication_sequence",
         ),
     }
     if observed_foreign_keys != expected_foreign_keys:
@@ -1490,8 +1507,10 @@ def _verify_statistics_sources_table(connection: sqlite3.Connection) -> None:
             "TYPEOF(CODEX_SESSION_ID_SIGNED_BIGINT_2) = 'INTEGER'",
             "ANALYZED_SIZE_BYTES IS NULL OR ANALYZED_SIZE_BYTES >= 0",
             "ANALYZED_MTIME_NS IS NULL OR ANALYZED_MTIME_NS >= 0",
-            "INCLUDED_STATISTICS_REVISION IS NULL OR INCLUDED_STATISTICS_REVISION >= 1",
-            "INCLUDED_STATISTICS_REVISION IS NULL OR ROLLOUT_FILE_PATH IS NOT NULL",
+            "INCLUDED_STATISTICS_PUBLICATION_SEQUENCE IS NULL "
+            "OR INCLUDED_STATISTICS_PUBLICATION_SEQUENCE >= 1",
+            "INCLUDED_STATISTICS_PUBLICATION_SEQUENCE IS NULL "
+            "OR ROLLOUT_FILE_PATH IS NOT NULL",
             "DEFERRABLE INITIALLY DEFERRED",
         ),
     )
@@ -1510,7 +1529,7 @@ def _verify_statistics_turns_table(connection: sqlite3.Connection) -> None:
             ("codex_turn_id_sha256_int_3", "BIGINT", 1, 0),
             ("codex_turn_id_sha256_int_4", "BIGINT", 1, 0),
             ("codex_turn_id", "TEXT", 1, 0),
-            ("included_statistics_revision", "INTEGER", 1, 0),
+            ("included_statistics_publication_sequence", "INTEGER", 1, 0),
             ("started_at_utc", "TEXT", 0, 0),
             ("terminal_at_utc", "TEXT", 0, 0),
             ("outcome", "TEXT", 1, 0),
@@ -1536,8 +1555,8 @@ def _verify_statistics_turns_table(connection: sqlite3.Connection) -> None:
         ),
         (
             RODEX_SESSIONS_STATISTICS_SOURCES_TABLE,
-            "included_statistics_revision",
-            "included_statistics_revision",
+            "included_statistics_publication_sequence",
+            "included_statistics_publication_sequence",
         ),
         (
             RODEX_SESSIONS_STATISTICS_TABLE,
@@ -1546,8 +1565,8 @@ def _verify_statistics_turns_table(connection: sqlite3.Connection) -> None:
         ),
         (
             RODEX_SESSIONS_STATISTICS_TABLE,
-            "included_statistics_revision",
-            "statistics_revision",
+            "included_statistics_publication_sequence",
+            "statistics_publication_sequence",
         ),
         (MODEL_NAMES_TABLE, "model_names_id", "id"),
         (
@@ -1569,7 +1588,7 @@ def _verify_statistics_turns_table(connection: sqlite3.Connection) -> None:
             "TYPEOF(CODEX_TURN_ID_SHA256_INT_2) = 'INTEGER'",
             "TYPEOF(CODEX_TURN_ID_SHA256_INT_3) = 'INTEGER'",
             "TYPEOF(CODEX_TURN_ID_SHA256_INT_4) = 'INTEGER'",
-            "CHECK ( INCLUDED_STATISTICS_REVISION >= 1 )",
+            "CHECK ( INCLUDED_STATISTICS_PUBLICATION_SEQUENCE >= 1 )",
             "OUTCOME IN ('OPEN', 'COMPLETED', 'ABORTED')",
             "OUTCOME != 'OPEN' OR TERMINAL_AT_UTC IS NULL",
             "HANDS_ON IN (0, 1)",
@@ -1589,7 +1608,7 @@ def _verify_statistics_turn_named_counts_table(
             ("id", "INTEGER", 0, 1),
             ("rodex_sessions_id", "INTEGER", 1, 0),
             ("rodex_sessions_statistics_turns_id", "INTEGER", 1, 0),
-            ("included_statistics_revision", "INTEGER", 1, 0),
+            ("included_statistics_publication_sequence", "INTEGER", 1, 0),
             ("count_kind", "TEXT", 1, 0),
             ("count_name", "TEXT", 1, 0),
             ("occurrence_count", "INTEGER", 1, 0),
@@ -1612,8 +1631,8 @@ def _verify_statistics_turn_named_counts_table(
         ),
         (
             RODEX_SESSIONS_STATISTICS_TURNS_TABLE,
-            "included_statistics_revision",
-            "included_statistics_revision",
+            "included_statistics_publication_sequence",
+            "included_statistics_publication_sequence",
         ),
     }
     if observed != expected:

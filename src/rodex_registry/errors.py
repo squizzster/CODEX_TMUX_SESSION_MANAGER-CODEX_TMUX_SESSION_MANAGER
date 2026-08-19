@@ -14,7 +14,7 @@ class RodexRuntimeIdCollisionError(RodexSessionError):
 
 
 class RodexSessionStatisticsConflictError(RodexSessionError):
-    """A statistics publication lost its identity or revision fence."""
+    """A statistics publication lost its identity or publication-sequence fence."""
 
 
 class RodexSessionTurnStatisticsAmbiguousError(RodexSessionError):

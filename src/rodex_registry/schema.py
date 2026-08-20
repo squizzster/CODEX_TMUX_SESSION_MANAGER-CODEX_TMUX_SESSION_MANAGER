@@ -1073,9 +1073,7 @@ def initialise_rodex_database(database_path: str | os.PathLike[str] | None = Non
                 "included_statistics_publication_sequence",
             ],
         )
-        connection.execute(
-            _CREATE_STATISTICS_SOURCES_HIERARCHY_PUBLICATION_UNIQUE_INDEX
-        )
+        connection.execute(_CREATE_STATISTICS_SOURCES_HIERARCHY_PUBLICATION_UNIQUE_INDEX)
         _verify_unique_index(
             connection,
             RODEX_SESSIONS_STATISTICS_SOURCES_TABLE,

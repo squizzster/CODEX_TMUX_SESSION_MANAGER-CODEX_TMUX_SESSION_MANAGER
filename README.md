@@ -236,8 +236,8 @@ pipeline. SQLite stores each Rodex-owned ID losslessly in one signed `BIGINT` an
 enforces its domain uniqueness. Codex session IDs remain Codex-owned 128-bit values and
 are stored losslessly across two `BIGINT` columns.
 
-Version 8 is an incompatible ALPHA schema with no v7 reader or migration path. Rodex
-leaves `rodex-v7.sqlite3` and earlier generations untouched; explicitly selecting one
+Version 9 is an incompatible ALPHA schema with no v8 reader or migration path. Rodex
+leaves `rodex-v8.sqlite3` and earlier generations untouched; explicitly selecting one
 fails exact schema verification rather than falling back or rewriting it.
 
 Short-lived Unix sockets and app-server logs use `$XDG_RUNTIME_DIR/rodex`, normally

@@ -205,9 +205,7 @@ def _canonical_turn_collaboration(
     turn: TurnStatisticsProjection,
 ) -> TurnStatisticsProjection:
     collaboration_counts = tuple(
-        StatisticsNamedCount(
-            "collaboration_tool", item.count_name, item.occurrence_count
-        )
+        StatisticsNamedCount("collaboration_tool", item.count_name, item.occurrence_count)
         for item in turn.named_counts
         if item.count_kind == "model_tool"
         and item.count_name in COLLABORATION_MODEL_TOOL_NAMES
@@ -219,9 +217,7 @@ def _canonical_turn_collaboration(
         ),
         collaboration_agents_started_count=0,
         named_counts=tuple(
-            item
-            for item in turn.named_counts
-            if item.count_kind != "collaboration_tool"
+            item for item in turn.named_counts if item.count_kind != "collaboration_tool"
         )
         + collaboration_counts,
     )

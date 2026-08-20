@@ -242,9 +242,7 @@ class AnalyticsRolloutWorker:
                 ]
                 verified_collaboration = _derive_verified_collaboration_projection(
                     calculation.statistics_projection,
-                    analyzed_sources=tuple(
-                        item.observation for item in stable_copies
-                    ),
+                    analyzed_sources=tuple(item.observation for item in stable_copies),
                 )
                 publish_rodex_session_statistics(
                     session_id,
@@ -260,9 +258,7 @@ class AnalyticsRolloutWorker:
                     ),
                     calculated_at_utc=self._timestamp(),
                     coverage_state=calculation.coverage_state,
-                    statistics_projection=(
-                        verified_collaboration.statistics_projection
-                    ),
+                    statistics_projection=(verified_collaboration.statistics_projection),
                     analyzed_sources=verified_collaboration.analyzed_sources,
                 )
                 self._source_authentication = {
@@ -877,9 +873,7 @@ def _derive_verified_collaboration_projection(
     return VerifiedCollaborationProjection(
         statistics_projection=replace(
             projection,
-            collaboration_operations_count=sum(
-                item.occurrence_count for item in by_tool
-            ),
+            collaboration_operations_count=sum(item.occurrence_count for item in by_tool),
             collaboration_agents_started_count=descendant_count,
             named_counts=named_counts,
             turn_statistics=projected_turns,
@@ -930,14 +924,9 @@ def _replace_collaboration_counts(
     named_counts: Sequence[StatisticsNamedCount],
     canonical_counts: Sequence[StatisticsNamedCount],
 ) -> tuple[StatisticsNamedCount, ...]:
-    return (
-        tuple(
-            item
-            for item in named_counts
-            if item.count_kind != "collaboration_tool"
-        )
-        + tuple(canonical_counts)
-    )
+    return tuple(
+        item for item in named_counts if item.count_kind != "collaboration_tool"
+    ) + tuple(canonical_counts)
 
 
 def _collaboration_timestamp(value: str, description: str) -> datetime:

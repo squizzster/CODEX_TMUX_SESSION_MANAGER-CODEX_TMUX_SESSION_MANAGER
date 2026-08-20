@@ -625,9 +625,7 @@ def publish_rodex_session_statistics(
                     "sub-agent spawning turn disappeared during publication"
                 )
             subagent_source_id = source_ids[
-                split_codex_thread_id_into_signed_bigints(
-                    subagent_source.codex_thread_id
-                )
+                split_codex_thread_id_into_signed_bigints(subagent_source.codex_thread_id)
             ]
             connection.execute(
                 f"INSERT INTO {RODEX_SESSIONS_STATISTICS_SUBAGENT_SPAWNS_TABLE} "
@@ -639,9 +637,7 @@ def publish_rodex_session_statistics(
                 (
                     session_id,
                     subagent_source_id,
-                    source_ids[
-                        split_codex_thread_id_into_signed_bigints(parent_thread_id)
-                    ],
+                    source_ids[split_codex_thread_id_into_signed_bigints(parent_thread_id)],
                     spawning_turn_row_id,
                     new_publication_sequence,
                 ),
@@ -1192,18 +1188,14 @@ def _validate_authoritative_collaboration_projection(
     projection: SessionStatisticsProjection,
     observations: Sequence[RodexSessionStatisticsSourceObservation],
 ) -> None:
-    expected_session_tools = _canonical_collaboration_count_map(
-        projection.named_counts
-    )
+    expected_session_tools = _canonical_collaboration_count_map(projection.named_counts)
     if _named_count_map(projection.named_counts, "collaboration_tool") != (
         expected_session_tools
     ):
         raise ValueError(
             "session collaboration tools must derive from canonical model tools"
         )
-    if projection.collaboration_operations_count != sum(
-        expected_session_tools.values()
-    ):
+    if projection.collaboration_operations_count != sum(expected_session_tools.values()):
         raise ValueError(
             "session collaboration operations must derive from canonical model tools"
         )
@@ -1211,9 +1203,7 @@ def _validate_authoritative_collaboration_projection(
         item for item in observations if item.parent_codex_thread_id is not None
     )
     if projection.collaboration_agents_started_count != len(verified_subagents):
-        raise ValueError(
-            "session agents started must equal verified sub-agent sources"
-        )
+        raise ValueError("session agents started must equal verified sub-agent sources")
 
     expected_agents_by_turn: dict[tuple[CodexThreadId, str], int] = {}
     for subagent in verified_subagents:

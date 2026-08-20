@@ -31,6 +31,7 @@ from rodex_registry import (
     SessionStatisticsProjection,
     StatisticsNamedCount,
     StatisticsProjectionError,
+    TurnStatisticsProjection,
     current_rodex_sessions_user_identity,
     lookup_codex_session_id_from_a_rodex_sessions_id,
     lookup_rodex_sessions_id_from_a_rodex_session_id,
@@ -46,7 +47,7 @@ from .process_contracts import AnalyticsWorkerConfig
 
 ANALYTICS_POLL_INTERVAL_SECONDS = 0.5
 ANALYTICS_RESTART_DELAY_SECONDS = 2.0
-STATISTICS_PROJECTION_SCHEMA_VERSION = "rodex-statistics-v5"
+STATISTICS_PROJECTION_SCHEMA_VERSION = "rodex-statistics-v6"
 
 
 class RodexAnalyticsError(RuntimeError):
@@ -97,6 +98,14 @@ class AnalyticsCalculation:
 
     statistics_projection: SessionStatisticsProjection
     coverage_state: str
+
+
+@dataclass(frozen=True, slots=True)
+class VerifiedCollaborationProjection:
+    """Canonical collaboration facts joined to authenticated source lineage."""
+
+    statistics_projection: SessionStatisticsProjection
+    analyzed_sources: tuple[RodexSessionStatisticsSourceObservation, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -231,10 +240,10 @@ class AnalyticsRolloutWorker:
                 authenticated_sources = [
                     _verify_source_unchanged(item) for item in stable_copies
                 ]
-                projection = _project_verified_collaboration(
+                verified_collaboration = _derive_verified_collaboration_projection(
                     calculation.statistics_projection,
-                    descendant_count=sum(
-                        item.observation.source_kind == "subagent" for item in stable_copies
+                    analyzed_sources=tuple(
+                        item.observation for item in stable_copies
                     ),
                 )
                 publish_rodex_session_statistics(
@@ -251,8 +260,10 @@ class AnalyticsRolloutWorker:
                     ),
                     calculated_at_utc=self._timestamp(),
                     coverage_state=calculation.coverage_state,
-                    statistics_projection=projection,
-                    analyzed_sources=[item.observation for item in stable_copies],
+                    statistics_projection=(
+                        verified_collaboration.statistics_projection
+                    ),
+                    analyzed_sources=verified_collaboration.analyzed_sources,
                 )
                 self._source_authentication = {
                     item.observation.codex_thread_id: authenticated
@@ -770,36 +781,173 @@ def _subagent_only_rollout_content(content: bytes, cutoff: int | None) -> bytes:
     return b"".join(retained)
 
 
-def _project_verified_collaboration(
+def _derive_verified_collaboration_projection(
     projection: SessionStatisticsProjection,
     *,
-    descendant_count: int,
-) -> SessionStatisticsProjection:
-    """Derive team operations from canonical model tools and verified child sources."""
-    by_tool = tuple(
+    analyzed_sources: Sequence[RodexSessionStatisticsSourceObservation],
+) -> VerifiedCollaborationProjection:
+    """Derive exact-turn and team collaboration from authenticated source truth."""
+    sources = tuple(analyzed_sources)
+    sources_by_thread = {item.codex_thread_id: item for item in sources}
+    if len(sources_by_thread) != len(sources):
+        raise RodexAnalyticsError(
+            "verified collaboration sources contain a duplicate thread"
+        )
+
+    spawning_turn_id_by_child_thread: dict[CodexThreadId, str] = {}
+    for child in sources:
+        parent_thread_id = child.parent_codex_thread_id
+        if parent_thread_id is None:
+            continue
+        if parent_thread_id not in sources_by_thread:
+            raise RodexAnalyticsError(
+                f"verified sub-agent has no parent source: {child.codex_thread_id}"
+            )
+        linked_at = _collaboration_timestamp(
+            child.first_linked_at_utc,
+            f"sub-agent {child.codex_thread_id} first-linked time",
+        )
+        owners = [
+            turn
+            for turn in projection.turn_statistics
+            if turn.codex_thread_id == parent_thread_id
+            and turn.started_at_utc is not None
+            and _collaboration_timestamp(
+                turn.started_at_utc,
+                f"turn {turn.codex_turn_id} start time",
+            )
+            <= linked_at
+            and (
+                turn.terminal_at_utc is None
+                or linked_at
+                <= _collaboration_timestamp(
+                    turn.terminal_at_utc,
+                    f"turn {turn.codex_turn_id} terminal time",
+                )
+            )
+        ]
+        if len(owners) != 1:
+            raise RodexAnalyticsError(
+                "verified sub-agent must belong to exactly one direct-parent turn: "
+                f"{child.codex_thread_id}"
+            )
+        owner = owners[0]
+        spawning_turn_id_by_child_thread[child.codex_thread_id] = owner.codex_turn_id
+
+    children_started_by_turn: dict[tuple[CodexThreadId, str], int] = {}
+    for child in sources:
+        parent_thread_id = child.parent_codex_thread_id
+        if parent_thread_id is None:
+            continue
+        spawning_turn_id = spawning_turn_id_by_child_thread[child.codex_thread_id]
+        spawning_turn_key = (parent_thread_id, spawning_turn_id)
+        children_started_by_turn[spawning_turn_key] = (
+            children_started_by_turn.get(spawning_turn_key, 0) + 1
+        )
+
+    projected_turns = tuple(
+        _derive_verified_turn_collaboration(
+            turn,
+            agents_started=children_started_by_turn.get(
+                (turn.codex_thread_id, turn.codex_turn_id), 0
+            ),
+        )
+        for turn in projection.turn_statistics
+    )
+    by_tool = _canonical_collaboration_counts(projection.named_counts)
+    turn_by_tool: dict[str, int] = {}
+    for turn in projected_turns:
+        for item in turn.named_counts:
+            if item.count_kind != "collaboration_tool":
+                continue
+            turn_by_tool[item.count_name] = (
+                turn_by_tool.get(item.count_name, 0) + item.occurrence_count
+            )
+    aggregate_by_tool = {item.count_name: item.occurrence_count for item in by_tool}
+    if turn_by_tool != aggregate_by_tool:
+        raise RodexAnalyticsError(
+            "aggregate collaboration tools disagree with exact-turn model tools"
+        )
+    descendant_count = sum(item.parent_codex_thread_id is not None for item in sources)
+    if sum(children_started_by_turn.values()) != descendant_count:
+        raise RodexAnalyticsError(
+            "verified sub-agent count disagrees with exact-turn ownership"
+        )
+    named_counts = _replace_collaboration_counts(projection.named_counts, by_tool)
+    return VerifiedCollaborationProjection(
+        statistics_projection=replace(
+            projection,
+            collaboration_operations_count=sum(
+                item.occurrence_count for item in by_tool
+            ),
+            collaboration_agents_started_count=descendant_count,
+            named_counts=named_counts,
+            turn_statistics=projected_turns,
+        ),
+        analyzed_sources=tuple(
+            replace(
+                source,
+                spawning_codex_turn_id=spawning_turn_id_by_child_thread.get(
+                    source.codex_thread_id
+                ),
+            )
+            for source in sources
+        ),
+    )
+
+
+def _derive_verified_turn_collaboration(
+    turn: TurnStatisticsProjection,
+    *,
+    agents_started: int,
+) -> TurnStatisticsProjection:
+    """Replace one analyzer turn's legacy collaboration view with canonical facts."""
+    by_tool = _canonical_collaboration_counts(turn.named_counts)
+    return replace(
+        turn,
+        collaboration_operations_count=sum(item.occurrence_count for item in by_tool),
+        collaboration_agents_started_count=agents_started,
+        named_counts=_replace_collaboration_counts(turn.named_counts, by_tool),
+    )
+
+
+def _canonical_collaboration_counts(
+    named_counts: Sequence[StatisticsNamedCount],
+) -> tuple[StatisticsNamedCount, ...]:
+    return tuple(
         StatisticsNamedCount(
             count_kind="collaboration_tool",
             count_name=item.count_name,
             occurrence_count=item.occurrence_count,
         )
-        for item in projection.named_counts
+        for item in named_counts
         if item.count_kind == "model_tool"
         and item.count_name in COLLABORATION_MODEL_TOOL_NAMES
     )
-    named_counts = (
+
+
+def _replace_collaboration_counts(
+    named_counts: Sequence[StatisticsNamedCount],
+    canonical_counts: Sequence[StatisticsNamedCount],
+) -> tuple[StatisticsNamedCount, ...]:
+    return (
         tuple(
             item
-            for item in projection.named_counts
+            for item in named_counts
             if item.count_kind != "collaboration_tool"
         )
-        + by_tool
+        + tuple(canonical_counts)
     )
-    return replace(
-        projection,
-        collaboration_operations_count=sum(item.occurrence_count for item in by_tool),
-        collaboration_agents_started_count=descendant_count,
-        named_counts=named_counts,
-    )
+
+
+def _collaboration_timestamp(value: str, description: str) -> datetime:
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except (TypeError, ValueError) as error:
+        raise RodexAnalyticsError(f"invalid {description}") from error
+    if parsed.tzinfo is None:
+        raise RodexAnalyticsError(f"invalid {description}")
+    return parsed.astimezone(UTC)
 
 
 def _copy_complete_rollout_prefix(
@@ -837,6 +985,7 @@ def _copy_complete_rollout_prefix(
             agent_path=verified.agent_path,
             agent_nickname=verified.agent_nickname,
             subagent_history_start_ordinal=(verified.subagent_history_start_ordinal),
+            spawning_codex_turn_id=None,
             first_linked_at_utc=verified.first_linked_at_utc,
             rollout_file_path=authenticated.path,
             analyzed_size_bytes=authenticated.analyzed_size_bytes,

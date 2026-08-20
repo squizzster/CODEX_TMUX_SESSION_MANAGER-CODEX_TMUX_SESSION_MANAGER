@@ -188,6 +188,7 @@ def _source_summary_as_dict(
         "agent_path": source.agent_path,
         "agent_nickname": source.agent_nickname,
         "subagent_history_start_ordinal": source.subagent_history_start_ordinal,
+        "spawning_codex_turn_id": source.spawning_codex_turn_id,
         "first_linked_at_utc": source.first_linked_at_utc,
         "lifecycle": {
             "turns_started": summary.turns_started_count,

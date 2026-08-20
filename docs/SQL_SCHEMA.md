@@ -64,8 +64,8 @@ Apply these standards to future schema decisions. These authorative standards ma
 - `rodex_sessions` contains one signed-BIGINT Rodex session ID, the two signed
   halves of the Codex session ID, and permanent/optional display-name links. The public Rodex
   session ID is always serialized as a 16-character lowercase hex string, never a JSON
-  number. This incompatible ALPHA schema generation is stored in `rodex-v8.sqlite3`;
-  Rodex leaves v7 and earlier generation files untouched and does not read or migrate
+  number. This incompatible ALPHA schema generation is stored in `rodex-v9.sqlite3`;
+  Rodex leaves v8 and earlier generation files untouched and does not read or migrate
   their schemas.
 - `rodex_runtime_instances` contains one signed-`BIGINT` random 64-bit `runtime_id` and
   its start time for a Rodex session. Unique indexes fence both session cardinality and
@@ -107,7 +107,14 @@ Apply these standards to future schema decisions. These authorative standards ma
   separate turn-scoped facts. Aggregate model and reasoning-effort maps are grouped from
   these exact relationships rather than stored as redundant named counts.
   `rodex_sessions_statistics_turn_named_counts` normalizes the remaining dynamic
-  category maps.
+  category maps. Canonical collaboration operations are model-tool facts, so neither
+  statistics table stores collaboration scalar columns or `collaboration_tool` named
+  counts; read views derive that vocabulary directly from the stored `model_tool` rows.
+- `rodex_sessions_statistics_subagent_spawns` records exactly one verified relationship
+  from each sub-agent source to its direct parent's spawning turn. Composite deferred
+  foreign keys bind the child source's stored parent, the spawning turn's owning source,
+  the Rodex session, and one publication sequence. The schema therefore cannot attach a
+  child to its own turn, an unrelated source's turn, or a turn from another publication.
 - `rodex_sessions_statistics_workers` is independent one-to-one health. Its bounded
   diagnostic code cannot contain free-form errors or paths. Failure never fabricates or
   overwrites a statistics snapshot.
@@ -122,8 +129,8 @@ Apply these standards to future schema decisions. These authorative standards ma
   source analysis.
 - Child rollout staging retains its own `session_meta` and records after
   `subagent_history_start_ordinal`; inherited parent history is excluded before analysis.
-  Collaboration operations derive from canonical model-tool counts, while verified child
-  source rows determine agents started.
+  Collaboration operations derive from canonical model-tool counts, while verified
+  spawn relationships determine agents started at session, source, and exact-turn scope.
 - Strict typed projection parsing rejects missing, unknown, or wrongly typed analyzer
   fields before SQL begins. Reads select root and child rows in one transaction; the CLI
   presentation layer can reconstruct every analyzer statistic without stored JSON.

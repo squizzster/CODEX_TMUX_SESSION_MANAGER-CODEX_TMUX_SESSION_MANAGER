@@ -14,6 +14,7 @@ from test_statistics_projection import _snapshot as analyzer_snapshot
 import rodex_registry.statistics as statistics_module
 from rodex.cli import RodexLaunchError, run
 from rodex_registry import (
+    COLLABORATION_MODEL_TOOL_NAMES,
     RodexSessionError,
     RodexSessionStatisticsConflictError,
     RodexSessionStatisticsSourceObservation,
@@ -28,6 +29,7 @@ from rodex_registry import (
     parse_session_statistics_snapshot,
     publish_rodex_session_statistics,
     read_rodex_session_statistics,
+    read_rodex_session_statistics_source_summaries,
     read_rodex_session_turn_statistics,
     record_a_rodex_session_runtime_resume,
     record_rodex_session_statistics_worker_health,
@@ -53,12 +55,41 @@ def _observation(root: Path, codex_session_id: uuid.UUID, marker: str = "a"):
     path = (root / f"rollout-{codex_session_id}.jsonl").resolve()
     content = marker.encode()
     return RodexSessionStatisticsSourceObservation(
-        codex_session_id=codex_session_id,
+        codex_thread_id=codex_session_id,
+        source_kind="root",
+        parent_codex_thread_id=None,
+        thread_depth=0,
+        agent_path=None,
+        agent_nickname=None,
+        subagent_history_start_ordinal=None,
+        spawning_codex_turn_id=None,
+        first_linked_at_utc="2026-08-16T12:00:00Z",
         rollout_file_path=path,
         analyzed_size_bytes=len(content),
         analyzed_mtime_ns=123,
         analyzed_prefix_sha256=hashlib.sha256(content).hexdigest(),
         verified_at_utc="2026-08-16T12:00:00Z",
+    )
+
+
+def _child_observation(root: Path, child_thread_id: uuid.UUID):
+    path = (root / f"rollout-{child_thread_id}.jsonl").resolve()
+    content = b"child"
+    return RodexSessionStatisticsSourceObservation(
+        codex_thread_id=child_thread_id,
+        source_kind="subagent",
+        parent_codex_thread_id=CODEX_SESSION_ID,
+        thread_depth=1,
+        agent_path="/root/review",
+        agent_nickname="Curie",
+        subagent_history_start_ordinal=12,
+        spawning_codex_turn_id="root",
+        first_linked_at_utc="2026-08-16T12:01:00Z",
+        rollout_file_path=path,
+        analyzed_size_bytes=len(content),
+        analyzed_mtime_ns=456,
+        analyzed_prefix_sha256=hashlib.sha256(content).hexdigest(),
+        verified_at_utc="2026-08-16T12:01:01Z",
     )
 
 
@@ -77,7 +108,7 @@ def _turn(
     base = _base_projection().turn_statistics[0]
     return replace(
         base,
-        codex_session_id=codex_session_id,
+        codex_thread_id=codex_session_id,
         codex_turn_id=turn_id,
         outcome=outcome,
         terminal_at_utc=terminal_at,
@@ -89,7 +120,8 @@ def _projection(
     turns: tuple[TurnStatisticsProjection, ...] | None = None,
 ) -> SessionStatisticsProjection:
     base = _base_projection()
-    selected = base.turn_statistics if turns is None else turns
+    selected_input = base.turn_statistics if turns is None else turns
+    selected = tuple(_canonical_turn_collaboration(turn) for turn in selected_input)
     completed = sum(turn.outcome == "completed" for turn in selected)
     aborted = sum(turn.outcome == "aborted" for turn in selected)
     open_turns = sum(turn.outcome == "open" for turn in selected)
@@ -117,6 +149,22 @@ def _projection(
             )
         ),
     )
+    model_tool_counts = Counter(
+        item.count_name
+        for turn in selected
+        for item in turn.named_counts
+        if item.count_kind == "model_tool"
+        for _occurrence in range(item.occurrence_count)
+    )
+    canonical_model_tool_counts = tuple(
+        StatisticsNamedCount("model_tool", name, count)
+        for name, count in sorted(model_tool_counts.items())
+    )
+    collaboration_tool_counts = tuple(
+        StatisticsNamedCount("collaboration_tool", name, count)
+        for name, count in sorted(model_tool_counts.items())
+        if name in COLLABORATION_MODEL_TOOL_NAMES
+    )
     return replace(
         base,
         turns_started_count=len(selected),
@@ -131,13 +179,47 @@ def _projection(
         turns_with_local_hour_count=hour_turns,
         busiest_local_hour=(selected[0].local_start_hour if hour_turns else None),
         turns_in_busiest_local_hour_count=hour_turns,
+        collaboration_operations_count=sum(
+            item.occurrence_count for item in collaboration_tool_counts
+        ),
+        collaboration_agents_started_count=0,
         named_counts=tuple(
             count
             for count in base.named_counts
-            if count.count_kind not in {"model", "reasoning_effort"}
+            if count.count_kind
+            not in {
+                "model",
+                "reasoning_effort",
+                "model_tool",
+                "collaboration_tool",
+            }
         )
-        + lookup_counts,
+        + lookup_counts
+        + canonical_model_tool_counts
+        + collaboration_tool_counts,
         turn_statistics=selected,
+    )
+
+
+def _canonical_turn_collaboration(
+    turn: TurnStatisticsProjection,
+) -> TurnStatisticsProjection:
+    collaboration_counts = tuple(
+        StatisticsNamedCount("collaboration_tool", item.count_name, item.occurrence_count)
+        for item in turn.named_counts
+        if item.count_kind == "model_tool"
+        and item.count_name in COLLABORATION_MODEL_TOOL_NAMES
+    )
+    return replace(
+        turn,
+        collaboration_operations_count=sum(
+            item.occurrence_count for item in collaboration_counts
+        ),
+        collaboration_agents_started_count=0,
+        named_counts=tuple(
+            item for item in turn.named_counts if item.count_kind != "collaboration_tool"
+        )
+        + collaboration_counts,
     )
 
 
@@ -186,6 +268,7 @@ def test_schema_is_relational_queryable_and_contains_no_json_columns(
         "rodex_sessions_statistics_audit_limits",
         "rodex_sessions_statistics_sources",
         "rodex_sessions_statistics_turns",
+        "rodex_sessions_statistics_subagent_spawns",
         "rodex_sessions_statistics_turn_named_counts",
         "rodex_sessions_statistics_workers",
     )
@@ -197,9 +280,23 @@ def test_schema_is_relational_queryable_and_contains_no_json_columns(
     assert "total_tokens" in all_columns["rodex_sessions_statistics_turns"]
     assert "statistics_publication_sequence" in all_columns["rodex_sessions_statistics"]
     assert "statistics_revision" not in all_columns["rodex_sessions_statistics"]
-    for child_table in table_names[3:9]:
+    for child_table in table_names[3:10]:
         assert "included_statistics_publication_sequence" in all_columns[child_table]
         assert "included_statistics_revision" not in all_columns[child_table]
+    for statistics_table in (
+        "rodex_sessions_statistics",
+        "rodex_sessions_statistics_turns",
+    ):
+        assert "collaboration_operations_count" not in all_columns[statistics_table]
+        assert "collaboration_agents_started_count" not in all_columns[statistics_table]
+    assert all_columns["rodex_sessions_statistics_subagent_spawns"] == [
+        "id",
+        "rodex_sessions_id",
+        "subagent_rodex_sessions_statistics_sources_id",
+        "parent_rodex_sessions_statistics_sources_id",
+        "spawning_rodex_sessions_statistics_turns_id",
+        "included_statistics_publication_sequence",
+    ]
     assert all_columns["model_names"] == ["id", "name_of_the_model"]
     assert all_columns["reasoning_effort_names"] == [
         "id",
@@ -374,7 +471,7 @@ def test_statistics_reader_does_not_coerce_corrupt_source_identity(
         connection.execute("PRAGMA ignore_check_constraints = ON")
         connection.execute(
             "UPDATE rodex_sessions_statistics_sources "
-            "SET codex_session_id_signed_bigint_1 = 1.5"
+            "SET codex_thread_id_signed_bigint_1 = 1.5"
         )
 
     with pytest.raises(ValueError, match="signed 64-bit"):
@@ -406,6 +503,160 @@ def test_sql_can_sum_group_and_filter_base_statistics(tmp_path: Path) -> None:
             "WHERE count_kind = 'model_tool'"
         ).fetchone()[0]
         assert tool_total == 4
+
+
+def test_source_id_groups_subagent_lifecycle_and_resource_totals(tmp_path: Path) -> None:
+    database = tmp_path / "rodex.sqlite3"
+    child_thread_id = uuid.UUID(int=CODEX_SESSION_ID.int + 100)
+    create_a_rodex_session(database, codex_session_id=CODEX_SESSION_ID)
+    turns = (
+        _turn("root", total_tokens=40),
+        _turn("child-a", codex_session_id=child_thread_id, total_tokens=60),
+        _turn(
+            "child-b",
+            codex_session_id=child_thread_id,
+            total_tokens=20,
+            outcome="aborted",
+        ),
+    )
+    canonical_projection = _projection(turns)
+    projection = replace(
+        canonical_projection,
+        analyzer_source_count=2,
+        history_sessions_count=2,
+        collaboration_agents_started_count=1,
+        turn_statistics=(
+            replace(
+                canonical_projection.turn_statistics[0],
+                collaboration_agents_started_count=1,
+            ),
+            *canonical_projection.turn_statistics[1:],
+        ),
+    )
+
+    publish_rodex_session_statistics(
+        1,
+        database,
+        expected_current_codex_session_id=CODEX_SESSION_ID,
+        based_on_statistics_publication_sequence=None,
+        statistics_projection_schema_version="rodex-statistics-v6",
+        calculated_at_utc="2026-08-16T12:02:00Z",
+        coverage_state="complete",
+        statistics_projection=projection,
+        analyzed_sources=(
+            _observation(tmp_path, CODEX_SESSION_ID),
+            _child_observation(tmp_path, child_thread_id),
+        ),
+    )
+
+    root, child = read_rodex_session_statistics_source_summaries(
+        1, database, expected_statistics_publication_sequence=1
+    )
+    assert child.source.parent_rodex_sessions_statistics_sources_id == root.source.id
+    assert child.turns_started_count == 2
+    assert child.turns_completed_count == 1
+    assert child.turns_aborted_count == 1
+    assert child.total_tokens == 80
+    assert child.web_queries_count == 2
+    assert child.source.spawning_codex_turn_id == "root"
+    with sqlite3.connect(database) as connection:
+        spawn = connection.execute(
+            "SELECT child.codex_thread_id_signed_bigint_1, "
+            "parent.codex_thread_id_signed_bigint_1, spawning_turn.codex_turn_id "
+            "FROM rodex_sessions_statistics_subagent_spawns AS spawns "
+            "JOIN rodex_sessions_statistics_sources AS child "
+            "ON child.id = spawns.subagent_rodex_sessions_statistics_sources_id "
+            "JOIN rodex_sessions_statistics_sources AS parent "
+            "ON parent.id = spawns.parent_rodex_sessions_statistics_sources_id "
+            "JOIN rodex_sessions_statistics_turns AS spawning_turn "
+            "ON spawning_turn.id = "
+            "spawns.spawning_rodex_sessions_statistics_turns_id"
+        ).fetchone()
+        assert spawn is not None and spawn[2] == "root"
+        assert connection.execute(
+            "SELECT COUNT(*) FROM rodex_sessions_statistics_named_counts "
+            "WHERE count_kind = 'collaboration_tool'"
+        ).fetchone() == (0,)
+        assert connection.execute(
+            "SELECT COUNT(*) FROM rodex_sessions_statistics_turn_named_counts "
+            "WHERE count_kind = 'collaboration_tool'"
+        ).fetchone() == (0,)
+    with pytest.raises(
+        RodexSessionStatisticsConflictError,
+        match="omit a registered Codex thread source",
+    ):
+        publish_rodex_session_statistics(
+            1,
+            database,
+            expected_current_codex_session_id=CODEX_SESSION_ID,
+            based_on_statistics_publication_sequence=1,
+            statistics_projection_schema_version="rodex-statistics-v6",
+            calculated_at_utc="2026-08-16T12:03:00Z",
+            coverage_state="complete",
+            statistics_projection=replace(
+                _projection((_turn("root"),)), analyzer_source_count=1
+            ),
+            analyzed_sources=(_observation(tmp_path, CODEX_SESSION_ID),),
+        )
+
+
+def test_exact_spawning_turn_is_derived_from_model_tools_and_spawn_relation(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "rodex.sqlite3"
+    child_thread_id = uuid.UUID(int=CODEX_SESSION_ID.int + 100)
+    create_a_rodex_session(database, codex_session_id=CODEX_SESSION_ID)
+    base_turn = _turn("root")
+    raw_turn = replace(
+        base_turn,
+        named_counts=(
+            *(
+                item
+                for item in base_turn.named_counts
+                if item.count_kind not in {"model_tool", "collaboration_tool"}
+            ),
+            StatisticsNamedCount("model_tool", "spawn_agent", 1),
+            StatisticsNamedCount("model_tool", "list_agents", 1),
+            StatisticsNamedCount("model_tool", "wait_agent", 2),
+        ),
+    )
+    canonical_projection = _projection((raw_turn,))
+    projection = replace(
+        canonical_projection,
+        analyzer_source_count=2,
+        history_sessions_count=2,
+        collaboration_agents_started_count=1,
+        turn_statistics=(
+            replace(
+                canonical_projection.turn_statistics[0],
+                collaboration_agents_started_count=1,
+            ),
+        ),
+    )
+    publish_rodex_session_statistics(
+        1,
+        database,
+        expected_current_codex_session_id=CODEX_SESSION_ID,
+        based_on_statistics_publication_sequence=None,
+        statistics_projection_schema_version="rodex-statistics-v6",
+        calculated_at_utc="2026-08-16T12:02:00Z",
+        coverage_state="complete",
+        statistics_projection=projection,
+        analyzed_sources=(
+            _observation(tmp_path, CODEX_SESSION_ID),
+            _child_observation(tmp_path, child_thread_id),
+        ),
+    )
+
+    exact = read_rodex_session_turn_statistics(1, "root", database)
+    assert exact.turn is not None
+    assert exact.turn.projection.collaboration_operations_count == 4
+    assert exact.turn.projection.collaboration_agents_started_count == 1
+    assert {
+        item.count_name: item.occurrence_count
+        for item in exact.turn.projection.named_counts
+        if item.count_kind == "collaboration_tool"
+    } == {"list_agents": 1, "spawn_agent": 1, "wait_agent": 2}
 
 
 def test_publication_sequence_mark_and_sweep_preserves_identity_and_replaces_children(
@@ -525,7 +776,7 @@ def test_same_turn_id_in_two_sources_requires_exact_source(tmp_path: Path) -> No
     with pytest.raises(RodexSessionTurnStatisticsAmbiguousError):
         read_rodex_session_turn_statistics(1, "shared", database)
     exact = read_rodex_session_turn_statistics(
-        1, "shared", database, codex_session_id=REPLACEMENT_CODEX_SESSION_ID
+        1, "shared", database, codex_thread_id=REPLACEMENT_CODEX_SESSION_ID
     ).turn
     assert exact is not None and exact.projection.total_tokens == 20
 
@@ -701,6 +952,12 @@ def test_cli_reconstructs_json_from_sql_without_runtime_dependencies(
         "models": {"gpt-test": 1},
         "reasoning_efforts": {"xhigh": 1},
     }
+    assert aggregate["registered_thread_count"] == 1
+    assert aggregate["included_thread_count"] == 1
+    assert aggregate["threads"][0]["rodex_sessions_statistics_sources_id"] == 1
+    assert aggregate["threads"][0]["source_kind"] == "root"
+    assert aggregate["threads"][0]["lifecycle"]["turns_started"] == 1
+    assert aggregate["threads"][0]["token_usage"]["total_tokens"] == 42
     assert (
         run(
             ["_stats", created.cool_name, "--turn", "turn-exact", "--json"],
@@ -751,7 +1008,7 @@ def test_historical_source_cannot_move_to_another_lineage(tmp_path: Path) -> Non
     with pytest.raises(RodexSessionError, match="statistics lineage"):
         create_a_rodex_session(database, codex_session_id=CODEX_SESSION_ID)
     assert [
-        item.codex_session_id for item in list_rodex_session_statistics_sources(1, database)
+        item.codex_thread_id for item in list_rodex_session_statistics_sources(1, database)
     ] == [CODEX_SESSION_ID, REPLACEMENT_CODEX_SESSION_ID]
 
 

@@ -13,7 +13,7 @@ from typing import Final
 
 SQLValue = int | float | str | bytes | None
 _SQL_IDENTIFIER = re.compile(r"^[a-z][a-z0-9_]*$")
-RODEX_DATABASE_SCHEMA_GENERATION: Final = 7
+RODEX_DATABASE_SCHEMA_GENERATION: Final = 9
 RODEX_DATABASE_FILENAME: Final = f"rodex-v{RODEX_DATABASE_SCHEMA_GENERATION}.sqlite3"
 
 

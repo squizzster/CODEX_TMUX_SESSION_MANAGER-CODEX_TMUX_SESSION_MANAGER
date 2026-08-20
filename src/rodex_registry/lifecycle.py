@@ -49,7 +49,7 @@ from .schema import (
     existing_rodex_database_path,
     initialise_rodex_database,
 )
-from .statistics import register_codex_statistics_source_in_transaction
+from .statistics import register_codex_root_statistics_source_in_transaction
 from .validation import (
     _normalise_utc_datetime,
     _utc_now_timestamp,
@@ -267,7 +267,7 @@ def create_a_rodex_session(
                     created_at_utc,
                 ),
             )
-            register_codex_statistics_source_in_transaction(
+            register_codex_root_statistics_source_in_transaction(
                 connection,
                 session.rodex_sessions_id,
                 parsed_codex_session_id,
@@ -524,7 +524,7 @@ def record_a_rodex_session_runtime_resume(
             )
             if codex_cursor.rowcount != 1:
                 raise RodexSessionError(f"Rodex session does not exist: {session_id}")
-            register_codex_statistics_source_in_transaction(
+            register_codex_root_statistics_source_in_transaction(
                 connection,
                 session_id,
                 parsed_codex_session_id,

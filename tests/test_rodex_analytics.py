@@ -19,11 +19,16 @@ from rodex.analytics import (
     AnalyticsSubprocessSupervisor,
     CodexProtocolAnalyticsAdapter,
     RodexAnalyticsError,
+    _derive_verified_collaboration_projection,
     locate_verified_rollout,
 )
 from rodex.process_contracts import AnalyticsWorkerConfig
 from rodex_registry import (
     RodexSessionId,
+    RodexSessionStatisticsSourceObservation,
+    SessionStatisticsProjection,
+    StatisticsNamedCount,
+    TurnStatisticsProjection,
     create_a_rodex_session,
     list_rodex_session_statistics_sources,
     parse_session_statistics_snapshot,
@@ -110,7 +115,12 @@ def _rollout(root: Path, codex_session_id: uuid.UUID) -> Path:
         {
             "timestamp": "2026-08-16T12:00:00Z",
             "type": "session_meta",
-            "payload": {"id": str(codex_session_id)},
+            "payload": {
+                "session_id": str(codex_session_id),
+                "id": str(codex_session_id),
+                "timestamp": "2026-08-16T12:00:00Z",
+                "thread_source": "user",
+            },
         },
         {
             "timestamp": "2026-08-16T12:00:01Z",
@@ -138,6 +148,47 @@ def _rollout(root: Path, codex_session_id: uuid.UUID) -> Path:
     return path
 
 
+def _subagent_rollout(
+    root: Path,
+    root_thread_id: uuid.UUID,
+    child_thread_id: uuid.UUID,
+) -> Path:
+    path = root / "2026" / "08" / "16" / f"rollout-child-{child_thread_id}.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    spawn = {
+        "parent_thread_id": str(root_thread_id),
+        "depth": 1,
+        "agent_path": "/root/review",
+        "agent_nickname": "Curie",
+    }
+    records = [
+        {
+            "timestamp": "2026-08-16T12:00:00.500000Z",
+            "ordinal": 0,
+            "type": "session_meta",
+            "payload": {
+                "session_id": str(root_thread_id),
+                "id": str(child_thread_id),
+                "forked_from_id": str(root_thread_id),
+                "parent_thread_id": str(root_thread_id),
+                "timestamp": "2026-08-16T12:00:00.500000Z",
+                "source": {"subagent": {"thread_spawn": spawn}},
+                "thread_source": "subagent",
+                "agent_path": "/root/review",
+                "agent_nickname": "Curie",
+                "subagent_history_start_ordinal": 2,
+            },
+        },
+        {"ordinal": 1, "type": "event_msg", "payload": {"inherited": True}},
+        {"ordinal": 2, "type": "event_msg", "payload": {"inherited": True}},
+        {"ordinal": 3, "type": "event_msg", "payload": {"child": True}},
+    ]
+    path.write_text(
+        "".join(json.dumps(record) + "\n" for record in records), encoding="utf-8"
+    )
+    return path
+
+
 def _config(tmp_path: Path) -> AnalyticsWorkerConfig:
     return AnalyticsWorkerConfig(
         rodex_database_path=tmp_path / "rodex.sqlite3",
@@ -154,6 +205,282 @@ def _create(
         rodex_session_id=RODEX_SESSION_ID,
         codex_session_id=codex_session_id,
     )
+
+
+def _collaboration_source(
+    tmp_path: Path,
+    thread_id: uuid.UUID,
+    *,
+    linked_at_utc: str,
+    parent_thread_id: uuid.UUID | None = None,
+    depth: int = 0,
+) -> RodexSessionStatisticsSourceObservation:
+    is_subagent = parent_thread_id is not None
+    return RodexSessionStatisticsSourceObservation(
+        codex_thread_id=thread_id,
+        source_kind="subagent" if is_subagent else "root",
+        parent_codex_thread_id=parent_thread_id,
+        thread_depth=depth,
+        agent_path=f"/root/agent-{depth}" if is_subagent else None,
+        agent_nickname=f"Agent-{depth}" if is_subagent else None,
+        subagent_history_start_ordinal=0 if is_subagent else None,
+        spawning_codex_turn_id=None,
+        first_linked_at_utc=linked_at_utc,
+        rollout_file_path=(tmp_path / f"{thread_id}.jsonl").resolve(),
+        analyzed_size_bytes=1,
+        analyzed_mtime_ns=1,
+        analyzed_prefix_sha256="0" * 64,
+        verified_at_utc=linked_at_utc,
+    )
+
+
+def _collaboration_turn(
+    thread_id: uuid.UUID,
+    turn_id: str,
+    *,
+    started_at_utc: str,
+    terminal_at_utc: str | None,
+    model_tools: tuple[tuple[str, int], ...] = (),
+) -> TurnStatisticsProjection:
+    base = parse_session_statistics_snapshot(analyzer_snapshot()).turn_statistics[0]
+    legacy_collaboration_count = (StatisticsNamedCount("collaboration_tool", "wait", 2),)
+    return replace(
+        base,
+        codex_thread_id=thread_id,
+        codex_turn_id=turn_id,
+        started_at_utc=started_at_utc,
+        terminal_at_utc=terminal_at_utc,
+        outcome="open" if terminal_at_utc is None else "completed",
+        collaboration_operations_count=2,
+        collaboration_agents_started_count=0,
+        named_counts=tuple(
+            item
+            for item in base.named_counts
+            if item.count_kind not in {"model_tool", "collaboration_tool"}
+        )
+        + tuple(
+            StatisticsNamedCount("model_tool", tool_name, count)
+            for tool_name, count in model_tools
+        )
+        + legacy_collaboration_count,
+    )
+
+
+def _collaboration_projection(
+    turns: tuple[TurnStatisticsProjection, ...],
+) -> SessionStatisticsProjection:
+    base = parse_session_statistics_snapshot(analyzer_snapshot())
+    model_tools: dict[str, int] = {}
+    for turn in turns:
+        for item in turn.named_counts:
+            if item.count_kind == "model_tool":
+                model_tools[item.count_name] = (
+                    model_tools.get(item.count_name, 0) + item.occurrence_count
+                )
+    return replace(
+        base,
+        named_counts=tuple(
+            item
+            for item in base.named_counts
+            if item.count_kind not in {"model_tool", "collaboration_tool"}
+        )
+        + tuple(
+            StatisticsNamedCount("model_tool", tool_name, count)
+            for tool_name, count in sorted(model_tools.items())
+        )
+        + (StatisticsNamedCount("collaboration_tool", "wait", 2),),
+        turn_statistics=turns,
+    )
+
+
+def test_verified_collaboration_replaces_legacy_spawning_turn_counts(
+    tmp_path: Path,
+) -> None:
+    child_thread_id = uuid.UUID(int=CODEX_SESSION_ID.int + 100)
+    raw_turn = _collaboration_turn(
+        CODEX_SESSION_ID,
+        "spawning-turn",
+        started_at_utc="2026-08-16T12:00:00Z",
+        terminal_at_utc="2026-08-16T12:00:01Z",
+        model_tools=(("spawn_agent", 1), ("list_agents", 1), ("wait_agent", 2)),
+    )
+    verified = _derive_verified_collaboration_projection(
+        _collaboration_projection((raw_turn,)),
+        analyzed_sources=(
+            _collaboration_source(
+                tmp_path,
+                CODEX_SESSION_ID,
+                linked_at_utc="2026-08-16T12:00:00Z",
+            ),
+            _collaboration_source(
+                tmp_path,
+                child_thread_id,
+                parent_thread_id=CODEX_SESSION_ID,
+                depth=1,
+                linked_at_utc="2026-08-16T12:00:00.500000Z",
+            ),
+        ),
+    )
+
+    projection = verified.statistics_projection
+    assert projection.collaboration_operations_count == 4
+    assert projection.collaboration_agents_started_count == 1
+    assert projection.turn_statistics[0].collaboration_operations_count == 4
+    assert projection.turn_statistics[0].collaboration_agents_started_count == 1
+    assert {
+        item.count_name: item.occurrence_count
+        for item in projection.turn_statistics[0].named_counts
+        if item.count_kind == "collaboration_tool"
+    } == {"spawn_agent": 1, "list_agents": 1, "wait_agent": 2}
+    assert verified.analyzed_sources[1].spawning_codex_turn_id == "spawning-turn"
+
+
+def test_verified_collaboration_owns_multiple_and_nested_subagents(
+    tmp_path: Path,
+) -> None:
+    child_thread_id = uuid.UUID(int=CODEX_SESSION_ID.int + 100)
+    sibling_thread_id = uuid.UUID(int=CODEX_SESSION_ID.int + 101)
+    grandchild_thread_id = uuid.UUID(int=CODEX_SESSION_ID.int + 102)
+    root_turn = _collaboration_turn(
+        CODEX_SESSION_ID,
+        "root-spawn",
+        started_at_utc="2026-08-16T12:00:00Z",
+        terminal_at_utc=None,
+        model_tools=(("spawn_agent", 2),),
+    )
+    child_turn = _collaboration_turn(
+        child_thread_id,
+        "child-spawn",
+        started_at_utc="2026-08-16T12:01:00Z",
+        terminal_at_utc="2026-08-16T12:02:00Z",
+        model_tools=(("spawn_agent", 1),),
+    )
+    verified = _derive_verified_collaboration_projection(
+        _collaboration_projection((root_turn, child_turn)),
+        analyzed_sources=(
+            _collaboration_source(
+                tmp_path,
+                CODEX_SESSION_ID,
+                linked_at_utc="2026-08-16T12:00:00Z",
+            ),
+            _collaboration_source(
+                tmp_path,
+                child_thread_id,
+                parent_thread_id=CODEX_SESSION_ID,
+                depth=1,
+                linked_at_utc="2026-08-16T12:00:01Z",
+            ),
+            _collaboration_source(
+                tmp_path,
+                sibling_thread_id,
+                parent_thread_id=CODEX_SESSION_ID,
+                depth=1,
+                linked_at_utc="2026-08-16T12:00:02Z",
+            ),
+            _collaboration_source(
+                tmp_path,
+                grandchild_thread_id,
+                parent_thread_id=child_thread_id,
+                depth=2,
+                linked_at_utc="2026-08-16T12:01:30Z",
+            ),
+        ),
+    )
+
+    assert verified.statistics_projection.collaboration_agents_started_count == 3
+    assert [
+        turn.collaboration_agents_started_count
+        for turn in verified.statistics_projection.turn_statistics
+    ] == [2, 1]
+    assert [source.spawning_codex_turn_id for source in verified.analyzed_sources[1:]] == [
+        "root-spawn",
+        "root-spawn",
+        "child-spawn",
+    ]
+
+
+@pytest.mark.parametrize("terminal_at_utc", ["2026-08-16T12:00:01Z", None])
+def test_verified_collaboration_rejects_missing_or_ambiguous_turn_ownership(
+    tmp_path: Path,
+    terminal_at_utc: str | None,
+) -> None:
+    child_thread_id = uuid.UUID(int=CODEX_SESSION_ID.int + 100)
+    turns = (
+        _collaboration_turn(
+            CODEX_SESSION_ID,
+            "first",
+            started_at_utc="2026-08-16T12:00:00Z",
+            terminal_at_utc=terminal_at_utc,
+            model_tools=(("spawn_agent", 1),),
+        ),
+    )
+    if terminal_at_utc is None:
+        turns += (
+            _collaboration_turn(
+                CODEX_SESSION_ID,
+                "overlap",
+                started_at_utc="2026-08-16T12:00:00Z",
+                terminal_at_utc=None,
+            ),
+        )
+    sources = (
+        _collaboration_source(
+            tmp_path,
+            CODEX_SESSION_ID,
+            linked_at_utc="2026-08-16T12:00:00Z",
+        ),
+        _collaboration_source(
+            tmp_path,
+            child_thread_id,
+            parent_thread_id=CODEX_SESSION_ID,
+            depth=1,
+            linked_at_utc="2026-08-16T12:00:02Z",
+        ),
+    )
+
+    with pytest.raises(
+        RodexAnalyticsError,
+        match="must belong to exactly one direct-parent turn",
+    ):
+        _derive_verified_collaboration_projection(
+            _collaboration_projection(turns), analyzed_sources=sources
+        )
+
+
+def test_verified_collaboration_rejects_session_and_turn_tool_disagreement(
+    tmp_path: Path,
+) -> None:
+    turn = _collaboration_turn(
+        CODEX_SESSION_ID,
+        "turn",
+        started_at_utc="2026-08-16T12:00:00Z",
+        terminal_at_utc="2026-08-16T12:00:01Z",
+        model_tools=(("wait_agent", 1),),
+    )
+    projection = _collaboration_projection((turn,))
+    projection = replace(
+        projection,
+        named_counts=tuple(
+            item
+            for item in projection.named_counts
+            if not (item.count_kind == "model_tool" and item.count_name == "wait_agent")
+        ),
+    )
+
+    with pytest.raises(
+        RodexAnalyticsError,
+        match="aggregate collaboration tools disagree",
+    ):
+        _derive_verified_collaboration_projection(
+            projection,
+            analyzed_sources=(
+                _collaboration_source(
+                    tmp_path,
+                    CODEX_SESSION_ID,
+                    linked_at_utc="2026-08-16T12:00:00Z",
+                ),
+            ),
+        )
 
 
 @pytest.mark.evolutionary_regression
@@ -232,9 +559,38 @@ def test_worker_backfills_verified_rollout_and_projects_only_aggregates(
     assert adapter.analyses[0][0] == (rollout.read_bytes(),)
     assert adapter.analyses[0][1].startswith("posix:")
     source = list_rodex_session_statistics_sources(1, config.rodex_database_path)[0]
-    assert source.codex_session_id == CODEX_SESSION_ID
+    assert source.codex_thread_id == CODEX_SESSION_ID
     assert source.rollout_file_path == str(rollout.resolve())
     assert source.analyzed_prefix_sha256 is not None
+
+
+def test_worker_discovers_subagent_and_removes_inherited_parent_history(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    _rollout(config.codex_sessions_root, CODEX_SESSION_ID)
+    child_thread_id = uuid.UUID(int=CODEX_SESSION_ID.int + 100)
+    _subagent_rollout(config.codex_sessions_root, CODEX_SESSION_ID, child_thread_id)
+    _create(config)
+    adapter = FakeAnalyticsAdapter()
+
+    assert (
+        AnalyticsRolloutWorker(config, adapter_factory=lambda: adapter).poll_once()
+        == "up_to_date"
+    )
+
+    analyzed = adapter.analyses[0][0]
+    assert len(analyzed) == 2
+    child_records = [json.loads(line) for line in analyzed[1].splitlines()]
+    assert [record.get("ordinal") for record in child_records] == [0, 3]
+    view = read_rodex_session_statistics(1, config.rodex_database_path)
+    assert view.statistics is not None
+    assert view.statistics.projection.collaboration_agents_started_count == 1
+    root, child = sorted(view.sources, key=lambda source: source.thread_depth)
+    assert child.codex_thread_id == child_thread_id
+    assert child.parent_rodex_sessions_statistics_sources_id == root.id
+    assert child.agent_path == "/root/review"
+    assert child.subagent_history_start_ordinal == 2
     view = read_rodex_session_statistics(1, config.rodex_database_path)
     assert view.statistics is not None
     assert view.statistics.statistics_publication_sequence == 1
@@ -341,7 +697,7 @@ def test_replacement_retains_old_source_and_analyzes_full_history(
 
     assert adapter.analyses[-1][0] == (first.read_bytes(), replacement.read_bytes())
     sources = list_rodex_session_statistics_sources(1, config.rodex_database_path)
-    assert [source.codex_session_id for source in sources] == [
+    assert [source.codex_thread_id for source in sources] == [
         CODEX_SESSION_ID,
         REPLACEMENT_CODEX_SESSION_ID,
     ]
@@ -612,7 +968,7 @@ def test_real_adapter_uses_existing_in_memory_analyzer_api(tmp_path: Path) -> No
     assert calculation.statistics_projection.analyzer_source_count == 1
     assert len(calculation.statistics_projection.turn_statistics) == 1
     assert (
-        calculation.statistics_projection.turn_statistics[0].codex_session_id
+        calculation.statistics_projection.turn_statistics[0].codex_thread_id
         == CODEX_SESSION_ID
     )
     assert calculation.statistics_projection.turn_statistics[0].codex_turn_id == "turn-test"
@@ -631,11 +987,11 @@ def test_real_worker_publishes_exact_turn_projection_into_rodex_sql(
 
     exact = read_rodex_session_turn_statistics(1, "turn-test", config.rodex_database_path)
     assert exact.statistics is not None
-    assert exact.statistics.statistics_projection_schema_version == "rodex-statistics-v4"
+    assert exact.statistics.statistics_projection_schema_version == "rodex-statistics-v6"
     assert exact.worker is not None
     assert exact.worker.worker_state == "up_to_date"
     assert exact.turn is not None
-    assert exact.turn.codex_session_id == CODEX_SESSION_ID
+    assert exact.turn.codex_thread_id == CODEX_SESSION_ID
     assert (
         exact.turn.included_statistics_publication_sequence
         == exact.statistics.statistics_publication_sequence

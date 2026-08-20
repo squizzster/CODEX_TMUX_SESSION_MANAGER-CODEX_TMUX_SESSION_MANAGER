@@ -16,14 +16,20 @@ from rodex_registry.statistics_projection import (
 
 
 def test_scalar_layouts_follow_projection_field_order_without_parallel_lists() -> None:
-    session_structured = {
+    derived_collaboration = {
+        "collaboration_operations_count",
+        "collaboration_agents_started_count",
+    }
+    session_non_scalars = {
+        *derived_collaboration,
         "distributions",
         "named_counts",
         "audit_limits",
         "turn_statistics",
     }
-    turn_identity_and_structured = {
-        "codex_session_id",
+    turn_non_scalars = {
+        *derived_collaboration,
+        "codex_thread_id",
         "codex_turn_id",
         "started_at_utc",
         "terminal_at_utc",
@@ -36,12 +42,12 @@ def test_scalar_layouts_follow_projection_field_order_without_parallel_lists() -
     assert SESSION_STATISTICS_SCALARS.columns == tuple(
         field.name
         for field in fields(SessionStatisticsProjection)
-        if field.name not in session_structured
+        if field.name not in session_non_scalars
     )
     assert TURN_STATISTICS_SCALARS.columns == tuple(
         field.name
         for field in fields(TurnStatisticsProjection)
-        if field.name not in turn_identity_and_structured
+        if field.name not in turn_non_scalars
     )
 
 

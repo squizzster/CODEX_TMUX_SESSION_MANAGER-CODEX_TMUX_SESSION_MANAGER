@@ -77,13 +77,19 @@ RODEX_SESSIONS_STATISTICS_AUDIT_LIMITS_UNIQUE_INDEX: Final = (
 )
 RODEX_SESSIONS_STATISTICS_SOURCES_TABLE: Final = "rodex_sessions_statistics_sources"
 RODEX_SESSIONS_STATISTICS_SOURCES_UNIQUE_INDEX: Final = (
-    "rodex_sessions_statistics_sources_codex_session_id_unique"
+    "rodex_sessions_statistics_sources_codex_thread_id_unique"
 )
-RODEX_SESSIONS_STATISTICS_SOURCES_SESSION_INDEX: Final = (
-    "rodex_sessions_statistics_sources_session"
+RODEX_SESSIONS_STATISTICS_SOURCES_SESSION_ID_UNIQUE_INDEX: Final = (
+    "rodex_sessions_statistics_sources_session_id_unique"
+)
+RODEX_SESSIONS_STATISTICS_SOURCES_PARENT_INDEX: Final = (
+    "rodex_sessions_statistics_sources_parent"
 )
 RODEX_SESSIONS_STATISTICS_SOURCES_SESSION_ID_PUBLICATION_SEQUENCE_UNIQUE_INDEX: Final = (
     "rodex_sessions_statistics_sources_session_id_publication_sequence_unique"
+)
+RODEX_SESSIONS_STATISTICS_SOURCES_HIERARCHY_PUBLICATION_UNIQUE_INDEX: Final = (
+    "rodex_sessions_statistics_sources_hierarchy_publication_unique"
 )
 RODEX_SESSIONS_STATISTICS_TURNS_TABLE: Final = "rodex_sessions_statistics_turns"
 RODEX_SESSIONS_STATISTICS_TURNS_SOURCE_TURN_UNIQUE_INDEX: Final = (
@@ -94,6 +100,18 @@ RODEX_SESSIONS_STATISTICS_TURNS_SESSION_TURN_INDEX: Final = (
 )
 RODEX_SESSIONS_STATISTICS_TURNS_SESSION_ID_PUBLICATION_SEQUENCE_UNIQUE_INDEX: Final = (
     "rodex_sessions_statistics_turns_session_id_publication_sequence_unique"
+)
+RODEX_SESSIONS_STATISTICS_TURNS_SOURCE_ID_PUBLICATION_SEQUENCE_UNIQUE_INDEX: Final = (
+    "rodex_sessions_statistics_turns_source_id_publication_sequence_unique"
+)
+RODEX_SESSIONS_STATISTICS_SUBAGENT_SPAWNS_TABLE: Final = (
+    "rodex_sessions_statistics_subagent_spawns"
+)
+RODEX_SESSIONS_STATISTICS_SUBAGENT_SPAWNS_SOURCE_UNIQUE_INDEX: Final = (
+    "rodex_sessions_statistics_subagent_spawns_source_unique"
+)
+RODEX_SESSIONS_STATISTICS_SUBAGENT_SPAWNS_TURN_INDEX: Final = (
+    "rodex_sessions_statistics_subagent_spawns_turn"
 )
 RODEX_SESSIONS_STATISTICS_TURN_NAMED_COUNTS_TABLE: Final = (
     "rodex_sessions_statistics_turn_named_counts"
@@ -307,12 +325,6 @@ CREATE TABLE IF NOT EXISTS {RODEX_SESSIONS_STATISTICS_TABLE} (
     web_distinct_result_or_action_urls_count INTEGER NOT NULL CHECK (
         web_distinct_result_or_action_urls_count >= 0
     ),
-    collaboration_operations_count INTEGER NOT NULL CHECK (
-        collaboration_operations_count >= 0
-    ),
-    collaboration_agents_started_count INTEGER NOT NULL CHECK (
-        collaboration_agents_started_count >= 0
-    ),
     compactions_count INTEGER NOT NULL CHECK (compactions_count >= 0),
     distinct_workspaces_count INTEGER NOT NULL CHECK (distinct_workspaces_count >= 0),
     typical_turns_count INTEGER NOT NULL CHECK (typical_turns_count >= 0),
@@ -477,7 +489,7 @@ CREATE TABLE IF NOT EXISTS {RODEX_SESSIONS_STATISTICS_NAMED_COUNTS_TABLE} (
     ),
     count_kind TEXT NOT NULL CHECK (count_kind IN (
         'command_exit_status', 'command_family', 'model_tool', 'file_change_type',
-        'web_action', 'collaboration_tool', 'goal_status'
+        'web_action', 'goal_status'
     )),
     count_name TEXT NOT NULL CHECK (length(count_name) > 0),
     occurrence_count INTEGER NOT NULL CHECK (occurrence_count > 0),
@@ -518,11 +530,18 @@ _CREATE_STATISTICS_SOURCES_TABLE = f"""
 CREATE TABLE IF NOT EXISTS {RODEX_SESSIONS_STATISTICS_SOURCES_TABLE} (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     rodex_sessions_id INTEGER NOT NULL,
-    codex_session_id_signed_bigint_1 BIGINT NOT NULL CHECK (
-        typeof(codex_session_id_signed_bigint_1) = 'integer'
+    codex_thread_id_signed_bigint_1 BIGINT NOT NULL CHECK (
+        typeof(codex_thread_id_signed_bigint_1) = 'integer'
     ),
-    codex_session_id_signed_bigint_2 BIGINT NOT NULL CHECK (
-        typeof(codex_session_id_signed_bigint_2) = 'integer'
+    codex_thread_id_signed_bigint_2 BIGINT NOT NULL CHECK (
+        typeof(codex_thread_id_signed_bigint_2) = 'integer'
+    ),
+    parent_rodex_sessions_statistics_sources_id INTEGER DEFAULT NULL,
+    agent_path TEXT DEFAULT NULL,
+    agent_nickname TEXT DEFAULT NULL,
+    subagent_history_start_ordinal INTEGER DEFAULT NULL CHECK (
+        subagent_history_start_ordinal IS NULL
+        OR subagent_history_start_ordinal >= 0
     ),
     first_linked_at_utc TEXT NOT NULL,
     rollout_file_path TEXT DEFAULT NULL,
@@ -553,7 +572,21 @@ CREATE TABLE IF NOT EXISTS {RODEX_SESSIONS_STATISTICS_SOURCES_TABLE} (
             AND analyzed_mtime_ns IS NOT NULL AND analyzed_prefix_sha256 IS NOT NULL
             AND verified_at_utc IS NOT NULL)
     ),
+    CHECK (
+        (parent_rodex_sessions_statistics_sources_id IS NULL
+            AND agent_path IS NULL
+            AND agent_nickname IS NULL
+            AND subagent_history_start_ordinal IS NULL)
+        OR
+        (parent_rodex_sessions_statistics_sources_id IS NOT NULL
+            AND agent_path IS NOT NULL
+            AND length(agent_path) > 0
+            AND subagent_history_start_ordinal IS NOT NULL)
+    ),
     FOREIGN KEY (rodex_sessions_id) REFERENCES {RODEX_SESSIONS_TABLE} (id),
+    FOREIGN KEY (rodex_sessions_id, parent_rodex_sessions_statistics_sources_id)
+        REFERENCES {RODEX_SESSIONS_STATISTICS_SOURCES_TABLE} (rodex_sessions_id, id)
+        DEFERRABLE INITIALLY DEFERRED,
     FOREIGN KEY (rodex_sessions_id, included_statistics_publication_sequence)
         REFERENCES {RODEX_SESSIONS_STATISTICS_TABLE}
             (rodex_sessions_id, statistics_publication_sequence)
@@ -563,17 +596,30 @@ CREATE TABLE IF NOT EXISTS {RODEX_SESSIONS_STATISTICS_SOURCES_TABLE} (
 _CREATE_STATISTICS_SOURCES_UNIQUE_INDEX = f"""
 CREATE UNIQUE INDEX IF NOT EXISTS {RODEX_SESSIONS_STATISTICS_SOURCES_UNIQUE_INDEX}
 ON {RODEX_SESSIONS_STATISTICS_SOURCES_TABLE}
-    (codex_session_id_signed_bigint_1, codex_session_id_signed_bigint_2)
+    (codex_thread_id_signed_bigint_1, codex_thread_id_signed_bigint_2)
 """
-_CREATE_STATISTICS_SOURCES_SESSION_INDEX = f"""
-CREATE INDEX IF NOT EXISTS {RODEX_SESSIONS_STATISTICS_SOURCES_SESSION_INDEX}
-ON {RODEX_SESSIONS_STATISTICS_SOURCES_TABLE} (rodex_sessions_id)
+_CREATE_STATISTICS_SOURCES_SESSION_ID_UNIQUE_INDEX = f"""
+CREATE UNIQUE INDEX IF NOT EXISTS
+    {RODEX_SESSIONS_STATISTICS_SOURCES_SESSION_ID_UNIQUE_INDEX}
+ON {RODEX_SESSIONS_STATISTICS_SOURCES_TABLE} (rodex_sessions_id, id)
+"""
+_CREATE_STATISTICS_SOURCES_PARENT_INDEX = f"""
+CREATE INDEX IF NOT EXISTS {RODEX_SESSIONS_STATISTICS_SOURCES_PARENT_INDEX}
+ON {RODEX_SESSIONS_STATISTICS_SOURCES_TABLE}
+    (parent_rodex_sessions_statistics_sources_id)
 """
 _CREATE_STATISTICS_SOURCES_SESSION_ID_PUBLICATION_SEQUENCE_UNIQUE_INDEX = f"""
 CREATE UNIQUE INDEX IF NOT EXISTS
     {RODEX_SESSIONS_STATISTICS_SOURCES_SESSION_ID_PUBLICATION_SEQUENCE_UNIQUE_INDEX}
 ON {RODEX_SESSIONS_STATISTICS_SOURCES_TABLE}
     (rodex_sessions_id, id, included_statistics_publication_sequence)
+"""
+_CREATE_STATISTICS_SOURCES_HIERARCHY_PUBLICATION_UNIQUE_INDEX = f"""
+CREATE UNIQUE INDEX IF NOT EXISTS
+    {RODEX_SESSIONS_STATISTICS_SOURCES_HIERARCHY_PUBLICATION_UNIQUE_INDEX}
+ON {RODEX_SESSIONS_STATISTICS_SOURCES_TABLE}
+    (rodex_sessions_id, id, parent_rodex_sessions_statistics_sources_id,
+        included_statistics_publication_sequence)
 """
 _CREATE_STATISTICS_TURNS_TABLE = f"""
 CREATE TABLE IF NOT EXISTS {RODEX_SESSIONS_STATISTICS_TURNS_TABLE} (
@@ -657,12 +703,6 @@ CREATE TABLE IF NOT EXISTS {RODEX_SESSIONS_STATISTICS_TURNS_TABLE} (
     web_distinct_result_or_action_urls_count INTEGER NOT NULL CHECK (
         web_distinct_result_or_action_urls_count >= 0
     ),
-    collaboration_operations_count INTEGER NOT NULL CHECK (
-        collaboration_operations_count >= 0
-    ),
-    collaboration_agents_started_count INTEGER NOT NULL CHECK (
-        collaboration_agents_started_count >= 0
-    ),
     compactions_count INTEGER NOT NULL CHECK (compactions_count >= 0),
     workspace_digest TEXT DEFAULT NULL,
     local_start_hour INTEGER DEFAULT NULL CHECK (
@@ -742,6 +782,57 @@ CREATE UNIQUE INDEX IF NOT EXISTS
 ON {RODEX_SESSIONS_STATISTICS_TURNS_TABLE}
     (rodex_sessions_id, id, included_statistics_publication_sequence)
 """
+_CREATE_STATISTICS_TURNS_SOURCE_ID_PUBLICATION_SEQUENCE_UNIQUE_INDEX = f"""
+CREATE UNIQUE INDEX IF NOT EXISTS
+    {RODEX_SESSIONS_STATISTICS_TURNS_SOURCE_ID_PUBLICATION_SEQUENCE_UNIQUE_INDEX}
+ON {RODEX_SESSIONS_STATISTICS_TURNS_TABLE}
+    (rodex_sessions_id, rodex_sessions_statistics_sources_id, id,
+        included_statistics_publication_sequence)
+"""
+_CREATE_STATISTICS_SUBAGENT_SPAWNS_TABLE = f"""
+CREATE TABLE IF NOT EXISTS {RODEX_SESSIONS_STATISTICS_SUBAGENT_SPAWNS_TABLE} (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    rodex_sessions_id INTEGER NOT NULL,
+    subagent_rodex_sessions_statistics_sources_id INTEGER NOT NULL,
+    parent_rodex_sessions_statistics_sources_id INTEGER NOT NULL,
+    spawning_rodex_sessions_statistics_turns_id INTEGER NOT NULL,
+    included_statistics_publication_sequence INTEGER NOT NULL CHECK (
+        included_statistics_publication_sequence >= 1
+    ),
+    FOREIGN KEY (rodex_sessions_id,
+        subagent_rodex_sessions_statistics_sources_id,
+        parent_rodex_sessions_statistics_sources_id,
+        included_statistics_publication_sequence)
+        REFERENCES {RODEX_SESSIONS_STATISTICS_SOURCES_TABLE}
+            (rodex_sessions_id, id,
+                parent_rodex_sessions_statistics_sources_id,
+                included_statistics_publication_sequence)
+        DEFERRABLE INITIALLY DEFERRED,
+    FOREIGN KEY (rodex_sessions_id,
+        parent_rodex_sessions_statistics_sources_id,
+        spawning_rodex_sessions_statistics_turns_id,
+        included_statistics_publication_sequence)
+        REFERENCES {RODEX_SESSIONS_STATISTICS_TURNS_TABLE}
+            (rodex_sessions_id, rodex_sessions_statistics_sources_id, id,
+                included_statistics_publication_sequence)
+        DEFERRABLE INITIALLY DEFERRED,
+    CHECK (
+        subagent_rodex_sessions_statistics_sources_id
+        != parent_rodex_sessions_statistics_sources_id
+    )
+)
+"""
+_CREATE_STATISTICS_SUBAGENT_SPAWNS_SOURCE_UNIQUE_INDEX = f"""
+CREATE UNIQUE INDEX IF NOT EXISTS
+    {RODEX_SESSIONS_STATISTICS_SUBAGENT_SPAWNS_SOURCE_UNIQUE_INDEX}
+ON {RODEX_SESSIONS_STATISTICS_SUBAGENT_SPAWNS_TABLE}
+    (subagent_rodex_sessions_statistics_sources_id)
+"""
+_CREATE_STATISTICS_SUBAGENT_SPAWNS_TURN_INDEX = f"""
+CREATE INDEX IF NOT EXISTS {RODEX_SESSIONS_STATISTICS_SUBAGENT_SPAWNS_TURN_INDEX}
+ON {RODEX_SESSIONS_STATISTICS_SUBAGENT_SPAWNS_TABLE}
+    (spawning_rodex_sessions_statistics_turns_id)
+"""
 _CREATE_STATISTICS_TURN_NAMED_COUNTS_TABLE = f"""
 CREATE TABLE IF NOT EXISTS {RODEX_SESSIONS_STATISTICS_TURN_NAMED_COUNTS_TABLE} (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -752,7 +843,7 @@ CREATE TABLE IF NOT EXISTS {RODEX_SESSIONS_STATISTICS_TURN_NAMED_COUNTS_TABLE} (
     ),
     count_kind TEXT NOT NULL CHECK (count_kind IN (
         'command_exit_status', 'command_family', 'model_tool', 'file_change_type',
-        'web_action', 'collaboration_tool', 'goal_status'
+        'web_action', 'goal_status'
     )),
     count_name TEXT NOT NULL CHECK (length(count_name) > 0),
     occurrence_count INTEGER NOT NULL CHECK (occurrence_count > 0),
@@ -952,14 +1043,21 @@ def initialise_rodex_database(database_path: str | os.PathLike[str] | None = Non
             connection,
             RODEX_SESSIONS_STATISTICS_SOURCES_TABLE,
             RODEX_SESSIONS_STATISTICS_SOURCES_UNIQUE_INDEX,
-            ["codex_session_id_signed_bigint_1", "codex_session_id_signed_bigint_2"],
+            ["codex_thread_id_signed_bigint_1", "codex_thread_id_signed_bigint_2"],
         )
-        connection.execute(_CREATE_STATISTICS_SOURCES_SESSION_INDEX)
+        connection.execute(_CREATE_STATISTICS_SOURCES_SESSION_ID_UNIQUE_INDEX)
+        _verify_unique_index(
+            connection,
+            RODEX_SESSIONS_STATISTICS_SOURCES_TABLE,
+            RODEX_SESSIONS_STATISTICS_SOURCES_SESSION_ID_UNIQUE_INDEX,
+            ["rodex_sessions_id", "id"],
+        )
+        connection.execute(_CREATE_STATISTICS_SOURCES_PARENT_INDEX)
         _verify_index(
             connection,
             RODEX_SESSIONS_STATISTICS_SOURCES_TABLE,
-            RODEX_SESSIONS_STATISTICS_SOURCES_SESSION_INDEX,
-            ["rodex_sessions_id"],
+            RODEX_SESSIONS_STATISTICS_SOURCES_PARENT_INDEX,
+            ["parent_rodex_sessions_statistics_sources_id"],
             unique=False,
         )
         connection.execute(
@@ -972,6 +1070,18 @@ def initialise_rodex_database(database_path: str | os.PathLike[str] | None = Non
             [
                 "rodex_sessions_id",
                 "id",
+                "included_statistics_publication_sequence",
+            ],
+        )
+        connection.execute(_CREATE_STATISTICS_SOURCES_HIERARCHY_PUBLICATION_UNIQUE_INDEX)
+        _verify_unique_index(
+            connection,
+            RODEX_SESSIONS_STATISTICS_SOURCES_TABLE,
+            RODEX_SESSIONS_STATISTICS_SOURCES_HIERARCHY_PUBLICATION_UNIQUE_INDEX,
+            [
+                "rodex_sessions_id",
+                "id",
+                "parent_rodex_sessions_statistics_sources_id",
                 "included_statistics_publication_sequence",
             ],
         )
@@ -1016,6 +1126,37 @@ def initialise_rodex_database(database_path: str | os.PathLike[str] | None = Non
                 "id",
                 "included_statistics_publication_sequence",
             ],
+        )
+        connection.execute(
+            _CREATE_STATISTICS_TURNS_SOURCE_ID_PUBLICATION_SEQUENCE_UNIQUE_INDEX
+        )
+        _verify_unique_index(
+            connection,
+            RODEX_SESSIONS_STATISTICS_TURNS_TABLE,
+            RODEX_SESSIONS_STATISTICS_TURNS_SOURCE_ID_PUBLICATION_SEQUENCE_UNIQUE_INDEX,
+            [
+                "rodex_sessions_id",
+                "rodex_sessions_statistics_sources_id",
+                "id",
+                "included_statistics_publication_sequence",
+            ],
+        )
+        connection.execute(_CREATE_STATISTICS_SUBAGENT_SPAWNS_TABLE)
+        _verify_statistics_subagent_spawns_table(connection)
+        connection.execute(_CREATE_STATISTICS_SUBAGENT_SPAWNS_SOURCE_UNIQUE_INDEX)
+        _verify_unique_index(
+            connection,
+            RODEX_SESSIONS_STATISTICS_SUBAGENT_SPAWNS_TABLE,
+            RODEX_SESSIONS_STATISTICS_SUBAGENT_SPAWNS_SOURCE_UNIQUE_INDEX,
+            ["subagent_rodex_sessions_statistics_sources_id"],
+        )
+        connection.execute(_CREATE_STATISTICS_SUBAGENT_SPAWNS_TURN_INDEX)
+        _verify_index(
+            connection,
+            RODEX_SESSIONS_STATISTICS_SUBAGENT_SPAWNS_TABLE,
+            RODEX_SESSIONS_STATISTICS_SUBAGENT_SPAWNS_TURN_INDEX,
+            ["spawning_rodex_sessions_statistics_turns_id"],
+            unique=False,
         )
         connection.execute(_CREATE_STATISTICS_TURN_NAMED_COUNTS_TABLE)
         _verify_statistics_turn_named_counts_table(connection)
@@ -1466,8 +1607,12 @@ def _verify_statistics_sources_table(connection: sqlite3.Connection) -> None:
         [
             ("id", "INTEGER", 0, 1),
             ("rodex_sessions_id", "INTEGER", 1, 0),
-            ("codex_session_id_signed_bigint_1", "BIGINT", 1, 0),
-            ("codex_session_id_signed_bigint_2", "BIGINT", 1, 0),
+            ("codex_thread_id_signed_bigint_1", "BIGINT", 1, 0),
+            ("codex_thread_id_signed_bigint_2", "BIGINT", 1, 0),
+            ("parent_rodex_sessions_statistics_sources_id", "INTEGER", 0, 0),
+            ("agent_path", "TEXT", 0, 0),
+            ("agent_nickname", "TEXT", 0, 0),
+            ("subagent_history_start_ordinal", "INTEGER", 0, 0),
             ("first_linked_at_utc", "TEXT", 1, 0),
             ("rollout_file_path", "TEXT", 0, 0),
             ("analyzed_size_bytes", "INTEGER", 0, 0),
@@ -1483,6 +1628,16 @@ def _verify_statistics_sources_table(connection: sqlite3.Connection) -> None:
     observed_foreign_keys = {(row[2], row[3], row[4]) for row in foreign_keys}
     expected_foreign_keys = {
         (RODEX_SESSIONS_TABLE, "rodex_sessions_id", "id"),
+        (
+            RODEX_SESSIONS_STATISTICS_SOURCES_TABLE,
+            "rodex_sessions_id",
+            "rodex_sessions_id",
+        ),
+        (
+            RODEX_SESSIONS_STATISTICS_SOURCES_TABLE,
+            "parent_rodex_sessions_statistics_sources_id",
+            "id",
+        ),
         (
             RODEX_SESSIONS_STATISTICS_TABLE,
             "rodex_sessions_id",
@@ -1503,8 +1658,8 @@ def _verify_statistics_sources_table(connection: sqlite3.Connection) -> None:
         connection,
         RODEX_SESSIONS_STATISTICS_SOURCES_TABLE,
         (
-            "TYPEOF(CODEX_SESSION_ID_SIGNED_BIGINT_1) = 'INTEGER'",
-            "TYPEOF(CODEX_SESSION_ID_SIGNED_BIGINT_2) = 'INTEGER'",
+            "TYPEOF(CODEX_THREAD_ID_SIGNED_BIGINT_1) = 'INTEGER'",
+            "TYPEOF(CODEX_THREAD_ID_SIGNED_BIGINT_2) = 'INTEGER'",
             "ANALYZED_SIZE_BYTES IS NULL OR ANALYZED_SIZE_BYTES >= 0",
             "ANALYZED_MTIME_NS IS NULL OR ANALYZED_MTIME_NS >= 0",
             "INCLUDED_STATISTICS_PUBLICATION_SEQUENCE IS NULL "
@@ -1593,6 +1748,87 @@ def _verify_statistics_turns_table(connection: sqlite3.Connection) -> None:
             "OUTCOME != 'OPEN' OR TERMINAL_AT_UTC IS NULL",
             "HANDS_ON IN (0, 1)",
             "EDITED_THEN_VERIFIED IN (0, 1)",
+            "DEFERRABLE INITIALLY DEFERRED",
+        ),
+    )
+
+
+def _verify_statistics_subagent_spawns_table(connection: sqlite3.Connection) -> None:
+    _verify_table_columns(
+        connection,
+        RODEX_SESSIONS_STATISTICS_SUBAGENT_SPAWNS_TABLE,
+        [
+            ("id", "INTEGER", 0, 1),
+            ("rodex_sessions_id", "INTEGER", 1, 0),
+            (
+                "subagent_rodex_sessions_statistics_sources_id",
+                "INTEGER",
+                1,
+                0,
+            ),
+            ("parent_rodex_sessions_statistics_sources_id", "INTEGER", 1, 0),
+            ("spawning_rodex_sessions_statistics_turns_id", "INTEGER", 1, 0),
+            ("included_statistics_publication_sequence", "INTEGER", 1, 0),
+        ],
+    )
+    foreign_keys = connection.execute(
+        f"PRAGMA foreign_key_list({RODEX_SESSIONS_STATISTICS_SUBAGENT_SPAWNS_TABLE})"
+    ).fetchall()
+    observed_foreign_keys = {(row[2], row[3], row[4]) for row in foreign_keys}
+    expected_foreign_keys = {
+        (
+            RODEX_SESSIONS_STATISTICS_SOURCES_TABLE,
+            "rodex_sessions_id",
+            "rodex_sessions_id",
+        ),
+        (
+            RODEX_SESSIONS_STATISTICS_SOURCES_TABLE,
+            "subagent_rodex_sessions_statistics_sources_id",
+            "id",
+        ),
+        (
+            RODEX_SESSIONS_STATISTICS_SOURCES_TABLE,
+            "parent_rodex_sessions_statistics_sources_id",
+            "parent_rodex_sessions_statistics_sources_id",
+        ),
+        (
+            RODEX_SESSIONS_STATISTICS_SOURCES_TABLE,
+            "included_statistics_publication_sequence",
+            "included_statistics_publication_sequence",
+        ),
+        (
+            RODEX_SESSIONS_STATISTICS_TURNS_TABLE,
+            "rodex_sessions_id",
+            "rodex_sessions_id",
+        ),
+        (
+            RODEX_SESSIONS_STATISTICS_TURNS_TABLE,
+            "parent_rodex_sessions_statistics_sources_id",
+            "rodex_sessions_statistics_sources_id",
+        ),
+        (
+            RODEX_SESSIONS_STATISTICS_TURNS_TABLE,
+            "spawning_rodex_sessions_statistics_turns_id",
+            "id",
+        ),
+        (
+            RODEX_SESSIONS_STATISTICS_TURNS_TABLE,
+            "included_statistics_publication_sequence",
+            "included_statistics_publication_sequence",
+        ),
+    }
+    if observed_foreign_keys != expected_foreign_keys:
+        raise RodexSessionError(
+            f"{RODEX_SESSIONS_STATISTICS_SUBAGENT_SPAWNS_TABLE} foreign keys "
+            f"mismatch: {observed_foreign_keys!r}"
+        )
+    _verify_table_definition_contains(
+        connection,
+        RODEX_SESSIONS_STATISTICS_SUBAGENT_SPAWNS_TABLE,
+        (
+            "CHECK ( INCLUDED_STATISTICS_PUBLICATION_SEQUENCE >= 1 )",
+            "SUBAGENT_RODEX_SESSIONS_STATISTICS_SOURCES_ID "
+            "!= PARENT_RODEX_SESSIONS_STATISTICS_SOURCES_ID",
             "DEFERRABLE INITIALLY DEFERRED",
         ),
     )

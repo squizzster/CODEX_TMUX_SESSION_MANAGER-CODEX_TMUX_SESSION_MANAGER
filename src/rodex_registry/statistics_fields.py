@@ -124,20 +124,29 @@ def _scalar_layout(
 SESSION_STATISTICS_SCALARS: Final = _scalar_layout(
     SessionStatisticsProjection,
     excluded=frozenset(
-        {"distributions", "named_counts", "audit_limits", "turn_statistics"}
+        {
+            "collaboration_operations_count",
+            "collaboration_agents_started_count",
+            "distributions",
+            "named_counts",
+            "audit_limits",
+            "turn_statistics",
+        }
     ),
 )
 TURN_STATISTICS_SCALARS: Final = _scalar_layout(
     TurnStatisticsProjection,
     excluded=frozenset(
         {
-            "codex_session_id",
+            "codex_thread_id",
             "codex_turn_id",
             "started_at_utc",
             "terminal_at_utc",
             "outcome",
             "model",
             "reasoning_effort",
+            "collaboration_operations_count",
+            "collaboration_agents_started_count",
             "named_counts",
         }
     ),

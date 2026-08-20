@@ -163,6 +163,9 @@ exact control commands emit a schema-v2 success/error envelope containing separa
 session, runtime, Codex thread, Codex session-tree, and turn identities. They require
 stdin prompts and a runtime created by this Rodex version. `_inspect` reports the live
 App Server thread working directory so callers can verify workspace scope before mutation.
+The checked App Server version is a minimum compatibility floor, not an exact pin:
+newer stable Codex versions remain available to exact control, while older or
+unrecognized versions fail with a compatibility diagnostic.
 Resuming from a different caller working directory intentionally relocates the runtime;
 session identity follows the human rather than permanently pinning the original path.
 Exact start/steer responses expose `data.dispatch.id` and a structured

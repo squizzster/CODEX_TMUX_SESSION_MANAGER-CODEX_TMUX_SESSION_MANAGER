@@ -1539,7 +1539,7 @@ def test_machine_inspect_reports_incompatible_exact_control_without_hiding_state
     launcher = StubLauncher(tmp_path)
     control = StubControlClient()
     control.compatibility_error = RodexAppServerCompatibilityError(
-        "exact control supports 0.147.0; live server is 0.148.0"
+        "exact control requires 0.147.0 or newer; live server is 0.146.0"
     )
 
     status = run(
@@ -1556,7 +1556,9 @@ def test_machine_inspect_reports_incompatible_exact_control_without_hiding_state
     assert payload["data"]["app_server"] == {
         "compatible_version": None,
         "exact_control_compatible": False,
-        "compatibility_error": "exact control supports 0.147.0; live server is 0.148.0",
+        "compatibility_error": (
+            "exact control requires 0.147.0 or newer; live server is 0.146.0"
+        ),
     }
 
 

@@ -1,5 +1,9 @@
 # Codex App Server 0.147 live control evidence
 
+This version is Rodex's observed minimum compatibility floor, not a maximum or exact
+runtime pin. Later stable Codex App Server versions are accepted; earlier or
+unrecognized versions are rejected before exact control.
+
 Observed on 2026-08-18 with `codex-cli 0.147.0`, private Unix WebSockets, two initialized
 clients, and the [official App Server protocol](https://developers.openai.com/codex/app-server).
 

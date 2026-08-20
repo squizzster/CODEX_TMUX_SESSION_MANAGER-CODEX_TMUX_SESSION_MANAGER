@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final
@@ -25,7 +26,7 @@ class AppServerClientInfo:
 
 @dataclass(frozen=True, slots=True)
 class CodexAppServerContract:
-    supported_version: str
+    minimum_supported_version: str
     rpc_connection_path: str = "/rpc"
     initialize_method: str = "initialize"
     initialized_method: str = "initialized"
@@ -98,15 +99,32 @@ class CodexAppServerContract:
             raise RodexAppServerCompatibilityError(
                 "App Server initialize response has no recognized Codex user agent"
             )
-        if version != self.supported_version:
+        live_release = _stable_release(version)
+        minimum_release = _stable_release(self.minimum_supported_version)
+        if live_release is None:
             raise RodexAppServerCompatibilityError(
-                "exact control supports Codex App Server "
-                f"{self.supported_version}; live server is {version}"
+                f"App Server reported an unrecognized Codex version: {version}"
+            )
+        if minimum_release is None:
+            raise AssertionError("Rodex App Server minimum version is invalid")
+        if live_release < minimum_release:
+            raise RodexAppServerCompatibilityError(
+                "exact control requires Codex App Server "
+                f"{self.minimum_supported_version} or newer; live server is {version}"
             )
         return version
 
 
-CODEX_APP_SERVER: Final = CodexAppServerContract(supported_version="0.147.0")
+def _stable_release(version: str) -> tuple[int, int, int] | None:
+    """Return the comparable numeric release for an official stable Codex version."""
+
+    if re.fullmatch(r"\d+\.\d+\.\d+", version) is None:
+        return None
+    major, minor, patch = version.split(".")
+    return int(major), int(minor), int(patch)
+
+
+CODEX_APP_SERVER: Final = CodexAppServerContract(minimum_supported_version="0.147.0")
 RODEX_CONTROL_APP_SERVER_CLIENT: Final = AppServerClientInfo(
     name="rodex-control",
     title="Rodex Control",

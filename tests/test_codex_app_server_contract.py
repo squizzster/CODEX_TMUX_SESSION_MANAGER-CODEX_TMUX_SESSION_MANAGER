@@ -44,7 +44,7 @@ def _characterize_schema(schema_root: Path) -> dict[str, object]:
         if option["title"] == "UserMessageThreadItem"
     )
     return {
-        "codex_cli_version": CODEX_APP_SERVER.supported_version,
+        "codex_cli_version": CODEX_APP_SERVER.minimum_supported_version,
         "generated_with": "codex app-server generate-json-schema --experimental",
         "request_id_types": sorted(option["type"] for option in request_id["anyOf"]),
         "thread_required_fields": definitions["Thread"]["required"],
@@ -98,7 +98,7 @@ def test_checked_in_contract_is_generated_from_the_installed_supported_cli(
         capture_output=True,
         text=True,
     ).stdout.strip()
-    if version != f"codex-cli {CODEX_APP_SERVER.supported_version}":
+    if version != f"codex-cli {CODEX_APP_SERVER.minimum_supported_version}":
         pytest.skip(f"installed CLI is outside this contract: {version}")
     schema_root = tmp_path / "schema"
     subprocess.run(
@@ -122,7 +122,7 @@ def test_checked_in_contract_is_generated_from_the_installed_supported_cli(
     assert checked_in == _characterize_schema(schema_root)
 
 
-def test_live_initialize_metadata_is_the_exact_control_compatibility_gate() -> None:
+def test_live_initialize_metadata_accepts_the_minimum_and_newer_versions() -> None:
     assert (
         CODEX_APP_SERVER.require_supported_version(
             {"userAgent": "rodex-control/0.147.0 (Linux; x86_64)"}
@@ -130,9 +130,35 @@ def test_live_initialize_metadata_is_the_exact_control_compatibility_gate() -> N
         == "0.147.0"
     )
 
-    with pytest.raises(RodexAppServerCompatibilityError, match=r"live server is 0\.148\.0"):
+    assert (
         CODEX_APP_SERVER.require_supported_version(
             {"userAgent": "rodex-control/0.148.0 (Linux)"}
+        )
+        == "0.148.0"
+    )
+
+    assert (
+        CODEX_APP_SERVER.require_supported_version(
+            {"userAgent": "rodex-control/1.0.0 (Linux)"}
+        )
+        == "1.0.0"
+    )
+
+
+def test_live_initialize_metadata_rejects_downgrades_and_unknown_versions() -> None:
+    with pytest.raises(
+        RodexAppServerCompatibilityError,
+        match=r"requires Codex App Server 0\.147\.0 or newer; live server is 0\.146\.0",
+    ):
+        CODEX_APP_SERVER.require_supported_version(
+            {"userAgent": "rodex-control/0.146.0 (Linux)"}
+        )
+
+    with pytest.raises(
+        RodexAppServerCompatibilityError, match="unrecognized Codex version"
+    ):
+        CODEX_APP_SERVER.require_supported_version(
+            {"userAgent": "rodex-control/development (Linux)"}
         )
 
     with pytest.raises(RodexAppServerCompatibilityError, match="no recognized"):

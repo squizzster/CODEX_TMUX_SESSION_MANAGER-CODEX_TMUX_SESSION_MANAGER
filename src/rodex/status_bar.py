@@ -26,6 +26,7 @@ class StatusBarColours:
     mouse_mode: str
     context_warning: str
     context_danger: str
+    context_compaction_foregrounds: tuple[str, ...]
     sharing_shared: str
     sharing_private: str
     completion: str
@@ -54,6 +55,7 @@ class StatusBarColours:
             self.animation_foreground,
         )
         animation_colours = (
+            *self.context_compaction_foregrounds,
             *self.animation_arrival_backgrounds,
             *self.animation_departure_backgrounds,
         )
@@ -160,6 +162,22 @@ RODEX_STATUS_COLOURS: Final = StatusBarColours(
     mouse_mode="yellow",
     context_warning="yellow",
     context_danger="red",
+    context_compaction_foregrounds=(
+        "colour45",
+        "colour51",
+        "colour87",
+        "colour123",
+        "colour159",
+        "colour195",
+        "colour231",
+        "colour231",
+        "colour195",
+        "colour159",
+        "colour123",
+        "colour87",
+        "colour51",
+        "colour45",
+    ),
     sharing_shared="yellow",
     sharing_private="green",
     completion="magenta",
@@ -273,11 +291,22 @@ _CONTEXT_COLOUR_BANDS: Final = (
         foreground=RODEX_STATUS_COLOURS.primary_blue,
     ),
 )
-_CONTEXT_COMPACTION_FRAMES: Final = (
-    "COMPACTING   ",
-    "COMPACTING.  ",
-    "COMPACTING.. ",
-    "COMPACTING...",
+CONTEXT_COMPACTION_FRAME_INTERVAL_SECONDS: Final = 0.12
+_CONTEXT_COMPACTION_ACTIVITY_FRAMES: Final = (
+    "▏",
+    "▎",
+    "▍",
+    "▌",
+    "▋",
+    "▊",
+    "▉",
+    "█",
+    "▉",
+    "▊",
+    "▋",
+    "▌",
+    "▍",
+    "▎",
 )
 
 RODEX_BASE_STATUS_LEFT_FORMAT: Final = f"{_BASE_STATUS_BAR.render()}#[default]"
@@ -331,12 +360,14 @@ def context_status_segment(context_percent: float | None) -> str:
 
 
 def compacting_status_segment(frame_index: int) -> str:
-    """Render one fixed-width context-compaction animation frame."""
+    """Render one fixed-width, colour-pulsing context-compaction frame."""
     if isinstance(frame_index, bool) or not isinstance(frame_index, int):
         raise ValueError("compaction frame index must be an integer")
-    frame = _CONTEXT_COMPACTION_FRAMES[frame_index % len(_CONTEXT_COMPACTION_FRAMES)]
+    frame_position = frame_index % len(_CONTEXT_COMPACTION_ACTIVITY_FRAMES)
+    activity = _CONTEXT_COMPACTION_ACTIVITY_FRAMES[frame_position]
+    foreground = RODEX_STATUS_COLOURS.context_compaction_foregrounds[frame_position]
     return replace(
         _CONTEXT_FALLBACK_SEGMENT,
-        foreground=_CONTEXT_DANGER_BAND.foreground,
-        content_format=f"| {frame} | ",
+        foreground=foreground,
+        content_format=f"| COMPACTING {activity} | ",
     ).render()

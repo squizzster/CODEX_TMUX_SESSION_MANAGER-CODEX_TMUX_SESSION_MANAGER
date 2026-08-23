@@ -17,12 +17,13 @@ from websockets.sync.server import unix_serve
 
 from .app_server_contract import CODEX_APP_SERVER
 from .status_bar import (
+    CONTEXT_COMPACTION_FRAME_INTERVAL_SECONDS,
     RODEX_CONTEXT_STATUS_OPTION,
     RODEX_TOOL_CALL_STATUS_OPTION,
     compacting_status_segment,
     context_status_segment,
 )
-from .tmux_status import STATUS_ANIMATION_FRAME_INTERVAL_SECONDS, TmuxStatusOption
+from .tmux_status import TmuxStatusOption
 
 TOOL_CALL_ITEM_TYPES: Final = frozenset(
     {
@@ -249,7 +250,7 @@ class CodexContextStatusObserver:
         self,
         on_status_changed: ContextStatusCallback,
         *,
-        animation_interval_seconds: float = STATUS_ANIMATION_FRAME_INTERVAL_SECONDS,
+        animation_interval_seconds: float = CONTEXT_COMPACTION_FRAME_INTERVAL_SECONDS,
     ) -> None:
         if animation_interval_seconds <= 0 or not math.isfinite(animation_interval_seconds):
             raise ValueError("animation interval must be finite and positive")

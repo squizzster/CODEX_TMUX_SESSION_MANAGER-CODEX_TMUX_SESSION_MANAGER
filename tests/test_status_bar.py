@@ -33,6 +33,9 @@ def test_status_palette_has_one_authoritative_value_per_colour_role() -> None:
     assert RODEX_STATUS_COLOURS.primary_blue == "#1402D8"
     assert RODEX_STATUS_COLOURS.tool_count == "cyan"
     assert RODEX_STATUS_COLOURS.mouse_mode == "yellow"
+    assert RODEX_STATUS_COLOURS.context_compaction_foregrounds[0] == "colour45"
+    assert "colour231" in RODEX_STATUS_COLOURS.context_compaction_foregrounds
+    assert len(RODEX_STATUS_COLOURS.context_compaction_foregrounds) == 14
     assert f"fg={RODEX_STATUS_COLOURS.sharing_shared}" in RODEX_STATUS_RIGHT_FORMAT
     assert f"fg={RODEX_STATUS_COLOURS.sharing_private}" in RODEX_STATUS_RIGHT_FORMAT
 
@@ -125,7 +128,10 @@ def test_context_status_has_stable_unavailable_and_compacting_states() -> None:
     assert f"fg={RODEX_STATUS_COLOURS.primary_blue}" in context_status_segment(None)
     assert "Context: -- |" in context_status_segment(None)
     assert "Context: 32% |" in context_status_segment(31.5)
-    assert f"fg={RODEX_STATUS_COLOURS.context_danger}" in compacting_status_segment(0)
-    assert "COMPACTING    |" in compacting_status_segment(0)
-    assert "COMPACTING... |" in compacting_status_segment(3)
-    assert compacting_status_segment(4) == compacting_status_segment(0)
+    compacting_frames = tuple(compacting_status_segment(index) for index in range(14))
+    assert "fg=colour45" in compacting_frames[0]
+    assert "COMPACTING ▏ |" in compacting_frames[0]
+    assert "fg=colour231" in compacting_frames[7]
+    assert "COMPACTING █ |" in compacting_frames[7]
+    assert len(set(compacting_frames)) == 14
+    assert compacting_status_segment(14) == compacting_frames[0]

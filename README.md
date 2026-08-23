@@ -86,8 +86,8 @@ The Rodex identity is blue (`#1402D8`). The context indicator shows a rounded wh
 percentage using the same last-token-usage divided by model-context-window calculation as
 Rodex analytics. It is blue below 70%, tmux yellow from 70%, and tmux red from 75%.
 These are empirical bands rather than a claim that Codex compacts at one exact
-percentage. While the App Server reports
-a live context compaction item, the same slot animates `COMPACTING`; it returns to the
+percentage. While the App Server reports a live context compaction item, the same slot
+animates `COMPACTING` with a bright cyan-to-white activity pulse; it returns to the
 freshest post-compaction percentage, or `Context: --` until one arrives.
 
 To expose this checkout as a per-user `rodex` command, follow the

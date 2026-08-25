@@ -25,6 +25,7 @@ from rodex.analytics_analyzer import (
     CodexProtocolAnalyticsAdapter,
     RodexAnalyticsError,
 )
+from rodex.analytics_scheduler import AnalyticsDirtyBatch
 from rodex.process_contracts import AnalyticsWorkerConfig
 from rodex_registry import (
     RodexRegistryId,
@@ -562,11 +563,13 @@ def test_worker_runs_one_startup_reconciliation_then_uses_the_event_scheduler(
     lifecycle: list[str] = []
 
     class RecordingScheduler:
-        def offer_dirty(self) -> None:
+        def offer_dirty(self, _thread_id: uuid.UUID) -> None:
             lifecycle.append("scheduler-dirty")
 
-        def run(self, reconcile: Callable[[], object]) -> None:
-            lifecycle.append(f"reconcile:{reconcile()}")
+        def run(self, reconcile: Callable[[AnalyticsDirtyBatch], object]) -> None:
+            lifecycle.append(
+                f"reconcile:{reconcile(AnalyticsDirtyBatch(frozenset(), True))}"
+            )
 
         def close(self) -> None:
             lifecycle.append("scheduler-close")

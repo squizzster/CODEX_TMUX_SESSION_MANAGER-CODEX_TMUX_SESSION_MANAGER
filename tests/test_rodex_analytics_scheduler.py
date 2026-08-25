@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import uuid
 from pathlib import Path
 from threading import Event, Thread
 
@@ -8,6 +9,7 @@ import pytest
 
 from rodex.analytics_scheduler import (
     AnalyticsBurstWindow,
+    AnalyticsDirtyBatch,
     AnalyticsEventScheduler,
     AnalyticsEventStreamClosed,
     AnalyticsProtocolEventSubscriber,
@@ -15,13 +17,16 @@ from rodex.analytics_scheduler import (
 )
 from rodex.protocol_proxy import CodexProtocolEventTap
 
+THREAD_ID = "01a00654-f2bc-7a30-834a-a5f886a65f82"
+SECOND_THREAD_ID = "01a00654-f2bc-7a30-834a-a5f886a65f83"
+
 
 def test_empty_scheduler_blocks_without_repeated_reconciliation() -> None:
     scheduler = AnalyticsEventScheduler(quiet_seconds=0.01, max_batch_seconds=0.05)
     startup_complete = Event()
     reconciliations = 0
 
-    def reconcile() -> None:
+    def reconcile(_batch: AnalyticsDirtyBatch) -> None:
         nonlocal reconciliations
         reconciliations += 1
         startup_complete.set()
@@ -43,7 +48,7 @@ def test_many_dirty_signals_coalesce_into_one_reconciliation() -> None:
     reconciled = Event()
     reconciliations = 0
 
-    def reconcile() -> None:
+    def reconcile(_batch: AnalyticsDirtyBatch) -> None:
         nonlocal reconciliations
         reconciliations += 1
         startup_complete.set()
@@ -54,7 +59,7 @@ def test_many_dirty_signals_coalesce_into_one_reconciliation() -> None:
     thread.start()
     assert startup_complete.wait(timeout=1)
     for _ in range(100):
-        scheduler.offer_dirty()
+        scheduler.offer_dirty(THREAD_ID)
 
     assert reconciled.wait(timeout=1)
     scheduler.close()
@@ -72,7 +77,7 @@ def test_degraded_generation_gets_one_retry_then_blocks() -> None:
     third = Event()
     reconciliations = 0
 
-    def reconcile() -> str:
+    def reconcile(_batch: AnalyticsDirtyBatch) -> str:
         nonlocal reconciliations
         reconciliations += 1
         if reconciliations == 2:
@@ -102,7 +107,7 @@ def test_new_dirty_generation_restores_one_retry() -> None:
     fourth = Event()
     reconciliations = 0
 
-    def reconcile() -> str:
+    def reconcile(_batch: AnalyticsDirtyBatch) -> str:
         nonlocal reconciliations
         reconciliations += 1
         if reconciliations == 2:
@@ -114,7 +119,7 @@ def test_new_dirty_generation_restores_one_retry() -> None:
     thread = Thread(target=scheduler.run, args=(reconcile,))
     thread.start()
     assert twice.wait(timeout=1)
-    scheduler.offer_dirty()
+    scheduler.offer_dirty(THREAD_ID)
 
     assert fourth.wait(timeout=1)
     scheduler.close()
@@ -184,12 +189,14 @@ def test_burst_hard_deadline_never_moves_after_the_first_event() -> None:
 
 def test_continuously_ready_queue_cannot_starve_the_hard_batch_deadline() -> None:
     clock = [0.0]
-    dirty = object()
-
     class ContinuouslyReadyQueue:
+        def put_nowait(self, _signal: object) -> None:
+            return
+
         def get(self, timeout: float | None = None) -> object:
             clock[0] += 0.01
-            return dirty
+            scheduler.offer_dirty(THREAD_ID)
+            return object()
 
     scheduler = AnalyticsEventScheduler(
         quiet_seconds=0.5,
@@ -197,12 +204,13 @@ def test_continuously_ready_queue_cannot_starve_the_hard_batch_deadline() -> Non
         monotonic=lambda: clock[0],
     )
     scheduler._signals = ContinuouslyReadyQueue()  # type: ignore[assignment]
+    scheduler.offer_dirty(THREAD_ID)
     reconciliations = 0
 
     class HardDeadlineObserved(Exception):
         pass
 
-    def reconcile() -> None:
+    def reconcile(_batch: AnalyticsDirtyBatch) -> None:
         nonlocal reconciliations
         reconciliations += 1
         if reconciliations == 2:
@@ -212,6 +220,66 @@ def test_continuously_ready_queue_cannot_starve_the_hard_batch_deadline() -> Non
         scheduler.run(reconcile)
 
     assert 5.0 <= clock[0] <= 5.02
+
+
+def test_dirty_identities_are_lossless_while_wake_queue_is_full() -> None:
+    scheduler = AnalyticsEventScheduler(quiet_seconds=0.01, max_batch_seconds=0.05)
+    reconciled = Event()
+    batches: list[AnalyticsDirtyBatch] = []
+
+    def reconcile(batch: AnalyticsDirtyBatch) -> None:
+        batches.append(batch)
+        if not batch.full_reconcile:
+            reconciled.set()
+
+    thread = Thread(target=scheduler.run, args=(reconcile,))
+    thread.start()
+    for _ in range(100):
+        scheduler.offer_dirty(THREAD_ID)
+    scheduler.offer_dirty(SECOND_THREAD_ID)
+
+    assert reconciled.wait(timeout=1)
+    scheduler.close()
+    thread.join(timeout=1)
+    assert batches[0] == AnalyticsDirtyBatch(frozenset(), full_reconcile=True)
+    assert batches[1].thread_ids == frozenset(
+        {uuid.UUID(THREAD_ID), uuid.UUID(SECOND_THREAD_ID)}
+    )
+
+
+@pytest.mark.parametrize(
+    ("event", "expected"),
+    [
+        (
+            {"method": "thread/started", "params": {"thread": {"id": THREAD_ID}}},
+            THREAD_ID,
+        ),
+        (
+            {"method": "turn/completed", "params": {"threadId": THREAD_ID}},
+            THREAD_ID,
+        ),
+    ],
+)
+def test_lifecycle_events_retain_their_exact_dirty_identity(
+    event: dict[str, object], expected: str
+) -> None:
+    scheduler = AnalyticsEventScheduler(quiet_seconds=0.01, max_batch_seconds=0.05)
+    reconciled = Event()
+    batches: list[AnalyticsDirtyBatch] = []
+
+    def reconcile(batch: AnalyticsDirtyBatch) -> None:
+        batches.append(batch)
+        if not batch.full_reconcile:
+            reconciled.set()
+
+    thread = Thread(target=scheduler.run, args=(reconcile,))
+    thread.start()
+    scheduler.offer_protocol_event(event)
+
+    assert reconciled.wait(timeout=1)
+    scheduler.close()
+    thread.join(timeout=1)
+    assert batches[1].thread_ids == frozenset({uuid.UUID(expected)})
 
 
 def test_only_authoritative_lifecycle_messages_mark_analytics_dirty() -> None:

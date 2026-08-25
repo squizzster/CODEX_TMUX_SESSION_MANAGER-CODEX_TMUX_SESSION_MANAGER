@@ -41,6 +41,7 @@ from .analytics_analyzer import (
     StatefulCodexProtocolAnalyticsAdapter,
 )
 from .analytics_scheduler import (
+    AnalyticsDirtyBatch,
     AnalyticsEventScheduler,
     AnalyticsProtocolEventSubscriber,
 )
@@ -159,7 +160,7 @@ class AnalyticsRolloutWorker:
         self._source_catalog = AnalyticsSourceCatalog(config.codex_sessions_root)
         self._source_reader = AnalyticsSourceReader()
         self._verified_sources: dict[CodexThreadId, VerifiedRollout] = {}
-        self._schedule_followup: Callable[[], None] | None = None
+        self._schedule_followup: Callable[[CodexThreadId], None] | None = None
         self._last_health_transition: tuple[str, str | None] | None = None
         self._consecutive_failures = 0
         self._published_turns: dict[
@@ -170,7 +171,7 @@ class AnalyticsRolloutWorker:
         """Feed exact lifecycle identity metadata into bounded source resolution."""
         self._source_catalog.observe_protocol_event(event)
 
-    def poll_once(self) -> str:
+    def poll_once(self, batch: AnalyticsDirtyBatch | None = None) -> str:
         """Perform one reconciliation; no analytics failure is allowed to escape."""
         expected_codex_session_id = self._expected_codex_session_id
         try:
@@ -281,7 +282,9 @@ class AnalyticsRolloutWorker:
             self._source_reader.accept([item.prepared_read for item in stable_reads])
             if append_arrived_during_analysis:
                 if self._schedule_followup is not None:
-                    self._schedule_followup()
+                    for item, grew in zip(stable_reads, source_growth, strict=True):
+                        if grew:
+                            self._schedule_followup(item.observation.codex_thread_id)
                 return "pending_append"
             return "up_to_date"
         except RodexDatabaseNotFoundError:

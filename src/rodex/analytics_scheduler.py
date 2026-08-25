@@ -13,6 +13,8 @@ from typing import Any, Final
 
 from websockets.sync.client import unix_connect
 
+from rodex_registry import CodexThreadId, parse_codex_thread_id
+
 from .protocol_proxy import (
     ANALYTICS_EVENT_STREAM_PATH,
     ANALYTICS_LIFECYCLE_EVENT_METHODS,
@@ -30,6 +32,14 @@ _STREAM_CLOSED: Final = object()
 
 class AnalyticsEventStreamClosed(RuntimeError):
     """The runtime event stream closed while analytics was active."""
+
+
+@dataclass(frozen=True, slots=True)
+class AnalyticsDirtyBatch:
+    """Exact source identities coalesced into one bounded reconciliation."""
+
+    thread_ids: frozenset[CodexThreadId]
+    full_reconcile: bool = False
 
 
 @dataclass(slots=True)
@@ -84,20 +94,31 @@ class AnalyticsEventScheduler:
         self._monotonic = monotonic
         self._event_observer = event_observer
         self._signals: queue.Queue[object] = queue.Queue(maxsize=2)
+        self._pending_thread_ids: set[CodexThreadId] = set()
+        self._pending_first_at: float | None = None
+        self._pending_last_at: float | None = None
         self._closed = False
-        self._close_lock = Lock()
+        self._state_lock = Lock()
 
     def offer_protocol_event(self, event: Mapping[str, Any]) -> None:
         """Mark analytics dirty only for a relevant App Server lifecycle event."""
         if self._event_observer is not None:
             self._event_observer(event)
-        if event.get("method") in ANALYTICS_LIFECYCLE_EVENT_METHODS:
-            self.offer_dirty()
+        thread_id = _analytics_event_thread_id(event)
+        if thread_id is not None:
+            self.offer_dirty(thread_id)
 
-    def offer_dirty(self) -> None:
-        """Offer bounded dirty state without blocking the protocol producer."""
-        if self._closed:
-            return
+    def offer_dirty(self, thread_id: CodexThreadId) -> None:
+        """Retain an exact dirty identity and offer a bounded nonblocking wake-up."""
+        parsed_thread_id = parse_codex_thread_id(thread_id)
+        now = self._monotonic()
+        with self._state_lock:
+            if self._closed:
+                return
+            if self._pending_first_at is None:
+                self._pending_first_at = now
+            self._pending_last_at = now
+            self._pending_thread_ids.add(parsed_thread_id)
         try:
             self._signals.put_nowait(_DIRTY)
         except queue.Full:
@@ -109,41 +130,35 @@ class AnalyticsEventScheduler:
     def close(self) -> None:
         self._offer_terminal(_STOP)
 
-    def run(self, reconcile: Callable[[], object]) -> None:
+    def run(self, reconcile: Callable[[AnalyticsDirtyBatch], object]) -> None:
         """Reconcile dirty bursts with at most one clean retry per generation."""
-        retry_at = self._retry_at_for(reconcile())
-        burst: AnalyticsBurstWindow | None = None
+        retry_at = self._retry_at_for(
+            reconcile(AnalyticsDirtyBatch(frozenset(), full_reconcile=True))
+        )
         while True:
             now = self._monotonic()
-            if burst is not None and now >= burst.deadline:
-                burst = None
-                retry_at = self._retry_at_for(reconcile())
+            pending_deadline = self._pending_deadline()
+            if retry_at is not None and now >= retry_at:
+                retry_at = None
+                reconcile(AnalyticsDirtyBatch(frozenset()))
                 continue
-            deadline = burst.deadline if burst is not None else retry_at
+            if (
+                retry_at is None
+                and pending_deadline is not None
+                and now >= pending_deadline
+            ):
+                retry_at = self._retry_at_for(reconcile(self._take_pending_batch()))
+                continue
+            deadline = retry_at if retry_at is not None else pending_deadline
             timeout = None if deadline is None else max(0.0, deadline - now)
             try:
                 signal = self._signals.get(timeout=timeout)
             except queue.Empty:
-                if burst is not None:
-                    burst = None
-                    retry_at = self._retry_at_for(reconcile())
-                else:
-                    retry_at = None
-                    reconcile()
                 continue
             if signal is _STOP:
                 return
             if signal is _STREAM_CLOSED:
                 raise AnalyticsEventStreamClosed("analytics event stream closed")
-            retry_at = None
-            if burst is None:
-                burst = AnalyticsBurstWindow.start(
-                    self._monotonic(),
-                    quiet_seconds=self._quiet_seconds,
-                    max_batch_seconds=self._max_batch_seconds,
-                )
-            else:
-                burst.observe(self._monotonic())
 
     def _retry_at_for(self, result: object) -> float | None:
         if result != "degraded":
@@ -151,7 +166,7 @@ class AnalyticsEventScheduler:
         return self._monotonic() + self._one_shot_retry_seconds
 
     def _offer_terminal(self, signal: object) -> None:
-        with self._close_lock:
+        with self._state_lock:
             if signal is _STOP:
                 self._closed = True
             while True:
@@ -163,6 +178,25 @@ class AnalyticsEventScheduler:
                         self._signals.get_nowait()
                     except queue.Empty:
                         continue
+
+    def _pending_deadline(self) -> float | None:
+        with self._state_lock:
+            first_at = self._pending_first_at
+            last_at = self._pending_last_at
+        if first_at is None or last_at is None:
+            return None
+        return min(
+            last_at + self._quiet_seconds,
+            first_at + self._max_batch_seconds,
+        )
+
+    def _take_pending_batch(self) -> AnalyticsDirtyBatch:
+        with self._state_lock:
+            batch = AnalyticsDirtyBatch(frozenset(self._pending_thread_ids))
+            self._pending_thread_ids.clear()
+            self._pending_first_at = None
+            self._pending_last_at = None
+        return batch
 
 
 class AnalyticsProtocolEventSubscriber:
@@ -254,6 +288,26 @@ def _is_relevant_protocol_event(message: str | bytes) -> bool:
         decoded is not None
         and decoded.get("method") in ANALYTICS_LIFECYCLE_EVENT_METHODS
     )
+
+
+def _analytics_event_thread_id(
+    event: Mapping[str, Any],
+) -> CodexThreadId | None:
+    method = event.get("method")
+    if method not in ANALYTICS_LIFECYCLE_EVENT_METHODS:
+        return None
+    params = event.get("params")
+    if not isinstance(params, Mapping):
+        return None
+    if method == "thread/started":
+        thread = params.get("thread")
+        value = thread.get("id") if isinstance(thread, Mapping) else None
+    else:
+        value = params.get("threadId")
+    try:
+        return parse_codex_thread_id(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _decode_protocol_event(message: str | bytes) -> dict[str, Any] | None:

@@ -13,8 +13,11 @@ from typing import Any, Final
 
 from websockets.sync.client import unix_connect
 
-from .app_server_contract import CODEX_APP_SERVER
-from .protocol_proxy import EVENT_STREAM_READY_METHOD
+from .protocol_proxy import (
+    ANALYTICS_EVENT_STREAM_PATH,
+    ANALYTICS_LIFECYCLE_EVENT_METHODS,
+    EVENT_STREAM_READY_METHOD,
+)
 
 ANALYTICS_QUIET_SECONDS: Final = 0.5
 ANALYTICS_MAX_BATCH_SECONDS: Final = 5.0
@@ -23,12 +26,6 @@ ANALYTICS_SUBSCRIBER_START_TIMEOUT_SECONDS: Final = 5.0
 _DIRTY: Final = object()
 _STOP: Final = object()
 _STREAM_CLOSED: Final = object()
-_RELEVANT_METHODS: Final = frozenset(
-    {
-        CODEX_APP_SERVER.thread_started_method,
-        CODEX_APP_SERVER.turn_completed_method,
-    }
-)
 
 
 class AnalyticsEventStreamClosed(RuntimeError):
@@ -90,14 +87,11 @@ class AnalyticsEventScheduler:
         self._closed = False
         self._close_lock = Lock()
 
-    def offer_protocol_message(self, message: str | bytes) -> None:
+    def offer_protocol_event(self, event: Mapping[str, Any]) -> None:
         """Mark analytics dirty only for a relevant App Server lifecycle event."""
-        event = _decode_protocol_event(message)
-        if event is None:
-            return
         if self._event_observer is not None:
             self._event_observer(event)
-        if event.get("method") in _RELEVANT_METHODS:
+        if event.get("method") in ANALYTICS_LIFECYCLE_EVENT_METHODS:
             self.offer_dirty()
 
     def offer_dirty(self) -> None:
@@ -222,6 +216,7 @@ class AnalyticsProtocolEventSubscriber:
         try:
             with unix_connect(
                 str(self._event_socket_path),
+                uri=f"ws://localhost{ANALYTICS_EVENT_STREAM_PATH}",
                 compression=None,
                 max_size=None,
             ) as connection:
@@ -238,7 +233,8 @@ class AnalyticsProtocolEventSubscriber:
                         raise AnalyticsEventStreamClosed(
                             "analytics event stream sent no ready snapshot"
                         )
-                    self._scheduler.offer_protocol_message(message)
+                    if event is not None:
+                        self._scheduler.offer_protocol_event(event)
                     self._ready.set()
         except Exception as error:
             if not self._ready.is_set():
@@ -254,7 +250,10 @@ class AnalyticsProtocolEventSubscriber:
 
 def _is_relevant_protocol_event(message: str | bytes) -> bool:
     decoded = _decode_protocol_event(message)
-    return decoded is not None and decoded.get("method") in _RELEVANT_METHODS
+    return (
+        decoded is not None
+        and decoded.get("method") in ANALYTICS_LIFECYCLE_EVENT_METHODS
+    )
 
 
 def _decode_protocol_event(message: str | bytes) -> dict[str, Any] | None:

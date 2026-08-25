@@ -10,6 +10,7 @@ from websockets.sync.client import unix_connect
 from websockets.sync.server import unix_serve
 
 from rodex.protocol_proxy import (
+    ANALYTICS_EVENT_STREAM_PATH,
     CONTROL_CONNECTION_PATH,
     EVENT_STREAM_READY_MESSAGE,
     TOOL_CALL_ITEM_TYPES,
@@ -312,6 +313,51 @@ def test_event_tap_streams_runtime_events_and_removes_its_socket(tmp_path: Path)
         tap.close()
 
     assert not event_socket.exists()
+
+
+def test_event_tap_sends_only_lifecycle_events_to_analytics(tmp_path: Path) -> None:
+    event_socket = tmp_path / "events.sock"
+    tap = CodexProtocolEventTap(event_socket)
+    thread_started = json.dumps(
+        {"method": "thread/started", "params": {"thread": {"id": "thread-1"}}}
+    )
+    token_delta = json.dumps(
+        {"method": "item/agentMessage/delta", "params": {"delta": "noise"}}
+    )
+    turn_completed = json.dumps(
+        {"method": "turn/completed", "params": {"threadId": "thread-1"}}
+    )
+
+    try:
+        tap.start()
+        with (
+            unix_connect(
+                str(event_socket),
+                uri=f"ws://localhost{ANALYTICS_EVENT_STREAM_PATH}",
+                compression=None,
+            ) as analytics,
+            unix_connect(
+                str(event_socket), uri="ws://localhost/events", compression=None
+            ) as external,
+        ):
+            assert analytics.recv(timeout=1) == EVENT_STREAM_READY_MESSAGE
+            assert external.recv(timeout=1) == EVENT_STREAM_READY_MESSAGE
+
+            tap.publish(thread_started)
+            tap.publish(token_delta)
+            tap.publish(turn_completed)
+
+            assert analytics.recv(timeout=1) == thread_started
+            assert analytics.recv(timeout=1) == turn_completed
+            with pytest.raises(TimeoutError):
+                analytics.recv(timeout=0.05)
+            assert [external.recv(timeout=1) for _ in range(3)] == [
+                thread_started,
+                token_delta,
+                turn_completed,
+            ]
+    finally:
+        tap.close()
 
 
 def test_event_tap_ready_signal_reports_the_current_active_turn(tmp_path: Path) -> None:

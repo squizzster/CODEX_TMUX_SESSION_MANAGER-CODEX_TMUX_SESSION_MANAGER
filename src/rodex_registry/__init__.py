@@ -69,6 +69,7 @@ from .schema import (
 )
 from .statistics import (
     RodexAnalyticsCheckpoint,
+    RodexAnalyticsPublishReceipt,
     RodexAnalyticsStatisticsCheckpoint,
     RodexSessionStatistics,
     RodexSessionStatisticsSource,
@@ -107,6 +108,7 @@ __all__ = [
     "CodexThreadId",
     "RodexAnalyticsCheckpoint",
     "RodexAnalyticsPublication",
+    "RodexAnalyticsPublishReceipt",
     "RodexAnalyticsRegistry",
     "RodexAnalyticsStatisticsCheckpoint",
     "RodexIdError",

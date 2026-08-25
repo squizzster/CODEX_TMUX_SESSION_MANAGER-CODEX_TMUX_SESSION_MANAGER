@@ -7,11 +7,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Self
 
-from .identity import CodexSessionId, parse_codex_session_id
+from .identity import CodexSessionId, CodexThreadId, parse_codex_session_id
 from .schema import existing_rodex_database_path
 from .statistics import (
     RodexAnalyticsCheckpoint,
-    RodexSessionStatistics,
+    RodexAnalyticsPublishReceipt,
     RodexSessionStatisticsSourceObservation,
     RodexSessionStatisticsWorker,
     publish_rodex_session_statistics,
@@ -32,6 +32,9 @@ class RodexAnalyticsPublication:
     coverage_state: str
     statistics_projection: SessionStatisticsProjection
     analyzed_sources: tuple[RodexSessionStatisticsSourceObservation, ...]
+    changed_source_thread_ids: frozenset[CodexThreadId] | None = None
+    changed_turn_keys: frozenset[tuple[CodexThreadId, str]] | None = None
+    removed_turn_keys: frozenset[tuple[CodexThreadId, str]] = frozenset()
 
 
 class RodexAnalyticsRegistry:
@@ -84,7 +87,9 @@ class RodexAnalyticsRegistry:
             expected_current_codex_session_id=self._expected_codex_session_id,
         )
 
-    def publish(self, publication: RodexAnalyticsPublication) -> RodexSessionStatistics:
+    def publish(
+        self, publication: RodexAnalyticsPublication
+    ) -> RodexAnalyticsPublishReceipt:
         """Publish one identity-fenced calculation through the registry API."""
         return publish_rodex_session_statistics(
             self._session_id,
@@ -100,6 +105,9 @@ class RodexAnalyticsRegistry:
             coverage_state=publication.coverage_state,
             statistics_projection=publication.statistics_projection,
             analyzed_sources=publication.analyzed_sources,
+            changed_source_thread_ids=publication.changed_source_thread_ids,
+            changed_turn_keys=publication.changed_turn_keys,
+            removed_turn_keys=publication.removed_turn_keys,
         )
 
     def record_health_transition(

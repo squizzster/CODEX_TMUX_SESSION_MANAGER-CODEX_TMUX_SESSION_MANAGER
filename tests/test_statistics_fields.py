@@ -59,6 +59,9 @@ def test_scalar_layout_generates_complete_sql_fragments() -> None:
     assert layout.excluded_updates_sql.split(", ") == [
         f"{name} = excluded.{name}" for name in layout.columns
     ]
+    assert layout.excluded_changes_sql.split(" OR ") == [
+        f"{name} IS NOT excluded.{name}" for name in layout.columns
+    ]
 
 
 def test_scalar_fields_own_nullability_storage_and_row_decoding() -> None:

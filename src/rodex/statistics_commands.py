@@ -109,14 +109,8 @@ def execute_statistics_command(arguments: list[str], database_path: Path) -> Non
         "consecutive_failures": (0 if worker is None else worker.consecutive_failures),
         "next_retry_at_utc": None if worker is None else worker.next_retry_at_utc,
         "registered_thread_count": len(view.sources),
-        "included_thread_count": (
-            0
-            if snapshot is None
-            else sum(
-                source.included_statistics_publication_sequence
-                == snapshot.statistics_publication_sequence
-                for source in view.sources
-            )
+        "analyzed_thread_count": sum(
+            source.verified_at_utc is not None for source in view.sources
         ),
     }
     if command == STATS_STATUS_COMMAND:
@@ -156,9 +150,6 @@ def execute_statistics_command(arguments: list[str], database_path: Path) -> Non
             "started_at_utc": turn.started_at_utc,
             "terminal_at_utc": turn.terminal_at_utc,
             "outcome": turn.outcome,
-            "included_statistics_publication_sequence": (
-                turn.included_statistics_publication_sequence
-            ),
         }
         payload["statistics"] = turn_statistics_as_dict(turn.projection)
     if as_json:

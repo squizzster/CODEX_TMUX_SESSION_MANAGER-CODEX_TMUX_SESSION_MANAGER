@@ -58,7 +58,7 @@ from .analytics_source_reader import (
 from .process_contracts import AnalyticsWorkerConfig
 
 ANALYTICS_RESTART_DELAY_SECONDS = 2.0
-STATISTICS_PROJECTION_SCHEMA_VERSION = "rodex-statistics-v6"
+STATISTICS_PROJECTION_SCHEMA_VERSION = "rodex-statistics-v7"
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,6 +111,31 @@ def _analyzer_sources(
     ]
 
 
+def _turns_by_key(
+    turns: Sequence[TurnStatisticsProjection],
+) -> dict[tuple[CodexThreadId, str], TurnStatisticsProjection]:
+    return {(turn.codex_thread_id, turn.codex_turn_id): turn for turn in turns}
+
+
+def _changed_source_thread_ids(
+    prior_sources: Sequence[RodexSessionStatisticsSource],
+    stable_reads: Sequence[StableRolloutRead],
+) -> frozenset[CodexThreadId]:
+    prior_by_thread = {source.codex_thread_id: source for source in prior_sources}
+    return frozenset(
+        read.observation.codex_thread_id
+        for read in stable_reads
+        if (
+            (prior := prior_by_thread.get(read.observation.codex_thread_id)) is None
+            or prior.rollout_file_path != str(read.observation.rollout_file_path)
+            or prior.analyzed_size_bytes != read.observation.analyzed_size_bytes
+            or prior.analyzed_mtime_ns != read.observation.analyzed_mtime_ns
+            or prior.analyzed_prefix_sha256
+            != read.observation.analyzed_prefix_sha256
+        )
+    )
+
+
 class AnalyticsRolloutWorker:
     """Watch verified rollouts and project aggregate statistics into Rodex SQLite."""
 
@@ -138,6 +163,9 @@ class AnalyticsRolloutWorker:
         self._schedule_followup: Callable[[], None] | None = None
         self._last_health_transition: tuple[str, str | None] | None = None
         self._consecutive_failures = 0
+        self._published_turns: dict[
+            tuple[CodexThreadId, str], TurnStatisticsProjection
+        ] | None = None
 
     def observe_protocol_event(self, event: Mapping[str, Any]) -> None:
         """Feed exact lifecycle identity metadata into bounded source resolution."""
@@ -173,9 +201,18 @@ class AnalyticsRolloutWorker:
                 if adapter is None:
                     adapter = self._adapter_factory()
                     self._adapter = adapter
-                    adapter.analyze_rollouts(
+                    warm_calculation = adapter.analyze_rollouts(
                         _analyzer_sources(stable_reads),
                         _current_analytics_user_id(),
+                    )
+                    warm_projection = _derive_verified_collaboration_projection(
+                        warm_calculation.statistics_projection,
+                        analyzed_sources=tuple(
+                            item.observation for item in stable_reads
+                        ),
+                    )
+                    self._published_turns = _turns_by_key(
+                        warm_projection.statistics_projection.turn_statistics
                     )
                 adapter.accept_batch()
                 self._source_reader.accept([item.prepared_read for item in stable_reads])
@@ -199,6 +236,24 @@ class AnalyticsRolloutWorker:
                 calculation.statistics_projection,
                 analyzed_sources=tuple(item.observation for item in stable_reads),
             )
+            current_turns = _turns_by_key(
+                verified_collaboration.statistics_projection.turn_statistics
+            )
+            previous_turns = self._published_turns
+            changed_turn_keys = (
+                None
+                if previous_turns is None
+                else frozenset(
+                    key
+                    for key, turn in current_turns.items()
+                    if previous_turns.get(key) != turn
+                )
+            )
+            removed_turn_keys = (
+                frozenset()
+                if previous_turns is None
+                else frozenset(previous_turns.keys() - current_turns.keys())
+            )
             registry.publish(
                 RodexAnalyticsPublication(
                     based_on_statistics_publication_sequence=(
@@ -213,10 +268,16 @@ class AnalyticsRolloutWorker:
                     coverage_state=calculation.coverage_state,
                     statistics_projection=verified_collaboration.statistics_projection,
                     analyzed_sources=tuple(verified_collaboration.analyzed_sources),
+                    changed_source_thread_ids=_changed_source_thread_ids(
+                        view.sources, stable_reads
+                    ),
+                    changed_turn_keys=changed_turn_keys,
+                    removed_turn_keys=removed_turn_keys,
                 )
             )
             self._last_health_transition = ("up_to_date", None)
             self._consecutive_failures = 0
+            self._published_turns = current_turns
             adapter.accept_batch()
             self._source_reader.accept([item.prepared_read for item in stable_reads])
             if append_arrived_during_analysis:
@@ -964,13 +1025,11 @@ def _view_matches_source_reads(
         or len(sources) != len(reads)
     ):
         return False
-    publication_sequence = statistics.statistics_publication_sequence
     sources_by_thread = {source.codex_thread_id: source for source in sources}
     for read in reads:
         source = sources_by_thread.get(read.observation.codex_thread_id)
         if source is None or (
-            source.included_statistics_publication_sequence != publication_sequence
-            or source.rollout_file_path != str(read.observation.rollout_file_path)
+            source.rollout_file_path != str(read.observation.rollout_file_path)
             or source.analyzed_size_bytes != read.observation.analyzed_size_bytes
             or source.analyzed_prefix_sha256 != read.observation.analyzed_prefix_sha256
         ):

@@ -807,8 +807,8 @@ def test_worker_does_not_adopt_a_replacement_codex_identity(
         CODEX_SESSION_ID,
         REPLACEMENT_CODEX_SESSION_ID,
     ]
-    assert sources[0].included_statistics_publication_sequence == 1
-    assert sources[1].included_statistics_publication_sequence is None
+    assert sources[0].verified_at_utc is not None
+    assert sources[1].verified_at_utc is None
 
 
 def test_analyzer_failure_preserves_last_good_aggregate_and_increments_health(
@@ -1165,15 +1165,11 @@ def test_real_worker_publishes_exact_turn_projection_into_rodex_sql(
 
     exact = read_rodex_session_turn_statistics(1, "turn-test", config.rodex_database_path)
     assert exact.statistics is not None
-    assert exact.statistics.statistics_projection_schema_version == "rodex-statistics-v6"
+    assert exact.statistics.statistics_projection_schema_version == "rodex-statistics-v7"
     assert exact.worker is not None
     assert exact.worker.worker_state == "up_to_date"
     assert exact.turn is not None
     assert exact.turn.codex_thread_id == CODEX_SESSION_ID
-    assert (
-        exact.turn.included_statistics_publication_sequence
-        == exact.statistics.statistics_publication_sequence
-    )
     assert exact.turn.outcome == "completed"
     assert exact.turn.projection.model == "gpt-test"
     assert exact.turn.projection.reasoning_effort == "xhigh"

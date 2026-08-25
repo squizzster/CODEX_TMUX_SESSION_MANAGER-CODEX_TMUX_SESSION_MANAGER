@@ -75,6 +75,13 @@ class StatisticsScalarLayout:
         return ", ".join(f"{field.name} = excluded.{field.name}" for field in self.fields)
 
     @property
+    def excluded_changes_sql(self) -> str:
+        """Return a null-safe predicate that rejects unchanged UPSERT writes."""
+        return " OR ".join(
+            f"{field.name} IS NOT excluded.{field.name}" for field in self.fields
+        )
+
+    @property
     def schema_columns(self) -> tuple[tuple[str, str, int, int], ...]:
         return tuple(field.schema_column for field in self.fields)
 

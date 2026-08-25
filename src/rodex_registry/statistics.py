@@ -99,7 +99,6 @@ class RodexSessionStatisticsSource:
     analyzed_mtime_ns: int | None
     analyzed_prefix_sha256: str | None
     verified_at_utc: str | None
-    included_statistics_publication_sequence: int | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -129,7 +128,6 @@ class RodexSessionTurnStatistics:
     id: int
     rodex_sessions_id: int
     rodex_sessions_statistics_sources_id: int
-    included_statistics_publication_sequence: int
     projection: TurnStatisticsProjection
 
     @property
@@ -179,6 +177,15 @@ class RodexSessionStatisticsView:
 class RodexAnalyticsStatisticsCheckpoint:
     """Only publication metadata needed by the live analytics worker."""
 
+    statistics_publication_sequence: int
+    statistics_projection_schema_version: str
+
+
+@dataclass(frozen=True, slots=True)
+class RodexAnalyticsPublishReceipt:
+    """Small acknowledgement returned without re-reading the published projection."""
+
+    statistics_id: int
     statistics_publication_sequence: int
     statistics_projection_schema_version: str
 
@@ -243,7 +250,10 @@ def publish_rodex_session_statistics(
     coverage_state: str,
     statistics_projection: SessionStatisticsProjection,
     analyzed_sources: Sequence[RodexSessionStatisticsSourceObservation],
-) -> RodexSessionStatistics:
+    changed_source_thread_ids: frozenset[CodexThreadId] | None = None,
+    changed_turn_keys: frozenset[tuple[CodexThreadId, str]] | None = None,
+    removed_turn_keys: frozenset[tuple[CodexThreadId, str]] = frozenset(),
+) -> RodexAnalyticsPublishReceipt:
     """Atomically publish one fenced session projection, turns, and sources."""
     _validate_session_id(session_id)
     expected_halves = split_codex_session_id_into_signed_bigints(
@@ -283,6 +293,10 @@ def publish_rodex_session_statistics(
     turn_keys = {(item.codex_thread_id, item.codex_turn_id) for item in turns}
     if len(turn_keys) != len(turns):
         raise ValueError("turn_statistics contains a duplicate source and turn ID")
+    if changed_turn_keys is not None and not changed_turn_keys.issubset(turn_keys):
+        raise ValueError("changed_turn_keys contains a turn outside the projection")
+    if removed_turn_keys & turn_keys:
+        raise ValueError("removed_turn_keys contains a projected turn")
     _validate_authoritative_collaboration_projection(statistics_projection, observations)
 
     path = existing_rodex_database_path(database_path)
@@ -340,10 +354,22 @@ def publish_rodex_session_statistics(
             split_codex_thread_id_into_signed_bigints(item.codex_thread_id)
             for item in observations
         )
+        source_threads_to_write = (
+            frozenset(item.codex_thread_id for item in observations)
+            if changed_source_thread_ids is None
+            else changed_source_thread_ids
+        )
+        if not source_threads_to_write.issubset(
+            item.codex_thread_id for item in observations
+        ):
+            raise ValueError(
+                "changed_source_thread_ids contains an unobserved source"
+            )
         if not previously_registered.issubset(observed):
             raise RodexSessionStatisticsConflictError(
                 "statistics omit a registered Codex thread source"
             )
+        new_source_threads: set[CodexThreadId] = set()
         for item in sorted(observations, key=lambda observation: observation.thread_depth):
             thread_halves = split_codex_thread_id_into_signed_bigints(item.codex_thread_id)
             parent_source_id = (
@@ -393,6 +419,7 @@ def publish_rodex_session_statistics(
                         "statistics source insertion returned no identity"
                     )
                 source_ids[thread_halves] = int(row[0])
+                new_source_threads.add(item.codex_thread_id)
                 continue
             stored_metadata = (
                 None if existing[3] is None else int(existing[3]),
@@ -405,6 +432,7 @@ def publish_rodex_session_statistics(
                 raise RodexSessionStatisticsConflictError(
                     "statistics source hierarchy changed during calculation"
                 )
+        source_threads_to_write = source_threads_to_write.union(new_source_threads)
         turn_sources = {
             split_codex_thread_id_into_signed_bigints(item.codex_thread_id)
             for item in turns
@@ -414,18 +442,7 @@ def publish_rodex_session_statistics(
                 "turn statistics include a source outside the analyzed snapshot"
             )
 
-        connection.execute(
-            f"DELETE FROM {RODEX_SESSIONS_STATISTICS_SUBAGENT_SPAWNS_TABLE} "
-            "WHERE rodex_sessions_id = ?",
-            (session_id,),
-        )
-        connection.execute(
-            f"UPDATE {RODEX_SESSIONS_STATISTICS_SOURCES_TABLE} "
-            "SET included_statistics_publication_sequence = NULL "
-            "WHERE rodex_sessions_id = ?",
-            (session_id,),
-        )
-        connection.execute(
+        statistics_row = connection.execute(
             f"INSERT INTO {RODEX_SESSIONS_STATISTICS_TABLE} "
             "(rodex_sessions_id, statistics_publication_sequence, "
             "statistics_projection_schema_version, calculated_at_utc, "
@@ -438,7 +455,8 @@ def publish_rodex_session_statistics(
             "excluded.statistics_projection_schema_version, "
             "calculated_at_utc = excluded.calculated_at_utc, "
             "coverage_state = excluded.coverage_state, "
-            f"{SESSION_STATISTICS_SCALARS.excluded_updates_sql}",
+            f"{SESSION_STATISTICS_SCALARS.excluded_updates_sql} "
+            "RETURNING id",
             (
                 session_id,
                 new_publication_sequence,
@@ -447,69 +465,18 @@ def publish_rodex_session_statistics(
                 coverage,
                 *SESSION_STATISTICS_SCALARS.write_values(statistics_projection),
             ),
-        )
-        for table in (
-            RODEX_SESSIONS_STATISTICS_DISTRIBUTIONS_TABLE,
-            RODEX_SESSIONS_STATISTICS_NAMED_COUNTS_TABLE,
-            RODEX_SESSIONS_STATISTICS_AUDIT_LIMITS_TABLE,
-        ):
-            connection.execute(
-                f"DELETE FROM {table} WHERE rodex_sessions_id = ?", (session_id,)
-            )
-        connection.executemany(
-            f"INSERT INTO {RODEX_SESSIONS_STATISTICS_DISTRIBUTIONS_TABLE} "
-            "(rodex_sessions_id, included_statistics_publication_sequence, "
-            "distribution_kind, "
-            "observation_count, total, median, p75, p90, p95, maximum) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                (
-                    session_id,
-                    new_publication_sequence,
-                    item.distribution_kind,
-                    item.observation_count,
-                    item.total,
-                    item.median,
-                    item.p75,
-                    item.p90,
-                    item.p95,
-                    item.maximum,
-                )
-                for item in statistics_projection.distributions
-            ),
-        )
-        connection.executemany(
-            f"INSERT INTO {RODEX_SESSIONS_STATISTICS_NAMED_COUNTS_TABLE} "
-            "(rodex_sessions_id, included_statistics_publication_sequence, count_kind, "
-            "count_name, occurrence_count) VALUES (?, ?, ?, ?, ?)",
-            (
-                (
-                    session_id,
-                    new_publication_sequence,
-                    item.count_kind,
-                    item.count_name,
-                    item.occurrence_count,
-                )
-                for item in statistics_projection.named_counts
-                if item.count_kind not in _DERIVED_SESSION_NAMED_COUNT_KINDS
-            ),
-        )
-        connection.executemany(
-            f"INSERT INTO {RODEX_SESSIONS_STATISTICS_AUDIT_LIMITS_TABLE} "
-            "(rodex_sessions_id, included_statistics_publication_sequence, "
-            "limit_ordinal, "
-            "limitation) VALUES (?, ?, ?, ?)",
-            (
-                (session_id, new_publication_sequence, ordinal, limitation)
-                for ordinal, limitation in enumerate(statistics_projection.audit_limits)
-            ),
-        )
+        ).fetchone()
+        if statistics_row is None:
+            raise RodexSessionError("statistics upsert returned no identity")
+        _sync_session_projection_children(connection, session_id, statistics_projection)
         for item in observations:
+            if item.codex_thread_id not in source_threads_to_write:
+                continue
             cursor = connection.execute(
                 f"UPDATE {RODEX_SESSIONS_STATISTICS_SOURCES_TABLE} SET "
                 "rollout_file_path = ?, analyzed_size_bytes = ?, "
                 "analyzed_mtime_ns = ?, analyzed_prefix_sha256 = ?, "
-                "verified_at_utc = ?, included_statistics_publication_sequence = ? "
+                "verified_at_utc = ? "
                 "WHERE rodex_sessions_id = ? AND codex_thread_id_signed_bigint_1 = ? "
                 "AND codex_thread_id_signed_bigint_2 = ?",
                 (
@@ -518,7 +485,6 @@ def publish_rodex_session_statistics(
                     item.analyzed_mtime_ns,
                     item.analyzed_prefix_sha256,
                     item.verified_at_utc,
-                    new_publication_sequence,
                     session_id,
                     *split_codex_thread_id_into_signed_bigints(item.codex_thread_id),
                 ),
@@ -527,15 +493,20 @@ def publish_rodex_session_statistics(
                 raise RodexSessionStatisticsConflictError(
                     "registered statistics source changed during publication"
                 )
-        connection.execute(
-            f"DELETE FROM {RODEX_SESSIONS_STATISTICS_TURN_NAMED_COUNTS_TABLE} "
-            "WHERE rodex_sessions_id = ?",
-            (session_id,),
-        )
+        turns_by_key = {
+            (item.codex_thread_id, item.codex_turn_id): item for item in turns
+        }
+        if changed_turn_keys is None:
+            stored_turn_keys = _select_stored_turn_keys(connection, session_id)
+            turns_to_write = turns
+            turns_to_remove = stored_turn_keys - turn_keys
+        else:
+            turns_to_write = tuple(turns_by_key[key] for key in changed_turn_keys)
+            turns_to_remove = set(removed_turn_keys)
         model_name_ids: dict[str, int] = {}
         reasoning_effort_name_ids: dict[str, int] = {}
         turn_row_ids: dict[tuple[CodexThreadId, str], int] = {}
-        for item in turns:
+        for item in turns_to_write:
             source_halves = split_codex_thread_id_into_signed_bigints(item.codex_thread_id)
             source_id = source_ids[source_halves]
             turn_hash = _turn_id_sha256_signed_bigints(item.codex_turn_id)
@@ -572,31 +543,34 @@ def publish_rodex_session_statistics(
                 "(rodex_sessions_id, rodex_sessions_statistics_sources_id, "
                 "codex_turn_id_sha256_int_1, codex_turn_id_sha256_int_2, "
                 "codex_turn_id_sha256_int_3, codex_turn_id_sha256_int_4, "
-                "codex_turn_id, included_statistics_publication_sequence, "
-                "started_at_utc, "
+                "codex_turn_id, started_at_utc, "
                 "terminal_at_utc, outcome, model_names_id, "
                 "reasoning_effort_names_id, "
                 f"{TURN_STATISTICS_SCALARS.columns_sql}) "
-                f"VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
+                f"VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
                 f"{TURN_STATISTICS_SCALARS.placeholders_sql}) "
                 "ON CONFLICT(rodex_sessions_statistics_sources_id, "
                 "codex_turn_id_sha256_int_1, codex_turn_id_sha256_int_2, "
                 "codex_turn_id_sha256_int_3, codex_turn_id_sha256_int_4) "
-                "DO UPDATE SET included_statistics_publication_sequence = "
-                "excluded.included_statistics_publication_sequence, "
-                "started_at_utc = excluded.started_at_utc, "
+                "DO UPDATE SET started_at_utc = excluded.started_at_utc, "
                 "terminal_at_utc = excluded.terminal_at_utc, "
                 "outcome = excluded.outcome, "
                 "model_names_id = excluded.model_names_id, "
                 "reasoning_effort_names_id = excluded.reasoning_effort_names_id, "
                 f"{TURN_STATISTICS_SCALARS.excluded_updates_sql} "
+                "WHERE started_at_utc IS NOT excluded.started_at_utc "
+                "OR terminal_at_utc IS NOT excluded.terminal_at_utc "
+                "OR outcome IS NOT excluded.outcome "
+                "OR model_names_id IS NOT excluded.model_names_id "
+                "OR reasoning_effort_names_id IS NOT "
+                "excluded.reasoning_effort_names_id "
+                f"OR {TURN_STATISTICS_SCALARS.excluded_changes_sql} "
                 "RETURNING id",
                 (
                     session_id,
                     source_id,
                     *turn_hash,
                     item.codex_turn_id,
-                    new_publication_sequence,
                     item.started_at_utc,
                     item.terminal_at_utc,
                     item.outcome,
@@ -606,28 +580,44 @@ def publish_rodex_session_statistics(
                 ),
             ).fetchone()
             if row is None:
-                raise RodexSessionError("turn statistics upsert returned no identity")
-            turn_row_id = int(row[0])
+                if existing is None:
+                    raise RodexSessionError("turn statistics upsert returned no identity")
+                turn_row_id = int(existing[0])
+            else:
+                turn_row_id = int(row[0])
             turn_row_ids[(item.codex_thread_id, item.codex_turn_id)] = turn_row_id
-            connection.executemany(
-                f"INSERT INTO {RODEX_SESSIONS_STATISTICS_TURN_NAMED_COUNTS_TABLE} "
-                "(rodex_sessions_id, rodex_sessions_statistics_turns_id, "
-                "included_statistics_publication_sequence, count_kind, count_name, "
-                "occurrence_count) VALUES (?, ?, ?, ?, ?, ?)",
-                (
-                    (
-                        session_id,
-                        turn_row_id,
-                        new_publication_sequence,
-                        count.count_kind,
-                        count.count_name,
-                        count.occurrence_count,
-                    )
-                    for count in item.named_counts
-                    if count.count_kind != "collaboration_tool"
-                ),
+            _sync_turn_named_counts(
+                connection,
+                session_id,
+                turn_row_id,
+                item.named_counts,
+            )
+        for turn_key in turns_to_remove:
+            source_id = source_ids.get(
+                split_codex_thread_id_into_signed_bigints(turn_key[0])
+            )
+            if source_id is None:
+                raise RodexSessionStatisticsConflictError(
+                    "removed turn identifies an unregistered source"
+                )
+            turn_row_id = _lookup_turn_row_id(
+                connection, source_id, turn_key[1], required=False
+            )
+            if turn_row_id is None:
+                continue
+            connection.execute(
+                f"DELETE FROM {RODEX_SESSIONS_STATISTICS_TURN_NAMED_COUNTS_TABLE} "
+                "WHERE rodex_sessions_statistics_turns_id = ?",
+                (turn_row_id,),
+            )
+            connection.execute(
+                f"DELETE FROM {RODEX_SESSIONS_STATISTICS_TURNS_TABLE} "
+                "WHERE id = ? AND rodex_sessions_id = ?",
+                (turn_row_id, session_id),
             )
         for subagent_source in observations:
+            if subagent_source.codex_thread_id not in new_source_threads:
+                continue
             parent_thread_id = subagent_source.parent_codex_thread_id
             if parent_thread_id is None:
                 continue
@@ -637,8 +627,13 @@ def publish_rodex_session_statistics(
                 (parent_thread_id, spawning_codex_turn_id)
             )
             if spawning_turn_row_id is None:
-                raise RodexSessionStatisticsConflictError(
-                    "sub-agent spawning turn disappeared during publication"
+                spawning_turn_row_id = _lookup_turn_row_id(
+                    connection,
+                    source_ids[
+                        split_codex_thread_id_into_signed_bigints(parent_thread_id)
+                    ],
+                    spawning_codex_turn_id,
+                    required=True,
                 )
             subagent_source_id = source_ids[
                 split_codex_thread_id_into_signed_bigints(subagent_source.codex_thread_id)
@@ -648,22 +643,14 @@ def publish_rodex_session_statistics(
                 "(rodex_sessions_id, "
                 "subagent_rodex_sessions_statistics_sources_id, "
                 "parent_rodex_sessions_statistics_sources_id, "
-                "spawning_rodex_sessions_statistics_turns_id, "
-                "included_statistics_publication_sequence) VALUES (?, ?, ?, ?, ?)",
+                "spawning_rodex_sessions_statistics_turns_id) VALUES (?, ?, ?, ?)",
                 (
                     session_id,
                     subagent_source_id,
                     source_ids[split_codex_thread_id_into_signed_bigints(parent_thread_id)],
                     spawning_turn_row_id,
-                    new_publication_sequence,
                 ),
             )
-        connection.execute(
-            f"DELETE FROM {RODEX_SESSIONS_STATISTICS_TURNS_TABLE} "
-            "WHERE rodex_sessions_id = ? "
-            "AND included_statistics_publication_sequence != ?",
-            (session_id, new_publication_sequence),
-        )
         _upsert_statistics_worker(
             connection,
             session_id,
@@ -673,10 +660,11 @@ def publish_rodex_session_statistics(
             consecutive_failures=0,
             next_retry_at_utc=None,
         )
-    published = lookup_rodex_session_statistics(session_id, path)
-    if published is None:
-        raise RodexSessionError(f"Rodex statistics disappeared: {session_id}")
-    return published
+    return RodexAnalyticsPublishReceipt(
+        statistics_id=int(statistics_row[0]),
+        statistics_publication_sequence=new_publication_sequence,
+        statistics_projection_schema_version=schema_version,
+    )
 
 
 def record_rodex_session_statistics_worker_health(
@@ -800,8 +788,7 @@ def read_rodex_analytics_checkpoint(
             "sources.subagent_history_start_ordinal, spawning_turn.codex_turn_id, "
             "sources.first_linked_at_utc, sources.rollout_file_path, "
             "sources.analyzed_size_bytes, sources.analyzed_mtime_ns, "
-            "sources.analyzed_prefix_sha256, sources.verified_at_utc, "
-            "sources.included_statistics_publication_sequence "
+            "sources.analyzed_prefix_sha256, sources.verified_at_utc "
             f"FROM {RODEX_SESSIONS_TABLE} AS sessions "
             f"LEFT JOIN {RODEX_SESSIONS_STATISTICS_TABLE} AS statistics "
             "ON statistics.rodex_sessions_id = sessions.id "
@@ -833,7 +820,7 @@ def read_rodex_analytics_checkpoint(
     )
     worker = None if rows[0][4] is None else _statistics_worker_from_row(rows[0][4:11])
     sources = tuple(
-        _statistics_source_from_row(row[11:29]) for row in rows if row[11] is not None
+        _statistics_source_from_row(row[11:28]) for row in rows if row[11] is not None
     )
     return RodexAnalyticsCheckpoint(statistics, worker, sources)
 
@@ -908,8 +895,7 @@ def read_rodex_session_turn_statistics(
             "turns.rodex_sessions_statistics_sources_id, "
             "sources.codex_thread_id_signed_bigint_1, "
             "sources.codex_thread_id_signed_bigint_2, turns.codex_turn_id, "
-            "turns.included_statistics_publication_sequence, turns.started_at_utc, "
-            "turns.terminal_at_utc, turns.outcome, "
+            "turns.started_at_utc, turns.terminal_at_utc, turns.outcome, "
             "models.name_of_the_model, "
             "efforts.name_of_the_reasoning_effort, "
             f"(SELECT COUNT(*) FROM {RODEX_SESSIONS_STATISTICS_SUBAGENT_SPAWNS_TABLE} "
@@ -1152,6 +1138,222 @@ def _turn_id_sha256_signed_bigints(turn_id: str) -> tuple[int, int, int, int]:
         for offset in range(0, 32, 8)
     )
     return pieces[0], pieces[1], pieces[2], pieces[3]
+
+
+def _sync_session_projection_children(
+    connection: sqlite3.Connection,
+    session_id: int,
+    projection: SessionStatisticsProjection,
+) -> None:
+    """Synchronize bounded aggregate children without rewriting equal rows."""
+    distributions = {
+        item.distribution_kind: item for item in projection.distributions
+    }
+    stored_distribution_kinds = {
+        str(row[0])
+        for row in connection.execute(
+            f"SELECT distribution_kind FROM "
+            f"{RODEX_SESSIONS_STATISTICS_DISTRIBUTIONS_TABLE} "
+            "WHERE rodex_sessions_id = ?",
+            (session_id,),
+        )
+    }
+    connection.executemany(
+        f"INSERT INTO {RODEX_SESSIONS_STATISTICS_DISTRIBUTIONS_TABLE} "
+        "(rodex_sessions_id, distribution_kind, observation_count, total, median, "
+        "p75, p90, p95, maximum) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT(rodex_sessions_id, distribution_kind) DO UPDATE SET "
+        "observation_count = excluded.observation_count, total = excluded.total, "
+        "median = excluded.median, p75 = excluded.p75, p90 = excluded.p90, "
+        "p95 = excluded.p95, maximum = excluded.maximum "
+        "WHERE observation_count IS NOT excluded.observation_count "
+        "OR total IS NOT excluded.total OR median IS NOT excluded.median "
+        "OR p75 IS NOT excluded.p75 OR p90 IS NOT excluded.p90 "
+        "OR p95 IS NOT excluded.p95 OR maximum IS NOT excluded.maximum",
+        (
+            (
+                session_id,
+                item.distribution_kind,
+                item.observation_count,
+                item.total,
+                item.median,
+                item.p75,
+                item.p90,
+                item.p95,
+                item.maximum,
+            )
+            for item in distributions.values()
+        ),
+    )
+    connection.executemany(
+        f"DELETE FROM {RODEX_SESSIONS_STATISTICS_DISTRIBUTIONS_TABLE} "
+        "WHERE rodex_sessions_id = ? AND distribution_kind = ?",
+        ((session_id, key) for key in stored_distribution_kinds - distributions.keys()),
+    )
+
+    named_counts = {
+        (item.count_kind, item.count_name): item
+        for item in projection.named_counts
+        if item.count_kind not in _DERIVED_SESSION_NAMED_COUNT_KINDS
+    }
+    stored_named_count_keys = {
+        (str(row[0]), str(row[1]))
+        for row in connection.execute(
+            f"SELECT count_kind, count_name FROM "
+            f"{RODEX_SESSIONS_STATISTICS_NAMED_COUNTS_TABLE} "
+            "WHERE rodex_sessions_id = ?",
+            (session_id,),
+        )
+    }
+    connection.executemany(
+        f"INSERT INTO {RODEX_SESSIONS_STATISTICS_NAMED_COUNTS_TABLE} "
+        "(rodex_sessions_id, count_kind, count_name, occurrence_count) "
+        "VALUES (?, ?, ?, ?) "
+        "ON CONFLICT(rodex_sessions_id, count_kind, count_name) DO UPDATE SET "
+        "occurrence_count = excluded.occurrence_count "
+        "WHERE occurrence_count IS NOT excluded.occurrence_count",
+        (
+            (session_id, item.count_kind, item.count_name, item.occurrence_count)
+            for item in named_counts.values()
+        ),
+    )
+    connection.executemany(
+        f"DELETE FROM {RODEX_SESSIONS_STATISTICS_NAMED_COUNTS_TABLE} "
+        "WHERE rodex_sessions_id = ? AND count_kind = ? AND count_name = ?",
+        (
+            (session_id, count_kind, count_name)
+            for count_kind, count_name in stored_named_count_keys - named_counts.keys()
+        ),
+    )
+
+    audit_limits = dict(enumerate(projection.audit_limits))
+    stored_audit_limit_ordinals = {
+        int(row[0])
+        for row in connection.execute(
+            f"SELECT limit_ordinal FROM "
+            f"{RODEX_SESSIONS_STATISTICS_AUDIT_LIMITS_TABLE} "
+            "WHERE rodex_sessions_id = ?",
+            (session_id,),
+        )
+    }
+    connection.executemany(
+        f"INSERT INTO {RODEX_SESSIONS_STATISTICS_AUDIT_LIMITS_TABLE} "
+        "(rodex_sessions_id, limit_ordinal, limitation) VALUES (?, ?, ?) "
+        "ON CONFLICT(rodex_sessions_id, limit_ordinal) DO UPDATE SET "
+        "limitation = excluded.limitation "
+        "WHERE limitation IS NOT excluded.limitation",
+        (
+            (session_id, ordinal, limitation)
+            for ordinal, limitation in audit_limits.items()
+        ),
+    )
+    connection.executemany(
+        f"DELETE FROM {RODEX_SESSIONS_STATISTICS_AUDIT_LIMITS_TABLE} "
+        "WHERE rodex_sessions_id = ? AND limit_ordinal = ?",
+        (
+            (session_id, ordinal)
+            for ordinal in stored_audit_limit_ordinals - audit_limits.keys()
+        ),
+    )
+
+
+def _sync_turn_named_counts(
+    connection: sqlite3.Connection,
+    session_id: int,
+    turn_row_id: int,
+    named_counts: Sequence[StatisticsNamedCount],
+) -> None:
+    desired = {
+        (item.count_kind, item.count_name): item
+        for item in named_counts
+        if item.count_kind != "collaboration_tool"
+    }
+    stored_keys = {
+        (str(row[0]), str(row[1]))
+        for row in connection.execute(
+            f"SELECT count_kind, count_name FROM "
+            f"{RODEX_SESSIONS_STATISTICS_TURN_NAMED_COUNTS_TABLE} "
+            "WHERE rodex_sessions_statistics_turns_id = ?",
+            (turn_row_id,),
+        )
+    }
+    connection.executemany(
+        f"INSERT INTO {RODEX_SESSIONS_STATISTICS_TURN_NAMED_COUNTS_TABLE} "
+        "(rodex_sessions_id, rodex_sessions_statistics_turns_id, count_kind, "
+        "count_name, occurrence_count) VALUES (?, ?, ?, ?, ?) "
+        "ON CONFLICT(rodex_sessions_statistics_turns_id, count_kind, count_name) "
+        "DO UPDATE SET occurrence_count = excluded.occurrence_count "
+        "WHERE occurrence_count IS NOT excluded.occurrence_count",
+        (
+            (
+                session_id,
+                turn_row_id,
+                item.count_kind,
+                item.count_name,
+                item.occurrence_count,
+            )
+            for item in desired.values()
+        ),
+    )
+    connection.executemany(
+        f"DELETE FROM {RODEX_SESSIONS_STATISTICS_TURN_NAMED_COUNTS_TABLE} "
+        "WHERE rodex_sessions_statistics_turns_id = ? "
+        "AND count_kind = ? AND count_name = ?",
+        (
+            (turn_row_id, count_kind, count_name)
+            for count_kind, count_name in stored_keys - desired.keys()
+        ),
+    )
+
+
+def _select_stored_turn_keys(
+    connection: sqlite3.Connection,
+    session_id: int,
+) -> set[tuple[CodexThreadId, str]]:
+    return {
+        (
+            join_signed_bigints_into_a_codex_thread_id(row[0], row[1]),
+            str(row[2]),
+        )
+        for row in connection.execute(
+            f"SELECT sources.codex_thread_id_signed_bigint_1, "
+            "sources.codex_thread_id_signed_bigint_2, turns.codex_turn_id "
+            f"FROM {RODEX_SESSIONS_STATISTICS_TURNS_TABLE} AS turns "
+            f"JOIN {RODEX_SESSIONS_STATISTICS_SOURCES_TABLE} AS sources "
+            "ON sources.id = turns.rodex_sessions_statistics_sources_id "
+            "WHERE turns.rodex_sessions_id = ?",
+            (session_id,),
+        )
+    }
+
+
+def _lookup_turn_row_id(
+    connection: sqlite3.Connection,
+    source_id: int,
+    codex_turn_id: str,
+    *,
+    required: bool,
+) -> int | None:
+    row = connection.execute(
+        f"SELECT id, codex_turn_id FROM {RODEX_SESSIONS_STATISTICS_TURNS_TABLE} "
+        "WHERE rodex_sessions_statistics_sources_id = ? "
+        "AND codex_turn_id_sha256_int_1 = ? "
+        "AND codex_turn_id_sha256_int_2 = ? "
+        "AND codex_turn_id_sha256_int_3 = ? "
+        "AND codex_turn_id_sha256_int_4 = ?",
+        (source_id, *_turn_id_sha256_signed_bigints(codex_turn_id)),
+    ).fetchone()
+    if row is None:
+        if required:
+            raise RodexSessionStatisticsConflictError(
+                "sub-agent spawning turn disappeared during publication"
+            )
+        return None
+    if str(row[1]) != codex_turn_id:
+        raise RodexSessionStatisticsConflictError(
+            "turn ID digest collision during statistics publication"
+        )
+    return int(row[0])
 
 
 def _lookup_or_insert_cached_name_id(
@@ -1510,8 +1712,7 @@ def _select_statistics_sources(
         "sources.first_linked_at_utc, "
         "sources.rollout_file_path, sources.analyzed_size_bytes, "
         "sources.analyzed_mtime_ns, sources.analyzed_prefix_sha256, "
-        "sources.verified_at_utc, "
-        "sources.included_statistics_publication_sequence "
+        "sources.verified_at_utc "
         f"FROM {RODEX_SESSIONS_STATISTICS_SOURCES_TABLE} AS sources "
         "JOIN hierarchy ON hierarchy.id = sources.id "
         f"LEFT JOIN {RODEX_SESSIONS_STATISTICS_SUBAGENT_SPAWNS_TABLE} AS spawns "
@@ -1636,9 +1837,6 @@ def _statistics_source_from_row(
         analyzed_mtime_ns=None if row[14] is None else int(row[14]),
         analyzed_prefix_sha256=None if row[15] is None else str(row[15]),
         verified_at_utc=None if row[16] is None else str(row[16]),
-        included_statistics_publication_sequence=(
-            None if row[17] is None else int(row[17])
-        ),
     )
 
 
@@ -1646,30 +1844,29 @@ def _turn_statistics_from_rows(
     row: tuple[object, ...],
     named_count_rows: Sequence[tuple[object, ...]],
 ) -> RodexSessionTurnStatistics:
-    values = TURN_STATISTICS_SCALARS.read_values(row[13:])
+    values = TURN_STATISTICS_SCALARS.read_values(row[12:])
     named_counts = _append_collaboration_view_from_model_tools(
         _named_counts_from_rows(named_count_rows)
     )
     projection = TurnStatisticsProjection(
         codex_thread_id=join_signed_bigints_into_a_codex_thread_id(row[3], row[4]),
         codex_turn_id=str(row[5]),
-        started_at_utc=None if row[7] is None else str(row[7]),
-        terminal_at_utc=None if row[8] is None else str(row[8]),
-        outcome=str(row[9]),
-        model=None if row[10] is None else str(row[10]),
-        reasoning_effort=None if row[11] is None else str(row[11]),
+        started_at_utc=None if row[6] is None else str(row[6]),
+        terminal_at_utc=None if row[7] is None else str(row[7]),
+        outcome=str(row[8]),
+        model=None if row[9] is None else str(row[9]),
+        reasoning_effort=None if row[10] is None else str(row[10]),
         **values,
         collaboration_operations_count=sum(
             _canonical_collaboration_count_map(named_counts).values()
         ),
-        collaboration_agents_started_count=int(row[12]),
+        collaboration_agents_started_count=int(row[11]),
         named_counts=named_counts,
     )
     return RodexSessionTurnStatistics(
         id=int(row[0]),
         rodex_sessions_id=int(row[1]),
         rodex_sessions_statistics_sources_id=int(row[2]),
-        included_statistics_publication_sequence=int(row[6]),
         projection=projection,
     )
 

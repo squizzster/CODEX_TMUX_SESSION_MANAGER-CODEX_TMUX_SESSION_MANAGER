@@ -2300,6 +2300,9 @@ def test_session_host_terminates_the_tui_when_runtime_keepalive_fails(
 
         def fail(self) -> None:
             self.failure = RodexRuntimeError("runtime keepalive lost proxy.sock")
+            callback = getattr(self, "failure_callback", None)
+            if callback is not None:
+                callback(self.failure)
 
     monkeypatch.setenv("TMUX_PANE", "%4")
     monkeypatch.setattr(

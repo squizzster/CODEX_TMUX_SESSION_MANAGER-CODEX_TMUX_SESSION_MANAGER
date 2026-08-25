@@ -72,7 +72,7 @@ CODEX_PRIMARY_CONNECTION_RELEASE_TIMEOUT_SECONDS: Final = 2.5
 RUNTIME_PATH_KEEPALIVE_INTERVAL_SECONDS: Final = 60.0 * 60.0
 RODEX_REGISTRATION_TIMEOUT_SECONDS: Final = 60.0
 RODEX_TMUX_HISTORY_LIMIT_LINES: Final = 50_000
-_TUI_SUPERVISION_INTERVAL_SECONDS: Final = 1.0
+_REGISTRATION_POLL_INTERVAL_SECONDS: Final = 1.0
 _POLL_INTERVAL_SECONDS: Final = 0.05
 _PROXY_SOCKET_OPTION: Final = "@rodex_protocol_proxy_socket_path"
 _EVENT_SOCKET_OPTION: Final = "@rodex_protocol_event_socket_path"
@@ -119,6 +119,7 @@ class _RuntimePathKeepalive:
         self._failure: RodexRuntimeError | None = None
         self._failure_reported = Event()
         self._identities: dict[Path, tuple[int, int, int, int]] = {}
+        self.failure_callback: Callable[[RodexRuntimeError], None] | None = None
 
     @property
     def failure(self) -> RodexRuntimeError | None:
@@ -161,6 +162,10 @@ class _RuntimePathKeepalive:
             except RodexRuntimeError as error:
                 self._failure = error
                 self._failure_reported.set()
+                callback = self.failure_callback
+                if callback is not None:
+                    with suppress(Exception):
+                        callback(error)
                 return
 
     def _refresh(self) -> None:
@@ -1303,6 +1308,16 @@ def run_session_host(
                     protocol_event_socket_path,
                 )
             )
+
+            def stop_tui_after_keepalive_failure(_error: RodexRuntimeError) -> None:
+                active_tui = tui
+                if active_tui is None or active_tui.poll() is not None:
+                    return
+                _stop_child_process(active_tui)
+
+            runtime_path_keepalive.failure_callback = (
+                stop_tui_after_keepalive_failure
+            )
             try:
                 runtime_path_keepalive.start()
             except RodexRuntimeError as error:
@@ -1351,14 +1366,21 @@ def run_session_host(
                         )
                         if activated_analytics is not None:
                             registration_deadline = None
+                            candidate_supervisor: AnalyticsSubprocessSupervisor | None = (
+                                None
+                            )
                             try:
-                                analytics_supervisor = analytics_supervisor_factory(
+                                candidate_supervisor = analytics_supervisor_factory(
                                     activated_analytics
                                 )
-                                analytics_supervisor.poll()
+                                candidate_supervisor.start()
+                                analytics_supervisor = candidate_supervisor
                             except Exception:
                                 # Persistent statistics are strictly off the interactive
                                 # path; a failed sidecar must not break the Codex TUI.
+                                if candidate_supervisor is not None:
+                                    with suppress(Exception):
+                                        candidate_supervisor.close()
                                 analytics_config = None
                                 analytics_supervisor = None
                         elif (
@@ -1368,17 +1390,22 @@ def run_session_host(
                             raise RodexRuntimeError(
                                 "runtime registration was not confirmed before its deadline"
                             )
-                    if analytics_supervisor is not None:
-                        try:
-                            analytics_supervisor.poll()
-                        except Exception:
-                            analytics_supervisor = None
                     failure = runtime_path_keepalive.failure
                     if failure is not None:
                         _record_runtime_path_keepalive_failure(log, failure)
                         raise failure
                     try:
-                        returncode = tui.wait(timeout=_TUI_SUPERVISION_INTERVAL_SECONDS)
+                        registration_pending = (
+                            analytics_config is not None
+                            and analytics_supervisor is None
+                        )
+                        returncode = tui.wait(
+                            timeout=(
+                                _REGISTRATION_POLL_INTERVAL_SECONDS
+                                if registration_pending
+                                else None
+                            )
+                        )
                     except subprocess.TimeoutExpired:
                         continue
                     break

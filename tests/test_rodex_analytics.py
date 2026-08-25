@@ -90,23 +90,34 @@ class FakeWorkerProcess:
         self.terminated = False
         self.killed = False
         self.wait_calls = 0
+        self.exited = Event()
 
     def poll(self) -> int | None:
         return self.returncode
 
     def terminate(self) -> None:
         self.terminated = True
+        if not self.timeout_on_wait:
+            self.returncode = -15
+            self.exited.set()
 
-    def wait(self, timeout: float) -> int:
-        assert timeout == 1
+    def wait(self, timeout: float | None = None) -> int:
         self.wait_calls += 1
+        if not self.exited.wait(timeout):
+            raise subprocess.TimeoutExpired("analytics-worker", timeout)
         if self.timeout_on_wait and not self.killed:
             raise subprocess.TimeoutExpired("analytics-worker", timeout)
-        self.returncode = -9 if self.killed else 0
+        assert self.returncode is not None
         return self.returncode
+
+    def exit(self, returncode: int) -> None:
+        self.returncode = returncode
+        self.exited.set()
 
     def kill(self) -> None:
         self.killed = True
+        self.returncode = -9
+        self.exited.set()
 
 
 def _rollout(root: Path, codex_session_id: uuid.UUID) -> Path:
@@ -1021,11 +1032,9 @@ def test_supervisor_start_failure_is_fail_open_and_health_only(tmp_path: Path) -
     def fail_start(*_args: object, **_kwargs: object) -> subprocess.Popen[bytes]:
         raise OSError("cannot fork analytics")
 
-    supervisor = AnalyticsSubprocessSupervisor(
-        config, popen=fail_start, monotonic=lambda: 1.0
-    )
+    supervisor = AnalyticsSubprocessSupervisor(config, popen=fail_start)
 
-    supervisor.poll()
+    supervisor.start()
     supervisor.close()
 
     view = read_rodex_session_statistics(1, config.rodex_database_path)
@@ -1040,42 +1049,36 @@ def test_supervisor_restarts_once_after_backoff_then_exhausts(
 ) -> None:
     config = _config(tmp_path)
     _create(config)
-    clock = [1.0]
     first = FakeWorkerProcess()
     second = FakeWorkerProcess()
     pending = [first, second]
     commands: list[list[str]] = []
+    second_started = Event()
 
     def start(command: list[str], **_options: object) -> FakeWorkerProcess:
         commands.append(command)
-        return pending.pop(0)
+        process = pending.pop(0)
+        if process is second:
+            second_started.set()
+        return process
 
     supervisor = AnalyticsSubprocessSupervisor(
         config,
         popen=start,  # type: ignore[arg-type]
-        monotonic=lambda: clock[0],
-        restart_delay_seconds=2.0,
+        restart_delay_seconds=0.01,
     )
-    supervisor.poll()
-    first.returncode = 7
-    supervisor.poll()
-    clock[0] = 2.9
-    supervisor.poll()
-    assert len(commands) == 1
-    clock[0] = 3.0
-    supervisor.poll()
-    assert len(commands) == 2
-    second.returncode = 7
-    supervisor.poll()
-    clock[0] = 10.0
-    supervisor.poll()
+    supervisor.start()
+    first.exit(7)
+    assert second_started.wait(1)
+    second.exit(7)
+    assert supervisor.wait(1)
 
     assert len(commands) == 2
 
     supervisor.close()
 
     assert not second.terminated
-    assert second.wait_calls == 0
+    assert second.wait_calls == 1
     view = read_rodex_session_statistics(1, config.rodex_database_path)
     assert view.worker is not None
     assert view.worker.worker_state == "degraded"
@@ -1089,7 +1092,6 @@ def test_supervisor_bounds_repeated_start_failure_to_two_attempts(
 ) -> None:
     config = _config(tmp_path)
     _create(config)
-    clock = [1.0]
     attempts = 0
 
     def fail_start(*_args: object, **_kwargs: object) -> subprocess.Popen[bytes]:
@@ -1100,15 +1102,11 @@ def test_supervisor_bounds_repeated_start_failure_to_two_attempts(
     supervisor = AnalyticsSubprocessSupervisor(
         config,
         popen=fail_start,
-        monotonic=lambda: clock[0],
-        restart_delay_seconds=2.0,
+        restart_delay_seconds=0,
     )
 
-    supervisor.poll()
-    clock[0] = 3.0
-    supervisor.poll()
-    clock[0] = 10.0
-    supervisor.poll()
+    supervisor.start()
+    assert supervisor.wait(1)
 
     assert attempts == 2
     view = read_rodex_session_statistics(1, config.rodex_database_path)
@@ -1126,13 +1124,13 @@ def test_supervisor_close_kills_and_reaps_a_worker_that_ignores_terminate(
         config,
         popen=lambda *_args, **_kwargs: process,  # type: ignore[arg-type]
     )
-    supervisor.poll()
+    supervisor.start()
 
     supervisor.close()
 
     assert process.terminated
     assert process.killed
-    assert process.wait_calls == 2
+    assert process.wait_calls == 3
 
 
 def test_real_adapter_uses_existing_in_memory_analyzer_api(tmp_path: Path) -> None:

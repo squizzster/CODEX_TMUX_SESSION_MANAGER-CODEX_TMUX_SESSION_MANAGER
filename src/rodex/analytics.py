@@ -8,13 +8,12 @@ import shutil
 import signal
 import subprocess
 import sys
-import time
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from threading import Event, Thread
+from threading import Event, Lock, Thread
 from typing import Any
 
 from rodex_registry import (
@@ -405,7 +404,7 @@ class AnalyticsRolloutWorker:
 
 
 class AnalyticsSubprocessSupervisor:
-    """Own an optional worker with one bounded restart for this runtime."""
+    """Own an optional worker through one blocking, bounded monitor thread."""
 
     def __init__(
         self,
@@ -413,7 +412,6 @@ class AnalyticsSubprocessSupervisor:
         *,
         python_executable: str = sys.executable,
         popen: Callable[..., subprocess.Popen[bytes]] = subprocess.Popen,
-        monotonic: Callable[[], float] = time.monotonic,
         restart_delay_seconds: float = ANALYTICS_RESTART_DELAY_SECONDS,
         max_start_attempts: int = 2,
     ) -> None:
@@ -424,46 +422,41 @@ class AnalyticsSubprocessSupervisor:
         self._config = config
         self._python_executable = python_executable
         self._popen = popen
-        self._monotonic = monotonic
         self._restart_delay_seconds = restart_delay_seconds
         self._max_start_attempts = max_start_attempts
         self._start_attempts = 0
         self._exhausted = False
+        self._started = False
+        self._stop = Event()
+        self._process_lock = Lock()
         self._process: subprocess.Popen[bytes] | None = None
-        self._next_start_at = 0.0
+        self._thread: Thread | None = None
 
-    def poll(self) -> None:
-        if self._exhausted:
-            return
-        now = self._monotonic()
-        process = self._process
-        if process is not None and process.poll() is None:
-            return
-        if process is not None:
-            self._process = None
-            self._next_start_at = now + self._restart_delay_seconds
-            retry_scheduled = self._start_attempts < self._max_start_attempts
-            _project_supervisor_health(
-                self._config,
-                "analytics_worker_exited",
-                retry_scheduled=retry_scheduled,
-                retry_delay_seconds=self._restart_delay_seconds,
-            )
-            if not retry_scheduled:
-                self._exhausted = True
-                return
-        if now < self._next_start_at:
+    def start(self) -> None:
+        """Start once; process exit and one backoff retry are event-driven."""
+        if self._started:
+            raise RuntimeError("analytics supervisor is already started")
+        self._started = True
+        self._start_next_process()
+        self._thread = Thread(
+            target=self._monitor,
+            name="rodex-analytics-supervisor",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def _start_next_process(self) -> None:
+        if self._stop.is_set() or self._exhausted:
             return
         self._start_attempts += 1
         try:
-            self._process = self._popen(
+            process = self._popen(
                 self._config.command(self._python_executable),
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
         except (OSError, subprocess.SubprocessError):
-            self._next_start_at = now + self._restart_delay_seconds
             retry_scheduled = self._start_attempts < self._max_start_attempts
             _project_supervisor_health(
                 self._config,
@@ -473,20 +466,85 @@ class AnalyticsSubprocessSupervisor:
             )
             if not retry_scheduled:
                 self._exhausted = True
+            return
+        with self._process_lock:
+            if self._stop.is_set():
+                stop_immediately = True
+            else:
+                self._process = process
+                stop_immediately = False
+        if stop_immediately:
+            _terminate_analytics_process(process)
+
+    def _monitor(self) -> None:
+        while not self._stop.is_set() and not self._exhausted:
+            with self._process_lock:
+                process = self._process
+            if process is not None:
+                try:
+                    process.wait()
+                except (OSError, subprocess.SubprocessError):
+                    self._exhausted = True
+                    return
+                with self._process_lock:
+                    if self._process is process:
+                        self._process = None
+                if self._stop.is_set():
+                    return
+                retry_scheduled = self._start_attempts < self._max_start_attempts
+                _project_supervisor_health(
+                    self._config,
+                    "analytics_worker_exited",
+                    retry_scheduled=retry_scheduled,
+                    retry_delay_seconds=self._restart_delay_seconds,
+                )
+                if not retry_scheduled:
+                    self._exhausted = True
+                    return
+            elif self._start_attempts >= self._max_start_attempts:
+                self._exhausted = True
+                return
+            if self._stop.wait(self._restart_delay_seconds):
+                return
+            self._start_next_process()
+
+    def wait(self, timeout: float | None = None) -> bool:
+        """Wait for bounded supervision to finish; return false on timeout."""
+        thread = self._thread
+        if thread is None:
+            return True
+        thread.join(timeout)
+        return not thread.is_alive()
 
     def close(self) -> None:
+        self._stop.set()
         self._exhausted = True
-        process = self._process
-        self._process = None
-        if process is None or process.poll() is not None:
-            return
-        try:
-            process.terminate()
+        with self._process_lock:
+            process = self._process
+        if process is not None:
+            _terminate_analytics_process(process)
+        thread = self._thread
+        if thread is not None:
+            thread.join(timeout=2)
+            if thread.is_alive() and process is not None:
+                with suppress(OSError, subprocess.SubprocessError):
+                    process.kill()
+                thread.join(timeout=2)
+        with self._process_lock:
+            self._process = None
+        self._thread = None
+
+
+def _terminate_analytics_process(process: subprocess.Popen[bytes]) -> None:
+    if process.poll() is not None:
+        return
+    try:
+        process.terminate()
+        process.wait(timeout=1)
+    except (OSError, subprocess.SubprocessError):
+        with suppress(OSError, subprocess.SubprocessError):
+            process.kill()
             process.wait(timeout=1)
-        except (OSError, subprocess.SubprocessError):
-            with suppress(OSError, subprocess.SubprocessError):
-                process.kill()
-                process.wait(timeout=1)
 
 
 def default_codex_sessions_root() -> Path:

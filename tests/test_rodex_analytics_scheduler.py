@@ -182,6 +182,38 @@ def test_burst_hard_deadline_never_moves_after_the_first_event() -> None:
     assert burst.deadline == 5.0
 
 
+def test_continuously_ready_queue_cannot_starve_the_hard_batch_deadline() -> None:
+    clock = [0.0]
+    dirty = object()
+
+    class ContinuouslyReadyQueue:
+        def get(self, timeout: float | None = None) -> object:
+            clock[0] += 0.01
+            return dirty
+
+    scheduler = AnalyticsEventScheduler(
+        quiet_seconds=0.5,
+        max_batch_seconds=5.0,
+        monotonic=lambda: clock[0],
+    )
+    scheduler._signals = ContinuouslyReadyQueue()  # type: ignore[assignment]
+    reconciliations = 0
+
+    class HardDeadlineObserved(Exception):
+        pass
+
+    def reconcile() -> None:
+        nonlocal reconciliations
+        reconciliations += 1
+        if reconciliations == 2:
+            raise HardDeadlineObserved
+
+    with pytest.raises(HardDeadlineObserved):
+        scheduler.run(reconcile)
+
+    assert 5.0 <= clock[0] <= 5.02
+
+
 def test_only_authoritative_lifecycle_messages_mark_analytics_dirty() -> None:
     assert _is_relevant_protocol_event('{"method":"turn/completed","params":{}}')
     assert _is_relevant_protocol_event(b'{"method":"thread/started","params":{}}')

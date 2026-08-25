@@ -121,6 +121,10 @@ class AnalyticsEventScheduler:
         burst: AnalyticsBurstWindow | None = None
         while True:
             now = self._monotonic()
+            if burst is not None and now >= burst.deadline:
+                burst = None
+                retry_at = self._retry_at_for(reconcile())
+                continue
             deadline = burst.deadline if burst is not None else retry_at
             timeout = None if deadline is None else max(0.0, deadline - now)
             try:

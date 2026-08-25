@@ -91,6 +91,48 @@ def test_unaccepted_cursor_rereads_pending_append(tmp_path: Path) -> None:
     assert reader.read(source).appended_analyzer_content == b""
 
 
+def test_clean_replay_reads_full_history_again_without_forgetting_cursor(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "sessions"
+    path = root / "2026" / "08" / "16" / f"rollout-{THREAD_ID}.jsonl"
+    path.parent.mkdir(parents=True)
+    path.write_bytes(_root_content())
+    source = _root_source(path, root)
+    reader = AnalyticsSourceReader()
+    initial = reader.read(source)
+    reader.accept([initial])
+    addition = b'{"type":"event_msg"}\n'
+    with path.open("ab") as output:
+        output.write(addition)
+
+    reader.require_clean_replay()
+    replay = reader.read(source)
+
+    assert replay.analyzer_content == _root_content() + addition
+    assert replay.appended_analyzer_content == _root_content() + addition
+
+
+def test_clean_replay_rejects_changed_accepted_prefix_even_after_growth(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "sessions"
+    path = root / "2026" / "08" / "16" / f"rollout-{THREAD_ID}.jsonl"
+    path.parent.mkdir(parents=True)
+    original = _root_content() + b'{"marker":"one"}\n'
+    path.write_bytes(original)
+    source = _root_source(path, root)
+    reader = AnalyticsSourceReader()
+    initial = reader.read(source)
+    reader.accept([initial])
+    path.write_bytes(original.replace(b'"one"', b'"two"') + b"{}\n")
+
+    reader.require_clean_replay()
+
+    with pytest.raises(AnalyticsSourceReadError, match="accepted prefix changed"):
+        reader.read(source)
+
+
 def test_incomplete_tail_is_buffered_until_newline_completion(tmp_path: Path) -> None:
     root = tmp_path / "sessions"
     path = root / "2026" / "08" / "16" / f"rollout-{THREAD_ID}.jsonl"

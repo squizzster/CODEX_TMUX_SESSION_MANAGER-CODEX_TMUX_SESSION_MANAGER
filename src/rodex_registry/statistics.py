@@ -176,6 +176,23 @@ class RodexSessionStatisticsView:
 
 
 @dataclass(frozen=True, slots=True)
+class RodexAnalyticsStatisticsCheckpoint:
+    """Only publication metadata needed by the live analytics worker."""
+
+    statistics_publication_sequence: int
+    statistics_projection_schema_version: str
+
+
+@dataclass(frozen=True, slots=True)
+class RodexAnalyticsCheckpoint:
+    """Narrow worker checkpoint loaded without materializing statistics."""
+
+    statistics: RodexAnalyticsStatisticsCheckpoint | None
+    worker: RodexSessionStatisticsWorker | None
+    sources: tuple[RodexSessionStatisticsSource, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class RodexSessionStatisticsSourceSummary:
     """SQL-derived additive lifecycle and resource totals for one thread source."""
 
@@ -741,6 +758,84 @@ def record_rodex_session_statistics_worker_health(
     if row is None:
         raise RodexSessionError(f"Rodex statistics worker disappeared: {session_id}")
     return _statistics_worker_from_row(row)
+
+
+def read_rodex_analytics_checkpoint(
+    session_id: int,
+    database_path: str | os.PathLike[str] | None = None,
+    *,
+    expected_current_codex_session_id: CodexSessionId | str,
+) -> RodexAnalyticsCheckpoint:
+    """Read only publication, health, and source cursor facts in one SELECT."""
+    _validate_session_id(session_id)
+    expected_halves = split_codex_session_id_into_signed_bigints(
+        expected_current_codex_session_id
+    )
+    path = existing_rodex_database_path(database_path)
+    with open_rodex_read_transaction(path) as connection:
+        rows = connection.execute(
+            f"WITH RECURSIVE hierarchy(id, thread_depth) AS ("
+            f"SELECT id, 0 FROM {RODEX_SESSIONS_STATISTICS_SOURCES_TABLE} "
+            "WHERE rodex_sessions_id = ? "
+            "AND parent_rodex_sessions_statistics_sources_id IS NULL "
+            "UNION ALL "
+            f"SELECT child.id, parent.thread_depth + 1 "
+            f"FROM {RODEX_SESSIONS_STATISTICS_SOURCES_TABLE} AS child "
+            "JOIN hierarchy AS parent "
+            "ON child.parent_rodex_sessions_statistics_sources_id = parent.id) "
+            "SELECT sessions.codex_session_id_signed_bigint_1, "
+            "sessions.codex_session_id_signed_bigint_2, "
+            "statistics.statistics_publication_sequence, "
+            "statistics.statistics_projection_schema_version, "
+            "workers.id, workers.rodex_sessions_id, workers.worker_state, "
+            "workers.diagnostic_code, workers.last_attempted_at_utc, "
+            "workers.consecutive_failures, workers.next_retry_at_utc, "
+            "sources.id, sources.rodex_sessions_id, "
+            "sources.codex_thread_id_signed_bigint_1, "
+            "sources.codex_thread_id_signed_bigint_2, "
+            "CASE WHEN sources.parent_rodex_sessions_statistics_sources_id IS NULL "
+            "THEN 'root' ELSE 'subagent' END, "
+            "sources.parent_rodex_sessions_statistics_sources_id, "
+            "hierarchy.thread_depth, sources.agent_path, sources.agent_nickname, "
+            "sources.subagent_history_start_ordinal, spawning_turn.codex_turn_id, "
+            "sources.first_linked_at_utc, sources.rollout_file_path, "
+            "sources.analyzed_size_bytes, sources.analyzed_mtime_ns, "
+            "sources.analyzed_prefix_sha256, sources.verified_at_utc, "
+            "sources.included_statistics_publication_sequence "
+            f"FROM {RODEX_SESSIONS_TABLE} AS sessions "
+            f"LEFT JOIN {RODEX_SESSIONS_STATISTICS_TABLE} AS statistics "
+            "ON statistics.rodex_sessions_id = sessions.id "
+            f"LEFT JOIN {RODEX_SESSIONS_STATISTICS_WORKERS_TABLE} AS workers "
+            "ON workers.rodex_sessions_id = sessions.id "
+            "LEFT JOIN hierarchy ON TRUE "
+            f"LEFT JOIN {RODEX_SESSIONS_STATISTICS_SOURCES_TABLE} AS sources "
+            "ON sources.id = hierarchy.id "
+            f"LEFT JOIN {RODEX_SESSIONS_STATISTICS_SUBAGENT_SPAWNS_TABLE} AS spawns "
+            "ON spawns.subagent_rodex_sessions_statistics_sources_id = sources.id "
+            f"LEFT JOIN {RODEX_SESSIONS_STATISTICS_TURNS_TABLE} AS spawning_turn "
+            "ON spawning_turn.id = spawns.spawning_rodex_sessions_statistics_turns_id "
+            "WHERE sessions.id = ? ORDER BY sources.id",
+            (session_id, session_id),
+        ).fetchall()
+    if not rows:
+        raise RodexSessionError(f"Rodex session does not exist: {session_id}")
+    if (int(rows[0][0]), int(rows[0][1])) != expected_halves:
+        raise RodexSessionStatisticsConflictError(
+            "current Codex session ID changed before checkpoint read"
+        )
+    statistics = (
+        None
+        if rows[0][2] is None
+        else RodexAnalyticsStatisticsCheckpoint(
+            statistics_publication_sequence=int(rows[0][2]),
+            statistics_projection_schema_version=str(rows[0][3]),
+        )
+    )
+    worker = None if rows[0][4] is None else _statistics_worker_from_row(rows[0][4:11])
+    sources = tuple(
+        _statistics_source_from_row(row[11:29]) for row in rows if row[11] is not None
+    )
+    return RodexAnalyticsCheckpoint(statistics, worker, sources)
 
 
 def read_rodex_session_statistics(

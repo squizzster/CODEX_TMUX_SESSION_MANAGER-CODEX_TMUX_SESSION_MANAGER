@@ -67,6 +67,11 @@ class AnalyticsSourceReader:
 
     def __init__(self) -> None:
         self._cursors: dict[CodexThreadId, _AppendCursor] = {}
+        self._replay_required = False
+
+    def require_clean_replay(self) -> None:
+        """Replay accepted sources without forgetting their tamper evidence."""
+        self._replay_required = True
 
     def read(self, source: AnalyticsAppendSource) -> AnalyticsSourceRead:
         """Capture the source's current complete prefix with append-only work."""
@@ -79,8 +84,12 @@ class AnalyticsSourceReader:
             before = os.fstat(descriptor)
             cursor = self._cursors.get(normalized.codex_thread_id)
             start = (
-                0 if cursor is None else _append_start(cursor, normalized, resolved, before)
+                0
+                if cursor is None or self._replay_required
+                else _append_start(cursor, normalized, resolved, before)
             )
+            if cursor is not None and self._replay_required:
+                _append_start(cursor, normalized, resolved, before)
             added = _pread_exact(descriptor, start, before.st_size - start)
             after = os.fstat(descriptor)
             path_state = os.stat(resolved, follow_symlinks=False)
@@ -91,8 +100,10 @@ class AnalyticsSourceReader:
         finally:
             os.close(descriptor)
         _require_stable_source(before, after, path_state)
-        if cursor is None:
+        if cursor is None or self._replay_required:
             next_cursor, appended = _new_cursor(normalized, resolved, after, added)
+            if cursor is not None:
+                _require_accepted_prefix(cursor, added)
         else:
             next_cursor, appended = _advance_cursor(cursor, resolved, after, added)
         return AnalyticsSourceRead(
@@ -107,6 +118,7 @@ class AnalyticsSourceReader:
         for read in reads:
             candidate = read._candidate_cursor
             self._cursors[candidate.source.codex_thread_id] = candidate
+        self._replay_required = False
 
     def verify_captured_prefix(self, captured: AuthenticatedRolloutPrefix) -> bool:
         """Accept later appends but reject replacement, truncation, or mutation."""
@@ -313,6 +325,16 @@ def _authentication(
         analyzed_size_bytes=analyzed_size_bytes,
         analyzed_prefix_sha256=digest.hexdigest(),  # type: ignore[attr-defined]
     )
+
+
+def _require_accepted_prefix(cursor: _AppendCursor, current_content: bytes) -> None:
+    """Authenticate a clean replay against the last accepted complete prefix."""
+    accepted_size = cursor.raw_complete_size
+    if len(current_content) < accepted_size:
+        raise AnalyticsSourceReadError("rollout source was truncated before replay")
+    observed = hashlib.sha256(current_content[:accepted_size]).hexdigest()
+    if observed != cursor.authenticated_source.analyzed_prefix_sha256:
+        raise AnalyticsSourceReadError("rollout accepted prefix changed before replay")
 
 
 def _split_complete_prefix(content: bytes) -> tuple[bytes, bytes]:

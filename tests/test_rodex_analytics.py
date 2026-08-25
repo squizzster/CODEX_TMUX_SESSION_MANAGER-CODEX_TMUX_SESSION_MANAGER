@@ -699,6 +699,33 @@ def test_worker_retains_one_analyzer_and_offers_only_accepted_suffix(
     assert created[0].accepted_batches == 2
 
 
+def test_restarted_worker_warms_state_once_then_consumes_only_suffix(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    rollout = _rollout(config.codex_sessions_root, CODEX_SESSION_ID)
+    _create(config)
+    first_adapter = FakeAnalyticsAdapter()
+    assert (
+        AnalyticsRolloutWorker(config, adapter_factory=lambda: first_adapter).poll_once()
+        == "up_to_date"
+    )
+    restarted_adapter = FakeAnalyticsAdapter()
+    restarted = AnalyticsRolloutWorker(config, adapter_factory=lambda: restarted_adapter)
+
+    assert restarted.poll_once() == "up_to_date"
+    addition = b'{"timestamp":"2026-08-16T12:00:04Z","type":"future"}\n'
+    with rollout.open("ab") as output:
+        output.write(addition)
+    assert restarted.poll_once() == "up_to_date"
+
+    assert restarted_adapter.appended_analyses == [
+        (restarted_adapter.analyses[0][0][0],),
+        (addition,),
+    ]
+    assert restarted_adapter.accepted_batches == 2
+
+
 def test_worker_analyzes_only_through_final_complete_newline(tmp_path: Path) -> None:
     config = _config(tmp_path)
     rollout = _rollout(config.codex_sessions_root, CODEX_SESSION_ID)
@@ -753,7 +780,7 @@ def test_worker_does_not_adopt_a_replacement_codex_identity(
 ) -> None:
     config = _config(tmp_path)
     _rollout(config.codex_sessions_root, CODEX_SESSION_ID)
-    replacement = _rollout(config.codex_sessions_root, REPLACEMENT_CODEX_SESSION_ID)
+    _rollout(config.codex_sessions_root, REPLACEMENT_CODEX_SESSION_ID)
     create_a_rodex_session(
         config.rodex_database_path,
         rodex_session_id=RODEX_SESSION_ID,
@@ -774,7 +801,7 @@ def test_worker_does_not_adopt_a_replacement_codex_identity(
 
     assert worker.poll_once() == "degraded"
 
-    assert adapter.analyses[-1][0] == (b"", replacement.read_bytes())
+    assert len(adapter.analyses) == 1
     sources = list_rodex_session_statistics_sources(1, config.rodex_database_path)
     assert [source.codex_thread_id for source in sources] == [
         CODEX_SESSION_ID,
@@ -806,7 +833,26 @@ def test_analyzer_failure_preserves_last_good_aggregate_and_increments_health(
     assert view.worker is not None
     assert view.worker.worker_state == "degraded"
     assert view.worker.consecutive_failures == 1
-    assert view.worker.next_retry_at_utc is not None
+    assert view.worker.next_retry_at_utc is None
+
+
+def test_failed_analysis_resets_resident_state_for_one_clean_replay(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    rollout = _rollout(config.codex_sessions_root, CODEX_SESSION_ID)
+    _create(config)
+    failed = FakeAnalyticsAdapter()
+    failed.fail = True
+    recovered = FakeAnalyticsAdapter()
+    adapters = iter((failed, recovered))
+    worker = AnalyticsRolloutWorker(config, adapter_factory=lambda: next(adapters))
+
+    assert worker.poll_once() == "degraded"
+    assert worker.poll_once() == "up_to_date"
+
+    assert recovered.analyses[0][0] == (rollout.read_bytes(),)
+    assert recovered.appended_analyses[0] == (rollout.read_bytes(),)
 
 
 def test_analyzer_schema_drift_degrades_without_replacing_relational_snapshot(
@@ -914,9 +960,7 @@ def test_stale_worker_cannot_publish_snapshot_or_health_after_replacement(
     assert state == "degraded"
     view = read_rodex_session_statistics(1, config.rodex_database_path)
     assert view.statistics is None
-    assert view.worker is not None
-    assert view.worker.worker_state == "catching_up"
-    assert view.worker.diagnostic_code is None
+    assert view.worker is None
 
 
 def test_partial_usable_analysis_publishes_gapped_coverage(tmp_path: Path) -> None:
@@ -991,7 +1035,7 @@ def test_supervisor_start_failure_is_fail_open_and_health_only(tmp_path: Path) -
     assert view.worker.diagnostic_code == "analytics_worker_start_failed"
 
 
-def test_supervisor_restarts_only_after_backoff_and_closes_new_worker(
+def test_supervisor_restarts_once_after_backoff_then_exhausts(
     tmp_path: Path,
 ) -> None:
     config = _config(tmp_path)
@@ -1021,15 +1065,56 @@ def test_supervisor_restarts_only_after_backoff_and_closes_new_worker(
     clock[0] = 3.0
     supervisor.poll()
     assert len(commands) == 2
+    second.returncode = 7
+    supervisor.poll()
+    clock[0] = 10.0
+    supervisor.poll()
+
+    assert len(commands) == 2
 
     supervisor.close()
 
-    assert second.terminated
-    assert second.wait_calls == 1
+    assert not second.terminated
+    assert second.wait_calls == 0
     view = read_rodex_session_statistics(1, config.rodex_database_path)
     assert view.worker is not None
     assert view.worker.worker_state == "degraded"
     assert view.worker.diagnostic_code == "analytics_worker_exited"
+    assert view.worker.consecutive_failures == 2
+    assert view.worker.next_retry_at_utc is None
+
+
+def test_supervisor_bounds_repeated_start_failure_to_two_attempts(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    _create(config)
+    clock = [1.0]
+    attempts = 0
+
+    def fail_start(*_args: object, **_kwargs: object) -> subprocess.Popen[bytes]:
+        nonlocal attempts
+        attempts += 1
+        raise OSError("cannot fork analytics")
+
+    supervisor = AnalyticsSubprocessSupervisor(
+        config,
+        popen=fail_start,
+        monotonic=lambda: clock[0],
+        restart_delay_seconds=2.0,
+    )
+
+    supervisor.poll()
+    clock[0] = 3.0
+    supervisor.poll()
+    clock[0] = 10.0
+    supervisor.poll()
+
+    assert attempts == 2
+    view = read_rodex_session_statistics(1, config.rodex_database_path)
+    assert view.worker is not None
+    assert view.worker.consecutive_failures == 2
+    assert view.worker.next_retry_at_utc is None
 
 
 def test_supervisor_close_kills_and_reaps_a_worker_that_ignores_terminate(

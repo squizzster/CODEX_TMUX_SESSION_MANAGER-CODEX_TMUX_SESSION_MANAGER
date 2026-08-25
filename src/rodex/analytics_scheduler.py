@@ -11,13 +11,15 @@ from pathlib import Path
 from threading import Event, Lock, Thread
 from typing import Any, Final
 
-from websockets.exceptions import ConnectionClosed, InvalidHandshake
 from websockets.sync.client import unix_connect
 
 from .app_server_contract import CODEX_APP_SERVER
+from .protocol_proxy import EVENT_STREAM_READY_METHOD
 
 ANALYTICS_QUIET_SECONDS: Final = 0.5
 ANALYTICS_MAX_BATCH_SECONDS: Final = 5.0
+ANALYTICS_ONE_SHOT_RETRY_SECONDS: Final = 2.0
+ANALYTICS_SUBSCRIBER_START_TIMEOUT_SECONDS: Final = 5.0
 _DIRTY: Final = object()
 _STOP: Final = object()
 _STREAM_CLOSED: Final = object()
@@ -73,13 +75,15 @@ class AnalyticsEventScheduler:
         *,
         quiet_seconds: float = ANALYTICS_QUIET_SECONDS,
         max_batch_seconds: float = ANALYTICS_MAX_BATCH_SECONDS,
+        one_shot_retry_seconds: float = ANALYTICS_ONE_SHOT_RETRY_SECONDS,
         monotonic: Callable[[], float] = time.monotonic,
         event_observer: Callable[[Mapping[str, Any]], None] | None = None,
     ) -> None:
-        if quiet_seconds < 0 or max_batch_seconds <= 0:
+        if quiet_seconds < 0 or max_batch_seconds <= 0 or one_shot_retry_seconds <= 0:
             raise ValueError("analytics batch intervals must be positive")
         self._quiet_seconds = quiet_seconds
         self._max_batch_seconds = max_batch_seconds
+        self._one_shot_retry_seconds = one_shot_retry_seconds
         self._monotonic = monotonic
         self._event_observer = event_observer
         self._signals: queue.Queue[object] = queue.Queue(maxsize=2)
@@ -112,33 +116,41 @@ class AnalyticsEventScheduler:
         self._offer_terminal(_STOP)
 
     def run(self, reconcile: Callable[[], object]) -> None:
-        """Reconcile startup once, then block until dirty work or shutdown."""
-        reconcile()
+        """Reconcile dirty bursts with at most one clean retry per generation."""
+        retry_at = self._retry_at_for(reconcile())
+        burst: AnalyticsBurstWindow | None = None
         while True:
-            signal = self._signals.get()
+            now = self._monotonic()
+            deadline = burst.deadline if burst is not None else retry_at
+            timeout = None if deadline is None else max(0.0, deadline - now)
+            try:
+                signal = self._signals.get(timeout=timeout)
+            except queue.Empty:
+                if burst is not None:
+                    burst = None
+                    retry_at = self._retry_at_for(reconcile())
+                else:
+                    retry_at = None
+                    reconcile()
+                continue
             if signal is _STOP:
                 return
             if signal is _STREAM_CLOSED:
                 raise AnalyticsEventStreamClosed("analytics event stream closed")
-            burst = AnalyticsBurstWindow.start(
-                self._monotonic(),
-                quiet_seconds=self._quiet_seconds,
-                max_batch_seconds=self._max_batch_seconds,
-            )
-            while True:
-                remaining = burst.deadline - self._monotonic()
-                if remaining <= 0:
-                    break
-                try:
-                    signal = self._signals.get(timeout=remaining)
-                except queue.Empty:
-                    break
-                if signal is _STOP:
-                    return
-                if signal is _STREAM_CLOSED:
-                    raise AnalyticsEventStreamClosed("analytics event stream closed")
+            retry_at = None
+            if burst is None:
+                burst = AnalyticsBurstWindow.start(
+                    self._monotonic(),
+                    quiet_seconds=self._quiet_seconds,
+                    max_batch_seconds=self._max_batch_seconds,
+                )
+            else:
                 burst.observe(self._monotonic())
-            reconcile()
+
+    def _retry_at_for(self, result: object) -> float | None:
+        if result != "degraded":
+            return None
+        return self._monotonic() + self._one_shot_retry_seconds
 
     def _offer_terminal(self, signal: object) -> None:
         with self._close_lock:
@@ -169,6 +181,8 @@ class AnalyticsProtocolEventSubscriber:
         self._connection: Any | None = None
         self._connection_lock = Lock()
         self._thread: Thread | None = None
+        self._ready = Event()
+        self._startup_error: BaseException | None = None
 
     def start(self) -> None:
         if self._thread is not None:
@@ -179,6 +193,14 @@ class AnalyticsProtocolEventSubscriber:
             daemon=True,
         )
         self._thread.start()
+        if not self._ready.wait(ANALYTICS_SUBSCRIBER_START_TIMEOUT_SECONDS):
+            self.close()
+            raise AnalyticsEventStreamClosed("analytics event stream did not become ready")
+        if self._startup_error is not None:
+            self.close()
+            raise AnalyticsEventStreamClosed(
+                "analytics event stream failed during startup"
+            ) from self._startup_error
 
     def close(self) -> None:
         self._stop.set()
@@ -205,14 +227,25 @@ class AnalyticsProtocolEventSubscriber:
                     if self._stop.is_set():
                         unexpected_close = False
                         return
+                    event = _decode_protocol_event(message)
+                    if not self._ready.is_set() and (
+                        event is None or event.get("method") != EVENT_STREAM_READY_METHOD
+                    ):
+                        raise AnalyticsEventStreamClosed(
+                            "analytics event stream sent no ready snapshot"
+                        )
                     self._scheduler.offer_protocol_message(message)
-        except (ConnectionClosed, InvalidHandshake, OSError):
+                    self._ready.set()
+        except Exception as error:
+            if not self._ready.is_set():
+                self._startup_error = error
             unexpected_close = not self._stop.is_set()
         finally:
             with self._connection_lock:
                 self._connection = None
             if unexpected_close:
                 self._scheduler.event_stream_closed()
+            self._ready.set()
 
 
 def _is_relevant_protocol_event(message: str | bytes) -> bool:

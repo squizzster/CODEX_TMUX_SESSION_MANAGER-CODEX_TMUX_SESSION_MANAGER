@@ -68,6 +68,8 @@ from .schema import (
     lookup_rodex_registry_id,
 )
 from .statistics import (
+    RodexAnalyticsCheckpoint,
+    RodexAnalyticsStatisticsCheckpoint,
     RodexSessionStatistics,
     RodexSessionStatisticsSource,
     RodexSessionStatisticsSourceObservation,
@@ -103,8 +105,10 @@ __all__ = [
     "RODEX_ID_HEX_CHARACTERS",
     "CodexSessionId",
     "CodexThreadId",
+    "RodexAnalyticsCheckpoint",
     "RodexAnalyticsPublication",
     "RodexAnalyticsRegistry",
+    "RodexAnalyticsStatisticsCheckpoint",
     "RodexIdError",
     "RodexRegistryId",
     "RodexRuntimeId",

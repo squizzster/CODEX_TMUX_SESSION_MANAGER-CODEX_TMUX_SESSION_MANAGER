@@ -23,7 +23,7 @@ from rodex_registry import (
     CodexThreadId,
     RodexAnalyticsPublication,
     RodexAnalyticsRegistry,
-    RodexSessionStatistics,
+    RodexAnalyticsStatisticsCheckpoint,
     RodexSessionStatisticsSource,
     RodexSessionStatisticsSourceObservation,
     SessionStatisticsProjection,
@@ -97,6 +97,20 @@ class StableRolloutRead:
     authenticated_source: AuthenticatedRolloutPrefix
 
 
+def _analyzer_sources(
+    stable_reads: Sequence[StableRolloutRead],
+) -> list[AnalyticsAnalyzerSource]:
+    """Adapt authenticated reads into the worker's single analyzer boundary."""
+    return [
+        AnalyticsAnalyzerSource(
+            codex_thread_id=item.observation.codex_thread_id,
+            analyzer_content=item.analyzer_content,
+            appended_analyzer_content=item.appended_analyzer_content,
+        )
+        for item in stable_reads
+    ]
+
+
 class AnalyticsRolloutWorker:
     """Watch verified rollouts and project aggregate statistics into Rodex SQLite."""
 
@@ -122,6 +136,8 @@ class AnalyticsRolloutWorker:
         self._source_reader = AnalyticsSourceReader()
         self._verified_sources: dict[CodexThreadId, VerifiedRollout] = {}
         self._schedule_followup: Callable[[], None] | None = None
+        self._last_health_transition: tuple[str, str | None] | None = None
+        self._consecutive_failures = 0
 
     def observe_protocol_event(self, event: Mapping[str, Any]) -> None:
         """Feed exact lifecycle identity metadata into bounded source resolution."""
@@ -142,31 +158,36 @@ class AnalyticsRolloutWorker:
                 )
                 self._registry = registry
             view = registry.load_checkpoint()
+            if view.worker is not None:
+                self._last_health_transition = (
+                    view.worker.worker_state,
+                    view.worker.diagnostic_code,
+                )
+                self._consecutive_failures = view.worker.consecutive_failures
             stable_reads = self._read_registered_sources(view.sources)
             if stable_reads is None:
                 self._project_health("catching_up", "rollout_not_found", codex_session_id)
                 return "catching_up"
             if _view_matches_source_reads(view.statistics, view.sources, stable_reads):
-                if self._adapter is not None:
-                    self._adapter.accept_batch()
+                adapter = self._adapter
+                if adapter is None:
+                    adapter = self._adapter_factory()
+                    self._adapter = adapter
+                    adapter.analyze_rollouts(
+                        _analyzer_sources(stable_reads),
+                        _current_analytics_user_id(),
+                    )
+                adapter.accept_batch()
                 self._source_reader.accept([item.prepared_read for item in stable_reads])
                 if view.worker is None or view.worker.worker_state != "up_to_date":
                     self._project_health("up_to_date", None, codex_session_id)
                 return "up_to_date"
-            self._project_health("catching_up", None, codex_session_id)
             adapter = self._adapter
             if adapter is None:
                 adapter = self._adapter_factory()
                 self._adapter = adapter
             calculation = adapter.analyze_rollouts(
-                [
-                    AnalyticsAnalyzerSource(
-                        codex_thread_id=item.observation.codex_thread_id,
-                        analyzer_content=item.analyzer_content,
-                        appended_analyzer_content=item.appended_analyzer_content,
-                    )
-                    for item in stable_reads
-                ],
+                _analyzer_sources(stable_reads),
                 _current_analytics_user_id(),
             )
             source_growth = tuple(
@@ -194,6 +215,8 @@ class AnalyticsRolloutWorker:
                     analyzed_sources=tuple(verified_collaboration.analyzed_sources),
                 )
             )
+            self._last_health_transition = ("up_to_date", None)
+            self._consecutive_failures = 0
             adapter.accept_batch()
             self._source_reader.accept([item.prepared_read for item in stable_reads])
             if append_arrived_during_analysis:
@@ -210,6 +233,8 @@ class AnalyticsRolloutWorker:
                 expected_codex_session_id,
                 failed=True,
             )
+            self._adapter = None
+            self._source_reader.require_clean_replay()
             return "degraded"
 
     def run_until_stopped(
@@ -293,20 +318,20 @@ class AnalyticsRolloutWorker:
             registry = self._registry
             if registry is None:
                 return
+            transition = (state, diagnostic_code)
+            if not failed and self._last_health_transition == transition:
+                return
             now = self._now()
             registry.record_health_transition(
                 worker_state=state,
                 diagnostic_code=diagnostic_code,
                 attempted_at_utc=now.isoformat(timespec="microseconds"),
                 failed=failed,
-                next_retry_at_utc=(
-                    (now + timedelta(seconds=ANALYTICS_RESTART_DELAY_SECONDS)).isoformat(
-                        timespec="microseconds"
-                    )
-                    if failed
-                    else None
-                ),
+                next_retry_at_utc=None,
+                prior_consecutive_failures=self._consecutive_failures,
             )
+            self._last_health_transition = transition
+            self._consecutive_failures = self._consecutive_failures + 1 if failed else 0
         except Exception:
             return
 
@@ -319,7 +344,7 @@ class AnalyticsRolloutWorker:
 
 
 class AnalyticsSubprocessSupervisor:
-    """Own and restart an optional worker without affecting the session host."""
+    """Own an optional worker with one bounded restart for this runtime."""
 
     def __init__(
         self,
@@ -329,16 +354,26 @@ class AnalyticsSubprocessSupervisor:
         popen: Callable[..., subprocess.Popen[bytes]] = subprocess.Popen,
         monotonic: Callable[[], float] = time.monotonic,
         restart_delay_seconds: float = ANALYTICS_RESTART_DELAY_SECONDS,
+        max_start_attempts: int = 2,
     ) -> None:
+        if max_start_attempts < 1:
+            raise ValueError("analytics supervisor requires a start attempt")
+        if restart_delay_seconds < 0:
+            raise ValueError("analytics restart delay cannot be negative")
         self._config = config
         self._python_executable = python_executable
         self._popen = popen
         self._monotonic = monotonic
         self._restart_delay_seconds = restart_delay_seconds
+        self._max_start_attempts = max_start_attempts
+        self._start_attempts = 0
+        self._exhausted = False
         self._process: subprocess.Popen[bytes] | None = None
         self._next_start_at = 0.0
 
     def poll(self) -> None:
+        if self._exhausted:
+            return
         now = self._monotonic()
         process = self._process
         if process is not None and process.poll() is None:
@@ -346,9 +381,19 @@ class AnalyticsSubprocessSupervisor:
         if process is not None:
             self._process = None
             self._next_start_at = now + self._restart_delay_seconds
-            _project_supervisor_health(self._config, "analytics_worker_exited")
+            retry_scheduled = self._start_attempts < self._max_start_attempts
+            _project_supervisor_health(
+                self._config,
+                "analytics_worker_exited",
+                retry_scheduled=retry_scheduled,
+                retry_delay_seconds=self._restart_delay_seconds,
+            )
+            if not retry_scheduled:
+                self._exhausted = True
+                return
         if now < self._next_start_at:
             return
+        self._start_attempts += 1
         try:
             self._process = self._popen(
                 self._config.command(self._python_executable),
@@ -358,9 +403,18 @@ class AnalyticsSubprocessSupervisor:
             )
         except (OSError, subprocess.SubprocessError):
             self._next_start_at = now + self._restart_delay_seconds
-            _project_supervisor_health(self._config, "analytics_worker_start_failed")
+            retry_scheduled = self._start_attempts < self._max_start_attempts
+            _project_supervisor_health(
+                self._config,
+                "analytics_worker_start_failed",
+                retry_scheduled=retry_scheduled,
+                retry_delay_seconds=self._restart_delay_seconds,
+            )
+            if not retry_scheduled:
+                self._exhausted = True
 
     def close(self) -> None:
+        self._exhausted = True
         process = self._process
         self._process = None
         if process is None or process.poll() is not None:
@@ -421,10 +475,8 @@ def analytics_worker_main(arguments: list[str] | None = None) -> int:
     for signum in (signal.SIGTERM, signal.SIGHUP):
         signal.signal(signum, request_stop)
     worker = AnalyticsRolloutWorker(config)
-    try:
-        worker.run_until_stopped(stop)
-    finally:
-        worker.mark_stopped()
+    worker.run_until_stopped(stop)
+    worker.mark_stopped()
     return 0
 
 
@@ -901,7 +953,7 @@ def _stable_rollout_read(
 
 
 def _view_matches_source_reads(
-    statistics: RodexSessionStatistics | None,
+    statistics: RodexAnalyticsStatisticsCheckpoint | None,
     sources: Sequence[RodexSessionStatisticsSource],
     reads: Sequence[StableRolloutRead],
 ) -> bool:
@@ -953,7 +1005,13 @@ def _diagnostic_code(error: Exception) -> str:
     return "analytics_internal_error"
 
 
-def _project_supervisor_health(config: AnalyticsWorkerConfig, code: str) -> None:
+def _project_supervisor_health(
+    config: AnalyticsWorkerConfig,
+    code: str,
+    *,
+    retry_scheduled: bool,
+    retry_delay_seconds: float,
+) -> None:
     if not config.is_activated:
         return
     assert config.rodex_sessions_id is not None
@@ -971,8 +1029,12 @@ def _project_supervisor_health(config: AnalyticsWorkerConfig, code: str) -> None
             attempted_at_utc=now.isoformat(timespec="microseconds"),
             failed=True,
             next_retry_at_utc=(
-                now + timedelta(seconds=ANALYTICS_RESTART_DELAY_SECONDS)
-            ).isoformat(timespec="microseconds"),
+                (now + timedelta(seconds=retry_delay_seconds)).isoformat(
+                    timespec="microseconds"
+                )
+                if retry_scheduled
+                else None
+            ),
         )
     except Exception:
         return

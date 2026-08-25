@@ -14,13 +14,16 @@ import pytest
 from test_statistics_projection import _snapshot as analyzer_snapshot
 
 from rodex.analytics import (
-    AnalyticsCalculation,
     AnalyticsRolloutWorker,
     AnalyticsSubprocessSupervisor,
-    CodexProtocolAnalyticsAdapter,
-    RodexAnalyticsError,
     _derive_verified_collaboration_projection,
     locate_verified_rollout,
+)
+from rodex.analytics_analyzer import (
+    AnalyticsAnalyzerSource,
+    AnalyticsCalculation,
+    CodexProtocolAnalyticsAdapter,
+    RodexAnalyticsError,
 )
 from rodex.process_contracts import AnalyticsWorkerConfig
 from rodex_registry import (
@@ -47,27 +50,37 @@ REPLACEMENT_CODEX_SESSION_ID = uuid.UUID(int=CODEX_SESSION_ID.int + 1)
 class FakeAnalyticsAdapter:
     def __init__(self) -> None:
         self.analyses: list[tuple[tuple[bytes, ...], str]] = []
+        self.appended_analyses: list[tuple[bytes, ...]] = []
         self.fail = False
         self.coverage_state = "complete"
         self.on_analyze: Callable[[], None] | None = None
+        self.accepted_batches = 0
 
-    def analyze_rollouts(self, contents: list[bytes], user_id: str) -> AnalyticsCalculation:
+    def analyze_rollouts(
+        self, sources: list[AnalyticsAnalyzerSource], user_id: str
+    ) -> AnalyticsCalculation:
         if self.fail:
             raise OSError("analytics unavailable")
-        captured = tuple(contents)
+        captured = tuple(source.analyzer_content for source in sources)
         self.analyses.append((captured, user_id))
+        self.appended_analyses.append(
+            tuple(source.appended_analyzer_content for source in sources)
+        )
         if self.on_analyze is not None:
             self.on_analyze()
         base = parse_session_statistics_snapshot(analyzer_snapshot())
         return AnalyticsCalculation(
             statistics_projection=replace(
                 base,
-                analyzer_event_count=len(contents),
-                analyzer_source_count=len(contents),
-                history_records_count=len(contents),
+                analyzer_event_count=len(sources),
+                analyzer_source_count=len(sources),
+                history_records_count=len(sources),
             ),
             coverage_state=self.coverage_state,
         )
+
+    def accept_batch(self) -> None:
+        self.accepted_batches += 1
 
 
 class FakeWorkerProcess:
@@ -187,6 +200,14 @@ def _config(tmp_path: Path) -> AnalyticsWorkerConfig:
         protocol_event_socket_path=tmp_path / "events.sock",
         rodex_sessions_id=1,
         codex_session_id=CODEX_SESSION_ID,
+    )
+
+
+def _analyzer_source(content: bytes) -> AnalyticsAnalyzerSource:
+    return AnalyticsAnalyzerSource(
+        codex_thread_id=CODEX_SESSION_ID,
+        analyzer_content=content,
+        appended_analyzer_content=content,
     )
 
 
@@ -653,6 +674,31 @@ def test_unchanged_rollout_does_not_recalculate_but_append_does(tmp_path: Path) 
     assert view.statistics.statistics_publication_sequence == 2
 
 
+def test_worker_retains_one_analyzer_and_offers_only_accepted_suffix(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    rollout = _rollout(config.codex_sessions_root, CODEX_SESSION_ID)
+    _create(config)
+    created: list[FakeAnalyticsAdapter] = []
+
+    def adapter_factory() -> FakeAnalyticsAdapter:
+        adapter = FakeAnalyticsAdapter()
+        created.append(adapter)
+        return adapter
+
+    worker = AnalyticsRolloutWorker(config, adapter_factory=adapter_factory)
+    assert worker.poll_once() == "up_to_date"
+    addition = b'{"timestamp":"2026-08-16T12:00:04Z","type":"future"}\n'
+    with rollout.open("ab") as output:
+        output.write(addition)
+    assert worker.poll_once() == "up_to_date"
+
+    assert len(created) == 1
+    assert created[0].appended_analyses == [(created[0].analyses[0][0][0],), (addition,)]
+    assert created[0].accepted_batches == 2
+
+
 def test_worker_analyzes_only_through_final_complete_newline(tmp_path: Path) -> None:
     config = _config(tmp_path)
     rollout = _rollout(config.codex_sessions_root, CODEX_SESSION_ID)
@@ -706,7 +752,7 @@ def test_worker_does_not_adopt_a_replacement_codex_identity(
     tmp_path: Path,
 ) -> None:
     config = _config(tmp_path)
-    first = _rollout(config.codex_sessions_root, CODEX_SESSION_ID)
+    _rollout(config.codex_sessions_root, CODEX_SESSION_ID)
     replacement = _rollout(config.codex_sessions_root, REPLACEMENT_CODEX_SESSION_ID)
     create_a_rodex_session(
         config.rodex_database_path,
@@ -728,7 +774,7 @@ def test_worker_does_not_adopt_a_replacement_codex_identity(
 
     assert worker.poll_once() == "degraded"
 
-    assert adapter.analyses[-1][0] == (first.read_bytes(), replacement.read_bytes())
+    assert adapter.analyses[-1][0] == (b"", replacement.read_bytes())
     sources = list_rodex_session_statistics_sources(1, config.rodex_database_path)
     assert [source.codex_thread_id for source in sources] == [
         CODEX_SESSION_ID,
@@ -797,7 +843,7 @@ def test_analyzer_schema_drift_degrades_without_replacing_relational_snapshot(
             return None
 
     monkeypatch.setattr(
-        "rodex.analytics.importlib.import_module",
+        "rodex.analytics_analyzer.importlib.import_module",
         lambda _name: SimpleNamespace(CodexProtocolLibrary=DriftedLibrary),
     )
     state = AnalyticsRolloutWorker(
@@ -1008,7 +1054,7 @@ def test_real_adapter_uses_existing_in_memory_analyzer_api(tmp_path: Path) -> No
     rollout = _rollout(tmp_path, CODEX_SESSION_ID)
 
     calculation = CodexProtocolAnalyticsAdapter().analyze_rollouts(
-        [rollout.read_bytes()], "test-user"
+        [_analyzer_source(rollout.read_bytes())], "test-user"
     )
 
     assert calculation.coverage_state == "complete"
@@ -1093,16 +1139,18 @@ def test_adapter_maps_partial_values_but_rejects_fatal_or_valueless_results(
             return True
 
     monkeypatch.setattr(
-        "rodex.analytics.importlib.import_module",
+        "rodex.analytics_analyzer.importlib.import_module",
         lambda _name: SimpleNamespace(CodexProtocolLibrary=FakeLibrary),
     )
 
     if raises:
         with pytest.raises(RodexAnalyticsError):
-            CodexProtocolAnalyticsAdapter().analyze_rollouts([b"{}\n"], "test-user")
+            CodexProtocolAnalyticsAdapter().analyze_rollouts(
+                [_analyzer_source(b"{}\n")], "test-user"
+            )
     else:
         calculation = CodexProtocolAnalyticsAdapter().analyze_rollouts(
-            [b"{}\n"], "test-user"
+            [_analyzer_source(b"{}\n")], "test-user"
         )
         assert calculation.coverage_state == expected_coverage
         assert calculation.statistics_projection.analyzer_source_count == 1

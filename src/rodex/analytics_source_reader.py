@@ -58,7 +58,6 @@ class _AppendCursor:
     authenticated_source: AuthenticatedRolloutPrefix
     raw_complete_size: int
     incomplete_tail: bytes
-    analyzer_content: bytes
     complete_line_count: int
     digest: object
 
@@ -97,7 +96,7 @@ class AnalyticsSourceReader:
         else:
             next_cursor, appended = _advance_cursor(cursor, resolved, after, added)
         return AnalyticsSourceRead(
-            analyzer_content=next_cursor.analyzer_content,
+            analyzer_content=appended,
             appended_analyzer_content=appended,
             authenticated_source=next_cursor.authenticated_source,
             _candidate_cursor=next_cursor,
@@ -254,7 +253,6 @@ def _new_cursor(
         authenticated_source=authenticated,
         raw_complete_size=len(raw_complete),
         incomplete_tail=tail,
-        analyzer_content=analyzer_content,
         complete_line_count=raw_complete.count(b"\n"),
         digest=digest,
     )
@@ -289,7 +287,6 @@ def _advance_cursor(
             authenticated_source=authenticated,
             raw_complete_size=raw_complete_size,
             incomplete_tail=tail,
-            analyzer_content=cursor.analyzer_content + analyzer_addition,
             complete_line_count=(
                 cursor.complete_line_count + complete_addition.count(b"\n")
             ),

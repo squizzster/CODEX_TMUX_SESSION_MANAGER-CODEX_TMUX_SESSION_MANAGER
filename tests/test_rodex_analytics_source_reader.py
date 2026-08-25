@@ -66,7 +66,7 @@ def test_committed_cursor_reads_only_appended_bytes(
 
     assert calls == [(len(addition), len(_root_content()))]
     assert prepared.appended_analyzer_content == addition
-    assert prepared.analyzer_content == _root_content() + addition
+    assert prepared.analyzer_content == addition
 
 
 def test_unaccepted_cursor_rereads_pending_append(tmp_path: Path) -> None:
@@ -127,9 +127,9 @@ def test_committed_cursor_rejects_same_inode_rewrite(tmp_path: Path) -> None:
     reader = AnalyticsSourceReader()
     initial = reader.read(source)
     reader.accept([initial])
-    original = path.stat()
     path.write_bytes(path.read_bytes().replace(b'"one"', b'"two"'))
-    os.utime(path, ns=(original.st_atime_ns, original.st_mtime_ns))
+    state = path.stat()
+    os.utime(path, ns=(state.st_atime_ns, state.st_mtime_ns + 1_000_000_000))
 
     with pytest.raises(AnalyticsSourceReadError, match="rewritten in place"):
         reader.read(source)

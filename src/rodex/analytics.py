@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import importlib
 import json
 import os
 import shutil
@@ -16,7 +15,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from threading import Event, Thread
-from typing import Any, Protocol
+from typing import Any
 
 from rodex_registry import (
     COLLABORATION_MODEL_TOOL_NAMES,
@@ -29,14 +28,19 @@ from rodex_registry import (
     RodexSessionStatisticsSourceObservation,
     SessionStatisticsProjection,
     StatisticsNamedCount,
-    StatisticsProjectionError,
     TurnStatisticsProjection,
     current_rodex_sessions_user_identity,
     parse_codex_thread_id,
-    parse_session_statistics_snapshot,
 )
 from rodex_sql import RodexDatabaseNotFoundError
 
+from .analytics_analyzer import (
+    AnalyticsAnalyzerSource,
+    AnalyticsBoundary,
+    AnalyticsBoundaryFactory,
+    RodexAnalyticsError,
+    StatefulCodexProtocolAnalyticsAdapter,
+)
 from .analytics_scheduler import (
     AnalyticsEventScheduler,
     AnalyticsProtocolEventSubscriber,
@@ -57,31 +61,6 @@ ANALYTICS_RESTART_DELAY_SECONDS = 2.0
 STATISTICS_PROJECTION_SCHEMA_VERSION = "rodex-statistics-v6"
 
 
-class RodexAnalyticsError(RuntimeError):
-    """The optional analytics subsystem could not satisfy a request."""
-
-
-class _AnalyzerLibrary(Protocol):
-    def create_new_codex_protocol_id(self, user_id: str) -> object: ...
-
-    def load_file(self, protocol_id: str, path: Path) -> object: ...
-
-    def get_stats(
-        self, protocol_id: str, *, include_turn_statistics: bool = False
-    ) -> object: ...
-
-    def close(self) -> object: ...
-
-
-class AnalyticsBoundary(Protocol):
-    def analyze_rollouts(
-        self, contents: Sequence[bytes], user_id: str
-    ) -> AnalyticsCalculation: ...
-
-
-AnalyticsBoundaryFactory = Callable[[], AnalyticsBoundary]
-
-
 @dataclass(frozen=True, slots=True)
 class VerifiedRollout:
     """An exact root or sub-agent rollout authenticated from its own metadata."""
@@ -97,14 +76,6 @@ class VerifiedRollout:
     agent_nickname: str | None
     subagent_history_start_ordinal: int | None
     first_linked_at_utc: str
-
-
-@dataclass(frozen=True, slots=True)
-class AnalyticsCalculation:
-    """Usable session and turn projections from one analyzer calculation."""
-
-    statistics_projection: SessionStatisticsProjection
-    coverage_state: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,61 +97,6 @@ class StableRolloutRead:
     authenticated_source: AuthenticatedRolloutPrefix
 
 
-class CodexProtocolAnalyticsAdapter:
-    """Small seam around one analyzer calculation over memory-backed bytes."""
-
-    def analyze_rollouts(
-        self, contents: Sequence[bytes], user_id: str
-    ) -> AnalyticsCalculation:
-        try:
-            module = importlib.import_module("codex_protocol_log_analyzer")
-            library: _AnalyzerLibrary = module.CodexProtocolLibrary()
-        except Exception as error:
-            raise RodexAnalyticsError(
-                f"could not initialize Codex protocol analytics: {error}"
-            ) from error
-        try:
-            protocol_id = _protocol_id(
-                _operation_value(
-                    library.create_new_codex_protocol_id(user_id),
-                    "create temporary analytics dataset",
-                )
-            )
-            coverage_state = "complete"
-            for index, content in enumerate(contents):
-                loaded = _load_analyzer_bytes(library, protocol_id, content, index)
-                _operation_value(
-                    loaded,
-                    "load verified Codex rollout",
-                    allow_partial=True,
-                )
-                if getattr(loaded, "status", "ok") != "ok":
-                    coverage_state = "gapped"
-            stats_result = library.get_stats(protocol_id, include_turn_statistics=True)
-            stats = _mapping_value(
-                _operation_value(
-                    stats_result,
-                    "calculate aggregate statistics",
-                    allow_partial=True,
-                )
-            )
-            if getattr(stats_result, "status", "ok") != "ok":
-                coverage_state = "gapped"
-            try:
-                projection = parse_session_statistics_snapshot(stats)
-            except StatisticsProjectionError as error:
-                raise RodexAnalyticsError(
-                    f"analyzer statistics contract mismatch: {error}"
-                ) from error
-            return AnalyticsCalculation(
-                statistics_projection=projection,
-                coverage_state=coverage_state,
-            )
-        finally:
-            with suppress(Exception):
-                library.close()
-
-
 class AnalyticsRolloutWorker:
     """Watch verified rollouts and project aggregate statistics into Rodex SQLite."""
 
@@ -188,13 +104,14 @@ class AnalyticsRolloutWorker:
         self,
         config: AnalyticsWorkerConfig,
         *,
-        adapter_factory: AnalyticsBoundaryFactory = CodexProtocolAnalyticsAdapter,
+        adapter_factory: AnalyticsBoundaryFactory = (StatefulCodexProtocolAnalyticsAdapter),
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         if not config.is_activated:
             raise ValueError("analytics worker requires committed runtime identity")
         self._config = config
         self._adapter_factory = adapter_factory
+        self._adapter: AnalyticsBoundary | None = None
         self._now = now
         assert config.rodex_sessions_id is not None
         assert config.codex_session_id is not None
@@ -230,13 +147,26 @@ class AnalyticsRolloutWorker:
                 self._project_health("catching_up", "rollout_not_found", codex_session_id)
                 return "catching_up"
             if _view_matches_source_reads(view.statistics, view.sources, stable_reads):
+                if self._adapter is not None:
+                    self._adapter.accept_batch()
                 self._source_reader.accept([item.prepared_read for item in stable_reads])
                 if view.worker is None or view.worker.worker_state != "up_to_date":
                     self._project_health("up_to_date", None, codex_session_id)
                 return "up_to_date"
             self._project_health("catching_up", None, codex_session_id)
-            calculation = self._adapter_factory().analyze_rollouts(
-                [item.analyzer_content for item in stable_reads],
+            adapter = self._adapter
+            if adapter is None:
+                adapter = self._adapter_factory()
+                self._adapter = adapter
+            calculation = adapter.analyze_rollouts(
+                [
+                    AnalyticsAnalyzerSource(
+                        codex_thread_id=item.observation.codex_thread_id,
+                        analyzer_content=item.analyzer_content,
+                        appended_analyzer_content=item.appended_analyzer_content,
+                    )
+                    for item in stable_reads
+                ],
                 _current_analytics_user_id(),
             )
             source_growth = tuple(
@@ -264,6 +194,7 @@ class AnalyticsRolloutWorker:
                     analyzed_sources=tuple(verified_collaboration.analyzed_sources),
                 )
             )
+            adapter.accept_batch()
             self._source_reader.accept([item.prepared_read for item in stable_reads])
             if append_arrived_during_analysis:
                 if self._schedule_followup is not None:
@@ -993,99 +924,6 @@ def _view_matches_source_reads(
         ):
             return False
     return True
-
-
-def _load_analyzer_bytes(
-    library: _AnalyzerLibrary,
-    protocol_id: str,
-    content: bytes,
-    source_index: int,
-) -> object:
-    """Bridge the pinned path API through a sealed memory-backed file."""
-    descriptor = _create_memory_file(f"rodex-analytics-{source_index}")
-    try:
-        remaining = memoryview(content)
-        while remaining:
-            written = os.write(descriptor, remaining)
-            if written <= 0:
-                raise RodexAnalyticsError("could not populate memory-backed analyzer file")
-            remaining = remaining[written:]
-        _seal_memory_file(descriptor)
-        return library.load_file(protocol_id, Path(f"/proc/self/fd/{descriptor}"))
-    except OSError as error:
-        raise RodexAnalyticsError(
-            f"could not prepare memory-backed analyzer file: {error}"
-        ) from error
-    finally:
-        os.close(descriptor)
-
-
-def _create_memory_file(name: str) -> int:
-    flags = 0x0001 | 0x0002  # Linux MFD_CLOEXEC | MFD_ALLOW_SEALING
-    if hasattr(os, "memfd_create"):
-        return os.memfd_create(name, flags)
-    try:
-        import ctypes
-
-        libc = ctypes.CDLL(None, use_errno=True)
-        memfd_create = libc.memfd_create
-        memfd_create.argtypes = (ctypes.c_char_p, ctypes.c_uint)
-        memfd_create.restype = ctypes.c_int
-        descriptor = memfd_create(name.encode(), flags)
-    except (AttributeError, ImportError) as error:
-        raise RodexAnalyticsError("memory-backed analyzer files are unavailable") from error
-    if descriptor < 0:
-        error_number = ctypes.get_errno()
-        raise RodexAnalyticsError(
-            f"could not create memory-backed analyzer file: {os.strerror(error_number)}"
-        )
-    return int(descriptor)
-
-
-def _seal_memory_file(descriptor: int) -> None:
-    try:
-        import fcntl
-
-        # Linux uapi values; some minimal Python builds omit the symbolic names.
-        fcntl.fcntl(descriptor, 1033, 0x0001 | 0x0002 | 0x0004 | 0x0008)
-    except (ImportError, OSError) as error:
-        raise RodexAnalyticsError(
-            f"could not seal memory-backed analyzer file: {error}"
-        ) from error
-
-
-def _operation_value(
-    result: object, operation: str, *, allow_partial: bool = False
-) -> object:
-    value = getattr(result, "value", result)
-    status = getattr(result, "status", "ok")
-    if status != "fatal" and value is not None and (allow_partial or status != "error"):
-        return value
-    diagnostics = getattr(result, "diagnostics", ())
-    detail = "; ".join(
-        str(getattr(diagnostic, "message", diagnostic)) for diagnostic in diagnostics
-    )
-    raise RodexAnalyticsError(f"could not {operation}" + (f": {detail}" if detail else ""))
-
-
-def _protocol_id(value: object) -> str:
-    if isinstance(value, str) and value:
-        return value
-    if isinstance(value, Mapping):
-        value = value.get("protocol_id")
-    else:
-        value = getattr(value, "protocol_id", None)
-    if not isinstance(value, str) or not value:
-        raise RodexAnalyticsError("analyzer returned no temporary protocol identity")
-    return value
-
-
-def _mapping_value(value: object) -> dict[str, Any]:
-    if hasattr(value, "to_dict"):
-        value = value.to_dict()
-    if not isinstance(value, Mapping):
-        raise RodexAnalyticsError("analyzer returned an invalid statistics snapshot")
-    return dict(value)
 
 
 def _current_analytics_user_id() -> str:

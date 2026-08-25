@@ -7,13 +7,13 @@ import uuid
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
+from threading import Event
 from types import SimpleNamespace
 
 import pytest
 from test_statistics_projection import _snapshot as analyzer_snapshot
 
 from rodex.analytics import (
-    ANALYTICS_RESTART_DELAY_SECONDS,
     AnalyticsCalculation,
     AnalyticsRolloutWorker,
     AnalyticsSubprocessSupervisor,
@@ -94,20 +94,6 @@ class FakeWorkerProcess:
 
     def kill(self) -> None:
         self.killed = True
-
-
-class RecordingStop:
-    def __init__(self) -> None:
-        self.stopped = False
-        self.waits: list[float] = []
-
-    def is_set(self) -> bool:
-        return self.stopped
-
-    def wait(self, timeout: float) -> bool:
-        self.waits.append(timeout)
-        self.stopped = True
-        return True
 
 
 def _rollout(root: Path, codex_session_id: uuid.UUID) -> Path:
@@ -534,22 +520,47 @@ def test_worker_with_the_wrong_session_id_cannot_publish_for_an_existing_session
     assert read_rodex_session_statistics(1, config.rodex_database_path).statistics is None
 
 
-@pytest.mark.parametrize("state, expected_wait", [("up_to_date", 0.125), ("degraded", 2.0)])
-def test_worker_loop_wait_matches_persisted_retry_policy(
+def test_worker_runs_one_startup_reconciliation_then_uses_the_event_scheduler(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    state: str,
-    expected_wait: float,
 ) -> None:
-    worker = AnalyticsRolloutWorker(_config(tmp_path))
-    stop = RecordingStop()
-    monkeypatch.setattr(worker, "poll_once", lambda: state)
+    config = _config(tmp_path)
+    _create(config)
+    _rollout(config.codex_sessions_root, CODEX_SESSION_ID)
+    worker = AnalyticsRolloutWorker(config, adapter_factory=FakeAnalyticsAdapter)
+    lifecycle: list[str] = []
 
-    worker.run_until_stopped(stop, poll_interval_seconds=0.125)  # type: ignore[arg-type]
+    class RecordingScheduler:
+        def run(self, reconcile: Callable[[], object]) -> None:
+            lifecycle.append(f"reconcile:{reconcile()}")
 
-    assert stop.waits == [expected_wait]
-    if state == "degraded":
-        assert expected_wait == ANALYTICS_RESTART_DELAY_SECONDS
+        def close(self) -> None:
+            lifecycle.append("scheduler-close")
+
+    class RecordingSubscriber:
+        def start(self) -> None:
+            lifecycle.append("subscriber-start")
+
+        def close(self) -> None:
+            lifecycle.append("subscriber-close")
+
+    scheduler = RecordingScheduler()
+
+    def subscriber_factory(path: Path, supplied_scheduler: object) -> RecordingSubscriber:
+        assert path == config.protocol_event_socket_path
+        assert supplied_scheduler is scheduler
+        return RecordingSubscriber()
+
+    worker.run_until_stopped(  # type: ignore[arg-type]
+        Event(),
+        scheduler=scheduler,
+        subscriber_factory=subscriber_factory,  # type: ignore[arg-type]
+    )
+
+    assert lifecycle == [
+        "subscriber-start",
+        "reconcile:up_to_date",
+        "subscriber-close",
+    ]
 
 
 def test_worker_backfills_verified_rollout_and_projects_only_aggregates(

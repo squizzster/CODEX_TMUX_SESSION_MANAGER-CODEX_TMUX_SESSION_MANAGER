@@ -274,7 +274,7 @@ class CodexContextStatusObserver:
         params = payload.get("params")
         if not isinstance(params, dict):
             return
-        if method == "thread/started":
+        if method == CODEX_APP_SERVER.thread_started_method:
             thread_id = _started_thread_id(params)
             if thread_id is not None:
                 with self._lock:

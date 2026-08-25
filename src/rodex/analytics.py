@@ -18,7 +18,7 @@ from contextlib import suppress
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from threading import Event
+from threading import Event, Thread
 from typing import Any, Protocol
 
 from rodex_registry import (
@@ -40,9 +40,12 @@ from rodex_registry import (
 )
 from rodex_sql import RodexDatabaseNotFoundError
 
+from .analytics_scheduler import (
+    AnalyticsEventScheduler,
+    AnalyticsProtocolEventSubscriber,
+)
 from .process_contracts import AnalyticsWorkerConfig
 
-ANALYTICS_POLL_INTERVAL_SECONDS = 0.5
 ANALYTICS_RESTART_DELAY_SECONDS = 2.0
 STATISTICS_PROJECTION_SCHEMA_VERSION = "rodex-statistics-v6"
 
@@ -281,15 +284,32 @@ class AnalyticsRolloutWorker:
         self,
         stop: Event,
         *,
-        poll_interval_seconds: float = ANALYTICS_POLL_INTERVAL_SECONDS,
+        scheduler: AnalyticsEventScheduler | None = None,
+        subscriber_factory: Callable[
+            [Path, AnalyticsEventScheduler], AnalyticsProtocolEventSubscriber
+        ] = AnalyticsProtocolEventSubscriber,
     ) -> None:
-        while not stop.is_set():
-            state = self.poll_once()
-            stop.wait(
-                ANALYTICS_RESTART_DELAY_SECONDS
-                if state == "degraded"
-                else poll_interval_seconds
-            )
+        active_scheduler = scheduler or AnalyticsEventScheduler()
+        subscriber = subscriber_factory(
+            self._config.protocol_event_socket_path,
+            active_scheduler,
+        )
+
+        def stop_scheduler() -> None:
+            stop.wait()
+            active_scheduler.close()
+
+        stop_watcher = Thread(
+            target=stop_scheduler,
+            name="rodex-analytics-stop-watcher",
+            daemon=True,
+        )
+        subscriber.start()
+        stop_watcher.start()
+        try:
+            active_scheduler.run(self.poll_once)
+        finally:
+            subscriber.close()
 
     def _copy_registered_sources(
         self,

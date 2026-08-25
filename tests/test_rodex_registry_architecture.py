@@ -98,6 +98,8 @@ def test_runtime_analytics_uses_the_single_registry_boundary() -> None:
     assert "RodexAnalyticsPublication" in imported_registry_names
     assert not imported_registry_names.intersection(
         {
+            "lookup_codex_session_id_from_a_rodex_sessions_id",
+            "lookup_rodex_sessions_id_from_a_rodex_session_id",
             "publish_rodex_session_statistics",
             "read_rodex_session_statistics",
             "record_rodex_session_statistics_worker_health",

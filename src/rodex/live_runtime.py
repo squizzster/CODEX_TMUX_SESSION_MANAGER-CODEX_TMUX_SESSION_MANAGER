@@ -125,7 +125,7 @@ def verify_live_runtime_identity(
             database_path,
             runtime_id=control.runtime_id,
         )
-        launcher.confirm_runtime_registration(runtime)
+        launcher.confirm_runtime_registration(runtime, session_id)
         control = launcher.discover_runtime_control(runtime)
     require_live_runtime_identity(
         control,

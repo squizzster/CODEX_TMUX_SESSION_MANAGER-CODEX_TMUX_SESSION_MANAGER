@@ -24,6 +24,8 @@ from rodex.analytics import (
 )
 from rodex.process_contracts import AnalyticsWorkerConfig
 from rodex_registry import (
+    RodexRegistryId,
+    RodexRuntimeId,
     RodexSessionId,
     RodexSessionStatisticsSourceObservation,
     SessionStatisticsProjection,
@@ -194,6 +196,11 @@ def _config(tmp_path: Path) -> AnalyticsWorkerConfig:
         rodex_database_path=tmp_path / "rodex.sqlite3",
         codex_sessions_root=tmp_path / "sessions",
         rodex_session_id=RODEX_SESSION_ID,
+        rodex_registry_id=RodexRegistryId.parse("0000000000000001"),
+        runtime_id=RodexRuntimeId.parse("0000000000000001"),
+        protocol_event_socket_path=tmp_path / "events.sock",
+        rodex_sessions_id=1,
+        codex_session_id=CODEX_SESSION_ID,
     )
 
 
@@ -669,7 +676,7 @@ def test_same_size_rewrite_with_restored_mtime_is_reauthenticated(
     assert view.statistics.statistics_publication_sequence == 2
 
 
-def test_replacement_retains_old_source_and_analyzes_full_history(
+def test_worker_does_not_adopt_a_replacement_codex_identity(
     tmp_path: Path,
 ) -> None:
     config = _config(tmp_path)
@@ -693,7 +700,7 @@ def test_replacement_retains_old_source_and_analyzes_full_history(
         codex_session_id=REPLACEMENT_CODEX_SESSION_ID,
     )
 
-    assert worker.poll_once() == "up_to_date"
+    assert worker.poll_once() == "degraded"
 
     assert adapter.analyses[-1][0] == (first.read_bytes(), replacement.read_bytes())
     sources = list_rodex_session_statistics_sources(1, config.rodex_database_path)
@@ -701,7 +708,8 @@ def test_replacement_retains_old_source_and_analyzes_full_history(
         CODEX_SESSION_ID,
         REPLACEMENT_CODEX_SESSION_ID,
     ]
-    assert all(source.included_statistics_publication_sequence == 2 for source in sources)
+    assert sources[0].included_statistics_publication_sequence == 1
+    assert sources[1].included_statistics_publication_sequence is None
 
 
 def test_analyzer_failure_preserves_last_good_aggregate_and_increments_health(

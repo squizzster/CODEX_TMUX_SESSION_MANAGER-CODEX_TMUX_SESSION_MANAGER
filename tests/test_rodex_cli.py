@@ -207,7 +207,9 @@ class StubLauncher:
                 return self.control
         return self.control
 
-    def confirm_runtime_registration(self, runtime: LiveTmuxSession) -> None:
+    def confirm_runtime_registration(
+        self, runtime: LiveTmuxSession, _rodex_sessions_id: int
+    ) -> None:
         self.confirmed.append(runtime)
         if self.control.registration_state == "pending":
             self.control = replace(self.control, registration_state="registered")
@@ -3757,7 +3759,9 @@ def test_registration_confirmation_failure_stops_the_pending_runtime(
     monkeypatch.setattr(
         launcher,
         "confirm_runtime_registration",
-        lambda _runtime: (_ for _ in ()).throw(RodexRuntimeError("confirm failed")),
+        lambda _runtime, _session_id: (_ for _ in ()).throw(
+            RodexRuntimeError("confirm failed")
+        ),
     )
 
     with pytest.raises(RodexRuntimeError, match="confirm failed"):

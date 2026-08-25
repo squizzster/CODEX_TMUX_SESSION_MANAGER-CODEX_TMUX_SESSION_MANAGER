@@ -266,7 +266,9 @@ def _create_managed_session(
             tmux_session_name=live_runtime.tmux_session_name,
             runtime_id=live_runtime.runtime_id,
         )
-        runtime_launcher.confirm_runtime_registration(active_tmux)
+        runtime_launcher.confirm_runtime_registration(
+            active_tmux, session.rodex_sessions_id
+        )
         display_name = session.cool_name
         if requested_name is None:
             active_tmux = rename_tmux_identity(runtime_launcher, active_tmux, display_name)
@@ -406,7 +408,7 @@ def _prepare_selected_session(
             runtime_id=relocated_control.runtime_id,
         )
         if relocated_control.registration_state == RODEX_REGISTRATION_PENDING:
-            launcher.confirm_runtime_registration(relocated)
+            launcher.confirm_runtime_registration(relocated, session_id)
             require_live_runtime_identity(
                 launcher.discover_runtime_control(relocated),
                 expected_rodex_session_id=rodex_session_id,
@@ -484,7 +486,7 @@ def _prepare_selected_session(
             ),
             runtime_id=resumed_runtime.runtime_id,
         )
-        launcher.confirm_runtime_registration(active_tmux)
+        launcher.confirm_runtime_registration(active_tmux, session_id)
         launcher.initialise_session_ui(active_tmux)
     except BaseException:
         launcher.stop(active_tmux, check=False)

@@ -35,8 +35,6 @@ from rodex_registry import (
     StatisticsProjectionError,
     TurnStatisticsProjection,
     current_rodex_sessions_user_identity,
-    lookup_codex_session_id_from_a_rodex_sessions_id,
-    lookup_rodex_sessions_id_from_a_rodex_session_id,
     parse_codex_thread_id,
     parse_session_statistics_snapshot,
 )
@@ -193,36 +191,26 @@ class AnalyticsRolloutWorker:
         adapter_factory: AnalyticsBoundaryFactory = CodexProtocolAnalyticsAdapter,
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
+        if not config.is_activated:
+            raise ValueError("analytics worker requires committed runtime identity")
         self._config = config
         self._adapter_factory = adapter_factory
         self._now = now
-        self._session_id: int | None = None
-        self._expected_codex_session_id: CodexSessionId | None = None
+        assert config.rodex_sessions_id is not None
+        assert config.codex_session_id is not None
+        self._session_id = config.rodex_sessions_id
+        self._expected_codex_session_id = config.codex_session_id
         self._registry: RodexAnalyticsRegistry | None = None
         self._source_authentication: dict[CodexThreadId, AuthenticatedRolloutPrefix] = {}
 
     def poll_once(self) -> str:
         """Perform one reconciliation; no analytics failure is allowed to escape."""
-        expected_codex_session_id: CodexSessionId | None = None
+        expected_codex_session_id = self._expected_codex_session_id
         try:
-            session_id = lookup_rodex_sessions_id_from_a_rodex_session_id(
-                self._config.rodex_session_id, self._config.rodex_database_path
-            )
-            self._session_id = session_id
-            if session_id is None:
-                return "catching_up"
-            codex_session_id = lookup_codex_session_id_from_a_rodex_sessions_id(
-                session_id, self._config.rodex_database_path
-            )
-            expected_codex_session_id = codex_session_id
-            if codex_session_id is None:
-                return "catching_up"
-            self._expected_codex_session_id = codex_session_id
+            session_id = self._session_id
+            codex_session_id = self._expected_codex_session_id
             registry = self._registry
-            if registry is None or (
-                registry.session_id != session_id
-                or registry.expected_codex_session_id != codex_session_id
-            ):
+            if registry is None:
                 registry = RodexAnalyticsRegistry.open(
                     self._config.rodex_database_path,
                     session_id=session_id,
@@ -421,9 +409,6 @@ class AnalyticsRolloutWorker:
 
     def mark_stopped(self) -> None:
         """Best-effort terminal health update for an orderly worker shutdown."""
-        session_id = self._session_id
-        if session_id is None:
-            return
         self._project_health("stopped", None, self._expected_codex_session_id)
 
 
@@ -1170,21 +1155,15 @@ def _diagnostic_code(error: Exception) -> str:
 
 
 def _project_supervisor_health(config: AnalyticsWorkerConfig, code: str) -> None:
-    session_id = lookup_rodex_sessions_id_from_a_rodex_session_id(
-        config.rodex_session_id, config.rodex_database_path
-    )
-    if session_id is None:
+    if not config.is_activated:
         return
+    assert config.rodex_sessions_id is not None
+    assert config.codex_session_id is not None
     try:
-        expected_codex_session_id = lookup_codex_session_id_from_a_rodex_sessions_id(
-            session_id, config.rodex_database_path
-        )
-        if expected_codex_session_id is None:
-            return
         registry = RodexAnalyticsRegistry.open(
             config.rodex_database_path,
-            session_id=session_id,
-            expected_codex_session_id=expected_codex_session_id,
+            session_id=config.rodex_sessions_id,
+            expected_codex_session_id=config.codex_session_id,
         )
         now = datetime.now(UTC)
         registry.record_health_transition(

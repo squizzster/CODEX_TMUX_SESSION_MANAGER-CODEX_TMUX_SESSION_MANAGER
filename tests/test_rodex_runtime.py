@@ -1518,7 +1518,7 @@ def test_runtime_control_publishes_pending_then_registered_identity(
     launcher.publish_runtime_control(
         runtime, codex_session_id, rodex_session_id, registry_id
     )
-    launcher.confirm_runtime_registration(runtime)
+    launcher.confirm_runtime_registration(runtime, 41)
 
     options = [command[3:] for command in runner.calls]
     assert [
@@ -1528,7 +1528,7 @@ def test_runtime_control_publishes_pending_then_registered_identity(
         "@rodex_runtime_id",
         str(runtime.runtime_id),
     ] in options
-    assert options[-4:] == [
+    assert options[-5:] == [
         [
             "set-option",
             "-t",
@@ -1549,6 +1549,13 @@ def test_runtime_control_publishes_pending_then_registered_identity(
             "=rodex-token:",
             "@rodex_registration_state",
             "pending",
+        ],
+        [
+            "set-option",
+            "-t",
+            "=rodex-token:",
+            "@rodex_sessions_id",
+            "41",
         ],
         [
             "set-option",
@@ -1680,6 +1687,66 @@ def test_runtime_registration_check_uses_the_exact_pane_and_private_socket(
             "-t",
             "%4",
             "@rodex_registration_state",
+        ]
+    ]
+
+
+def test_registered_analytics_config_binds_the_committed_identity_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    codex_session_id = uuid.UUID("01a00654-f2bc-7a30-834a-a5f886a65f82")
+    rodex_session_id = RodexSessionId.parse("0123456789abcdef")
+    registry_id = RodexRegistryId.parse("06179a3581264d53")
+    event_socket = tmp_path / "events.sock"
+    pending = AnalyticsWorkerConfig(
+        rodex_database_path=tmp_path / "rodex.sqlite3",
+        codex_sessions_root=tmp_path / "sessions",
+        rodex_session_id=rodex_session_id,
+        rodex_registry_id=registry_id,
+        runtime_id=RUNTIME_ID,
+        protocol_event_socket_path=event_socket,
+    )
+    output = "\n".join(
+        (
+            f"@rodex_session_id {rodex_session_id}",
+            f"@rodex_registry_id {registry_id}",
+            f"@rodex_runtime_id {RUNTIME_ID}",
+            f"@rodex_protocol_event_socket_path {event_socket}",
+            f"@rodex_codex_session_id {codex_session_id}",
+            "@rodex_sessions_id 41",
+            "@rodex_registration_state registered",
+        )
+    )
+    observed: list[list[str]] = []
+
+    def run_tmux(
+        command: list[str], **_options: object
+    ) -> subprocess.CompletedProcess[str]:
+        observed.append(command)
+        return subprocess.CompletedProcess(command, 0, stdout=output, stderr="")
+
+    monkeypatch.setattr(runtime_module.subprocess, "run", run_tmux)
+
+    activated = runtime_module._registered_analytics_worker_config(
+        pending,
+        "/usr/bin/tmux",
+        tmp_path / "tmux.sock",
+        "%4",
+    )
+
+    assert activated is not None
+    assert activated.rodex_sessions_id == 41
+    assert activated.codex_session_id == codex_session_id
+    assert activated.runtime_id == RUNTIME_ID
+    assert observed == [
+        [
+            "/usr/bin/tmux",
+            "-S",
+            str(tmp_path / "tmux.sock"),
+            "show-options",
+            "-t",
+            "%4",
         ]
     ]
 
@@ -1898,6 +1965,11 @@ def test_session_host_connects_the_tui_through_the_protocol_proxy(
     monkeypatch.setattr(runtime_module, "CodexProtocolEventTap", FakeEventTap)
     monkeypatch.setattr(runtime_module, "CodexProtocolProxy", FakeProxy)
     monkeypatch.setattr(runtime_module, "_RuntimePathKeepalive", FakeKeepalive)
+    monkeypatch.setattr(
+        runtime_module,
+        "_registered_analytics_worker_config",
+        lambda *_args: None,
+    )
     signal_changes: list[tuple[int, bool]] = []
 
     def record_signal_change(signum: int, handler: object) -> object:
@@ -1922,6 +1994,9 @@ def test_session_host_connects_the_tui_through_the_protocol_proxy(
                     rodex_database_path=tmp_path / "rodex.sqlite3",
                     codex_sessions_root=tmp_path / "sessions",
                     rodex_session_id=RodexSessionId(1),
+                    rodex_registry_id=RodexRegistryId.parse("0000000000000001"),
+                    runtime_id=RUNTIME_ID,
+                    protocol_event_socket_path=event_socket,
                 ),
             ),
             analytics_supervisor_factory=FailingAnalyticsSupervisor,
@@ -1944,7 +2019,6 @@ def test_session_host_connects_the_tui_through_the_protocol_proxy(
         "event-start",
         "start",
         "keepalive-start",
-        "analytics-poll-failed",
         "signal-install",
         "keepalive-close",
         "close",

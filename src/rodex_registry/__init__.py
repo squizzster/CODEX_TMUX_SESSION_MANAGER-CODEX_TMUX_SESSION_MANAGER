@@ -1,5 +1,6 @@
 """Public contracts for the durable Rodex registry."""
 
+from .analytics_registry import RodexAnalyticsPublication, RodexAnalyticsRegistry
 from .errors import (
     RodexRuntimeIdCollisionError,
     RodexSessionError,
@@ -102,6 +103,8 @@ __all__ = [
     "RODEX_ID_HEX_CHARACTERS",
     "CodexSessionId",
     "CodexThreadId",
+    "RodexAnalyticsPublication",
+    "RodexAnalyticsRegistry",
     "RodexIdError",
     "RodexRegistryId",
     "RodexRuntimeId",

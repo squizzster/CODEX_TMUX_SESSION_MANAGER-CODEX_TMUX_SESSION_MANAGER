@@ -25,6 +25,8 @@ from rodex_registry import (
     COLLABORATION_MODEL_TOOL_NAMES,
     CodexSessionId,
     CodexThreadId,
+    RodexAnalyticsPublication,
+    RodexAnalyticsRegistry,
     RodexSessionStatistics,
     RodexSessionStatisticsSource,
     RodexSessionStatisticsSourceObservation,
@@ -37,9 +39,6 @@ from rodex_registry import (
     lookup_rodex_sessions_id_from_a_rodex_session_id,
     parse_codex_thread_id,
     parse_session_statistics_snapshot,
-    publish_rodex_session_statistics,
-    read_rodex_session_statistics,
-    record_rodex_session_statistics_worker_health,
 )
 from rodex_sql import RodexDatabaseNotFoundError
 
@@ -199,6 +198,7 @@ class AnalyticsRolloutWorker:
         self._now = now
         self._session_id: int | None = None
         self._expected_codex_session_id: CodexSessionId | None = None
+        self._registry: RodexAnalyticsRegistry | None = None
         self._source_authentication: dict[CodexThreadId, AuthenticatedRolloutPrefix] = {}
 
     def poll_once(self) -> str:
@@ -218,9 +218,18 @@ class AnalyticsRolloutWorker:
             if codex_session_id is None:
                 return "catching_up"
             self._expected_codex_session_id = codex_session_id
-            view = read_rodex_session_statistics(
-                session_id, self._config.rodex_database_path
-            )
+            registry = self._registry
+            if registry is None or (
+                registry.session_id != session_id
+                or registry.expected_codex_session_id != codex_session_id
+            ):
+                registry = RodexAnalyticsRegistry.open(
+                    self._config.rodex_database_path,
+                    session_id=session_id,
+                    expected_codex_session_id=codex_session_id,
+                )
+                self._registry = registry
+            view = registry.load_checkpoint()
             if self._view_matches_live_sources(view.statistics, view.sources):
                 if view.worker is None or view.worker.worker_state != "up_to_date":
                     self._project_health("up_to_date", None, codex_session_id)
@@ -244,22 +253,23 @@ class AnalyticsRolloutWorker:
                     calculation.statistics_projection,
                     analyzed_sources=tuple(item.observation for item in stable_copies),
                 )
-                publish_rodex_session_statistics(
-                    session_id,
-                    self._config.rodex_database_path,
-                    expected_current_codex_session_id=codex_session_id,
-                    based_on_statistics_publication_sequence=(
-                        None
-                        if view.statistics is None
-                        else view.statistics.statistics_publication_sequence
-                    ),
-                    statistics_projection_schema_version=(
-                        STATISTICS_PROJECTION_SCHEMA_VERSION
-                    ),
-                    calculated_at_utc=self._timestamp(),
-                    coverage_state=calculation.coverage_state,
-                    statistics_projection=(verified_collaboration.statistics_projection),
-                    analyzed_sources=verified_collaboration.analyzed_sources,
+                registry.publish(
+                    RodexAnalyticsPublication(
+                        based_on_statistics_publication_sequence=(
+                            None
+                            if view.statistics is None
+                            else view.statistics.statistics_publication_sequence
+                        ),
+                        statistics_projection_schema_version=(
+                            STATISTICS_PROJECTION_SCHEMA_VERSION
+                        ),
+                        calculated_at_utc=self._timestamp(),
+                        coverage_state=calculation.coverage_state,
+                        statistics_projection=(
+                            verified_collaboration.statistics_projection
+                        ),
+                        analyzed_sources=tuple(verified_collaboration.analyzed_sources),
+                    )
                 )
                 self._source_authentication = {
                     item.observation.codex_thread_id: authenticated
@@ -386,20 +396,15 @@ class AnalyticsRolloutWorker:
         if session_id is None or expected_codex_session_id is None:
             return
         try:
-            view = read_rodex_session_statistics(
-                session_id, self._config.rodex_database_path
-            )
-            prior_failures = 0 if view.worker is None else view.worker.consecutive_failures
-            failures = prior_failures + 1 if failed else 0
+            registry = self._registry
+            if registry is None:
+                return
             now = self._now()
-            record_rodex_session_statistics_worker_health(
-                session_id,
-                self._config.rodex_database_path,
-                expected_current_codex_session_id=expected_codex_session_id,
+            registry.record_health_transition(
                 worker_state=state,
                 diagnostic_code=diagnostic_code,
-                last_attempted_at_utc=now.isoformat(timespec="microseconds"),
-                consecutive_failures=failures,
+                attempted_at_utc=now.isoformat(timespec="microseconds"),
+                failed=failed,
                 next_retry_at_utc=(
                     (now + timedelta(seconds=ANALYTICS_RESTART_DELAY_SECONDS)).isoformat(
                         timespec="microseconds"
@@ -1176,18 +1181,17 @@ def _project_supervisor_health(config: AnalyticsWorkerConfig, code: str) -> None
         )
         if expected_codex_session_id is None:
             return
-        view = read_rodex_session_statistics(session_id, config.rodex_database_path)
-        now = datetime.now(UTC)
-        record_rodex_session_statistics_worker_health(
-            session_id,
+        registry = RodexAnalyticsRegistry.open(
             config.rodex_database_path,
-            expected_current_codex_session_id=expected_codex_session_id,
+            session_id=session_id,
+            expected_codex_session_id=expected_codex_session_id,
+        )
+        now = datetime.now(UTC)
+        registry.record_health_transition(
             worker_state="degraded",
             diagnostic_code=code,
-            last_attempted_at_utc=now.isoformat(timespec="microseconds"),
-            consecutive_failures=(
-                1 if view.worker is None else view.worker.consecutive_failures + 1
-            ),
+            attempted_at_utc=now.isoformat(timespec="microseconds"),
+            failed=True,
             next_retry_at_utc=(
                 now + timedelta(seconds=ANALYTICS_RESTART_DELAY_SECONDS)
             ).isoformat(timespec="microseconds"),

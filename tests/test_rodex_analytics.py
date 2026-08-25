@@ -51,20 +51,20 @@ class FakeAnalyticsAdapter:
         self.coverage_state = "complete"
         self.on_analyze: Callable[[], None] | None = None
 
-    def analyze_rollouts(self, paths: list[Path], user_id: str) -> AnalyticsCalculation:
+    def analyze_rollouts(self, contents: list[bytes], user_id: str) -> AnalyticsCalculation:
         if self.fail:
             raise OSError("analytics unavailable")
-        contents = tuple(path.read_bytes() for path in paths)
-        self.analyses.append((contents, user_id))
+        captured = tuple(contents)
+        self.analyses.append((captured, user_id))
         if self.on_analyze is not None:
             self.on_analyze()
         base = parse_session_statistics_snapshot(analyzer_snapshot())
         return AnalyticsCalculation(
             statistics_projection=replace(
                 base,
-                analyzer_event_count=len(paths),
-                analyzer_source_count=len(paths),
-                history_records_count=len(paths),
+                analyzer_event_count=len(contents),
+                analyzer_source_count=len(contents),
+                history_records_count=len(contents),
             ),
             coverage_state=self.coverage_state,
         )
@@ -530,6 +530,9 @@ def test_worker_runs_one_startup_reconciliation_then_uses_the_event_scheduler(
     lifecycle: list[str] = []
 
     class RecordingScheduler:
+        def offer_dirty(self) -> None:
+            lifecycle.append("scheduler-dirty")
+
         def run(self, reconcile: Callable[[], object]) -> None:
             lifecycle.append(f"reconcile:{reconcile()}")
 
@@ -670,7 +673,7 @@ def test_worker_analyzes_only_through_final_complete_newline(tmp_path: Path) -> 
     assert source.analyzed_size_bytes < rollout.stat().st_size
 
 
-def test_same_size_rewrite_with_restored_mtime_is_reauthenticated(
+def test_same_size_rewrite_with_restored_mtime_invalidates_append_cursor(
     tmp_path: Path,
 ) -> None:
     config = _config(tmp_path)
@@ -690,11 +693,13 @@ def test_same_size_rewrite_with_restored_mtime_is_reauthenticated(
         ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns),
     )
 
-    assert worker.poll_once() == "up_to_date"
-    assert len(adapter.analyses) == 2
+    assert worker.poll_once() == "degraded"
+    assert len(adapter.analyses) == 1
     view = read_rodex_session_statistics(1, config.rodex_database_path)
     assert view.statistics is not None
-    assert view.statistics.statistics_publication_sequence == 2
+    assert view.statistics.statistics_publication_sequence == 1
+    assert view.worker is not None
+    assert view.worker.diagnostic_code == "analytics_error"
 
 
 def test_worker_does_not_adopt_a_replacement_codex_identity(
@@ -806,23 +811,34 @@ def test_analyzer_schema_drift_degrades_without_replacing_relational_snapshot(
     assert after.worker.diagnostic_code == "analytics_error"
 
 
-def test_source_change_during_analysis_does_not_publish(tmp_path: Path) -> None:
+def test_append_during_analysis_publishes_prefix_then_catches_up(tmp_path: Path) -> None:
     config = _config(tmp_path)
     rollout = _rollout(config.codex_sessions_root, CODEX_SESSION_ID)
     _create(config)
     adapter = FakeAnalyticsAdapter()
-    adapter.on_analyze = lambda: rollout.write_text(
-        rollout.read_text(encoding="utf-8") + "{}\n", encoding="utf-8"
-    )
 
-    state = AnalyticsRolloutWorker(config, adapter_factory=lambda: adapter).poll_once()
+    def append_once() -> None:
+        adapter.on_analyze = None
+        with rollout.open("a", encoding="utf-8") as output:
+            output.write("{}\n")
 
-    assert state == "degraded"
+    adapter.on_analyze = append_once
+
+    worker = AnalyticsRolloutWorker(config, adapter_factory=lambda: adapter)
+    state = worker.poll_once()
+
+    assert state == "pending_append"
     view = read_rodex_session_statistics(1, config.rodex_database_path)
-    assert view.statistics is None
-    assert view.sources[0].rollout_file_path is None
+    assert view.statistics is not None
+    assert view.statistics.statistics_publication_sequence == 1
+    assert view.sources[0].rollout_file_path == str(rollout.resolve())
     assert view.worker is not None
-    assert view.worker.worker_state == "degraded"
+    assert view.worker.worker_state == "up_to_date"
+
+    assert worker.poll_once() == "up_to_date"
+    caught_up = read_rodex_session_statistics(1, config.rodex_database_path)
+    assert caught_up.statistics is not None
+    assert caught_up.statistics.statistics_publication_sequence == 2
 
 
 def test_stale_worker_cannot_publish_snapshot_or_health_after_replacement(
@@ -991,7 +1007,9 @@ def test_supervisor_close_kills_and_reaps_a_worker_that_ignores_terminate(
 def test_real_adapter_uses_existing_in_memory_analyzer_api(tmp_path: Path) -> None:
     rollout = _rollout(tmp_path, CODEX_SESSION_ID)
 
-    calculation = CodexProtocolAnalyticsAdapter().analyze_rollouts([rollout], "test-user")
+    calculation = CodexProtocolAnalyticsAdapter().analyze_rollouts(
+        [rollout.read_bytes()], "test-user"
+    )
 
     assert calculation.coverage_state == "complete"
     assert calculation.statistics_projection.analyzer_source_count == 1
@@ -1081,12 +1099,10 @@ def test_adapter_maps_partial_values_but_rejects_fatal_or_valueless_results(
 
     if raises:
         with pytest.raises(RodexAnalyticsError):
-            CodexProtocolAnalyticsAdapter().analyze_rollouts(
-                [tmp_path / "source.jsonl"], "test-user"
-            )
+            CodexProtocolAnalyticsAdapter().analyze_rollouts([b"{}\n"], "test-user")
     else:
         calculation = CodexProtocolAnalyticsAdapter().analyze_rollouts(
-            [tmp_path / "source.jsonl"], "test-user"
+            [b"{}\n"], "test-user"
         )
         assert calculation.coverage_state == expected_coverage
         assert calculation.statistics_projection.analyzer_source_count == 1

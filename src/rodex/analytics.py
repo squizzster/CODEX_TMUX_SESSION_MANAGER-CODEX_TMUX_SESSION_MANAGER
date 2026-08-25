@@ -2,16 +2,13 @@
 
 from __future__ import annotations
 
-import hashlib
 import importlib
 import json
 import os
 import shutil
 import signal
-import stat as stat_module
 import subprocess
 import sys
-import tempfile
 import time
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import suppress
@@ -45,6 +42,15 @@ from .analytics_scheduler import (
     AnalyticsProtocolEventSubscriber,
 )
 from .analytics_source_catalog import AnalyticsSourceCatalog
+from .analytics_source_reader import (
+    AnalyticsAppendSource,
+    AnalyticsSourceRead,
+    AnalyticsSourceReader,
+    AnalyticsSourceReadError,
+    AuthenticatedRolloutPrefix,
+    open_rollout_descriptor,
+    resolve_rollout_path,
+)
 from .process_contracts import AnalyticsWorkerConfig
 
 ANALYTICS_RESTART_DELAY_SECONDS = 2.0
@@ -69,7 +75,7 @@ class _AnalyzerLibrary(Protocol):
 
 class AnalyticsBoundary(Protocol):
     def analyze_rollouts(
-        self, paths: Sequence[Path], user_id: str
+        self, contents: Sequence[bytes], user_id: str
     ) -> AnalyticsCalculation: ...
 
 
@@ -110,32 +116,22 @@ class VerifiedCollaborationProjection:
 
 
 @dataclass(frozen=True, slots=True)
-class StableRolloutCopy:
-    """A private complete-line prefix plus the exact source state it represents."""
+class StableRolloutRead:
+    """One in-memory complete-line prefix plus its exact source state."""
 
-    temporary_path: Path
+    analyzer_content: bytes
+    appended_analyzer_content: bytes
+    prepared_read: AnalyticsSourceRead
     observation: RodexSessionStatisticsSourceObservation
     authenticated_source: AuthenticatedRolloutPrefix
 
 
-@dataclass(frozen=True, slots=True)
-class AuthenticatedRolloutPrefix:
-    """Filesystem identity and digest of the current complete-record prefix."""
-
-    path: Path
-    source_device: int
-    source_inode: int
-    source_size_bytes: int
-    source_mtime_ns: int
-    source_ctime_ns: int
-    analyzed_size_bytes: int
-    analyzed_prefix_sha256: str
-
-
 class CodexProtocolAnalyticsAdapter:
-    """Small seam around one temporary in-memory analyzer calculation."""
+    """Small seam around one analyzer calculation over memory-backed bytes."""
 
-    def analyze_rollouts(self, paths: Sequence[Path], user_id: str) -> AnalyticsCalculation:
+    def analyze_rollouts(
+        self, contents: Sequence[bytes], user_id: str
+    ) -> AnalyticsCalculation:
         try:
             module = importlib.import_module("codex_protocol_log_analyzer")
             library: _AnalyzerLibrary = module.CodexProtocolLibrary()
@@ -151,8 +147,8 @@ class CodexProtocolAnalyticsAdapter:
                 )
             )
             coverage_state = "complete"
-            for path in paths:
-                loaded = library.load_file(protocol_id, path)
+            for index, content in enumerate(contents):
+                loaded = _load_analyzer_bytes(library, protocol_id, content, index)
                 _operation_value(
                     loaded,
                     "load verified Codex rollout",
@@ -205,8 +201,10 @@ class AnalyticsRolloutWorker:
         self._session_id = config.rodex_sessions_id
         self._expected_codex_session_id = config.codex_session_id
         self._registry: RodexAnalyticsRegistry | None = None
-        self._source_authentication: dict[CodexThreadId, AuthenticatedRolloutPrefix] = {}
         self._source_catalog = AnalyticsSourceCatalog(config.codex_sessions_root)
+        self._source_reader = AnalyticsSourceReader()
+        self._verified_sources: dict[CodexThreadId, VerifiedRollout] = {}
+        self._schedule_followup: Callable[[], None] | None = None
 
     def observe_protocol_event(self, event: Mapping[str, Any]) -> None:
         """Feed exact lifecycle identity metadata into bounded source resolution."""
@@ -227,53 +225,50 @@ class AnalyticsRolloutWorker:
                 )
                 self._registry = registry
             view = registry.load_checkpoint()
-            if self._view_matches_live_sources(view.statistics, view.sources):
+            stable_reads = self._read_registered_sources(view.sources)
+            if stable_reads is None:
+                self._project_health("catching_up", "rollout_not_found", codex_session_id)
+                return "catching_up"
+            if _view_matches_source_reads(view.statistics, view.sources, stable_reads):
+                self._source_reader.accept([item.prepared_read for item in stable_reads])
                 if view.worker is None or view.worker.worker_state != "up_to_date":
                     self._project_health("up_to_date", None, codex_session_id)
                 return "up_to_date"
             self._project_health("catching_up", None, codex_session_id)
-            with tempfile.TemporaryDirectory(prefix="rodex-analytics-") as temporary:
-                stable_copies = self._copy_registered_sources(view.sources, Path(temporary))
-                if stable_copies is None:
-                    self._project_health(
-                        "catching_up", "rollout_not_found", codex_session_id
-                    )
-                    return "catching_up"
-                calculation = self._adapter_factory().analyze_rollouts(
-                    [item.temporary_path for item in stable_copies],
-                    _current_analytics_user_id(),
+            calculation = self._adapter_factory().analyze_rollouts(
+                [item.analyzer_content for item in stable_reads],
+                _current_analytics_user_id(),
+            )
+            source_growth = tuple(
+                self._source_reader.verify_captured_prefix(item.authenticated_source)
+                for item in stable_reads
+            )
+            append_arrived_during_analysis = any(source_growth)
+            verified_collaboration = _derive_verified_collaboration_projection(
+                calculation.statistics_projection,
+                analyzed_sources=tuple(item.observation for item in stable_reads),
+            )
+            registry.publish(
+                RodexAnalyticsPublication(
+                    based_on_statistics_publication_sequence=(
+                        None
+                        if view.statistics is None
+                        else view.statistics.statistics_publication_sequence
+                    ),
+                    statistics_projection_schema_version=(
+                        STATISTICS_PROJECTION_SCHEMA_VERSION
+                    ),
+                    calculated_at_utc=self._timestamp(),
+                    coverage_state=calculation.coverage_state,
+                    statistics_projection=verified_collaboration.statistics_projection,
+                    analyzed_sources=tuple(verified_collaboration.analyzed_sources),
                 )
-                authenticated_sources = [
-                    _verify_source_unchanged(item) for item in stable_copies
-                ]
-                verified_collaboration = _derive_verified_collaboration_projection(
-                    calculation.statistics_projection,
-                    analyzed_sources=tuple(item.observation for item in stable_copies),
-                )
-                registry.publish(
-                    RodexAnalyticsPublication(
-                        based_on_statistics_publication_sequence=(
-                            None
-                            if view.statistics is None
-                            else view.statistics.statistics_publication_sequence
-                        ),
-                        statistics_projection_schema_version=(
-                            STATISTICS_PROJECTION_SCHEMA_VERSION
-                        ),
-                        calculated_at_utc=self._timestamp(),
-                        coverage_state=calculation.coverage_state,
-                        statistics_projection=(
-                            verified_collaboration.statistics_projection
-                        ),
-                        analyzed_sources=tuple(verified_collaboration.analyzed_sources),
-                    )
-                )
-                self._source_authentication = {
-                    item.observation.codex_thread_id: authenticated
-                    for item, authenticated in zip(
-                        stable_copies, authenticated_sources, strict=True
-                    )
-                }
+            )
+            self._source_reader.accept([item.prepared_read for item in stable_reads])
+            if append_arrived_during_analysis:
+                if self._schedule_followup is not None:
+                    self._schedule_followup()
+                return "pending_append"
             return "up_to_date"
         except RodexDatabaseNotFoundError:
             return "catching_up"
@@ -298,6 +293,7 @@ class AnalyticsRolloutWorker:
         active_scheduler = scheduler or AnalyticsEventScheduler(
             event_observer=self.observe_protocol_event
         )
+        self._schedule_followup = active_scheduler.offer_dirty
         subscriber = subscriber_factory(
             self._config.protocol_event_socket_path,
             active_scheduler,
@@ -317,89 +313,39 @@ class AnalyticsRolloutWorker:
         try:
             active_scheduler.run(self.poll_once)
         finally:
+            self._schedule_followup = None
             subscriber.close()
 
-    def _copy_registered_sources(
+    def _read_registered_sources(
         self,
         sources: Sequence[RodexSessionStatisticsSource],
-        temporary_root: Path,
-    ) -> list[StableRolloutCopy] | None:
+    ) -> list[StableRolloutRead] | None:
         verified_sources = _discover_verified_thread_rollouts(
             self._config.codex_sessions_root,
             sources,
             self._source_catalog,
+            verified_cache=self._verified_sources,
         )
         if verified_sources is None:
             return None
-        copies: list[StableRolloutCopy] = []
-        for index, verified in enumerate(verified_sources):
-            copies.append(
-                _copy_complete_rollout_prefix(
-                    verified,
-                    temporary_root / f"source-{index}.jsonl",
-                    self._timestamp(),
+        self._verified_sources = {
+            verified.codex_thread_id: verified for verified in verified_sources
+        }
+        reads: list[StableRolloutRead] = []
+        for verified in verified_sources:
+            captured = self._source_reader.read(
+                AnalyticsAppendSource(
+                    path=verified.path,
+                    codex_thread_id=verified.codex_thread_id,
+                    source_kind=verified.source_kind,
+                    subagent_history_start_ordinal=(
+                        verified.subagent_history_start_ordinal
+                    ),
+                    allowed_root=self._config.codex_sessions_root,
                 )
             )
-        return copies
-
-    def _view_matches_live_sources(
-        self,
-        statistics: RodexSessionStatistics | None,
-        sources: Sequence[RodexSessionStatisticsSource],
-    ) -> bool:
-        if (
-            statistics is None
-            or statistics.statistics_projection_schema_version
-            != STATISTICS_PROJECTION_SCHEMA_VERSION
-            or not sources
-        ):
-            return False
-        publication_sequence = statistics.statistics_publication_sequence
-        for source in sources:
-            if (
-                source.included_statistics_publication_sequence != publication_sequence
-                or source.rollout_file_path is None
-                or source.analyzed_size_bytes is None
-                or source.analyzed_mtime_ns is None
-                or source.analyzed_prefix_sha256 is None
-            ):
-                return False
-            path = Path(source.rollout_file_path)
-            try:
-                stat = path.stat()
-            except OSError:
-                return False
-            authenticated = self._source_authentication.get(source.codex_thread_id)
-            if authenticated is None or (
-                authenticated.path,
-                authenticated.source_device,
-                authenticated.source_inode,
-                authenticated.source_size_bytes,
-                authenticated.source_mtime_ns,
-                authenticated.source_ctime_ns,
-            ) != (
-                path,
-                stat.st_dev,
-                stat.st_ino,
-                stat.st_size,
-                stat.st_mtime_ns,
-                stat.st_ctime_ns,
-            ):
-                try:
-                    authenticated, _ = _authenticate_rollout_prefix(
-                        path,
-                        source.codex_thread_id,
-                        allowed_root=self._config.codex_sessions_root,
-                    )
-                except RodexAnalyticsError:
-                    return False
-                self._source_authentication[source.codex_thread_id] = authenticated
-            if (
-                authenticated.analyzed_size_bytes != source.analyzed_size_bytes
-                or authenticated.analyzed_prefix_sha256 != source.analyzed_prefix_sha256
-            ):
-                return False
-        return True
+            reads.append(_stable_rollout_read(verified, captured, self._timestamp()))
+        return reads
 
     def _project_health(
         self,
@@ -558,8 +504,8 @@ def _verify_root_rollout(
     allowed_root: Path | None = None,
 ) -> VerifiedRollout | None:
     try:
-        source_path = _resolve_rollout_path(path, allowed_root=allowed_root)
-        descriptor = _open_rollout_descriptor(source_path)
+        source_path = resolve_rollout_path(path, allowed_root=allowed_root)
+        descriptor = open_rollout_descriptor(source_path)
         with os.fdopen(descriptor, encoding="utf-8") as records:
             state = os.fstat(records.fileno())
             for _, line in zip(range(32), records, strict=False):
@@ -593,7 +539,7 @@ def _verify_root_rollout(
                     None,
                     timestamp,
                 )
-    except (OSError, UnicodeError, RodexAnalyticsError):
+    except (OSError, UnicodeError, AnalyticsSourceReadError, RodexAnalyticsError):
         return None
     return None
 
@@ -606,8 +552,8 @@ def _verify_subagent_rollout(
 ) -> VerifiedRollout | None:
     """Authenticate the self-describing hierarchy metadata of one child rollout."""
     try:
-        source_path = _resolve_rollout_path(path, allowed_root=allowed_root)
-        descriptor = _open_rollout_descriptor(source_path)
+        source_path = resolve_rollout_path(path, allowed_root=allowed_root)
+        descriptor = open_rollout_descriptor(source_path)
         with os.fdopen(descriptor, encoding="utf-8") as records:
             state = os.fstat(records.fileno())
             line = next(records)
@@ -673,6 +619,7 @@ def _verify_subagent_rollout(
         TypeError,
         UnicodeError,
         ValueError,
+        AnalyticsSourceReadError,
         RodexAnalyticsError,
     ):
         return None
@@ -682,6 +629,8 @@ def _discover_verified_thread_rollouts(
     root: Path,
     registered_sources: Sequence[RodexSessionStatisticsSource],
     source_catalog: AnalyticsSourceCatalog,
+    *,
+    verified_cache: Mapping[CodexThreadId, VerifiedRollout] | None = None,
 ) -> list[VerifiedRollout] | None:
     """Discover the authenticated descendant closure for registered root history."""
     registered = {source.codex_thread_id: source for source in registered_sources}
@@ -690,17 +639,24 @@ def _discover_verified_thread_rollouts(
     )
     if not root_sources:
         return None
+    cached = {} if verified_cache is None else verified_cache
     closure: dict[CodexThreadId, VerifiedRollout] = {}
     for root_source in root_sources:
-        root_verified = (
-            None
-            if root_source.rollout_file_path is None
-            else _verify_root_rollout(
+        root_verified = cached.get(root_source.codex_thread_id)
+        if root_verified is not None and (
+            root_verified.source_kind != "root"
+            or (
+                root_source.rollout_file_path is not None
+                and root_verified.path != Path(root_source.rollout_file_path)
+            )
+        ):
+            root_verified = None
+        if root_verified is None and root_source.rollout_file_path is not None:
+            root_verified = _verify_root_rollout(
                 root_source.rollout_file_path,
                 root_source.codex_thread_id,
                 allowed_root=root,
             )
-        )
         if root_verified is None:
             root_verified = locate_verified_rollout(
                 root,
@@ -719,6 +675,10 @@ def _discover_verified_thread_rollouts(
     candidate_thread_ids.update(registered)
     candidate_thread_ids.difference_update(root_thread_ids)
     for thread_id in candidate_thread_ids:
+        cached_candidate = cached.get(thread_id)
+        if cached_candidate is not None and cached_candidate.source_kind == "subagent":
+            candidates[thread_id] = cached_candidate
+            continue
         registered_source = registered.get(thread_id)
         known_path = (
             None
@@ -815,27 +775,6 @@ def _discover_verified_thread_rollouts(
     return sorted(
         closure.values(), key=lambda item: (item.thread_depth, str(item.codex_thread_id))
     )
-
-
-def _subagent_only_rollout_content(content: bytes, cutoff: int | None) -> bytes:
-    """Remove the inherited parent prefix while retaining child session metadata."""
-    if cutoff is None:
-        raise RodexAnalyticsError("sub-agent rollout has no history cutoff")
-    retained: list[bytes] = []
-    for index, line in enumerate(content.splitlines(keepends=True)):
-        if index == 0:
-            retained.append(line)
-            continue
-        try:
-            record = json.loads(line)
-        except (json.JSONDecodeError, UnicodeError):
-            continue
-        ordinal = record.get("ordinal") if isinstance(record, dict) else None
-        if isinstance(ordinal, int) and not isinstance(ordinal, bool) and ordinal > cutoff:
-            retained.append(line)
-    if len(retained) == 1:
-        raise RodexAnalyticsError("sub-agent rollout contains no child history records")
-    return b"".join(retained)
 
 
 def _derive_verified_collaboration_projection(
@@ -1000,33 +939,16 @@ def _collaboration_timestamp(value: str, description: str) -> datetime:
     return parsed.astimezone(UTC)
 
 
-def _copy_complete_rollout_prefix(
+def _stable_rollout_read(
     verified: VerifiedRollout,
-    temporary_path: Path,
+    captured: AnalyticsSourceRead,
     verified_at_utc: str,
-) -> StableRolloutCopy:
-    authenticated, analyzed = _authenticate_rollout_prefix(
-        verified.path, verified.codex_thread_id
-    )
-    staged = (
-        analyzed
-        if verified.source_kind == "root"
-        else _subagent_only_rollout_content(
-            analyzed, verified.subagent_history_start_ordinal
-        )
-    )
-    try:
-        output_descriptor = os.open(
-            temporary_path,
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
-            0o600,
-        )
-        with os.fdopen(output_descriptor, "wb") as output:
-            output.write(staged)
-    except OSError as error:
-        raise RodexAnalyticsError(f"could not stage rollout prefix: {error}") from error
-    return StableRolloutCopy(
-        temporary_path=temporary_path,
+) -> StableRolloutRead:
+    authenticated = captured.authenticated_source
+    return StableRolloutRead(
+        analyzer_content=captured.analyzer_content,
+        appended_analyzer_content=captured.appended_analyzer_content,
+        prepared_read=captured,
         observation=RodexSessionStatisticsSourceObservation(
             codex_thread_id=verified.codex_thread_id,
             source_kind=verified.source_kind,
@@ -1047,121 +969,89 @@ def _copy_complete_rollout_prefix(
     )
 
 
-def _authenticate_rollout_prefix(
-    source_path: Path,
-    expected_codex_thread_id: CodexThreadId,
-    *,
-    allowed_root: Path | None = None,
-) -> tuple[AuthenticatedRolloutPrefix, bytes]:
-    try:
-        resolved_source = _resolve_rollout_path(source_path, allowed_root=allowed_root)
-        descriptor = _open_rollout_descriptor(resolved_source)
-        with os.fdopen(descriptor, "rb") as source:
-            before = os.fstat(source.fileno())
-            content = source.read()
-            after = os.fstat(source.fileno())
-        path_state = os.stat(resolved_source, follow_symlinks=False)
-    except (OSError, RodexAnalyticsError) as error:
-        raise RodexAnalyticsError(f"could not authenticate rollout: {error}") from error
-    identity = (before.st_dev, before.st_ino)
-    if identity != (after.st_dev, after.st_ino) or identity != (
-        path_state.st_dev,
-        path_state.st_ino,
-    ):
-        raise RodexAnalyticsError("rollout source identity changed while reading")
-    final_newline = content.rfind(b"\n")
-    if final_newline < 0:
-        raise RodexAnalyticsError("rollout contains no complete newline-terminated record")
-    analyzed = content[: final_newline + 1]
-    if not _rollout_content_declares_codex_thread_id(analyzed, expected_codex_thread_id):
-        raise RodexAnalyticsError("rollout has an unexpected Codex identity")
-    return (
-        AuthenticatedRolloutPrefix(
-            path=resolved_source,
-            source_device=after.st_dev,
-            source_inode=after.st_ino,
-            source_size_bytes=after.st_size,
-            source_mtime_ns=after.st_mtime_ns,
-            source_ctime_ns=after.st_ctime_ns,
-            analyzed_size_bytes=len(analyzed),
-            analyzed_prefix_sha256=hashlib.sha256(analyzed).hexdigest(),
-        ),
-        analyzed,
-    )
-
-
-def _resolve_rollout_path(path: str | Path, *, allowed_root: Path | None = None) -> Path:
-    candidate = Path(path).expanduser()
-    state = candidate.lstat()
-    if stat_module.S_ISLNK(state.st_mode):
-        raise RodexAnalyticsError(f"rollout source is a symbolic link: {candidate}")
-    resolved = candidate.resolve()
-    if allowed_root is not None:
-        root = allowed_root.expanduser().resolve()
-        try:
-            resolved.relative_to(root)
-        except ValueError as error:
-            raise RodexAnalyticsError(
-                f"rollout source escapes the configured sessions root: {candidate}"
-            ) from error
-    return resolved
-
-
-def _open_rollout_descriptor(path: Path) -> int:
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
-    descriptor = os.open(path, flags)
-    try:
-        state = os.fstat(descriptor)
-        if not stat_module.S_ISREG(state.st_mode):
-            raise RodexAnalyticsError(f"rollout source is not a regular file: {path}")
-        if state.st_uid != os.getuid():
-            raise RodexAnalyticsError(
-                f"rollout source is not owned by uid {os.getuid()}: {path}"
-            )
-        return descriptor
-    except BaseException:
-        os.close(descriptor)
-        raise
-
-
-def _rollout_content_declares_codex_thread_id(
-    content: bytes, expected: CodexThreadId
+def _view_matches_source_reads(
+    statistics: RodexSessionStatistics | None,
+    sources: Sequence[RodexSessionStatisticsSource],
+    reads: Sequence[StableRolloutRead],
 ) -> bool:
-    for line in content.splitlines()[:32]:
-        try:
-            record = json.loads(line)
-        except (json.JSONDecodeError, UnicodeError):
-            continue
-        if not isinstance(record, dict) or record.get("type") != "session_meta":
-            continue
-        payload = record.get("payload")
-        return isinstance(payload, dict) and payload.get("id") == str(expected)
-    return False
-
-
-def _verify_source_unchanged(
-    source: StableRolloutCopy,
-) -> AuthenticatedRolloutPrefix:
-    current, _ = _authenticate_rollout_prefix(
-        source.observation.rollout_file_path,
-        source.observation.codex_thread_id,
-    )
-    original = source.authenticated_source
     if (
-        current.source_device,
-        current.source_inode,
-        current.analyzed_size_bytes,
-        current.analyzed_prefix_sha256,
-    ) != (
-        original.source_device,
-        original.source_inode,
-        original.analyzed_size_bytes,
-        original.analyzed_prefix_sha256,
+        statistics is None
+        or statistics.statistics_projection_schema_version
+        != STATISTICS_PROJECTION_SCHEMA_VERSION
+        or len(sources) != len(reads)
     ):
+        return False
+    publication_sequence = statistics.statistics_publication_sequence
+    sources_by_thread = {source.codex_thread_id: source for source in sources}
+    for read in reads:
+        source = sources_by_thread.get(read.observation.codex_thread_id)
+        if source is None or (
+            source.included_statistics_publication_sequence != publication_sequence
+            or source.rollout_file_path != str(read.observation.rollout_file_path)
+            or source.analyzed_size_bytes != read.observation.analyzed_size_bytes
+            or source.analyzed_prefix_sha256 != read.observation.analyzed_prefix_sha256
+        ):
+            return False
+    return True
+
+
+def _load_analyzer_bytes(
+    library: _AnalyzerLibrary,
+    protocol_id: str,
+    content: bytes,
+    source_index: int,
+) -> object:
+    """Bridge the pinned path API through a sealed memory-backed file."""
+    descriptor = _create_memory_file(f"rodex-analytics-{source_index}")
+    try:
+        remaining = memoryview(content)
+        while remaining:
+            written = os.write(descriptor, remaining)
+            if written <= 0:
+                raise RodexAnalyticsError("could not populate memory-backed analyzer file")
+            remaining = remaining[written:]
+        _seal_memory_file(descriptor)
+        return library.load_file(protocol_id, Path(f"/proc/self/fd/{descriptor}"))
+    except OSError as error:
         raise RodexAnalyticsError(
-            "rollout complete-record prefix changed during analytics calculation"
+            f"could not prepare memory-backed analyzer file: {error}"
+        ) from error
+    finally:
+        os.close(descriptor)
+
+
+def _create_memory_file(name: str) -> int:
+    flags = 0x0001 | 0x0002  # Linux MFD_CLOEXEC | MFD_ALLOW_SEALING
+    if hasattr(os, "memfd_create"):
+        return os.memfd_create(name, flags)
+    try:
+        import ctypes
+
+        libc = ctypes.CDLL(None, use_errno=True)
+        memfd_create = libc.memfd_create
+        memfd_create.argtypes = (ctypes.c_char_p, ctypes.c_uint)
+        memfd_create.restype = ctypes.c_int
+        descriptor = memfd_create(name.encode(), flags)
+    except (AttributeError, ImportError) as error:
+        raise RodexAnalyticsError("memory-backed analyzer files are unavailable") from error
+    if descriptor < 0:
+        error_number = ctypes.get_errno()
+        raise RodexAnalyticsError(
+            f"could not create memory-backed analyzer file: {os.strerror(error_number)}"
         )
-    return current
+    return int(descriptor)
+
+
+def _seal_memory_file(descriptor: int) -> None:
+    try:
+        import fcntl
+
+        # Linux uapi values; some minimal Python builds omit the symbolic names.
+        fcntl.fcntl(descriptor, 1033, 0x0001 | 0x0002 | 0x0004 | 0x0008)
+    except (ImportError, OSError) as error:
+        raise RodexAnalyticsError(
+            f"could not seal memory-backed analyzer file: {error}"
+        ) from error
 
 
 def _operation_value(
@@ -1218,7 +1108,7 @@ def _lower_process_priority() -> None:
 
 
 def _diagnostic_code(error: Exception) -> str:
-    if isinstance(error, RodexAnalyticsError):
+    if isinstance(error, (RodexAnalyticsError, AnalyticsSourceReadError)):
         return "analytics_error"
     if isinstance(error, OSError):
         return "analytics_io_error"

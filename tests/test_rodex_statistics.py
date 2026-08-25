@@ -897,6 +897,35 @@ def test_health_is_separate_and_preserves_last_good_statistics(tmp_path: Path) -
     assert view.worker == health
 
 
+def test_analytics_hot_writes_do_not_reinitialise_the_schema(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database = tmp_path / "rodex.sqlite3"
+    create_a_rodex_session(database, codex_session_id=CODEX_SESSION_ID)
+
+    monkeypatch.delattr(
+        statistics_module,
+        "initialise_rodex_database",
+        raising=False,
+    )
+
+    published = _publish(database, tmp_path)
+    health = record_rodex_session_statistics_worker_health(
+        1,
+        database,
+        expected_current_codex_session_id=CODEX_SESSION_ID,
+        worker_state="degraded",
+        diagnostic_code="analytics_io_error",
+        last_attempted_at_utc="2026-08-16T12:01:00Z",
+        consecutive_failures=1,
+        next_retry_at_utc="2026-08-16T12:01:02Z",
+    )
+
+    assert published.statistics_publication_sequence == 1
+    assert health.worker_state == "degraded"
+
+
 def test_foreign_keys_and_checks_reject_detached_relational_facts(tmp_path: Path) -> None:
     database = tmp_path / "rodex.sqlite3"
     create_a_rodex_session(database, codex_session_id=CODEX_SESSION_ID)

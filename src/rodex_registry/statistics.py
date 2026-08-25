@@ -44,7 +44,6 @@ from .schema import (
     STATISTICS_COVERAGE_STATES,
     STATISTICS_WORKER_STATES,
     existing_rodex_database_path,
-    initialise_rodex_database,
 )
 from .statistics_fields import SESSION_STATISTICS_SCALARS, TURN_STATISTICS_SCALARS
 from .statistics_projection import (
@@ -269,7 +268,7 @@ def publish_rodex_session_statistics(
         raise ValueError("turn_statistics contains a duplicate source and turn ID")
     _validate_authoritative_collaboration_projection(statistics_projection, observations)
 
-    path = initialise_rodex_database(database_path)
+    path = existing_rodex_database_path(database_path)
     with open_rodex_transaction(path) as connection:
         identity_row = connection.execute(
             f"SELECT codex_session_id_signed_bigint_1, codex_session_id_signed_bigint_2 "
@@ -716,7 +715,7 @@ def record_rodex_session_statistics_worker_health(
         raise ValueError(
             "up_to_date worker health cannot include diagnostics, failures, or retry"
         )
-    path = initialise_rodex_database(database_path)
+    path = existing_rodex_database_path(database_path)
     with open_rodex_transaction(path) as connection:
         identity_row = connection.execute(
             f"SELECT codex_session_id_signed_bigint_1, codex_session_id_signed_bigint_2 "

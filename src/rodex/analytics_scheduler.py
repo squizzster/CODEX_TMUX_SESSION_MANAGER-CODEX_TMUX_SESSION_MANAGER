@@ -162,7 +162,7 @@ class AnalyticsEventScheduler:
                 raise AnalyticsEventStreamClosed("analytics event stream closed")
 
     def _retry_at_for(self, result: object) -> float | None:
-        if result != "degraded":
+        if result not in {"catching_up", "degraded"}:
             return None
         return self._monotonic() + self._one_shot_retry_seconds
 

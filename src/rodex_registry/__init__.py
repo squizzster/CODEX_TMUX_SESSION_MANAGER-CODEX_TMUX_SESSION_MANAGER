@@ -2,6 +2,7 @@
 
 from .analytics_registry import RodexAnalyticsPublication, RodexAnalyticsRegistry
 from .errors import (
+    RodexAnalyticsPublicationRetryableError,
     RodexRuntimeIdCollisionError,
     RodexSessionError,
     RodexSessionIdCollisionError,
@@ -108,6 +109,7 @@ __all__ = [
     "CodexThreadId",
     "RodexAnalyticsCheckpoint",
     "RodexAnalyticsPublication",
+    "RodexAnalyticsPublicationRetryableError",
     "RodexAnalyticsPublishReceipt",
     "RodexAnalyticsRegistry",
     "RodexAnalyticsStatisticsCheckpoint",

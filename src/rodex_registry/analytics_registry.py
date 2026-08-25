@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import os
+import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Self
 
+from .errors import RodexAnalyticsPublicationRetryableError
 from .identity import CodexSessionId, CodexThreadId, parse_codex_session_id
 from .schema import existing_rodex_database_path
 from .statistics import (
@@ -91,24 +93,32 @@ class RodexAnalyticsRegistry:
         self, publication: RodexAnalyticsPublication
     ) -> RodexAnalyticsPublishReceipt:
         """Publish one identity-fenced calculation through the registry API."""
-        return publish_rodex_session_statistics(
-            self._session_id,
-            self._database_path,
-            expected_current_codex_session_id=self._expected_codex_session_id,
-            based_on_statistics_publication_sequence=(
-                publication.based_on_statistics_publication_sequence
-            ),
-            statistics_projection_schema_version=(
-                publication.statistics_projection_schema_version
-            ),
-            calculated_at_utc=publication.calculated_at_utc,
-            coverage_state=publication.coverage_state,
-            statistics_projection=publication.statistics_projection,
-            analyzed_sources=publication.analyzed_sources,
-            changed_source_thread_ids=publication.changed_source_thread_ids,
-            changed_turn_keys=publication.changed_turn_keys,
-            removed_turn_keys=publication.removed_turn_keys,
-        )
+        try:
+            return publish_rodex_session_statistics(
+                self._session_id,
+                self._database_path,
+                expected_current_codex_session_id=self._expected_codex_session_id,
+                based_on_statistics_publication_sequence=(
+                    publication.based_on_statistics_publication_sequence
+                ),
+                statistics_projection_schema_version=(
+                    publication.statistics_projection_schema_version
+                ),
+                calculated_at_utc=publication.calculated_at_utc,
+                coverage_state=publication.coverage_state,
+                statistics_projection=publication.statistics_projection,
+                analyzed_sources=publication.analyzed_sources,
+                changed_source_thread_ids=publication.changed_source_thread_ids,
+                changed_turn_keys=publication.changed_turn_keys,
+                removed_turn_keys=publication.removed_turn_keys,
+            )
+        except sqlite3.OperationalError as error:
+            error_code = getattr(error, "sqlite_errorcode", 0)
+            if error_code & 0xFF in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED}:
+                raise RodexAnalyticsPublicationRetryableError(
+                    "analytics publication was blocked by a transient SQLite lock"
+                ) from error
+            raise
 
     def record_health_transition(
         self,

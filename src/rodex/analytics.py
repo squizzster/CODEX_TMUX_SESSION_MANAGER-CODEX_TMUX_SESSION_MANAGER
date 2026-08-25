@@ -22,6 +22,8 @@ from rodex_registry import (
     CodexThreadId,
     RodexAnalyticsCheckpoint,
     RodexAnalyticsPublication,
+    RodexAnalyticsPublicationRetryableError,
+    RodexAnalyticsPublishReceipt,
     RodexAnalyticsRegistry,
     RodexAnalyticsStatisticsCheckpoint,
     RodexSessionStatisticsSource,
@@ -98,6 +100,17 @@ class StableRolloutRead:
     authenticated_source: AuthenticatedRolloutPrefix
 
 
+@dataclass(frozen=True, slots=True)
+class _PreparedAnalyticsPublication:
+    """One analyzed source prefix retained unchanged until SQLite accepts it."""
+
+    publication: RodexAnalyticsPublication
+    stable_reads: tuple[StableRolloutRead, ...]
+    observations: tuple[RodexSessionStatisticsSourceObservation, ...]
+    turns_by_key: dict[tuple[CodexThreadId, str], TurnStatisticsProjection]
+    followup_thread_ids: frozenset[CodexThreadId]
+
+
 def _analyzer_sources(
     stable_reads: Sequence[StableRolloutRead],
 ) -> list[AnalyticsAnalyzerSource]:
@@ -166,6 +179,8 @@ class AnalyticsRolloutWorker:
             CodexThreadId, RodexSessionStatisticsSourceObservation
         ] = {}
         self._requires_full_reconcile = True
+        self._prepared_publication: _PreparedAnalyticsPublication | None = None
+        self._deferred_dirty_thread_ids: set[CodexThreadId] = set()
         self._source_catalog = AnalyticsSourceCatalog(config.codex_sessions_root)
         self._source_reader = AnalyticsSourceReader()
         self._verified_sources: dict[CodexThreadId, VerifiedRollout] = {}
@@ -210,6 +225,12 @@ class AnalyticsRolloutWorker:
                     checkpoint.worker.diagnostic_code,
                 )
                 self._consecutive_failures = checkpoint.worker.consecutive_failures
+            prepared = self._prepared_publication
+            if prepared is not None:
+                if batch is not None:
+                    self._deferred_dirty_thread_ids.update(batch.thread_ids)
+                receipt = registry.publish(prepared.publication)
+                return self._accept_prepared_publication(prepared, receipt)
             full_reconcile = (
                 self._requires_full_reconcile or batch is None or batch.full_reconcile
             )
@@ -302,22 +323,37 @@ class AnalyticsRolloutWorker:
                 != STATISTICS_PROJECTION_SCHEMA_VERSION
             )
             if should_publish:
-                receipt = registry.publish(
-                    RodexAnalyticsPublication(
-                        based_on_statistics_publication_sequence=self._publication_sequence,
-                        statistics_projection_schema_version=(
-                            STATISTICS_PROJECTION_SCHEMA_VERSION
-                        ),
-                        calculated_at_utc=self._timestamp(),
-                        coverage_state=calculation.coverage_state,
-                        statistics_projection=verified_collaboration.statistics_projection,
-                        analyzed_sources=tuple(verified_collaboration.analyzed_sources),
-                        changed_source_thread_ids=changed_source_thread_ids,
-                        changed_turn_keys=changed_turn_keys,
-                        removed_turn_keys=removed_turn_keys,
-                    )
+                publication = RodexAnalyticsPublication(
+                    based_on_statistics_publication_sequence=self._publication_sequence,
+                    statistics_projection_schema_version=(
+                        STATISTICS_PROJECTION_SCHEMA_VERSION
+                    ),
+                    calculated_at_utc=self._timestamp(),
+                    coverage_state=calculation.coverage_state,
+                    statistics_projection=verified_collaboration.statistics_projection,
+                    analyzed_sources=tuple(verified_collaboration.analyzed_sources),
+                    changed_source_thread_ids=changed_source_thread_ids,
+                    changed_turn_keys=changed_turn_keys,
+                    removed_turn_keys=removed_turn_keys,
                 )
-                self._publication_sequence = receipt.statistics_publication_sequence
+                prepared = _PreparedAnalyticsPublication(
+                    publication=publication,
+                    stable_reads=tuple(stable_reads),
+                    observations=tuple(verified_collaboration.analyzed_sources),
+                    turns_by_key=current_turns,
+                    followup_thread_ids=frozenset(
+                        item.observation.codex_thread_id
+                        for item, grew in zip(
+                            stable_reads,
+                            source_growth,
+                            strict=True,
+                        )
+                        if grew
+                    ),
+                )
+                self._prepared_publication = prepared
+                receipt = registry.publish(publication)
+                return self._accept_prepared_publication(prepared, receipt)
             self._last_health_transition = ("up_to_date", None)
             self._consecutive_failures = 0
             self._published_turns = current_turns
@@ -337,6 +373,13 @@ class AnalyticsRolloutWorker:
             return "up_to_date"
         except RodexDatabaseNotFoundError:
             return "catching_up"
+        except RodexAnalyticsPublicationRetryableError:
+            prepared = self._prepared_publication
+            if prepared is not None:
+                changed_ids = prepared.publication.changed_source_thread_ids
+                if changed_ids is not None:
+                    self._deferred_dirty_thread_ids.update(changed_ids)
+            return "degraded"
         except Exception as error:
             self._project_health(
                 "degraded",
@@ -345,6 +388,8 @@ class AnalyticsRolloutWorker:
                 failed=True,
             )
             self._adapter = None
+            self._prepared_publication = None
+            self._deferred_dirty_thread_ids.clear()
             self._source_reader.require_clean_replay()
             self._requires_full_reconcile = True
             return "degraded"
@@ -447,6 +492,37 @@ class AnalyticsRolloutWorker:
             )
             reads.append(_stable_rollout_read(source, captured, self._timestamp()))
         return reads
+
+    def _accept_prepared_publication(
+        self,
+        prepared: _PreparedAnalyticsPublication,
+        receipt: RodexAnalyticsPublishReceipt,
+    ) -> str:
+        if self._prepared_publication is not prepared:
+            raise RodexAnalyticsError("analytics publication candidate changed")
+        adapter = self._adapter
+        if adapter is None:
+            raise RodexAnalyticsError("analytics publication has no resident analyzer")
+        self._publication_sequence = receipt.statistics_publication_sequence
+        self._last_health_transition = ("up_to_date", None)
+        self._consecutive_failures = 0
+        self._published_turns = prepared.turns_by_key
+        self._accepted_observations = {
+            item.codex_thread_id: item for item in prepared.observations
+        }
+        adapter.accept_batch()
+        self._source_reader.accept([item.prepared_read for item in prepared.stable_reads])
+        self._requires_full_reconcile = False
+        self._prepared_publication = None
+        followup_thread_ids = set(prepared.followup_thread_ids)
+        followup_thread_ids.update(self._deferred_dirty_thread_ids)
+        self._deferred_dirty_thread_ids.clear()
+        if followup_thread_ids:
+            if self._schedule_followup is not None:
+                for thread_id in followup_thread_ids:
+                    self._schedule_followup(thread_id)
+            return "pending_append"
+        return "up_to_date"
 
     def _project_health(
         self,

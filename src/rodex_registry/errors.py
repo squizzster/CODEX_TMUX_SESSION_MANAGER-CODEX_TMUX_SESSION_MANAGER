@@ -17,5 +17,9 @@ class RodexSessionStatisticsConflictError(RodexSessionError):
     """A statistics publication lost its identity or publication-sequence fence."""
 
 
+class RodexAnalyticsPublicationRetryableError(RodexSessionError):
+    """A transient SQLite lock prevented an analytics publication commit."""
+
+
 class RodexSessionTurnStatisticsAmbiguousError(RodexSessionError):
     """One unqualified turn ID exists in multiple Codex lineage sources."""

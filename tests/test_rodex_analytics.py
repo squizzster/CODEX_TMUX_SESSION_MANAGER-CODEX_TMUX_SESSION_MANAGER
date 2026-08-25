@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import subprocess
 import uuid
 from collections.abc import Callable
@@ -915,6 +916,62 @@ def test_analyzer_failure_preserves_last_good_aggregate_and_increments_health(
     assert view.worker.worker_state == "degraded"
     assert view.worker.consecutive_failures == 1
     assert view.worker.next_retry_at_utc is None
+
+
+def test_transient_publication_retry_reuses_the_prepared_analysis(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+    _rollout(config.codex_sessions_root, CODEX_SESSION_ID)
+    _create(config)
+    adapter = FakeAnalyticsAdapter()
+    worker = AnalyticsRolloutWorker(config, adapter_factory=lambda: adapter)
+    original_read = worker._source_reader.read
+    read_calls = 0
+
+    def count_read(source: object) -> object:
+        nonlocal read_calls
+        read_calls += 1
+        return original_read(source)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(worker._source_reader, "read", count_read)
+
+    from rodex_registry import analytics_registry as registry_module
+
+    original_publish_statistics = registry_module.publish_rodex_session_statistics
+    lower_publish_calls = 0
+
+    def lock_once(*args: object, **kwargs: object) -> object:
+        nonlocal lower_publish_calls
+        lower_publish_calls += 1
+        if lower_publish_calls == 1:
+            error = sqlite3.OperationalError("database is locked")
+            error.sqlite_errorcode = sqlite3.SQLITE_BUSY
+            raise error
+        return original_publish_statistics(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(registry_module, "publish_rodex_session_statistics", lock_once)
+    original_registry_publish = RodexAnalyticsRegistry.publish
+    publications: list[object] = []
+
+    def record_publication(registry: RodexAnalyticsRegistry, publication: object) -> object:
+        publications.append(publication)
+        return original_registry_publish(registry, publication)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(RodexAnalyticsRegistry, "publish", record_publication)
+
+    assert worker.poll_once() == "degraded"
+    assert adapter.accepted_batches == 0
+    assert worker.poll_once(AnalyticsDirtyBatch(frozenset())) == "pending_append"
+
+    assert publications[0] is publications[1]
+    assert read_calls == 1
+    assert len(adapter.analyses) == 1
+    assert adapter.accepted_batches == 1
+    view = read_rodex_session_statistics(1, config.rodex_database_path)
+    assert view.statistics is not None
+    assert view.statistics.statistics_publication_sequence == 1
 
 
 def test_failed_analysis_resets_resident_state_for_one_clean_replay(

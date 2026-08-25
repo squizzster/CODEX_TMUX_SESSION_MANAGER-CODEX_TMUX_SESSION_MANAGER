@@ -48,6 +48,7 @@ def test_registry_has_one_way_domain_dependencies_without_the_old_monolith() -> 
     }
     assert _relative_imports("statistics_fields") == {"statistics_projection"}
     assert _relative_imports("analytics_registry") == {
+        "errors",
         "identity",
         "schema",
         "statistics",

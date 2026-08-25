@@ -44,6 +44,7 @@ from .analytics_scheduler import (
     AnalyticsEventScheduler,
     AnalyticsProtocolEventSubscriber,
 )
+from .analytics_source_catalog import AnalyticsSourceCatalog
 from .process_contracts import AnalyticsWorkerConfig
 
 ANALYTICS_RESTART_DELAY_SECONDS = 2.0
@@ -205,6 +206,11 @@ class AnalyticsRolloutWorker:
         self._expected_codex_session_id = config.codex_session_id
         self._registry: RodexAnalyticsRegistry | None = None
         self._source_authentication: dict[CodexThreadId, AuthenticatedRolloutPrefix] = {}
+        self._source_catalog = AnalyticsSourceCatalog(config.codex_sessions_root)
+
+    def observe_protocol_event(self, event: Mapping[str, Any]) -> None:
+        """Feed exact lifecycle identity metadata into bounded source resolution."""
+        self._source_catalog.observe_protocol_event(event)
 
     def poll_once(self) -> str:
         """Perform one reconciliation; no analytics failure is allowed to escape."""
@@ -289,7 +295,9 @@ class AnalyticsRolloutWorker:
             [Path, AnalyticsEventScheduler], AnalyticsProtocolEventSubscriber
         ] = AnalyticsProtocolEventSubscriber,
     ) -> None:
-        active_scheduler = scheduler or AnalyticsEventScheduler()
+        active_scheduler = scheduler or AnalyticsEventScheduler(
+            event_observer=self.observe_protocol_event
+        )
         subscriber = subscriber_factory(
             self._config.protocol_event_socket_path,
             active_scheduler,
@@ -319,6 +327,7 @@ class AnalyticsRolloutWorker:
         verified_sources = _discover_verified_thread_rollouts(
             self._config.codex_sessions_root,
             sources,
+            self._source_catalog,
         )
         if verified_sources is None:
             return None
@@ -498,14 +507,19 @@ def default_codex_sessions_root() -> Path:
 
 
 def locate_verified_rollout(
-    root: Path, codex_session_id: CodexSessionId
+    root: Path,
+    codex_session_id: CodexSessionId,
+    *,
+    first_linked_at_utc: str | None = None,
+    source_catalog: AnalyticsSourceCatalog | None = None,
 ) -> VerifiedRollout | None:
     """Find the rollout whose metadata confirms the exact Codex session ID."""
-    if not root.is_dir():
-        return None
+    catalog = source_catalog or AnalyticsSourceCatalog(root)
     verified = [
         source
-        for path in sorted(root.rglob(f"*{codex_session_id}*.jsonl"))
+        for path in catalog.candidate_paths(
+            codex_session_id, first_linked_at_utc=first_linked_at_utc
+        )
         if (source := _verify_root_rollout(path, codex_session_id, allowed_root=root))
         is not None
     ]
@@ -513,7 +527,10 @@ def locate_verified_rollout(
         raise RodexAnalyticsError(
             f"multiple rollout files declare Codex identity {codex_session_id}"
         )
-    return verified[0] if verified else None
+    if not verified:
+        return None
+    catalog.remember_resolved_path(codex_session_id, verified[0].path)
+    return verified[0]
 
 
 def analytics_worker_main(arguments: list[str] | None = None) -> int:
@@ -664,6 +681,7 @@ def _verify_subagent_rollout(
 def _discover_verified_thread_rollouts(
     root: Path,
     registered_sources: Sequence[RodexSessionStatisticsSource],
+    source_catalog: AnalyticsSourceCatalog,
 ) -> list[VerifiedRollout] | None:
     """Discover the authenticated descendant closure for registered root history."""
     registered = {source.codex_thread_id: source for source in registered_sources}
@@ -684,27 +702,60 @@ def _discover_verified_thread_rollouts(
             )
         )
         if root_verified is None:
-            root_verified = locate_verified_rollout(root, root_source.codex_thread_id)
+            root_verified = locate_verified_rollout(
+                root,
+                root_source.codex_thread_id,
+                first_linked_at_utc=root_source.first_linked_at_utc,
+                source_catalog=source_catalog,
+            )
         if root_verified is None:
             return None
         closure[root_source.codex_thread_id] = replace(
             root_verified, first_linked_at_utc=root_source.first_linked_at_utc
         )
     candidates: dict[CodexThreadId, VerifiedRollout] = {}
-    if not root.is_dir():
-        return None
-    paths = tuple(sorted(root.rglob("*.jsonl")))
     root_thread_ids = frozenset(source.codex_thread_id for source in root_sources)
-    for path in paths:
-        candidate = _verify_subagent_rollout(path, root_thread_ids, allowed_root=root)
-        if candidate is None:
-            continue
-        prior = candidates.get(candidate.codex_thread_id)
-        if prior is not None and prior.path != candidate.path:
-            raise RodexAnalyticsError(
-                f"multiple rollout files declare Codex thread {candidate.codex_thread_id}"
+    candidate_thread_ids = set(source_catalog.candidate_thread_ids())
+    candidate_thread_ids.update(registered)
+    candidate_thread_ids.difference_update(root_thread_ids)
+    for thread_id in candidate_thread_ids:
+        registered_source = registered.get(thread_id)
+        known_path = (
+            None
+            if registered_source is None or registered_source.rollout_file_path is None
+            else Path(registered_source.rollout_file_path)
+        )
+        paths = (
+            (known_path,)
+            if known_path is not None
+            else source_catalog.candidate_paths(
+                thread_id,
+                first_linked_at_utc=(
+                    None
+                    if registered_source is None
+                    else registered_source.first_linked_at_utc
+                ),
             )
-        candidates[candidate.codex_thread_id] = candidate
+        )
+        verified_for_thread = [
+            candidate
+            for path in paths
+            if (
+                candidate := _verify_subagent_rollout(
+                    path, root_thread_ids, allowed_root=root
+                )
+            )
+            is not None
+            and candidate.codex_thread_id == thread_id
+        ]
+        if len(verified_for_thread) > 1:
+            raise RodexAnalyticsError(
+                f"multiple rollout files declare Codex thread {thread_id}"
+            )
+        if verified_for_thread:
+            candidate = verified_for_thread[0]
+            candidates[thread_id] = candidate
+            source_catalog.remember_resolved_path(thread_id, candidate.path)
     pending = dict(candidates)
     while pending:
         added = False

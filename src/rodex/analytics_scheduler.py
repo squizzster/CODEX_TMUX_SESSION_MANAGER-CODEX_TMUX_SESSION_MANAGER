@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import queue
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Event, Lock, Thread
@@ -74,19 +74,26 @@ class AnalyticsEventScheduler:
         quiet_seconds: float = ANALYTICS_QUIET_SECONDS,
         max_batch_seconds: float = ANALYTICS_MAX_BATCH_SECONDS,
         monotonic: Callable[[], float] = time.monotonic,
+        event_observer: Callable[[Mapping[str, Any]], None] | None = None,
     ) -> None:
         if quiet_seconds < 0 or max_batch_seconds <= 0:
             raise ValueError("analytics batch intervals must be positive")
         self._quiet_seconds = quiet_seconds
         self._max_batch_seconds = max_batch_seconds
         self._monotonic = monotonic
+        self._event_observer = event_observer
         self._signals: queue.Queue[object] = queue.Queue(maxsize=2)
         self._closed = False
         self._close_lock = Lock()
 
     def offer_protocol_message(self, message: str | bytes) -> None:
         """Mark analytics dirty only for a relevant App Server lifecycle event."""
-        if _is_relevant_protocol_event(message):
+        event = _decode_protocol_event(message)
+        if event is None:
+            return
+        if self._event_observer is not None:
+            self._event_observer(event)
+        if event.get("method") in _RELEVANT_METHODS:
             self.offer_dirty()
 
     def offer_dirty(self) -> None:
@@ -209,8 +216,13 @@ class AnalyticsProtocolEventSubscriber:
 
 
 def _is_relevant_protocol_event(message: str | bytes) -> bool:
+    decoded = _decode_protocol_event(message)
+    return decoded is not None and decoded.get("method") in _RELEVANT_METHODS
+
+
+def _decode_protocol_event(message: str | bytes) -> dict[str, Any] | None:
     try:
         decoded = json.loads(message)
     except (json.JSONDecodeError, TypeError, UnicodeDecodeError):
-        return False
-    return isinstance(decoded, dict) and decoded.get("method") in _RELEVANT_METHODS
+        return None
+    return decoded if isinstance(decoded, dict) else None

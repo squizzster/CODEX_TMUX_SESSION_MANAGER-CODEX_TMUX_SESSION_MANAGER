@@ -592,10 +592,20 @@ def test_worker_discovers_subagent_and_removes_inherited_parent_history(
     _create(config)
     adapter = FakeAnalyticsAdapter()
 
-    assert (
-        AnalyticsRolloutWorker(config, adapter_factory=lambda: adapter).poll_once()
-        == "up_to_date"
+    worker = AnalyticsRolloutWorker(config, adapter_factory=lambda: adapter)
+    worker.observe_protocol_event(
+        {
+            "method": "thread/started",
+            "params": {
+                "thread": {
+                    "id": str(child_thread_id),
+                    "createdAt": "2026-08-16T12:00:00.500000Z",
+                }
+            },
+        }
     )
+
+    assert worker.poll_once() == "up_to_date"
 
     analyzed = adapter.analyses[0][0]
     assert len(analyzed) == 2

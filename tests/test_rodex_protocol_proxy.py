@@ -335,21 +335,42 @@ def test_event_tap_ready_signal_reports_the_current_active_turn(tmp_path: Path) 
             },
         }
     )
+    thread_started = json.dumps(
+        {
+            "method": "thread/started",
+            "params": {
+                "thread": {
+                    "id": "thread-1",
+                    "createdAt": 1_787_692_800,
+                }
+            },
+        }
+    )
 
     try:
         tap.start()
+        tap.publish(thread_started)
         tap.publish(started)
         with unix_connect(
             str(event_socket), uri="ws://localhost/events", compression=None
         ) as subscriber:
             assert json.loads(subscriber.recv(timeout=1)) == {
                 "method": "rodex/event-stream/ready",
-                "params": {"activeTurns": {"thread-1": "turn-1"}},
+                "params": {
+                    "activeTurns": {"thread-1": "turn-1"},
+                    "knownThreads": [{"id": "thread-1", "createdAt": 1_787_692_800}],
+                },
             }
         tap.publish(completed)
         with unix_connect(
             str(event_socket), uri="ws://localhost/events", compression=None
         ) as subscriber:
-            assert subscriber.recv(timeout=1) == EVENT_STREAM_READY_MESSAGE
+            assert json.loads(subscriber.recv(timeout=1)) == {
+                "method": "rodex/event-stream/ready",
+                "params": {
+                    "activeTurns": {},
+                    "knownThreads": [{"id": "thread-1", "createdAt": 1_787_692_800}],
+                },
+            }
     finally:
         tap.close()

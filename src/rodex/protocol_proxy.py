@@ -46,7 +46,10 @@ _EVENT_STREAM_CLOSED: Final = object()
 EVENT_STREAM_READY_METHOD: Final = "rodex/event-stream/ready"
 CONTROL_CONNECTION_PATH: Final = "/rodex-control"
 EVENT_STREAM_READY_MESSAGE: Final = json.dumps(
-    {"method": EVENT_STREAM_READY_METHOD, "params": {"activeTurns": {}}},
+    {
+        "method": EVENT_STREAM_READY_METHOD,
+        "params": {"activeTurns": {}, "knownThreads": []},
+    },
     separators=(",", ":"),
 )
 
@@ -66,6 +69,7 @@ class CodexProtocolEventTap:
         self._subscribers: set[queue.Queue[str | bytes | object]] = set()
         self._subscribers_lock = Lock()
         self._active_turns: dict[str, str] = {}
+        self._known_threads: dict[str, dict[str, object]] = {}
         self._server: Any | None = None
         self._server_thread: Thread | None = None
 
@@ -97,6 +101,7 @@ class CodexProtocolEventTap:
         """Offer one event to every live subscriber without delaying the TUI."""
         with self._subscribers_lock:
             _update_active_turns(self._active_turns, message)
+            _update_known_threads(self._known_threads, message)
             subscribers = tuple(self._subscribers)
         for subscriber in subscribers:
             try:
@@ -130,7 +135,10 @@ class CodexProtocolEventTap:
             ready_message = json.dumps(
                 {
                     "method": EVENT_STREAM_READY_METHOD,
-                    "params": {"activeTurns": dict(self._active_turns)},
+                    "params": {
+                        "activeTurns": dict(self._active_turns),
+                        "knownThreads": list(self._known_threads.values()),
+                    },
                 },
                 separators=(",", ":"),
             )
@@ -618,6 +626,28 @@ def _started_thread_id(params: dict[str, Any]) -> str | None:
         if isinstance(thread_id, str) and thread_id:
             return thread_id
     return _event_thread_id(params)
+
+
+def _update_known_threads(
+    known_threads: dict[str, dict[str, object]], message: str | bytes
+) -> None:
+    payload = _json_object(message)
+    if payload is None or payload.get("method") != CODEX_APP_SERVER.thread_started_method:
+        return
+    params = payload.get("params")
+    if not isinstance(params, dict):
+        return
+    thread = params.get("thread")
+    if not isinstance(thread, dict):
+        return
+    thread_id = _started_thread_id(params)
+    if thread_id is None:
+        return
+    remembered: dict[str, object] = {"id": thread_id}
+    created_at = thread.get("createdAt")
+    if isinstance(created_at, (str, int, float)) and not isinstance(created_at, bool):
+        remembered["createdAt"] = created_at
+    known_threads[thread_id] = remembered
 
 
 def _event_thread_id(params: dict[str, Any]) -> str | None:

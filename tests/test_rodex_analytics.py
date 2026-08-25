@@ -28,6 +28,7 @@ from rodex.analytics_analyzer import (
 from rodex.analytics_scheduler import AnalyticsDirtyBatch
 from rodex.process_contracts import AnalyticsWorkerConfig
 from rodex_registry import (
+    RodexAnalyticsRegistry,
     RodexRegistryId,
     RodexRuntimeId,
     RodexSessionId,
@@ -56,6 +57,7 @@ class FakeAnalyticsAdapter:
         self.coverage_state = "complete"
         self.on_analyze: Callable[[], None] | None = None
         self.accepted_batches = 0
+        self.source_ids: set[uuid.UUID] = set()
 
     def analyze_rollouts(
         self, sources: list[AnalyticsAnalyzerSource], user_id: str
@@ -63,6 +65,7 @@ class FakeAnalyticsAdapter:
         if self.fail:
             raise OSError("analytics unavailable")
         captured = tuple(source.analyzer_content for source in sources)
+        self.source_ids.update(source.codex_thread_id for source in sources)
         self.analyses.append((captured, user_id))
         self.appended_analyses.append(
             tuple(source.appended_analyzer_content for source in sources)
@@ -73,9 +76,9 @@ class FakeAnalyticsAdapter:
         return AnalyticsCalculation(
             statistics_projection=replace(
                 base,
-                analyzer_event_count=len(sources),
-                analyzer_source_count=len(sources),
-                history_records_count=len(sources),
+                analyzer_event_count=len(self.source_ids),
+                analyzer_source_count=len(self.source_ids),
+                history_records_count=len(self.source_ids),
             ),
             coverage_state=self.coverage_state,
         )
@@ -666,6 +669,68 @@ def test_worker_discovers_subagent_and_removes_inherited_parent_history(
     assert b'"type":"session_meta"' not in config.rodex_database_path.read_bytes()
 
 
+def test_live_batch_loads_checkpoint_once_and_reads_only_its_exact_source(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+    _rollout(config.codex_sessions_root, CODEX_SESSION_ID)
+    child_thread_id = uuid.UUID(int=CODEX_SESSION_ID.int + 100)
+    child_rollout = _subagent_rollout(
+        config.codex_sessions_root,
+        CODEX_SESSION_ID,
+        child_thread_id,
+    )
+    _create(config)
+    adapter = FakeAnalyticsAdapter()
+    worker = AnalyticsRolloutWorker(config, adapter_factory=lambda: adapter)
+    worker.observe_protocol_event(
+        {
+            "method": "thread/started",
+            "params": {
+                "thread": {
+                    "id": str(child_thread_id),
+                    "createdAt": "2026-08-16T12:00:00.500000Z",
+                }
+            },
+        }
+    )
+    checkpoint_loads = 0
+    original_load_checkpoint = RodexAnalyticsRegistry.load_checkpoint
+
+    def count_checkpoint_load(registry: RodexAnalyticsRegistry) -> object:
+        nonlocal checkpoint_loads
+        checkpoint_loads += 1
+        return original_load_checkpoint(registry)
+
+    monkeypatch.setattr(
+        RodexAnalyticsRegistry,
+        "load_checkpoint",
+        count_checkpoint_load,
+    )
+    assert worker.poll_once(AnalyticsDirtyBatch(frozenset(), True)) == "up_to_date"
+
+    read_paths: list[Path] = []
+    original_read = worker._source_reader.read
+
+    def record_read(source: object) -> object:
+        read_paths.append(source.path)  # type: ignore[attr-defined]
+        return original_read(source)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(worker._source_reader, "read", record_read)
+    addition = b'{"ordinal":4,"type":"event_msg","payload":{"child":true}}\n'
+    with child_rollout.open("ab") as output:
+        output.write(addition)
+
+    assert (
+        worker.poll_once(AnalyticsDirtyBatch(frozenset({child_thread_id}))) == "up_to_date"
+    )
+
+    assert checkpoint_loads == 1
+    assert read_paths == [child_rollout.resolve()]
+    assert adapter.appended_analyses[-1] == (addition,)
+
+
 def test_unchanged_rollout_does_not_recalculate_but_append_does(tmp_path: Path) -> None:
     config = _config(tmp_path)
     rollout = _rollout(config.codex_sessions_root, CODEX_SESSION_ID)
@@ -793,7 +858,7 @@ def test_worker_does_not_adopt_a_replacement_codex_identity(
     tmp_path: Path,
 ) -> None:
     config = _config(tmp_path)
-    _rollout(config.codex_sessions_root, CODEX_SESSION_ID)
+    original_rollout = _rollout(config.codex_sessions_root, CODEX_SESSION_ID)
     _rollout(config.codex_sessions_root, REPLACEMENT_CODEX_SESSION_ID)
     create_a_rodex_session(
         config.rodex_database_path,
@@ -812,10 +877,12 @@ def test_worker_does_not_adopt_a_replacement_codex_identity(
         config.rodex_database_path,
         codex_session_id=REPLACEMENT_CODEX_SESSION_ID,
     )
+    with original_rollout.open("a", encoding="utf-8") as output:
+        output.write('{"type":"event_msg","payload":{"changed":true}}\n')
 
     assert worker.poll_once() == "degraded"
 
-    assert len(adapter.analyses) == 1
+    assert len(adapter.analyses) == 2
     sources = list_rodex_session_statistics_sources(1, config.rodex_database_path)
     assert [source.codex_thread_id for source in sources] == [
         CODEX_SESSION_ID,

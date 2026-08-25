@@ -15,6 +15,7 @@ from websockets.sync.client import unix_connect
 
 from rodex_registry import CodexThreadId, parse_codex_thread_id
 
+from .app_server_contract import CODEX_APP_SERVER
 from .protocol_proxy import (
     ANALYTICS_EVENT_STREAM_PATH,
     ANALYTICS_LIFECYCLE_EVENT_METHODS,
@@ -299,7 +300,7 @@ def _analytics_event_thread_id(
     params = event.get("params")
     if not isinstance(params, Mapping):
         return None
-    if method == "thread/started":
+    if method == CODEX_APP_SERVER.thread_started_method:
         thread = params.get("thread")
         value = thread.get("id") if isinstance(thread, Mapping) else None
     else:

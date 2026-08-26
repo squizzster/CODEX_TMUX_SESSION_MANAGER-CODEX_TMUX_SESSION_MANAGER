@@ -24,8 +24,10 @@ from .errors import (
     RodexSessionTurnStatisticsAmbiguousError,
 )
 from .execution import (
+    RodexSessionCodexRolloutSource,
     RodexSessionCodexThread,
     RodexSessionCodexThreadObservation,
+    list_rodex_session_codex_rollout_sources,
     list_rodex_session_codex_threads,
 )
 from .identity import (
@@ -155,6 +157,7 @@ __all__ = [
     "RodexRuntimeInstance",
     "RodexSession",
     "RodexSessionAnalyticsWorker",
+    "RodexSessionCodexRolloutSource",
     "RodexSessionCodexThread",
     "RodexSessionCodexThreadObservation",
     "RodexSessionCodexThreadSummary",
@@ -198,6 +201,7 @@ __all__ = [
     "join_signed_bigints_into_a_codex_session_id",
     "join_signed_bigints_into_a_codex_thread_id",
     "join_signed_bigints_into_a_codex_turn_id",
+    "list_rodex_session_codex_rollout_sources",
     "list_rodex_session_codex_threads",
     "list_rodex_session_runtimes_for_a_user",
     "lookup_codex_session_id_from_a_rodex_sessions_id",

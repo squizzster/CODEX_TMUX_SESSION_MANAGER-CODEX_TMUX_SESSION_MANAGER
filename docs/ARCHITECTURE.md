@@ -125,14 +125,17 @@ recovery follows exact event-named UUIDs first; a startup-only fallback scans re
 JSONL files in the root UUIDv7 three-day window, reads only first metadata lines, and
 accepts the authenticated parent closure. Resident wakes never repeat that scan or
 reload unchanged prefixes. Catch-up, stale-publication recovery, and clean replay remain
-bounded.
+bounded. Clean replay invalidates cached verified lineage and byte-reader state as one
+recovery boundary before source metadata is trusted again.
 
 Canonical execution identity, rollout provenance, worker checkpoints, replaceable
 statistics metrics, and the append-only typed trace have separate relational owners and
 no JSON/body copies. One fenced transaction publishes changed metrics, accepted source
 progress, trace suffix, and worker health. Trace totals advance from the persisted head
-instead of recounting history; failures preserve the last good view and cannot affect
-the TUI. Statistics and trace reads need neither Codex nor tmux.
+instead of recounting history; trace coverage remains cumulatively gapped after any
+durable gap or retained unrecognized record. Explicit body reads resolve authenticated
+prefixes across both current and historical memberships. Failures preserve the last good
+view and cannot affect the TUI. Statistics and trace reads need neither Codex nor tmux.
 
 ## Live control
 

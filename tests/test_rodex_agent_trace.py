@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 import uuid
@@ -13,6 +14,7 @@ from rodex.errors import RodexLaunchError
 from rodex_registry import (
     create_a_rodex_session,
     read_rodex_agent_trace,
+    record_a_rodex_session_runtime_resume,
     split_codex_item_id_into_signed_bigints,
     split_codex_thread_id_into_signed_bigints,
 )
@@ -29,6 +31,7 @@ from rodex_sql import open_rodex_transaction
 
 THREAD_ID = uuid.UUID("01a00654-f2bc-7a30-834a-a5f886a65f82")
 CHILD_THREAD_ID = uuid.UUID("01a00654-f2bc-7a30-834a-a5f886a65f83")
+REPLACEMENT_THREAD_ID = uuid.UUID("01a00654-f2bc-7a30-834a-a5f886a65f84")
 TURN_A_ID = "00000000-0000-7000-8000-00000000000a"
 TURN_B_ID = "00000000-0000-7000-8000-00000000000b"
 ITEM_A_ID = "00000000-0000-7000-8000-0000000000aa"
@@ -428,6 +431,74 @@ def test_trace_publication_is_deduplicated_typed_and_contains_no_bodies(
             "VALUES (?, 'unknown', 'unknown', 0, 0, 'unavailable')",
             (command_event_id,),
         )
+
+
+def test_trace_coverage_remains_gapped_while_unrecognized_events_are_durable(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "rodex.sqlite3"
+    create_a_rodex_session(database, codex_session_id=THREAD_ID)
+    _publish_trace(
+        database,
+        RodexAgentTracePublication(
+            None,
+            "test-v1",
+            "2026-08-26T12:00:00Z",
+            "gapped",
+            (
+                RodexAgentTraceEvent(
+                    THREAD_ID, None, 1, 0, "unrecognized_record", None, None
+                ),
+            ),
+        ),
+    )
+
+    _publish_trace(
+        database,
+        RodexAgentTracePublication(
+            1,
+            "test-v1",
+            "2026-08-26T12:00:01Z",
+            "complete",
+            (RodexAgentTraceEvent(THREAD_ID, None, 2, 0, "session_metadata", None, None),),
+        ),
+    )
+
+    snapshot = read_rodex_agent_trace(1, database)
+    assert snapshot.coverage_state == "gapped"
+    assert snapshot.unrecognized_record_count == 1
+
+
+def test_trace_coverage_preserves_a_prior_gap_without_unrecognized_events(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "rodex.sqlite3"
+    create_a_rodex_session(database, codex_session_id=THREAD_ID)
+    _publish_trace(
+        database,
+        RodexAgentTracePublication(
+            None,
+            "test-v1",
+            "2026-08-26T12:00:00Z",
+            "gapped",
+            (RodexAgentTraceEvent(THREAD_ID, None, 1, 0, "session_metadata", None, None),),
+        ),
+    )
+
+    _publish_trace(
+        database,
+        RodexAgentTracePublication(
+            1,
+            "test-v1",
+            "2026-08-26T12:00:01Z",
+            "complete",
+            (RodexAgentTraceEvent(THREAD_ID, None, 2, 0, "compaction", None, None),),
+        ),
+    )
+
+    snapshot = read_rodex_agent_trace(1, database)
+    assert snapshot.coverage_state == "gapped"
+    assert snapshot.unrecognized_record_count == 0
 
 
 def test_tool_request_and_output_share_one_canonical_public_tool_call(
@@ -978,6 +1049,18 @@ def test_include_body_adapter_is_allowlisted_and_redacts_hidden_or_encrypted_dat
             }
         },
     )
+    embedded = _safe_event_body(
+        "message",
+        {
+            "payload": {
+                "type": "item_completed",
+                "item": {
+                    "type": "AgentMessage",
+                    "content": "prefix gAAAA-encrypted suffix",
+                },
+            }
+        },
+    )
 
     assert unknown == {"capture_state": "redacted", "reason": "metadata_only_event"}
     assert reasoning == {"capture_state": "redacted", "reason": "hidden_reasoning"}
@@ -987,6 +1070,106 @@ def test_include_body_adapter_is_allowlisted_and_redacts_hidden_or_encrypted_dat
     }
     assert "must-not-leak" not in json.dumps(nested_reasoning)
     assert tool["value"]["input"]["secret"] == "<encrypted>"
+    assert embedded["value"]["content"] == "<encrypted>"
+
+
+def test_include_bodies_resolves_an_authenticated_historical_root(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    database = tmp_path / "rodex.sqlite3"
+    session = create_a_rodex_session(
+        database,
+        codex_session_id=THREAD_ID,
+        tmux_server_socket_path=tmp_path / "tmux.sock",
+        tmux_session_name="first",
+    )
+    rollout = tmp_path / "historical-root.jsonl"
+    content = _content(
+        {
+            "ordinal": 1,
+            "type": "event_msg",
+            "payload": {
+                "type": "item_completed",
+                "item": {
+                    "type": "AgentMessage",
+                    "phase": "final_answer",
+                    "content": "historic answer",
+                },
+            },
+        }
+    )
+    rollout.write_bytes(content)
+    with open_rodex_transaction(database) as connection:
+        worker_id = connection.execute(
+            "INSERT INTO rodex_sessions_analytics_workers "
+            "(rodex_sessions_id, worker_state, last_attempted_at_utc, "
+            "consecutive_failures) VALUES (1, 'up_to_date', ?, 0) RETURNING id",
+            ("2026-08-26T12:00:00Z",),
+        ).fetchone()[0]
+        source_id = connection.execute(
+            "INSERT INTO rodex_sessions_codex_rollout_sources "
+            "(rodex_sessions_id, rodex_sessions_codex_threads_id, "
+            "rollout_file_path, first_observed_at_utc) VALUES (1, 1, ?, ?) "
+            "RETURNING id",
+            (str(rollout), "2026-08-26T12:00:00Z"),
+        ).fetchone()[0]
+        stat = rollout.stat()
+        connection.execute(
+            "INSERT INTO rodex_sessions_analytics_worker_thread_checkpoints "
+            "(rodex_sessions_id, rodex_sessions_analytics_workers_id, "
+            "rodex_sessions_codex_rollout_sources_id, analyzed_size_bytes, "
+            "analyzed_mtime_ns, analyzed_prefix_sha256, verified_at_utc) "
+            "VALUES (1, ?, ?, ?, ?, ?, ?)",
+            (
+                worker_id,
+                source_id,
+                len(content),
+                stat.st_mtime_ns,
+                hashlib.sha256(content).hexdigest(),
+                "2026-08-26T12:00:00Z",
+            ),
+        )
+    _publish_trace(
+        database,
+        RodexAgentTracePublication(
+            None,
+            "test-v1",
+            "2026-08-26T12:00:00Z",
+            "complete",
+            (
+                RodexAgentTraceEvent(
+                    THREAD_ID,
+                    None,
+                    1,
+                    0,
+                    "message",
+                    None,
+                    TraceMessage(
+                        None,
+                        "final_answer",
+                        "assistant",
+                        1,
+                        len("historic answer"),
+                        "rollout_reference",
+                    ),
+                ),
+            ),
+        ),
+    )
+    record_a_rodex_session_runtime_resume(
+        1,
+        tmp_path / "tmux.sock",
+        "replacement",
+        database,
+        codex_session_id=REPLACEMENT_THREAD_ID,
+    )
+
+    execute_agent_trace_command(
+        ["_trace", session.cool_name, "--include-bodies", "--json"], database
+    )
+
+    trace = json.loads(capsys.readouterr().out)
+    assert trace["events"][0]["body"]["value"]["content"] == "historic answer"
 
 
 def test_agent_trace_commands_render_lineage_and_snapshot(

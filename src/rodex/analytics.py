@@ -678,6 +678,7 @@ class AnalyticsRolloutWorker:
             self._prepared_publication = None
             self._deferred_dirty_thread_ids.clear()
             self._source_reader = AnalyticsSourceReader()
+            self._verified_sources.clear()
             self._trace_normalizer.require_clean_replay()
             self._requires_full_reconcile = True
             return "clean_replay"
@@ -695,6 +696,7 @@ class AnalyticsRolloutWorker:
             self._prepared_publication = None
             self._deferred_dirty_thread_ids.clear()
             self._source_reader.require_clean_replay()
+            self._verified_sources.clear()
             self._trace_normalizer.require_clean_replay()
             self._requires_full_reconcile = True
             return "clean_replay"

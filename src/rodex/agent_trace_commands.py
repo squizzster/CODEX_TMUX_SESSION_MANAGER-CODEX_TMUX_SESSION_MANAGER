@@ -11,11 +11,13 @@ from pathlib import Path
 from typing import Any
 
 from rodex_registry import (
+    list_rodex_session_codex_rollout_sources,
     list_rodex_session_codex_threads,
     lookup_owned_rodex_sessions_id_from_a_cool_name,
     read_rodex_agent_trace,
 )
 
+from .agent_trace_privacy import redact_codex_encrypted_text
 from .analytics_source_reader import open_rollout_descriptor
 from .command_contract import AGENTS_COMMAND, TRACE_COMMAND
 from .errors import RodexLaunchError
@@ -218,7 +220,7 @@ def _attach_authenticated_rollout_bodies(
 ) -> None:
     sources = {
         str(source.codex_thread_id): source
-        for source in list_rodex_session_codex_threads(session_id, database_path)
+        for source in list_rodex_session_codex_rollout_sources(session_id, database_path)
     }
     records_by_thread: dict[str, dict[int, dict[str, Any]]] = {}
     for event in events:
@@ -350,7 +352,7 @@ def _safe_event_body(event_kind: str, record: dict[str, Any]) -> dict[str, Any]:
 
 def _redact_encrypted(value: Any) -> Any:
     if isinstance(value, str):
-        return "<encrypted>" if value.startswith("gAAAA") else value
+        return redact_codex_encrypted_text(value)
     if isinstance(value, list):
         return [_redact_encrypted(item) for item in value]
     if isinstance(value, dict):

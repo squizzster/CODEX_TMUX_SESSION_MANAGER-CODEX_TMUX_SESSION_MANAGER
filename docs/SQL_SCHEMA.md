@@ -64,8 +64,8 @@ Apply these standards to future schema decisions. These authorative standards ma
 - `rodex_sessions` contains one signed-BIGINT Rodex session ID, the two signed
   halves of the Codex session ID, and permanent/optional display-name links. The public Rodex
   session ID is always serialized as a 16-character lowercase hex string, never a JSON
-  number. This incompatible ALPHA schema generation is stored in `rodex-v9.sqlite3`;
-  Rodex leaves v8 and earlier generation files untouched and does not read or migrate
+  number. This incompatible ALPHA schema generation is stored in `rodex-v10.sqlite3`;
+  Rodex leaves v9 and earlier generation files untouched and does not read or migrate
   their schemas.
 - `rodex_runtime_instances` contains one signed-`BIGINT` random 64-bit `runtime_id` and
   its start time for a Rodex session. Unique indexes fence both session cardinality and
@@ -75,8 +75,9 @@ Apply these standards to future schema decisions. These authorative standards ma
 - `rodex_sessions_statistics` is the latest successful aggregate snapshot, one row per
   Rodex session. Every fixed aggregate and its available base count is a typed scalar
   column. Rodex allocates its session-local monotonic
-  `statistics_publication_sequence` whenever a changed authenticated rollout prefix is
-  successfully published. The sequence is a compare-and-set and relational consistency
+  `statistics_publication_sequence` only when a changed authenticated projection is
+  successfully published; no-op lifecycle events do not advance it. The sequence is a
+  compare-and-set and relational consistency
   token, not a turn count or retained history; temporary analyzer dataset identities,
   dataset revisions, prior Rodex snapshots, and redundant JSON documents are excluded.
 - `rodex_sessions_statistics_distributions` stores the seven bounded distribution kinds
@@ -127,6 +128,10 @@ Apply these standards to future schema decisions. These authorative standards ma
   removes obsolete turns without a variable-length SQL key list. Health-only failure
   publication uses the ID fence but does not mutate last-good statistics, turns, or
   source analysis.
+- The analytics worker enters SQL through its registry boundary. It caches stable lookup
+  identities for its database lifetime, prepares a publication once, and reuses that
+  immutable publication if SQLite asks it to retry; a retry never reruns analysis or
+  source I/O inside the transaction.
 - Child rollout staging retains its own `session_meta` and records after
   `subagent_history_start_ordinal`; inherited parent history is excluded before analysis.
   Collaboration operations derive from canonical model-tool counts, while verified

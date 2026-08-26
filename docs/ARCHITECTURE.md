@@ -126,13 +126,19 @@ and `_result`.
 
 ## Persistent analytics
 
-The worker authenticates complete rollout prefixes and analyzes private copies in
-memory. Typed relational projections retain source provenance and worker health without
-raw events or JSON blobs. Publication is atomic behind
+The worker has one blocking, protocol-event-driven scheduling spine. It coalesces a
+0.5-second quiet window up to a five-second ceiling, resolves only event-named thread
+identities, and feeds newline-complete appended bytes through per-source cursors into one
+resident analyzer. Startup reconciliation, exact-source catch-up, and one clean replay
+are bounded; normal operation performs no recursive rollout discovery, idle polling, or
+unchanged-prefix reload.
+
+Typed relational projections retain authenticated source provenance and worker health
+without raw events or JSON blobs. Publication is atomic behind
 source/publication-sequence fences; failures preserve the last good view and cannot
 affect the TUI. Statistics reads need neither Codex nor tmux. The session-local sequence
-advances for every successfully published changed prefix and binds the current
-relational snapshot; it is neither a turn count nor retained history.
+advances only for a changed projection and binds the current relational snapshot; it is
+neither a turn count nor retained history.
 Model and reasoning effort enter through the same exact-turn projection as independent,
 nullable `turn_context` facts. Publication resolves each distinct name once per
 transaction into its dedicated lookup table, stores only those integer relationships on

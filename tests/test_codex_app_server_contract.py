@@ -208,6 +208,7 @@ def test_app_server_method_vocabulary_has_one_production_owner() -> None:
     owned_methods = {
         CODEX_APP_SERVER.initialize_method,
         CODEX_APP_SERVER.initialized_method,
+        CODEX_APP_SERVER.thread_started_method,
         CODEX_APP_SERVER.thread_loaded_list_method,
         CODEX_APP_SERVER.thread_read_method,
         CODEX_APP_SERVER.thread_status_changed_method,

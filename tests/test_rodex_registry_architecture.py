@@ -4,6 +4,7 @@ import ast
 from pathlib import Path
 
 REGISTRY_ROOT = Path(__file__).parents[1] / "src" / "rodex_registry"
+RODEX_ROOT = REGISTRY_ROOT.parent / "rodex"
 
 
 def _relative_imports(module_name: str) -> set[str]:
@@ -46,6 +47,14 @@ def test_registry_has_one_way_domain_dependencies_without_the_old_monolith() -> 
         "validation",
     }
     assert _relative_imports("statistics_fields") == {"statistics_projection"}
+    assert _relative_imports("analytics_registry") == {
+        "errors",
+        "identity",
+        "schema",
+        "statistics",
+        "statistics_projection",
+        "validation",
+    }
     assert _relative_imports("lifecycle") == {
         "errors",
         "identity",
@@ -57,6 +66,7 @@ def test_registry_has_one_way_domain_dependencies_without_the_old_monolith() -> 
 
 def test_registry_modules_do_not_import_their_public_facade() -> None:
     for module_name in (
+        "analytics_registry",
         "errors",
         "identity",
         "lifecycle",
@@ -74,6 +84,28 @@ def test_registry_modules_do_not_import_their_public_facade() -> None:
             for alias in node.names
         }
         assert "rodex_registry" not in imported
+
+
+def test_runtime_analytics_uses_the_single_registry_boundary() -> None:
+    tree = ast.parse((RODEX_ROOT / "analytics.py").read_text(encoding="utf-8"))
+    imported_registry_names = {
+        alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom) and node.module == "rodex_registry"
+        for alias in node.names
+    }
+
+    assert "RodexAnalyticsRegistry" in imported_registry_names
+    assert "RodexAnalyticsPublication" in imported_registry_names
+    assert not imported_registry_names.intersection(
+        {
+            "lookup_codex_session_id_from_a_rodex_sessions_id",
+            "lookup_rodex_sessions_id_from_a_rodex_session_id",
+            "publish_rodex_session_statistics",
+            "read_rodex_session_statistics",
+            "record_rodex_session_statistics_worker_health",
+        }
+    )
 
 
 def test_registry_readers_use_only_the_existing_database_read_pipeline() -> None:

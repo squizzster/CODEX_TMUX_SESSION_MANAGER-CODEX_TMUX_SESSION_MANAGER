@@ -40,13 +40,23 @@ TOOL_CALL_ITEM_TYPES: Final = frozenset(
 )
 
 ToolCountCallback = Callable[[int], None]
-ProtocolEventCallback = Callable[[str | bytes], None]
+ProtocolEventCallback = Callable[[str | bytes, dict[str, Any] | None], None]
 ContextStatusCallback = Callable[[str], None]
 _EVENT_STREAM_CLOSED: Final = object()
 EVENT_STREAM_READY_METHOD: Final = "rodex/event-stream/ready"
 CONTROL_CONNECTION_PATH: Final = "/rodex-control"
+ANALYTICS_EVENT_STREAM_PATH: Final = "/rodex-analytics"
+ANALYTICS_LIFECYCLE_EVENT_METHODS: Final = frozenset(
+    {
+        CODEX_APP_SERVER.thread_started_method,
+        CODEX_APP_SERVER.turn_completed_method,
+    }
+)
 EVENT_STREAM_READY_MESSAGE: Final = json.dumps(
-    {"method": EVENT_STREAM_READY_METHOD, "params": {"activeTurns": {}}},
+    {
+        "method": EVENT_STREAM_READY_METHOD,
+        "params": {"activeTurns": {}, "knownThreads": []},
+    },
     separators=(",", ":"),
 )
 
@@ -63,9 +73,10 @@ class CodexProtocolEventTap:
             raise ValueError("queue_size must be positive")
         self._event_socket_path = event_socket_path
         self._queue_size = queue_size
-        self._subscribers: set[queue.Queue[str | bytes | object]] = set()
+        self._subscribers: dict[queue.Queue[str | bytes | object], bool] = {}
         self._subscribers_lock = Lock()
         self._active_turns: dict[str, str] = {}
+        self._known_threads: dict[str, dict[str, object]] = {}
         self._server: Any | None = None
         self._server_thread: Thread | None = None
 
@@ -95,10 +106,25 @@ class CodexProtocolEventTap:
 
     def publish(self, message: str | bytes) -> None:
         """Offer one event to every live subscriber without delaying the TUI."""
+        self.publish_protocol_event(message, _json_object(message))
+
+    def publish_protocol_event(
+        self,
+        message: str | bytes,
+        event: dict[str, Any] | None,
+    ) -> None:
+        """Publish raw transport bytes using the proxy's single decoded value."""
         with self._subscribers_lock:
-            _update_active_turns(self._active_turns, message)
-            subscribers = tuple(self._subscribers)
-        for subscriber in subscribers:
+            if event is not None:
+                _update_active_turns(self._active_turns, event)
+                _update_known_threads(self._known_threads, event)
+            subscribers = tuple(self._subscribers.items())
+        is_analytics_event = (
+            event is not None and event.get("method") in ANALYTICS_LIFECYCLE_EVENT_METHODS
+        )
+        for subscriber, analytics_only in subscribers:
+            if analytics_only and not is_analytics_event:
+                continue
             try:
                 subscriber.put_nowait(message)
             except queue.Full:
@@ -125,12 +151,16 @@ class CodexProtocolEventTap:
 
     def _handle_subscriber(self, connection: Any) -> None:
         subscriber: queue.Queue[str | bytes | object] = queue.Queue(self._queue_size)
+        analytics_only = _connection_path(connection) == ANALYTICS_EVENT_STREAM_PATH
         with self._subscribers_lock:
-            self._subscribers.add(subscriber)
+            self._subscribers[subscriber] = analytics_only
             ready_message = json.dumps(
                 {
                     "method": EVENT_STREAM_READY_METHOD,
-                    "params": {"activeTurns": dict(self._active_turns)},
+                    "params": {
+                        "activeTurns": dict(self._active_turns),
+                        "knownThreads": list(self._known_threads.values()),
+                    },
                 },
                 separators=(",", ":"),
             )
@@ -145,7 +175,7 @@ class CodexProtocolEventTap:
             return
         finally:
             with self._subscribers_lock:
-                self._subscribers.discard(subscriber)
+                self._subscribers.pop(subscriber, None)
             connection.close()
 
     def _disconnect_slow_subscriber(
@@ -154,7 +184,7 @@ class CodexProtocolEventTap:
         with self._subscribers_lock:
             if subscriber not in self._subscribers:
                 return
-            self._subscribers.remove(subscriber)
+            self._subscribers.pop(subscriber)
         _close_subscriber_queue(subscriber)
 
 
@@ -175,7 +205,11 @@ class ToolCallCounter:
 
     def observe_server_message(self, message: str | bytes) -> None:
         """Update the count from one app-server-to-TUI protocol message."""
-        item_id = _started_tool_call_item_id(message)
+        self.observe_protocol_event(_json_object(message))
+
+    def observe_protocol_event(self, event: dict[str, Any] | None) -> None:
+        """Update the count from an already decoded protocol event."""
+        item_id = _started_tool_call_item_id(event)
         if item_id is None:
             return
         with self._lock:
@@ -267,14 +301,17 @@ class CodexContextStatusObserver:
 
     def observe_server_message(self, message: str | bytes) -> None:
         """Consume one primary app-server-to-TUI protocol message."""
-        payload = _json_object(message)
+        self.observe_protocol_event(_json_object(message))
+
+    def observe_protocol_event(self, payload: dict[str, Any] | None) -> None:
+        """Consume the proxy's single decoded primary protocol event."""
         if payload is None:
             return
         method = payload.get("method")
         params = payload.get("params")
         if not isinstance(params, dict):
             return
-        if method == "thread/started":
+        if method == CODEX_APP_SERVER.thread_started_method:
             thread_id = _started_thread_id(params)
             if thread_id is not None:
                 with self._lock:
@@ -487,9 +524,10 @@ class CodexProtocolProxy:
                     for message in app_server_connection:
                         tui_connection.send(message)
                         if is_primary_connection:
-                            self._tool_call_counter.observe_server_message(message)
+                            event = _json_object(message)
+                            self._tool_call_counter.observe_protocol_event(event)
                             if self._on_primary_server_message is not None:
-                                self._on_primary_server_message(message)
+                                self._on_primary_server_message(message, event)
                 except (ConnectionClosed, OSError):
                     pass
                 finally:
@@ -546,17 +584,8 @@ def _close_subscriber_queue(
         return
 
 
-def _started_tool_call_item_id(message: str | bytes) -> str | None:
-    if isinstance(message, bytes):
-        try:
-            message = message.decode("utf-8")
-        except UnicodeDecodeError:
-            return None
-    try:
-        payload = json.loads(message)
-    except (json.JSONDecodeError, TypeError):
-        return None
-    if not isinstance(payload, dict) or payload.get("method") != "item/started":
+def _started_tool_call_item_id(payload: dict[str, Any] | None) -> str | None:
+    if payload is None or payload.get("method") != "item/started":
         return None
     params = payload.get("params")
     if not isinstance(params, dict):
@@ -568,11 +597,8 @@ def _started_tool_call_item_id(message: str | bytes) -> str | None:
     return item_id if isinstance(item_id, str) and item_id else None
 
 
-def _update_active_turns(active_turns: dict[str, str], message: str | bytes) -> None:
+def _update_active_turns(active_turns: dict[str, str], payload: dict[str, Any]) -> None:
     """Track only the live turn identity needed for safe external steering."""
-    payload = _json_object(message)
-    if payload is None:
-        return
     method = payload.get("method")
     params = payload.get("params")
     if not isinstance(params, dict):
@@ -618,6 +644,27 @@ def _started_thread_id(params: dict[str, Any]) -> str | None:
         if isinstance(thread_id, str) and thread_id:
             return thread_id
     return _event_thread_id(params)
+
+
+def _update_known_threads(
+    known_threads: dict[str, dict[str, object]], payload: dict[str, Any]
+) -> None:
+    if payload.get("method") != CODEX_APP_SERVER.thread_started_method:
+        return
+    params = payload.get("params")
+    if not isinstance(params, dict):
+        return
+    thread = params.get("thread")
+    if not isinstance(thread, dict):
+        return
+    thread_id = _started_thread_id(params)
+    if thread_id is None:
+        return
+    remembered: dict[str, object] = {"id": thread_id}
+    created_at = thread.get("createdAt")
+    if isinstance(created_at, (str, int, float)) and not isinstance(created_at, bool):
+        remembered["createdAt"] = created_at
+    known_threads[thread_id] = remembered
 
 
 def _event_thread_id(params: dict[str, Any]) -> str | None:

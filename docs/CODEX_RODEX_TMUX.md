@@ -106,21 +106,25 @@ Enter/Tab bindings and pane pipe, so all input currently passes directly to Code
 ## Persistent statistics
 
 Each session host supervises one low-priority analytics subprocess keyed by the Rodex
-session ID allocated for that launch. The worker waits for SQL registration,
-discovers every retained root plus the authenticated sub-agent descendant closure from
-rollout `session_meta`. It copies only the final newline-complete prefix to a private
-0600 temporary file, removes inherited parent history from child copies, and
-reauthenticates each SHA-256 before publishing.
+session ID allocated for that launch. The worker waits for SQL registration, then
+performs one bounded reconciliation of already registered sources. Thereafter the
+protocol event socket is the authoritative trigger: a blocking scheduler coalesces
+events until 0.5 seconds of quiet or five seconds of continuous activity and resolves
+only the exact root or sub-agent thread identities carried by those events. No runtime
+path recursively searches the Codex sessions tree.
 
-The worker creates a fresh in-memory `CodexProtocolLibrary`, loads the authenticated
-copies, calculates statistics, then closes it. The analyzer owns calculation only;
-Rodex owns watching, scheduling, source provenance, retries, health, and persistence.
+One resident `CodexProtocolLibrary` owns calculation for the worker lifetime. Per-source
+cursors feed it only newline-complete appended bytes, with direct-parent topology staged
+before a newly observed child. Unresolved exact sources retry only within the current
+bounded batch and are then parked for a later event; an ordinary failed generation gets
+at most one clean replay. Rodex owns scheduling, authenticated source provenance,
+bounded recovery, health, and persistence.
 One transaction publishes a Rodex-owned, session-local publication sequence, the
 team projection, the complete `(Codex thread, turn_id)` projection set, and exact
 thread descriptors. Codex-session-ID and prior-publication-sequence fences reject stale
 workers. Health failures commit separately and never overwrite the last good snapshot.
-The sequence advances for each successfully published changed rollout prefix; it does
-not count turns or retain prior snapshots.
+The sequence advances only when a changed authenticated projection is published; no-op
+events do not write a new snapshot. It does not count turns or retain prior snapshots.
 
 Fixed statistics are typed scalar columns. The genuinely repeating values are normalized
 as seven distribution rows, bounded category/name/count rows, and ordered audit-limit

@@ -30,6 +30,7 @@ class CodexAppServerContract:
     rpc_connection_path: str = "/rpc"
     initialize_method: str = "initialize"
     initialized_method: str = "initialized"
+    thread_started_method: str = "thread/started"
     thread_loaded_list_method: str = "thread/loaded/list"
     thread_read_method: str = "thread/read"
     thread_status_changed_method: str = "thread/status/changed"

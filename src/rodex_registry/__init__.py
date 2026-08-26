@@ -1,6 +1,8 @@
 """Public contracts for the durable Rodex registry."""
 
+from .analytics_registry import RodexAnalyticsPublication, RodexAnalyticsRegistry
 from .errors import (
+    RodexAnalyticsPublicationRetryableError,
     RodexRuntimeIdCollisionError,
     RodexSessionError,
     RodexSessionIdCollisionError,
@@ -12,6 +14,7 @@ from .identity import (
     RODEX_ID_HEX_CHARACTERS,
     CodexSessionId,
     CodexThreadId,
+    RodexAnalyticsIdentityFence,
     RodexIdError,
     RodexRegistryId,
     RodexRuntimeId,
@@ -67,6 +70,9 @@ from .schema import (
     lookup_rodex_registry_id,
 )
 from .statistics import (
+    RodexAnalyticsCheckpoint,
+    RodexAnalyticsPublishReceipt,
+    RodexAnalyticsStatisticsCheckpoint,
     RodexSessionStatistics,
     RodexSessionStatisticsSource,
     RodexSessionStatisticsSourceObservation,
@@ -91,6 +97,7 @@ from .statistics_projection import (
     StatisticsProjectionError,
     TurnStatisticsProjection,
     parse_session_statistics_snapshot,
+    parse_turn_statistics_snapshot,
     session_statistics_as_dict,
     turn_statistics_as_dict,
     validate_session_statistics_projection,
@@ -102,6 +109,13 @@ __all__ = [
     "RODEX_ID_HEX_CHARACTERS",
     "CodexSessionId",
     "CodexThreadId",
+    "RodexAnalyticsCheckpoint",
+    "RodexAnalyticsIdentityFence",
+    "RodexAnalyticsPublication",
+    "RodexAnalyticsPublicationRetryableError",
+    "RodexAnalyticsPublishReceipt",
+    "RodexAnalyticsRegistry",
+    "RodexAnalyticsStatisticsCheckpoint",
     "RodexIdError",
     "RodexRegistryId",
     "RodexRuntimeId",
@@ -166,6 +180,7 @@ __all__ = [
     "parse_rodex_runtime_id",
     "parse_rodex_session_id",
     "parse_session_statistics_snapshot",
+    "parse_turn_statistics_snapshot",
     "publish_rodex_session_statistics",
     "read_rodex_session_statistics",
     "read_rodex_session_statistics_source_summaries",

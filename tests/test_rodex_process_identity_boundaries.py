@@ -6,9 +6,12 @@ import pytest
 
 from rodex.analytics import analytics_worker_main
 from rodex.process_contracts import AnalyticsWorkerConfig, SessionHostConfig
-from rodex_registry import RodexSessionId
+from rodex_registry import RodexRegistryId, RodexRuntimeId, RodexSessionId
 
 LEADING_ZERO_SESSION_ID = RodexSessionId.parse("0000000000000001")
+REGISTRY_ID = RodexRegistryId.parse("0000000000000001")
+RUNTIME_ID = RodexRuntimeId.parse("0000000000000001")
+CODEX_SESSION_ID = "01a00654-f2bc-7a30-834a-a5f886a65f82"
 
 
 def _session_host_arguments(rodex_session_id: str) -> list[str]:
@@ -33,6 +36,12 @@ def _session_host_arguments(rodex_session_id: str) -> list[str]:
         "/tmp/sessions",
         "--rodex-session-id",
         rodex_session_id,
+        "--rodex-registry-id",
+        str(REGISTRY_ID),
+        "--rodex-runtime-id",
+        str(RUNTIME_ID),
+        "--protocol-event-socket",
+        "/tmp/events.sock",
     ]
 
 
@@ -49,10 +58,16 @@ def test_analytics_worker_command_preserves_the_exact_string_wire_form() -> None
         rodex_database_path=Path("/tmp/rodex.sqlite3"),
         codex_sessions_root=Path("/tmp/sessions"),
         rodex_session_id=LEADING_ZERO_SESSION_ID,
+        rodex_registry_id=REGISTRY_ID,
+        runtime_id=RUNTIME_ID,
+        protocol_event_socket_path=Path("/tmp/events.sock"),
+        rodex_sessions_id=1,
+        codex_session_id=CODEX_SESSION_ID,
     )
     command = config.command("/venv/bin/python")
 
-    assert command[-2:] == ["--rodex-session-id", "0000000000000001"]
+    assert command[-2:] == ["--codex-session-id", CODEX_SESSION_ID]
+    assert command[command.index("--rodex-session-id") + 1] == "0000000000000001"
 
 
 def test_process_configs_own_round_trippable_wire_contracts() -> None:
@@ -60,6 +75,11 @@ def test_process_configs_own_round_trippable_wire_contracts() -> None:
         rodex_database_path=Path("/tmp/rodex database.sqlite3"),
         codex_sessions_root=Path("/tmp/codex sessions"),
         rodex_session_id=LEADING_ZERO_SESSION_ID,
+        rodex_registry_id=REGISTRY_ID,
+        runtime_id=RUNTIME_ID,
+        protocol_event_socket_path=Path("/tmp/event socket.sock"),
+        rodex_sessions_id=1,
+        codex_session_id=CODEX_SESSION_ID,
     )
     host = SessionHostConfig(
         codex_binary="/opt/Codex CLI/codex",
@@ -95,5 +115,15 @@ def test_process_entry_points_reject_noncanonical_session_ids_before_work_starts
                 "/tmp/sessions",
                 "--rodex-session-id",
                 invalid_session_id,
+                "--rodex-registry-id",
+                str(REGISTRY_ID),
+                "--rodex-runtime-id",
+                str(RUNTIME_ID),
+                "--protocol-event-socket",
+                "/tmp/events.sock",
+                "--rodex-sessions-id",
+                "1",
+                "--codex-session-id",
+                CODEX_SESSION_ID,
             ]
         )

@@ -72,7 +72,7 @@ CODEX_PRIMARY_CONNECTION_RELEASE_TIMEOUT_SECONDS: Final = 2.5
 RUNTIME_PATH_KEEPALIVE_INTERVAL_SECONDS: Final = 60.0 * 60.0
 RODEX_REGISTRATION_TIMEOUT_SECONDS: Final = 60.0
 RODEX_TMUX_HISTORY_LIMIT_LINES: Final = 50_000
-_TUI_SUPERVISION_INTERVAL_SECONDS: Final = 1.0
+_REGISTRATION_POLL_INTERVAL_SECONDS: Final = 1.0
 _POLL_INTERVAL_SECONDS: Final = 0.05
 _PROXY_SOCKET_OPTION: Final = "@rodex_protocol_proxy_socket_path"
 _EVENT_SOCKET_OPTION: Final = "@rodex_protocol_event_socket_path"
@@ -81,6 +81,7 @@ _RODEX_SESSION_ID_OPTION: Final = "@rodex_session_id"
 _REGISTRY_ID_OPTION: Final = "@rodex_registry_id"
 _REGISTRATION_STATE_OPTION: Final = "@rodex_registration_state"
 _RUNTIME_ID_OPTION: Final = "@rodex_runtime_id"
+_INTERNAL_SESSION_ID_OPTION: Final = "@rodex_sessions_id"
 RODEX_REGISTRATION_PENDING: Final = "pending"
 RODEX_REGISTRATION_REGISTERED: Final = "registered"
 # One switch owns installation of the tmux `/rodex` bindings and completion pipe.
@@ -118,6 +119,7 @@ class _RuntimePathKeepalive:
         self._failure: RodexRuntimeError | None = None
         self._failure_reported = Event()
         self._identities: dict[Path, tuple[int, int, int, int]] = {}
+        self.failure_callback: Callable[[RodexRuntimeError], None] | None = None
 
     @property
     def failure(self) -> RodexRuntimeError | None:
@@ -160,6 +162,10 @@ class _RuntimePathKeepalive:
             except RodexRuntimeError as error:
                 self._failure = error
                 self._failure_reported.set()
+                callback = self.failure_callback
+                if callback is not None:
+                    with suppress(Exception):
+                        callback(error)
                 return
 
     def _refresh(self) -> None:
@@ -535,6 +541,9 @@ class RodexRuntimeLauncher:
                 rodex_database_path=rodex_database_path,
                 codex_sessions_root=default_codex_sessions_root(),
                 rodex_session_id=rodex_session_id,
+                rodex_registry_id=rodex_registry_id,
+                runtime_id=runtime_id,
+                protocol_event_socket_path=runtime.protocol_event_socket_path,
             )
         host_config = SessionHostConfig(
             codex_binary=self._codex_binary,
@@ -604,13 +613,32 @@ class RodexRuntimeLauncher:
         for option_name, value in options:
             self._tmux(runtime, "set-option", "-t", target, option_name, value)
 
-    def confirm_runtime_registration(self, runtime: LiveTmuxSession) -> None:
+    def confirm_runtime_registration(
+        self,
+        runtime: LiveTmuxSession,
+        rodex_sessions_id: int,
+    ) -> None:
         """Mark one exact live runtime usable only after its SQL identity commits."""
+        if (
+            not isinstance(rodex_sessions_id, int)
+            or isinstance(rodex_sessions_id, bool)
+            or rodex_sessions_id <= 0
+        ):
+            raise ValueError("rodex_sessions_id must be a positive integer")
+        target = _exact_tmux_pane_target(runtime.tmux_session_name)
         self._tmux(
             runtime,
             "set-option",
             "-t",
-            _exact_tmux_pane_target(runtime.tmux_session_name),
+            target,
+            _INTERNAL_SESSION_ID_OPTION,
+            str(rodex_sessions_id),
+        )
+        self._tmux(
+            runtime,
+            "set-option",
+            "-t",
+            target,
             _REGISTRATION_STATE_OPTION,
             RODEX_REGISTRATION_REGISTERED,
         )
@@ -1258,9 +1286,12 @@ def run_session_host(
             protocol_event_tap = live_event_tap
             live_event_tap.start()
 
-            def publish_primary_server_message(message: str | bytes) -> None:
-                live_context_observer.observe_server_message(message)
-                live_event_tap.publish(message)
+            def publish_primary_server_message(
+                message: str | bytes,
+                event: dict[str, Any] | None,
+            ) -> None:
+                live_context_observer.observe_protocol_event(event)
+                live_event_tap.publish_protocol_event(message, event)
 
             protocol_proxy = CodexProtocolProxy(
                 protocol_proxy_socket_path,
@@ -1280,18 +1311,19 @@ def run_session_host(
                     protocol_event_socket_path,
                 )
             )
+
+            def stop_tui_after_keepalive_failure(_error: RodexRuntimeError) -> None:
+                active_tui = tui
+                if active_tui is None or active_tui.poll() is not None:
+                    return
+                _stop_child_process(active_tui)
+
+            runtime_path_keepalive.failure_callback = stop_tui_after_keepalive_failure
             try:
                 runtime_path_keepalive.start()
             except RodexRuntimeError as error:
                 _record_runtime_path_keepalive_failure(log, error)
                 raise
-            if analytics_config is not None:
-                try:
-                    analytics_supervisor = analytics_supervisor_factory(analytics_config)
-                    analytics_supervisor.poll()
-                except Exception:
-                    # Persistent statistics are strictly off the interactive path.
-                    analytics_supervisor = None
             tui_command = [
                 codex_binary,
                 "--no-alt-screen",
@@ -1326,30 +1358,54 @@ def run_session_host(
                         inherited_sigint_handler = replaced_handler
                         previous_handlers[signal.SIGINT] = replaced_handler
                 while True:
-                    if (
-                        registration_deadline is not None
-                        and time.monotonic() >= registration_deadline
-                    ):
-                        if not _runtime_registration_is_confirmed(
+                    if analytics_config is not None and analytics_supervisor is None:
+                        activated_analytics = _registered_analytics_worker_config(
+                            analytics_config,
                             tmux_binary,
                             tmux_server_socket_path,
                             tmux_pane_target,
+                        )
+                        if activated_analytics is not None:
+                            registration_deadline = None
+                            candidate_supervisor: AnalyticsSubprocessSupervisor | None = (
+                                None
+                            )
+                            try:
+                                candidate_supervisor = analytics_supervisor_factory(
+                                    activated_analytics
+                                )
+                                candidate_supervisor.start()
+                                analytics_supervisor = candidate_supervisor
+                            except Exception:
+                                # Persistent statistics are strictly off the interactive
+                                # path; a failed sidecar must not break the Codex TUI.
+                                if candidate_supervisor is not None:
+                                    with suppress(Exception):
+                                        candidate_supervisor.close()
+                                analytics_config = None
+                                analytics_supervisor = None
+                        elif (
+                            registration_deadline is not None
+                            and time.monotonic() >= registration_deadline
                         ):
                             raise RodexRuntimeError(
                                 "runtime registration was not confirmed before its deadline"
                             )
-                        registration_deadline = None
-                    if analytics_supervisor is not None:
-                        try:
-                            analytics_supervisor.poll()
-                        except Exception:
-                            analytics_supervisor = None
                     failure = runtime_path_keepalive.failure
                     if failure is not None:
                         _record_runtime_path_keepalive_failure(log, failure)
                         raise failure
                     try:
-                        returncode = tui.wait(timeout=_TUI_SUPERVISION_INTERVAL_SECONDS)
+                        registration_pending = (
+                            analytics_config is not None and analytics_supervisor is None
+                        )
+                        returncode = tui.wait(
+                            timeout=(
+                                _REGISTRATION_POLL_INTERVAL_SECONDS
+                                if registration_pending
+                                else None
+                            )
+                        )
                     except subprocess.TimeoutExpired:
                         continue
                     break
@@ -1452,6 +1508,64 @@ def _runtime_registration_is_confirmed(
         capture_output=True,
     )
     return result.returncode == 0 and result.stdout.strip() == RODEX_REGISTRATION_REGISTERED
+
+
+def _registered_analytics_worker_config(
+    config: AnalyticsWorkerConfig,
+    tmux_binary: str,
+    tmux_server_socket_path: Path,
+    tmux_pane_target: str,
+) -> AnalyticsWorkerConfig | None:
+    """Read and validate one post-commit analytics activation manifest."""
+    if not tmux_pane_target:
+        return None
+    result = subprocess.run(
+        [
+            tmux_binary,
+            "-S",
+            str(tmux_server_socket_path),
+            "show-options",
+            "-t",
+            tmux_pane_target,
+        ],
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+    if result.returncode != 0:
+        return None
+    options: dict[str, str] = {}
+    try:
+        for line in result.stdout.splitlines():
+            fields = shlex.split(line)
+            if len(fields) >= 2:
+                options[fields[0]] = " ".join(fields[1:])
+    except ValueError as error:
+        raise RodexRuntimeError("live runtime options could not be parsed") from error
+    if options.get(_REGISTRATION_STATE_OPTION) != RODEX_REGISTRATION_REGISTERED:
+        return None
+    expected = {
+        _RODEX_SESSION_ID_OPTION: str(config.rodex_session_id),
+        _REGISTRY_ID_OPTION: str(config.rodex_registry_id),
+        _RUNTIME_ID_OPTION: str(config.runtime_id),
+        _EVENT_SOCKET_OPTION: str(config.protocol_event_socket_path),
+    }
+    for option_name, expected_value in expected.items():
+        if options.get(option_name) != expected_value:
+            raise RodexRuntimeError(
+                f"registered analytics identity disagrees at {option_name}"
+            )
+    try:
+        rodex_sessions_id = int(options[_INTERNAL_SESSION_ID_OPTION])
+        codex_session_id = parse_codex_session_id(options[_CODEX_SESSION_ID_OPTION])
+    except (KeyError, ValueError) as error:
+        raise RodexRuntimeError(
+            "registered analytics identity is missing or invalid"
+        ) from error
+    return config.activate(
+        rodex_sessions_id=rodex_sessions_id,
+        codex_session_id=codex_session_id,
+    )
 
 
 def _stop_child_process(process: subprocess.Popen[bytes]) -> None:

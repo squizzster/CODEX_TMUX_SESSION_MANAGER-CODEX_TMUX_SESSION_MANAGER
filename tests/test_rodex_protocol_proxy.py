@@ -10,6 +10,7 @@ from websockets.sync.client import unix_connect
 from websockets.sync.server import unix_serve
 
 from rodex.protocol_proxy import (
+    ANALYTICS_EVENT_STREAM_PATH,
     CONTROL_CONNECTION_PATH,
     EVENT_STREAM_READY_MESSAGE,
     TOOL_CALL_ITEM_TYPES,
@@ -197,7 +198,10 @@ def test_context_observer_animates_compaction_then_restores_fresh_usage() -> Non
 
 def test_proxy_forwards_both_directions_and_counts_server_tool_items(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from rodex import protocol_proxy as proxy_module
+
     app_socket = tmp_path / "app.sock"
     proxy_socket = tmp_path / "proxy.sock"
     client_message = json.dumps({"method": "thread/read", "id": 7, "params": {}})
@@ -214,11 +218,20 @@ def test_proxy_forwards_both_directions_and_counts_server_tool_items(
     upstream_thread.start()
     counts: list[int] = []
     observed_events: list[str | bytes] = []
+    decode_calls = 0
+    original_decode = proxy_module._json_object
+
+    def count_decode(message: str | bytes) -> dict[str, object] | None:
+        nonlocal decode_calls
+        decode_calls += 1
+        return original_decode(message)
+
+    monkeypatch.setattr(proxy_module, "_json_object", count_decode)
     proxy = CodexProtocolProxy(
         proxy_socket,
         app_socket,
         ToolCallCounter(counts.append),
-        observed_events.append,
+        lambda message, _event: observed_events.append(message),
     )
     try:
         proxy.start()
@@ -236,6 +249,7 @@ def test_proxy_forwards_both_directions_and_counts_server_tool_items(
     assert received_by_server == [client_message]
     assert counts == [1]
     assert observed_events == [server_message]
+    assert decode_calls == 1
     assert not proxy_socket.exists()
 
 
@@ -259,7 +273,7 @@ def test_proxy_hands_primary_event_ownership_to_a_reconnecting_tui(tmp_path: Pat
         proxy_socket,
         app_socket,
         ToolCallCounter(lambda _count: None),
-        observed_events.append,
+        lambda message, _event: observed_events.append(message),
     )
     try:
         proxy.start()
@@ -314,6 +328,51 @@ def test_event_tap_streams_runtime_events_and_removes_its_socket(tmp_path: Path)
     assert not event_socket.exists()
 
 
+def test_event_tap_sends_only_lifecycle_events_to_analytics(tmp_path: Path) -> None:
+    event_socket = tmp_path / "events.sock"
+    tap = CodexProtocolEventTap(event_socket)
+    thread_started = json.dumps(
+        {"method": "thread/started", "params": {"thread": {"id": "thread-1"}}}
+    )
+    token_delta = json.dumps(
+        {"method": "item/agentMessage/delta", "params": {"delta": "noise"}}
+    )
+    turn_completed = json.dumps(
+        {"method": "turn/completed", "params": {"threadId": "thread-1"}}
+    )
+
+    try:
+        tap.start()
+        with (
+            unix_connect(
+                str(event_socket),
+                uri=f"ws://localhost{ANALYTICS_EVENT_STREAM_PATH}",
+                compression=None,
+            ) as analytics,
+            unix_connect(
+                str(event_socket), uri="ws://localhost/events", compression=None
+            ) as external,
+        ):
+            assert analytics.recv(timeout=1) == EVENT_STREAM_READY_MESSAGE
+            assert external.recv(timeout=1) == EVENT_STREAM_READY_MESSAGE
+
+            tap.publish(thread_started)
+            tap.publish(token_delta)
+            tap.publish(turn_completed)
+
+            assert analytics.recv(timeout=1) == thread_started
+            assert analytics.recv(timeout=1) == turn_completed
+            with pytest.raises(TimeoutError):
+                analytics.recv(timeout=0.05)
+            assert [external.recv(timeout=1) for _ in range(3)] == [
+                thread_started,
+                token_delta,
+                turn_completed,
+            ]
+    finally:
+        tap.close()
+
+
 def test_event_tap_ready_signal_reports_the_current_active_turn(tmp_path: Path) -> None:
     event_socket = tmp_path / "events.sock"
     tap = CodexProtocolEventTap(event_socket)
@@ -335,21 +394,42 @@ def test_event_tap_ready_signal_reports_the_current_active_turn(tmp_path: Path) 
             },
         }
     )
+    thread_started = json.dumps(
+        {
+            "method": "thread/started",
+            "params": {
+                "thread": {
+                    "id": "thread-1",
+                    "createdAt": 1_787_692_800,
+                }
+            },
+        }
+    )
 
     try:
         tap.start()
+        tap.publish(thread_started)
         tap.publish(started)
         with unix_connect(
             str(event_socket), uri="ws://localhost/events", compression=None
         ) as subscriber:
             assert json.loads(subscriber.recv(timeout=1)) == {
                 "method": "rodex/event-stream/ready",
-                "params": {"activeTurns": {"thread-1": "turn-1"}},
+                "params": {
+                    "activeTurns": {"thread-1": "turn-1"},
+                    "knownThreads": [{"id": "thread-1", "createdAt": 1_787_692_800}],
+                },
             }
         tap.publish(completed)
         with unix_connect(
             str(event_socket), uri="ws://localhost/events", compression=None
         ) as subscriber:
-            assert subscriber.recv(timeout=1) == EVENT_STREAM_READY_MESSAGE
+            assert json.loads(subscriber.recv(timeout=1)) == {
+                "method": "rodex/event-stream/ready",
+                "params": {
+                    "activeTurns": {},
+                    "knownThreads": [{"id": "thread-1", "createdAt": 1_787_692_800}],
+                },
+            }
     finally:
         tap.close()

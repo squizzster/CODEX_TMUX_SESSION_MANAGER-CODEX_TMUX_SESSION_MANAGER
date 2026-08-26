@@ -46,8 +46,8 @@ command carries the same classified specification through parsing and execution.
    WebSocket proxy on short Unix sockets, then connects the inline Codex TUI through
    it with `--no-alt-screen`.
 4. Rodex asks that private app-server for its one loaded Codex session ID.
-5. One SQLite transaction creates the Rodex/runtime identities, name, user/log, and
-   tmux rows.
+5. One SQLite transaction creates the Rodex/runtime identities, canonical root-thread
+   membership, name, user/log, and tmux rows.
 6. tmux is renamed to the cool name and displays its Rodex identity, tool count, and
    live private/shared attachment state in its status bar.
 7. Rodex attaches to the ordinary Codex prompt; forwarded arguments and slash commands
@@ -103,45 +103,45 @@ The separate tmux input proxy and completion observer for `/rodex` are retained 
 temporarily disabled by `RODEX_TMUX_SLASH_ENABLED`. Runtime status setup removes their
 Enter/Tab bindings and pane pipe, so all input currently passes directly to Codex.
 
-## Persistent statistics
+## Persistent analytics and agent trace
 
-Each session host supervises one low-priority analytics subprocess keyed by the Rodex
-session ID allocated for that launch. The worker waits for SQL registration, then
-performs one bounded reconciliation of already registered sources. Thereafter the
-protocol event socket is the authoritative trigger: a blocking scheduler coalesces
-events until 0.5 seconds of quiet or five seconds of continuous activity and resolves
-only the exact root or sub-agent thread identities carried by those events. No runtime
-path recursively searches the Codex sessions tree.
+Each session host supervises one low-priority analytics subprocess keyed by its Rodex
+session. A blocking scheduler coalesces protocol activity until 0.5 seconds of quiet or
+five seconds of continuous work. Cold lineage recovery follows exact event-named thread
+UUIDs first. When historical spawn output lacks a UUID, one startup-only fallback scans
+regular JSONL files in the root UUIDv7 three-day window, reads only first metadata lines,
+and accepts the authenticated parent closure. Cached resident sources then consume only
+newline-complete suffixes; ordinary wakes never repeat discovery or reload unchanged
+prefixes.
 
-One resident `CodexProtocolLibrary` owns calculation for the worker lifetime. Per-source
-cursors feed it only newline-complete appended bytes, with direct-parent topology staged
-before a newly observed child. Unresolved exact sources retry only within the current
-bounded batch and are then parked for a later event; an ordinary failed generation gets
-at most one clean replay. Retryable publication and clean-replay outcomes receive a
-fresh, finite recovery window after reconciliation returns; exhausting that window
-parks the work instead of starting another window. Rodex owns scheduling, authenticated
-source provenance, bounded recovery, health, and persistence.
-One transaction publishes a Rodex-owned, session-local publication sequence, the
-team projection, the complete `(Codex thread, turn_id)` projection set, and exact
-thread descriptors. Codex-session-ID and prior-publication-sequence fences reject stale
-workers. Health failures commit separately and never overwrite the last good snapshot.
-The sequence advances only when a changed authenticated projection is published; no-op
-events do not write a new snapshot. It does not count turns or retain prior snapshots.
+One resident analyzer and stateful trace normalizer own calculation for the worker
+lifetime. Direct-parent topology is staged before a new child. Catch-up, stale
+compare-and-set recovery, and clean replay have finite windows; exhausting one parks the
+work for a later event instead of polling or looping. Rodex owns scheduling,
+authenticated rollout provenance, bounded recovery, health, and persistence.
 
-Fixed statistics are typed scalar columns. The genuinely repeating values are normalized
-as seven distribution rows, bounded category/name/count rows, and ordered audit-limit
-rows at session or turn scope. No JSON statistics document is persisted: `_stats --json`
-reconstructs the analyzer shape deterministically from indexed SQL rows. This keeps every
-base count directly available to `SUM`, `GROUP BY`, filtering, and joins.
-The same command includes per-thread lifecycle and additive resource totals grouped by
-the existing source-row ID; parentage is the source table's self-foreign key.
+Canonical thread, turn, item, and tool-call identities outlive replaceable statistics.
+Session membership, current-root selection, rollout source, and sub-agent lineage are
+separate relational rows. One registry/session/runtime/Codex-fenced transaction commits
+accepted source checkpoints, changed statistics metrics, the append-only typed trace
+suffix, and healthy state. Statistics and trace publication heads are independent
+compare-and-set domains. Trace totals advance from persisted counts rather than
+recounting history; failures preserve every last-good projection and cannot affect the
+TUI.
 
-Analytics is fail-open: import, parsing, calculation, process, or database failure
-cannot change the Codex TUI's behavior or exit status. `_stats NAME [--json]`, `_stats
-NAME --turn TURN_ID [--thread CODEX_THREAD_ID] [--json]`, and `_stats-status NAME` enforce
-normal ownership but query SQLite without requiring live Codex, tmux, or analyzer
-processes. A runtime started before this feature must end and resume before it has an
-analytics sidecar.
+Fixed statistics use typed scalar columns; repeating values use bounded distribution,
+category/name/count, and audit-limit rows. `_stats --json` reconstructs the analyzer
+shape from indexed SQL. Per-thread summaries group through canonical membership and the
+separate lineage edge. Trace tables retain typed event metadata, source coordinates,
+byte counts, and opaque public UUIDs without copying message, command, tool, or output
+bodies. `_trace --include-bodies` explicitly re-authenticates recorded rollout prefixes
+before resolving those bodies.
+
+Analytics is fail-open: source, parsing, calculation, process, or database failure
+cannot change the Codex TUI's behavior or exit status. `_stats`, `_stats-status`,
+`_agents`, and `_trace` enforce normal ownership but query SQLite without requiring live
+Codex, tmux, or analyzer processes. A runtime started before this feature must end and
+resume before it has an analytics sidecar.
 
 ## Named reattachment
 

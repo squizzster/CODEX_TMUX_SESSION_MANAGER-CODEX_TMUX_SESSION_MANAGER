@@ -248,9 +248,9 @@ Each is stored once in the canonical `codex_threads` table across two `BIGINT` c
 memberships, current-root selection, activities, and lineage use integer foreign keys.
 
 Version 12 is an incompatible ALPHA schema with no earlier-generation reader or
-migration path. Rodex leaves `rodex-v11.sqlite3` and earlier generations untouched. An internal generation
-marker rejects nonempty unmarked databases and wrong generations before any v12 domain
-table is created.
+migration path. Rodex leaves `rodex-v11.sqlite3` and earlier generations untouched. An
+internal generation marker rejects nonempty unmarked databases and wrong generations
+before any v12 domain table is created.
 
 Short-lived Unix sockets and app-server logs use `$XDG_RUNTIME_DIR/rodex`, normally
 `/run/user/<uid>/rodex`. When `XDG_RUNTIME_DIR` is unset or that socket path would be
@@ -268,11 +268,11 @@ sockets persistent; refreshes stop when the owning session ends.
 
 The Rodex registry also stores accepted append-stream provenance, independent analytics
 worker checkpoints and health, the latest successful derived statistics snapshot, and
-an append-only typed agent trace. Each session host
-runs a low-priority, fail-open sidecar whose event scheduler blocks while idle, batches
+an append-only typed agent trace. Each session host runs a low-priority, fail-open
+sidecar whose event scheduler blocks while idle, batches
 activity for a 0.5-second quiet period with a five-second ceiling, and resolves only the
-exact Codex thread identities named by bounded semantic wake events. A resident analyzer consumes
-only newline-complete appended bytes after initial registration; it neither recursively
+exact Codex thread identities named by bounded semantic wake events. A resident analyzer
+consumes only newline-complete appended bytes after initial registration; it neither recursively
 scans the sessions tree nor repeatedly reloads unchanged rollout prefixes. Bounded
 catch-up and one clean replay cover races and recoverable faults without an unbounded
 polling or retry loop.

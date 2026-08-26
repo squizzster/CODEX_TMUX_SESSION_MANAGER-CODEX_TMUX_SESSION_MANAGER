@@ -1,6 +1,7 @@
 # SQL schema methodology
 
-Apply these standards to future schema decisions. These authorative standards may be modified only by an agent-suggestion followed by a user-agreement.
+Apply these standards to future schema decisions. These authoritative standards may be
+modified only by an agent suggestion followed by user agreement.
 
 - Table names are always plural.
 - Every table starts with `id INTEGER PRIMARY KEY AUTOINCREMENT`.
@@ -110,9 +111,10 @@ Apply these standards to future schema decisions. These authorative standards ma
 - `rodex_sessions_codex_rollout_sources` owns the immutable canonical rollout path
   observed for each thread. `rodex_sessions_analytics_worker_thread_checkpoints` owns
   the analytics worker's accepted append-stream prefix byte count, observation mtime,
-  SHA-256, and verification time for that rollout. Codex rollouts are a trusted append-only event
-  stream: the resident hot path extends this digest from suffix bytes only, while cold
-  startup, clean replay, and explicit body reads re-hash the durable accepted prefix.
+  SHA-256, and verification time for that rollout. Codex rollouts are a trusted
+  append-only event stream: the resident hot path extends this digest from suffix bytes
+  only, while cold startup, clean replay, and explicit body reads re-hash the durable
+  accepted prefix.
   This avoids a full historical reread for every emitted record without presenting the
   digest as continuous hostile-file authentication. Composite session/row foreign keys
   prevent a worker checkpoint from joining another session's worker or rollout. This

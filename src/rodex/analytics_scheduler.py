@@ -33,6 +33,9 @@ _STREAM_CLOSED: Final = object()
 _SIGNAL_QUEUE_CAPACITY: Final = 2
 _WINDOW_RETRY_RESULTS: Final = frozenset({"catching_up", "publication_retry"})
 _ONE_SHOT_RETRY_RESULT: Final = "clean_replay"
+_POST_RECONCILIATION_RETRY_RESULTS: Final = frozenset(
+    {"publication_retry", _ONE_SHOT_RETRY_RESULT}
+)
 
 
 class AnalyticsEventStreamClosed(RuntimeError):
@@ -215,7 +218,13 @@ class AnalyticsEventScheduler:
                 generation_started_at = retry_window.generation_started_at
                 result = reconcile(AnalyticsDirtyBatch(frozenset()))
                 if not retry_window.retain_after(result, self._monotonic()):
-                    if not completed_repeatable_retry and result == _ONE_SHOT_RETRY_RESULT:
+                    repeatable_window_finished = (
+                        completed_repeatable_retry and result in _WINDOW_RETRY_RESULTS
+                    )
+                    one_shot_replay_finished = (
+                        not completed_repeatable_retry and result == _ONE_SHOT_RETRY_RESULT
+                    )
+                    if repeatable_window_finished or one_shot_replay_finished:
                         retry_window = None
                     else:
                         retry_window = self._retry_window_for(
@@ -257,11 +266,14 @@ class AnalyticsEventScheduler:
         if result not in _WINDOW_RETRY_RESULTS and result != _ONE_SHOT_RETRY_RESULT:
             return None
         now = self._monotonic()
-        if now >= generation_started_at + self._max_retry_window_seconds:
+        window_started_at = (
+            now if result in _POST_RECONCILIATION_RETRY_RESULTS else generation_started_at
+        )
+        if now >= window_started_at + self._max_retry_window_seconds:
             return None
         return _AnalyticsRetryWindow.start(
             now,
-            generation_started_at=generation_started_at,
+            generation_started_at=window_started_at,
             initial_seconds=self._retry_initial_seconds,
             max_window_seconds=self._max_retry_window_seconds,
             repeatable=result in _WINDOW_RETRY_RESULTS,

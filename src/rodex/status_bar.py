@@ -331,6 +331,7 @@ RODEX_STATUS_LEFT_FORMAT: Final = (
     "}"
 )
 RODEX_STATUS_LEFT_LENGTH: Final = "160"
+RODEX_WINDOW_STATUS_FORMAT: Final = ""
 RODEX_STATUS_RIGHT_FORMAT: Final = (
     "#{?session_many_attached,"
     f"#[fg={RODEX_STATUS_COLOURS.sharing_shared}]#[bold] "

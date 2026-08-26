@@ -13,6 +13,7 @@ from rodex.status_bar import (
     RODEX_STATUS_LEFT_FORMAT,
     RODEX_STATUS_RIGHT_FORMAT,
     RODEX_STATUS_STYLE,
+    RODEX_WINDOW_STATUS_FORMAT,
 )
 from rodex.tmux_status import (
     STATUS_CLAIM_PRIORITY_OPTION,
@@ -107,6 +108,8 @@ def test_status_pipeline_configures_the_complete_base_bar() -> None:
     assert tmux.options == {
         "status": "on",
         "status-left-length": "160",
+        "window-status-format": RODEX_WINDOW_STATUS_FORMAT,
+        "window-status-current-format": RODEX_WINDOW_STATUS_FORMAT,
         "status-right": RODEX_STATUS_RIGHT_FORMAT,
         "status-right-length": "64",
         "status-style": RODEX_STATUS_STYLE,

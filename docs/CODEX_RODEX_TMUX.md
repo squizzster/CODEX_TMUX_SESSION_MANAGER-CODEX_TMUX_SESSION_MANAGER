@@ -117,8 +117,10 @@ One resident `CodexProtocolLibrary` owns calculation for the worker lifetime. Pe
 cursors feed it only newline-complete appended bytes, with direct-parent topology staged
 before a newly observed child. Unresolved exact sources retry only within the current
 bounded batch and are then parked for a later event; an ordinary failed generation gets
-at most one clean replay. Rodex owns scheduling, authenticated source provenance,
-bounded recovery, health, and persistence.
+at most one clean replay. Retryable publication and clean-replay outcomes receive a
+fresh, finite recovery window after reconciliation returns; exhausting that window
+parks the work instead of starting another window. Rodex owns scheduling, authenticated
+source provenance, bounded recovery, health, and persistence.
 One transaction publishes a Rodex-owned, session-local publication sequence, the
 team projection, the complete `(Codex thread, turn_id)` projection set, and exact
 thread descriptors. Codex-session-ID and prior-publication-sequence fences reject stale

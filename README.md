@@ -32,7 +32,8 @@ Both sides retain the same Rodex, runtime, Codex, and workspace context.
 - Reattaches a live session or transparently resumes its saved Codex session.
 - Adopts a persisted standalone Codex UUID into a newly named Rodex session.
 - Recovers an empty, unsaved Codex session under the same Rodex identity.
-- Supports an optional user-defined display name without losing the generated name.
+- Atomically reserves an optional user-defined display name with session creation
+  without losing the generated name.
 - Shows the Rodex name, tool-call count, effective mouse mode, live context fill, and
   private/shared state in the tmux bar.
 - Preserves 50,000 lines of conversation scrollback with keyboard copy-mode access.

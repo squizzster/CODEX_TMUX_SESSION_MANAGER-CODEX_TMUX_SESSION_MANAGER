@@ -206,6 +206,9 @@ class AnalyticsRolloutWorker:
                 registry = RodexAnalyticsRegistry.open(
                     self._config.rodex_database_path,
                     session_id=session_id,
+                    rodex_session_id=self._config.rodex_session_id,
+                    rodex_registry_id=self._config.rodex_registry_id,
+                    runtime_id=self._config.runtime_id,
                     expected_codex_session_id=codex_session_id,
                 )
                 self._registry = registry
@@ -1348,6 +1351,9 @@ def _project_supervisor_health(
         registry = RodexAnalyticsRegistry.open(
             config.rodex_database_path,
             session_id=config.rodex_sessions_id,
+            rodex_session_id=config.rodex_session_id,
+            rodex_registry_id=config.rodex_registry_id,
+            runtime_id=config.runtime_id,
             expected_codex_session_id=config.codex_session_id,
         )
         now = datetime.now(UTC)

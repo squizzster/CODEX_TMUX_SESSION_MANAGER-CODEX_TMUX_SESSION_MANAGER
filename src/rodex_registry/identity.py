@@ -92,6 +92,45 @@ class RodexRegistryId(_RodexId):
     _domain_name = "Rodex registry"
 
 
+@dataclass(frozen=True, slots=True)
+class RodexAnalyticsIdentityFence:
+    """Immutable durable identity of one live analytics worker incarnation."""
+
+    rodex_sessions_id: int
+    rodex_session_id: RodexSessionId
+    rodex_registry_id: RodexRegistryId
+    runtime_id: RodexRuntimeId
+    codex_session_id: CodexSessionId
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.rodex_sessions_id, int)
+            or isinstance(self.rodex_sessions_id, bool)
+            or self.rodex_sessions_id <= 0
+        ):
+            raise ValueError("rodex_sessions_id must be a positive integer")
+        object.__setattr__(
+            self,
+            "rodex_session_id",
+            parse_rodex_session_id(self.rodex_session_id),
+        )
+        object.__setattr__(
+            self,
+            "rodex_registry_id",
+            parse_rodex_registry_id(self.rodex_registry_id),
+        )
+        object.__setattr__(
+            self,
+            "runtime_id",
+            parse_rodex_runtime_id(self.runtime_id),
+        )
+        object.__setattr__(
+            self,
+            "codex_session_id",
+            parse_codex_session_id(self.codex_session_id),
+        )
+
+
 def parse_rodex_session_id(value: RodexSessionId | str) -> RodexSessionId:
     """Accept an existing session ID or parse its canonical wire representation."""
     if isinstance(value, RodexSessionId):

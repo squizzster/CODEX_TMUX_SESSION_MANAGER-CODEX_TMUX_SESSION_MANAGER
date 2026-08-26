@@ -29,16 +29,19 @@ from rodex.analytics_analyzer import (
 from rodex.analytics_scheduler import AnalyticsDirtyBatch
 from rodex.process_contracts import AnalyticsWorkerConfig
 from rodex_registry import (
+    RodexAnalyticsPublication,
     RodexAnalyticsRegistry,
     RodexRegistryId,
     RodexRuntimeId,
     RodexSessionId,
+    RodexSessionStatisticsConflictError,
     RodexSessionStatisticsSourceObservation,
     SessionStatisticsProjection,
     StatisticsNamedCount,
     TurnStatisticsProjection,
     create_a_rodex_session,
     list_rodex_session_statistics_sources,
+    lookup_rodex_registry_id,
     parse_session_statistics_snapshot,
     read_rodex_session_statistics,
     read_rodex_session_turn_statistics,
@@ -48,6 +51,7 @@ from rodex_registry import (
 RODEX_SESSION_ID = RodexSessionId.parse("1234567890abcdef")
 CODEX_SESSION_ID = uuid.UUID("01a00654-f2bc-7a30-834a-a5f886a65f82")
 REPLACEMENT_CODEX_SESSION_ID = uuid.UUID(int=CODEX_SESSION_ID.int + 1)
+REPLACEMENT_RUNTIME_ID = RodexRuntimeId.parse("0000000000000002")
 
 
 class FakeAnalyticsAdapter:
@@ -234,7 +238,13 @@ def _create(
         config.rodex_database_path,
         rodex_session_id=RODEX_SESSION_ID,
         codex_session_id=codex_session_id,
+        tmux_server_socket_path=config.rodex_database_path.parent / "tmux.sock",
+        tmux_session_name="test-runtime",
+        runtime_id=config.runtime_id,
     )
+    registry_id = lookup_rodex_registry_id(config.rodex_database_path)
+    assert registry_id is not None
+    object.__setattr__(config, "rodex_registry_id", registry_id)
 
 
 def _collaboration_source(
@@ -552,7 +562,7 @@ def test_worker_with_the_wrong_session_id_cannot_publish_for_an_existing_session
         adapter_factory=lambda: adapters.append(FakeAnalyticsAdapter()) or adapters[-1],
     ).poll_once()
 
-    assert state == "catching_up"
+    assert state == "degraded"
     assert adapters == []
     assert read_rodex_session_statistics(1, config.rodex_database_path).statistics is None
 
@@ -867,7 +877,11 @@ def test_worker_does_not_adopt_a_replacement_codex_identity(
         codex_session_id=CODEX_SESSION_ID,
         tmux_server_socket_path=tmp_path / "tmux.sock",
         tmux_session_name="first",
+        runtime_id=config.runtime_id,
     )
+    registry_id = lookup_rodex_registry_id(config.rodex_database_path)
+    assert registry_id is not None
+    object.__setattr__(config, "rodex_registry_id", registry_id)
     adapter = FakeAnalyticsAdapter()
     worker = AnalyticsRolloutWorker(config, adapter_factory=lambda: adapter)
     assert worker.poll_once() == "up_to_date"
@@ -877,6 +891,7 @@ def test_worker_does_not_adopt_a_replacement_codex_identity(
         "replacement",
         config.rodex_database_path,
         codex_session_id=REPLACEMENT_CODEX_SESSION_ID,
+        runtime_id=REPLACEMENT_RUNTIME_ID,
     )
     with original_rollout.open("a", encoding="utf-8") as output:
         output.write('{"type":"event_msg","payload":{"changed":true}}\n')
@@ -891,6 +906,103 @@ def test_worker_does_not_adopt_a_replacement_codex_identity(
     ]
     assert sources[0].verified_at_utc is not None
     assert sources[1].verified_at_utc is None
+
+
+def test_registry_fence_rejects_a_stale_runtime_for_every_analytics_operation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+    _rollout(config.codex_sessions_root, CODEX_SESSION_ID)
+    _create(config)
+    publications: list[RodexAnalyticsPublication] = []
+    original_publish = RodexAnalyticsRegistry.publish
+
+    def remember_publication(
+        registry: RodexAnalyticsRegistry,
+        publication: RodexAnalyticsPublication,
+    ) -> object:
+        publications.append(publication)
+        return original_publish(registry, publication)
+
+    monkeypatch.setattr(RodexAnalyticsRegistry, "publish", remember_publication)
+    worker = AnalyticsRolloutWorker(config, adapter_factory=FakeAnalyticsAdapter)
+    assert worker.poll_once() == "up_to_date"
+    assert worker._registry is not None
+    stale_registry = worker._registry
+    before = read_rodex_session_statistics(1, config.rodex_database_path)
+
+    record_a_rodex_session_runtime_resume(
+        1,
+        config.rodex_database_path.parent / "tmux.sock",
+        "replacement-runtime",
+        config.rodex_database_path,
+        runtime_id=REPLACEMENT_RUNTIME_ID,
+    )
+
+    with pytest.raises(RodexSessionStatisticsConflictError, match="identity changed"):
+        stale_registry.load_checkpoint()
+    with pytest.raises(RodexSessionStatisticsConflictError, match="identity changed"):
+        stale_registry.publish(publications[0])
+    with pytest.raises(RodexSessionStatisticsConflictError, match="identity changed"):
+        stale_registry.record_health_transition(
+            worker_state="degraded",
+            diagnostic_code="stale_runtime",
+            attempted_at_utc="2026-08-26T00:00:00+00:00",
+            failed=True,
+            prior_consecutive_failures=0,
+        )
+
+    after = read_rodex_session_statistics(1, config.rodex_database_path)
+    assert after.statistics == before.statistics
+    assert after.worker == before.worker
+    resumed_registry = RodexAnalyticsRegistry.open(
+        config.rodex_database_path,
+        session_id=1,
+        rodex_session_id=config.rodex_session_id,
+        rodex_registry_id=config.rodex_registry_id,
+        runtime_id=REPLACEMENT_RUNTIME_ID,
+        expected_codex_session_id=config.codex_session_id,
+    )
+    assert resumed_registry.load_checkpoint().statistics is not None
+
+
+@pytest.mark.parametrize(
+    "fence_change",
+    ["registry", "session", "runtime", "codex"],
+)
+def test_checkpoint_rejects_each_wrong_durable_identity(
+    tmp_path: Path,
+    fence_change: str,
+) -> None:
+    config = _config(tmp_path)
+    _create(config)
+    values: dict[str, object] = {
+        "rodex_session_id": config.rodex_session_id,
+        "rodex_registry_id": config.rodex_registry_id,
+        "runtime_id": config.runtime_id,
+        "expected_codex_session_id": config.codex_session_id,
+    }
+    parameter_name = {
+        "registry": "rodex_registry_id",
+        "session": "rodex_session_id",
+        "runtime": "runtime_id",
+        "codex": "expected_codex_session_id",
+    }[fence_change]
+    values[parameter_name] = {
+        "registry": RodexRegistryId(config.rodex_registry_id.value + 1),
+        "session": RodexSessionId(config.rodex_session_id.value + 1),
+        "runtime": REPLACEMENT_RUNTIME_ID,
+        "codex": REPLACEMENT_CODEX_SESSION_ID,
+    }[fence_change]
+    registry = RodexAnalyticsRegistry.open(
+        config.rodex_database_path,
+        session_id=1,
+        **values,  # type: ignore[arg-type]
+    )
+
+    with pytest.raises(RodexSessionStatisticsConflictError, match="identity changed"):
+        registry.load_checkpoint()
 
 
 def test_analyzer_failure_preserves_last_good_aggregate_and_increments_health(
@@ -1083,7 +1195,11 @@ def test_stale_worker_cannot_publish_snapshot_or_health_after_replacement(
         codex_session_id=CODEX_SESSION_ID,
         tmux_server_socket_path=tmp_path / "tmux.sock",
         tmux_session_name="first",
+        runtime_id=config.runtime_id,
     )
+    registry_id = lookup_rodex_registry_id(config.rodex_database_path)
+    assert registry_id is not None
+    object.__setattr__(config, "rodex_registry_id", registry_id)
     adapter = FakeAnalyticsAdapter()
     adapter.on_analyze = lambda: record_a_rodex_session_runtime_resume(
         1,
@@ -1091,6 +1207,7 @@ def test_stale_worker_cannot_publish_snapshot_or_health_after_replacement(
         "replacement",
         config.rodex_database_path,
         codex_session_id=REPLACEMENT_CODEX_SESSION_ID,
+        runtime_id=REPLACEMENT_RUNTIME_ID,
     )
 
     state = AnalyticsRolloutWorker(config, adapter_factory=lambda: adapter).poll_once()

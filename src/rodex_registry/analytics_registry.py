@@ -9,7 +9,14 @@ from pathlib import Path
 from typing import Self
 
 from .errors import RodexAnalyticsPublicationRetryableError
-from .identity import CodexSessionId, CodexThreadId, parse_codex_session_id
+from .identity import (
+    CodexSessionId,
+    CodexThreadId,
+    RodexAnalyticsIdentityFence,
+    RodexRegistryId,
+    RodexRuntimeId,
+    RodexSessionId,
+)
 from .schema import existing_rodex_database_path
 from .statistics import (
     RodexAnalyticsCheckpoint,
@@ -47,12 +54,20 @@ class RodexAnalyticsRegistry:
         database_path: str | os.PathLike[str],
         *,
         session_id: int,
+        rodex_session_id: RodexSessionId | str,
+        rodex_registry_id: RodexRegistryId | str,
+        runtime_id: RodexRuntimeId | str,
         expected_codex_session_id: CodexSessionId | str,
     ) -> None:
         _validate_session_id(session_id)
         self._database_path = existing_rodex_database_path(database_path)
-        self._session_id = session_id
-        self._expected_codex_session_id = parse_codex_session_id(expected_codex_session_id)
+        self._identity = RodexAnalyticsIdentityFence(
+            rodex_sessions_id=session_id,
+            rodex_session_id=rodex_session_id,
+            rodex_registry_id=rodex_registry_id,
+            runtime_id=runtime_id,
+            codex_session_id=expected_codex_session_id,
+        )
 
     @classmethod
     def open(
@@ -60,12 +75,18 @@ class RodexAnalyticsRegistry:
         database_path: str | os.PathLike[str],
         *,
         session_id: int,
+        rodex_session_id: RodexSessionId | str,
+        rodex_registry_id: RodexRegistryId | str,
+        runtime_id: RodexRuntimeId | str,
         expected_codex_session_id: CodexSessionId | str,
     ) -> Self:
         """Open the existing registry and bind one immutable worker identity."""
         return cls(
             database_path,
             session_id=session_id,
+            rodex_session_id=rodex_session_id,
+            rodex_registry_id=rodex_registry_id,
+            runtime_id=runtime_id,
             expected_codex_session_id=expected_codex_session_id,
         )
 
@@ -75,18 +96,19 @@ class RodexAnalyticsRegistry:
 
     @property
     def session_id(self) -> int:
-        return self._session_id
+        return self._identity.rodex_sessions_id
 
     @property
     def expected_codex_session_id(self) -> CodexSessionId:
-        return self._expected_codex_session_id
+        return self._identity.codex_session_id
 
     def load_checkpoint(self) -> RodexAnalyticsCheckpoint:
         """Load the last committed analytics checkpoint for this worker."""
         return read_rodex_analytics_checkpoint(
-            self._session_id,
+            self._identity.rodex_sessions_id,
             self._database_path,
-            expected_current_codex_session_id=self._expected_codex_session_id,
+            expected_current_codex_session_id=self._identity.codex_session_id,
+            identity_fence=self._identity,
         )
 
     def publish(
@@ -95,9 +117,10 @@ class RodexAnalyticsRegistry:
         """Publish one identity-fenced calculation through the registry API."""
         try:
             return publish_rodex_session_statistics(
-                self._session_id,
+                self._identity.rodex_sessions_id,
                 self._database_path,
-                expected_current_codex_session_id=self._expected_codex_session_id,
+                expected_current_codex_session_id=self._identity.codex_session_id,
+                identity_fence=self._identity,
                 based_on_statistics_publication_sequence=(
                     publication.based_on_statistics_publication_sequence
                 ),
@@ -136,9 +159,10 @@ class RodexAnalyticsRegistry:
             prior_consecutive_failures = 0 if prior is None else prior.consecutive_failures
         consecutive_failures = prior_consecutive_failures + 1 if failed else 0
         return record_rodex_session_statistics_worker_health(
-            self._session_id,
+            self._identity.rodex_sessions_id,
             self._database_path,
-            expected_current_codex_session_id=self._expected_codex_session_id,
+            expected_current_codex_session_id=self._identity.codex_session_id,
+            identity_fence=self._identity,
             worker_state=worker_state,
             diagnostic_code=diagnostic_code,
             last_attempted_at_utc=attempted_at_utc,

@@ -23,6 +23,7 @@ from .errors import (
 from .identity import (
     CodexSessionId,
     CodexThreadId,
+    RodexAnalyticsIdentityFence,
     join_signed_bigints_into_a_codex_thread_id,
     parse_codex_thread_id,
     split_codex_session_id_into_signed_bigints,
@@ -31,6 +32,8 @@ from .identity import (
 from .schema import (
     MODEL_NAMES_TABLE,
     REASONING_EFFORT_NAMES_TABLE,
+    RODEX_REGISTRIES_TABLE,
+    RODEX_RUNTIME_INSTANCES_TABLE,
     RODEX_SESSIONS_STATISTICS_AUDIT_LIMITS_TABLE,
     RODEX_SESSIONS_STATISTICS_DISTRIBUTIONS_TABLE,
     RODEX_SESSIONS_STATISTICS_NAMED_COUNTS_TABLE,
@@ -64,6 +67,26 @@ from .validation import (
 _DERIVED_SESSION_NAMED_COUNT_KINDS = frozenset(
     {"model", "reasoning_effort", "collaboration_tool"}
 )
+
+
+def _require_analytics_identity_fence(
+    row: Sequence[object] | None,
+    fence: RodexAnalyticsIdentityFence,
+    *,
+    operation: str,
+) -> None:
+    if row is None:
+        raise RodexSessionError(f"Rodex session does not exist: {fence.rodex_sessions_id}")
+    expected = (
+        fence.rodex_registry_id.as_signed_bigint(),
+        fence.rodex_session_id.as_signed_bigint(),
+        *split_codex_session_id_into_signed_bigints(fence.codex_session_id),
+        fence.runtime_id.as_signed_bigint(),
+    )
+    if tuple(row[:5]) != expected:
+        raise RodexSessionStatisticsConflictError(
+            f"analytics registry/session/runtime identity changed before {operation}"
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -244,6 +267,7 @@ def publish_rodex_session_statistics(
     database_path: str | os.PathLike[str] | None = None,
     *,
     expected_current_codex_session_id: CodexSessionId | str,
+    identity_fence: RodexAnalyticsIdentityFence | None = None,
     based_on_statistics_publication_sequence: int | None,
     statistics_projection_schema_version: str,
     calculated_at_utc: str,
@@ -302,24 +326,35 @@ def publish_rodex_session_statistics(
     path = existing_rodex_database_path(database_path)
     with open_rodex_transaction(path) as connection:
         identity_row = connection.execute(
-            f"SELECT codex_session_id_signed_bigint_1, codex_session_id_signed_bigint_2 "
-            f"FROM {RODEX_SESSIONS_TABLE} WHERE id = ?",
+            f"SELECT registries.rodex_registry_id_signed_bigint, "
+            "sessions.rodex_session_id_signed_bigint, "
+            "sessions.codex_session_id_signed_bigint_1, "
+            "sessions.codex_session_id_signed_bigint_2, "
+            "runtimes.runtime_id_signed_bigint, "
+            "statistics.statistics_publication_sequence "
+            f"FROM {RODEX_SESSIONS_TABLE} AS sessions "
+            f"JOIN {RODEX_REGISTRIES_TABLE} AS registries ON registries.id = 1 "
+            f"LEFT JOIN {RODEX_RUNTIME_INSTANCES_TABLE} AS runtimes "
+            "ON runtimes.rodex_sessions_id = sessions.id "
+            f"LEFT JOIN {RODEX_SESSIONS_STATISTICS_TABLE} AS statistics "
+            "ON statistics.rodex_sessions_id = sessions.id "
+            "WHERE sessions.id = ?",
             (session_id,),
         ).fetchone()
         if identity_row is None:
             raise RodexSessionError(f"Rodex session does not exist: {session_id}")
-        if (int(identity_row[0]), int(identity_row[1])) != expected_halves:
+        if identity_fence is not None:
+            _require_analytics_identity_fence(
+                identity_row,
+                identity_fence,
+                operation="statistics publication",
+            )
+        elif (int(identity_row[2]), int(identity_row[3])) != expected_halves:
             raise RodexSessionStatisticsConflictError(
                 "current Codex session ID changed during statistics calculation"
             )
-        previous_row = connection.execute(
-            f"SELECT statistics_publication_sequence "
-            f"FROM {RODEX_SESSIONS_STATISTICS_TABLE} "
-            "WHERE rodex_sessions_id = ?",
-            (session_id,),
-        ).fetchone()
         previous_publication_sequence = (
-            None if previous_row is None else int(previous_row[0])
+            None if identity_row[5] is None else int(identity_row[5])
         )
         if previous_publication_sequence != based_on_statistics_publication_sequence:
             raise RodexSessionStatisticsConflictError(
@@ -362,9 +397,7 @@ def publish_rodex_session_statistics(
         if not source_threads_to_write.issubset(
             item.codex_thread_id for item in observations
         ):
-            raise ValueError(
-                "changed_source_thread_ids contains an unobserved source"
-            )
+            raise ValueError("changed_source_thread_ids contains an unobserved source")
         if not previously_registered.issubset(observed):
             raise RodexSessionStatisticsConflictError(
                 "statistics omit a registered Codex thread source"
@@ -493,9 +526,7 @@ def publish_rodex_session_statistics(
                 raise RodexSessionStatisticsConflictError(
                     "registered statistics source changed during publication"
                 )
-        turns_by_key = {
-            (item.codex_thread_id, item.codex_turn_id): item for item in turns
-        }
+        turns_by_key = {(item.codex_thread_id, item.codex_turn_id): item for item in turns}
         if changed_turn_keys is None:
             stored_turn_keys = _select_stored_turn_keys(connection, session_id)
             turns_to_write = turns
@@ -629,9 +660,7 @@ def publish_rodex_session_statistics(
             if spawning_turn_row_id is None:
                 spawning_turn_row_id = _lookup_turn_row_id(
                     connection,
-                    source_ids[
-                        split_codex_thread_id_into_signed_bigints(parent_thread_id)
-                    ],
+                    source_ids[split_codex_thread_id_into_signed_bigints(parent_thread_id)],
                     spawning_codex_turn_id,
                     required=True,
                 )
@@ -672,6 +701,7 @@ def record_rodex_session_statistics_worker_health(
     database_path: str | os.PathLike[str] | None = None,
     *,
     expected_current_codex_session_id: CodexSessionId | str,
+    identity_fence: RodexAnalyticsIdentityFence | None = None,
     worker_state: str,
     diagnostic_code: str | None,
     last_attempted_at_utc: str,
@@ -723,13 +753,27 @@ def record_rodex_session_statistics_worker_health(
     path = existing_rodex_database_path(database_path)
     with open_rodex_transaction(path) as connection:
         identity_row = connection.execute(
-            f"SELECT codex_session_id_signed_bigint_1, codex_session_id_signed_bigint_2 "
-            f"FROM {RODEX_SESSIONS_TABLE} WHERE id = ?",
+            f"SELECT registries.rodex_registry_id_signed_bigint, "
+            "sessions.rodex_session_id_signed_bigint, "
+            "sessions.codex_session_id_signed_bigint_1, "
+            "sessions.codex_session_id_signed_bigint_2, "
+            "runtimes.runtime_id_signed_bigint "
+            f"FROM {RODEX_SESSIONS_TABLE} AS sessions "
+            f"JOIN {RODEX_REGISTRIES_TABLE} AS registries ON registries.id = 1 "
+            f"LEFT JOIN {RODEX_RUNTIME_INSTANCES_TABLE} AS runtimes "
+            "ON runtimes.rodex_sessions_id = sessions.id "
+            "WHERE sessions.id = ?",
             (session_id,),
         ).fetchone()
         if identity_row is None:
             raise RodexSessionError(f"Rodex session does not exist: {session_id}")
-        if (int(identity_row[0]), int(identity_row[1])) != expected_halves:
+        if identity_fence is not None:
+            _require_analytics_identity_fence(
+                identity_row,
+                identity_fence,
+                operation="worker health publication",
+            )
+        elif (int(identity_row[2]), int(identity_row[3])) != expected_halves:
             raise RodexSessionStatisticsConflictError(
                 "current Codex session ID changed before worker health publication"
             )
@@ -753,6 +797,7 @@ def read_rodex_analytics_checkpoint(
     database_path: str | os.PathLike[str] | None = None,
     *,
     expected_current_codex_session_id: CodexSessionId | str,
+    identity_fence: RodexAnalyticsIdentityFence | None = None,
 ) -> RodexAnalyticsCheckpoint:
     """Read only publication, health, and source cursor facts in one SELECT."""
     _validate_session_id(session_id)
@@ -771,8 +816,11 @@ def read_rodex_analytics_checkpoint(
             f"FROM {RODEX_SESSIONS_STATISTICS_SOURCES_TABLE} AS child "
             "JOIN hierarchy AS parent "
             "ON child.parent_rodex_sessions_statistics_sources_id = parent.id) "
-            "SELECT sessions.codex_session_id_signed_bigint_1, "
+            "SELECT registries.rodex_registry_id_signed_bigint, "
+            "sessions.rodex_session_id_signed_bigint, "
+            "sessions.codex_session_id_signed_bigint_1, "
             "sessions.codex_session_id_signed_bigint_2, "
+            "runtimes.runtime_id_signed_bigint, "
             "statistics.statistics_publication_sequence, "
             "statistics.statistics_projection_schema_version, "
             "workers.id, workers.rodex_sessions_id, workers.worker_state, "
@@ -790,6 +838,9 @@ def read_rodex_analytics_checkpoint(
             "sources.analyzed_size_bytes, sources.analyzed_mtime_ns, "
             "sources.analyzed_prefix_sha256, sources.verified_at_utc "
             f"FROM {RODEX_SESSIONS_TABLE} AS sessions "
+            f"JOIN {RODEX_REGISTRIES_TABLE} AS registries ON registries.id = 1 "
+            f"LEFT JOIN {RODEX_RUNTIME_INSTANCES_TABLE} AS runtimes "
+            "ON runtimes.rodex_sessions_id = sessions.id "
             f"LEFT JOIN {RODEX_SESSIONS_STATISTICS_TABLE} AS statistics "
             "ON statistics.rodex_sessions_id = sessions.id "
             f"LEFT JOIN {RODEX_SESSIONS_STATISTICS_WORKERS_TABLE} AS workers "
@@ -806,21 +857,27 @@ def read_rodex_analytics_checkpoint(
         ).fetchall()
     if not rows:
         raise RodexSessionError(f"Rodex session does not exist: {session_id}")
-    if (int(rows[0][0]), int(rows[0][1])) != expected_halves:
+    if identity_fence is not None:
+        _require_analytics_identity_fence(
+            rows[0],
+            identity_fence,
+            operation="checkpoint read",
+        )
+    elif (int(rows[0][2]), int(rows[0][3])) != expected_halves:
         raise RodexSessionStatisticsConflictError(
             "current Codex session ID changed before checkpoint read"
         )
     statistics = (
         None
-        if rows[0][2] is None
+        if rows[0][5] is None
         else RodexAnalyticsStatisticsCheckpoint(
-            statistics_publication_sequence=int(rows[0][2]),
-            statistics_projection_schema_version=str(rows[0][3]),
+            statistics_publication_sequence=int(rows[0][5]),
+            statistics_projection_schema_version=str(rows[0][6]),
         )
     )
-    worker = None if rows[0][4] is None else _statistics_worker_from_row(rows[0][4:11])
+    worker = None if rows[0][7] is None else _statistics_worker_from_row(rows[0][7:14])
     sources = tuple(
-        _statistics_source_from_row(row[11:28]) for row in rows if row[11] is not None
+        _statistics_source_from_row(row[14:31]) for row in rows if row[14] is not None
     )
     return RodexAnalyticsCheckpoint(statistics, worker, sources)
 
@@ -1146,9 +1203,7 @@ def _sync_session_projection_children(
     projection: SessionStatisticsProjection,
 ) -> None:
     """Synchronize bounded aggregate children without rewriting equal rows."""
-    distributions = {
-        item.distribution_kind: item for item in projection.distributions
-    }
+    distributions = {item.distribution_kind: item for item in projection.distributions}
     stored_distribution_kinds = {
         str(row[0])
         for row in connection.execute(
@@ -1242,10 +1297,7 @@ def _sync_session_projection_children(
         "ON CONFLICT(rodex_sessions_id, limit_ordinal) DO UPDATE SET "
         "limitation = excluded.limitation "
         "WHERE limitation IS NOT excluded.limitation",
-        (
-            (session_id, ordinal, limitation)
-            for ordinal, limitation in audit_limits.items()
-        ),
+        ((session_id, ordinal, limitation) for ordinal, limitation in audit_limits.items()),
     )
     connection.executemany(
         f"DELETE FROM {RODEX_SESSIONS_STATISTICS_AUDIT_LIMITS_TABLE} "

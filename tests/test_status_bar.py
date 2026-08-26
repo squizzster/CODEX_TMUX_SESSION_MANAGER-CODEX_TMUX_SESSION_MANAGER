@@ -32,8 +32,8 @@ def test_base_status_selects_ctrl_b_banner_from_tmux_client_prefix_state() -> No
 
 def test_status_palette_has_one_authoritative_value_per_colour_role() -> None:
     assert RODEX_STATUS_COLOURS.base_foreground == "black"
-    assert RODEX_STATUS_COLOURS.base_background == "#B6FF00"
-    assert RODEX_STATUS_STYLE == "bg=#B6FF00,fg=black"
+    assert RODEX_STATUS_COLOURS.base_background == "#FDF7FF"
+    assert RODEX_STATUS_STYLE == "bg=#FDF7FF,fg=black"
     assert RODEX_STATUS_COLOURS.primary_blue == "#1402D8"
     assert RODEX_STATUS_COLOURS.tool_count == "cyan"
     assert RODEX_STATUS_COLOURS.mouse_mode == "yellow"

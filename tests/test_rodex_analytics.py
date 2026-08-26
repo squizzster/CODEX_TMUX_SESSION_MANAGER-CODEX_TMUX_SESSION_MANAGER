@@ -174,13 +174,16 @@ def _subagent_rollout(
     root_thread_id: uuid.UUID,
     child_thread_id: uuid.UUID,
     *,
+    parent_thread_id: uuid.UUID | None = None,
+    depth: int = 1,
     linked_at_utc: str = "2026-08-16T12:00:00.500000Z",
 ) -> Path:
+    direct_parent_thread_id = parent_thread_id or root_thread_id
     path = root / "2026" / "08" / "16" / f"rollout-child-{child_thread_id}.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
     spawn = {
-        "parent_thread_id": str(root_thread_id),
-        "depth": 1,
+        "parent_thread_id": str(direct_parent_thread_id),
+        "depth": depth,
         "agent_path": "/root/review",
         "agent_nickname": "Curie",
     }
@@ -192,8 +195,8 @@ def _subagent_rollout(
             "payload": {
                 "session_id": str(root_thread_id),
                 "id": str(child_thread_id),
-                "forked_from_id": str(root_thread_id),
-                "parent_thread_id": str(root_thread_id),
+                "forked_from_id": str(direct_parent_thread_id),
+                "parent_thread_id": str(direct_parent_thread_id),
                 "timestamp": linked_at_utc,
                 "source": {"subagent": {"thread_spawn": spawn}},
                 "thread_source": "subagent",
@@ -859,6 +862,82 @@ def test_new_child_batch_reads_its_exact_parent_dependency_without_full_replay(
     exact = read_rodex_session_turn_statistics(1, "turn-test", config.rodex_database_path)
     assert exact.turn is not None
     assert exact.turn.projection.collaboration_agents_started_count == 1
+
+
+def test_same_burst_nested_children_resolve_in_parent_first_topology(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    _rollout(config.codex_sessions_root, CODEX_SESSION_ID)
+    _create(config)
+    worker = AnalyticsRolloutWorker(config)
+    assert worker.poll_once() == "up_to_date"
+    child_thread_id = uuid.UUID(int=CODEX_SESSION_ID.int + 1000)
+    grandchild_thread_id = uuid.UUID(int=CODEX_SESSION_ID.int + 500)
+    assert sorted({child_thread_id, grandchild_thread_id}, key=str) == [
+        grandchild_thread_id,
+        child_thread_id,
+    ]
+    child_rollout = _subagent_rollout(
+        config.codex_sessions_root,
+        CODEX_SESSION_ID,
+        child_thread_id,
+        linked_at_utc="2026-08-16T12:00:01.500000Z",
+    )
+    with child_rollout.open("a", encoding="utf-8") as output:
+        output.write(
+            json.dumps(
+                {
+                    "timestamp": "2026-08-16T12:00:01.700000Z",
+                    "ordinal": 4,
+                    "type": "event_msg",
+                    "payload": {"type": "task_started", "turn_id": "child-turn"},
+                }
+            )
+            + "\n"
+        )
+        output.write(
+            json.dumps(
+                {
+                    "timestamp": "2026-08-16T12:00:02.500000Z",
+                    "ordinal": 5,
+                    "type": "event_msg",
+                    "payload": {"type": "task_complete", "turn_id": "child-turn"},
+                }
+            )
+            + "\n"
+        )
+    _subagent_rollout(
+        config.codex_sessions_root,
+        CODEX_SESSION_ID,
+        grandchild_thread_id,
+        parent_thread_id=child_thread_id,
+        depth=2,
+        linked_at_utc="2026-08-16T12:00:02Z",
+    )
+    for thread_id in (child_thread_id, grandchild_thread_id):
+        worker.observe_protocol_event(
+            {
+                "method": "thread/started",
+                "params": {
+                    "thread": {
+                        "id": str(thread_id),
+                        "createdAt": "2026-08-16T12:00:02Z",
+                    }
+                },
+            }
+        )
+
+    state = worker.poll_once(
+        AnalyticsDirtyBatch(frozenset({child_thread_id, grandchild_thread_id}))
+    )
+
+    assert state == "up_to_date"
+    assert worker._requires_full_reconcile is False
+    view = read_rodex_session_statistics(1, config.rodex_database_path)
+    assert view.statistics is not None
+    assert view.statistics.statistics_publication_sequence == 2
+    assert len(view.sources) == 3
 
 
 def test_unchanged_rollout_does_not_recalculate_but_append_does(tmp_path: Path) -> None:

@@ -542,25 +542,75 @@ class AnalyticsRolloutWorker:
         self,
         thread_ids: frozenset[CodexThreadId],
     ) -> tuple[list[StableRolloutRead], frozenset[CodexThreadId]]:
+        candidates: dict[CodexThreadId, VerifiedRollout] = {}
+        unavailable: set[CodexThreadId] = set()
+        discovery_queue = set(thread_ids).difference(self._verified_sources)
+        attempted: set[CodexThreadId] = set()
+        while discovery_queue:
+            thread_id = min(discovery_queue, key=str)
+            discovery_queue.remove(thread_id)
+            attempted.add(thread_id)
+            source = _discover_exact_thread_rollout(
+                self._config.codex_sessions_root,
+                thread_id,
+                self._source_catalog,
+                expected_root_thread_id=self._expected_codex_session_id,
+            )
+            if source is None:
+                unavailable.add(thread_id)
+                continue
+            candidates[thread_id] = source
+            parent_thread_id = source.parent_codex_thread_id
+            if (
+                parent_thread_id is not None
+                and parent_thread_id not in self._verified_sources
+                and parent_thread_id not in candidates
+                and parent_thread_id not in attempted
+            ):
+                discovery_queue.add(parent_thread_id)
+
+        closure = dict(self._verified_sources)
+        pending_candidates = dict(candidates)
+        while pending_candidates:
+            added = False
+            for thread_id, source in sorted(
+                tuple(pending_candidates.items()),
+                key=lambda item: (item[1].thread_depth, str(item[0])),
+            ):
+                parent_thread_id = source.parent_codex_thread_id
+                if parent_thread_id is None:
+                    if thread_id != self._expected_codex_session_id:
+                        raise RodexAnalyticsError(
+                            f"non-root source lost its parent: {thread_id}"
+                        )
+                else:
+                    parent = closure.get(parent_thread_id)
+                    if parent is None:
+                        continue
+                    if source.thread_depth != parent.thread_depth + 1:
+                        raise RodexAnalyticsError(
+                            f"sub-agent thread depth disagrees with parent: {thread_id}"
+                        )
+                closure[thread_id] = source
+                del pending_candidates[thread_id]
+                added = True
+            if not added:
+                break
+
+        resolved_candidates = set(candidates).difference(pending_candidates)
+        self._verified_sources.update(
+            (thread_id, candidates[thread_id]) for thread_id in resolved_candidates
+        )
         selected: dict[CodexThreadId, VerifiedRollout] = {}
-        unresolved: set[CodexThreadId] = set()
+        unresolved = unavailable | set(pending_candidates)
+        newly_discovered_thread_ids = set(candidates)
         for thread_id in sorted(thread_ids, key=str):
-            source = self._verified_sources.get(thread_id)
-            newly_discovered = source is None
-            if newly_discovered:
-                source = _discover_exact_thread_rollout(
-                    self._config.codex_sessions_root,
-                    thread_id,
-                    self._source_catalog,
-                    verified_cache=self._verified_sources,
-                    expected_root_thread_id=self._expected_codex_session_id,
-                )
-                if source is None:
-                    unresolved.add(thread_id)
-                    continue
-                self._verified_sources[thread_id] = source
+            source = closure.get(thread_id)
+            if source is None:
+                unresolved.add(thread_id)
+                continue
             selected[source.codex_thread_id] = source
-            if not newly_discovered:
+            if thread_id not in newly_discovered_thread_ids:
                 continue
             parent_thread_id = source.parent_codex_thread_id
             while parent_thread_id is not None:
@@ -1179,10 +1229,9 @@ def _discover_exact_thread_rollout(
     thread_id: CodexThreadId,
     source_catalog: AnalyticsSourceCatalog,
     *,
-    verified_cache: Mapping[CodexThreadId, VerifiedRollout],
     expected_root_thread_id: CodexThreadId,
 ) -> VerifiedRollout | None:
-    """Resolve and authenticate one lifecycle-named source without global discovery."""
+    """Authenticate one lifecycle-named source without assuming discovery order."""
     parsed_thread_id = parse_codex_thread_id(thread_id)
     if parsed_thread_id == expected_root_thread_id:
         return locate_verified_rollout(
@@ -1190,18 +1239,13 @@ def _discover_exact_thread_rollout(
             expected_root_thread_id,
             source_catalog=source_catalog,
         )
-    root_thread_ids = frozenset(
-        source.codex_thread_id
-        for source in verified_cache.values()
-        if source.source_kind == "root"
-    )
     verified = [
         source
         for path in source_catalog.candidate_paths(parsed_thread_id)
         if (
             source := _verify_subagent_rollout(
                 path,
-                root_thread_ids,
+                frozenset({expected_root_thread_id}),
                 allowed_root=root,
             )
         )
@@ -1215,11 +1259,6 @@ def _discover_exact_thread_rollout(
     if not verified:
         return None
     source = verified[0]
-    parent = verified_cache.get(source.parent_codex_thread_id)
-    if parent is None or source.thread_depth != parent.thread_depth + 1:
-        raise RodexAnalyticsError(
-            f"sub-agent thread has no verified direct parent: {parsed_thread_id}"
-        )
     source_catalog.remember_resolved_path(parsed_thread_id, source.path)
     return source
 

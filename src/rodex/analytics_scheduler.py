@@ -24,7 +24,8 @@ from .protocol_proxy import (
 
 ANALYTICS_QUIET_SECONDS: Final = 0.5
 ANALYTICS_MAX_BATCH_SECONDS: Final = 5.0
-ANALYTICS_ONE_SHOT_RETRY_SECONDS: Final = 2.0
+ANALYTICS_RETRY_INITIAL_SECONDS: Final = 0.5
+ANALYTICS_MAX_RETRY_WINDOW_SECONDS: Final = 5.0
 ANALYTICS_SUBSCRIBER_START_TIMEOUT_SECONDS: Final = 5.0
 _DIRTY: Final = object()
 _STOP: Final = object()
@@ -75,6 +76,38 @@ class AnalyticsBurstWindow:
         )
 
 
+@dataclass(slots=True)
+class _AnalyticsRetryWindow:
+    """Bound exact catch-up retries without creating permanent idle I/O."""
+
+    deadline: float
+    next_retry_at: float
+    next_delay_seconds: float
+
+    @classmethod
+    def start(
+        cls,
+        now: float,
+        *,
+        generation_started_at: float,
+        initial_seconds: float,
+        max_window_seconds: float,
+    ) -> _AnalyticsRetryWindow:
+        deadline = generation_started_at + max_window_seconds
+        return cls(
+            deadline=deadline,
+            next_retry_at=min(now + initial_seconds, deadline),
+            next_delay_seconds=initial_seconds * 2,
+        )
+
+    def retain_after(self, result: object, now: float) -> bool:
+        if result not in {"catching_up", "degraded"} or now >= self.deadline:
+            return False
+        self.next_retry_at = min(now + self.next_delay_seconds, self.deadline)
+        self.next_delay_seconds *= 2
+        return True
+
+
 class AnalyticsEventScheduler:
     """Coalesce relevant runtime events and reconcile only non-empty work."""
 
@@ -83,15 +116,22 @@ class AnalyticsEventScheduler:
         *,
         quiet_seconds: float = ANALYTICS_QUIET_SECONDS,
         max_batch_seconds: float = ANALYTICS_MAX_BATCH_SECONDS,
-        one_shot_retry_seconds: float = ANALYTICS_ONE_SHOT_RETRY_SECONDS,
+        retry_initial_seconds: float = ANALYTICS_RETRY_INITIAL_SECONDS,
+        max_retry_window_seconds: float = ANALYTICS_MAX_RETRY_WINDOW_SECONDS,
         monotonic: Callable[[], float] = time.monotonic,
         event_observer: Callable[[Mapping[str, Any]], None] | None = None,
     ) -> None:
-        if quiet_seconds < 0 or max_batch_seconds <= 0 or one_shot_retry_seconds <= 0:
+        if (
+            quiet_seconds < 0
+            or max_batch_seconds <= 0
+            or retry_initial_seconds <= 0
+            or max_retry_window_seconds < retry_initial_seconds
+        ):
             raise ValueError("analytics batch intervals must be positive")
         self._quiet_seconds = quiet_seconds
         self._max_batch_seconds = max_batch_seconds
-        self._one_shot_retry_seconds = one_shot_retry_seconds
+        self._retry_initial_seconds = retry_initial_seconds
+        self._max_retry_window_seconds = max_retry_window_seconds
         self._monotonic = monotonic
         self._event_observer = event_observer
         self._signals: queue.Queue[object] = queue.Queue(maxsize=2)
@@ -132,25 +172,34 @@ class AnalyticsEventScheduler:
         self._offer_terminal(_STOP)
 
     def run(self, reconcile: Callable[[AnalyticsDirtyBatch], object]) -> None:
-        """Reconcile dirty bursts with at most one clean retry per generation."""
-        retry_at = self._retry_at_for(
-            reconcile(AnalyticsDirtyBatch(frozenset(), full_reconcile=True))
+        """Reconcile bursts and bound exact catch-up retries to one short window."""
+        startup_started_at = self._monotonic()
+        retry_window = self._retry_window_for(
+            reconcile(AnalyticsDirtyBatch(frozenset(), full_reconcile=True)),
+            generation_started_at=startup_started_at,
         )
         while True:
             now = self._monotonic()
             pending_deadline = self._pending_deadline()
-            if retry_at is not None and now >= retry_at:
-                retry_at = None
-                reconcile(AnalyticsDirtyBatch(frozenset()))
+            if retry_window is not None and now >= retry_window.next_retry_at:
+                result = reconcile(AnalyticsDirtyBatch(frozenset()))
+                if not retry_window.retain_after(result, self._monotonic()):
+                    retry_window = None
                 continue
             if (
-                retry_at is None
+                retry_window is None
                 and pending_deadline is not None
                 and now >= pending_deadline
             ):
-                retry_at = self._retry_at_for(reconcile(self._take_pending_batch()))
+                batch, generation_started_at = self._take_pending_batch()
+                retry_window = self._retry_window_for(
+                    reconcile(batch),
+                    generation_started_at=generation_started_at,
+                )
                 continue
-            deadline = retry_at if retry_at is not None else pending_deadline
+            deadline = (
+                retry_window.next_retry_at if retry_window is not None else pending_deadline
+            )
             timeout = None if deadline is None else max(0.0, deadline - now)
             try:
                 signal = self._signals.get(timeout=timeout)
@@ -161,10 +210,23 @@ class AnalyticsEventScheduler:
             if signal is _STREAM_CLOSED:
                 raise AnalyticsEventStreamClosed("analytics event stream closed")
 
-    def _retry_at_for(self, result: object) -> float | None:
+    def _retry_window_for(
+        self,
+        result: object,
+        *,
+        generation_started_at: float,
+    ) -> _AnalyticsRetryWindow | None:
         if result not in {"catching_up", "degraded"}:
             return None
-        return self._monotonic() + self._one_shot_retry_seconds
+        now = self._monotonic()
+        if now >= generation_started_at + self._max_retry_window_seconds:
+            return None
+        return _AnalyticsRetryWindow.start(
+            now,
+            generation_started_at=generation_started_at,
+            initial_seconds=self._retry_initial_seconds,
+            max_window_seconds=self._max_retry_window_seconds,
+        )
 
     def _offer_terminal(self, signal: object) -> None:
         with self._state_lock:
@@ -191,13 +253,16 @@ class AnalyticsEventScheduler:
             first_at + self._max_batch_seconds,
         )
 
-    def _take_pending_batch(self) -> AnalyticsDirtyBatch:
+    def _take_pending_batch(self) -> tuple[AnalyticsDirtyBatch, float]:
         with self._state_lock:
             batch = AnalyticsDirtyBatch(frozenset(self._pending_thread_ids))
+            generation_started_at = self._pending_first_at
             self._pending_thread_ids.clear()
             self._pending_first_at = None
             self._pending_last_at = None
-        return batch
+        if generation_started_at is None:
+            raise RuntimeError("analytics pending batch lost its first event time")
+        return batch, generation_started_at
 
 
 class AnalyticsProtocolEventSubscriber:

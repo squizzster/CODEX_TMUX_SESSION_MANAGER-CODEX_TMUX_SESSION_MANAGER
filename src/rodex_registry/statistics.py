@@ -277,6 +277,8 @@ def publish_rodex_session_statistics(
     changed_source_thread_ids: frozenset[CodexThreadId] | None = None,
     changed_turn_keys: frozenset[tuple[CodexThreadId, str]] | None = None,
     removed_turn_keys: frozenset[tuple[CodexThreadId, str]] = frozenset(),
+    model_name_ids: dict[str, int] | None = None,
+    reasoning_effort_name_ids: dict[str, int] | None = None,
 ) -> RodexAnalyticsPublishReceipt:
     """Atomically publish one fenced session projection, turns, and sources."""
     _validate_session_id(session_id)
@@ -320,8 +322,8 @@ def publish_rodex_session_statistics(
     turn_keys = {(item.codex_thread_id, item.codex_turn_id) for item in turns}
     if len(turn_keys) != len(turns):
         raise ValueError("turn_statistics contains a duplicate source and turn ID")
-    if changed_turn_keys is not None and not changed_turn_keys.issubset(turn_keys):
-        raise ValueError("changed_turn_keys contains a turn outside the projection")
+    if changed_turn_keys is not None and changed_turn_keys != turn_keys:
+        raise ValueError("changed_turn_keys must exactly identify the projected turn delta")
     if removed_turn_keys & turn_keys:
         raise ValueError("removed_turn_keys contains a projected turn")
     _validate_authoritative_collaboration_projection(
@@ -550,8 +552,10 @@ def publish_rodex_session_statistics(
         else:
             turns_to_write = tuple(turns_by_key[key] for key in changed_turn_keys)
             turns_to_remove = set(removed_turn_keys)
-        model_name_ids: dict[str, int] = {}
-        reasoning_effort_name_ids: dict[str, int] = {}
+        model_name_ids = {} if model_name_ids is None else model_name_ids
+        reasoning_effort_name_ids = (
+            {} if reasoning_effort_name_ids is None else reasoning_effort_name_ids
+        )
         turn_row_ids: dict[tuple[CodexThreadId, str], int] = {}
         for item in turns_to_write:
             source_halves = split_codex_thread_id_into_signed_bigints(item.codex_thread_id)
@@ -724,7 +728,8 @@ def record_rodex_session_statistics_worker_health(
     worker_state: str,
     diagnostic_code: str | None,
     last_attempted_at_utc: str,
-    consecutive_failures: int,
+    consecutive_failures: int | None,
+    increment_failure: bool = False,
     next_retry_at_utc: str | None = None,
 ) -> RodexSessionStatisticsWorker:
     """Update only fail-open worker health, preserving all last-good statistics."""
@@ -752,7 +757,12 @@ def record_rodex_session_statistics_worker_health(
             "or underscores"
         )
     attempted = _normalise_utc_timestamp_text(last_attempted_at_utc)
-    if (
+    if consecutive_failures is None:
+        if not increment_failure:
+            raise ValueError(
+                "consecutive_failures may be omitted only for an atomic increment"
+            )
+    elif (
         not isinstance(consecutive_failures, int)
         or isinstance(consecutive_failures, bool)
         or consecutive_failures < 0
@@ -776,11 +786,14 @@ def record_rodex_session_statistics_worker_health(
             "sessions.rodex_session_id_signed_bigint, "
             "sessions.codex_session_id_signed_bigint_1, "
             "sessions.codex_session_id_signed_bigint_2, "
-            "runtimes.runtime_id_signed_bigint "
+            "runtimes.runtime_id_signed_bigint, "
+            "workers.consecutive_failures "
             f"FROM {RODEX_SESSIONS_TABLE} AS sessions "
             f"JOIN {RODEX_REGISTRIES_TABLE} AS registries ON registries.id = 1 "
             f"LEFT JOIN {RODEX_RUNTIME_INSTANCES_TABLE} AS runtimes "
             "ON runtimes.rodex_sessions_id = sessions.id "
+            f"LEFT JOIN {RODEX_SESSIONS_STATISTICS_WORKERS_TABLE} AS workers "
+            "ON workers.rodex_sessions_id = sessions.id "
             "WHERE sessions.id = ?",
             (session_id,),
         ).fetchone()
@@ -796,7 +809,11 @@ def record_rodex_session_statistics_worker_health(
             raise RodexSessionStatisticsConflictError(
                 "current Codex session ID changed before worker health publication"
             )
-        _upsert_statistics_worker(
+        if consecutive_failures is None:
+            consecutive_failures = (
+                0 if identity_row[5] is None else int(identity_row[5])
+            ) + 1
+        row = _upsert_statistics_worker(
             connection,
             session_id,
             worker_state=state,
@@ -805,9 +822,6 @@ def record_rodex_session_statistics_worker_health(
             consecutive_failures=consecutive_failures,
             next_retry_at_utc=next_retry,
         )
-        row = _select_statistics_worker(connection, session_id)
-    if row is None:
-        raise RodexSessionError(f"Rodex statistics worker disappeared: {session_id}")
     return _statistics_worker_from_row(row)
 
 
@@ -1867,7 +1881,7 @@ def _upsert_statistics_worker(
     last_attempted_at_utc: str,
     consecutive_failures: int,
     next_retry_at_utc: str | None,
-) -> None:
+) -> tuple[object, ...]:
     values = (
         worker_state,
         diagnostic_code,
@@ -1879,20 +1893,27 @@ def _upsert_statistics_worker(
         f"UPDATE {RODEX_SESSIONS_STATISTICS_WORKERS_TABLE} SET "
         "worker_state = ?, diagnostic_code = ?, last_attempted_at_utc = ?, "
         "consecutive_failures = ?, next_retry_at_utc = ? "
-        "WHERE rodex_sessions_id = ? RETURNING id",
+        "WHERE rodex_sessions_id = ? RETURNING id, rodex_sessions_id, worker_state, "
+        "diagnostic_code, last_attempted_at_utc, consecutive_failures, "
+        "next_retry_at_utc",
         (*values, session_id),
     ).fetchone()
     if row is not None:
-        return
-    connection.execute(
+        return row
+    inserted = connection.execute(
         f"INSERT INTO {RODEX_SESSIONS_STATISTICS_WORKERS_TABLE} "
         "(rodex_sessions_id, worker_state, diagnostic_code, last_attempted_at_utc, "
-        "consecutive_failures, next_retry_at_utc) VALUES (?, ?, ?, ?, ?, ?)",
+        "consecutive_failures, next_retry_at_utc) VALUES (?, ?, ?, ?, ?, ?) "
+        "RETURNING id, rodex_sessions_id, worker_state, diagnostic_code, "
+        "last_attempted_at_utc, consecutive_failures, next_retry_at_utc",
         (
             session_id,
             *values,
         ),
-    )
+    ).fetchone()
+    if inserted is None:
+        raise RodexSessionError(f"statistics worker disappeared: {session_id}")
+    return inserted
 
 
 def _session_statistics_from_rows(

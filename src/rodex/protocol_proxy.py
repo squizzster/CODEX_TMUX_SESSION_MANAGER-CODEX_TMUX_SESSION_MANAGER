@@ -40,7 +40,7 @@ TOOL_CALL_ITEM_TYPES: Final = frozenset(
 )
 
 ToolCountCallback = Callable[[int], None]
-ProtocolEventCallback = Callable[[str | bytes], None]
+ProtocolEventCallback = Callable[[str | bytes, dict[str, Any] | None], None]
 ContextStatusCallback = Callable[[str], None]
 _EVENT_STREAM_CLOSED: Final = object()
 EVENT_STREAM_READY_METHOD: Final = "rodex/event-stream/ready"
@@ -106,15 +106,21 @@ class CodexProtocolEventTap:
 
     def publish(self, message: str | bytes) -> None:
         """Offer one event to every live subscriber without delaying the TUI."""
-        event = _json_object(message)
+        self.publish_protocol_event(message, _json_object(message))
+
+    def publish_protocol_event(
+        self,
+        message: str | bytes,
+        event: dict[str, Any] | None,
+    ) -> None:
+        """Publish raw transport bytes using the proxy's single decoded value."""
         with self._subscribers_lock:
             if event is not None:
                 _update_active_turns(self._active_turns, event)
                 _update_known_threads(self._known_threads, event)
             subscribers = tuple(self._subscribers.items())
         is_analytics_event = (
-            event is not None
-            and event.get("method") in ANALYTICS_LIFECYCLE_EVENT_METHODS
+            event is not None and event.get("method") in ANALYTICS_LIFECYCLE_EVENT_METHODS
         )
         for subscriber, analytics_only in subscribers:
             if analytics_only and not is_analytics_event:
@@ -199,7 +205,11 @@ class ToolCallCounter:
 
     def observe_server_message(self, message: str | bytes) -> None:
         """Update the count from one app-server-to-TUI protocol message."""
-        item_id = _started_tool_call_item_id(message)
+        self.observe_protocol_event(_json_object(message))
+
+    def observe_protocol_event(self, event: dict[str, Any] | None) -> None:
+        """Update the count from an already decoded protocol event."""
+        item_id = _started_tool_call_item_id(event)
         if item_id is None:
             return
         with self._lock:
@@ -291,7 +301,10 @@ class CodexContextStatusObserver:
 
     def observe_server_message(self, message: str | bytes) -> None:
         """Consume one primary app-server-to-TUI protocol message."""
-        payload = _json_object(message)
+        self.observe_protocol_event(_json_object(message))
+
+    def observe_protocol_event(self, payload: dict[str, Any] | None) -> None:
+        """Consume the proxy's single decoded primary protocol event."""
         if payload is None:
             return
         method = payload.get("method")
@@ -511,9 +524,10 @@ class CodexProtocolProxy:
                     for message in app_server_connection:
                         tui_connection.send(message)
                         if is_primary_connection:
-                            self._tool_call_counter.observe_server_message(message)
+                            event = _json_object(message)
+                            self._tool_call_counter.observe_protocol_event(event)
                             if self._on_primary_server_message is not None:
-                                self._on_primary_server_message(message)
+                                self._on_primary_server_message(message, event)
                 except (ConnectionClosed, OSError):
                     pass
                 finally:
@@ -570,17 +584,8 @@ def _close_subscriber_queue(
         return
 
 
-def _started_tool_call_item_id(message: str | bytes) -> str | None:
-    if isinstance(message, bytes):
-        try:
-            message = message.decode("utf-8")
-        except UnicodeDecodeError:
-            return None
-    try:
-        payload = json.loads(message)
-    except (json.JSONDecodeError, TypeError):
-        return None
-    if not isinstance(payload, dict) or payload.get("method") != "item/started":
+def _started_tool_call_item_id(payload: dict[str, Any] | None) -> str | None:
+    if payload is None or payload.get("method") != "item/started":
         return None
     params = payload.get("params")
     if not isinstance(params, dict):
@@ -592,9 +597,7 @@ def _started_tool_call_item_id(message: str | bytes) -> str | None:
     return item_id if isinstance(item_id, str) and item_id else None
 
 
-def _update_active_turns(
-    active_turns: dict[str, str], payload: dict[str, Any]
-) -> None:
+def _update_active_turns(active_turns: dict[str, str], payload: dict[str, Any]) -> None:
     """Track only the live turn identity needed for safe external steering."""
     method = payload.get("method")
     params = payload.get("params")

@@ -1286,9 +1286,12 @@ def run_session_host(
             protocol_event_tap = live_event_tap
             live_event_tap.start()
 
-            def publish_primary_server_message(message: str | bytes) -> None:
-                live_context_observer.observe_server_message(message)
-                live_event_tap.publish(message)
+            def publish_primary_server_message(
+                message: str | bytes,
+                event: dict[str, Any] | None,
+            ) -> None:
+                live_context_observer.observe_protocol_event(event)
+                live_event_tap.publish_protocol_event(message, event)
 
             protocol_proxy = CodexProtocolProxy(
                 protocol_proxy_socket_path,
@@ -1315,9 +1318,7 @@ def run_session_host(
                     return
                 _stop_child_process(active_tui)
 
-            runtime_path_keepalive.failure_callback = (
-                stop_tui_after_keepalive_failure
-            )
+            runtime_path_keepalive.failure_callback = stop_tui_after_keepalive_failure
             try:
                 runtime_path_keepalive.start()
             except RodexRuntimeError as error:
@@ -1396,8 +1397,7 @@ def run_session_host(
                         raise failure
                     try:
                         registration_pending = (
-                            analytics_config is not None
-                            and analytics_supervisor is None
+                            analytics_config is not None and analytics_supervisor is None
                         )
                         returncode = tui.wait(
                             timeout=(

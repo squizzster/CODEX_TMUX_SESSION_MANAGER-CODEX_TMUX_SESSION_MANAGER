@@ -863,11 +863,18 @@ def test_exact_turn_delta_does_not_touch_unchanged_large_history(tmp_path: Path)
             "INSERT INTO turn_write_audit VALUES ('delete'); END;"
         )
     changed_key = (CODEX_SESSION_ID, "turn-550")
-    changed_projection = _projection(
-        tuple(
-            replace(turn, total_tokens=99) if turn.codex_turn_id == "turn-550" else turn
-            for turn in turns
-        )
+    changed_turns = tuple(
+        replace(turn, total_tokens=99) if turn.codex_turn_id == "turn-550" else turn
+        for turn in turns
+    )
+    complete_changed_projection = _projection(changed_turns)
+    changed_projection = replace(
+        complete_changed_projection,
+        turn_statistics=tuple(
+            turn
+            for turn in complete_changed_projection.turn_statistics
+            if turn.codex_turn_id == "turn-550"
+        ),
     )
     _publish(
         database,

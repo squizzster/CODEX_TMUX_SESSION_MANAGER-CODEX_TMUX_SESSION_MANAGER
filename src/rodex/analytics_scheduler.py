@@ -112,13 +112,13 @@ class AnalyticsEventScheduler:
     def offer_dirty(self, thread_id: CodexThreadId) -> None:
         """Retain an exact dirty identity and offer a bounded nonblocking wake-up."""
         parsed_thread_id = parse_codex_thread_id(thread_id)
-        now = self._monotonic()
         with self._state_lock:
             if self._closed:
                 return
+            now = self._monotonic()
             if self._pending_first_at is None:
                 self._pending_first_at = now
-            self._pending_last_at = now
+            self._pending_last_at = max(self._pending_last_at or now, now)
             self._pending_thread_ids.add(parsed_thread_id)
         try:
             self._signals.put_nowait(_DIRTY)
@@ -286,8 +286,7 @@ class AnalyticsProtocolEventSubscriber:
 def _is_relevant_protocol_event(message: str | bytes) -> bool:
     decoded = _decode_protocol_event(message)
     return (
-        decoded is not None
-        and decoded.get("method") in ANALYTICS_LIFECYCLE_EVENT_METHODS
+        decoded is not None and decoded.get("method") in ANALYTICS_LIFECYCLE_EVENT_METHODS
     )
 
 

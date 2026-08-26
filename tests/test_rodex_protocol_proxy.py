@@ -198,7 +198,10 @@ def test_context_observer_animates_compaction_then_restores_fresh_usage() -> Non
 
 def test_proxy_forwards_both_directions_and_counts_server_tool_items(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from rodex import protocol_proxy as proxy_module
+
     app_socket = tmp_path / "app.sock"
     proxy_socket = tmp_path / "proxy.sock"
     client_message = json.dumps({"method": "thread/read", "id": 7, "params": {}})
@@ -215,11 +218,20 @@ def test_proxy_forwards_both_directions_and_counts_server_tool_items(
     upstream_thread.start()
     counts: list[int] = []
     observed_events: list[str | bytes] = []
+    decode_calls = 0
+    original_decode = proxy_module._json_object
+
+    def count_decode(message: str | bytes) -> dict[str, object] | None:
+        nonlocal decode_calls
+        decode_calls += 1
+        return original_decode(message)
+
+    monkeypatch.setattr(proxy_module, "_json_object", count_decode)
     proxy = CodexProtocolProxy(
         proxy_socket,
         app_socket,
         ToolCallCounter(counts.append),
-        observed_events.append,
+        lambda message, _event: observed_events.append(message),
     )
     try:
         proxy.start()
@@ -237,6 +249,7 @@ def test_proxy_forwards_both_directions_and_counts_server_tool_items(
     assert received_by_server == [client_message]
     assert counts == [1]
     assert observed_events == [server_message]
+    assert decode_calls == 1
     assert not proxy_socket.exists()
 
 
@@ -260,7 +273,7 @@ def test_proxy_hands_primary_event_ownership_to_a_reconnecting_tui(tmp_path: Pat
         proxy_socket,
         app_socket,
         ToolCallCounter(lambda _count: None),
-        observed_events.append,
+        lambda message, _event: observed_events.append(message),
     )
     try:
         proxy.start()

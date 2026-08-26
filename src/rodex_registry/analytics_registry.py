@@ -68,6 +68,8 @@ class RodexAnalyticsRegistry:
             runtime_id=runtime_id,
             codex_session_id=expected_codex_session_id,
         )
+        self._model_name_ids: dict[str, int] = {}
+        self._reasoning_effort_name_ids: dict[str, int] = {}
 
     @classmethod
     def open(
@@ -115,8 +117,10 @@ class RodexAnalyticsRegistry:
         self, publication: RodexAnalyticsPublication
     ) -> RodexAnalyticsPublishReceipt:
         """Publish one identity-fenced calculation through the registry API."""
+        model_name_ids = dict(self._model_name_ids)
+        reasoning_effort_name_ids = dict(self._reasoning_effort_name_ids)
         try:
-            return publish_rodex_session_statistics(
+            receipt = publish_rodex_session_statistics(
                 self._identity.rodex_sessions_id,
                 self._database_path,
                 expected_current_codex_session_id=self._identity.codex_session_id,
@@ -134,6 +138,8 @@ class RodexAnalyticsRegistry:
                 changed_source_thread_ids=publication.changed_source_thread_ids,
                 changed_turn_keys=publication.changed_turn_keys,
                 removed_turn_keys=publication.removed_turn_keys,
+                model_name_ids=model_name_ids,
+                reasoning_effort_name_ids=reasoning_effort_name_ids,
             )
         except sqlite3.OperationalError as error:
             error_code = getattr(error, "sqlite_errorcode", 0)
@@ -142,6 +148,9 @@ class RodexAnalyticsRegistry:
                     "analytics publication was blocked by a transient SQLite lock"
                 ) from error
             raise
+        self._model_name_ids = model_name_ids
+        self._reasoning_effort_name_ids = reasoning_effort_name_ids
+        return receipt
 
     def record_health_transition(
         self,
@@ -154,10 +163,13 @@ class RodexAnalyticsRegistry:
         prior_consecutive_failures: int | None = None,
     ) -> RodexSessionStatisticsWorker:
         """Persist one health transition while preserving last-good statistics."""
-        if prior_consecutive_failures is None:
-            prior = self.load_checkpoint().worker
-            prior_consecutive_failures = 0 if prior is None else prior.consecutive_failures
-        consecutive_failures = prior_consecutive_failures + 1 if failed else 0
+        consecutive_failures = (
+            None
+            if failed and prior_consecutive_failures is None
+            else (prior_consecutive_failures or 0) + 1
+            if failed
+            else 0
+        )
         return record_rodex_session_statistics_worker_health(
             self._identity.rodex_sessions_id,
             self._database_path,
@@ -167,5 +179,6 @@ class RodexAnalyticsRegistry:
             diagnostic_code=diagnostic_code,
             last_attempted_at_utc=attempted_at_utc,
             consecutive_failures=consecutive_failures,
+            increment_failure=failed and prior_consecutive_failures is None,
             next_retry_at_utc=next_retry_at_utc,
         )

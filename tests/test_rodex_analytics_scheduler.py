@@ -187,8 +187,23 @@ def test_burst_hard_deadline_never_moves_after_the_first_event() -> None:
     assert burst.deadline == 5.0
 
 
+def test_dirty_quiet_deadline_never_regresses_between_producers() -> None:
+    observed_times = iter((2.0, 1.0))
+    scheduler = AnalyticsEventScheduler(
+        quiet_seconds=0.5,
+        max_batch_seconds=5.0,
+        monotonic=lambda: next(observed_times),
+    )
+
+    scheduler.offer_dirty(THREAD_ID)
+    scheduler.offer_dirty(SECOND_THREAD_ID)
+
+    assert scheduler._pending_deadline() == 2.5
+
+
 def test_continuously_ready_queue_cannot_starve_the_hard_batch_deadline() -> None:
     clock = [0.0]
+
     class ContinuouslyReadyQueue:
         def put_nowait(self, _signal: object) -> None:
             return

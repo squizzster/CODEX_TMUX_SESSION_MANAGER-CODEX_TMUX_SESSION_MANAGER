@@ -173,6 +173,8 @@ def _subagent_rollout(
     root: Path,
     root_thread_id: uuid.UUID,
     child_thread_id: uuid.UUID,
+    *,
+    linked_at_utc: str = "2026-08-16T12:00:00.500000Z",
 ) -> Path:
     path = root / "2026" / "08" / "16" / f"rollout-child-{child_thread_id}.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -184,7 +186,7 @@ def _subagent_rollout(
     }
     records = [
         {
-            "timestamp": "2026-08-16T12:00:00.500000Z",
+            "timestamp": linked_at_utc,
             "ordinal": 0,
             "type": "session_meta",
             "payload": {
@@ -192,7 +194,7 @@ def _subagent_rollout(
                 "id": str(child_thread_id),
                 "forked_from_id": str(root_thread_id),
                 "parent_thread_id": str(root_thread_id),
-                "timestamp": "2026-08-16T12:00:00.500000Z",
+                "timestamp": linked_at_utc,
                 "source": {"subagent": {"thread_spawn": spawn}},
                 "thread_source": "subagent",
                 "agent_path": "/root/review",
@@ -742,6 +744,123 @@ def test_live_batch_loads_checkpoint_once_and_reads_only_its_exact_source(
     assert adapter.appended_analyses[-1] == (addition,)
 
 
+def test_mixed_batch_publishes_resolved_source_and_retains_unresolved_identity(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    root_rollout = _rollout(config.codex_sessions_root, CODEX_SESSION_ID)
+    _create(config)
+    adapter = FakeAnalyticsAdapter()
+    worker = AnalyticsRolloutWorker(config, adapter_factory=lambda: adapter)
+    assert worker.poll_once() == "up_to_date"
+    missing_child_id = uuid.UUID(int=CODEX_SESSION_ID.int + 200)
+    worker.observe_protocol_event(
+        {
+            "method": "thread/started",
+            "params": {
+                "thread": {
+                    "id": str(missing_child_id),
+                    "createdAt": "2026-08-16T12:00:01.500000Z",
+                }
+            },
+        }
+    )
+    root_addition = (
+        b'{"timestamp":"2026-08-16T12:01:00Z","type":"event_msg",'
+        b'"payload":{"type":"task_started","turn_id":"turn-next"}}\n'
+    )
+    with root_rollout.open("ab") as output:
+        output.write(root_addition)
+
+    state = worker.poll_once(
+        AnalyticsDirtyBatch(frozenset({CODEX_SESSION_ID, missing_child_id}))
+    )
+
+    assert state == "catching_up"
+    assert adapter.appended_analyses[-1] == (root_addition,)
+    statistics = read_rodex_session_statistics(1, config.rodex_database_path).statistics
+    assert statistics is not None
+    assert statistics.statistics_publication_sequence == 2
+    assert worker.poll_once(AnalyticsDirtyBatch(frozenset())) == "catching_up"
+    assert len(adapter.analyses) == 2
+    _subagent_rollout(
+        config.codex_sessions_root,
+        CODEX_SESSION_ID,
+        missing_child_id,
+    )
+
+    assert (
+        worker.poll_once(AnalyticsDirtyBatch(frozenset({CODEX_SESSION_ID}))) == "up_to_date"
+    )
+    assert missing_child_id in adapter.source_ids
+
+
+def test_new_child_batch_reads_its_exact_parent_dependency_without_full_replay(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from rodex import analytics as analytics_module
+
+    config = _config(tmp_path)
+    root_rollout = _rollout(config.codex_sessions_root, CODEX_SESSION_ID)
+    _create(config)
+    worker = AnalyticsRolloutWorker(config)
+    assert worker.poll_once() == "up_to_date"
+    child_thread_id = uuid.UUID(int=CODEX_SESSION_ID.int + 100)
+    child_rollout = _subagent_rollout(
+        config.codex_sessions_root,
+        CODEX_SESSION_ID,
+        child_thread_id,
+        linked_at_utc="2026-08-16T12:00:01.500000Z",
+    )
+    worker.observe_protocol_event(
+        {
+            "method": "thread/started",
+            "params": {
+                "thread": {
+                    "id": str(child_thread_id),
+                    "createdAt": "2026-08-16T12:00:01.500000Z",
+                }
+            },
+        }
+    )
+    read_paths: list[Path] = []
+    original_read = worker._source_reader.read
+
+    def record_read(source: object) -> object:
+        read_paths.append(source.path)  # type: ignore[attr-defined]
+        return original_read(source)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(worker._source_reader, "read", record_read)
+    assert worker._adapter is not None
+    monkeypatch.setattr(
+        worker._adapter._analyzer,  # type: ignore[attr-defined]
+        "report",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("full report called")),
+    )
+    errors: list[Exception] = []
+
+    def remember_error(error: Exception) -> str:
+        errors.append(error)
+        return "captured_error"
+
+    monkeypatch.setattr(analytics_module, "_diagnostic_code", remember_error)
+
+    state = worker.poll_once(AnalyticsDirtyBatch(frozenset({child_thread_id})))
+
+    assert state == "up_to_date", repr(errors)
+
+    assert read_paths == [root_rollout.resolve(), child_rollout.resolve()]
+    view = read_rodex_session_statistics(1, config.rodex_database_path)
+    assert view.statistics is not None
+    assert view.statistics.statistics_publication_sequence == 2
+    assert view.statistics.projection.collaboration_agents_started_count == 1
+    assert len(view.sources) == 2
+    exact = read_rodex_session_turn_statistics(1, "turn-test", config.rodex_database_path)
+    assert exact.turn is not None
+    assert exact.turn.projection.collaboration_agents_started_count == 1
+
+
 def test_unchanged_rollout_does_not_recalculate_but_append_does(tmp_path: Path) -> None:
     config = _config(tmp_path)
     rollout = _rollout(config.codex_sessions_root, CODEX_SESSION_ID)
@@ -1075,7 +1194,7 @@ def test_transient_publication_retry_reuses_the_prepared_analysis(
 
     assert worker.poll_once() == "degraded"
     assert adapter.accepted_batches == 0
-    assert worker.poll_once(AnalyticsDirtyBatch(frozenset())) == "pending_append"
+    assert worker.poll_once(AnalyticsDirtyBatch(frozenset())) == "up_to_date"
 
     assert publications[0] is publications[1]
     assert read_calls == 1
@@ -1269,9 +1388,19 @@ def test_rollout_locator_rejects_a_matching_fifo_without_blocking(
     assert locate_verified_rollout(root, CODEX_SESSION_ID) is None
 
 
-def test_supervisor_start_failure_is_fail_open_and_health_only(tmp_path: Path) -> None:
+def test_supervisor_start_failure_is_fail_open_and_health_only(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     config = _config(tmp_path)
     _create(config)
+    monkeypatch.setattr(
+        RodexAnalyticsRegistry,
+        "load_checkpoint",
+        lambda _registry: (_ for _ in ()).throw(
+            AssertionError("supervisor health opened a read transaction")
+        ),
+    )
 
     def fail_start(*_args: object, **_kwargs: object) -> subprocess.Popen[bytes]:
         raise OSError("cannot fork analytics")
@@ -1421,11 +1550,23 @@ def test_real_worker_publishes_only_the_incrementally_changed_turn(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from rodex_registry import statistics as statistics_module
+
     config = _config(tmp_path)
     _create(config)
     rollout = _rollout(config.codex_sessions_root, CODEX_SESSION_ID)
     publications: list[RodexAnalyticsPublication] = []
+    lookup_resolutions: list[tuple[str, str]] = []
     original_publish = RodexAnalyticsRegistry.publish
+    original_lookup = statistics_module.select_or_insert_lookup_id
+
+    def record_lookup(
+        connection: sqlite3.Connection,
+        table_name: str,
+        lookup_values: dict[str, object],
+    ) -> int:
+        lookup_resolutions.append((table_name, str(next(iter(lookup_values.values())))))
+        return original_lookup(connection, table_name, lookup_values)
 
     def remember_publication(
         registry: RodexAnalyticsRegistry,
@@ -1435,8 +1576,32 @@ def test_real_worker_publishes_only_the_incrementally_changed_turn(
         return original_publish(registry, publication)
 
     monkeypatch.setattr(RodexAnalyticsRegistry, "publish", remember_publication)
+    monkeypatch.setattr(
+        statistics_module,
+        "select_or_insert_lookup_id",
+        record_lookup,
+    )
     worker = AnalyticsRolloutWorker(config)
     assert worker.poll_once() == "up_to_date"
+
+    class ResidentTurns(dict[tuple[uuid.UUID, str], TurnStatisticsProjection]):
+        def __iter__(self) -> object:
+            raise AssertionError("resident turn history was iterated")
+
+        def items(self) -> object:
+            raise AssertionError("resident turn history was scanned")
+
+        def keys(self) -> object:
+            raise AssertionError("resident turn keys were scanned")
+
+        def values(self) -> object:
+            raise AssertionError("resident turn values were scanned")
+
+        def copy(self) -> object:
+            raise AssertionError("resident turn history was copied")
+
+    assert worker._published_turns is not None
+    worker._published_turns = ResidentTurns(worker._published_turns)
     second_turn = [
         {
             "timestamp": "2026-08-16T12:01:01Z",
@@ -1462,17 +1627,19 @@ def test_real_worker_publishes_only_the_incrementally_changed_turn(
         output.writelines(json.dumps(record) + "\n" for record in second_turn)
 
     assert (
-        worker.poll_once(AnalyticsDirtyBatch(frozenset({CODEX_SESSION_ID})))
-        == "up_to_date"
+        worker.poll_once(AnalyticsDirtyBatch(frozenset({CODEX_SESSION_ID}))) == "up_to_date"
     )
 
     assert len(publications) == 2
     incremental = publications[1]
     assert incremental.changed_turn_keys == {(CODEX_SESSION_ID, "turn-second")}
     assert [
-        turn.codex_turn_id
-        for turn in incremental.statistics_projection.turn_statistics
+        turn.codex_turn_id for turn in incremental.statistics_projection.turn_statistics
     ] == ["turn-second"]
+    assert lookup_resolutions == [
+        ("model_names", "gpt-test"),
+        ("reasoning_effort_names", "xhigh"),
+    ]
     assert (
         read_rodex_session_turn_statistics(
             1,

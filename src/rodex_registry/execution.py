@@ -81,6 +81,18 @@ class RodexSessionCodexThreadObservation:
     history_inheritance_kind: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class RodexSessionCodexRolloutSource:
+    """One current or historical authenticated rollout-prefix reference."""
+
+    codex_thread_id: CodexThreadId
+    rollout_file_path: str
+    analyzed_size_bytes: int
+    analyzed_mtime_ns: int
+    analyzed_prefix_sha256: str
+    verified_at_utc: str
+
+
 def list_rodex_session_codex_threads(
     session_id: int,
     database_path: str | os.PathLike[str] | None = None,
@@ -91,6 +103,47 @@ def list_rodex_session_codex_threads(
     with open_rodex_read_transaction(path) as connection:
         rows = select_codex_threads_in_transaction(connection, session_id)
     return tuple(codex_thread_from_row(row) for row in rows)
+
+
+def list_rodex_session_codex_rollout_sources(
+    session_id: int,
+    database_path: str | os.PathLike[str] | None = None,
+) -> tuple[RodexSessionCodexRolloutSource, ...]:
+    """Read authenticated prefixes for all current and historical memberships."""
+    _validate_session_id(session_id)
+    path = existing_rodex_database_path(database_path)
+    with open_rodex_read_transaction(path) as connection:
+        rows = connection.execute(
+            f"SELECT identities.codex_thread_public_id_signed_bigint_1, "
+            "identities.codex_thread_public_id_signed_bigint_2, "
+            "rollouts.rollout_file_path, checkpoints.analyzed_size_bytes, "
+            "checkpoints.analyzed_mtime_ns, checkpoints.analyzed_prefix_sha256, "
+            "checkpoints.verified_at_utc "
+            f"FROM {RODEX_SESSIONS_CODEX_THREADS_TABLE} AS memberships "
+            f"JOIN {CODEX_THREADS_TABLE} AS identities "
+            "ON identities.id = memberships.codex_threads_id "
+            f"JOIN {RODEX_SESSIONS_CODEX_ROLLOUT_SOURCES_TABLE} AS rollouts "
+            "ON rollouts.rodex_sessions_codex_threads_id = memberships.id "
+            f"JOIN {RODEX_SESSIONS_ANALYTICS_WORKERS_TABLE} AS workers "
+            "ON workers.rodex_sessions_id = memberships.rodex_sessions_id "
+            f"JOIN {RODEX_SESSIONS_ANALYTICS_WORKER_THREAD_CHECKPOINTS_TABLE} "
+            "AS checkpoints ON checkpoints.rodex_sessions_analytics_workers_id = "
+            "workers.id AND checkpoints.rodex_sessions_codex_rollout_sources_id = "
+            "rollouts.id WHERE memberships.rodex_sessions_id = ? "
+            "ORDER BY memberships.id",
+            (session_id,),
+        ).fetchall()
+    return tuple(
+        RodexSessionCodexRolloutSource(
+            codex_thread_id=join_signed_bigints_into_a_codex_thread_id(row[0], row[1]),
+            rollout_file_path=str(row[2]),
+            analyzed_size_bytes=int(row[3]),
+            analyzed_mtime_ns=int(row[4]),
+            analyzed_prefix_sha256=str(row[5]),
+            verified_at_utc=str(row[6]),
+        )
+        for row in rows
+    )
 
 
 def select_codex_threads_in_transaction(

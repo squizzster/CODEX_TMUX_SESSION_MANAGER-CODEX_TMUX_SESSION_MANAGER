@@ -115,6 +115,8 @@ modified only by an agent suggestion followed by user agreement.
   append-only event stream: the resident hot path extends this digest from suffix bytes
   only, while cold startup, clean replay, and explicit body reads re-hash the durable
   accepted prefix.
+  Clean replay invalidates cached verified lineage metadata together with reader state;
+  no source can reuse pre-recovery parent, depth, path, nickname, or inheritance facts.
   This avoids a full historical reread for every emitted record without presenting the
   digest as continuous hostile-file authentication. Composite session/row foreign keys
   prevent a worker checkpoint from joining another session's worker or rollout. This
@@ -156,7 +158,9 @@ modified only by an agent suggestion followed by user agreement.
   unrecognized-record count. Statistics and trace publication sequences are separate
   domains even though the worker commits both projections atomically. Each append
   advances those counts from the persisted head plus newly inserted rows; it never
-  recounts the historical event ledger.
+  recounts the historical event ledger. Coverage is cumulative at this boundary: a
+  prior `gapped` head remains gapped, and a nonzero cumulative unrecognized-record count
+  cannot be published as `complete`.
 - `rodex_sessions_agent_trace_events` is the append-only event ledger. Its natural key
   is `(Codex thread row, rollout record ordinal, derived event ordinal)`. Each event has
   a bounded kind, non-null canonical activity-scope foreign key, timestamp, and first
@@ -171,7 +175,9 @@ modified only by an agent suggestion followed by user agreement.
   contexts, token usage, rate-limit windows, and sub-agent activities. There are no JSON
   columns. SQL stores bounded metadata and body byte counts; message, command, tool, and
   output bodies remain references to the authenticated rollout by default. Explicit
-  body reads re-hash the recorded prefix and redact hidden reasoning and encrypted text.
+  body reads select authenticated rollout checkpoints for all current and historical
+  session memberships, re-hash each requested prefix, and redact hidden reasoning and
+  encrypted text through the same shared classifier used during normalization.
   Message, command, and tool satellites carry the same activity-scope ID plus a literal
   event kind and exact composite foreign keys to their event and optional item/tool-call
   rows. Every typed detail rejects update and delete after publication. SQL therefore

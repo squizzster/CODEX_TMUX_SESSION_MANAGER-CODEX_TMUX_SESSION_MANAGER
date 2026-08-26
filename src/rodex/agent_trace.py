@@ -22,6 +22,8 @@ from rodex_registry import (
     parse_codex_turn_id,
 )
 
+from .agent_trace_privacy import contains_codex_encrypted_value
+
 AGENT_TRACE_SCHEMA_VERSION = "rodex-agent-trace-v1"
 type AgentTraceSource = (
     tuple[CodexThreadId, bytes] | tuple[CodexThreadId, bytes, int | Sequence[int]]
@@ -566,7 +568,7 @@ def _capture_state(value: object) -> str:
     if value is None or value == "" or value == [] or value == {}:
         return "unavailable"
     rendered = value if isinstance(value, str) else json.dumps(value, default=str)
-    if "gAAAA" in rendered:
+    if contains_codex_encrypted_value(rendered):
         return "encrypted"
     return "rollout_reference" if rendered else "unavailable"
 

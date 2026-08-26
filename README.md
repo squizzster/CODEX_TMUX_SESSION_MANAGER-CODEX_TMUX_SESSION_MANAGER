@@ -272,10 +272,11 @@ an append-only typed agent trace. Each session host runs a low-priority, fail-op
 sidecar whose event scheduler blocks while idle, batches
 activity for a 0.5-second quiet period with a five-second ceiling, and resolves only the
 exact Codex thread identities named by bounded semantic wake events. A resident analyzer
-consumes only newline-complete appended bytes after initial registration; it neither recursively
-scans the sessions tree nor repeatedly reloads unchanged rollout prefixes. Bounded
-catch-up and one clean replay cover races and recoverable faults without an unbounded
-polling or retry loop.
+consumes only newline-complete appended bytes after initial registration; it neither
+recursively scans the sessions tree nor repeatedly reloads unchanged rollout prefixes.
+Bounded catch-up and one clean replay cover races and recoverable faults without an
+unbounded polling or retry loop. Clean replay invalidates cached verified lineage
+metadata together with byte-reader and analyzer state before re-authenticating sources.
 
 Cold lineage recovery first uses exact 128-bit child identities named by lifecycle or
 parent activity. For historical runs whose spawn result carried only an agent path, one
@@ -307,11 +308,13 @@ memberships, rollout-source provenance, lineage, item/tool-call aliases, and eve
 published typed trace detail reject update and delete. A canonical tool call may fill
 its initially unknown tool name once; its identity and verified name are then final.
 Trace publication totals advance incrementally rather than recounting the historical
-ledger.
-`_trace --include-bodies` deliberately re-reads and re-hashes the recorded prefix;
-hidden reasoning and encrypted values remain redacted. Canonical rollout paths and
-SHA-256 digests are sensitive local metadata, so the database remains private to its
-POSIX user. Codex remains responsible for raw history. Each session's
+ledger. Coverage is cumulative: a prior durable gap remains gapped, and any retained
+unrecognized record prevents a complete claim.
+`_trace --include-bodies` deliberately re-reads and re-hashes recorded prefixes for
+current or historical thread memberships; hidden reasoning and encrypted values remain
+redacted through the same privacy classifier used during normalization. Canonical
+rollout paths and SHA-256 digests are sensitive local metadata, so the database remains
+private to its POSIX user. Codex remains responsible for raw history. Each session's
 `statistics_publication_sequence` starts at one and advances only when a changed,
 authenticated projection is published. It is a consistency and concurrency token, not
 a turn count or retained history; only the latest successful snapshot remains in Rodex

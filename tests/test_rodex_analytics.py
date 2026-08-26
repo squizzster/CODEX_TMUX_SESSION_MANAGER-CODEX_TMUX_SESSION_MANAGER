@@ -1458,6 +1458,7 @@ def test_stale_publication_head_reloads_sql_cursor_before_accepting_later_append
     stale = AnalyticsRolloutWorker(config, adapter_factory=stale_adapter_factory)
     assert leading.poll_once() == "up_to_date"
     assert stale.poll_once() == "up_to_date"
+    assert CODEX_SESSION_ID in stale._verified_sources
     accepted_baseline = rollout.read_bytes()
     leader_append = b'{"type":"leader-append","payload":{}}\n'
     with rollout.open("ab") as output:
@@ -1465,6 +1466,7 @@ def test_stale_publication_head_reloads_sql_cursor_before_accepting_later_append
 
     assert leading.poll_once() == "up_to_date"
     assert stale.poll_once() == "clean_replay"
+    assert stale._verified_sources == {}
     later_append = b'{"type":"later-append","payload":{}}\n'
     with rollout.open("ab") as output:
         output.write(later_append)
@@ -1827,16 +1829,22 @@ def test_failed_analysis_resets_resident_state_for_one_clean_replay(
     rollout = _rollout(config.codex_sessions_root, CODEX_SESSION_ID)
     _create(config)
     failed = FakeAnalyticsAdapter()
-    failed.fail = True
     recovered = FakeAnalyticsAdapter()
     adapters = iter((failed, recovered))
     worker = AnalyticsRolloutWorker(config, adapter_factory=lambda: next(adapters))
 
+    assert worker.poll_once() == "up_to_date"
+    assert CODEX_SESSION_ID in worker._verified_sources
+    addition = b'{"type":"event_msg","payload":{"changed":true}}\n'
+    with rollout.open("ab") as output:
+        output.write(addition)
+    failed.fail = True
     assert worker.poll_once() == "clean_replay"
+    assert worker._verified_sources == {}
     assert worker.poll_once() == "up_to_date"
 
     assert recovered.analyses[0][0] == (rollout.read_bytes(),)
-    assert recovered.appended_analyses[0] == (rollout.read_bytes(),)
+    assert recovered.appended_analyses[0] == (addition,)
 
 
 def test_analyzer_schema_drift_degrades_without_replacing_relational_snapshot(

@@ -229,7 +229,7 @@ def publish_agent_trace_in_transaction(
     _validate_session_id(session_id)
     current = connection.execute(
         f"SELECT trace_publication_sequence, durable_event_count, "
-        "unrecognized_record_count FROM "
+        "unrecognized_record_count, coverage_state FROM "
         f"{RODEX_SESSIONS_AGENT_TRACE_PUBLICATIONS_TABLE} "
         "WHERE rodex_sessions_id = ?",
         (session_id,),
@@ -237,6 +237,7 @@ def publish_agent_trace_in_transaction(
     current_sequence = None if current is None else int(current[0])
     prior_event_count = 0 if current is None else int(current[1])
     prior_unrecognized_count = 0 if current is None else int(current[2])
+    prior_coverage = None if current is None else str(current[3])
     if current_sequence != publication.based_on_trace_publication_sequence:
         raise RodexSessionStatisticsConflictError(
             "agent trace publication sequence changed during calculation"
@@ -362,6 +363,8 @@ def publish_agent_trace_in_transaction(
         )
     durable_event_count = prior_event_count + inserted_event_count
     unrecognized_count = prior_unrecognized_count + inserted_unrecognized_count
+    if prior_coverage == "gapped" or unrecognized_count:
+        coverage = "gapped"
     values = (
         sequence,
         schema_version,

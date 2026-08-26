@@ -261,6 +261,7 @@ def _create_managed_session(
         session = create_a_rodex_session(
             resolved_database,
             codex_session_id=codex_session_id,
+            user_defined_cool_name=requested_name,
             rodex_session_id=planned_rodex_session_id,
             tmux_server_socket_path=live_runtime.tmux_server_socket_path,
             tmux_session_name=live_runtime.tmux_session_name,

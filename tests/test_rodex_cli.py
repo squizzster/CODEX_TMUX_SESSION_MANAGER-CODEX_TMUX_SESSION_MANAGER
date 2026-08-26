@@ -8,7 +8,7 @@ import sys
 import uuid
 from dataclasses import replace
 from pathlib import Path
-from threading import Event, Lock, Thread, current_thread
+from threading import Barrier, Event, Lock, Thread, current_thread
 from typing import Any
 
 import pytest
@@ -44,6 +44,7 @@ from rodex_registry import (
     RodexSessionsUserIdentity,
     assign_a_user_defined_cool_name,
     create_a_rodex_session,
+    initialise_rodex_database,
     lookup_codex_session_id_from_a_rodex_sessions_id,
     lookup_rodex_registry_id,
     lookup_rodex_runtime_instance,
@@ -2051,6 +2052,86 @@ def test_explicit_create_assigns_the_requested_display_name(
     tmux_link = lookup_rodex_tmux_session(1, database)
     assert tmux_link is not None
     assert tmux_link.tmux_session_name == "project_1234"
+
+
+def test_concurrent_requested_name_creation_leaves_only_the_successful_session(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database = tmp_path / "rodex.sqlite3"
+    monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
+    monkeypatch.setattr(
+        "rodex_registry.lifecycle.current_rodex_sessions_user_identity", lambda: DNA
+    )
+    monkeypatch.setattr(
+        "cool_name.functions.coolname.generate_slug",
+        lambda _count: f"{current_thread().name}-generated",
+    )
+    initialise_rodex_database(database)
+    both_prechecks_completed = Barrier(2)
+
+    class ConcurrentCreateLauncher(StubLauncher):
+        def __init__(self, codex_session_id: uuid.UUID) -> None:
+            super().__init__(tmp_path)
+            self.observed_codex_session_id = codex_session_id
+            self.runtime = replace(
+                self.runtime,
+                tmux_session_name=f"rodex-{codex_session_id.hex[-8:]}",
+            )
+
+        def start(self, *args: object, **kwargs: object):  # type: ignore[no-untyped-def]
+            result = super().start(*args, **kwargs)
+            both_prechecks_completed.wait(timeout=5)
+            return result
+
+    outcomes: list[str] = []
+    unexpected_errors: list[BaseException] = []
+    outcome_lock = Lock()
+
+    def create_requested_session(
+        launcher: ConcurrentCreateLauncher,
+    ) -> None:
+        try:
+            run(
+                ["_create", "same-name"],
+                database_path=database,
+                launcher=launcher,  # type: ignore[arg-type]
+            )
+        except RodexSessionError:
+            outcome = "collision"
+        except BaseException as error:
+            with outcome_lock:
+                unexpected_errors.append(error)
+            return
+        else:
+            outcome = "created"
+        with outcome_lock:
+            outcomes.append(outcome)
+
+    threads = (
+        Thread(
+            target=create_requested_session,
+            args=(ConcurrentCreateLauncher(CODEX_SESSION_ID),),
+            name="first-create",
+        ),
+        Thread(
+            target=create_requested_session,
+            args=(ConcurrentCreateLauncher(REPLACEMENT_CODEX_SESSION_ID),),
+            name="second-create",
+        ),
+    )
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=5)
+
+    assert all(not thread.is_alive() for thread in threads)
+    assert unexpected_errors == []
+    assert sorted(outcomes) == ["collision", "created"]
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM rodex_sessions").fetchone() == (1,)
+    winning_session_id = lookup_rodex_sessions_id_from_a_cool_name("same-name", database)
+    assert winning_session_id == 1
 
 
 @pytest.mark.parametrize("create_flag", ["_create"])

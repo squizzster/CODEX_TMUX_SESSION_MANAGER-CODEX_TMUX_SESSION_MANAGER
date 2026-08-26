@@ -163,6 +163,7 @@ def create_a_rodex_session(
     database_path: str | os.PathLike[str] | None = None,
     *,
     codex_session_id: CodexSessionId | str,
+    user_defined_cool_name: str | None = None,
     rodex_session_id: RodexSessionId | str | None = None,
     user_identity: RodexSessionsUserIdentity | None = None,
     tmux_server_socket_path: str | os.PathLike[str] | None = None,
@@ -287,6 +288,16 @@ def create_a_rodex_session(
                     session.rodex_sessions_id,
                     parsed_runtime_id,
                     created_at_utc,
+                )
+            if user_defined_cool_name is not None:
+                _apply_user_defined_cool_name_assignment(
+                    connection,
+                    session.cool_name,
+                    user_defined_cool_name,
+                    identity,
+                    force=False,
+                    mutate=True,
+                    renamed_tmux_session_name=None,
                 )
             return session
         raise RodexSessionIdCollisionError(

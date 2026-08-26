@@ -239,8 +239,8 @@ pipeline. SQLite stores each Rodex-owned ID losslessly in one signed `BIGINT` an
 enforces its domain uniqueness. Codex session IDs remain Codex-owned 128-bit values and
 are stored losslessly across two `BIGINT` columns.
 
-Version 9 is an incompatible ALPHA schema with no v8 reader or migration path. Rodex
-leaves `rodex-v8.sqlite3` and earlier generations untouched; explicitly selecting one
+Version 10 is an incompatible ALPHA schema with no v9 reader or migration path. Rodex
+leaves `rodex-v9.sqlite3` and earlier generations untouched; explicitly selecting one
 fails exact schema verification rather than falling back or rewriting it.
 
 Short-lived Unix sockets and app-server logs use `$XDG_RUNTIME_DIR/rodex`, normally
@@ -259,19 +259,26 @@ sockets persistent; refreshes stop when the owning session ends.
 
 The Rodex registry also stores authenticated rollout provenance, independent analytics
 worker health, and the latest successful derived statistics snapshot. Each session host
-runs a low-priority, fail-open sidecar that analyzes complete JSONL record prefixes in a
-fresh in-memory analyzer. Rodex persists typed session/turn columns plus normalized
-distribution and named-count rows. Model and reasoning effort remain separate nullable
-turn facts whose stable integer IDs reference dedicated lookup tables; their session
-counts are derived from those exact turn rows. Metrics therefore remain directly
-queryable and JSON output can be rebuilt deterministically. Rodex never stores copied
-prompts, responses, commands, tool output, raw events, or redundant statistics JSON.
-Canonical rollout paths and SHA-256 digests are sensitive local metadata, so the
-database remains private to its POSIX user. Codex remains responsible for raw history.
-Each session's `statistics_publication_sequence` starts at one and advances whenever a
-changed authenticated rollout prefix is successfully published. It is a consistency
-and concurrency token, not a turn count or retained history; only the latest successful
-snapshot remains in Rodex SQL.
+runs a low-priority, fail-open sidecar whose event scheduler blocks while idle, batches
+activity for a 0.5-second quiet period with a five-second ceiling, and resolves only the
+exact Codex thread identities named by lifecycle events. A resident analyzer consumes
+only newline-complete appended bytes after initial registration; it neither recursively
+scans the sessions tree nor repeatedly reloads unchanged rollout prefixes. Bounded
+catch-up and one clean replay cover races and recoverable faults without an unbounded
+polling or retry loop.
+
+Rodex persists typed session/turn columns plus normalized distribution and named-count
+rows. Model and reasoning effort remain separate nullable turn facts whose stable
+integer IDs reference dedicated lookup tables; their session counts are derived from
+those exact turn rows. Metrics therefore remain directly queryable and JSON output can
+be rebuilt deterministically. Rodex never stores copied prompts, responses, commands,
+tool output, raw events, or redundant statistics JSON. Canonical rollout paths and
+SHA-256 digests are sensitive local metadata, so the database remains private to its
+POSIX user. Codex remains responsible for raw history. Each session's
+`statistics_publication_sequence` starts at one and advances only when a changed,
+authenticated projection is published. It is a consistency and concurrency token, not
+a turn count or retained history; only the latest successful snapshot remains in Rodex
+SQL.
 
 ## Documentation
 

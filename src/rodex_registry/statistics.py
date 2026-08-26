@@ -475,30 +475,39 @@ def publish_rodex_session_statistics(
                 "turn statistics include a source outside the analyzed snapshot"
             )
 
-        statistics_row = connection.execute(
-            f"INSERT INTO {RODEX_SESSIONS_STATISTICS_TABLE} "
-            "(rodex_sessions_id, statistics_publication_sequence, "
-            "statistics_projection_schema_version, calculated_at_utc, "
-            f"coverage_state, {SESSION_STATISTICS_SCALARS.columns_sql}) "
-            f"VALUES (?, ?, ?, ?, ?, {SESSION_STATISTICS_SCALARS.placeholders_sql}) "
-            "ON CONFLICT(rodex_sessions_id) DO UPDATE SET "
-            "statistics_publication_sequence = "
-            "excluded.statistics_publication_sequence, "
-            "statistics_projection_schema_version = "
-            "excluded.statistics_projection_schema_version, "
-            "calculated_at_utc = excluded.calculated_at_utc, "
-            "coverage_state = excluded.coverage_state, "
-            f"{SESSION_STATISTICS_SCALARS.excluded_updates_sql} "
-            "RETURNING id",
-            (
-                session_id,
-                new_publication_sequence,
-                schema_version,
-                calculated,
-                coverage,
-                *SESSION_STATISTICS_SCALARS.write_values(statistics_projection),
-            ),
-        ).fetchone()
+        aggregate_values = (
+            new_publication_sequence,
+            schema_version,
+            calculated,
+            coverage,
+            *SESSION_STATISTICS_SCALARS.write_values(statistics_projection),
+        )
+        if previous_publication_sequence is None:
+            statistics_row = connection.execute(
+                f"INSERT INTO {RODEX_SESSIONS_STATISTICS_TABLE} "
+                "(rodex_sessions_id, statistics_publication_sequence, "
+                "statistics_projection_schema_version, calculated_at_utc, "
+                f"coverage_state, {SESSION_STATISTICS_SCALARS.columns_sql}) "
+                f"VALUES (?, ?, ?, ?, ?, "
+                f"{SESSION_STATISTICS_SCALARS.placeholders_sql}) RETURNING id",
+                (session_id, *aggregate_values),
+            ).fetchone()
+        else:
+            aggregate_assignments = ", ".join(
+                f"{column} = ?"
+                for column in (
+                    "statistics_publication_sequence",
+                    "statistics_projection_schema_version",
+                    "calculated_at_utc",
+                    "coverage_state",
+                    *SESSION_STATISTICS_SCALARS.columns,
+                )
+            )
+            statistics_row = connection.execute(
+                f"UPDATE {RODEX_SESSIONS_STATISTICS_TABLE} "
+                f"SET {aggregate_assignments} WHERE rodex_sessions_id = ? RETURNING id",
+                (*aggregate_values, session_id),
+            ).fetchone()
         if statistics_row is None:
             raise RodexSessionError("statistics upsert returned no identity")
         _sync_session_projection_children(connection, session_id, statistics_projection)
@@ -569,53 +578,56 @@ def publish_rodex_session_statistics(
                 raise RodexSessionStatisticsConflictError(
                     "turn ID digest collision during statistics publication"
                 )
-            row = connection.execute(
-                f"INSERT INTO {RODEX_SESSIONS_STATISTICS_TURNS_TABLE} "
-                "(rodex_sessions_id, rodex_sessions_statistics_sources_id, "
-                "codex_turn_id_sha256_int_1, codex_turn_id_sha256_int_2, "
-                "codex_turn_id_sha256_int_3, codex_turn_id_sha256_int_4, "
-                "codex_turn_id, started_at_utc, "
-                "terminal_at_utc, outcome, model_names_id, "
-                "reasoning_effort_names_id, "
-                f"{TURN_STATISTICS_SCALARS.columns_sql}) "
-                f"VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
-                f"{TURN_STATISTICS_SCALARS.placeholders_sql}) "
-                "ON CONFLICT(rodex_sessions_statistics_sources_id, "
-                "codex_turn_id_sha256_int_1, codex_turn_id_sha256_int_2, "
-                "codex_turn_id_sha256_int_3, codex_turn_id_sha256_int_4) "
-                "DO UPDATE SET started_at_utc = excluded.started_at_utc, "
-                "terminal_at_utc = excluded.terminal_at_utc, "
-                "outcome = excluded.outcome, "
-                "model_names_id = excluded.model_names_id, "
-                "reasoning_effort_names_id = excluded.reasoning_effort_names_id, "
-                f"{TURN_STATISTICS_SCALARS.excluded_updates_sql} "
-                "WHERE started_at_utc IS NOT excluded.started_at_utc "
-                "OR terminal_at_utc IS NOT excluded.terminal_at_utc "
-                "OR outcome IS NOT excluded.outcome "
-                "OR model_names_id IS NOT excluded.model_names_id "
-                "OR reasoning_effort_names_id IS NOT "
-                "excluded.reasoning_effort_names_id "
-                f"OR {TURN_STATISTICS_SCALARS.excluded_changes_sql} "
-                "RETURNING id",
-                (
-                    session_id,
-                    source_id,
-                    *turn_hash,
-                    item.codex_turn_id,
-                    item.started_at_utc,
-                    item.terminal_at_utc,
-                    item.outcome,
-                    model_names_id,
-                    reasoning_effort_names_id,
-                    *TURN_STATISTICS_SCALARS.write_values(item),
-                ),
-            ).fetchone()
-            if row is None:
-                if existing is None:
-                    raise RodexSessionError("turn statistics upsert returned no identity")
-                turn_row_id = int(existing[0])
-            else:
+            turn_values = (
+                item.started_at_utc,
+                item.terminal_at_utc,
+                item.outcome,
+                model_names_id,
+                reasoning_effort_names_id,
+                *TURN_STATISTICS_SCALARS.write_values(item),
+            )
+            if existing is None:
+                row = connection.execute(
+                    f"INSERT INTO {RODEX_SESSIONS_STATISTICS_TURNS_TABLE} "
+                    "(rodex_sessions_id, rodex_sessions_statistics_sources_id, "
+                    "codex_turn_id_sha256_int_1, codex_turn_id_sha256_int_2, "
+                    "codex_turn_id_sha256_int_3, codex_turn_id_sha256_int_4, "
+                    "codex_turn_id, started_at_utc, terminal_at_utc, outcome, "
+                    "model_names_id, reasoning_effort_names_id, "
+                    f"{TURN_STATISTICS_SCALARS.columns_sql}) "
+                    f"VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
+                    f"{TURN_STATISTICS_SCALARS.placeholders_sql}) RETURNING id",
+                    (
+                        session_id,
+                        source_id,
+                        *turn_hash,
+                        item.codex_turn_id,
+                        *turn_values,
+                    ),
+                ).fetchone()
+                if row is None:
+                    raise RodexSessionError(
+                        "turn statistics insertion returned no identity"
+                    )
                 turn_row_id = int(row[0])
+            else:
+                turn_columns = (
+                    "started_at_utc",
+                    "terminal_at_utc",
+                    "outcome",
+                    "model_names_id",
+                    "reasoning_effort_names_id",
+                    *TURN_STATISTICS_SCALARS.columns,
+                )
+                row = connection.execute(
+                    f"UPDATE {RODEX_SESSIONS_STATISTICS_TURNS_TABLE} SET "
+                    + ", ".join(f"{column} = ?" for column in turn_columns)
+                    + " WHERE id = ? AND ("
+                    + " OR ".join(f"{column} IS NOT ?" for column in turn_columns)
+                    + ") RETURNING id",
+                    (*turn_values, int(existing[0]), *turn_values),
+                ).fetchone()
+                turn_row_id = int(existing[0] if row is None else row[0])
             turn_row_ids[(item.codex_thread_id, item.codex_turn_id)] = turn_row_id
             _sync_turn_named_counts(
                 connection,
@@ -1204,10 +1216,11 @@ def _sync_session_projection_children(
 ) -> None:
     """Synchronize bounded aggregate children without rewriting equal rows."""
     distributions = {item.distribution_kind: item for item in projection.distributions}
-    stored_distribution_kinds = {
-        str(row[0])
+    stored_distributions = {
+        str(row[0]): tuple(row[1:])
         for row in connection.execute(
-            f"SELECT distribution_kind FROM "
+            "SELECT distribution_kind, observation_count, total, median, p75, p90, "
+            "p95, maximum FROM "
             f"{RODEX_SESSIONS_STATISTICS_DISTRIBUTIONS_TABLE} "
             "WHERE rodex_sessions_id = ?",
             (session_id,),
@@ -1216,15 +1229,7 @@ def _sync_session_projection_children(
     connection.executemany(
         f"INSERT INTO {RODEX_SESSIONS_STATISTICS_DISTRIBUTIONS_TABLE} "
         "(rodex_sessions_id, distribution_kind, observation_count, total, median, "
-        "p75, p90, p95, maximum) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
-        "ON CONFLICT(rodex_sessions_id, distribution_kind) DO UPDATE SET "
-        "observation_count = excluded.observation_count, total = excluded.total, "
-        "median = excluded.median, p75 = excluded.p75, p90 = excluded.p90, "
-        "p95 = excluded.p95, maximum = excluded.maximum "
-        "WHERE observation_count IS NOT excluded.observation_count "
-        "OR total IS NOT excluded.total OR median IS NOT excluded.median "
-        "OR p75 IS NOT excluded.p75 OR p90 IS NOT excluded.p90 "
-        "OR p95 IS NOT excluded.p95 OR maximum IS NOT excluded.maximum",
+        "p75, p90, p95, maximum) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             (
                 session_id,
@@ -1237,13 +1242,44 @@ def _sync_session_projection_children(
                 item.p95,
                 item.maximum,
             )
-            for item in distributions.values()
+            for key, item in distributions.items()
+            if key not in stored_distributions
+        ),
+    )
+    connection.executemany(
+        f"UPDATE {RODEX_SESSIONS_STATISTICS_DISTRIBUTIONS_TABLE} SET "
+        "observation_count = ?, total = ?, median = ?, p75 = ?, p90 = ?, p95 = ?, "
+        "maximum = ? WHERE rodex_sessions_id = ? AND distribution_kind = ?",
+        (
+            (
+                item.observation_count,
+                item.total,
+                item.median,
+                item.p75,
+                item.p90,
+                item.p95,
+                item.maximum,
+                session_id,
+                key,
+            )
+            for key, item in distributions.items()
+            if key in stored_distributions
+            and stored_distributions[key]
+            != (
+                item.observation_count,
+                item.total,
+                item.median,
+                item.p75,
+                item.p90,
+                item.p95,
+                item.maximum,
+            )
         ),
     )
     connection.executemany(
         f"DELETE FROM {RODEX_SESSIONS_STATISTICS_DISTRIBUTIONS_TABLE} "
         "WHERE rodex_sessions_id = ? AND distribution_kind = ?",
-        ((session_id, key) for key in stored_distribution_kinds - distributions.keys()),
+        ((session_id, key) for key in stored_distributions.keys() - distributions.keys()),
     )
 
     named_counts = {
@@ -1251,10 +1287,10 @@ def _sync_session_projection_children(
         for item in projection.named_counts
         if item.count_kind not in _DERIVED_SESSION_NAMED_COUNT_KINDS
     }
-    stored_named_count_keys = {
-        (str(row[0]), str(row[1]))
+    stored_named_counts = {
+        (str(row[0]), str(row[1])): int(row[2])
         for row in connection.execute(
-            f"SELECT count_kind, count_name FROM "
+            f"SELECT count_kind, count_name, occurrence_count FROM "
             f"{RODEX_SESSIONS_STATISTICS_NAMED_COUNTS_TABLE} "
             "WHERE rodex_sessions_id = ?",
             (session_id,),
@@ -1263,13 +1299,22 @@ def _sync_session_projection_children(
     connection.executemany(
         f"INSERT INTO {RODEX_SESSIONS_STATISTICS_NAMED_COUNTS_TABLE} "
         "(rodex_sessions_id, count_kind, count_name, occurrence_count) "
-        "VALUES (?, ?, ?, ?) "
-        "ON CONFLICT(rodex_sessions_id, count_kind, count_name) DO UPDATE SET "
-        "occurrence_count = excluded.occurrence_count "
-        "WHERE occurrence_count IS NOT excluded.occurrence_count",
+        "VALUES (?, ?, ?, ?)",
         (
             (session_id, item.count_kind, item.count_name, item.occurrence_count)
-            for item in named_counts.values()
+            for key, item in named_counts.items()
+            if key not in stored_named_counts
+        ),
+    )
+    connection.executemany(
+        f"UPDATE {RODEX_SESSIONS_STATISTICS_NAMED_COUNTS_TABLE} "
+        "SET occurrence_count = ? WHERE rodex_sessions_id = ? "
+        "AND count_kind = ? AND count_name = ?",
+        (
+            (item.occurrence_count, session_id, *key)
+            for key, item in named_counts.items()
+            if key in stored_named_counts
+            and stored_named_counts[key] != item.occurrence_count
         ),
     )
     connection.executemany(
@@ -1277,15 +1322,15 @@ def _sync_session_projection_children(
         "WHERE rodex_sessions_id = ? AND count_kind = ? AND count_name = ?",
         (
             (session_id, count_kind, count_name)
-            for count_kind, count_name in stored_named_count_keys - named_counts.keys()
+            for count_kind, count_name in stored_named_counts.keys() - named_counts.keys()
         ),
     )
 
     audit_limits = dict(enumerate(projection.audit_limits))
-    stored_audit_limit_ordinals = {
-        int(row[0])
+    stored_audit_limits = {
+        int(row[0]): str(row[1])
         for row in connection.execute(
-            f"SELECT limit_ordinal FROM "
+            f"SELECT limit_ordinal, limitation FROM "
             f"{RODEX_SESSIONS_STATISTICS_AUDIT_LIMITS_TABLE} "
             "WHERE rodex_sessions_id = ?",
             (session_id,),
@@ -1293,18 +1338,28 @@ def _sync_session_projection_children(
     }
     connection.executemany(
         f"INSERT INTO {RODEX_SESSIONS_STATISTICS_AUDIT_LIMITS_TABLE} "
-        "(rodex_sessions_id, limit_ordinal, limitation) VALUES (?, ?, ?) "
-        "ON CONFLICT(rodex_sessions_id, limit_ordinal) DO UPDATE SET "
-        "limitation = excluded.limitation "
-        "WHERE limitation IS NOT excluded.limitation",
-        ((session_id, ordinal, limitation) for ordinal, limitation in audit_limits.items()),
+        "(rodex_sessions_id, limit_ordinal, limitation) VALUES (?, ?, ?)",
+        (
+            (session_id, ordinal, limitation)
+            for ordinal, limitation in audit_limits.items()
+            if ordinal not in stored_audit_limits
+        ),
+    )
+    connection.executemany(
+        f"UPDATE {RODEX_SESSIONS_STATISTICS_AUDIT_LIMITS_TABLE} SET limitation = ? "
+        "WHERE rodex_sessions_id = ? AND limit_ordinal = ?",
+        (
+            (limitation, session_id, ordinal)
+            for ordinal, limitation in audit_limits.items()
+            if ordinal in stored_audit_limits and stored_audit_limits[ordinal] != limitation
+        ),
     )
     connection.executemany(
         f"DELETE FROM {RODEX_SESSIONS_STATISTICS_AUDIT_LIMITS_TABLE} "
         "WHERE rodex_sessions_id = ? AND limit_ordinal = ?",
         (
             (session_id, ordinal)
-            for ordinal in stored_audit_limit_ordinals - audit_limits.keys()
+            for ordinal in stored_audit_limits.keys() - audit_limits.keys()
         ),
     )
 
@@ -1320,10 +1375,10 @@ def _sync_turn_named_counts(
         for item in named_counts
         if item.count_kind != "collaboration_tool"
     }
-    stored_keys = {
-        (str(row[0]), str(row[1]))
+    stored = {
+        (str(row[0]), str(row[1])): int(row[2])
         for row in connection.execute(
-            f"SELECT count_kind, count_name FROM "
+            f"SELECT count_kind, count_name, occurrence_count FROM "
             f"{RODEX_SESSIONS_STATISTICS_TURN_NAMED_COUNTS_TABLE} "
             "WHERE rodex_sessions_statistics_turns_id = ?",
             (turn_row_id,),
@@ -1332,10 +1387,7 @@ def _sync_turn_named_counts(
     connection.executemany(
         f"INSERT INTO {RODEX_SESSIONS_STATISTICS_TURN_NAMED_COUNTS_TABLE} "
         "(rodex_sessions_id, rodex_sessions_statistics_turns_id, count_kind, "
-        "count_name, occurrence_count) VALUES (?, ?, ?, ?, ?) "
-        "ON CONFLICT(rodex_sessions_statistics_turns_id, count_kind, count_name) "
-        "DO UPDATE SET occurrence_count = excluded.occurrence_count "
-        "WHERE occurrence_count IS NOT excluded.occurrence_count",
+        "count_name, occurrence_count) VALUES (?, ?, ?, ?, ?)",
         (
             (
                 session_id,
@@ -1344,7 +1396,18 @@ def _sync_turn_named_counts(
                 item.count_name,
                 item.occurrence_count,
             )
-            for item in desired.values()
+            for key, item in desired.items()
+            if key not in stored
+        ),
+    )
+    connection.executemany(
+        f"UPDATE {RODEX_SESSIONS_STATISTICS_TURN_NAMED_COUNTS_TABLE} "
+        "SET occurrence_count = ? WHERE rodex_sessions_statistics_turns_id = ? "
+        "AND count_kind = ? AND count_name = ?",
+        (
+            (item.occurrence_count, turn_row_id, *key)
+            for key, item in desired.items()
+            if key in stored and stored[key] != item.occurrence_count
         ),
     )
     connection.executemany(
@@ -1353,7 +1416,7 @@ def _sync_turn_named_counts(
         "AND count_kind = ? AND count_name = ?",
         (
             (turn_row_id, count_kind, count_name)
-            for count_kind, count_name in stored_keys - desired.keys()
+            for count_kind, count_name in stored.keys() - desired.keys()
         ),
     )
 
@@ -1796,23 +1859,29 @@ def _upsert_statistics_worker(
     consecutive_failures: int,
     next_retry_at_utc: str | None,
 ) -> None:
+    values = (
+        worker_state,
+        diagnostic_code,
+        last_attempted_at_utc,
+        consecutive_failures,
+        next_retry_at_utc,
+    )
+    row = connection.execute(
+        f"UPDATE {RODEX_SESSIONS_STATISTICS_WORKERS_TABLE} SET "
+        "worker_state = ?, diagnostic_code = ?, last_attempted_at_utc = ?, "
+        "consecutive_failures = ?, next_retry_at_utc = ? "
+        "WHERE rodex_sessions_id = ? RETURNING id",
+        (*values, session_id),
+    ).fetchone()
+    if row is not None:
+        return
     connection.execute(
         f"INSERT INTO {RODEX_SESSIONS_STATISTICS_WORKERS_TABLE} "
         "(rodex_sessions_id, worker_state, diagnostic_code, last_attempted_at_utc, "
-        "consecutive_failures, next_retry_at_utc) VALUES (?, ?, ?, ?, ?, ?) "
-        "ON CONFLICT(rodex_sessions_id) DO UPDATE SET "
-        "worker_state = excluded.worker_state, "
-        "diagnostic_code = excluded.diagnostic_code, "
-        "last_attempted_at_utc = excluded.last_attempted_at_utc, "
-        "consecutive_failures = excluded.consecutive_failures, "
-        "next_retry_at_utc = excluded.next_retry_at_utc",
+        "consecutive_failures, next_retry_at_utc) VALUES (?, ?, ?, ?, ?, ?)",
         (
             session_id,
-            worker_state,
-            diagnostic_code,
-            last_attempted_at_utc,
-            consecutive_failures,
-            next_retry_at_utc,
+            *values,
         ),
     )
 

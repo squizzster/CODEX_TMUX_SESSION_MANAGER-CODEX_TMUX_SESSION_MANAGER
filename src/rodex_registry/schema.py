@@ -54,9 +54,6 @@ RODEX_SESSIONS_STATISTICS_TABLE: Final = "rodex_sessions_statistics"
 RODEX_SESSIONS_STATISTICS_SESSION_UNIQUE_INDEX: Final = (
     "rodex_sessions_statistics_rodex_sessions_id_unique"
 )
-RODEX_SESSIONS_STATISTICS_SESSION_PUBLICATION_SEQUENCE_UNIQUE_INDEX: Final = (
-    "rodex_sessions_statistics_session_publication_sequence_unique"
-)
 RODEX_SESSIONS_STATISTICS_DISTRIBUTIONS_TABLE: Final = (
     "rodex_sessions_statistics_distributions"
 )
@@ -431,12 +428,6 @@ CREATE TABLE IF NOT EXISTS {RODEX_SESSIONS_STATISTICS_TABLE} (
 _CREATE_STATISTICS_SESSION_UNIQUE_INDEX = f"""
 CREATE UNIQUE INDEX IF NOT EXISTS {RODEX_SESSIONS_STATISTICS_SESSION_UNIQUE_INDEX}
 ON {RODEX_SESSIONS_STATISTICS_TABLE} (rodex_sessions_id)
-"""
-_CREATE_STATISTICS_SESSION_PUBLICATION_SEQUENCE_UNIQUE_INDEX = f"""
-CREATE UNIQUE INDEX IF NOT EXISTS
-    {RODEX_SESSIONS_STATISTICS_SESSION_PUBLICATION_SEQUENCE_UNIQUE_INDEX}
-ON {RODEX_SESSIONS_STATISTICS_TABLE}
-    (rodex_sessions_id, statistics_publication_sequence)
 """
 _CREATE_STATISTICS_DISTRIBUTIONS_TABLE = f"""
 CREATE TABLE IF NOT EXISTS {RODEX_SESSIONS_STATISTICS_DISTRIBUTIONS_TABLE} (
@@ -941,12 +932,9 @@ def initialise_rodex_database(database_path: str | os.PathLike[str] | None = Non
             RODEX_SESSIONS_STATISTICS_SESSION_UNIQUE_INDEX,
             ["rodex_sessions_id"],
         )
-        connection.execute(_CREATE_STATISTICS_SESSION_PUBLICATION_SEQUENCE_UNIQUE_INDEX)
-        _verify_unique_index(
-            connection,
-            RODEX_SESSIONS_STATISTICS_TABLE,
-            RODEX_SESSIONS_STATISTICS_SESSION_PUBLICATION_SEQUENCE_UNIQUE_INDEX,
-            ["rodex_sessions_id", "statistics_publication_sequence"],
+        connection.execute(
+            "DROP INDEX IF EXISTS "
+            "rodex_sessions_statistics_session_publication_sequence_unique"
         )
         connection.execute(_CREATE_STATISTICS_DISTRIBUTIONS_TABLE)
         _verify_statistics_distributions_table(connection)

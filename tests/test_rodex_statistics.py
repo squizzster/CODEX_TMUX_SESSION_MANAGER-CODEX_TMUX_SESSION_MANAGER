@@ -685,9 +685,7 @@ def test_delta_publication_preserves_identity_and_replaces_changed_children(
         based_on=1,
         projection=second_projection,
         changed_source_thread_ids=frozenset(),
-        changed_turn_keys=frozenset(
-            {(CODEX_SESSION_ID, "a"), (CODEX_SESSION_ID, "c")}
-        ),
+        changed_turn_keys=frozenset({(CODEX_SESSION_ID, "a"), (CODEX_SESSION_ID, "c")}),
         removed_turn_keys=frozenset({(CODEX_SESSION_ID, "b")}),
     )
 
@@ -733,10 +731,7 @@ def test_publication_failure_rolls_back_every_relational_fact(
     stable = read_rodex_session_turn_statistics(1, "stable", database).turn
     assert current is not None
     assert current.id == before.statistics_id
-    assert (
-        current.statistics_publication_sequence
-        == before.statistics_publication_sequence
-    )
+    assert current.statistics_publication_sequence == before.statistics_publication_sequence
     assert stable is not None and stable.projection.total_tokens == 10
     assert read_rodex_session_turn_statistics(1, "new", database).turn is None
     with sqlite3.connect(database) as connection:
@@ -854,6 +849,7 @@ def test_exact_turn_delta_does_not_touch_unchanged_large_history(tmp_path: Path)
     projection = _projection(turns)
     _publish(database, tmp_path, projection=projection)
     with sqlite3.connect(database) as connection:
+        sequence_before = dict(connection.execute("SELECT name, seq FROM sqlite_sequence"))
         connection.executescript(
             "CREATE TABLE turn_write_audit(operation TEXT NOT NULL);"
             "CREATE TRIGGER audit_turn_insert "
@@ -885,9 +881,16 @@ def test_exact_turn_delta_does_not_touch_unchanged_large_history(tmp_path: Path)
         assert connection.execute(
             "SELECT COUNT(*) FROM rodex_sessions_statistics_turns"
         ).fetchone() == (1_100,)
-        assert connection.execute(
-            "SELECT operation FROM turn_write_audit"
-        ).fetchall() == [("update",)]
+        assert connection.execute("SELECT operation FROM turn_write_audit").fetchall() == [
+            ("update",)
+        ]
+        assert dict(connection.execute("SELECT name, seq FROM sqlite_sequence")) == (
+            sequence_before
+        )
+        assert "rodex_sessions_statistics_session_publication_sequence_unique" not in {
+            str(row[1])
+            for row in connection.execute("PRAGMA index_list(rodex_sessions_statistics)")
+        }
 
 
 def test_stale_codex_session_id_and_publication_sequence_fences_preserve_rows(

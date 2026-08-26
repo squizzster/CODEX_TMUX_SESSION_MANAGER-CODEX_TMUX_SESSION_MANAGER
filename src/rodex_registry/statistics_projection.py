@@ -19,6 +19,7 @@ __all__ = [
     "StatisticsProjectionError",
     "TurnStatisticsProjection",
     "parse_session_statistics_snapshot",
+    "parse_turn_statistics_snapshot",
     "session_statistics_as_dict",
     "turn_statistics_as_dict",
     "validate_session_statistics_projection",
@@ -432,6 +433,8 @@ def turn_statistics_as_dict(projection: TurnStatisticsProjection) -> dict[str, o
 
 def validate_session_statistics_projection(
     projection: SessionStatisticsProjection,
+    *,
+    complete_turn_statistics: bool = True,
 ) -> SessionStatisticsProjection:
     """Re-parse a typed value so direct constructors cannot bypass the contract."""
     if not isinstance(projection, SessionStatisticsProjection):
@@ -460,7 +463,8 @@ def validate_session_statistics_projection(
             "revision": 1,
             **aggregate,
             "turn_statistics": turns,
-        }
+        },
+        complete_turn_statistics=complete_turn_statistics,
     )
 
 
@@ -616,6 +620,8 @@ _DISTRIBUTION_KEYS: Final = frozenset({"n", "total", "median", "p75", "p90", "p9
 
 def parse_session_statistics_snapshot(
     snapshot_mapping: Mapping[str, object],
+    *,
+    complete_turn_statistics: bool = True,
 ) -> SessionStatisticsProjection:
     """Parse one complete current analyzer snapshot or reject the whole projection."""
     snapshot = _exact_mapping(snapshot_mapping, _SNAPSHOT_KEYS, "snapshot")
@@ -800,48 +806,51 @@ def parse_session_statistics_snapshot(
         raise StatisticsProjectionError(
             "typical_turn_anatomy.turns must equal turns.started"
         )
-    if len(turn_statistics) != started_count:
-        raise StatisticsProjectionError("turn_statistics must contain every started turn")
-    observed_outcomes = {
-        outcome: sum(item.outcome == outcome for item in turn_statistics)
-        for outcome in ("completed", "aborted", "open")
-    }
-    expected_outcomes = {
-        "completed": completed_count,
-        "aborted": aborted_count,
-        "open": open_count,
-    }
-    if observed_outcomes != expected_outcomes:
-        raise StatisticsProjectionError(
-            "turn_statistics outcomes must equal aggregate turn outcomes"
+    if complete_turn_statistics:
+        if len(turn_statistics) != started_count:
+            raise StatisticsProjectionError(
+                "turn_statistics must contain every started turn"
+            )
+        observed_outcomes = {
+            outcome: sum(item.outcome == outcome for item in turn_statistics)
+            for outcome in ("completed", "aborted", "open")
+        }
+        expected_outcomes = {
+            "completed": completed_count,
+            "aborted": aborted_count,
+            "open": open_count,
+        }
+        if observed_outcomes != expected_outcomes:
+            raise StatisticsProjectionError(
+                "turn_statistics outcomes must equal aggregate turn outcomes"
+            )
+        observed_models = Counter(
+            item.model for item in turn_statistics if item.model is not None
         )
-    observed_models = Counter(
-        item.model for item in turn_statistics if item.model is not None
-    )
-    if _count_map(named_counts, "model") != dict(observed_models):
-        raise StatisticsProjectionError(
-            "aggregate model counts must equal final turn model values"
+        if _count_map(named_counts, "model") != dict(observed_models):
+            raise StatisticsProjectionError(
+                "aggregate model counts must equal final turn model values"
+            )
+        observed_reasoning_efforts = Counter(
+            item.reasoning_effort
+            for item in turn_statistics
+            if item.reasoning_effort is not None
         )
-    observed_reasoning_efforts = Counter(
-        item.reasoning_effort
-        for item in turn_statistics
-        if item.reasoning_effort is not None
-    )
-    if _count_map(named_counts, "reasoning_effort") != dict(observed_reasoning_efforts):
-        raise StatisticsProjectionError(
-            "aggregate reasoning effort counts must equal final turn values"
-        )
-    observed_workspaces = {
-        item.workspace_digest
-        for item in turn_statistics
-        if item.workspace_digest is not None
-    }
-    if _nonnegative_int(
-        workspaces["distinct_workspaces"], "workspaces.distinct_workspaces"
-    ) != len(observed_workspaces):
-        raise StatisticsProjectionError(
-            "distinct workspace count must equal final turn workspace values"
-        )
+        if _count_map(named_counts, "reasoning_effort") != dict(observed_reasoning_efforts):
+            raise StatisticsProjectionError(
+                "aggregate reasoning effort counts must equal final turn values"
+            )
+        observed_workspaces = {
+            item.workspace_digest
+            for item in turn_statistics
+            if item.workspace_digest is not None
+        }
+        if _nonnegative_int(
+            workspaces["distinct_workspaces"], "workspaces.distinct_workspaces"
+        ) != len(observed_workspaces):
+            raise StatisticsProjectionError(
+                "distinct workspace count must equal final turn workspace values"
+            )
 
     input_tokens = _nonnegative_int(token_usage["input_tokens"], "token_usage.input_tokens")
     cached_tokens = _nonnegative_int(
@@ -1085,6 +1094,11 @@ def _turns(value: object) -> tuple[TurnStatisticsProjection, ...]:
             "snapshot.turn_statistics contains a duplicate identity"
         )
     return parsed
+
+
+def parse_turn_statistics_snapshot(value: Mapping[str, object]) -> TurnStatisticsProjection:
+    """Parse one analyzer turn report without materializing session history."""
+    return _turn(value, 0)
 
 
 def _turn(value: object, index: int) -> TurnStatisticsProjection:

@@ -1417,6 +1417,80 @@ def test_real_worker_publishes_exact_turn_projection_into_rodex_sql(
     assert exact.turn.projection.reasoning_effort == "xhigh"
 
 
+def test_real_worker_publishes_only_the_incrementally_changed_turn(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+    _create(config)
+    rollout = _rollout(config.codex_sessions_root, CODEX_SESSION_ID)
+    publications: list[RodexAnalyticsPublication] = []
+    original_publish = RodexAnalyticsRegistry.publish
+
+    def remember_publication(
+        registry: RodexAnalyticsRegistry,
+        publication: RodexAnalyticsPublication,
+    ) -> object:
+        publications.append(publication)
+        return original_publish(registry, publication)
+
+    monkeypatch.setattr(RodexAnalyticsRegistry, "publish", remember_publication)
+    worker = AnalyticsRolloutWorker(config)
+    assert worker.poll_once() == "up_to_date"
+    second_turn = [
+        {
+            "timestamp": "2026-08-16T12:01:01Z",
+            "type": "event_msg",
+            "payload": {"type": "task_started", "turn_id": "turn-second"},
+        },
+        {
+            "timestamp": "2026-08-16T12:01:02Z",
+            "type": "turn_context",
+            "payload": {
+                "turn_id": "turn-second",
+                "model": "gpt-test",
+                "effort": "xhigh",
+            },
+        },
+        {
+            "timestamp": "2026-08-16T12:01:03Z",
+            "type": "event_msg",
+            "payload": {"type": "task_complete", "turn_id": "turn-second"},
+        },
+    ]
+    with rollout.open("a", encoding="utf-8") as output:
+        output.writelines(json.dumps(record) + "\n" for record in second_turn)
+
+    assert (
+        worker.poll_once(AnalyticsDirtyBatch(frozenset({CODEX_SESSION_ID})))
+        == "up_to_date"
+    )
+
+    assert len(publications) == 2
+    incremental = publications[1]
+    assert incremental.changed_turn_keys == {(CODEX_SESSION_ID, "turn-second")}
+    assert [
+        turn.codex_turn_id
+        for turn in incremental.statistics_projection.turn_statistics
+    ] == ["turn-second"]
+    assert (
+        read_rodex_session_turn_statistics(
+            1,
+            "turn-test",
+            config.rodex_database_path,
+        ).turn
+        is not None
+    )
+    assert (
+        read_rodex_session_turn_statistics(
+            1,
+            "turn-second",
+            config.rodex_database_path,
+        ).turn
+        is not None
+    )
+
+
 @pytest.mark.parametrize(
     "load_status, load_value, expected_coverage, raises",
     [

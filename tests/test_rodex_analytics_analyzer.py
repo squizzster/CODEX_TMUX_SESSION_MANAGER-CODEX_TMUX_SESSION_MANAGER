@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from dataclasses import replace
 
 import pytest
 
@@ -91,6 +92,70 @@ def test_stateful_analyzer_matches_full_replay_at_every_record_boundary() -> Non
         stateful.accept_batch()
         final = stateful.analyze_rollouts([_source(full, suffix)], "test-user")
         assert final == oracle
+
+
+def test_incremental_projection_materializes_only_the_changed_turn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first_turn = _records()
+    second_turn = [
+        {
+            "timestamp": "2026-08-16T12:01:01Z",
+            "type": "event_msg",
+            "payload": {"type": "task_started", "turn_id": "turn-b"},
+        },
+        {
+            "timestamp": "2026-08-16T12:01:02Z",
+            "type": "turn_context",
+            "payload": {"turn_id": "turn-b", "model": "gpt-test", "effort": "xhigh"},
+        },
+        {
+            "timestamp": "2026-08-16T12:01:03Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "task_complete",
+                "turn_id": "turn-b",
+                "duration_ms": 2_000,
+            },
+        },
+    ]
+    prefix = _content(first_turn)
+    suffix = _content(second_turn)
+    full = prefix + suffix
+    adapter = StatefulCodexProtocolAnalyticsAdapter()
+    adapter.analyze_rollouts([_source(prefix, prefix)], "test-user")
+    adapter.accept_batch()
+    turn_reports = 0
+    original_turn_report = adapter._analyzer._turn_statistical_report
+
+    def count_turn_report(turn: object) -> object:
+        nonlocal turn_reports
+        turn_reports += 1
+        return original_turn_report(turn)
+
+    monkeypatch.setattr(adapter._analyzer, "_turn_statistical_report", count_turn_report)
+    monkeypatch.setattr(
+        adapter._analyzer,
+        "report",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("full report called")),
+    )
+
+    incremental = adapter.analyze_rollouts([_source(full, suffix)], "test-user")
+    oracle = CodexProtocolAnalyticsAdapter().analyze_rollouts(
+        [_source(full, full)], "test-user"
+    )
+
+    assert [
+        turn.codex_turn_id for turn in incremental.statistics_projection.turn_statistics
+    ] == ["turn-b"]
+    assert turn_reports == 1
+    assert (
+        replace(
+            incremental.statistics_projection,
+            turn_statistics=oracle.statistics_projection.turn_statistics,
+        )
+        == oracle.statistics_projection
+    )
 
 
 def test_unaccepted_stateful_batch_extends_without_double_counting() -> None:

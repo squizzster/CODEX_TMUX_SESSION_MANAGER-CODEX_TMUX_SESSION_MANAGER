@@ -8,6 +8,7 @@ import shutil
 import signal
 import subprocess
 import sys
+from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, replace
@@ -152,6 +153,28 @@ def _changed_observation_thread_ids(
     return frozenset(changed)
 
 
+def _merge_source_observations(
+    accepted: Mapping[CodexThreadId, RodexSessionStatisticsSourceObservation],
+    stable_reads: Sequence[StableRolloutRead],
+) -> dict[CodexThreadId, RodexSessionStatisticsSourceObservation]:
+    merged = dict(accepted)
+    for read in stable_reads:
+        observation = read.observation
+        prior = accepted.get(observation.codex_thread_id)
+        if prior is not None:
+            observation = replace(
+                observation,
+                spawning_codex_turn_id=prior.spawning_codex_turn_id,
+            )
+        merged[observation.codex_thread_id] = observation
+    return dict(
+        sorted(
+            merged.items(),
+            key=lambda item: (item[1].thread_depth, str(item[0])),
+        )
+    )
+
+
 class AnalyticsRolloutWorker:
     """Watch verified rollouts and project aggregate statistics into Rodex SQLite."""
 
@@ -283,28 +306,44 @@ class AnalyticsRolloutWorker:
                 for item in stable_reads
             )
             append_arrived_during_analysis = any(source_growth)
-            verified_collaboration = _derive_verified_collaboration_projection(
-                calculation.statistics_projection,
-                analyzed_sources=tuple(
-                    sorted(
-                        (
-                            accepted_observations
-                            | {
-                                item.observation.codex_thread_id: item.observation
-                                for item in stable_reads
-                            }
-                        ).values(),
-                        key=lambda item: (
-                            item.thread_depth,
-                            str(item.codex_thread_id),
-                        ),
-                    )
-                ),
-            )
-            current_turns = _turns_by_key(
-                verified_collaboration.statistics_projection.turn_statistics
+            next_observations = _merge_source_observations(
+                accepted_observations,
+                stable_reads,
             )
             previous_turns = self._published_turns
+            calculated_turns = _turns_by_key(
+                calculation.statistics_projection.turn_statistics
+            )
+            merged_turns = dict(previous_turns or {})
+            merged_turns.update(calculated_turns)
+            new_source_arrived = any(
+                thread_id not in accepted_observations
+                for thread_id in changed_source_thread_ids
+            )
+            if previous_turns is None or new_source_arrived:
+                verified_collaboration = _derive_verified_collaboration_projection(
+                    replace(
+                        calculation.statistics_projection,
+                        turn_statistics=tuple(merged_turns.values()),
+                    ),
+                    analyzed_sources=tuple(next_observations.values()),
+                )
+                current_turns = _turns_by_key(
+                    verified_collaboration.statistics_projection.turn_statistics
+                )
+            else:
+                verified_collaboration = (
+                    _derive_incremental_verified_collaboration_projection(
+                        calculation.statistics_projection,
+                        analyzed_sources=tuple(next_observations.values()),
+                    )
+                )
+                current_turns = dict(previous_turns)
+                current_turns.update(
+                    _turns_by_key(
+                        verified_collaboration.statistics_projection.turn_statistics
+                    )
+                )
             changed_turn_keys = (
                 None
                 if previous_turns is None
@@ -326,6 +365,16 @@ class AnalyticsRolloutWorker:
                 != STATISTICS_PROJECTION_SCHEMA_VERSION
             )
             if should_publish:
+                publication_projection = (
+                    verified_collaboration.statistics_projection
+                    if changed_turn_keys is None
+                    else replace(
+                        verified_collaboration.statistics_projection,
+                        turn_statistics=tuple(
+                            current_turns[key] for key in sorted(changed_turn_keys, key=str)
+                        ),
+                    )
+                )
                 publication = RodexAnalyticsPublication(
                     based_on_statistics_publication_sequence=self._publication_sequence,
                     statistics_projection_schema_version=(
@@ -333,7 +382,7 @@ class AnalyticsRolloutWorker:
                     ),
                     calculated_at_utc=self._timestamp(),
                     coverage_state=calculation.coverage_state,
-                    statistics_projection=verified_collaboration.statistics_projection,
+                    statistics_projection=publication_projection,
                     analyzed_sources=tuple(verified_collaboration.analyzed_sources),
                     changed_source_thread_ids=changed_source_thread_ids,
                     changed_turn_keys=changed_turn_keys,
@@ -1203,6 +1252,61 @@ def _derive_verified_collaboration_projection(
             )
             for source in sources
         ),
+    )
+
+
+def _derive_incremental_verified_collaboration_projection(
+    projection: SessionStatisticsProjection,
+    *,
+    analyzed_sources: Sequence[RodexSessionStatisticsSourceObservation],
+) -> VerifiedCollaborationProjection:
+    """Decorate only analyzer-changed turns from resident verified source lineage."""
+    sources = tuple(analyzed_sources)
+    sources_by_thread = {item.codex_thread_id: item for item in sources}
+    if len(sources_by_thread) != len(sources):
+        raise RodexAnalyticsError(
+            "verified collaboration sources contain a duplicate thread"
+        )
+    children_started_by_turn: Counter[tuple[CodexThreadId, str]] = Counter()
+    for source in sources:
+        parent_thread_id = source.parent_codex_thread_id
+        if parent_thread_id is None:
+            continue
+        if parent_thread_id not in sources_by_thread:
+            raise RodexAnalyticsError(
+                f"verified sub-agent has no parent source: {source.codex_thread_id}"
+            )
+        spawning_turn_id = source.spawning_codex_turn_id
+        if spawning_turn_id is None:
+            raise RodexAnalyticsError(
+                f"verified sub-agent has no spawning turn: {source.codex_thread_id}"
+            )
+        children_started_by_turn[(parent_thread_id, spawning_turn_id)] += 1
+    projected_turns = tuple(
+        _derive_verified_turn_collaboration(
+            turn,
+            agents_started=children_started_by_turn.get(
+                (turn.codex_thread_id, turn.codex_turn_id),
+                0,
+            ),
+        )
+        for turn in projection.turn_statistics
+    )
+    canonical_counts = _canonical_collaboration_counts(projection.named_counts)
+    return VerifiedCollaborationProjection(
+        statistics_projection=replace(
+            projection,
+            collaboration_operations_count=sum(
+                item.occurrence_count for item in canonical_counts
+            ),
+            collaboration_agents_started_count=sum(children_started_by_turn.values()),
+            named_counts=_replace_collaboration_counts(
+                projection.named_counts,
+                canonical_counts,
+            ),
+            turn_statistics=projected_turns,
+        ),
+        analyzed_sources=sources,
     )
 
 

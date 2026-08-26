@@ -296,7 +296,10 @@ def publish_rodex_session_statistics(
     coverage = _normalise_required_text(coverage_state, "coverage_state")
     if coverage not in STATISTICS_COVERAGE_STATES:
         raise ValueError(f"unsupported statistics coverage state: {coverage}")
-    statistics_projection = validate_session_statistics_projection(statistics_projection)
+    statistics_projection = validate_session_statistics_projection(
+        statistics_projection,
+        complete_turn_statistics=changed_turn_keys is None,
+    )
     observations = tuple(_validate_source_observation(item) for item in analyzed_sources)
     if len({item.codex_thread_id for item in observations}) != len(observations):
         raise ValueError("analyzed_sources contains a duplicate Codex thread ID")
@@ -321,7 +324,11 @@ def publish_rodex_session_statistics(
         raise ValueError("changed_turn_keys contains a turn outside the projection")
     if removed_turn_keys & turn_keys:
         raise ValueError("removed_turn_keys contains a projected turn")
-    _validate_authoritative_collaboration_projection(statistics_projection, observations)
+    _validate_authoritative_collaboration_projection(
+        statistics_projection,
+        observations,
+        complete_turn_statistics=changed_turn_keys is None,
+    )
 
     path = existing_rodex_database_path(database_path)
     with open_rodex_transaction(path) as connection:
@@ -1598,6 +1605,8 @@ def _validate_source_observation(
 def _validate_authoritative_collaboration_projection(
     projection: SessionStatisticsProjection,
     observations: Sequence[RodexSessionStatisticsSourceObservation],
+    *,
+    complete_turn_statistics: bool,
 ) -> None:
     expected_session_tools = _canonical_collaboration_count_map(projection.named_counts)
     if _named_count_map(projection.named_counts, "collaboration_tool") != (
@@ -1654,11 +1663,11 @@ def _validate_authoritative_collaboration_projection(
             observed_session_tools[tool_name] = (
                 observed_session_tools.get(tool_name, 0) + occurrence_count
             )
-    if observed_session_tools != expected_session_tools:
+    if complete_turn_statistics and observed_session_tools != expected_session_tools:
         raise ValueError(
             "session collaboration tools must equal exact-turn collaboration tools"
         )
-    if observed_agent_count != len(verified_subagents):
+    if complete_turn_statistics and observed_agent_count != len(verified_subagents):
         raise ValueError(
             "every verified sub-agent must belong to one published spawning turn"
         )

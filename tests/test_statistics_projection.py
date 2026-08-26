@@ -19,6 +19,7 @@ from rodex_registry.statistics_projection import (
 )
 
 CODEX_SESSION_ID = "01a00654-f2bc-7a30-834a-a5f886a65f82"
+CODEX_TURN_ID = "00000000-0000-7000-8000-000000000001"
 
 
 def _distribution(*values: int) -> dict[str, int | float | None]:
@@ -48,7 +49,7 @@ def _distribution(*values: int) -> dict[str, int | float | None]:
 def _turn() -> dict[str, object]:
     return {
         "session_id": CODEX_SESSION_ID,
-        "turn_id": "turn-a",
+        "turn_id": CODEX_TURN_ID,
         "started_at": "2026-08-16T13:00:00+01:00",
         "terminal_at": "2026-08-16T13:00:01+01:00",
         "outcome": "completed",

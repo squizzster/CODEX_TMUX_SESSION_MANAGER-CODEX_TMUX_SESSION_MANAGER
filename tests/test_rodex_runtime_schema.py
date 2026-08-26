@@ -22,7 +22,10 @@ from rodex_registry import (
     lookup_rodex_sessions_id_from_a_codex_session_id,
     lookup_rodex_tmux_session,
     record_a_rodex_session_runtime_resume,
+    split_codex_thread_id_into_signed_bigints,
+    split_codex_turn_id_into_signed_bigints,
 )
+from rodex_sql import open_rodex_transaction
 
 CODEX_SESSION_ID = uuid.UUID("01a00654-f2bc-7a30-834a-a5f886a65f82")
 REPLACEMENT_CODEX_SESSION_ID = uuid.UUID(int=CODEX_SESSION_ID.int + 1)
@@ -33,7 +36,48 @@ def fetch_all(database: Path, query: str) -> list[tuple[object, ...]]:
         return connection.execute(query).fetchall()
 
 
-def test_codex_identity_is_stored_directly_on_the_root_session(
+def _insert_codex_thread_membership(
+    connection: sqlite3.Connection,
+    thread_id: uuid.UUID,
+) -> int:
+    identity_id = connection.execute(
+        "INSERT INTO codex_threads "
+        "(codex_thread_public_id_signed_bigint_1, "
+        "codex_thread_public_id_signed_bigint_2) VALUES (?, ?) RETURNING id",
+        split_codex_thread_id_into_signed_bigints(thread_id),
+    ).fetchone()[0]
+    return int(
+        connection.execute(
+            "INSERT INTO rodex_sessions_codex_threads "
+            "(rodex_sessions_id, codex_threads_id, first_linked_at_utc) "
+            "VALUES (1, ?, '2026-08-26T12:00:00Z') RETURNING id",
+            (identity_id,),
+        ).fetchone()[0]
+    )
+
+
+def _insert_codex_turn(
+    connection: sqlite3.Connection,
+    thread_membership_id: int,
+    turn_id: uuid.UUID,
+) -> int:
+    return int(
+        connection.execute(
+            "INSERT INTO rodex_sessions_codex_turns "
+            "(rodex_sessions_id, rodex_sessions_codex_threads_id, "
+            "turn_public_id_signed_bigint_1, turn_public_id_signed_bigint_2, "
+            "codex_turn_id_signed_bigint_1, codex_turn_id_signed_bigint_2) "
+            "VALUES (1, ?, ?, ?, ?, ?) RETURNING id",
+            (
+                thread_membership_id,
+                *split_codex_turn_id_into_signed_bigints(uuid.uuid4()),
+                *split_codex_turn_id_into_signed_bigints(turn_id),
+            ),
+        ).fetchone()[0]
+    )
+
+
+def test_codex_identity_is_canonical_and_current_root_is_a_relationship(
     tmp_path: Path,
 ) -> None:
     database = initialise_rodex_database(tmp_path / "rodex.sqlite3")
@@ -43,8 +87,6 @@ def test_codex_identity_is_stored_directly_on_the_root_session(
     assert [(row[1], row[2], row[3], row[5]) for row in columns] == [
         ("id", "INTEGER", 0, 1),
         ("rodex_session_id_signed_bigint", "BIGINT", 1, 0),
-        ("codex_session_id_signed_bigint_1", "BIGINT", 1, 0),
-        ("codex_session_id_signed_bigint_2", "BIGINT", 1, 0),
         ("cool_names_id", "INTEGER", 1, 0),
         ("user_defined_cool_names_id", "INTEGER", 0, 0),
     ]
@@ -52,16 +94,198 @@ def test_codex_identity_is_stored_directly_on_the_root_session(
         row[2]
         for row in fetch_all(
             database,
-            "PRAGMA index_info(rodex_sessions_codex_session_id_unique)",
+            "PRAGMA index_info(codex_threads_public_id_unique)",
         )
-    ] == ["codex_session_id_signed_bigint_1", "codex_session_id_signed_bigint_2"]
-    assert (
-        fetch_all(
+    ] == [
+        "codex_thread_public_id_signed_bigint_1",
+        "codex_thread_public_id_signed_bigint_2",
+    ]
+    assert fetch_all(
+        database,
+        "PRAGMA table_info(rodex_sessions_current_codex_threads)",
+    )
+    membership_columns = [
+        row[1]
+        for row in fetch_all(database, "PRAGMA table_info(rodex_sessions_codex_threads)")
+    ]
+    assert membership_columns == [
+        "id",
+        "rodex_sessions_id",
+        "codex_threads_id",
+        "first_linked_at_utc",
+    ]
+    assert "parent_rodex_sessions_codex_threads_id" not in membership_columns
+
+
+def test_current_root_and_subagent_roles_are_exclusive_for_insert_and_update(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "rodex.sqlite3"
+    create_a_rodex_session(database, codex_session_id=CODEX_SESSION_ID)
+    child_thread_id = uuid.UUID(int=CODEX_SESSION_ID.int + 10)
+    sibling_thread_id = uuid.UUID(int=CODEX_SESSION_ID.int + 11)
+    with open_rodex_transaction(database) as connection:
+        root_membership_id = int(
+            connection.execute(
+                "SELECT rodex_sessions_codex_threads_id "
+                "FROM rodex_sessions_current_codex_threads"
+            ).fetchone()[0]
+        )
+        child_membership_id = _insert_codex_thread_membership(connection, child_thread_id)
+        sibling_membership_id = _insert_codex_thread_membership(
+            connection, sibling_thread_id
+        )
+        spawning_turn_id = _insert_codex_turn(
+            connection,
+            root_membership_id,
+            uuid.UUID("00000000-0000-7000-8000-000000000001"),
+        )
+        spawn_sql = (
+            "INSERT INTO rodex_sessions_subagent_spawns "
+            "(rodex_sessions_id, subagent_rodex_sessions_codex_threads_id, "
+            "parent_rodex_sessions_codex_threads_id, "
+            "spawning_rodex_sessions_codex_turns_id, agent_path, "
+            "history_inheritance_kind) VALUES (1, ?, ?, ?, '/root/test', 'clean')"
+        )
+
+        with pytest.raises(sqlite3.IntegrityError, match="current Codex thread"):
+            connection.execute(
+                spawn_sql,
+                (root_membership_id, child_membership_id, spawning_turn_id),
+            )
+        connection.execute(
+            spawn_sql,
+            (child_membership_id, root_membership_id, spawning_turn_id),
+        )
+        with pytest.raises(sqlite3.IntegrityError, match="current Codex thread"):
+            connection.execute(
+                "UPDATE rodex_sessions_current_codex_threads "
+                "SET rodex_sessions_codex_threads_id = ?",
+                (child_membership_id,),
+            )
+
+        connection.execute("DELETE FROM rodex_sessions_current_codex_threads")
+        with pytest.raises(sqlite3.IntegrityError, match="current Codex thread"):
+            connection.execute(
+                "INSERT INTO rodex_sessions_current_codex_threads "
+                "(rodex_sessions_id, rodex_sessions_codex_threads_id) VALUES (1, ?)",
+                (child_membership_id,),
+            )
+        connection.execute(
+            "INSERT INTO rodex_sessions_current_codex_threads "
+            "(rodex_sessions_id, rodex_sessions_codex_threads_id) VALUES (1, ?)",
+            (root_membership_id,),
+        )
+        connection.execute(
+            spawn_sql,
+            (sibling_membership_id, root_membership_id, spawning_turn_id),
+        )
+        with pytest.raises(sqlite3.IntegrityError, match="current Codex thread"):
+            connection.execute(
+                "UPDATE rodex_sessions_subagent_spawns "
+                "SET subagent_rodex_sessions_codex_threads_id = ? "
+                "WHERE subagent_rodex_sessions_codex_threads_id = ?",
+                (root_membership_id, sibling_membership_id),
+            )
+
+        assert connection.execute(
+            "SELECT rodex_sessions_codex_threads_id "
+            "FROM rodex_sessions_current_codex_threads"
+        ).fetchone() == (root_membership_id,)
+        assert set(
+            connection.execute(
+                "SELECT subagent_rodex_sessions_codex_threads_id "
+                "FROM rodex_sessions_subagent_spawns"
+            ).fetchall()
+        ) == {(child_membership_id,), (sibling_membership_id,)}
+
+
+def test_schema_reopen_rejects_a_same_named_but_weakened_root_guard(
+    tmp_path: Path,
+) -> None:
+    database = initialise_rodex_database(tmp_path / "rodex.sqlite3")
+    with sqlite3.connect(database) as connection:
+        connection.execute("DROP TRIGGER rodex_current_codex_thread_reject_spawn_insert")
+        connection.execute(
+            "CREATE TRIGGER rodex_current_codex_thread_reject_spawn_insert "
+            "BEFORE INSERT ON rodex_sessions_current_codex_threads "
+            "BEGIN SELECT 1; END"
+        )
+
+    with pytest.raises(RodexSessionError, match="definition mismatch"):
+        initialise_rodex_database(database)
+
+
+def test_exact_foreign_key_verifier_preserves_composite_grouping() -> None:
+    from rodex_registry import schema as schema_module
+
+    with sqlite3.connect(":memory:") as connection:
+        connection.execute(
+            "CREATE TABLE parent (a INTEGER, b INTEGER, c INTEGER, UNIQUE (a, c))"
+        )
+        connection.execute(
+            "CREATE TABLE malformed (x INTEGER, y INTEGER, z INTEGER, "
+            "FOREIGN KEY (x, z) REFERENCES parent (a, c), "
+            "FOREIGN KEY (y) REFERENCES parent (b))"
+        )
+        with pytest.raises(RodexSessionError, match="foreign keys mismatch"):
+            schema_module._verify_exact_foreign_keys(
+                connection,
+                "malformed",
+                ((("parent", "x", "a"), ("parent", "y", "b"), ("parent", "z", "c")),),
+            )
+
+
+def test_resume_cannot_promote_a_subagent_and_rolls_back_runtime_changes(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "rodex.sqlite3"
+    session = create_a_rodex_session(
+        database,
+        codex_session_id=CODEX_SESSION_ID,
+        tmux_server_socket_path="/tmp/rodex/old.sock",
+        tmux_session_name="automatic-beluga",
+    )
+    child_thread_id = uuid.UUID(int=CODEX_SESSION_ID.int + 20)
+    with open_rodex_transaction(database) as connection:
+        root_membership_id = int(
+            connection.execute(
+                "SELECT rodex_sessions_codex_threads_id "
+                "FROM rodex_sessions_current_codex_threads"
+            ).fetchone()[0]
+        )
+        child_membership_id = _insert_codex_thread_membership(connection, child_thread_id)
+        spawning_turn_id = _insert_codex_turn(
+            connection,
+            root_membership_id,
+            uuid.UUID("00000000-0000-7000-8000-000000000002"),
+        )
+        connection.execute(
+            "INSERT INTO rodex_sessions_subagent_spawns "
+            "(rodex_sessions_id, subagent_rodex_sessions_codex_threads_id, "
+            "parent_rodex_sessions_codex_threads_id, "
+            "spawning_rodex_sessions_codex_turns_id, agent_path, "
+            "history_inheritance_kind) VALUES (1, ?, ?, ?, '/root/test', 'clean')",
+            (child_membership_id, root_membership_id, spawning_turn_id),
+        )
+
+    with pytest.raises(RodexSessionError, match="cannot become the current root"):
+        record_a_rodex_session_runtime_resume(
+            session.rodex_sessions_id,
+            "/tmp/rodex/new.sock",
+            "automatic-beluga",
             database,
-            "SELECT name FROM sqlite_master "
-            "WHERE type = 'table' AND name = 'rodex_codex_sessions'",
+            codex_session_id=child_thread_id,
         )
-        == []
+
+    tmux_link = lookup_rodex_tmux_session(session.rodex_sessions_id, database)
+    assert tmux_link is not None
+    assert tmux_link.tmux_server_socket_path == "/tmp/rodex/old.sock"
+    assert (
+        lookup_codex_session_id_from_a_rodex_sessions_id(
+            session.rodex_sessions_id, database
+        )
+        == CODEX_SESSION_ID
     )
 
 

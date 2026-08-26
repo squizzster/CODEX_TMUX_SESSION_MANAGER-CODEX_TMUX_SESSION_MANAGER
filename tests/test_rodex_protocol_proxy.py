@@ -328,7 +328,7 @@ def test_event_tap_streams_runtime_events_and_removes_its_socket(tmp_path: Path)
     assert not event_socket.exists()
 
 
-def test_event_tap_sends_only_lifecycle_events_to_analytics(tmp_path: Path) -> None:
+def test_event_tap_sends_only_semantic_wake_events_to_analytics(tmp_path: Path) -> None:
     event_socket = tmp_path / "events.sock"
     tap = CodexProtocolEventTap(event_socket)
     thread_started = json.dumps(
@@ -339,6 +339,9 @@ def test_event_tap_sends_only_lifecycle_events_to_analytics(tmp_path: Path) -> N
     )
     turn_completed = json.dumps(
         {"method": "turn/completed", "params": {"threadId": "thread-1"}}
+    )
+    item_completed = json.dumps(
+        {"method": "item/completed", "params": {"threadId": "thread-1"}}
     )
 
     try:
@@ -358,15 +361,18 @@ def test_event_tap_sends_only_lifecycle_events_to_analytics(tmp_path: Path) -> N
 
             tap.publish(thread_started)
             tap.publish(token_delta)
+            tap.publish(item_completed)
             tap.publish(turn_completed)
 
             assert analytics.recv(timeout=1) == thread_started
+            assert analytics.recv(timeout=1) == item_completed
             assert analytics.recv(timeout=1) == turn_completed
             with pytest.raises(TimeoutError):
                 analytics.recv(timeout=0.05)
-            assert [external.recv(timeout=1) for _ in range(3)] == [
+            assert [external.recv(timeout=1) for _ in range(4)] == [
                 thread_started,
                 token_delta,
+                item_completed,
                 turn_completed,
             ]
     finally:

@@ -1704,6 +1704,8 @@ def test_events_continues_the_verified_protocol_stream_without_session_text(
 ) -> None:
     """Replacing `_tail` must not turn the live event source into pane scrollback."""
     database = tmp_path / "rodex.sqlite3"
+    monkeypatch.delenv("TMUX", raising=False)
+    monkeypatch.delenv("TMUX_PANE", raising=False)
     monkeypatch.setattr(
         "cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga"
     )
@@ -1731,6 +1733,57 @@ def test_events_continues_the_verified_protocol_stream_without_session_text(
     )
     assert "following live Codex protocol events" in captured.err
     assert launcher.scrollback_captures == []
+
+
+def test_events_refuses_to_write_into_the_same_session_it_observes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database = tmp_path / "rodex.sqlite3"
+    monkeypatch.setenv("TMUX", f"{tmp_path / 'tmux.sock'},1,0")
+    monkeypatch.setenv("TMUX_PANE", "%4")
+    monkeypatch.setattr(
+        "cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga"
+    )
+    monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
+    create_controlled_session(database, tmp_path)
+    launcher = StubLauncher(tmp_path)
+
+    with pytest.raises(RodexLaunchError, match="same Rodex session"):
+        run(
+            ["_events", "automatic-beluga"],
+            database_path=database,
+            launcher=launcher,  # type: ignore[arg-type]
+            control_client=StubControlClient(),  # type: ignore[arg-type]
+        )
+
+
+def test_events_fail_closed_when_current_tmux_identity_cannot_be_verified(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database = tmp_path / "rodex.sqlite3"
+    monkeypatch.setenv("TMUX", f"{tmp_path / 'tmux.sock'},1,0")
+    monkeypatch.setenv("TMUX_PANE", "%4")
+    monkeypatch.setattr(
+        "cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga"
+    )
+    monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
+    create_controlled_session(database, tmp_path)
+    launcher = StubLauncher(tmp_path)
+    monkeypatch.setattr(
+        launcher,
+        "discover_current_tmux_pane_context",
+        lambda: (_ for _ in ()).throw(RodexRuntimeError("discovery failed")),
+    )
+
+    with pytest.raises(RodexLaunchError, match="could not be verified"):
+        run(
+            ["_events", "automatic-beluga"],
+            database_path=database,
+            launcher=launcher,  # type: ignore[arg-type]
+            control_client=StubControlClient(),  # type: ignore[arg-type]
+        )
 
 
 @pytest.mark.evolutionary_regression
@@ -2610,7 +2663,7 @@ def test_ended_codex_uuid_argument_resumes_the_registered_rodex_session(
 
     assert (
         run(
-            [str(CODEX_SESSION_ID).upper()],
+            [str(CODEX_SESSION_ID)],
             database_path=database,
             launcher=launcher,  # type: ignore[arg-type]
         )
@@ -2644,7 +2697,7 @@ def test_persisted_unregistered_codex_uuid_becomes_a_managed_rodex_session(
 
     assert (
         run(
-            [str(REPLACEMENT_CODEX_SESSION_ID).upper()],
+            [str(REPLACEMENT_CODEX_SESSION_ID)],
             database_path=database,
             launcher=launcher,  # type: ignore[arg-type]
         )

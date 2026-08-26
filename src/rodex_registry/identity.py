@@ -18,6 +18,8 @@ _CANONICAL_RODEX_ID = re.compile(r"^[0-9a-f]{16}$")
 
 type CodexSessionId = uuid.UUID
 type CodexThreadId = uuid.UUID
+type CodexTurnId = uuid.UUID
+type CodexItemId = uuid.UUID
 
 
 class RodexIdError(ValueError):
@@ -166,28 +168,38 @@ def split_codex_thread_id_into_signed_bigints(
     return _split_128_bit_id_into_signed_bigints(parse_codex_thread_id(value))
 
 
+def split_codex_turn_id_into_signed_bigints(
+    value: CodexTurnId | str,
+) -> tuple[int, int]:
+    """Map one 128-bit Codex turn ID into two lossless signed BIGINTs."""
+    return _split_128_bit_id_into_signed_bigints(parse_codex_turn_id(value))
+
+
+def split_codex_item_id_into_signed_bigints(
+    value: CodexItemId | str,
+) -> tuple[int, int]:
+    """Map one 128-bit Codex item ID into two lossless signed BIGINTs."""
+    return _split_128_bit_id_into_signed_bigints(parse_codex_item_id(value))
+
+
 def parse_codex_session_id(value: CodexSessionId | str) -> CodexSessionId:
     """Parse the exact 128-bit Codex-owned session ID domain."""
-    if isinstance(value, uuid.UUID):
-        return value
-    if not isinstance(value, str):
-        raise TypeError("Codex session ID must be a 128-bit ID or string")
-    try:
-        return uuid.UUID(value)
-    except ValueError as error:
-        raise ValueError("Codex session ID must be a valid 128-bit ID") from error
+    return _parse_codex_uuid(value, "session")
 
 
 def parse_codex_thread_id(value: CodexThreadId | str) -> CodexThreadId:
     """Parse the exact 128-bit Codex-owned thread ID domain."""
-    if isinstance(value, uuid.UUID):
-        return value
-    if not isinstance(value, str):
-        raise TypeError("Codex thread ID must be a 128-bit ID or string")
-    try:
-        return uuid.UUID(value)
-    except ValueError as error:
-        raise ValueError("Codex thread ID must be a valid 128-bit ID") from error
+    return _parse_codex_uuid(value, "thread")
+
+
+def parse_codex_turn_id(value: CodexTurnId | str) -> CodexTurnId:
+    """Parse the exact 128-bit Codex-owned turn ID domain."""
+    return _parse_codex_uuid(value, "turn")
+
+
+def parse_codex_item_id(value: CodexItemId | str) -> CodexItemId:
+    """Parse the exact 128-bit Codex-owned item ID domain."""
+    return _parse_codex_uuid(value, "item")
 
 
 def join_signed_bigints_into_a_codex_session_id(
@@ -203,6 +215,40 @@ def join_signed_bigints_into_a_codex_thread_id(
     high_signed: int, low_signed: int
 ) -> CodexThreadId:
     """Restore one 128-bit Codex thread ID from two signed BIGINTs."""
+    return uuid.UUID(
+        int=(_signed_64_to_unsigned(high_signed) << 64) | _signed_64_to_unsigned(low_signed)
+    )
+
+
+def join_signed_bigints_into_a_codex_turn_id(
+    high_signed: int, low_signed: int
+) -> CodexTurnId:
+    """Restore one 128-bit Codex turn ID from two signed BIGINTs."""
+    return _join_signed_bigints_into_a_uuid(high_signed, low_signed)
+
+
+def join_signed_bigints_into_a_codex_item_id(
+    high_signed: int, low_signed: int
+) -> CodexItemId:
+    """Restore one 128-bit Codex item ID from two signed BIGINTs."""
+    return _join_signed_bigints_into_a_uuid(high_signed, low_signed)
+
+
+def _parse_codex_uuid(value: uuid.UUID | str, domain: str) -> uuid.UUID:
+    if isinstance(value, uuid.UUID):
+        return value
+    if not isinstance(value, str):
+        raise TypeError(f"Codex {domain} ID must be a 128-bit ID or string")
+    try:
+        parsed = uuid.UUID(value)
+    except ValueError as error:
+        raise ValueError(f"Codex {domain} ID must be a valid 128-bit ID") from error
+    if str(parsed) != value:
+        raise ValueError(f"Codex {domain} ID must use canonical lowercase UUID text")
+    return parsed
+
+
+def _join_signed_bigints_into_a_uuid(high_signed: int, low_signed: int) -> uuid.UUID:
     return uuid.UUID(
         int=(_signed_64_to_unsigned(high_signed) << 64) | _signed_64_to_unsigned(low_signed)
     )

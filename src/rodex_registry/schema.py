@@ -9,18 +9,22 @@ from pathlib import Path
 from typing import Final
 
 from cool_name.functions import create_and_verify_cool_names_schema
-from rodex_sql import default_rodex_database_path as _default_rodex_database_path
 from rodex_sql import (
+    RODEX_DATABASE_SCHEMA_GENERATION,
     normalise_rodex_database_path,
     open_rodex_read_transaction,
     open_rodex_transaction,
     require_existing_rodex_database_path,
+)
+from rodex_sql import (
+    default_rodex_database_path as _default_rodex_database_path,
 )
 
 from .errors import RodexSessionError
 from .identity import RodexRegistryId
 from .statistics_fields import SESSION_STATISTICS_SCALARS, TURN_STATISTICS_SCALARS
 
+RODEX_SCHEMA_GENERATIONS_TABLE: Final = "rodex_schema_generations"
 RODEX_SESSIONS_TABLE: Final = "rodex_sessions"
 RODEX_REGISTRIES_TABLE: Final = "rodex_registries"
 RODEX_REGISTRIES_ID_UNIQUE_INDEX: Final = "rodex_registries_registry_id_unique"
@@ -31,7 +35,8 @@ RODEX_SESSIONS_LOG_TABLE: Final = "rodex_sessions_log"
 RODEX_SESSIONS_LOG_SESSION_UNIQUE_INDEX: Final = (
     "rodex_sessions_log_rodex_sessions_id_unique"
 )
-RODEX_CODEX_SESSION_ID_UNIQUE_INDEX: Final = "rodex_sessions_codex_session_id_unique"
+CODEX_THREADS_TABLE: Final = "codex_threads"
+CODEX_THREADS_PUBLIC_ID_UNIQUE_INDEX: Final = "codex_threads_public_id_unique"
 RODEX_TMUX_SESSIONS_TABLE: Final = "rodex_tmux_sessions"
 RODEX_TMUX_SESSIONS_SESSION_UNIQUE_INDEX: Final = (
     "rodex_tmux_sessions_rodex_sessions_id_unique"
@@ -50,6 +55,8 @@ REASONING_EFFORT_NAMES_TABLE: Final = "reasoning_effort_names"
 REASONING_EFFORT_NAMES_NAME_OF_THE_REASONING_EFFORT_UNIQUE_INDEX: Final = (
     "reasoning_effort_names_name_of_the_reasoning_effort_unique"
 )
+TOOL_NAMES_TABLE: Final = "tool_names"
+TOOL_NAMES_NAME_UNIQUE_INDEX: Final = "tool_names_name_unique"
 RODEX_SESSIONS_STATISTICS_TABLE: Final = "rodex_sessions_statistics"
 RODEX_SESSIONS_STATISTICS_SESSION_UNIQUE_INDEX: Final = (
     "rodex_sessions_statistics_rodex_sessions_id_unique"
@@ -72,40 +79,83 @@ RODEX_SESSIONS_STATISTICS_AUDIT_LIMITS_TABLE: Final = (
 RODEX_SESSIONS_STATISTICS_AUDIT_LIMITS_UNIQUE_INDEX: Final = (
     "rodex_sessions_statistics_audit_limits_ordinal_unique"
 )
-RODEX_SESSIONS_STATISTICS_SOURCES_TABLE: Final = "rodex_sessions_statistics_sources"
-RODEX_SESSIONS_STATISTICS_SOURCES_UNIQUE_INDEX: Final = (
-    "rodex_sessions_statistics_sources_codex_thread_id_unique"
+RODEX_SESSIONS_CODEX_THREADS_TABLE: Final = "rodex_sessions_codex_threads"
+RODEX_SESSIONS_CODEX_THREADS_UNIQUE_INDEX: Final = (
+    "rodex_sessions_codex_threads_codex_threads_id_unique"
 )
-RODEX_SESSIONS_STATISTICS_SOURCES_SESSION_ID_UNIQUE_INDEX: Final = (
-    "rodex_sessions_statistics_sources_session_id_unique"
+RODEX_SESSIONS_CODEX_THREADS_SESSION_ID_UNIQUE_INDEX: Final = (
+    "rodex_sessions_codex_threads_session_id_unique"
 )
-RODEX_SESSIONS_STATISTICS_SOURCES_PARENT_INDEX: Final = (
-    "rodex_sessions_statistics_sources_parent"
+RODEX_SESSIONS_CURRENT_CODEX_THREADS_TABLE: Final = "rodex_sessions_current_codex_threads"
+RODEX_SESSIONS_CURRENT_CODEX_THREADS_SESSION_UNIQUE_INDEX: Final = (
+    "rodex_sessions_current_codex_threads_session_unique"
 )
-RODEX_SESSIONS_STATISTICS_SOURCES_HIERARCHY_UNIQUE_INDEX: Final = (
-    "rodex_sessions_statistics_sources_hierarchy_unique"
+RODEX_SESSIONS_CURRENT_CODEX_THREADS_MEMBERSHIP_UNIQUE_INDEX: Final = (
+    "rodex_sessions_current_codex_threads_membership_unique"
 )
-RODEX_SESSIONS_STATISTICS_TURNS_TABLE: Final = "rodex_sessions_statistics_turns"
-RODEX_SESSIONS_STATISTICS_TURNS_SOURCE_TURN_UNIQUE_INDEX: Final = (
-    "rodex_sessions_statistics_turns_source_turn_unique"
+RODEX_SESSIONS_CODEX_ROLLOUT_SOURCES_TABLE: Final = "rodex_sessions_codex_rollout_sources"
+RODEX_SESSIONS_CODEX_ROLLOUT_SOURCES_THREAD_UNIQUE_INDEX: Final = (
+    "rodex_sessions_codex_rollout_sources_thread_unique"
 )
-RODEX_SESSIONS_STATISTICS_TURNS_SESSION_TURN_INDEX: Final = (
-    "rodex_sessions_statistics_turns_session_turn"
+RODEX_SESSIONS_CODEX_ROLLOUT_SOURCES_SESSION_ID_UNIQUE_INDEX: Final = (
+    "rodex_sessions_codex_rollout_sources_session_id_unique"
 )
-RODEX_SESSIONS_STATISTICS_TURNS_SESSION_ID_UNIQUE_INDEX: Final = (
-    "rodex_sessions_statistics_turns_session_id_unique"
+RODEX_SESSIONS_CODEX_TURNS_TABLE: Final = "rodex_sessions_codex_turns"
+RODEX_SESSIONS_CODEX_TURNS_SOURCE_TURN_UNIQUE_INDEX: Final = (
+    "rodex_sessions_codex_turns_source_turn_unique"
 )
-RODEX_SESSIONS_STATISTICS_TURNS_SOURCE_ID_UNIQUE_INDEX: Final = (
-    "rodex_sessions_statistics_turns_source_id_unique"
+RODEX_SESSIONS_CODEX_TURNS_SESSION_TURN_INDEX: Final = (
+    "rodex_sessions_codex_turns_session_turn"
 )
-RODEX_SESSIONS_STATISTICS_SUBAGENT_SPAWNS_TABLE: Final = (
-    "rodex_sessions_statistics_subagent_spawns"
+RODEX_SESSIONS_CODEX_TURNS_SESSION_ID_UNIQUE_INDEX: Final = (
+    "rodex_sessions_codex_turns_session_id_unique"
 )
-RODEX_SESSIONS_STATISTICS_SUBAGENT_SPAWNS_SOURCE_UNIQUE_INDEX: Final = (
-    "rodex_sessions_statistics_subagent_spawns_source_unique"
+RODEX_SESSIONS_CODEX_TURNS_SOURCE_ID_UNIQUE_INDEX: Final = (
+    "rodex_sessions_codex_turns_source_id_unique"
 )
-RODEX_SESSIONS_STATISTICS_SUBAGENT_SPAWNS_TURN_INDEX: Final = (
-    "rodex_sessions_statistics_subagent_spawns_turn"
+RODEX_SESSIONS_CODEX_TURNS_PUBLIC_ID_UNIQUE_INDEX: Final = (
+    "rodex_sessions_codex_turns_public_id_unique"
+)
+RODEX_SESSIONS_CODEX_ACTIVITY_SCOPES_TABLE: Final = "rodex_sessions_codex_activity_scopes"
+RODEX_SESSIONS_CODEX_ACTIVITY_SCOPES_WITHOUT_TURN_UNIQUE_INDEX: Final = (
+    "rodex_sessions_codex_activity_scopes_without_turn_unique"
+)
+RODEX_SESSIONS_CODEX_ACTIVITY_SCOPES_TURN_UNIQUE_INDEX: Final = (
+    "rodex_sessions_codex_activity_scopes_turn_unique"
+)
+RODEX_SESSIONS_CODEX_ACTIVITY_SCOPES_SESSION_THREAD_ID_UNIQUE_INDEX: Final = (
+    "rodex_sessions_codex_activity_scopes_session_thread_id_unique"
+)
+RODEX_SESSIONS_CODEX_ACTIVITY_SCOPES_IMMUTABLE_TRIGGER: Final = (
+    "rodex_sessions_codex_activity_scopes_immutable"
+)
+RODEX_SESSIONS_CODEX_TURN_STATES_TABLE: Final = "rodex_sessions_codex_turn_states"
+RODEX_SESSIONS_CODEX_TURN_STATES_TURN_UNIQUE_INDEX: Final = (
+    "rodex_sessions_codex_turn_states_turn_unique"
+)
+RODEX_SESSIONS_STATISTICS_TURN_METRICS_TABLE: Final = (
+    "rodex_sessions_statistics_turn_metrics"
+)
+RODEX_SESSIONS_STATISTICS_TURN_METRICS_TURN_UNIQUE_INDEX: Final = (
+    "rodex_sessions_statistics_turn_metrics_turn_unique"
+)
+RODEX_SESSIONS_SUBAGENT_SPAWNS_TABLE: Final = "rodex_sessions_subagent_spawns"
+RODEX_SESSIONS_SUBAGENT_SPAWNS_SOURCE_UNIQUE_INDEX: Final = (
+    "rodex_sessions_subagent_spawns_source_unique"
+)
+RODEX_SESSIONS_SUBAGENT_SPAWNS_TURN_INDEX: Final = "rodex_sessions_subagent_spawns_turn"
+RODEX_SESSIONS_SUBAGENT_SPAWNS_PARENT_INDEX: Final = "rodex_sessions_subagent_spawns_parent"
+RODEX_CURRENT_CODEX_THREAD_REJECT_SPAWN_INSERT_TRIGGER: Final = (
+    "rodex_current_codex_thread_reject_spawn_insert"
+)
+RODEX_CURRENT_CODEX_THREAD_REJECT_SPAWN_UPDATE_TRIGGER: Final = (
+    "rodex_current_codex_thread_reject_spawn_update"
+)
+RODEX_SUBAGENT_SPAWN_REJECT_CURRENT_INSERT_TRIGGER: Final = (
+    "rodex_subagent_spawn_reject_current_insert"
+)
+RODEX_SUBAGENT_SPAWN_REJECT_CURRENT_UPDATE_TRIGGER: Final = (
+    "rodex_subagent_spawn_reject_current_update"
 )
 RODEX_SESSIONS_STATISTICS_TURN_NAMED_COUNTS_TABLE: Final = (
     "rodex_sessions_statistics_turn_named_counts"
@@ -116,9 +166,142 @@ RODEX_SESSIONS_STATISTICS_TURN_NAMED_COUNTS_UNIQUE_INDEX: Final = (
 RODEX_SESSIONS_STATISTICS_TURN_NAMED_COUNTS_SESSION_KIND_INDEX: Final = (
     "rodex_sessions_statistics_turn_named_counts_session_kind"
 )
-RODEX_SESSIONS_STATISTICS_WORKERS_TABLE: Final = "rodex_sessions_statistics_workers"
-RODEX_SESSIONS_STATISTICS_WORKERS_SESSION_UNIQUE_INDEX: Final = (
-    "rodex_sessions_statistics_workers_rodex_sessions_id_unique"
+RODEX_SESSIONS_ANALYTICS_WORKERS_TABLE: Final = "rodex_sessions_analytics_workers"
+RODEX_SESSIONS_ANALYTICS_WORKERS_SESSION_UNIQUE_INDEX: Final = (
+    "rodex_sessions_analytics_workers_rodex_sessions_id_unique"
+)
+RODEX_SESSIONS_ANALYTICS_WORKERS_SESSION_ID_UNIQUE_INDEX: Final = (
+    "rodex_sessions_analytics_workers_session_id_unique"
+)
+RODEX_SESSIONS_ANALYTICS_WORKER_THREAD_CHECKPOINTS_TABLE: Final = (
+    "rodex_sessions_analytics_worker_thread_checkpoints"
+)
+RODEX_SESSIONS_ANALYTICS_WORKER_THREAD_CHECKPOINTS_UNIQUE_INDEX: Final = (
+    "rodex_sessions_analytics_worker_thread_checkpoints_unique"
+)
+RODEX_SESSIONS_AGENT_TRACE_PUBLICATIONS_TABLE: Final = (
+    "rodex_sessions_agent_trace_publications"
+)
+RODEX_SESSIONS_AGENT_TRACE_PUBLICATIONS_SESSION_UNIQUE_INDEX: Final = (
+    "rodex_sessions_agent_trace_publications_session_unique"
+)
+RODEX_SESSIONS_AGENT_TRACE_EVENTS_TABLE: Final = "rodex_sessions_agent_trace_events"
+RODEX_SESSIONS_AGENT_TRACE_EVENTS_SOURCE_UNIQUE_INDEX: Final = (
+    "rodex_sessions_agent_trace_events_source_unique"
+)
+RODEX_SESSIONS_AGENT_TRACE_EVENTS_SESSION_ORDER_INDEX: Final = (
+    "rodex_sessions_agent_trace_events_session_order"
+)
+RODEX_SESSIONS_AGENT_TRACE_EVENTS_ID_KIND_UNIQUE_INDEX: Final = (
+    "rodex_sessions_agent_trace_events_id_kind_unique"
+)
+RODEX_SESSIONS_AGENT_TRACE_EVENTS_SESSION_ID_KIND_UNIQUE_INDEX: Final = (
+    "rodex_sessions_agent_trace_events_session_id_kind_unique"
+)
+RODEX_SESSIONS_AGENT_TRACE_EVENTS_SESSION_ID_UNIQUE_INDEX: Final = (
+    "rodex_sessions_agent_trace_events_session_id_unique"
+)
+RODEX_SESSIONS_AGENT_TRACE_EVENTS_PUBLIC_ID_UNIQUE_INDEX: Final = (
+    "rodex_sessions_agent_trace_events_public_id_unique"
+)
+RODEX_SESSIONS_AGENT_TRACE_EVENTS_SESSION_SCOPE_ID_KIND_UNIQUE_INDEX: Final = (
+    "rodex_sessions_agent_trace_events_session_scope_id_kind_unique"
+)
+RODEX_SESSIONS_AGENT_TRACE_EVENTS_IMMUTABLE_TRIGGER: Final = (
+    "rodex_sessions_agent_trace_events_immutable"
+)
+RODEX_SESSIONS_AGENT_TRACE_MESSAGES_TABLE: Final = "rodex_sessions_agent_trace_messages"
+RODEX_SESSIONS_CODEX_ITEMS_TABLE: Final = "rodex_sessions_codex_items"
+RODEX_SESSIONS_CODEX_ITEMS_PUBLIC_ID_UNIQUE_INDEX: Final = (
+    "rodex_sessions_codex_items_public_id_unique"
+)
+RODEX_SESSIONS_CODEX_ITEMS_IDENTITY_UNIQUE_INDEX: Final = (
+    "rodex_sessions_codex_items_identity_unique"
+)
+RODEX_SESSIONS_CODEX_ITEMS_SESSION_THREAD_ID_UNIQUE_INDEX: Final = (
+    "rodex_sessions_codex_items_session_thread_id_unique"
+)
+RODEX_SESSIONS_CODEX_ITEMS_SESSION_ID_UNIQUE_INDEX: Final = (
+    "rodex_sessions_codex_items_session_id_unique"
+)
+RODEX_SESSIONS_CODEX_ITEMS_SESSION_SCOPE_ID_UNIQUE_INDEX: Final = (
+    "rodex_sessions_codex_items_session_scope_id_unique"
+)
+RODEX_SESSIONS_CODEX_ITEMS_IMMUTABLE_TRIGGER: Final = "rodex_sessions_codex_items_immutable"
+RODEX_SESSIONS_CODEX_ITEM_ALIASES_TABLE: Final = "rodex_sessions_codex_item_aliases"
+RODEX_SESSIONS_CODEX_ITEM_ALIASES_IDENTITY_UNIQUE_INDEX: Final = (
+    "rodex_sessions_codex_item_aliases_identity_unique"
+)
+RODEX_SESSIONS_CODEX_TOOL_CALLS_TABLE: Final = "rodex_sessions_codex_tool_calls"
+RODEX_SESSIONS_CODEX_TOOL_CALLS_PUBLIC_ID_UNIQUE_INDEX: Final = (
+    "rodex_sessions_codex_tool_calls_public_id_unique"
+)
+RODEX_SESSIONS_CODEX_TOOL_CALLS_SESSION_ID_UNIQUE_INDEX: Final = (
+    "rodex_sessions_codex_tool_calls_session_id_unique"
+)
+RODEX_SESSIONS_CODEX_TOOL_CALLS_SESSION_SCOPE_ID_UNIQUE_INDEX: Final = (
+    "rodex_sessions_codex_tool_calls_session_scope_id_unique"
+)
+RODEX_SESSIONS_CODEX_TOOL_CALLS_IDENTITY_IMMUTABLE_TRIGGER: Final = (
+    "rodex_sessions_codex_tool_calls_identity_immutable"
+)
+RODEX_SESSIONS_CODEX_TOOL_CALL_ALIASES_TABLE: Final = (
+    "rodex_sessions_codex_tool_call_aliases"
+)
+RODEX_SESSIONS_CODEX_TOOL_CALL_ALIASES_CALL_ID_UNIQUE_INDEX: Final = (
+    "rodex_sessions_codex_tool_call_aliases_call_id_unique"
+)
+RODEX_SESSIONS_CODEX_TOOL_CALL_ALIASES_ITEM_UNIQUE_INDEX: Final = (
+    "rodex_sessions_codex_tool_call_aliases_item_unique"
+)
+RODEX_SESSIONS_CODEX_TOOL_CALL_ALIASES_EVENT_UNIQUE_INDEX: Final = (
+    "rodex_sessions_codex_tool_call_aliases_event_unique"
+)
+RODEX_SESSIONS_CODEX_TOOL_CALL_ALIASES_CALL_INDEX: Final = (
+    "rodex_sessions_codex_tool_call_aliases_call"
+)
+RODEX_SESSIONS_AGENT_TRACE_TOOL_CALLS_TABLE: Final = (
+    "rodex_sessions_agent_trace_tool_call_activities"
+)
+RODEX_SESSIONS_AGENT_TRACE_COMMAND_EXECUTIONS_TABLE: Final = (
+    "rodex_sessions_agent_trace_command_executions"
+)
+RODEX_SESSIONS_AGENT_TRACE_CONTEXTS_TABLE: Final = "rodex_sessions_agent_trace_contexts"
+RODEX_SESSIONS_AGENT_TRACE_TOKEN_USAGE_TABLE: Final = (
+    "rodex_sessions_agent_trace_token_usage"
+)
+RODEX_SESSIONS_AGENT_TRACE_RATE_LIMIT_WINDOWS_TABLE: Final = (
+    "rodex_sessions_agent_trace_rate_limit_windows"
+)
+RODEX_SESSIONS_AGENT_TRACE_SUBAGENT_ACTIVITIES_TABLE: Final = (
+    "rodex_sessions_agent_trace_subagent_activities"
+)
+RODEX_SESSIONS_AGENT_TRACE_MESSAGES_EVENT_UNIQUE_INDEX: Final = (
+    "rodex_sessions_agent_trace_messages_event_unique"
+)
+RODEX_SESSIONS_AGENT_TRACE_TOOL_CALLS_EVENT_UNIQUE_INDEX: Final = (
+    "rodex_sessions_agent_trace_tool_call_activities_event_unique"
+)
+RODEX_SESSIONS_AGENT_TRACE_TOOL_CALLS_CALL_INDEX: Final = (
+    "rodex_sessions_agent_trace_tool_call_activities_call"
+)
+RODEX_SESSIONS_AGENT_TRACE_COMMAND_EXECUTIONS_EVENT_UNIQUE_INDEX: Final = (
+    "rodex_sessions_agent_trace_command_executions_event_unique"
+)
+RODEX_SESSIONS_AGENT_TRACE_CONTEXTS_EVENT_UNIQUE_INDEX: Final = (
+    "rodex_sessions_agent_trace_contexts_event_unique"
+)
+RODEX_SESSIONS_AGENT_TRACE_TOKEN_USAGE_EVENT_UNIQUE_INDEX: Final = (
+    "rodex_sessions_agent_trace_token_usage_event_unique"
+)
+RODEX_SESSIONS_AGENT_TRACE_RATE_LIMIT_WINDOWS_EVENT_ORDINAL_UNIQUE_INDEX: Final = (
+    "rodex_sessions_agent_trace_rate_limit_windows_event_ordinal_unique"
+)
+RODEX_SESSIONS_AGENT_TRACE_SUBAGENT_ACTIVITIES_EVENT_UNIQUE_INDEX: Final = (
+    "rodex_sessions_agent_trace_subagent_activities_event_unique"
+)
+RODEX_SESSIONS_AGENT_TRACE_SUBAGENT_ACTIVITIES_TARGET_INDEX: Final = (
+    "rodex_sessions_agent_trace_subagent_activities_target"
 )
 RODEX_SESSIONS_COOL_NAMES_UNIQUE_INDEX: Final = "rodex_sessions_cool_names_id_unique"
 RODEX_SESSIONS_USER_DEFINED_COOL_NAMES_UNIQUE_INDEX: Final = (
@@ -129,6 +312,13 @@ STATISTICS_TURN_OUTCOMES: Final = frozenset({"open", "completed", "aborted"})
 STATISTICS_WORKER_STATES: Final = frozenset(
     {"starting", "catching_up", "up_to_date", "degraded", "stopped"}
 )
+_CREATE_SCHEMA_GENERATIONS_TABLE = f"""
+CREATE TABLE IF NOT EXISTS {RODEX_SCHEMA_GENERATIONS_TABLE} (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    schema_generation INTEGER NOT NULL CHECK (schema_generation >= 1),
+    CHECK (id = 1)
+)
+"""
 _CREATE_REGISTRIES_TABLE = f"""
 CREATE TABLE IF NOT EXISTS {RODEX_REGISTRIES_TABLE} (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -148,12 +338,6 @@ CREATE TABLE IF NOT EXISTS {RODEX_SESSIONS_TABLE} (
     rodex_session_id_signed_bigint BIGINT NOT NULL CHECK (
         typeof(rodex_session_id_signed_bigint) = 'integer'
     ),
-    codex_session_id_signed_bigint_1 BIGINT NOT NULL CHECK (
-        typeof(codex_session_id_signed_bigint_1) = 'integer'
-    ),
-    codex_session_id_signed_bigint_2 BIGINT NOT NULL CHECK (
-        typeof(codex_session_id_signed_bigint_2) = 'integer'
-    ),
     cool_names_id INTEGER NOT NULL,
     user_defined_cool_names_id INTEGER DEFAULT NULL,
     FOREIGN KEY (cool_names_id) REFERENCES cool_names (id),
@@ -163,11 +347,6 @@ CREATE TABLE IF NOT EXISTS {RODEX_SESSIONS_TABLE} (
 _CREATE_UNIQUE_INDEX = f"""
 CREATE UNIQUE INDEX IF NOT EXISTS {RODEX_SESSION_ID_UNIQUE_INDEX}
 ON {RODEX_SESSIONS_TABLE} (rodex_session_id_signed_bigint)
-"""
-_CREATE_CODEX_SESSION_ID_UNIQUE_INDEX = f"""
-CREATE UNIQUE INDEX IF NOT EXISTS {RODEX_CODEX_SESSION_ID_UNIQUE_INDEX}
-ON {RODEX_SESSIONS_TABLE}
-    (codex_session_id_signed_bigint_1, codex_session_id_signed_bigint_2)
 """
 _CREATE_SESSIONS_COOL_NAMES_UNIQUE_INDEX = f"""
 CREATE UNIQUE INDEX IF NOT EXISTS {RODEX_SESSIONS_COOL_NAMES_UNIQUE_INDEX}
@@ -262,6 +441,16 @@ _CREATE_REASONING_EFFORT_NAMES_NAME_OF_THE_REASONING_EFFORT_UNIQUE_INDEX = f"""
 CREATE UNIQUE INDEX IF NOT EXISTS
     {REASONING_EFFORT_NAMES_NAME_OF_THE_REASONING_EFFORT_UNIQUE_INDEX}
 ON {REASONING_EFFORT_NAMES_TABLE} (name_of_the_reasoning_effort)
+"""
+_CREATE_TOOL_NAMES_TABLE = f"""
+CREATE TABLE IF NOT EXISTS {TOOL_NAMES_TABLE} (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    tool_name TEXT NOT NULL CHECK (length(trim(tool_name)) > 0)
+)
+"""
+_CREATE_TOOL_NAMES_NAME_UNIQUE_INDEX = f"""
+CREATE UNIQUE INDEX IF NOT EXISTS {TOOL_NAMES_NAME_UNIQUE_INDEX}
+ON {TOOL_NAMES_TABLE} (tool_name)
 """
 _CREATE_STATISTICS_TABLE = f"""
 CREATE TABLE IF NOT EXISTS {RODEX_SESSIONS_STATISTICS_TABLE} (
@@ -496,105 +685,139 @@ CREATE UNIQUE INDEX IF NOT EXISTS
 ON {RODEX_SESSIONS_STATISTICS_AUDIT_LIMITS_TABLE}
     (rodex_sessions_id, limit_ordinal)
 """
-_CREATE_STATISTICS_SOURCES_TABLE = f"""
-CREATE TABLE IF NOT EXISTS {RODEX_SESSIONS_STATISTICS_SOURCES_TABLE} (
+_CREATE_CANONICAL_CODEX_THREADS_TABLE = f"""
+CREATE TABLE IF NOT EXISTS {CODEX_THREADS_TABLE} (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    codex_thread_public_id_signed_bigint_1 BIGINT NOT NULL CHECK (
+        typeof(codex_thread_public_id_signed_bigint_1) = 'integer'
+    ),
+    codex_thread_public_id_signed_bigint_2 BIGINT NOT NULL CHECK (
+        typeof(codex_thread_public_id_signed_bigint_2) = 'integer'
+    )
+)
+"""
+_CREATE_CANONICAL_CODEX_THREADS_PUBLIC_ID_UNIQUE_INDEX = f"""
+CREATE UNIQUE INDEX IF NOT EXISTS {CODEX_THREADS_PUBLIC_ID_UNIQUE_INDEX}
+ON {CODEX_THREADS_TABLE}
+    (codex_thread_public_id_signed_bigint_1,
+        codex_thread_public_id_signed_bigint_2)
+"""
+_CREATE_CODEX_THREADS_TABLE = f"""
+CREATE TABLE IF NOT EXISTS {RODEX_SESSIONS_CODEX_THREADS_TABLE} (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     rodex_sessions_id INTEGER NOT NULL,
-    codex_thread_id_signed_bigint_1 BIGINT NOT NULL CHECK (
-        typeof(codex_thread_id_signed_bigint_1) = 'integer'
-    ),
-    codex_thread_id_signed_bigint_2 BIGINT NOT NULL CHECK (
-        typeof(codex_thread_id_signed_bigint_2) = 'integer'
-    ),
-    parent_rodex_sessions_statistics_sources_id INTEGER DEFAULT NULL,
-    agent_path TEXT DEFAULT NULL,
-    agent_nickname TEXT DEFAULT NULL,
-    subagent_history_start_ordinal INTEGER DEFAULT NULL CHECK (
-        subagent_history_start_ordinal IS NULL
-        OR subagent_history_start_ordinal >= 0
-    ),
+    codex_threads_id INTEGER NOT NULL,
     first_linked_at_utc TEXT NOT NULL,
-    rollout_file_path TEXT DEFAULT NULL,
-    analyzed_size_bytes INTEGER DEFAULT NULL CHECK (
-        analyzed_size_bytes IS NULL OR analyzed_size_bytes >= 0
-    ),
-    analyzed_mtime_ns INTEGER DEFAULT NULL CHECK (
-        analyzed_mtime_ns IS NULL OR analyzed_mtime_ns >= 0
-    ),
-    analyzed_prefix_sha256 TEXT DEFAULT NULL CHECK (
-        analyzed_prefix_sha256 IS NULL OR length(analyzed_prefix_sha256) = 64
-    ),
-    verified_at_utc TEXT DEFAULT NULL,
-    CHECK (
-        (rollout_file_path IS NULL AND analyzed_size_bytes IS NULL
-            AND analyzed_mtime_ns IS NULL AND analyzed_prefix_sha256 IS NULL
-            AND verified_at_utc IS NULL)
-        OR
-        (rollout_file_path IS NOT NULL AND analyzed_size_bytes IS NOT NULL
-            AND analyzed_mtime_ns IS NOT NULL AND analyzed_prefix_sha256 IS NOT NULL
-            AND verified_at_utc IS NOT NULL)
-    ),
-    CHECK (
-        (parent_rodex_sessions_statistics_sources_id IS NULL
-            AND agent_path IS NULL
-            AND agent_nickname IS NULL
-            AND subagent_history_start_ordinal IS NULL)
-        OR
-        (parent_rodex_sessions_statistics_sources_id IS NOT NULL
-            AND agent_path IS NOT NULL
-            AND length(agent_path) > 0
-            AND subagent_history_start_ordinal IS NOT NULL)
-    ),
     FOREIGN KEY (rodex_sessions_id) REFERENCES {RODEX_SESSIONS_TABLE} (id),
-    FOREIGN KEY (rodex_sessions_id, parent_rodex_sessions_statistics_sources_id)
-        REFERENCES {RODEX_SESSIONS_STATISTICS_SOURCES_TABLE} (rodex_sessions_id, id)
+    FOREIGN KEY (codex_threads_id) REFERENCES {CODEX_THREADS_TABLE} (id)
+)
+"""
+_CREATE_CURRENT_CODEX_THREADS_TABLE = f"""
+CREATE TABLE IF NOT EXISTS {RODEX_SESSIONS_CURRENT_CODEX_THREADS_TABLE} (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    rodex_sessions_id INTEGER NOT NULL,
+    rodex_sessions_codex_threads_id INTEGER NOT NULL,
+    FOREIGN KEY (rodex_sessions_id, rodex_sessions_codex_threads_id)
+        REFERENCES {RODEX_SESSIONS_CODEX_THREADS_TABLE} (rodex_sessions_id, id)
         DEFERRABLE INITIALLY DEFERRED
 )
 """
-_CREATE_STATISTICS_SOURCES_UNIQUE_INDEX = f"""
-CREATE UNIQUE INDEX IF NOT EXISTS {RODEX_SESSIONS_STATISTICS_SOURCES_UNIQUE_INDEX}
-ON {RODEX_SESSIONS_STATISTICS_SOURCES_TABLE}
-    (codex_thread_id_signed_bigint_1, codex_thread_id_signed_bigint_2)
-"""
-_CREATE_STATISTICS_SOURCES_SESSION_ID_UNIQUE_INDEX = f"""
-CREATE UNIQUE INDEX IF NOT EXISTS
-    {RODEX_SESSIONS_STATISTICS_SOURCES_SESSION_ID_UNIQUE_INDEX}
-ON {RODEX_SESSIONS_STATISTICS_SOURCES_TABLE} (rodex_sessions_id, id)
-"""
-_CREATE_STATISTICS_SOURCES_PARENT_INDEX = f"""
-CREATE INDEX IF NOT EXISTS {RODEX_SESSIONS_STATISTICS_SOURCES_PARENT_INDEX}
-ON {RODEX_SESSIONS_STATISTICS_SOURCES_TABLE}
-    (parent_rodex_sessions_statistics_sources_id)
-"""
-_CREATE_STATISTICS_SOURCES_HIERARCHY_UNIQUE_INDEX = f"""
-CREATE UNIQUE INDEX IF NOT EXISTS
-    {RODEX_SESSIONS_STATISTICS_SOURCES_HIERARCHY_UNIQUE_INDEX}
-ON {RODEX_SESSIONS_STATISTICS_SOURCES_TABLE}
-    (rodex_sessions_id, id, parent_rodex_sessions_statistics_sources_id)
-"""
-_CREATE_STATISTICS_TURNS_TABLE = f"""
-CREATE TABLE IF NOT EXISTS {RODEX_SESSIONS_STATISTICS_TURNS_TABLE} (
+_CREATE_CODEX_ROLLOUT_SOURCES_TABLE = f"""
+CREATE TABLE IF NOT EXISTS {RODEX_SESSIONS_CODEX_ROLLOUT_SOURCES_TABLE} (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     rodex_sessions_id INTEGER NOT NULL,
-    rodex_sessions_statistics_sources_id INTEGER NOT NULL,
-    codex_turn_id_sha256_int_1 BIGINT NOT NULL CHECK (
-        typeof(codex_turn_id_sha256_int_1) = 'integer'
+    rodex_sessions_codex_threads_id INTEGER NOT NULL,
+    rollout_file_path TEXT NOT NULL CHECK (length(rollout_file_path) > 0),
+    first_observed_at_utc TEXT NOT NULL,
+    FOREIGN KEY (rodex_sessions_id, rodex_sessions_codex_threads_id)
+        REFERENCES {RODEX_SESSIONS_CODEX_THREADS_TABLE} (rodex_sessions_id, id)
+        DEFERRABLE INITIALLY DEFERRED
+)
+"""
+_CREATE_CODEX_ROLLOUT_SOURCES_THREAD_UNIQUE_INDEX = f"""
+CREATE UNIQUE INDEX IF NOT EXISTS
+    {RODEX_SESSIONS_CODEX_ROLLOUT_SOURCES_THREAD_UNIQUE_INDEX}
+ON {RODEX_SESSIONS_CODEX_ROLLOUT_SOURCES_TABLE}
+    (rodex_sessions_codex_threads_id)
+"""
+_CREATE_CODEX_ROLLOUT_SOURCES_SESSION_ID_UNIQUE_INDEX = f"""
+CREATE UNIQUE INDEX IF NOT EXISTS
+    {RODEX_SESSIONS_CODEX_ROLLOUT_SOURCES_SESSION_ID_UNIQUE_INDEX}
+ON {RODEX_SESSIONS_CODEX_ROLLOUT_SOURCES_TABLE} (rodex_sessions_id, id)
+"""
+_CREATE_CODEX_THREADS_UNIQUE_INDEX = f"""
+CREATE UNIQUE INDEX IF NOT EXISTS {RODEX_SESSIONS_CODEX_THREADS_UNIQUE_INDEX}
+ON {RODEX_SESSIONS_CODEX_THREADS_TABLE}
+    (codex_threads_id)
+"""
+_CREATE_CODEX_THREADS_SESSION_ID_UNIQUE_INDEX = f"""
+CREATE UNIQUE INDEX IF NOT EXISTS
+    {RODEX_SESSIONS_CODEX_THREADS_SESSION_ID_UNIQUE_INDEX}
+ON {RODEX_SESSIONS_CODEX_THREADS_TABLE} (rodex_sessions_id, id)
+"""
+_CREATE_CURRENT_CODEX_THREADS_SESSION_UNIQUE_INDEX = f"""
+CREATE UNIQUE INDEX IF NOT EXISTS
+    {RODEX_SESSIONS_CURRENT_CODEX_THREADS_SESSION_UNIQUE_INDEX}
+ON {RODEX_SESSIONS_CURRENT_CODEX_THREADS_TABLE} (rodex_sessions_id)
+"""
+_CREATE_CURRENT_CODEX_THREADS_MEMBERSHIP_UNIQUE_INDEX = f"""
+CREATE UNIQUE INDEX IF NOT EXISTS
+    {RODEX_SESSIONS_CURRENT_CODEX_THREADS_MEMBERSHIP_UNIQUE_INDEX}
+ON {RODEX_SESSIONS_CURRENT_CODEX_THREADS_TABLE}
+    (rodex_sessions_codex_threads_id)
+"""
+_CREATE_CODEX_TURNS_TABLE = f"""
+CREATE TABLE IF NOT EXISTS {RODEX_SESSIONS_CODEX_TURNS_TABLE} (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    rodex_sessions_id INTEGER NOT NULL,
+    rodex_sessions_codex_threads_id INTEGER NOT NULL,
+    turn_public_id_signed_bigint_1 BIGINT NOT NULL CHECK (
+        typeof(turn_public_id_signed_bigint_1) = 'integer'
     ),
-    codex_turn_id_sha256_int_2 BIGINT NOT NULL CHECK (
-        typeof(codex_turn_id_sha256_int_2) = 'integer'
+    turn_public_id_signed_bigint_2 BIGINT NOT NULL CHECK (
+        typeof(turn_public_id_signed_bigint_2) = 'integer'
     ),
-    codex_turn_id_sha256_int_3 BIGINT NOT NULL CHECK (
-        typeof(codex_turn_id_sha256_int_3) = 'integer'
+    codex_turn_id_signed_bigint_1 BIGINT NOT NULL CHECK (
+        typeof(codex_turn_id_signed_bigint_1) = 'integer'
     ),
-    codex_turn_id_sha256_int_4 BIGINT NOT NULL CHECK (
-        typeof(codex_turn_id_sha256_int_4) = 'integer'
+    codex_turn_id_signed_bigint_2 BIGINT NOT NULL CHECK (
+        typeof(codex_turn_id_signed_bigint_2) = 'integer'
     ),
-    codex_turn_id TEXT NOT NULL,
+    FOREIGN KEY (rodex_sessions_id, rodex_sessions_codex_threads_id)
+        REFERENCES {RODEX_SESSIONS_CODEX_THREADS_TABLE}
+            (rodex_sessions_id, id)
+        DEFERRABLE INITIALLY DEFERRED
+)
+"""
+_CREATE_CODEX_TURN_STATES_TABLE = f"""
+CREATE TABLE IF NOT EXISTS {RODEX_SESSIONS_CODEX_TURN_STATES_TABLE} (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    rodex_sessions_id INTEGER NOT NULL,
+    rodex_sessions_codex_turns_id INTEGER NOT NULL,
     started_at_utc TEXT DEFAULT NULL,
     terminal_at_utc TEXT DEFAULT NULL,
     outcome TEXT NOT NULL CHECK (outcome IN ('open', 'completed', 'aborted')),
     model_names_id INTEGER DEFAULT NULL,
     reasoning_effort_names_id INTEGER DEFAULT NULL,
+    CHECK (outcome != 'open' OR terminal_at_utc IS NULL),
+    FOREIGN KEY (rodex_sessions_id, rodex_sessions_codex_turns_id)
+        REFERENCES {RODEX_SESSIONS_CODEX_TURNS_TABLE} (rodex_sessions_id, id)
+        DEFERRABLE INITIALLY DEFERRED,
+    FOREIGN KEY (model_names_id) REFERENCES {MODEL_NAMES_TABLE} (id),
+    FOREIGN KEY (reasoning_effort_names_id)
+        REFERENCES {REASONING_EFFORT_NAMES_TABLE} (id)
+)
+"""
+_CREATE_CODEX_TURN_STATES_TURN_UNIQUE_INDEX = f"""
+CREATE UNIQUE INDEX IF NOT EXISTS
+    {RODEX_SESSIONS_CODEX_TURN_STATES_TURN_UNIQUE_INDEX}
+ON {RODEX_SESSIONS_CODEX_TURN_STATES_TABLE} (rodex_sessions_codex_turns_id)
+"""
+_CREATE_STATISTICS_TURN_METRICS_TABLE = f"""
+CREATE TABLE IF NOT EXISTS {RODEX_SESSIONS_STATISTICS_TURN_METRICS_TABLE} (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    rodex_sessions_id INTEGER NOT NULL,
+    rodex_sessions_codex_turns_id INTEGER NOT NULL,
     duration_ms INTEGER DEFAULT NULL CHECK (duration_ms IS NULL OR duration_ms >= 0),
     time_to_first_token_ms INTEGER DEFAULT NULL CHECK (
         time_to_first_token_ms IS NULL OR time_to_first_token_ms >= 0
@@ -672,7 +895,6 @@ CREATE TABLE IF NOT EXISTS {RODEX_SESSIONS_STATISTICS_TURNS_TABLE} (
         web_research_followed_by_command_or_file_work IN (0, 1)
     ),
     goal_updates_count INTEGER NOT NULL CHECK (goal_updates_count >= 0),
-    CHECK (outcome != 'open' OR terminal_at_utc IS NULL),
     CHECK (
         (command_duration_observation_count = 0 AND command_duration_total_ms = 0
             AND command_duration_median_ms IS NULL AND command_duration_p75_ms IS NULL
@@ -689,97 +911,216 @@ CREATE TABLE IF NOT EXISTS {RODEX_SESSIONS_STATISTICS_TURNS_TABLE} (
             AND command_duration_p90_ms <= command_duration_p95_ms
             AND command_duration_p95_ms <= command_duration_maximum_ms)
     ),
-    FOREIGN KEY (rodex_sessions_id, rodex_sessions_statistics_sources_id)
-        REFERENCES {RODEX_SESSIONS_STATISTICS_SOURCES_TABLE}
-            (rodex_sessions_id, id)
-        DEFERRABLE INITIALLY DEFERRED,
-    FOREIGN KEY (model_names_id) REFERENCES {MODEL_NAMES_TABLE} (id),
-    FOREIGN KEY (reasoning_effort_names_id)
-        REFERENCES {REASONING_EFFORT_NAMES_TABLE} (id)
+    FOREIGN KEY (rodex_sessions_id, rodex_sessions_codex_turns_id)
+        REFERENCES {RODEX_SESSIONS_CODEX_TURNS_TABLE} (rodex_sessions_id, id)
+        DEFERRABLE INITIALLY DEFERRED
 )
 """
-_CREATE_STATISTICS_TURNS_SOURCE_TURN_UNIQUE_INDEX = f"""
+_CREATE_STATISTICS_TURN_METRICS_TURN_UNIQUE_INDEX = f"""
 CREATE UNIQUE INDEX IF NOT EXISTS
-    {RODEX_SESSIONS_STATISTICS_TURNS_SOURCE_TURN_UNIQUE_INDEX}
-ON {RODEX_SESSIONS_STATISTICS_TURNS_TABLE} (
-    rodex_sessions_statistics_sources_id,
-    codex_turn_id_sha256_int_1,
-    codex_turn_id_sha256_int_2,
-    codex_turn_id_sha256_int_3,
-    codex_turn_id_sha256_int_4
+    {RODEX_SESSIONS_STATISTICS_TURN_METRICS_TURN_UNIQUE_INDEX}
+ON {RODEX_SESSIONS_STATISTICS_TURN_METRICS_TABLE}
+    (rodex_sessions_codex_turns_id)
+"""
+_CREATE_CODEX_TURNS_SOURCE_TURN_UNIQUE_INDEX = f"""
+CREATE UNIQUE INDEX IF NOT EXISTS
+    {RODEX_SESSIONS_CODEX_TURNS_SOURCE_TURN_UNIQUE_INDEX}
+ON {RODEX_SESSIONS_CODEX_TURNS_TABLE} (
+    rodex_sessions_codex_threads_id,
+    codex_turn_id_signed_bigint_1,
+    codex_turn_id_signed_bigint_2
 )
 """
-_CREATE_STATISTICS_TURNS_SESSION_TURN_INDEX = f"""
-CREATE INDEX IF NOT EXISTS {RODEX_SESSIONS_STATISTICS_TURNS_SESSION_TURN_INDEX}
-ON {RODEX_SESSIONS_STATISTICS_TURNS_TABLE} (
+_CREATE_CODEX_TURNS_SESSION_TURN_INDEX = f"""
+CREATE INDEX IF NOT EXISTS {RODEX_SESSIONS_CODEX_TURNS_SESSION_TURN_INDEX}
+ON {RODEX_SESSIONS_CODEX_TURNS_TABLE} (
     rodex_sessions_id,
-    codex_turn_id_sha256_int_1,
-    codex_turn_id_sha256_int_2,
-    codex_turn_id_sha256_int_3,
-    codex_turn_id_sha256_int_4
+    codex_turn_id_signed_bigint_1,
+    codex_turn_id_signed_bigint_2
 )
 """
-_CREATE_STATISTICS_TURNS_SESSION_ID_UNIQUE_INDEX = f"""
+_CREATE_CODEX_TURNS_SESSION_ID_UNIQUE_INDEX = f"""
 CREATE UNIQUE INDEX IF NOT EXISTS
-    {RODEX_SESSIONS_STATISTICS_TURNS_SESSION_ID_UNIQUE_INDEX}
-ON {RODEX_SESSIONS_STATISTICS_TURNS_TABLE}
+    {RODEX_SESSIONS_CODEX_TURNS_SESSION_ID_UNIQUE_INDEX}
+ON {RODEX_SESSIONS_CODEX_TURNS_TABLE}
     (rodex_sessions_id, id)
 """
-_CREATE_STATISTICS_TURNS_SOURCE_ID_UNIQUE_INDEX = f"""
+_CREATE_CODEX_TURNS_SOURCE_ID_UNIQUE_INDEX = f"""
 CREATE UNIQUE INDEX IF NOT EXISTS
-    {RODEX_SESSIONS_STATISTICS_TURNS_SOURCE_ID_UNIQUE_INDEX}
-ON {RODEX_SESSIONS_STATISTICS_TURNS_TABLE}
-    (rodex_sessions_id, rodex_sessions_statistics_sources_id, id)
+    {RODEX_SESSIONS_CODEX_TURNS_SOURCE_ID_UNIQUE_INDEX}
+ON {RODEX_SESSIONS_CODEX_TURNS_TABLE}
+    (rodex_sessions_id, rodex_sessions_codex_threads_id, id)
 """
-_CREATE_STATISTICS_SUBAGENT_SPAWNS_TABLE = f"""
-CREATE TABLE IF NOT EXISTS {RODEX_SESSIONS_STATISTICS_SUBAGENT_SPAWNS_TABLE} (
+_CREATE_CODEX_TURNS_PUBLIC_ID_UNIQUE_INDEX = f"""
+CREATE UNIQUE INDEX IF NOT EXISTS
+    {RODEX_SESSIONS_CODEX_TURNS_PUBLIC_ID_UNIQUE_INDEX}
+ON {RODEX_SESSIONS_CODEX_TURNS_TABLE}
+    (turn_public_id_signed_bigint_1, turn_public_id_signed_bigint_2)
+"""
+_CREATE_CODEX_ACTIVITY_SCOPES_TABLE = f"""
+CREATE TABLE IF NOT EXISTS {RODEX_SESSIONS_CODEX_ACTIVITY_SCOPES_TABLE} (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     rodex_sessions_id INTEGER NOT NULL,
-    subagent_rodex_sessions_statistics_sources_id INTEGER NOT NULL,
-    parent_rodex_sessions_statistics_sources_id INTEGER NOT NULL,
-    spawning_rodex_sessions_statistics_turns_id INTEGER NOT NULL,
-    FOREIGN KEY (rodex_sessions_id,
-        subagent_rodex_sessions_statistics_sources_id,
-        parent_rodex_sessions_statistics_sources_id)
-        REFERENCES {RODEX_SESSIONS_STATISTICS_SOURCES_TABLE}
-            (rodex_sessions_id, id, parent_rodex_sessions_statistics_sources_id)
+    rodex_sessions_codex_threads_id INTEGER NOT NULL,
+    rodex_sessions_codex_turns_id INTEGER DEFAULT NULL,
+    FOREIGN KEY (rodex_sessions_id, rodex_sessions_codex_threads_id)
+        REFERENCES {RODEX_SESSIONS_CODEX_THREADS_TABLE} (rodex_sessions_id, id)
+        DEFERRABLE INITIALLY DEFERRED,
+    FOREIGN KEY (rodex_sessions_id, rodex_sessions_codex_threads_id,
+        rodex_sessions_codex_turns_id)
+        REFERENCES {RODEX_SESSIONS_CODEX_TURNS_TABLE}
+            (rodex_sessions_id, rodex_sessions_codex_threads_id, id)
+        DEFERRABLE INITIALLY DEFERRED
+)
+"""
+_CREATE_CODEX_ACTIVITY_SCOPES_WITHOUT_TURN_UNIQUE_INDEX = f"""
+CREATE UNIQUE INDEX IF NOT EXISTS
+    {RODEX_SESSIONS_CODEX_ACTIVITY_SCOPES_WITHOUT_TURN_UNIQUE_INDEX}
+ON {RODEX_SESSIONS_CODEX_ACTIVITY_SCOPES_TABLE}
+    (rodex_sessions_codex_threads_id)
+WHERE rodex_sessions_codex_turns_id IS NULL
+"""
+_CREATE_CODEX_ACTIVITY_SCOPES_TURN_UNIQUE_INDEX = f"""
+CREATE UNIQUE INDEX IF NOT EXISTS
+    {RODEX_SESSIONS_CODEX_ACTIVITY_SCOPES_TURN_UNIQUE_INDEX}
+ON {RODEX_SESSIONS_CODEX_ACTIVITY_SCOPES_TABLE}
+    (rodex_sessions_codex_turns_id)
+WHERE rodex_sessions_codex_turns_id IS NOT NULL
+"""
+_CREATE_CODEX_ACTIVITY_SCOPES_SESSION_THREAD_ID_UNIQUE_INDEX = f"""
+CREATE UNIQUE INDEX IF NOT EXISTS
+    {RODEX_SESSIONS_CODEX_ACTIVITY_SCOPES_SESSION_THREAD_ID_UNIQUE_INDEX}
+ON {RODEX_SESSIONS_CODEX_ACTIVITY_SCOPES_TABLE}
+    (rodex_sessions_id, rodex_sessions_codex_threads_id, id)
+"""
+_CREATE_CODEX_ACTIVITY_SCOPES_IMMUTABLE_TRIGGER = f"""
+CREATE TRIGGER IF NOT EXISTS {RODEX_SESSIONS_CODEX_ACTIVITY_SCOPES_IMMUTABLE_TRIGGER}
+BEFORE UPDATE ON {RODEX_SESSIONS_CODEX_ACTIVITY_SCOPES_TABLE}
+BEGIN
+    SELECT RAISE(ABORT, 'Codex activity scope identity is immutable');
+END
+"""
+_CREATE_SUBAGENT_SPAWNS_TABLE = f"""
+CREATE TABLE IF NOT EXISTS {RODEX_SESSIONS_SUBAGENT_SPAWNS_TABLE} (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    rodex_sessions_id INTEGER NOT NULL,
+    subagent_rodex_sessions_codex_threads_id INTEGER NOT NULL,
+    parent_rodex_sessions_codex_threads_id INTEGER NOT NULL,
+    spawning_rodex_sessions_codex_turns_id INTEGER NOT NULL,
+    agent_path TEXT NOT NULL CHECK (length(agent_path) > 0),
+    agent_nickname TEXT DEFAULT NULL CHECK (
+        agent_nickname IS NULL OR length(agent_nickname) > 0
+    ),
+    history_inheritance_kind TEXT NOT NULL CHECK (
+        history_inheritance_kind IN ('clean', 'inherited')
+    ),
+    inherited_history_start_ordinal INTEGER DEFAULT NULL,
+    CHECK (
+        (history_inheritance_kind = 'clean'
+            AND inherited_history_start_ordinal IS NULL)
+        OR
+        (history_inheritance_kind = 'inherited'
+            AND inherited_history_start_ordinal >= 0)
+    ),
+    FOREIGN KEY (rodex_sessions_id, subagent_rodex_sessions_codex_threads_id)
+        REFERENCES {RODEX_SESSIONS_CODEX_THREADS_TABLE}
+            (rodex_sessions_id, id)
+        DEFERRABLE INITIALLY DEFERRED,
+    FOREIGN KEY (rodex_sessions_id, parent_rodex_sessions_codex_threads_id)
+        REFERENCES {RODEX_SESSIONS_CODEX_THREADS_TABLE}
+            (rodex_sessions_id, id)
         DEFERRABLE INITIALLY DEFERRED,
     FOREIGN KEY (rodex_sessions_id,
-        parent_rodex_sessions_statistics_sources_id,
-        spawning_rodex_sessions_statistics_turns_id)
-        REFERENCES {RODEX_SESSIONS_STATISTICS_TURNS_TABLE}
-            (rodex_sessions_id, rodex_sessions_statistics_sources_id, id)
+        parent_rodex_sessions_codex_threads_id,
+        spawning_rodex_sessions_codex_turns_id)
+        REFERENCES {RODEX_SESSIONS_CODEX_TURNS_TABLE}
+            (rodex_sessions_id, rodex_sessions_codex_threads_id, id)
         DEFERRABLE INITIALLY DEFERRED,
     CHECK (
-        subagent_rodex_sessions_statistics_sources_id
-        != parent_rodex_sessions_statistics_sources_id
+        subagent_rodex_sessions_codex_threads_id
+        != parent_rodex_sessions_codex_threads_id
     )
 )
 """
-_CREATE_STATISTICS_SUBAGENT_SPAWNS_SOURCE_UNIQUE_INDEX = f"""
+_CREATE_SUBAGENT_SPAWNS_SOURCE_UNIQUE_INDEX = f"""
 CREATE UNIQUE INDEX IF NOT EXISTS
-    {RODEX_SESSIONS_STATISTICS_SUBAGENT_SPAWNS_SOURCE_UNIQUE_INDEX}
-ON {RODEX_SESSIONS_STATISTICS_SUBAGENT_SPAWNS_TABLE}
-    (subagent_rodex_sessions_statistics_sources_id)
+    {RODEX_SESSIONS_SUBAGENT_SPAWNS_SOURCE_UNIQUE_INDEX}
+ON {RODEX_SESSIONS_SUBAGENT_SPAWNS_TABLE}
+    (subagent_rodex_sessions_codex_threads_id)
 """
-_CREATE_STATISTICS_SUBAGENT_SPAWNS_TURN_INDEX = f"""
-CREATE INDEX IF NOT EXISTS {RODEX_SESSIONS_STATISTICS_SUBAGENT_SPAWNS_TURN_INDEX}
-ON {RODEX_SESSIONS_STATISTICS_SUBAGENT_SPAWNS_TABLE}
-    (spawning_rodex_sessions_statistics_turns_id)
+_CREATE_SUBAGENT_SPAWNS_TURN_INDEX = f"""
+CREATE INDEX IF NOT EXISTS {RODEX_SESSIONS_SUBAGENT_SPAWNS_TURN_INDEX}
+ON {RODEX_SESSIONS_SUBAGENT_SPAWNS_TABLE}
+    (spawning_rodex_sessions_codex_turns_id)
+"""
+_CREATE_SUBAGENT_SPAWNS_PARENT_INDEX = f"""
+CREATE INDEX IF NOT EXISTS {RODEX_SESSIONS_SUBAGENT_SPAWNS_PARENT_INDEX}
+ON {RODEX_SESSIONS_SUBAGENT_SPAWNS_TABLE}
+    (parent_rodex_sessions_codex_threads_id)
+"""
+_CREATE_CURRENT_CODEX_THREAD_REJECT_SPAWN_INSERT_TRIGGER = f"""
+CREATE TRIGGER IF NOT EXISTS {RODEX_CURRENT_CODEX_THREAD_REJECT_SPAWN_INSERT_TRIGGER}
+BEFORE INSERT ON {RODEX_SESSIONS_CURRENT_CODEX_THREADS_TABLE}
+WHEN EXISTS (
+    SELECT 1 FROM {RODEX_SESSIONS_SUBAGENT_SPAWNS_TABLE}
+    WHERE subagent_rodex_sessions_codex_threads_id =
+        NEW.rodex_sessions_codex_threads_id
+)
+BEGIN
+    SELECT RAISE(ABORT, 'current Codex thread cannot be a subagent spawn');
+END
+"""
+_CREATE_CURRENT_CODEX_THREAD_REJECT_SPAWN_UPDATE_TRIGGER = f"""
+CREATE TRIGGER IF NOT EXISTS {RODEX_CURRENT_CODEX_THREAD_REJECT_SPAWN_UPDATE_TRIGGER}
+BEFORE UPDATE OF rodex_sessions_codex_threads_id
+ON {RODEX_SESSIONS_CURRENT_CODEX_THREADS_TABLE}
+WHEN EXISTS (
+    SELECT 1 FROM {RODEX_SESSIONS_SUBAGENT_SPAWNS_TABLE}
+    WHERE subagent_rodex_sessions_codex_threads_id =
+        NEW.rodex_sessions_codex_threads_id
+)
+BEGIN
+    SELECT RAISE(ABORT, 'current Codex thread cannot be a subagent spawn');
+END
+"""
+_CREATE_SUBAGENT_SPAWN_REJECT_CURRENT_INSERT_TRIGGER = f"""
+CREATE TRIGGER IF NOT EXISTS {RODEX_SUBAGENT_SPAWN_REJECT_CURRENT_INSERT_TRIGGER}
+BEFORE INSERT ON {RODEX_SESSIONS_SUBAGENT_SPAWNS_TABLE}
+WHEN EXISTS (
+    SELECT 1 FROM {RODEX_SESSIONS_CURRENT_CODEX_THREADS_TABLE}
+    WHERE rodex_sessions_codex_threads_id =
+        NEW.subagent_rodex_sessions_codex_threads_id
+)
+BEGIN
+    SELECT RAISE(ABORT, 'current Codex thread cannot be a subagent spawn');
+END
+"""
+_CREATE_SUBAGENT_SPAWN_REJECT_CURRENT_UPDATE_TRIGGER = f"""
+CREATE TRIGGER IF NOT EXISTS {RODEX_SUBAGENT_SPAWN_REJECT_CURRENT_UPDATE_TRIGGER}
+BEFORE UPDATE OF subagent_rodex_sessions_codex_threads_id
+ON {RODEX_SESSIONS_SUBAGENT_SPAWNS_TABLE}
+WHEN EXISTS (
+    SELECT 1 FROM {RODEX_SESSIONS_CURRENT_CODEX_THREADS_TABLE}
+    WHERE rodex_sessions_codex_threads_id =
+        NEW.subagent_rodex_sessions_codex_threads_id
+)
+BEGIN
+    SELECT RAISE(ABORT, 'current Codex thread cannot be a subagent spawn');
+END
 """
 _CREATE_STATISTICS_TURN_NAMED_COUNTS_TABLE = f"""
 CREATE TABLE IF NOT EXISTS {RODEX_SESSIONS_STATISTICS_TURN_NAMED_COUNTS_TABLE} (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     rodex_sessions_id INTEGER NOT NULL,
-    rodex_sessions_statistics_turns_id INTEGER NOT NULL,
+    rodex_sessions_codex_turns_id INTEGER NOT NULL,
     count_kind TEXT NOT NULL CHECK (count_kind IN (
         'command_exit_status', 'command_family', 'model_tool', 'file_change_type',
         'web_action', 'goal_status'
     )),
     count_name TEXT NOT NULL CHECK (length(count_name) > 0),
     occurrence_count INTEGER NOT NULL CHECK (occurrence_count > 0),
-    FOREIGN KEY (rodex_sessions_id, rodex_sessions_statistics_turns_id)
-        REFERENCES {RODEX_SESSIONS_STATISTICS_TURNS_TABLE}
+    FOREIGN KEY (rodex_sessions_id, rodex_sessions_codex_turns_id)
+        REFERENCES {RODEX_SESSIONS_CODEX_TURNS_TABLE}
             (rodex_sessions_id, id)
         DEFERRABLE INITIALLY DEFERRED
 )
@@ -788,7 +1129,7 @@ _CREATE_STATISTICS_TURN_NAMED_COUNTS_UNIQUE_INDEX = f"""
 CREATE UNIQUE INDEX IF NOT EXISTS
     {RODEX_SESSIONS_STATISTICS_TURN_NAMED_COUNTS_UNIQUE_INDEX}
 ON {RODEX_SESSIONS_STATISTICS_TURN_NAMED_COUNTS_TABLE}
-    (rodex_sessions_statistics_turns_id, count_kind, count_name)
+    (rodex_sessions_codex_turns_id, count_kind, count_name)
 """
 _CREATE_STATISTICS_TURN_NAMED_COUNTS_SESSION_KIND_INDEX = f"""
 CREATE INDEX IF NOT EXISTS
@@ -796,8 +1137,8 @@ CREATE INDEX IF NOT EXISTS
 ON {RODEX_SESSIONS_STATISTICS_TURN_NAMED_COUNTS_TABLE}
     (rodex_sessions_id, count_kind, count_name)
 """
-_CREATE_STATISTICS_WORKERS_TABLE = f"""
-CREATE TABLE IF NOT EXISTS {RODEX_SESSIONS_STATISTICS_WORKERS_TABLE} (
+_CREATE_ANALYTICS_WORKERS_TABLE = f"""
+CREATE TABLE IF NOT EXISTS {RODEX_SESSIONS_ANALYTICS_WORKERS_TABLE} (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     rodex_sessions_id INTEGER NOT NULL,
     worker_state TEXT NOT NULL CHECK (
@@ -820,10 +1161,600 @@ CREATE TABLE IF NOT EXISTS {RODEX_SESSIONS_STATISTICS_WORKERS_TABLE} (
     FOREIGN KEY (rodex_sessions_id) REFERENCES {RODEX_SESSIONS_TABLE} (id)
 )
 """
-_CREATE_STATISTICS_WORKERS_SESSION_UNIQUE_INDEX = f"""
+_CREATE_ANALYTICS_WORKERS_SESSION_UNIQUE_INDEX = f"""
 CREATE UNIQUE INDEX IF NOT EXISTS
-    {RODEX_SESSIONS_STATISTICS_WORKERS_SESSION_UNIQUE_INDEX}
-ON {RODEX_SESSIONS_STATISTICS_WORKERS_TABLE} (rodex_sessions_id)
+    {RODEX_SESSIONS_ANALYTICS_WORKERS_SESSION_UNIQUE_INDEX}
+ON {RODEX_SESSIONS_ANALYTICS_WORKERS_TABLE} (rodex_sessions_id)
+"""
+_CREATE_ANALYTICS_WORKERS_SESSION_ID_UNIQUE_INDEX = f"""
+CREATE UNIQUE INDEX IF NOT EXISTS
+    {RODEX_SESSIONS_ANALYTICS_WORKERS_SESSION_ID_UNIQUE_INDEX}
+ON {RODEX_SESSIONS_ANALYTICS_WORKERS_TABLE} (rodex_sessions_id, id)
+"""
+_CREATE_ANALYTICS_WORKER_THREAD_CHECKPOINTS_TABLE = f"""
+CREATE TABLE IF NOT EXISTS
+    {RODEX_SESSIONS_ANALYTICS_WORKER_THREAD_CHECKPOINTS_TABLE} (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    rodex_sessions_id INTEGER NOT NULL,
+    rodex_sessions_analytics_workers_id INTEGER NOT NULL,
+    rodex_sessions_codex_rollout_sources_id INTEGER NOT NULL,
+    analyzed_size_bytes INTEGER NOT NULL CHECK (analyzed_size_bytes >= 0),
+    analyzed_mtime_ns INTEGER NOT NULL CHECK (analyzed_mtime_ns >= 0),
+    analyzed_prefix_sha256 TEXT NOT NULL CHECK (
+        length(analyzed_prefix_sha256) = 64
+        AND analyzed_prefix_sha256 NOT GLOB '*[^0-9a-f]*'
+    ),
+    verified_at_utc TEXT NOT NULL,
+    FOREIGN KEY (rodex_sessions_id, rodex_sessions_analytics_workers_id)
+        REFERENCES {RODEX_SESSIONS_ANALYTICS_WORKERS_TABLE} (rodex_sessions_id, id)
+        DEFERRABLE INITIALLY DEFERRED,
+    FOREIGN KEY (rodex_sessions_id, rodex_sessions_codex_rollout_sources_id)
+        REFERENCES {RODEX_SESSIONS_CODEX_ROLLOUT_SOURCES_TABLE} (rodex_sessions_id, id)
+        DEFERRABLE INITIALLY DEFERRED
+)
+"""
+_CREATE_ANALYTICS_WORKER_THREAD_CHECKPOINTS_UNIQUE_INDEX = f"""
+CREATE UNIQUE INDEX IF NOT EXISTS
+    {RODEX_SESSIONS_ANALYTICS_WORKER_THREAD_CHECKPOINTS_UNIQUE_INDEX}
+ON {RODEX_SESSIONS_ANALYTICS_WORKER_THREAD_CHECKPOINTS_TABLE}
+    (rodex_sessions_id, rodex_sessions_analytics_workers_id,
+        rodex_sessions_codex_rollout_sources_id)
+"""
+_CREATE_AGENT_TRACE_PUBLICATIONS_TABLE = f"""
+CREATE TABLE IF NOT EXISTS {RODEX_SESSIONS_AGENT_TRACE_PUBLICATIONS_TABLE} (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    rodex_sessions_id INTEGER NOT NULL,
+    trace_publication_sequence INTEGER NOT NULL CHECK (trace_publication_sequence >= 1),
+    trace_schema_version TEXT NOT NULL CHECK (length(trace_schema_version) > 0),
+    calculated_at_utc TEXT NOT NULL,
+    coverage_state TEXT NOT NULL CHECK (coverage_state IN ('complete', 'gapped')),
+    durable_event_count INTEGER NOT NULL CHECK (durable_event_count >= 0),
+    unrecognized_record_count INTEGER NOT NULL CHECK (unrecognized_record_count >= 0),
+    FOREIGN KEY (rodex_sessions_id) REFERENCES {RODEX_SESSIONS_TABLE} (id)
+)
+"""
+_CREATE_AGENT_TRACE_PUBLICATIONS_SESSION_UNIQUE_INDEX = f"""
+CREATE UNIQUE INDEX IF NOT EXISTS
+    {RODEX_SESSIONS_AGENT_TRACE_PUBLICATIONS_SESSION_UNIQUE_INDEX}
+ON {RODEX_SESSIONS_AGENT_TRACE_PUBLICATIONS_TABLE} (rodex_sessions_id)
+"""
+_CREATE_AGENT_TRACE_EVENTS_TABLE = f"""
+CREATE TABLE IF NOT EXISTS {RODEX_SESSIONS_AGENT_TRACE_EVENTS_TABLE} (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    trace_event_public_id_signed_bigint_1 BIGINT NOT NULL CHECK (
+        typeof(trace_event_public_id_signed_bigint_1) = 'integer'
+    ),
+    trace_event_public_id_signed_bigint_2 BIGINT NOT NULL CHECK (
+        typeof(trace_event_public_id_signed_bigint_2) = 'integer'
+    ),
+    rodex_sessions_id INTEGER NOT NULL,
+    rodex_sessions_codex_threads_id INTEGER NOT NULL,
+    rodex_sessions_codex_activity_scopes_id INTEGER NOT NULL,
+    source_record_ordinal INTEGER NOT NULL CHECK (source_record_ordinal >= 0),
+    derived_event_ordinal INTEGER NOT NULL CHECK (derived_event_ordinal >= 0),
+    first_trace_publication_sequence INTEGER NOT NULL CHECK (
+        first_trace_publication_sequence >= 1
+    ),
+    event_kind TEXT NOT NULL CHECK (event_kind IN (
+        'session_metadata', 'turn_context', 'turn_started', 'turn_completed',
+        'turn_aborted',
+        'message', 'tool_call', 'command_execution', 'subagent_activity',
+        'token_usage', 'rate_limit', 'compaction', 'unrecognized_record'
+    )),
+    event_time_utc TEXT DEFAULT NULL,
+    detail_sha256 TEXT NOT NULL CHECK (
+        length(detail_sha256) = 64 AND detail_sha256 NOT GLOB '*[^0-9a-f]*'
+    ),
+    FOREIGN KEY (rodex_sessions_id, rodex_sessions_codex_threads_id)
+        REFERENCES {RODEX_SESSIONS_CODEX_THREADS_TABLE} (rodex_sessions_id, id)
+        DEFERRABLE INITIALLY DEFERRED,
+    FOREIGN KEY (rodex_sessions_id, rodex_sessions_codex_threads_id,
+        rodex_sessions_codex_activity_scopes_id)
+        REFERENCES {RODEX_SESSIONS_CODEX_ACTIVITY_SCOPES_TABLE}
+            (rodex_sessions_id, rodex_sessions_codex_threads_id, id)
+        DEFERRABLE INITIALLY DEFERRED
+)
+"""
+_CREATE_AGENT_TRACE_EVENTS_SOURCE_UNIQUE_INDEX = f"""
+CREATE UNIQUE INDEX IF NOT EXISTS {RODEX_SESSIONS_AGENT_TRACE_EVENTS_SOURCE_UNIQUE_INDEX}
+ON {RODEX_SESSIONS_AGENT_TRACE_EVENTS_TABLE}
+    (rodex_sessions_codex_threads_id, source_record_ordinal, derived_event_ordinal)
+"""
+_CREATE_AGENT_TRACE_EVENTS_SESSION_ORDER_INDEX = f"""
+CREATE INDEX IF NOT EXISTS {RODEX_SESSIONS_AGENT_TRACE_EVENTS_SESSION_ORDER_INDEX}
+ON {RODEX_SESSIONS_AGENT_TRACE_EVENTS_TABLE}
+    (rodex_sessions_id, event_time_utc, id)
+"""
+_CREATE_AGENT_TRACE_EVENTS_ID_KIND_UNIQUE_INDEX = f"""
+CREATE UNIQUE INDEX IF NOT EXISTS {RODEX_SESSIONS_AGENT_TRACE_EVENTS_ID_KIND_UNIQUE_INDEX}
+ON {RODEX_SESSIONS_AGENT_TRACE_EVENTS_TABLE} (id, event_kind)
+"""
+_CREATE_AGENT_TRACE_EVENTS_SESSION_ID_KIND_UNIQUE_INDEX = f"""
+CREATE UNIQUE INDEX IF NOT EXISTS
+    {RODEX_SESSIONS_AGENT_TRACE_EVENTS_SESSION_ID_KIND_UNIQUE_INDEX}
+ON {RODEX_SESSIONS_AGENT_TRACE_EVENTS_TABLE} (rodex_sessions_id, id, event_kind)
+"""
+_CREATE_AGENT_TRACE_EVENTS_SESSION_ID_UNIQUE_INDEX = f"""
+CREATE UNIQUE INDEX IF NOT EXISTS
+    {RODEX_SESSIONS_AGENT_TRACE_EVENTS_SESSION_ID_UNIQUE_INDEX}
+ON {RODEX_SESSIONS_AGENT_TRACE_EVENTS_TABLE} (rodex_sessions_id, id)
+"""
+_CREATE_AGENT_TRACE_EVENTS_PUBLIC_ID_UNIQUE_INDEX = f"""
+CREATE UNIQUE INDEX IF NOT EXISTS
+    {RODEX_SESSIONS_AGENT_TRACE_EVENTS_PUBLIC_ID_UNIQUE_INDEX}
+ON {RODEX_SESSIONS_AGENT_TRACE_EVENTS_TABLE}
+    (trace_event_public_id_signed_bigint_1, trace_event_public_id_signed_bigint_2)
+"""
+_CREATE_AGENT_TRACE_EVENTS_SESSION_SCOPE_ID_KIND_UNIQUE_INDEX = f"""
+CREATE UNIQUE INDEX IF NOT EXISTS
+    {RODEX_SESSIONS_AGENT_TRACE_EVENTS_SESSION_SCOPE_ID_KIND_UNIQUE_INDEX}
+ON {RODEX_SESSIONS_AGENT_TRACE_EVENTS_TABLE}
+    (rodex_sessions_id, rodex_sessions_codex_activity_scopes_id, id, event_kind)
+"""
+_CREATE_AGENT_TRACE_EVENTS_IMMUTABLE_TRIGGER = f"""
+CREATE TRIGGER IF NOT EXISTS {RODEX_SESSIONS_AGENT_TRACE_EVENTS_IMMUTABLE_TRIGGER}
+BEFORE UPDATE ON {RODEX_SESSIONS_AGENT_TRACE_EVENTS_TABLE}
+BEGIN
+    SELECT RAISE(ABORT, 'agent trace event provenance is immutable');
+END
+"""
+_CREATE_AGENT_TRACE_MESSAGES_TABLE = f"""
+CREATE TABLE IF NOT EXISTS {RODEX_SESSIONS_AGENT_TRACE_MESSAGES_TABLE} (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    rodex_sessions_id INTEGER NOT NULL,
+    rodex_sessions_codex_activity_scopes_id INTEGER NOT NULL,
+    rodex_sessions_agent_trace_events_id INTEGER NOT NULL,
+    event_kind TEXT NOT NULL DEFAULT 'message' CHECK (event_kind = 'message'),
+    rodex_sessions_codex_items_id INTEGER DEFAULT NULL,
+    message_phase TEXT NOT NULL CHECK (message_phase IN (
+        'commentary', 'final_answer', 'analysis', 'unknown'
+    )),
+    message_role TEXT NOT NULL CHECK (message_role IN (
+        'assistant', 'user', 'system', 'unknown'
+    )),
+    content_block_count INTEGER NOT NULL CHECK (content_block_count >= 0),
+    body_utf8_bytes INTEGER NOT NULL CHECK (body_utf8_bytes >= 0),
+    body_capture_state TEXT NOT NULL CHECK (body_capture_state IN (
+        'rollout_reference', 'encrypted', 'redacted', 'unavailable'
+    )),
+    FOREIGN KEY (rodex_sessions_id, rodex_sessions_codex_activity_scopes_id,
+        rodex_sessions_agent_trace_events_id, event_kind)
+        REFERENCES {RODEX_SESSIONS_AGENT_TRACE_EVENTS_TABLE}
+            (rodex_sessions_id, rodex_sessions_codex_activity_scopes_id,
+                id, event_kind),
+    FOREIGN KEY (rodex_sessions_id, rodex_sessions_codex_activity_scopes_id,
+        rodex_sessions_codex_items_id)
+        REFERENCES {RODEX_SESSIONS_CODEX_ITEMS_TABLE}
+            (rodex_sessions_id, rodex_sessions_codex_activity_scopes_id, id)
+)
+"""
+_CREATE_CODEX_ITEMS_TABLE = f"""
+CREATE TABLE IF NOT EXISTS {RODEX_SESSIONS_CODEX_ITEMS_TABLE} (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    rodex_sessions_id INTEGER NOT NULL,
+    rodex_sessions_codex_threads_id INTEGER NOT NULL,
+    rodex_sessions_codex_activity_scopes_id INTEGER NOT NULL,
+    item_public_id_signed_bigint_1 BIGINT NOT NULL CHECK (
+        typeof(item_public_id_signed_bigint_1) = 'integer'
+    ),
+    item_public_id_signed_bigint_2 BIGINT NOT NULL CHECK (
+        typeof(item_public_id_signed_bigint_2) = 'integer'
+    ),
+    codex_item_id_signed_bigint_1 BIGINT DEFAULT NULL CHECK (
+        codex_item_id_signed_bigint_1 IS NULL
+        OR typeof(codex_item_id_signed_bigint_1) = 'integer'
+    ),
+    codex_item_id_signed_bigint_2 BIGINT DEFAULT NULL CHECK (
+        codex_item_id_signed_bigint_2 IS NULL
+        OR typeof(codex_item_id_signed_bigint_2) = 'integer'
+    ),
+    CHECK (
+        (codex_item_id_signed_bigint_1 IS NULL
+            AND codex_item_id_signed_bigint_2 IS NULL)
+        OR (codex_item_id_signed_bigint_1 IS NOT NULL
+            AND codex_item_id_signed_bigint_2 IS NOT NULL)
+    ),
+    FOREIGN KEY (rodex_sessions_id, rodex_sessions_codex_threads_id)
+        REFERENCES {RODEX_SESSIONS_CODEX_THREADS_TABLE} (rodex_sessions_id, id)
+        DEFERRABLE INITIALLY DEFERRED,
+    FOREIGN KEY (rodex_sessions_id, rodex_sessions_codex_threads_id,
+        rodex_sessions_codex_activity_scopes_id)
+        REFERENCES {RODEX_SESSIONS_CODEX_ACTIVITY_SCOPES_TABLE}
+            (rodex_sessions_id, rodex_sessions_codex_threads_id, id)
+        DEFERRABLE INITIALLY DEFERRED
+)
+"""
+_CREATE_CODEX_ITEMS_PUBLIC_ID_UNIQUE_INDEX = f"""
+CREATE UNIQUE INDEX IF NOT EXISTS
+    {RODEX_SESSIONS_CODEX_ITEMS_PUBLIC_ID_UNIQUE_INDEX}
+ON {RODEX_SESSIONS_CODEX_ITEMS_TABLE}
+    (item_public_id_signed_bigint_1, item_public_id_signed_bigint_2)
+"""
+_CREATE_CODEX_ITEMS_IDENTITY_UNIQUE_INDEX = f"""
+CREATE UNIQUE INDEX IF NOT EXISTS
+    {RODEX_SESSIONS_CODEX_ITEMS_IDENTITY_UNIQUE_INDEX}
+ON {RODEX_SESSIONS_CODEX_ITEMS_TABLE}
+    (rodex_sessions_codex_threads_id, codex_item_id_signed_bigint_1,
+        codex_item_id_signed_bigint_2)
+WHERE codex_item_id_signed_bigint_1 IS NOT NULL
+"""
+_CREATE_CODEX_ITEMS_SESSION_THREAD_ID_UNIQUE_INDEX = f"""
+CREATE UNIQUE INDEX IF NOT EXISTS
+    {RODEX_SESSIONS_CODEX_ITEMS_SESSION_THREAD_ID_UNIQUE_INDEX}
+ON {RODEX_SESSIONS_CODEX_ITEMS_TABLE}
+    (rodex_sessions_id, rodex_sessions_codex_threads_id, id)
+"""
+_CREATE_CODEX_ITEMS_SESSION_ID_UNIQUE_INDEX = f"""
+CREATE UNIQUE INDEX IF NOT EXISTS
+    {RODEX_SESSIONS_CODEX_ITEMS_SESSION_ID_UNIQUE_INDEX}
+ON {RODEX_SESSIONS_CODEX_ITEMS_TABLE} (rodex_sessions_id, id)
+"""
+_CREATE_CODEX_ITEMS_SESSION_SCOPE_ID_UNIQUE_INDEX = f"""
+CREATE UNIQUE INDEX IF NOT EXISTS
+    {RODEX_SESSIONS_CODEX_ITEMS_SESSION_SCOPE_ID_UNIQUE_INDEX}
+ON {RODEX_SESSIONS_CODEX_ITEMS_TABLE}
+    (rodex_sessions_id, rodex_sessions_codex_activity_scopes_id, id)
+"""
+_CREATE_CODEX_ITEMS_IMMUTABLE_TRIGGER = f"""
+CREATE TRIGGER IF NOT EXISTS {RODEX_SESSIONS_CODEX_ITEMS_IMMUTABLE_TRIGGER}
+BEFORE UPDATE ON {RODEX_SESSIONS_CODEX_ITEMS_TABLE}
+BEGIN
+    SELECT RAISE(ABORT, 'Codex item identity is immutable');
+END
+"""
+_CREATE_CODEX_ITEM_ALIASES_TABLE = f"""
+CREATE TABLE IF NOT EXISTS {RODEX_SESSIONS_CODEX_ITEM_ALIASES_TABLE} (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    rodex_sessions_id INTEGER NOT NULL,
+    rodex_sessions_codex_threads_id INTEGER NOT NULL,
+    rodex_sessions_codex_activity_scopes_id INTEGER NOT NULL,
+    rodex_sessions_codex_items_id INTEGER NOT NULL,
+    codex_item_alias_sha256_int_1 BIGINT NOT NULL CHECK (
+        typeof(codex_item_alias_sha256_int_1) = 'integer'
+    ),
+    codex_item_alias_sha256_int_2 BIGINT NOT NULL CHECK (
+        typeof(codex_item_alias_sha256_int_2) = 'integer'
+    ),
+    codex_item_alias_sha256_int_3 BIGINT NOT NULL CHECK (
+        typeof(codex_item_alias_sha256_int_3) = 'integer'
+    ),
+    codex_item_alias_sha256_int_4 BIGINT NOT NULL CHECK (
+        typeof(codex_item_alias_sha256_int_4) = 'integer'
+    ),
+    codex_item_alias TEXT NOT NULL CHECK (length(codex_item_alias) > 0),
+    FOREIGN KEY (rodex_sessions_id, rodex_sessions_codex_threads_id,
+        rodex_sessions_codex_items_id)
+        REFERENCES {RODEX_SESSIONS_CODEX_ITEMS_TABLE}
+            (rodex_sessions_id, rodex_sessions_codex_threads_id, id),
+    FOREIGN KEY (rodex_sessions_id, rodex_sessions_codex_activity_scopes_id,
+        rodex_sessions_codex_items_id)
+        REFERENCES {RODEX_SESSIONS_CODEX_ITEMS_TABLE}
+            (rodex_sessions_id, rodex_sessions_codex_activity_scopes_id, id)
+)
+"""
+_CREATE_CODEX_ITEM_ALIASES_IDENTITY_UNIQUE_INDEX = f"""
+CREATE UNIQUE INDEX IF NOT EXISTS
+    {RODEX_SESSIONS_CODEX_ITEM_ALIASES_IDENTITY_UNIQUE_INDEX}
+ON {RODEX_SESSIONS_CODEX_ITEM_ALIASES_TABLE}
+    (rodex_sessions_codex_threads_id, codex_item_alias_sha256_int_1,
+        codex_item_alias_sha256_int_2, codex_item_alias_sha256_int_3,
+        codex_item_alias_sha256_int_4)
+"""
+_CREATE_CODEX_TOOL_CALLS_TABLE = f"""
+CREATE TABLE IF NOT EXISTS {RODEX_SESSIONS_CODEX_TOOL_CALLS_TABLE} (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    rodex_sessions_id INTEGER NOT NULL,
+    rodex_sessions_codex_threads_id INTEGER NOT NULL,
+    rodex_sessions_codex_activity_scopes_id INTEGER NOT NULL,
+    tool_names_id INTEGER DEFAULT NULL,
+    tool_call_public_id_signed_bigint_1 BIGINT NOT NULL CHECK (
+        typeof(tool_call_public_id_signed_bigint_1) = 'integer'
+    ),
+    tool_call_public_id_signed_bigint_2 BIGINT NOT NULL CHECK (
+        typeof(tool_call_public_id_signed_bigint_2) = 'integer'
+    ),
+    FOREIGN KEY (rodex_sessions_id, rodex_sessions_codex_threads_id)
+        REFERENCES {RODEX_SESSIONS_CODEX_THREADS_TABLE} (rodex_sessions_id, id)
+        DEFERRABLE INITIALLY DEFERRED,
+    FOREIGN KEY (rodex_sessions_id, rodex_sessions_codex_threads_id,
+        rodex_sessions_codex_activity_scopes_id)
+        REFERENCES {RODEX_SESSIONS_CODEX_ACTIVITY_SCOPES_TABLE}
+            (rodex_sessions_id, rodex_sessions_codex_threads_id, id)
+        DEFERRABLE INITIALLY DEFERRED,
+    FOREIGN KEY (tool_names_id) REFERENCES {TOOL_NAMES_TABLE} (id)
+)
+"""
+_CREATE_CODEX_TOOL_CALLS_PUBLIC_ID_UNIQUE_INDEX = f"""
+CREATE UNIQUE INDEX IF NOT EXISTS
+    {RODEX_SESSIONS_CODEX_TOOL_CALLS_PUBLIC_ID_UNIQUE_INDEX}
+ON {RODEX_SESSIONS_CODEX_TOOL_CALLS_TABLE}
+    (tool_call_public_id_signed_bigint_1, tool_call_public_id_signed_bigint_2)
+"""
+_CREATE_CODEX_TOOL_CALLS_SESSION_ID_UNIQUE_INDEX = f"""
+CREATE UNIQUE INDEX IF NOT EXISTS
+    {RODEX_SESSIONS_CODEX_TOOL_CALLS_SESSION_ID_UNIQUE_INDEX}
+ON {RODEX_SESSIONS_CODEX_TOOL_CALLS_TABLE} (rodex_sessions_id, id)
+"""
+_CREATE_CODEX_TOOL_CALLS_SESSION_SCOPE_ID_UNIQUE_INDEX = f"""
+CREATE UNIQUE INDEX IF NOT EXISTS
+    {RODEX_SESSIONS_CODEX_TOOL_CALLS_SESSION_SCOPE_ID_UNIQUE_INDEX}
+ON {RODEX_SESSIONS_CODEX_TOOL_CALLS_TABLE}
+    (rodex_sessions_id, rodex_sessions_codex_activity_scopes_id, id)
+"""
+_CREATE_CODEX_TOOL_CALLS_IDENTITY_IMMUTABLE_TRIGGER = f"""
+CREATE TRIGGER IF NOT EXISTS
+    {RODEX_SESSIONS_CODEX_TOOL_CALLS_IDENTITY_IMMUTABLE_TRIGGER}
+BEFORE UPDATE ON {RODEX_SESSIONS_CODEX_TOOL_CALLS_TABLE}
+WHEN NOT (
+    OLD.tool_names_id IS NULL
+    AND NEW.tool_names_id IS NOT NULL
+    AND NEW.id = OLD.id
+    AND NEW.rodex_sessions_id = OLD.rodex_sessions_id
+    AND NEW.rodex_sessions_codex_threads_id =
+        OLD.rodex_sessions_codex_threads_id
+    AND NEW.rodex_sessions_codex_activity_scopes_id =
+        OLD.rodex_sessions_codex_activity_scopes_id
+    AND NEW.tool_call_public_id_signed_bigint_1 =
+        OLD.tool_call_public_id_signed_bigint_1
+    AND NEW.tool_call_public_id_signed_bigint_2 =
+        OLD.tool_call_public_id_signed_bigint_2
+)
+BEGIN
+    SELECT RAISE(ABORT, 'Codex tool-call identity is immutable');
+END
+"""
+_CREATE_CODEX_TOOL_CALL_ALIASES_TABLE = f"""
+CREATE TABLE IF NOT EXISTS {RODEX_SESSIONS_CODEX_TOOL_CALL_ALIASES_TABLE} (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    rodex_sessions_id INTEGER NOT NULL,
+    rodex_sessions_codex_threads_id INTEGER NOT NULL,
+    rodex_sessions_codex_activity_scopes_id INTEGER NOT NULL,
+    rodex_sessions_codex_tool_calls_id INTEGER NOT NULL,
+    alias_kind TEXT NOT NULL CHECK (
+        alias_kind IN ('call_id', 'item_id', 'source_event')
+    ),
+    codex_call_id_sha256_int_1 BIGINT DEFAULT NULL CHECK (
+        codex_call_id_sha256_int_1 IS NULL
+        OR typeof(codex_call_id_sha256_int_1) = 'integer'
+    ),
+    codex_call_id_sha256_int_2 BIGINT DEFAULT NULL CHECK (
+        codex_call_id_sha256_int_2 IS NULL
+        OR typeof(codex_call_id_sha256_int_2) = 'integer'
+    ),
+    codex_call_id_sha256_int_3 BIGINT DEFAULT NULL CHECK (
+        codex_call_id_sha256_int_3 IS NULL
+        OR typeof(codex_call_id_sha256_int_3) = 'integer'
+    ),
+    codex_call_id_sha256_int_4 BIGINT DEFAULT NULL CHECK (
+        codex_call_id_sha256_int_4 IS NULL
+        OR typeof(codex_call_id_sha256_int_4) = 'integer'
+    ),
+    codex_call_id TEXT DEFAULT NULL,
+    rodex_sessions_codex_items_id INTEGER DEFAULT NULL,
+    rodex_sessions_agent_trace_events_id INTEGER DEFAULT NULL,
+    source_event_kind TEXT DEFAULT NULL CHECK (
+        source_event_kind IS NULL OR source_event_kind = 'tool_call'
+    ),
+    CHECK (
+        (alias_kind = 'call_id' AND codex_call_id IS NOT NULL
+            AND length(codex_call_id) > 0
+            AND codex_call_id_sha256_int_1 IS NOT NULL
+            AND codex_call_id_sha256_int_2 IS NOT NULL
+            AND codex_call_id_sha256_int_3 IS NOT NULL
+            AND codex_call_id_sha256_int_4 IS NOT NULL
+            AND rodex_sessions_codex_items_id IS NULL
+            AND rodex_sessions_agent_trace_events_id IS NULL
+            AND source_event_kind IS NULL)
+        OR
+        (alias_kind = 'item_id' AND codex_call_id IS NULL
+            AND codex_call_id_sha256_int_1 IS NULL
+            AND codex_call_id_sha256_int_2 IS NULL
+            AND codex_call_id_sha256_int_3 IS NULL
+            AND codex_call_id_sha256_int_4 IS NULL
+            AND rodex_sessions_codex_items_id IS NOT NULL
+            AND rodex_sessions_agent_trace_events_id IS NULL
+            AND source_event_kind IS NULL)
+        OR
+        (alias_kind = 'source_event' AND codex_call_id IS NULL
+            AND codex_call_id_sha256_int_1 IS NULL
+            AND codex_call_id_sha256_int_2 IS NULL
+            AND codex_call_id_sha256_int_3 IS NULL
+            AND codex_call_id_sha256_int_4 IS NULL
+            AND rodex_sessions_codex_items_id IS NULL
+            AND rodex_sessions_agent_trace_events_id IS NOT NULL
+            AND source_event_kind = 'tool_call')
+    ),
+    FOREIGN KEY (rodex_sessions_id, rodex_sessions_codex_threads_id,
+        rodex_sessions_codex_activity_scopes_id)
+        REFERENCES {RODEX_SESSIONS_CODEX_ACTIVITY_SCOPES_TABLE}
+            (rodex_sessions_id, rodex_sessions_codex_threads_id, id),
+    FOREIGN KEY (rodex_sessions_id, rodex_sessions_codex_activity_scopes_id,
+        rodex_sessions_codex_tool_calls_id)
+        REFERENCES {RODEX_SESSIONS_CODEX_TOOL_CALLS_TABLE}
+            (rodex_sessions_id, rodex_sessions_codex_activity_scopes_id, id),
+    FOREIGN KEY (rodex_sessions_id, rodex_sessions_codex_activity_scopes_id,
+        rodex_sessions_codex_items_id)
+        REFERENCES {RODEX_SESSIONS_CODEX_ITEMS_TABLE}
+            (rodex_sessions_id, rodex_sessions_codex_activity_scopes_id, id),
+    FOREIGN KEY (rodex_sessions_id, rodex_sessions_codex_activity_scopes_id,
+        rodex_sessions_agent_trace_events_id, source_event_kind)
+        REFERENCES {RODEX_SESSIONS_AGENT_TRACE_EVENTS_TABLE}
+            (rodex_sessions_id, rodex_sessions_codex_activity_scopes_id,
+                id, event_kind)
+)
+"""
+_CREATE_CODEX_TOOL_CALL_ALIASES_CALL_ID_UNIQUE_INDEX = f"""
+CREATE UNIQUE INDEX IF NOT EXISTS
+    {RODEX_SESSIONS_CODEX_TOOL_CALL_ALIASES_CALL_ID_UNIQUE_INDEX}
+ON {RODEX_SESSIONS_CODEX_TOOL_CALL_ALIASES_TABLE}
+    (rodex_sessions_codex_threads_id, codex_call_id_sha256_int_1,
+        codex_call_id_sha256_int_2, codex_call_id_sha256_int_3,
+        codex_call_id_sha256_int_4)
+WHERE alias_kind = 'call_id'
+"""
+_CREATE_CODEX_TOOL_CALL_ALIASES_ITEM_UNIQUE_INDEX = f"""
+CREATE UNIQUE INDEX IF NOT EXISTS
+    {RODEX_SESSIONS_CODEX_TOOL_CALL_ALIASES_ITEM_UNIQUE_INDEX}
+ON {RODEX_SESSIONS_CODEX_TOOL_CALL_ALIASES_TABLE}
+    (rodex_sessions_codex_items_id)
+WHERE alias_kind = 'item_id'
+"""
+_CREATE_CODEX_TOOL_CALL_ALIASES_EVENT_UNIQUE_INDEX = f"""
+CREATE UNIQUE INDEX IF NOT EXISTS
+    {RODEX_SESSIONS_CODEX_TOOL_CALL_ALIASES_EVENT_UNIQUE_INDEX}
+ON {RODEX_SESSIONS_CODEX_TOOL_CALL_ALIASES_TABLE}
+    (rodex_sessions_agent_trace_events_id)
+WHERE alias_kind = 'source_event'
+"""
+_CREATE_CODEX_TOOL_CALL_ALIASES_CALL_INDEX = f"""
+CREATE INDEX IF NOT EXISTS {RODEX_SESSIONS_CODEX_TOOL_CALL_ALIASES_CALL_INDEX}
+ON {RODEX_SESSIONS_CODEX_TOOL_CALL_ALIASES_TABLE}
+    (rodex_sessions_codex_tool_calls_id)
+"""
+_CREATE_AGENT_TRACE_TOOL_CALLS_TABLE = f"""
+CREATE TABLE IF NOT EXISTS {RODEX_SESSIONS_AGENT_TRACE_TOOL_CALLS_TABLE} (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    rodex_sessions_id INTEGER NOT NULL,
+    rodex_sessions_codex_activity_scopes_id INTEGER NOT NULL,
+    rodex_sessions_agent_trace_events_id INTEGER NOT NULL,
+    rodex_sessions_codex_tool_calls_id INTEGER NOT NULL,
+    event_kind TEXT NOT NULL DEFAULT 'tool_call' CHECK (event_kind = 'tool_call'),
+    activity_kind TEXT NOT NULL CHECK (
+        activity_kind IN ('request', 'output', 'status')
+    ),
+    rodex_sessions_codex_items_id INTEGER DEFAULT NULL,
+    tool_status TEXT DEFAULT NULL,
+    request_utf8_bytes INTEGER NOT NULL CHECK (request_utf8_bytes >= 0),
+    response_utf8_bytes INTEGER NOT NULL CHECK (response_utf8_bytes >= 0),
+    payload_capture_state TEXT NOT NULL CHECK (payload_capture_state IN (
+        'rollout_reference', 'encrypted', 'redacted', 'unavailable'
+    )),
+    FOREIGN KEY (rodex_sessions_id, rodex_sessions_codex_activity_scopes_id,
+        rodex_sessions_agent_trace_events_id, event_kind)
+        REFERENCES {RODEX_SESSIONS_AGENT_TRACE_EVENTS_TABLE}
+            (rodex_sessions_id, rodex_sessions_codex_activity_scopes_id,
+                id, event_kind),
+    FOREIGN KEY (rodex_sessions_id, rodex_sessions_codex_activity_scopes_id,
+        rodex_sessions_codex_tool_calls_id)
+        REFERENCES {RODEX_SESSIONS_CODEX_TOOL_CALLS_TABLE}
+            (rodex_sessions_id, rodex_sessions_codex_activity_scopes_id, id),
+    FOREIGN KEY (rodex_sessions_id, rodex_sessions_codex_activity_scopes_id,
+        rodex_sessions_codex_items_id)
+        REFERENCES {RODEX_SESSIONS_CODEX_ITEMS_TABLE}
+            (rodex_sessions_id, rodex_sessions_codex_activity_scopes_id, id)
+)
+"""
+_CREATE_AGENT_TRACE_COMMAND_EXECUTIONS_TABLE = f"""
+CREATE TABLE IF NOT EXISTS {RODEX_SESSIONS_AGENT_TRACE_COMMAND_EXECUTIONS_TABLE} (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    rodex_sessions_id INTEGER NOT NULL,
+    rodex_sessions_codex_activity_scopes_id INTEGER NOT NULL,
+    rodex_sessions_agent_trace_events_id INTEGER NOT NULL,
+    event_kind TEXT NOT NULL DEFAULT 'command_execution' CHECK (
+        event_kind = 'command_execution'
+    ),
+    rodex_sessions_codex_items_id INTEGER DEFAULT NULL,
+    command_argument_count INTEGER NOT NULL CHECK (command_argument_count >= 0),
+    working_directory TEXT DEFAULT NULL,
+    command_status TEXT DEFAULT NULL,
+    duration_ms INTEGER DEFAULT NULL CHECK (duration_ms IS NULL OR duration_ms >= 0),
+    exit_code INTEGER DEFAULT NULL,
+    stdout_utf8_bytes INTEGER NOT NULL CHECK (stdout_utf8_bytes >= 0),
+    stderr_utf8_bytes INTEGER NOT NULL CHECK (stderr_utf8_bytes >= 0),
+    aggregated_output_utf8_bytes INTEGER NOT NULL CHECK (
+        aggregated_output_utf8_bytes >= 0
+    ),
+    payload_capture_state TEXT NOT NULL CHECK (payload_capture_state IN (
+        'rollout_reference', 'encrypted', 'redacted', 'unavailable'
+    )),
+    FOREIGN KEY (rodex_sessions_id, rodex_sessions_codex_activity_scopes_id,
+        rodex_sessions_agent_trace_events_id, event_kind)
+        REFERENCES {RODEX_SESSIONS_AGENT_TRACE_EVENTS_TABLE}
+            (rodex_sessions_id, rodex_sessions_codex_activity_scopes_id,
+                id, event_kind),
+    FOREIGN KEY (rodex_sessions_id, rodex_sessions_codex_activity_scopes_id,
+        rodex_sessions_codex_items_id)
+        REFERENCES {RODEX_SESSIONS_CODEX_ITEMS_TABLE}
+            (rodex_sessions_id, rodex_sessions_codex_activity_scopes_id, id)
+)
+"""
+_CREATE_AGENT_TRACE_CONTEXTS_TABLE = f"""
+CREATE TABLE IF NOT EXISTS {RODEX_SESSIONS_AGENT_TRACE_CONTEXTS_TABLE} (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    rodex_sessions_agent_trace_events_id INTEGER NOT NULL,
+    event_kind TEXT NOT NULL DEFAULT 'turn_context' CHECK (event_kind = 'turn_context'),
+    model_names_id INTEGER DEFAULT NULL,
+    reasoning_effort_names_id INTEGER DEFAULT NULL,
+    working_directory TEXT DEFAULT NULL,
+    sandbox_mode TEXT DEFAULT NULL,
+    approval_policy TEXT DEFAULT NULL,
+    permission_profile_type TEXT DEFAULT NULL,
+    workspace_root_count INTEGER NOT NULL CHECK (workspace_root_count >= 0),
+    FOREIGN KEY (rodex_sessions_agent_trace_events_id, event_kind)
+        REFERENCES {RODEX_SESSIONS_AGENT_TRACE_EVENTS_TABLE} (id, event_kind),
+    FOREIGN KEY (model_names_id) REFERENCES {MODEL_NAMES_TABLE} (id),
+    FOREIGN KEY (reasoning_effort_names_id)
+        REFERENCES {REASONING_EFFORT_NAMES_TABLE} (id)
+)
+"""
+_CREATE_AGENT_TRACE_TOKEN_USAGE_TABLE = f"""
+CREATE TABLE IF NOT EXISTS {RODEX_SESSIONS_AGENT_TRACE_TOKEN_USAGE_TABLE} (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    rodex_sessions_agent_trace_events_id INTEGER NOT NULL,
+    event_kind TEXT NOT NULL DEFAULT 'token_usage' CHECK (event_kind = 'token_usage'),
+    input_tokens INTEGER DEFAULT NULL CHECK (input_tokens IS NULL OR input_tokens >= 0),
+    cached_input_tokens INTEGER DEFAULT NULL CHECK (
+        cached_input_tokens IS NULL OR cached_input_tokens >= 0
+    ),
+    output_tokens INTEGER DEFAULT NULL CHECK (output_tokens IS NULL OR output_tokens >= 0),
+    reasoning_output_tokens INTEGER DEFAULT NULL CHECK (
+        reasoning_output_tokens IS NULL OR reasoning_output_tokens >= 0
+    ),
+    total_tokens INTEGER DEFAULT NULL CHECK (total_tokens IS NULL OR total_tokens >= 0),
+    context_used_percent REAL DEFAULT NULL CHECK (
+        context_used_percent IS NULL OR context_used_percent BETWEEN 0 AND 100
+    ),
+    FOREIGN KEY (rodex_sessions_agent_trace_events_id, event_kind)
+        REFERENCES {RODEX_SESSIONS_AGENT_TRACE_EVENTS_TABLE} (id, event_kind)
+)
+"""
+_CREATE_AGENT_TRACE_RATE_LIMIT_WINDOWS_TABLE = f"""
+CREATE TABLE IF NOT EXISTS {RODEX_SESSIONS_AGENT_TRACE_RATE_LIMIT_WINDOWS_TABLE} (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    rodex_sessions_agent_trace_events_id INTEGER NOT NULL,
+    event_kind TEXT NOT NULL DEFAULT 'rate_limit' CHECK (event_kind = 'rate_limit'),
+    window_ordinal INTEGER NOT NULL CHECK (window_ordinal >= 0),
+    limit_id TEXT NOT NULL CHECK (length(limit_id) > 0),
+    used_percent REAL DEFAULT NULL CHECK (
+        used_percent IS NULL OR used_percent BETWEEN 0 AND 100
+    ),
+    window_minutes INTEGER DEFAULT NULL CHECK (
+        window_minutes IS NULL OR window_minutes > 0
+    ),
+    resets_at_unix_seconds INTEGER DEFAULT NULL CHECK (
+        resets_at_unix_seconds IS NULL OR resets_at_unix_seconds >= 0
+    ),
+    plan_type TEXT DEFAULT NULL,
+    FOREIGN KEY (rodex_sessions_agent_trace_events_id, event_kind)
+        REFERENCES {RODEX_SESSIONS_AGENT_TRACE_EVENTS_TABLE} (id, event_kind)
+)
+"""
+_CREATE_AGENT_TRACE_SUBAGENT_ACTIVITIES_TABLE = f"""
+CREATE TABLE IF NOT EXISTS {RODEX_SESSIONS_AGENT_TRACE_SUBAGENT_ACTIVITIES_TABLE} (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    rodex_sessions_agent_trace_events_id INTEGER NOT NULL,
+    event_kind TEXT NOT NULL DEFAULT 'subagent_activity' CHECK (
+        event_kind = 'subagent_activity'
+    ),
+    rodex_sessions_id INTEGER NOT NULL,
+    target_codex_threads_id INTEGER DEFAULT NULL,
+    activity_kind TEXT NOT NULL CHECK (length(activity_kind) > 0),
+    agent_path TEXT DEFAULT NULL,
+    FOREIGN KEY (rodex_sessions_id, rodex_sessions_agent_trace_events_id, event_kind)
+        REFERENCES {RODEX_SESSIONS_AGENT_TRACE_EVENTS_TABLE}
+            (rodex_sessions_id, id, event_kind),
+    FOREIGN KEY (target_codex_threads_id) REFERENCES {CODEX_THREADS_TABLE} (id)
+)
 """
 
 
@@ -845,6 +1776,7 @@ def initialise_rodex_database(database_path: str | os.PathLike[str] | None = Non
     """Create and verify the current Rodex schema in one transaction."""
     path = normalise_rodex_database_path(database_path)
     with open_rodex_transaction(path) as connection:
+        _require_or_create_current_schema_generation(connection)
         connection.execute(_CREATE_REGISTRIES_TABLE)
         _verify_registries_table(connection)
         connection.execute(_CREATE_REGISTRIES_ID_UNIQUE_INDEX)
@@ -870,7 +1802,6 @@ def initialise_rodex_database(database_path: str | os.PathLike[str] | None = Non
         connection.execute(_CREATE_TABLE)
         _verify_sessions_table(connection)
         connection.execute(_CREATE_UNIQUE_INDEX)
-        connection.execute(_CREATE_CODEX_SESSION_ID_UNIQUE_INDEX)
         connection.execute(_CREATE_SESSIONS_COOL_NAMES_UNIQUE_INDEX)
         connection.execute(_CREATE_SESSIONS_USER_DEFINED_COOL_NAMES_UNIQUE_INDEX)
         _verify_sessions_unique_indexes(connection)
@@ -912,6 +1843,11 @@ def initialise_rodex_database(database_path: str | os.PathLike[str] | None = Non
             MODEL_NAMES_NAME_OF_THE_MODEL_UNIQUE_INDEX,
             ["name_of_the_model"],
         )
+        _create_and_verify_append_only_triggers(
+            connection,
+            MODEL_NAMES_TABLE,
+            "canonical model name is immutable",
+        )
         connection.execute(_CREATE_REASONING_EFFORT_NAMES_TABLE)
         _verify_reasoning_effort_names_table(connection)
         connection.execute(
@@ -923,6 +1859,25 @@ def initialise_rodex_database(database_path: str | os.PathLike[str] | None = Non
             REASONING_EFFORT_NAMES_NAME_OF_THE_REASONING_EFFORT_UNIQUE_INDEX,
             ["name_of_the_reasoning_effort"],
         )
+        _create_and_verify_append_only_triggers(
+            connection,
+            REASONING_EFFORT_NAMES_TABLE,
+            "canonical reasoning-effort name is immutable",
+        )
+        connection.execute(_CREATE_TOOL_NAMES_TABLE)
+        _verify_lookup_name_table(connection, TOOL_NAMES_TABLE, "tool_name")
+        connection.execute(_CREATE_TOOL_NAMES_NAME_UNIQUE_INDEX)
+        _verify_unique_index(
+            connection,
+            TOOL_NAMES_TABLE,
+            TOOL_NAMES_NAME_UNIQUE_INDEX,
+            ["tool_name"],
+        )
+        _create_and_verify_append_only_triggers(
+            connection,
+            TOOL_NAMES_TABLE,
+            "canonical tool name is immutable",
+        )
         connection.execute(_CREATE_STATISTICS_TABLE)
         _verify_statistics_table(connection)
         connection.execute(_CREATE_STATISTICS_SESSION_UNIQUE_INDEX)
@@ -931,10 +1886,6 @@ def initialise_rodex_database(database_path: str | os.PathLike[str] | None = Non
             RODEX_SESSIONS_STATISTICS_TABLE,
             RODEX_SESSIONS_STATISTICS_SESSION_UNIQUE_INDEX,
             ["rodex_sessions_id"],
-        )
-        connection.execute(
-            "DROP INDEX IF EXISTS "
-            "rodex_sessions_statistics_session_publication_sequence_unique"
         )
         connection.execute(_CREATE_STATISTICS_DISTRIBUTIONS_TABLE)
         _verify_statistics_distributions_table(connection)
@@ -963,105 +1914,225 @@ def initialise_rodex_database(database_path: str | os.PathLike[str] | None = Non
             RODEX_SESSIONS_STATISTICS_AUDIT_LIMITS_UNIQUE_INDEX,
             ["rodex_sessions_id", "limit_ordinal"],
         )
-        connection.execute(_CREATE_STATISTICS_SOURCES_TABLE)
-        _verify_statistics_sources_table(connection)
-        connection.execute(_CREATE_STATISTICS_SOURCES_UNIQUE_INDEX)
+        connection.execute(_CREATE_CANONICAL_CODEX_THREADS_TABLE)
+        _verify_canonical_codex_threads_table(connection)
+        connection.execute(_CREATE_CANONICAL_CODEX_THREADS_PUBLIC_ID_UNIQUE_INDEX)
         _verify_unique_index(
             connection,
-            RODEX_SESSIONS_STATISTICS_SOURCES_TABLE,
-            RODEX_SESSIONS_STATISTICS_SOURCES_UNIQUE_INDEX,
-            ["codex_thread_id_signed_bigint_1", "codex_thread_id_signed_bigint_2"],
+            CODEX_THREADS_TABLE,
+            CODEX_THREADS_PUBLIC_ID_UNIQUE_INDEX,
+            [
+                "codex_thread_public_id_signed_bigint_1",
+                "codex_thread_public_id_signed_bigint_2",
+            ],
         )
-        connection.execute(_CREATE_STATISTICS_SOURCES_SESSION_ID_UNIQUE_INDEX)
+        _create_and_verify_append_only_triggers(
+            connection,
+            CODEX_THREADS_TABLE,
+            "canonical Codex thread identity is immutable",
+        )
+        connection.execute(_CREATE_CODEX_THREADS_TABLE)
+        _verify_codex_threads_table(connection)
+        connection.execute(_CREATE_CODEX_THREADS_UNIQUE_INDEX)
         _verify_unique_index(
             connection,
-            RODEX_SESSIONS_STATISTICS_SOURCES_TABLE,
-            RODEX_SESSIONS_STATISTICS_SOURCES_SESSION_ID_UNIQUE_INDEX,
+            RODEX_SESSIONS_CODEX_THREADS_TABLE,
+            RODEX_SESSIONS_CODEX_THREADS_UNIQUE_INDEX,
+            ["codex_threads_id"],
+        )
+        connection.execute(_CREATE_CODEX_THREADS_SESSION_ID_UNIQUE_INDEX)
+        _verify_unique_index(
+            connection,
+            RODEX_SESSIONS_CODEX_THREADS_TABLE,
+            RODEX_SESSIONS_CODEX_THREADS_SESSION_ID_UNIQUE_INDEX,
             ["rodex_sessions_id", "id"],
         )
-        connection.execute(_CREATE_STATISTICS_SOURCES_PARENT_INDEX)
-        _verify_index(
+        _create_and_verify_append_only_triggers(
             connection,
-            RODEX_SESSIONS_STATISTICS_SOURCES_TABLE,
-            RODEX_SESSIONS_STATISTICS_SOURCES_PARENT_INDEX,
-            ["parent_rodex_sessions_statistics_sources_id"],
-            unique=False,
+            RODEX_SESSIONS_CODEX_THREADS_TABLE,
+            "Codex thread membership is immutable",
         )
-        connection.execute(_CREATE_STATISTICS_SOURCES_HIERARCHY_UNIQUE_INDEX)
+        connection.execute(_CREATE_CURRENT_CODEX_THREADS_TABLE)
+        _verify_current_codex_threads_table(connection)
+        connection.execute(_CREATE_CURRENT_CODEX_THREADS_SESSION_UNIQUE_INDEX)
         _verify_unique_index(
             connection,
-            RODEX_SESSIONS_STATISTICS_SOURCES_TABLE,
-            RODEX_SESSIONS_STATISTICS_SOURCES_HIERARCHY_UNIQUE_INDEX,
-            [
-                "rodex_sessions_id",
-                "id",
-                "parent_rodex_sessions_statistics_sources_id",
-            ],
+            RODEX_SESSIONS_CURRENT_CODEX_THREADS_TABLE,
+            RODEX_SESSIONS_CURRENT_CODEX_THREADS_SESSION_UNIQUE_INDEX,
+            ["rodex_sessions_id"],
         )
-        connection.execute(_CREATE_STATISTICS_TURNS_TABLE)
-        _verify_statistics_turns_table(connection)
-        connection.execute(_CREATE_STATISTICS_TURNS_SOURCE_TURN_UNIQUE_INDEX)
+        connection.execute(_CREATE_CURRENT_CODEX_THREADS_MEMBERSHIP_UNIQUE_INDEX)
         _verify_unique_index(
             connection,
-            RODEX_SESSIONS_STATISTICS_TURNS_TABLE,
-            RODEX_SESSIONS_STATISTICS_TURNS_SOURCE_TURN_UNIQUE_INDEX,
-            [
-                "rodex_sessions_statistics_sources_id",
-                "codex_turn_id_sha256_int_1",
-                "codex_turn_id_sha256_int_2",
-                "codex_turn_id_sha256_int_3",
-                "codex_turn_id_sha256_int_4",
-            ],
+            RODEX_SESSIONS_CURRENT_CODEX_THREADS_TABLE,
+            RODEX_SESSIONS_CURRENT_CODEX_THREADS_MEMBERSHIP_UNIQUE_INDEX,
+            ["rodex_sessions_codex_threads_id"],
         )
-        connection.execute(_CREATE_STATISTICS_TURNS_SESSION_TURN_INDEX)
-        _verify_index(
-            connection,
-            RODEX_SESSIONS_STATISTICS_TURNS_TABLE,
-            RODEX_SESSIONS_STATISTICS_TURNS_SESSION_TURN_INDEX,
-            [
-                "rodex_sessions_id",
-                "codex_turn_id_sha256_int_1",
-                "codex_turn_id_sha256_int_2",
-                "codex_turn_id_sha256_int_3",
-                "codex_turn_id_sha256_int_4",
-            ],
-            unique=False,
-        )
-        connection.execute(_CREATE_STATISTICS_TURNS_SESSION_ID_UNIQUE_INDEX)
+        connection.execute(_CREATE_CODEX_ROLLOUT_SOURCES_TABLE)
+        _verify_codex_rollout_sources_table(connection)
+        connection.execute(_CREATE_CODEX_ROLLOUT_SOURCES_THREAD_UNIQUE_INDEX)
         _verify_unique_index(
             connection,
-            RODEX_SESSIONS_STATISTICS_TURNS_TABLE,
-            RODEX_SESSIONS_STATISTICS_TURNS_SESSION_ID_UNIQUE_INDEX,
+            RODEX_SESSIONS_CODEX_ROLLOUT_SOURCES_TABLE,
+            RODEX_SESSIONS_CODEX_ROLLOUT_SOURCES_THREAD_UNIQUE_INDEX,
+            ["rodex_sessions_codex_threads_id"],
+        )
+        connection.execute(_CREATE_CODEX_ROLLOUT_SOURCES_SESSION_ID_UNIQUE_INDEX)
+        _verify_unique_index(
+            connection,
+            RODEX_SESSIONS_CODEX_ROLLOUT_SOURCES_TABLE,
+            RODEX_SESSIONS_CODEX_ROLLOUT_SOURCES_SESSION_ID_UNIQUE_INDEX,
             ["rodex_sessions_id", "id"],
         )
-        connection.execute(_CREATE_STATISTICS_TURNS_SOURCE_ID_UNIQUE_INDEX)
+        _create_and_verify_append_only_triggers(
+            connection,
+            RODEX_SESSIONS_CODEX_ROLLOUT_SOURCES_TABLE,
+            "Codex rollout-source provenance is immutable",
+        )
+        connection.execute(_CREATE_CODEX_TURNS_TABLE)
+        _verify_codex_turns_table(connection)
+        connection.execute(_CREATE_CODEX_TURNS_SOURCE_TURN_UNIQUE_INDEX)
         _verify_unique_index(
             connection,
-            RODEX_SESSIONS_STATISTICS_TURNS_TABLE,
-            RODEX_SESSIONS_STATISTICS_TURNS_SOURCE_ID_UNIQUE_INDEX,
+            RODEX_SESSIONS_CODEX_TURNS_TABLE,
+            RODEX_SESSIONS_CODEX_TURNS_SOURCE_TURN_UNIQUE_INDEX,
+            [
+                "rodex_sessions_codex_threads_id",
+                "codex_turn_id_signed_bigint_1",
+                "codex_turn_id_signed_bigint_2",
+            ],
+        )
+        connection.execute(_CREATE_CODEX_TURNS_SESSION_TURN_INDEX)
+        _verify_index(
+            connection,
+            RODEX_SESSIONS_CODEX_TURNS_TABLE,
+            RODEX_SESSIONS_CODEX_TURNS_SESSION_TURN_INDEX,
             [
                 "rodex_sessions_id",
-                "rodex_sessions_statistics_sources_id",
+                "codex_turn_id_signed_bigint_1",
+                "codex_turn_id_signed_bigint_2",
+            ],
+            unique=False,
+        )
+        connection.execute(_CREATE_CODEX_TURNS_SESSION_ID_UNIQUE_INDEX)
+        _verify_unique_index(
+            connection,
+            RODEX_SESSIONS_CODEX_TURNS_TABLE,
+            RODEX_SESSIONS_CODEX_TURNS_SESSION_ID_UNIQUE_INDEX,
+            ["rodex_sessions_id", "id"],
+        )
+        connection.execute(_CREATE_CODEX_TURNS_SOURCE_ID_UNIQUE_INDEX)
+        _verify_unique_index(
+            connection,
+            RODEX_SESSIONS_CODEX_TURNS_TABLE,
+            RODEX_SESSIONS_CODEX_TURNS_SOURCE_ID_UNIQUE_INDEX,
+            [
+                "rodex_sessions_id",
+                "rodex_sessions_codex_threads_id",
                 "id",
             ],
         )
-        connection.execute(_CREATE_STATISTICS_SUBAGENT_SPAWNS_TABLE)
-        _verify_statistics_subagent_spawns_table(connection)
-        connection.execute(_CREATE_STATISTICS_SUBAGENT_SPAWNS_SOURCE_UNIQUE_INDEX)
+        connection.execute(_CREATE_CODEX_TURNS_PUBLIC_ID_UNIQUE_INDEX)
         _verify_unique_index(
             connection,
-            RODEX_SESSIONS_STATISTICS_SUBAGENT_SPAWNS_TABLE,
-            RODEX_SESSIONS_STATISTICS_SUBAGENT_SPAWNS_SOURCE_UNIQUE_INDEX,
-            ["subagent_rodex_sessions_statistics_sources_id"],
+            RODEX_SESSIONS_CODEX_TURNS_TABLE,
+            RODEX_SESSIONS_CODEX_TURNS_PUBLIC_ID_UNIQUE_INDEX,
+            ["turn_public_id_signed_bigint_1", "turn_public_id_signed_bigint_2"],
         )
-        connection.execute(_CREATE_STATISTICS_SUBAGENT_SPAWNS_TURN_INDEX)
+        _create_and_verify_append_only_triggers(
+            connection,
+            RODEX_SESSIONS_CODEX_TURNS_TABLE,
+            "canonical Codex turn identity is immutable",
+        )
+        connection.execute(_CREATE_CODEX_ACTIVITY_SCOPES_TABLE)
+        _verify_codex_activity_scopes_table(connection)
+        for statement, index_name, columns, predicate in (
+            (
+                _CREATE_CODEX_ACTIVITY_SCOPES_WITHOUT_TURN_UNIQUE_INDEX,
+                RODEX_SESSIONS_CODEX_ACTIVITY_SCOPES_WITHOUT_TURN_UNIQUE_INDEX,
+                ["rodex_sessions_codex_threads_id"],
+                "WHERE RODEX_SESSIONS_CODEX_TURNS_ID IS NULL",
+            ),
+            (
+                _CREATE_CODEX_ACTIVITY_SCOPES_TURN_UNIQUE_INDEX,
+                RODEX_SESSIONS_CODEX_ACTIVITY_SCOPES_TURN_UNIQUE_INDEX,
+                ["rodex_sessions_codex_turns_id"],
+                "WHERE RODEX_SESSIONS_CODEX_TURNS_ID IS NOT NULL",
+            ),
+            (
+                _CREATE_CODEX_ACTIVITY_SCOPES_SESSION_THREAD_ID_UNIQUE_INDEX,
+                RODEX_SESSIONS_CODEX_ACTIVITY_SCOPES_SESSION_THREAD_ID_UNIQUE_INDEX,
+                ["rodex_sessions_id", "rodex_sessions_codex_threads_id", "id"],
+                None,
+            ),
+        ):
+            connection.execute(statement)
+            _verify_unique_index(
+                connection,
+                RODEX_SESSIONS_CODEX_ACTIVITY_SCOPES_TABLE,
+                index_name,
+                columns,
+            )
+            if predicate is not None:
+                _verify_schema_object_definition_contains(
+                    connection, "index", index_name, (predicate,)
+                )
+        _create_and_verify_immutable_trigger(
+            connection,
+            _CREATE_CODEX_ACTIVITY_SCOPES_IMMUTABLE_TRIGGER,
+            RODEX_SESSIONS_CODEX_ACTIVITY_SCOPES_IMMUTABLE_TRIGGER,
+            RODEX_SESSIONS_CODEX_ACTIVITY_SCOPES_TABLE,
+            "CODEX ACTIVITY SCOPE IDENTITY IS IMMUTABLE",
+        )
+        connection.execute(_CREATE_CODEX_TURN_STATES_TABLE)
+        _verify_codex_turn_states_table(connection)
+        connection.execute(_CREATE_CODEX_TURN_STATES_TURN_UNIQUE_INDEX)
+        _verify_unique_index(
+            connection,
+            RODEX_SESSIONS_CODEX_TURN_STATES_TABLE,
+            RODEX_SESSIONS_CODEX_TURN_STATES_TURN_UNIQUE_INDEX,
+            ["rodex_sessions_codex_turns_id"],
+        )
+        connection.execute(_CREATE_STATISTICS_TURN_METRICS_TABLE)
+        _verify_statistics_turn_metrics_table(connection)
+        connection.execute(_CREATE_STATISTICS_TURN_METRICS_TURN_UNIQUE_INDEX)
+        _verify_unique_index(
+            connection,
+            RODEX_SESSIONS_STATISTICS_TURN_METRICS_TABLE,
+            RODEX_SESSIONS_STATISTICS_TURN_METRICS_TURN_UNIQUE_INDEX,
+            ["rodex_sessions_codex_turns_id"],
+        )
+        connection.execute(_CREATE_SUBAGENT_SPAWNS_TABLE)
+        _verify_subagent_spawns_table(connection)
+        connection.execute(_CREATE_SUBAGENT_SPAWNS_SOURCE_UNIQUE_INDEX)
+        _verify_unique_index(
+            connection,
+            RODEX_SESSIONS_SUBAGENT_SPAWNS_TABLE,
+            RODEX_SESSIONS_SUBAGENT_SPAWNS_SOURCE_UNIQUE_INDEX,
+            ["subagent_rodex_sessions_codex_threads_id"],
+        )
+        connection.execute(_CREATE_SUBAGENT_SPAWNS_TURN_INDEX)
         _verify_index(
             connection,
-            RODEX_SESSIONS_STATISTICS_SUBAGENT_SPAWNS_TABLE,
-            RODEX_SESSIONS_STATISTICS_SUBAGENT_SPAWNS_TURN_INDEX,
-            ["spawning_rodex_sessions_statistics_turns_id"],
+            RODEX_SESSIONS_SUBAGENT_SPAWNS_TABLE,
+            RODEX_SESSIONS_SUBAGENT_SPAWNS_TURN_INDEX,
+            ["spawning_rodex_sessions_codex_turns_id"],
             unique=False,
         )
+        connection.execute(_CREATE_SUBAGENT_SPAWNS_PARENT_INDEX)
+        _verify_index(
+            connection,
+            RODEX_SESSIONS_SUBAGENT_SPAWNS_TABLE,
+            RODEX_SESSIONS_SUBAGENT_SPAWNS_PARENT_INDEX,
+            ["parent_rodex_sessions_codex_threads_id"],
+            unique=False,
+        )
+        _create_and_verify_append_only_triggers(
+            connection,
+            RODEX_SESSIONS_SUBAGENT_SPAWNS_TABLE,
+            "subagent spawn provenance is immutable",
+        )
+        _create_and_verify_codex_root_role_exclusion(connection)
         connection.execute(_CREATE_STATISTICS_TURN_NAMED_COUNTS_TABLE)
         _verify_statistics_turn_named_counts_table(connection)
         connection.execute(_CREATE_STATISTICS_TURN_NAMED_COUNTS_UNIQUE_INDEX)
@@ -1069,7 +2140,7 @@ def initialise_rodex_database(database_path: str | os.PathLike[str] | None = Non
             connection,
             RODEX_SESSIONS_STATISTICS_TURN_NAMED_COUNTS_TABLE,
             RODEX_SESSIONS_STATISTICS_TURN_NAMED_COUNTS_UNIQUE_INDEX,
-            ["rodex_sessions_statistics_turns_id", "count_kind", "count_name"],
+            ["rodex_sessions_codex_turns_id", "count_kind", "count_name"],
         )
         connection.execute(_CREATE_STATISTICS_TURN_NAMED_COUNTS_SESSION_KIND_INDEX)
         _verify_index(
@@ -1079,16 +2150,492 @@ def initialise_rodex_database(database_path: str | os.PathLike[str] | None = Non
             ["rodex_sessions_id", "count_kind", "count_name"],
             unique=False,
         )
-        connection.execute(_CREATE_STATISTICS_WORKERS_TABLE)
-        _verify_statistics_workers_table(connection)
-        connection.execute(_CREATE_STATISTICS_WORKERS_SESSION_UNIQUE_INDEX)
+        connection.execute(_CREATE_ANALYTICS_WORKERS_TABLE)
+        _verify_analytics_workers_table(connection)
+        connection.execute(_CREATE_ANALYTICS_WORKERS_SESSION_UNIQUE_INDEX)
         _verify_unique_index(
             connection,
-            RODEX_SESSIONS_STATISTICS_WORKERS_TABLE,
-            RODEX_SESSIONS_STATISTICS_WORKERS_SESSION_UNIQUE_INDEX,
+            RODEX_SESSIONS_ANALYTICS_WORKERS_TABLE,
+            RODEX_SESSIONS_ANALYTICS_WORKERS_SESSION_UNIQUE_INDEX,
             ["rodex_sessions_id"],
         )
+        connection.execute(_CREATE_ANALYTICS_WORKERS_SESSION_ID_UNIQUE_INDEX)
+        _verify_unique_index(
+            connection,
+            RODEX_SESSIONS_ANALYTICS_WORKERS_TABLE,
+            RODEX_SESSIONS_ANALYTICS_WORKERS_SESSION_ID_UNIQUE_INDEX,
+            ["rodex_sessions_id", "id"],
+        )
+        connection.execute(_CREATE_ANALYTICS_WORKER_THREAD_CHECKPOINTS_TABLE)
+        _verify_analytics_worker_thread_checkpoints_table(connection)
+        connection.execute(_CREATE_ANALYTICS_WORKER_THREAD_CHECKPOINTS_UNIQUE_INDEX)
+        _verify_unique_index(
+            connection,
+            RODEX_SESSIONS_ANALYTICS_WORKER_THREAD_CHECKPOINTS_TABLE,
+            RODEX_SESSIONS_ANALYTICS_WORKER_THREAD_CHECKPOINTS_UNIQUE_INDEX,
+            [
+                "rodex_sessions_id",
+                "rodex_sessions_analytics_workers_id",
+                "rodex_sessions_codex_rollout_sources_id",
+            ],
+        )
+        connection.execute(_CREATE_AGENT_TRACE_PUBLICATIONS_TABLE)
+        _verify_agent_trace_publications_table(connection)
+        connection.execute(_CREATE_AGENT_TRACE_PUBLICATIONS_SESSION_UNIQUE_INDEX)
+        _verify_unique_index(
+            connection,
+            RODEX_SESSIONS_AGENT_TRACE_PUBLICATIONS_TABLE,
+            RODEX_SESSIONS_AGENT_TRACE_PUBLICATIONS_SESSION_UNIQUE_INDEX,
+            ["rodex_sessions_id"],
+        )
+        connection.execute(_CREATE_AGENT_TRACE_EVENTS_TABLE)
+        _verify_agent_trace_events_table(connection)
+        connection.execute(_CREATE_AGENT_TRACE_EVENTS_SOURCE_UNIQUE_INDEX)
+        _verify_unique_index(
+            connection,
+            RODEX_SESSIONS_AGENT_TRACE_EVENTS_TABLE,
+            RODEX_SESSIONS_AGENT_TRACE_EVENTS_SOURCE_UNIQUE_INDEX,
+            [
+                "rodex_sessions_codex_threads_id",
+                "source_record_ordinal",
+                "derived_event_ordinal",
+            ],
+        )
+        connection.execute(_CREATE_AGENT_TRACE_EVENTS_SESSION_ORDER_INDEX)
+        _verify_index(
+            connection,
+            RODEX_SESSIONS_AGENT_TRACE_EVENTS_TABLE,
+            RODEX_SESSIONS_AGENT_TRACE_EVENTS_SESSION_ORDER_INDEX,
+            ["rodex_sessions_id", "event_time_utc", "id"],
+            unique=False,
+        )
+        connection.execute(_CREATE_AGENT_TRACE_EVENTS_ID_KIND_UNIQUE_INDEX)
+        _verify_unique_index(
+            connection,
+            RODEX_SESSIONS_AGENT_TRACE_EVENTS_TABLE,
+            RODEX_SESSIONS_AGENT_TRACE_EVENTS_ID_KIND_UNIQUE_INDEX,
+            ["id", "event_kind"],
+        )
+        connection.execute(_CREATE_AGENT_TRACE_EVENTS_SESSION_ID_KIND_UNIQUE_INDEX)
+        _verify_unique_index(
+            connection,
+            RODEX_SESSIONS_AGENT_TRACE_EVENTS_TABLE,
+            RODEX_SESSIONS_AGENT_TRACE_EVENTS_SESSION_ID_KIND_UNIQUE_INDEX,
+            ["rodex_sessions_id", "id", "event_kind"],
+        )
+        connection.execute(_CREATE_AGENT_TRACE_EVENTS_SESSION_ID_UNIQUE_INDEX)
+        _verify_unique_index(
+            connection,
+            RODEX_SESSIONS_AGENT_TRACE_EVENTS_TABLE,
+            RODEX_SESSIONS_AGENT_TRACE_EVENTS_SESSION_ID_UNIQUE_INDEX,
+            ["rodex_sessions_id", "id"],
+        )
+        connection.execute(_CREATE_AGENT_TRACE_EVENTS_PUBLIC_ID_UNIQUE_INDEX)
+        _verify_unique_index(
+            connection,
+            RODEX_SESSIONS_AGENT_TRACE_EVENTS_TABLE,
+            RODEX_SESSIONS_AGENT_TRACE_EVENTS_PUBLIC_ID_UNIQUE_INDEX,
+            [
+                "trace_event_public_id_signed_bigint_1",
+                "trace_event_public_id_signed_bigint_2",
+            ],
+        )
+        connection.execute(_CREATE_AGENT_TRACE_EVENTS_SESSION_SCOPE_ID_KIND_UNIQUE_INDEX)
+        _verify_unique_index(
+            connection,
+            RODEX_SESSIONS_AGENT_TRACE_EVENTS_TABLE,
+            RODEX_SESSIONS_AGENT_TRACE_EVENTS_SESSION_SCOPE_ID_KIND_UNIQUE_INDEX,
+            [
+                "rodex_sessions_id",
+                "rodex_sessions_codex_activity_scopes_id",
+                "id",
+                "event_kind",
+            ],
+        )
+        _create_and_verify_immutable_trigger(
+            connection,
+            _CREATE_AGENT_TRACE_EVENTS_IMMUTABLE_TRIGGER,
+            RODEX_SESSIONS_AGENT_TRACE_EVENTS_IMMUTABLE_TRIGGER,
+            RODEX_SESSIONS_AGENT_TRACE_EVENTS_TABLE,
+            "AGENT TRACE EVENT PROVENANCE IS IMMUTABLE",
+        )
+        connection.execute(_CREATE_CODEX_ITEMS_TABLE)
+        _verify_codex_items_table(connection)
+        for index_statement, index_name, index_columns in (
+            (
+                _CREATE_CODEX_ITEMS_PUBLIC_ID_UNIQUE_INDEX,
+                RODEX_SESSIONS_CODEX_ITEMS_PUBLIC_ID_UNIQUE_INDEX,
+                ["item_public_id_signed_bigint_1", "item_public_id_signed_bigint_2"],
+            ),
+            (
+                _CREATE_CODEX_ITEMS_IDENTITY_UNIQUE_INDEX,
+                RODEX_SESSIONS_CODEX_ITEMS_IDENTITY_UNIQUE_INDEX,
+                [
+                    "rodex_sessions_codex_threads_id",
+                    "codex_item_id_signed_bigint_1",
+                    "codex_item_id_signed_bigint_2",
+                ],
+            ),
+            (
+                _CREATE_CODEX_ITEMS_SESSION_THREAD_ID_UNIQUE_INDEX,
+                RODEX_SESSIONS_CODEX_ITEMS_SESSION_THREAD_ID_UNIQUE_INDEX,
+                ["rodex_sessions_id", "rodex_sessions_codex_threads_id", "id"],
+            ),
+            (
+                _CREATE_CODEX_ITEMS_SESSION_ID_UNIQUE_INDEX,
+                RODEX_SESSIONS_CODEX_ITEMS_SESSION_ID_UNIQUE_INDEX,
+                ["rodex_sessions_id", "id"],
+            ),
+            (
+                _CREATE_CODEX_ITEMS_SESSION_SCOPE_ID_UNIQUE_INDEX,
+                RODEX_SESSIONS_CODEX_ITEMS_SESSION_SCOPE_ID_UNIQUE_INDEX,
+                ["rodex_sessions_id", "rodex_sessions_codex_activity_scopes_id", "id"],
+            ),
+        ):
+            connection.execute(index_statement)
+            _verify_unique_index(
+                connection, RODEX_SESSIONS_CODEX_ITEMS_TABLE, index_name, index_columns
+            )
+        _verify_schema_object_definition_contains(
+            connection,
+            "index",
+            RODEX_SESSIONS_CODEX_ITEMS_IDENTITY_UNIQUE_INDEX,
+            ("WHERE CODEX_ITEM_ID_SIGNED_BIGINT_1 IS NOT NULL",),
+        )
+        _create_and_verify_immutable_trigger(
+            connection,
+            _CREATE_CODEX_ITEMS_IMMUTABLE_TRIGGER,
+            RODEX_SESSIONS_CODEX_ITEMS_IMMUTABLE_TRIGGER,
+            RODEX_SESSIONS_CODEX_ITEMS_TABLE,
+            "CODEX ITEM IDENTITY IS IMMUTABLE",
+        )
+        connection.execute(_CREATE_CODEX_ITEM_ALIASES_TABLE)
+        _verify_codex_item_aliases_table(connection)
+        connection.execute(_CREATE_CODEX_ITEM_ALIASES_IDENTITY_UNIQUE_INDEX)
+        _verify_unique_index(
+            connection,
+            RODEX_SESSIONS_CODEX_ITEM_ALIASES_TABLE,
+            RODEX_SESSIONS_CODEX_ITEM_ALIASES_IDENTITY_UNIQUE_INDEX,
+            [
+                "rodex_sessions_codex_threads_id",
+                "codex_item_alias_sha256_int_1",
+                "codex_item_alias_sha256_int_2",
+                "codex_item_alias_sha256_int_3",
+                "codex_item_alias_sha256_int_4",
+            ],
+        )
+        _create_and_verify_append_only_triggers(
+            connection,
+            RODEX_SESSIONS_CODEX_ITEM_ALIASES_TABLE,
+            "Codex item alias identity is immutable",
+        )
+        connection.execute(_CREATE_CODEX_TOOL_CALLS_TABLE)
+        _verify_codex_tool_calls_table(connection)
+        for index_statement, index_name, index_columns in (
+            (
+                _CREATE_CODEX_TOOL_CALLS_PUBLIC_ID_UNIQUE_INDEX,
+                RODEX_SESSIONS_CODEX_TOOL_CALLS_PUBLIC_ID_UNIQUE_INDEX,
+                [
+                    "tool_call_public_id_signed_bigint_1",
+                    "tool_call_public_id_signed_bigint_2",
+                ],
+            ),
+            (
+                _CREATE_CODEX_TOOL_CALLS_SESSION_ID_UNIQUE_INDEX,
+                RODEX_SESSIONS_CODEX_TOOL_CALLS_SESSION_ID_UNIQUE_INDEX,
+                ["rodex_sessions_id", "id"],
+            ),
+            (
+                _CREATE_CODEX_TOOL_CALLS_SESSION_SCOPE_ID_UNIQUE_INDEX,
+                RODEX_SESSIONS_CODEX_TOOL_CALLS_SESSION_SCOPE_ID_UNIQUE_INDEX,
+                ["rodex_sessions_id", "rodex_sessions_codex_activity_scopes_id", "id"],
+            ),
+        ):
+            connection.execute(index_statement)
+            _verify_unique_index(
+                connection,
+                RODEX_SESSIONS_CODEX_TOOL_CALLS_TABLE,
+                index_name,
+                index_columns,
+            )
+        _create_and_verify_immutable_trigger(
+            connection,
+            _CREATE_CODEX_TOOL_CALLS_IDENTITY_IMMUTABLE_TRIGGER,
+            RODEX_SESSIONS_CODEX_TOOL_CALLS_IDENTITY_IMMUTABLE_TRIGGER,
+            RODEX_SESSIONS_CODEX_TOOL_CALLS_TABLE,
+            "CODEX TOOL-CALL IDENTITY IS IMMUTABLE",
+        )
+        connection.execute(_CREATE_CODEX_TOOL_CALL_ALIASES_TABLE)
+        _verify_codex_tool_call_aliases_table(connection)
+        _create_and_verify_append_only_triggers(
+            connection,
+            RODEX_SESSIONS_CODEX_TOOL_CALL_ALIASES_TABLE,
+            "Codex tool-call alias identity is immutable",
+        )
+        for statement, index_name, index_columns, unique in (
+            (
+                _CREATE_CODEX_TOOL_CALL_ALIASES_CALL_ID_UNIQUE_INDEX,
+                RODEX_SESSIONS_CODEX_TOOL_CALL_ALIASES_CALL_ID_UNIQUE_INDEX,
+                [
+                    "rodex_sessions_codex_threads_id",
+                    "codex_call_id_sha256_int_1",
+                    "codex_call_id_sha256_int_2",
+                    "codex_call_id_sha256_int_3",
+                    "codex_call_id_sha256_int_4",
+                ],
+                True,
+            ),
+            (
+                _CREATE_CODEX_TOOL_CALL_ALIASES_ITEM_UNIQUE_INDEX,
+                RODEX_SESSIONS_CODEX_TOOL_CALL_ALIASES_ITEM_UNIQUE_INDEX,
+                ["rodex_sessions_codex_items_id"],
+                True,
+            ),
+            (
+                _CREATE_CODEX_TOOL_CALL_ALIASES_EVENT_UNIQUE_INDEX,
+                RODEX_SESSIONS_CODEX_TOOL_CALL_ALIASES_EVENT_UNIQUE_INDEX,
+                ["rodex_sessions_agent_trace_events_id"],
+                True,
+            ),
+            (
+                _CREATE_CODEX_TOOL_CALL_ALIASES_CALL_INDEX,
+                RODEX_SESSIONS_CODEX_TOOL_CALL_ALIASES_CALL_INDEX,
+                ["rodex_sessions_codex_tool_calls_id"],
+                False,
+            ),
+        ):
+            connection.execute(statement)
+            _verify_index(
+                connection,
+                RODEX_SESSIONS_CODEX_TOOL_CALL_ALIASES_TABLE,
+                index_name,
+                index_columns,
+                unique=unique,
+            )
+        for statement, table_name, expected_columns in (
+            (
+                _CREATE_AGENT_TRACE_MESSAGES_TABLE,
+                RODEX_SESSIONS_AGENT_TRACE_MESSAGES_TABLE,
+                [
+                    ("id", "INTEGER", 0, 1),
+                    ("rodex_sessions_id", "INTEGER", 1, 0),
+                    ("rodex_sessions_codex_activity_scopes_id", "INTEGER", 1, 0),
+                    ("rodex_sessions_agent_trace_events_id", "INTEGER", 1, 0),
+                    ("event_kind", "TEXT", 1, 0),
+                    ("rodex_sessions_codex_items_id", "INTEGER", 0, 0),
+                    ("message_phase", "TEXT", 1, 0),
+                    ("message_role", "TEXT", 1, 0),
+                    ("content_block_count", "INTEGER", 1, 0),
+                    ("body_utf8_bytes", "INTEGER", 1, 0),
+                    ("body_capture_state", "TEXT", 1, 0),
+                ],
+            ),
+            (
+                _CREATE_AGENT_TRACE_TOOL_CALLS_TABLE,
+                RODEX_SESSIONS_AGENT_TRACE_TOOL_CALLS_TABLE,
+                [
+                    ("id", "INTEGER", 0, 1),
+                    ("rodex_sessions_id", "INTEGER", 1, 0),
+                    ("rodex_sessions_codex_activity_scopes_id", "INTEGER", 1, 0),
+                    ("rodex_sessions_agent_trace_events_id", "INTEGER", 1, 0),
+                    ("rodex_sessions_codex_tool_calls_id", "INTEGER", 1, 0),
+                    ("event_kind", "TEXT", 1, 0),
+                    ("activity_kind", "TEXT", 1, 0),
+                    ("rodex_sessions_codex_items_id", "INTEGER", 0, 0),
+                    ("tool_status", "TEXT", 0, 0),
+                    ("request_utf8_bytes", "INTEGER", 1, 0),
+                    ("response_utf8_bytes", "INTEGER", 1, 0),
+                    ("payload_capture_state", "TEXT", 1, 0),
+                ],
+            ),
+            (
+                _CREATE_AGENT_TRACE_COMMAND_EXECUTIONS_TABLE,
+                RODEX_SESSIONS_AGENT_TRACE_COMMAND_EXECUTIONS_TABLE,
+                [
+                    ("id", "INTEGER", 0, 1),
+                    ("rodex_sessions_id", "INTEGER", 1, 0),
+                    ("rodex_sessions_codex_activity_scopes_id", "INTEGER", 1, 0),
+                    ("rodex_sessions_agent_trace_events_id", "INTEGER", 1, 0),
+                    ("event_kind", "TEXT", 1, 0),
+                    ("rodex_sessions_codex_items_id", "INTEGER", 0, 0),
+                    ("command_argument_count", "INTEGER", 1, 0),
+                    ("working_directory", "TEXT", 0, 0),
+                    ("command_status", "TEXT", 0, 0),
+                    ("duration_ms", "INTEGER", 0, 0),
+                    ("exit_code", "INTEGER", 0, 0),
+                    ("stdout_utf8_bytes", "INTEGER", 1, 0),
+                    ("stderr_utf8_bytes", "INTEGER", 1, 0),
+                    ("aggregated_output_utf8_bytes", "INTEGER", 1, 0),
+                    ("payload_capture_state", "TEXT", 1, 0),
+                ],
+            ),
+            (
+                _CREATE_AGENT_TRACE_CONTEXTS_TABLE,
+                RODEX_SESSIONS_AGENT_TRACE_CONTEXTS_TABLE,
+                [
+                    ("id", "INTEGER", 0, 1),
+                    ("rodex_sessions_agent_trace_events_id", "INTEGER", 1, 0),
+                    ("event_kind", "TEXT", 1, 0),
+                    ("model_names_id", "INTEGER", 0, 0),
+                    ("reasoning_effort_names_id", "INTEGER", 0, 0),
+                    ("working_directory", "TEXT", 0, 0),
+                    ("sandbox_mode", "TEXT", 0, 0),
+                    ("approval_policy", "TEXT", 0, 0),
+                    ("permission_profile_type", "TEXT", 0, 0),
+                    ("workspace_root_count", "INTEGER", 1, 0),
+                ],
+            ),
+            (
+                _CREATE_AGENT_TRACE_TOKEN_USAGE_TABLE,
+                RODEX_SESSIONS_AGENT_TRACE_TOKEN_USAGE_TABLE,
+                [
+                    ("id", "INTEGER", 0, 1),
+                    ("rodex_sessions_agent_trace_events_id", "INTEGER", 1, 0),
+                    ("event_kind", "TEXT", 1, 0),
+                    ("input_tokens", "INTEGER", 0, 0),
+                    ("cached_input_tokens", "INTEGER", 0, 0),
+                    ("output_tokens", "INTEGER", 0, 0),
+                    ("reasoning_output_tokens", "INTEGER", 0, 0),
+                    ("total_tokens", "INTEGER", 0, 0),
+                    ("context_used_percent", "REAL", 0, 0),
+                ],
+            ),
+            (
+                _CREATE_AGENT_TRACE_RATE_LIMIT_WINDOWS_TABLE,
+                RODEX_SESSIONS_AGENT_TRACE_RATE_LIMIT_WINDOWS_TABLE,
+                [
+                    ("id", "INTEGER", 0, 1),
+                    ("rodex_sessions_agent_trace_events_id", "INTEGER", 1, 0),
+                    ("event_kind", "TEXT", 1, 0),
+                    ("window_ordinal", "INTEGER", 1, 0),
+                    ("limit_id", "TEXT", 1, 0),
+                    ("used_percent", "REAL", 0, 0),
+                    ("window_minutes", "INTEGER", 0, 0),
+                    ("resets_at_unix_seconds", "INTEGER", 0, 0),
+                    ("plan_type", "TEXT", 0, 0),
+                ],
+            ),
+            (
+                _CREATE_AGENT_TRACE_SUBAGENT_ACTIVITIES_TABLE,
+                RODEX_SESSIONS_AGENT_TRACE_SUBAGENT_ACTIVITIES_TABLE,
+                [
+                    ("id", "INTEGER", 0, 1),
+                    ("rodex_sessions_agent_trace_events_id", "INTEGER", 1, 0),
+                    ("event_kind", "TEXT", 1, 0),
+                    ("rodex_sessions_id", "INTEGER", 1, 0),
+                    ("target_codex_threads_id", "INTEGER", 0, 0),
+                    ("activity_kind", "TEXT", 1, 0),
+                    ("agent_path", "TEXT", 0, 0),
+                ],
+            ),
+        ):
+            connection.execute(statement)
+            _verify_agent_trace_detail_table(connection, table_name, expected_columns)
+            _create_and_verify_append_only_triggers(
+                connection,
+                table_name,
+                "published agent trace detail is immutable",
+            )
+        for table_name, index_name, index_columns in (
+            (
+                RODEX_SESSIONS_AGENT_TRACE_MESSAGES_TABLE,
+                RODEX_SESSIONS_AGENT_TRACE_MESSAGES_EVENT_UNIQUE_INDEX,
+                ["rodex_sessions_agent_trace_events_id"],
+            ),
+            (
+                RODEX_SESSIONS_AGENT_TRACE_TOOL_CALLS_TABLE,
+                RODEX_SESSIONS_AGENT_TRACE_TOOL_CALLS_EVENT_UNIQUE_INDEX,
+                ["rodex_sessions_agent_trace_events_id"],
+            ),
+            (
+                RODEX_SESSIONS_AGENT_TRACE_COMMAND_EXECUTIONS_TABLE,
+                RODEX_SESSIONS_AGENT_TRACE_COMMAND_EXECUTIONS_EVENT_UNIQUE_INDEX,
+                ["rodex_sessions_agent_trace_events_id"],
+            ),
+            (
+                RODEX_SESSIONS_AGENT_TRACE_CONTEXTS_TABLE,
+                RODEX_SESSIONS_AGENT_TRACE_CONTEXTS_EVENT_UNIQUE_INDEX,
+                ["rodex_sessions_agent_trace_events_id"],
+            ),
+            (
+                RODEX_SESSIONS_AGENT_TRACE_TOKEN_USAGE_TABLE,
+                RODEX_SESSIONS_AGENT_TRACE_TOKEN_USAGE_EVENT_UNIQUE_INDEX,
+                ["rodex_sessions_agent_trace_events_id"],
+            ),
+            (
+                RODEX_SESSIONS_AGENT_TRACE_RATE_LIMIT_WINDOWS_TABLE,
+                RODEX_SESSIONS_AGENT_TRACE_RATE_LIMIT_WINDOWS_EVENT_ORDINAL_UNIQUE_INDEX,
+                ["rodex_sessions_agent_trace_events_id", "window_ordinal"],
+            ),
+            (
+                RODEX_SESSIONS_AGENT_TRACE_SUBAGENT_ACTIVITIES_TABLE,
+                RODEX_SESSIONS_AGENT_TRACE_SUBAGENT_ACTIVITIES_EVENT_UNIQUE_INDEX,
+                ["rodex_sessions_agent_trace_events_id"],
+            ),
+        ):
+            connection.execute(
+                f"CREATE UNIQUE INDEX IF NOT EXISTS {index_name} "
+                f"ON {table_name} ({', '.join(index_columns)})"
+            )
+            _verify_unique_index(connection, table_name, index_name, index_columns)
+        connection.execute(
+            f"CREATE INDEX IF NOT EXISTS "
+            f"{RODEX_SESSIONS_AGENT_TRACE_TOOL_CALLS_CALL_INDEX} "
+            f"ON {RODEX_SESSIONS_AGENT_TRACE_TOOL_CALLS_TABLE} "
+            "(rodex_sessions_codex_tool_calls_id)"
+        )
+        _verify_index(
+            connection,
+            RODEX_SESSIONS_AGENT_TRACE_TOOL_CALLS_TABLE,
+            RODEX_SESSIONS_AGENT_TRACE_TOOL_CALLS_CALL_INDEX,
+            ["rodex_sessions_codex_tool_calls_id"],
+            unique=False,
+        )
+        connection.execute(
+            f"CREATE INDEX IF NOT EXISTS "
+            f"{RODEX_SESSIONS_AGENT_TRACE_SUBAGENT_ACTIVITIES_TARGET_INDEX} "
+            f"ON {RODEX_SESSIONS_AGENT_TRACE_SUBAGENT_ACTIVITIES_TABLE} "
+            "(target_codex_threads_id)"
+        )
+        _verify_index(
+            connection,
+            RODEX_SESSIONS_AGENT_TRACE_SUBAGENT_ACTIVITIES_TABLE,
+            RODEX_SESSIONS_AGENT_TRACE_SUBAGENT_ACTIVITIES_TARGET_INDEX,
+            ["target_codex_threads_id"],
+            unique=False,
+        )
     return path
+
+
+def _require_or_create_current_schema_generation(
+    connection: sqlite3.Connection,
+) -> None:
+    """Reject hybrid databases before creating any generation-owned domain table."""
+    existing_tables = {
+        str(row[0])
+        for row in connection.execute(
+            "SELECT name FROM sqlite_master "
+            "WHERE type = 'table' AND name != 'sqlite_sequence'"
+        ).fetchall()
+    }
+    if RODEX_SCHEMA_GENERATIONS_TABLE not in existing_tables:
+        if existing_tables:
+            raise RodexSessionError(
+                "Rodex database has no schema-generation marker and is not empty"
+            )
+        connection.execute(_CREATE_SCHEMA_GENERATIONS_TABLE)
+        connection.execute(
+            f"INSERT INTO {RODEX_SCHEMA_GENERATIONS_TABLE} (schema_generation) VALUES (?)",
+            (RODEX_DATABASE_SCHEMA_GENERATION,),
+        )
+    _verify_schema_generations_table(connection)
+    rows = connection.execute(
+        f"SELECT id, schema_generation FROM {RODEX_SCHEMA_GENERATIONS_TABLE}"
+    ).fetchall()
+    if rows != [(1, RODEX_DATABASE_SCHEMA_GENERATION)]:
+        raise RodexSessionError(
+            "Rodex database schema generation does not match this Rodex version"
+        )
 
 
 def lookup_rodex_registry_id(
@@ -1104,6 +2651,26 @@ def lookup_rodex_registry_id(
     if row is None:
         raise RodexSessionError("Rodex registry identity disappeared")
     return RodexRegistryId.from_signed_bigint(row[0])
+
+
+def _verify_schema_generations_table(connection: sqlite3.Connection) -> None:
+    _verify_table_columns(
+        connection,
+        RODEX_SCHEMA_GENERATIONS_TABLE,
+        [
+            ("id", "INTEGER", 0, 1),
+            ("schema_generation", "INTEGER", 1, 0),
+        ],
+    )
+    _verify_table_definition_contains(
+        connection,
+        RODEX_SCHEMA_GENERATIONS_TABLE,
+        (
+            "ID INTEGER PRIMARY KEY AUTOINCREMENT",
+            "SCHEMA_GENERATION >= 1",
+            "CHECK (ID = 1)",
+        ),
+    )
 
 
 def _verify_registries_table(connection: sqlite3.Connection) -> None:
@@ -1133,8 +2700,6 @@ def _verify_sessions_table(connection: sqlite3.Connection) -> None:
     expected = [
         ("id", "INTEGER", 0, 1),
         ("rodex_session_id_signed_bigint", "BIGINT", 1, 0),
-        ("codex_session_id_signed_bigint_1", "BIGINT", 1, 0),
-        ("codex_session_id_signed_bigint_2", "BIGINT", 1, 0),
         ("cool_names_id", "INTEGER", 1, 0),
         ("user_defined_cool_names_id", "INTEGER", 0, 0),
     ]
@@ -1147,29 +2712,21 @@ def _verify_sessions_table(connection: sqlite3.Connection) -> None:
     definition = " ".join(str(definition_row[0]).upper().split())
     if "ID INTEGER PRIMARY KEY AUTOINCREMENT" not in definition:
         raise RodexSessionError(f"{RODEX_SESSIONS_TABLE} id must use AUTOINCREMENT")
-    required_identity_constraints = (
-        "TYPEOF(RODEX_SESSION_ID_SIGNED_BIGINT) = 'INTEGER'",
-        "TYPEOF(CODEX_SESSION_ID_SIGNED_BIGINT_1) = 'INTEGER'",
-        "TYPEOF(CODEX_SESSION_ID_SIGNED_BIGINT_2) = 'INTEGER'",
-    )
+    required_identity_constraints = ("TYPEOF(RODEX_SESSION_ID_SIGNED_BIGINT) = 'INTEGER'",)
     if any(fragment not in definition for fragment in required_identity_constraints):
         raise RodexSessionError(f"{RODEX_SESSIONS_TABLE} identity constraints mismatch")
     if columns[-1][4] != "NULL":
         raise RodexSessionError(
             f"{RODEX_SESSIONS_TABLE}.user_defined_cool_names_id must default to NULL"
         )
-    foreign_keys = connection.execute(
-        f"PRAGMA foreign_key_list({RODEX_SESSIONS_TABLE})"
-    ).fetchall()
-    observed_foreign_keys = {(row[2], row[3], row[4]) for row in foreign_keys}
-    expected_foreign_keys = {
-        ("cool_names", "cool_names_id", "id"),
-        ("cool_names", "user_defined_cool_names_id", "id"),
-    }
-    if observed_foreign_keys != expected_foreign_keys:
-        raise RodexSessionError(
-            f"{RODEX_SESSIONS_TABLE} foreign keys mismatch: {observed_foreign_keys!r}"
-        )
+    _verify_exact_foreign_keys(
+        connection,
+        RODEX_SESSIONS_TABLE,
+        (
+            (("cool_names", "cool_names_id", "id"),),
+            (("cool_names", "user_defined_cool_names_id", "id"),),
+        ),
+    )
 
 
 def _verify_sessions_unique_indexes(connection: sqlite3.Connection) -> None:
@@ -1178,12 +2735,6 @@ def _verify_sessions_unique_indexes(connection: sqlite3.Connection) -> None:
         RODEX_SESSIONS_TABLE,
         RODEX_SESSION_ID_UNIQUE_INDEX,
         ["rodex_session_id_signed_bigint"],
-    )
-    _verify_unique_index(
-        connection,
-        RODEX_SESSIONS_TABLE,
-        RODEX_CODEX_SESSION_ID_UNIQUE_INDEX,
-        ["codex_session_id_signed_bigint_1", "codex_session_id_signed_bigint_2"],
     )
     _verify_unique_index(
         connection,
@@ -1265,18 +2816,20 @@ def _verify_sessions_log_table(connection: sqlite3.Connection) -> None:
     definition = " ".join(str(definition_row[0]).upper().split())
     if "ID INTEGER PRIMARY KEY AUTOINCREMENT" not in definition:
         raise RodexSessionError(f"{RODEX_SESSIONS_LOG_TABLE} id must use AUTOINCREMENT")
-    foreign_keys = connection.execute(
-        f"PRAGMA foreign_key_list({RODEX_SESSIONS_LOG_TABLE})"
-    ).fetchall()
-    observed_foreign_keys = {(row[2], row[3], row[4]) for row in foreign_keys}
-    expected_foreign_keys = {
-        (RODEX_SESSIONS_TABLE, "rodex_sessions_id", "id"),
-        (RODEX_SESSIONS_USERS_TABLE, "rodex_sessions_users_id", "id"),
-    }
-    if observed_foreign_keys != expected_foreign_keys:
-        raise RodexSessionError(
-            f"{RODEX_SESSIONS_LOG_TABLE} foreign keys mismatch: {observed_foreign_keys!r}"
-        )
+    _verify_exact_foreign_keys(
+        connection,
+        RODEX_SESSIONS_LOG_TABLE,
+        (
+            ((RODEX_SESSIONS_TABLE, "rodex_sessions_id", "id"),),
+            (
+                (
+                    RODEX_SESSIONS_USERS_TABLE,
+                    "rodex_sessions_users_id",
+                    "id",
+                ),
+            ),
+        ),
+    )
 
 
 def _verify_sessions_log_unique_index(connection: sqlite3.Connection) -> None:
@@ -1483,120 +3036,292 @@ def _verify_statistics_audit_limits_table(connection: sqlite3.Connection) -> Non
     )
 
 
-def _verify_statistics_sources_table(connection: sqlite3.Connection) -> None:
+def _verify_canonical_codex_threads_table(connection: sqlite3.Connection) -> None:
     _verify_table_columns(
         connection,
-        RODEX_SESSIONS_STATISTICS_SOURCES_TABLE,
+        CODEX_THREADS_TABLE,
+        [
+            ("id", "INTEGER", 0, 1),
+            ("codex_thread_public_id_signed_bigint_1", "BIGINT", 1, 0),
+            ("codex_thread_public_id_signed_bigint_2", "BIGINT", 1, 0),
+        ],
+    )
+    _verify_table_definition_contains(
+        connection,
+        CODEX_THREADS_TABLE,
+        (
+            "ID INTEGER PRIMARY KEY AUTOINCREMENT",
+            "TYPEOF(CODEX_THREAD_PUBLIC_ID_SIGNED_BIGINT_1) = 'INTEGER'",
+            "TYPEOF(CODEX_THREAD_PUBLIC_ID_SIGNED_BIGINT_2) = 'INTEGER'",
+        ),
+    )
+
+
+def _verify_codex_threads_table(connection: sqlite3.Connection) -> None:
+    _verify_table_columns(
+        connection,
+        RODEX_SESSIONS_CODEX_THREADS_TABLE,
         [
             ("id", "INTEGER", 0, 1),
             ("rodex_sessions_id", "INTEGER", 1, 0),
-            ("codex_thread_id_signed_bigint_1", "BIGINT", 1, 0),
-            ("codex_thread_id_signed_bigint_2", "BIGINT", 1, 0),
-            ("parent_rodex_sessions_statistics_sources_id", "INTEGER", 0, 0),
-            ("agent_path", "TEXT", 0, 0),
-            ("agent_nickname", "TEXT", 0, 0),
-            ("subagent_history_start_ordinal", "INTEGER", 0, 0),
+            ("codex_threads_id", "INTEGER", 1, 0),
             ("first_linked_at_utc", "TEXT", 1, 0),
-            ("rollout_file_path", "TEXT", 0, 0),
-            ("analyzed_size_bytes", "INTEGER", 0, 0),
-            ("analyzed_mtime_ns", "INTEGER", 0, 0),
-            ("analyzed_prefix_sha256", "TEXT", 0, 0),
-            ("verified_at_utc", "TEXT", 0, 0),
         ],
     )
-    foreign_keys = connection.execute(
-        f"PRAGMA foreign_key_list({RODEX_SESSIONS_STATISTICS_SOURCES_TABLE})"
-    ).fetchall()
-    observed_foreign_keys = {(row[2], row[3], row[4]) for row in foreign_keys}
-    expected_foreign_keys = {
-        (RODEX_SESSIONS_TABLE, "rodex_sessions_id", "id"),
+    _verify_exact_foreign_keys(
+        connection,
+        RODEX_SESSIONS_CODEX_THREADS_TABLE,
         (
-            RODEX_SESSIONS_STATISTICS_SOURCES_TABLE,
-            "rodex_sessions_id",
-            "rodex_sessions_id",
+            ((RODEX_SESSIONS_TABLE, "rodex_sessions_id", "id"),),
+            ((CODEX_THREADS_TABLE, "codex_threads_id", "id"),),
         ),
+    )
+
+
+def _verify_current_codex_threads_table(connection: sqlite3.Connection) -> None:
+    _verify_table_columns(
+        connection,
+        RODEX_SESSIONS_CURRENT_CODEX_THREADS_TABLE,
+        [
+            ("id", "INTEGER", 0, 1),
+            ("rodex_sessions_id", "INTEGER", 1, 0),
+            ("rodex_sessions_codex_threads_id", "INTEGER", 1, 0),
+        ],
+    )
+    _verify_exact_foreign_keys(
+        connection,
+        RODEX_SESSIONS_CURRENT_CODEX_THREADS_TABLE,
         (
-            RODEX_SESSIONS_STATISTICS_SOURCES_TABLE,
-            "parent_rodex_sessions_statistics_sources_id",
-            "id",
+            (
+                (
+                    RODEX_SESSIONS_CODEX_THREADS_TABLE,
+                    "rodex_sessions_id",
+                    "rodex_sessions_id",
+                ),
+                (
+                    RODEX_SESSIONS_CODEX_THREADS_TABLE,
+                    "rodex_sessions_codex_threads_id",
+                    "id",
+                ),
+            ),
         ),
-    }
-    if observed_foreign_keys != expected_foreign_keys:
-        raise RodexSessionError(
-            f"{RODEX_SESSIONS_STATISTICS_SOURCES_TABLE} foreign keys mismatch: "
-            f"{observed_foreign_keys!r}"
-        )
+    )
     _verify_table_definition_contains(
         connection,
-        RODEX_SESSIONS_STATISTICS_SOURCES_TABLE,
+        RODEX_SESSIONS_CURRENT_CODEX_THREADS_TABLE,
+        ("DEFERRABLE INITIALLY DEFERRED",),
+    )
+
+
+def _verify_codex_rollout_sources_table(connection: sqlite3.Connection) -> None:
+    _verify_table_columns(
+        connection,
+        RODEX_SESSIONS_CODEX_ROLLOUT_SOURCES_TABLE,
+        [
+            ("id", "INTEGER", 0, 1),
+            ("rodex_sessions_id", "INTEGER", 1, 0),
+            ("rodex_sessions_codex_threads_id", "INTEGER", 1, 0),
+            ("rollout_file_path", "TEXT", 1, 0),
+            ("first_observed_at_utc", "TEXT", 1, 0),
+        ],
+    )
+    _verify_exact_foreign_keys(
+        connection,
+        RODEX_SESSIONS_CODEX_ROLLOUT_SOURCES_TABLE,
         (
-            "TYPEOF(CODEX_THREAD_ID_SIGNED_BIGINT_1) = 'INTEGER'",
-            "TYPEOF(CODEX_THREAD_ID_SIGNED_BIGINT_2) = 'INTEGER'",
-            "ANALYZED_SIZE_BYTES IS NULL OR ANALYZED_SIZE_BYTES >= 0",
-            "ANALYZED_MTIME_NS IS NULL OR ANALYZED_MTIME_NS >= 0",
+            (
+                (
+                    RODEX_SESSIONS_CODEX_THREADS_TABLE,
+                    "rodex_sessions_id",
+                    "rodex_sessions_id",
+                ),
+                (
+                    RODEX_SESSIONS_CODEX_THREADS_TABLE,
+                    "rodex_sessions_codex_threads_id",
+                    "id",
+                ),
+            ),
+        ),
+    )
+
+
+def _verify_codex_turns_table(connection: sqlite3.Connection) -> None:
+    _verify_table_columns(
+        connection,
+        RODEX_SESSIONS_CODEX_TURNS_TABLE,
+        [
+            ("id", "INTEGER", 0, 1),
+            ("rodex_sessions_id", "INTEGER", 1, 0),
+            ("rodex_sessions_codex_threads_id", "INTEGER", 1, 0),
+            ("turn_public_id_signed_bigint_1", "BIGINT", 1, 0),
+            ("turn_public_id_signed_bigint_2", "BIGINT", 1, 0),
+            ("codex_turn_id_signed_bigint_1", "BIGINT", 1, 0),
+            ("codex_turn_id_signed_bigint_2", "BIGINT", 1, 0),
+        ],
+    )
+    _verify_exact_foreign_keys(
+        connection,
+        RODEX_SESSIONS_CODEX_TURNS_TABLE,
+        (
+            (
+                (
+                    RODEX_SESSIONS_CODEX_THREADS_TABLE,
+                    "rodex_sessions_id",
+                    "rodex_sessions_id",
+                ),
+                (
+                    RODEX_SESSIONS_CODEX_THREADS_TABLE,
+                    "rodex_sessions_codex_threads_id",
+                    "id",
+                ),
+            ),
+        ),
+    )
+    _verify_table_definition_contains(
+        connection,
+        RODEX_SESSIONS_CODEX_TURNS_TABLE,
+        (
+            "TYPEOF(TURN_PUBLIC_ID_SIGNED_BIGINT_1) = 'INTEGER'",
+            "TYPEOF(TURN_PUBLIC_ID_SIGNED_BIGINT_2) = 'INTEGER'",
+            "TYPEOF(CODEX_TURN_ID_SIGNED_BIGINT_1) = 'INTEGER'",
+            "TYPEOF(CODEX_TURN_ID_SIGNED_BIGINT_2) = 'INTEGER'",
             "DEFERRABLE INITIALLY DEFERRED",
         ),
     )
 
 
-def _verify_statistics_turns_table(connection: sqlite3.Connection) -> None:
+def _verify_codex_activity_scopes_table(connection: sqlite3.Connection) -> None:
     _verify_table_columns(
         connection,
-        RODEX_SESSIONS_STATISTICS_TURNS_TABLE,
+        RODEX_SESSIONS_CODEX_ACTIVITY_SCOPES_TABLE,
         [
             ("id", "INTEGER", 0, 1),
             ("rodex_sessions_id", "INTEGER", 1, 0),
-            ("rodex_sessions_statistics_sources_id", "INTEGER", 1, 0),
-            ("codex_turn_id_sha256_int_1", "BIGINT", 1, 0),
-            ("codex_turn_id_sha256_int_2", "BIGINT", 1, 0),
-            ("codex_turn_id_sha256_int_3", "BIGINT", 1, 0),
-            ("codex_turn_id_sha256_int_4", "BIGINT", 1, 0),
-            ("codex_turn_id", "TEXT", 1, 0),
+            ("rodex_sessions_codex_threads_id", "INTEGER", 1, 0),
+            ("rodex_sessions_codex_turns_id", "INTEGER", 0, 0),
+        ],
+    )
+    _verify_exact_foreign_keys(
+        connection,
+        RODEX_SESSIONS_CODEX_ACTIVITY_SCOPES_TABLE,
+        (
+            (
+                (
+                    RODEX_SESSIONS_CODEX_THREADS_TABLE,
+                    "rodex_sessions_id",
+                    "rodex_sessions_id",
+                ),
+                (
+                    RODEX_SESSIONS_CODEX_THREADS_TABLE,
+                    "rodex_sessions_codex_threads_id",
+                    "id",
+                ),
+            ),
+            (
+                (
+                    RODEX_SESSIONS_CODEX_TURNS_TABLE,
+                    "rodex_sessions_id",
+                    "rodex_sessions_id",
+                ),
+                (
+                    RODEX_SESSIONS_CODEX_TURNS_TABLE,
+                    "rodex_sessions_codex_threads_id",
+                    "rodex_sessions_codex_threads_id",
+                ),
+                (
+                    RODEX_SESSIONS_CODEX_TURNS_TABLE,
+                    "rodex_sessions_codex_turns_id",
+                    "id",
+                ),
+            ),
+        ),
+    )
+    _verify_table_definition_contains(
+        connection,
+        RODEX_SESSIONS_CODEX_ACTIVITY_SCOPES_TABLE,
+        ("DEFERRABLE INITIALLY DEFERRED",),
+    )
+
+
+def _verify_codex_turn_states_table(connection: sqlite3.Connection) -> None:
+    _verify_table_columns(
+        connection,
+        RODEX_SESSIONS_CODEX_TURN_STATES_TABLE,
+        [
+            ("id", "INTEGER", 0, 1),
+            ("rodex_sessions_id", "INTEGER", 1, 0),
+            ("rodex_sessions_codex_turns_id", "INTEGER", 1, 0),
             ("started_at_utc", "TEXT", 0, 0),
             ("terminal_at_utc", "TEXT", 0, 0),
             ("outcome", "TEXT", 1, 0),
             ("model_names_id", "INTEGER", 0, 0),
             ("reasoning_effort_names_id", "INTEGER", 0, 0),
+        ],
+    )
+    _verify_exact_foreign_keys(
+        connection,
+        RODEX_SESSIONS_CODEX_TURN_STATES_TABLE,
+        (
+            (
+                (
+                    RODEX_SESSIONS_CODEX_TURNS_TABLE,
+                    "rodex_sessions_id",
+                    "rodex_sessions_id",
+                ),
+                (
+                    RODEX_SESSIONS_CODEX_TURNS_TABLE,
+                    "rodex_sessions_codex_turns_id",
+                    "id",
+                ),
+            ),
+            ((MODEL_NAMES_TABLE, "model_names_id", "id"),),
+            ((REASONING_EFFORT_NAMES_TABLE, "reasoning_effort_names_id", "id"),),
+        ),
+    )
+    _verify_table_definition_contains(
+        connection,
+        RODEX_SESSIONS_CODEX_TURN_STATES_TABLE,
+        (
+            "OUTCOME IN ('OPEN', 'COMPLETED', 'ABORTED')",
+            "OUTCOME != 'OPEN' OR TERMINAL_AT_UTC IS NULL",
+            "DEFERRABLE INITIALLY DEFERRED",
+        ),
+    )
+
+
+def _verify_statistics_turn_metrics_table(connection: sqlite3.Connection) -> None:
+    _verify_table_columns(
+        connection,
+        RODEX_SESSIONS_STATISTICS_TURN_METRICS_TABLE,
+        [
+            ("id", "INTEGER", 0, 1),
+            ("rodex_sessions_id", "INTEGER", 1, 0),
+            ("rodex_sessions_codex_turns_id", "INTEGER", 1, 0),
             *TURN_STATISTICS_SCALARS.schema_columns,
         ],
     )
-    foreign_keys = connection.execute(
-        f"PRAGMA foreign_key_list({RODEX_SESSIONS_STATISTICS_TURNS_TABLE})"
-    ).fetchall()
-    observed_foreign_keys = {(row[2], row[3], row[4]) for row in foreign_keys}
-    expected_foreign_keys = {
+    _verify_exact_foreign_keys(
+        connection,
+        RODEX_SESSIONS_STATISTICS_TURN_METRICS_TABLE,
         (
-            RODEX_SESSIONS_STATISTICS_SOURCES_TABLE,
-            "rodex_sessions_id",
-            "rodex_sessions_id",
+            (
+                (
+                    RODEX_SESSIONS_CODEX_TURNS_TABLE,
+                    "rodex_sessions_id",
+                    "rodex_sessions_id",
+                ),
+                (
+                    RODEX_SESSIONS_CODEX_TURNS_TABLE,
+                    "rodex_sessions_codex_turns_id",
+                    "id",
+                ),
+            ),
         ),
-        (
-            RODEX_SESSIONS_STATISTICS_SOURCES_TABLE,
-            "rodex_sessions_statistics_sources_id",
-            "id",
-        ),
-        (MODEL_NAMES_TABLE, "model_names_id", "id"),
-        (
-            REASONING_EFFORT_NAMES_TABLE,
-            "reasoning_effort_names_id",
-            "id",
-        ),
-    }
-    if observed_foreign_keys != expected_foreign_keys:
-        raise RodexSessionError(
-            f"{RODEX_SESSIONS_STATISTICS_TURNS_TABLE} foreign keys mismatch: "
-            f"{observed_foreign_keys!r}"
-        )
+    )
     _verify_table_definition_contains(
         connection,
-        RODEX_SESSIONS_STATISTICS_TURNS_TABLE,
+        RODEX_SESSIONS_STATISTICS_TURN_METRICS_TABLE,
         (
-            "TYPEOF(CODEX_TURN_ID_SHA256_INT_1) = 'INTEGER'",
-            "TYPEOF(CODEX_TURN_ID_SHA256_INT_2) = 'INTEGER'",
-            "TYPEOF(CODEX_TURN_ID_SHA256_INT_3) = 'INTEGER'",
-            "TYPEOF(CODEX_TURN_ID_SHA256_INT_4) = 'INTEGER'",
-            "OUTCOME IN ('OPEN', 'COMPLETED', 'ABORTED')",
-            "OUTCOME != 'OPEN' OR TERMINAL_AT_UTC IS NULL",
             "HANDS_ON IN (0, 1)",
             "EDITED_THEN_VERIFIED IN (0, 1)",
             "DEFERRABLE INITIALLY DEFERRED",
@@ -1604,73 +3329,180 @@ def _verify_statistics_turns_table(connection: sqlite3.Connection) -> None:
     )
 
 
-def _verify_statistics_subagent_spawns_table(connection: sqlite3.Connection) -> None:
+def _verify_subagent_spawns_table(connection: sqlite3.Connection) -> None:
     _verify_table_columns(
         connection,
-        RODEX_SESSIONS_STATISTICS_SUBAGENT_SPAWNS_TABLE,
+        RODEX_SESSIONS_SUBAGENT_SPAWNS_TABLE,
         [
             ("id", "INTEGER", 0, 1),
             ("rodex_sessions_id", "INTEGER", 1, 0),
             (
-                "subagent_rodex_sessions_statistics_sources_id",
+                "subagent_rodex_sessions_codex_threads_id",
                 "INTEGER",
                 1,
                 0,
             ),
-            ("parent_rodex_sessions_statistics_sources_id", "INTEGER", 1, 0),
-            ("spawning_rodex_sessions_statistics_turns_id", "INTEGER", 1, 0),
+            ("parent_rodex_sessions_codex_threads_id", "INTEGER", 1, 0),
+            ("spawning_rodex_sessions_codex_turns_id", "INTEGER", 1, 0),
+            ("agent_path", "TEXT", 1, 0),
+            ("agent_nickname", "TEXT", 0, 0),
+            ("history_inheritance_kind", "TEXT", 1, 0),
+            ("inherited_history_start_ordinal", "INTEGER", 0, 0),
         ],
     )
-    foreign_keys = connection.execute(
-        f"PRAGMA foreign_key_list({RODEX_SESSIONS_STATISTICS_SUBAGENT_SPAWNS_TABLE})"
-    ).fetchall()
-    observed_foreign_keys = {(row[2], row[3], row[4]) for row in foreign_keys}
-    expected_foreign_keys = {
+    _verify_exact_foreign_keys(
+        connection,
+        RODEX_SESSIONS_SUBAGENT_SPAWNS_TABLE,
         (
-            RODEX_SESSIONS_STATISTICS_SOURCES_TABLE,
-            "rodex_sessions_id",
-            "rodex_sessions_id",
+            (
+                (
+                    RODEX_SESSIONS_CODEX_THREADS_TABLE,
+                    "rodex_sessions_id",
+                    "rodex_sessions_id",
+                ),
+                (
+                    RODEX_SESSIONS_CODEX_THREADS_TABLE,
+                    "subagent_rodex_sessions_codex_threads_id",
+                    "id",
+                ),
+            ),
+            (
+                (
+                    RODEX_SESSIONS_CODEX_THREADS_TABLE,
+                    "rodex_sessions_id",
+                    "rodex_sessions_id",
+                ),
+                (
+                    RODEX_SESSIONS_CODEX_THREADS_TABLE,
+                    "parent_rodex_sessions_codex_threads_id",
+                    "id",
+                ),
+            ),
+            (
+                (
+                    RODEX_SESSIONS_CODEX_TURNS_TABLE,
+                    "rodex_sessions_id",
+                    "rodex_sessions_id",
+                ),
+                (
+                    RODEX_SESSIONS_CODEX_TURNS_TABLE,
+                    "parent_rodex_sessions_codex_threads_id",
+                    "rodex_sessions_codex_threads_id",
+                ),
+                (
+                    RODEX_SESSIONS_CODEX_TURNS_TABLE,
+                    "spawning_rodex_sessions_codex_turns_id",
+                    "id",
+                ),
+            ),
         ),
-        (
-            RODEX_SESSIONS_STATISTICS_SOURCES_TABLE,
-            "subagent_rodex_sessions_statistics_sources_id",
-            "id",
-        ),
-        (
-            RODEX_SESSIONS_STATISTICS_SOURCES_TABLE,
-            "parent_rodex_sessions_statistics_sources_id",
-            "parent_rodex_sessions_statistics_sources_id",
-        ),
-        (
-            RODEX_SESSIONS_STATISTICS_TURNS_TABLE,
-            "rodex_sessions_id",
-            "rodex_sessions_id",
-        ),
-        (
-            RODEX_SESSIONS_STATISTICS_TURNS_TABLE,
-            "parent_rodex_sessions_statistics_sources_id",
-            "rodex_sessions_statistics_sources_id",
-        ),
-        (
-            RODEX_SESSIONS_STATISTICS_TURNS_TABLE,
-            "spawning_rodex_sessions_statistics_turns_id",
-            "id",
-        ),
-    }
-    if observed_foreign_keys != expected_foreign_keys:
-        raise RodexSessionError(
-            f"{RODEX_SESSIONS_STATISTICS_SUBAGENT_SPAWNS_TABLE} foreign keys "
-            f"mismatch: {observed_foreign_keys!r}"
-        )
+    )
     _verify_table_definition_contains(
         connection,
-        RODEX_SESSIONS_STATISTICS_SUBAGENT_SPAWNS_TABLE,
+        RODEX_SESSIONS_SUBAGENT_SPAWNS_TABLE,
         (
-            "SUBAGENT_RODEX_SESSIONS_STATISTICS_SOURCES_ID "
-            "!= PARENT_RODEX_SESSIONS_STATISTICS_SOURCES_ID",
+            "SUBAGENT_RODEX_SESSIONS_CODEX_THREADS_ID "
+            "!= PARENT_RODEX_SESSIONS_CODEX_THREADS_ID",
+            "CHECK (LENGTH(AGENT_PATH) > 0)",
+            "HISTORY_INHERITANCE_KIND IN ('CLEAN', 'INHERITED')",
+            "INHERITED_HISTORY_START_ORDINAL >= 0",
             "DEFERRABLE INITIALLY DEFERRED",
         ),
     )
+
+
+def _create_and_verify_codex_root_role_exclusion(
+    connection: sqlite3.Connection,
+) -> None:
+    invalid = connection.execute(
+        f"SELECT 1 FROM {RODEX_SESSIONS_CURRENT_CODEX_THREADS_TABLE} AS current "
+        f"JOIN {RODEX_SESSIONS_SUBAGENT_SPAWNS_TABLE} AS spawns "
+        "ON spawns.subagent_rodex_sessions_codex_threads_id = "
+        "current.rodex_sessions_codex_threads_id LIMIT 1"
+    ).fetchone()
+    if invalid is not None:
+        raise RodexSessionError("current Codex thread is also a subagent spawn")
+    trigger_contracts = (
+        (
+            _CREATE_CURRENT_CODEX_THREAD_REJECT_SPAWN_INSERT_TRIGGER,
+            RODEX_CURRENT_CODEX_THREAD_REJECT_SPAWN_INSERT_TRIGGER,
+        ),
+        (
+            _CREATE_CURRENT_CODEX_THREAD_REJECT_SPAWN_UPDATE_TRIGGER,
+            RODEX_CURRENT_CODEX_THREAD_REJECT_SPAWN_UPDATE_TRIGGER,
+        ),
+        (
+            _CREATE_SUBAGENT_SPAWN_REJECT_CURRENT_INSERT_TRIGGER,
+            RODEX_SUBAGENT_SPAWN_REJECT_CURRENT_INSERT_TRIGGER,
+        ),
+        (
+            _CREATE_SUBAGENT_SPAWN_REJECT_CURRENT_UPDATE_TRIGGER,
+            RODEX_SUBAGENT_SPAWN_REJECT_CURRENT_UPDATE_TRIGGER,
+        ),
+    )
+    for statement, trigger_name in trigger_contracts:
+        connection.execute(statement)
+        _verify_schema_object_definition_exact(
+            connection,
+            "trigger",
+            trigger_name,
+            statement,
+        )
+
+
+def _create_and_verify_immutable_trigger(
+    connection: sqlite3.Connection,
+    statement: str,
+    trigger_name: str,
+    table_name: str,
+    diagnostic: str,
+) -> None:
+    connection.execute(statement)
+    _verify_schema_object_definition_exact(
+        connection,
+        "trigger",
+        trigger_name,
+        statement,
+    )
+    delete_trigger_name = f"{trigger_name}_delete"
+    delete_statement = f"""
+CREATE TRIGGER IF NOT EXISTS {delete_trigger_name}
+BEFORE DELETE ON {table_name}
+BEGIN
+    SELECT RAISE(ABORT, '{diagnostic.lower()}');
+END
+"""
+    connection.execute(delete_statement)
+    _verify_schema_object_definition_exact(
+        connection,
+        "trigger",
+        delete_trigger_name,
+        delete_statement,
+    )
+
+
+def _create_and_verify_append_only_triggers(
+    connection: sqlite3.Connection,
+    table_name: str,
+    diagnostic: str,
+) -> None:
+    """Install exact UPDATE/DELETE guards without affecting the INSERT hot path."""
+    for operation in ("UPDATE", "DELETE"):
+        trigger_name = f"{table_name}_reject_{operation.lower()}"
+        statement = f"""
+CREATE TRIGGER IF NOT EXISTS {trigger_name}
+BEFORE {operation} ON {table_name}
+BEGIN
+    SELECT RAISE(ABORT, '{diagnostic}');
+END
+"""
+        connection.execute(statement)
+        _verify_schema_object_definition_exact(
+            connection,
+            "trigger",
+            trigger_name,
+            statement,
+        )
 
 
 def _verify_statistics_turn_named_counts_table(
@@ -1682,39 +3514,36 @@ def _verify_statistics_turn_named_counts_table(
         [
             ("id", "INTEGER", 0, 1),
             ("rodex_sessions_id", "INTEGER", 1, 0),
-            ("rodex_sessions_statistics_turns_id", "INTEGER", 1, 0),
+            ("rodex_sessions_codex_turns_id", "INTEGER", 1, 0),
             ("count_kind", "TEXT", 1, 0),
             ("count_name", "TEXT", 1, 0),
             ("occurrence_count", "INTEGER", 1, 0),
         ],
     )
-    foreign_keys = connection.execute(
-        f"PRAGMA foreign_key_list({RODEX_SESSIONS_STATISTICS_TURN_NAMED_COUNTS_TABLE})"
-    ).fetchall()
-    observed = {(row[2], row[3], row[4]) for row in foreign_keys}
-    expected = {
+    _verify_exact_foreign_keys(
+        connection,
+        RODEX_SESSIONS_STATISTICS_TURN_NAMED_COUNTS_TABLE,
         (
-            RODEX_SESSIONS_STATISTICS_TURNS_TABLE,
-            "rodex_sessions_id",
-            "rodex_sessions_id",
+            (
+                (
+                    RODEX_SESSIONS_CODEX_TURNS_TABLE,
+                    "rodex_sessions_id",
+                    "rodex_sessions_id",
+                ),
+                (
+                    RODEX_SESSIONS_CODEX_TURNS_TABLE,
+                    "rodex_sessions_codex_turns_id",
+                    "id",
+                ),
+            ),
         ),
-        (
-            RODEX_SESSIONS_STATISTICS_TURNS_TABLE,
-            "rodex_sessions_statistics_turns_id",
-            "id",
-        ),
-    }
-    if observed != expected:
-        raise RodexSessionError(
-            f"{RODEX_SESSIONS_STATISTICS_TURN_NAMED_COUNTS_TABLE} foreign keys "
-            f"mismatch: {observed!r}"
-        )
+    )
 
 
-def _verify_statistics_workers_table(connection: sqlite3.Connection) -> None:
+def _verify_analytics_workers_table(connection: sqlite3.Connection) -> None:
     _verify_table_columns(
         connection,
-        RODEX_SESSIONS_STATISTICS_WORKERS_TABLE,
+        RODEX_SESSIONS_ANALYTICS_WORKERS_TABLE,
         [
             ("id", "INTEGER", 0, 1),
             ("rodex_sessions_id", "INTEGER", 1, 0),
@@ -1727,12 +3556,12 @@ def _verify_statistics_workers_table(connection: sqlite3.Connection) -> None:
     )
     _verify_single_foreign_key(
         connection,
-        RODEX_SESSIONS_STATISTICS_WORKERS_TABLE,
+        RODEX_SESSIONS_ANALYTICS_WORKERS_TABLE,
         (RODEX_SESSIONS_TABLE, "rodex_sessions_id", "id"),
     )
     _verify_table_definition_contains(
         connection,
-        RODEX_SESSIONS_STATISTICS_WORKERS_TABLE,
+        RODEX_SESSIONS_ANALYTICS_WORKERS_TABLE,
         (
             "WORKER_STATE IN ('STARTING', 'CATCHING_UP', 'UP_TO_DATE', "
             "'DEGRADED', 'STOPPED')",
@@ -1742,6 +3571,652 @@ def _verify_statistics_workers_table(connection: sqlite3.Connection) -> None:
             "LENGTH(DIAGNOSTIC_CODE) BETWEEN 1 AND 64",
             "DIAGNOSTIC_CODE NOT GLOB '*[^A-Z0-9_]*'",
         ),
+    )
+
+
+def _verify_analytics_worker_thread_checkpoints_table(
+    connection: sqlite3.Connection,
+) -> None:
+    _verify_table_columns(
+        connection,
+        RODEX_SESSIONS_ANALYTICS_WORKER_THREAD_CHECKPOINTS_TABLE,
+        [
+            ("id", "INTEGER", 0, 1),
+            ("rodex_sessions_id", "INTEGER", 1, 0),
+            ("rodex_sessions_analytics_workers_id", "INTEGER", 1, 0),
+            ("rodex_sessions_codex_rollout_sources_id", "INTEGER", 1, 0),
+            ("analyzed_size_bytes", "INTEGER", 1, 0),
+            ("analyzed_mtime_ns", "INTEGER", 1, 0),
+            ("analyzed_prefix_sha256", "TEXT", 1, 0),
+            ("verified_at_utc", "TEXT", 1, 0),
+        ],
+    )
+    _verify_exact_foreign_keys(
+        connection,
+        RODEX_SESSIONS_ANALYTICS_WORKER_THREAD_CHECKPOINTS_TABLE,
+        (
+            (
+                (
+                    RODEX_SESSIONS_ANALYTICS_WORKERS_TABLE,
+                    "rodex_sessions_id",
+                    "rodex_sessions_id",
+                ),
+                (
+                    RODEX_SESSIONS_ANALYTICS_WORKERS_TABLE,
+                    "rodex_sessions_analytics_workers_id",
+                    "id",
+                ),
+            ),
+            (
+                (
+                    RODEX_SESSIONS_CODEX_ROLLOUT_SOURCES_TABLE,
+                    "rodex_sessions_id",
+                    "rodex_sessions_id",
+                ),
+                (
+                    RODEX_SESSIONS_CODEX_ROLLOUT_SOURCES_TABLE,
+                    "rodex_sessions_codex_rollout_sources_id",
+                    "id",
+                ),
+            ),
+        ),
+    )
+    _verify_table_definition_contains(
+        connection,
+        RODEX_SESSIONS_ANALYTICS_WORKER_THREAD_CHECKPOINTS_TABLE,
+        (
+            "CHECK (ANALYZED_SIZE_BYTES >= 0)",
+            "CHECK (ANALYZED_MTIME_NS >= 0)",
+            "LENGTH(ANALYZED_PREFIX_SHA256) = 64",
+            "DEFERRABLE INITIALLY DEFERRED",
+        ),
+    )
+
+
+def _verify_agent_trace_publications_table(connection: sqlite3.Connection) -> None:
+    _verify_table_columns(
+        connection,
+        RODEX_SESSIONS_AGENT_TRACE_PUBLICATIONS_TABLE,
+        [
+            ("id", "INTEGER", 0, 1),
+            ("rodex_sessions_id", "INTEGER", 1, 0),
+            ("trace_publication_sequence", "INTEGER", 1, 0),
+            ("trace_schema_version", "TEXT", 1, 0),
+            ("calculated_at_utc", "TEXT", 1, 0),
+            ("coverage_state", "TEXT", 1, 0),
+            ("durable_event_count", "INTEGER", 1, 0),
+            ("unrecognized_record_count", "INTEGER", 1, 0),
+        ],
+    )
+    _verify_single_foreign_key(
+        connection,
+        RODEX_SESSIONS_AGENT_TRACE_PUBLICATIONS_TABLE,
+        (RODEX_SESSIONS_TABLE, "rodex_sessions_id", "id"),
+    )
+    _verify_table_definition_contains(
+        connection,
+        RODEX_SESSIONS_AGENT_TRACE_PUBLICATIONS_TABLE,
+        (
+            "CHECK (TRACE_PUBLICATION_SEQUENCE >= 1)",
+            "COVERAGE_STATE IN ('COMPLETE', 'GAPPED')",
+            "CHECK (DURABLE_EVENT_COUNT >= 0)",
+            "CHECK (UNRECOGNIZED_RECORD_COUNT >= 0)",
+        ),
+    )
+
+
+def _verify_agent_trace_events_table(connection: sqlite3.Connection) -> None:
+    _verify_table_columns(
+        connection,
+        RODEX_SESSIONS_AGENT_TRACE_EVENTS_TABLE,
+        [
+            ("id", "INTEGER", 0, 1),
+            ("trace_event_public_id_signed_bigint_1", "BIGINT", 1, 0),
+            ("trace_event_public_id_signed_bigint_2", "BIGINT", 1, 0),
+            ("rodex_sessions_id", "INTEGER", 1, 0),
+            ("rodex_sessions_codex_threads_id", "INTEGER", 1, 0),
+            ("rodex_sessions_codex_activity_scopes_id", "INTEGER", 1, 0),
+            ("source_record_ordinal", "INTEGER", 1, 0),
+            ("derived_event_ordinal", "INTEGER", 1, 0),
+            ("first_trace_publication_sequence", "INTEGER", 1, 0),
+            ("event_kind", "TEXT", 1, 0),
+            ("event_time_utc", "TEXT", 0, 0),
+            ("detail_sha256", "TEXT", 1, 0),
+        ],
+    )
+    _verify_exact_foreign_keys(
+        connection,
+        RODEX_SESSIONS_AGENT_TRACE_EVENTS_TABLE,
+        (
+            (
+                (
+                    RODEX_SESSIONS_CODEX_THREADS_TABLE,
+                    "rodex_sessions_id",
+                    "rodex_sessions_id",
+                ),
+                (
+                    RODEX_SESSIONS_CODEX_THREADS_TABLE,
+                    "rodex_sessions_codex_threads_id",
+                    "id",
+                ),
+            ),
+            (
+                (
+                    RODEX_SESSIONS_CODEX_ACTIVITY_SCOPES_TABLE,
+                    "rodex_sessions_id",
+                    "rodex_sessions_id",
+                ),
+                (
+                    RODEX_SESSIONS_CODEX_ACTIVITY_SCOPES_TABLE,
+                    "rodex_sessions_codex_threads_id",
+                    "rodex_sessions_codex_threads_id",
+                ),
+                (
+                    RODEX_SESSIONS_CODEX_ACTIVITY_SCOPES_TABLE,
+                    "rodex_sessions_codex_activity_scopes_id",
+                    "id",
+                ),
+            ),
+        ),
+    )
+    _verify_table_definition_contains(
+        connection,
+        RODEX_SESSIONS_AGENT_TRACE_EVENTS_TABLE,
+        (
+            "TYPEOF(TRACE_EVENT_PUBLIC_ID_SIGNED_BIGINT_1) = 'INTEGER'",
+            "TYPEOF(TRACE_EVENT_PUBLIC_ID_SIGNED_BIGINT_2) = 'INTEGER'",
+            "CHECK (SOURCE_RECORD_ORDINAL >= 0)",
+            "CHECK (DERIVED_EVENT_ORDINAL >= 0)",
+            "FIRST_TRACE_PUBLICATION_SEQUENCE >= 1",
+            "'UNRECOGNIZED_RECORD'",
+            "LENGTH(DETAIL_SHA256) = 64",
+            "DETAIL_SHA256 NOT GLOB '*[^0-9A-F]*'",
+        ),
+    )
+
+
+def _verify_codex_items_table(connection: sqlite3.Connection) -> None:
+    _verify_table_columns(
+        connection,
+        RODEX_SESSIONS_CODEX_ITEMS_TABLE,
+        [
+            ("id", "INTEGER", 0, 1),
+            ("rodex_sessions_id", "INTEGER", 1, 0),
+            ("rodex_sessions_codex_threads_id", "INTEGER", 1, 0),
+            ("rodex_sessions_codex_activity_scopes_id", "INTEGER", 1, 0),
+            ("item_public_id_signed_bigint_1", "BIGINT", 1, 0),
+            ("item_public_id_signed_bigint_2", "BIGINT", 1, 0),
+            ("codex_item_id_signed_bigint_1", "BIGINT", 0, 0),
+            ("codex_item_id_signed_bigint_2", "BIGINT", 0, 0),
+        ],
+    )
+    _verify_table_definition_contains(
+        connection,
+        RODEX_SESSIONS_CODEX_ITEMS_TABLE,
+        (
+            "TYPEOF(ITEM_PUBLIC_ID_SIGNED_BIGINT_1) = 'INTEGER'",
+            "TYPEOF(ITEM_PUBLIC_ID_SIGNED_BIGINT_2) = 'INTEGER'",
+            "CODEX_ITEM_ID_SIGNED_BIGINT_1 IS NULL",
+            "CODEX_ITEM_ID_SIGNED_BIGINT_2 IS NULL",
+            "DEFERRABLE INITIALLY DEFERRED",
+        ),
+    )
+    _verify_exact_foreign_keys(
+        connection,
+        RODEX_SESSIONS_CODEX_ITEMS_TABLE,
+        (
+            (
+                (
+                    RODEX_SESSIONS_CODEX_THREADS_TABLE,
+                    "rodex_sessions_id",
+                    "rodex_sessions_id",
+                ),
+                (
+                    RODEX_SESSIONS_CODEX_THREADS_TABLE,
+                    "rodex_sessions_codex_threads_id",
+                    "id",
+                ),
+            ),
+            (
+                (
+                    RODEX_SESSIONS_CODEX_ACTIVITY_SCOPES_TABLE,
+                    "rodex_sessions_id",
+                    "rodex_sessions_id",
+                ),
+                (
+                    RODEX_SESSIONS_CODEX_ACTIVITY_SCOPES_TABLE,
+                    "rodex_sessions_codex_threads_id",
+                    "rodex_sessions_codex_threads_id",
+                ),
+                (
+                    RODEX_SESSIONS_CODEX_ACTIVITY_SCOPES_TABLE,
+                    "rodex_sessions_codex_activity_scopes_id",
+                    "id",
+                ),
+            ),
+        ),
+    )
+
+
+def _verify_codex_item_aliases_table(connection: sqlite3.Connection) -> None:
+    _verify_table_columns(
+        connection,
+        RODEX_SESSIONS_CODEX_ITEM_ALIASES_TABLE,
+        [
+            ("id", "INTEGER", 0, 1),
+            ("rodex_sessions_id", "INTEGER", 1, 0),
+            ("rodex_sessions_codex_threads_id", "INTEGER", 1, 0),
+            ("rodex_sessions_codex_activity_scopes_id", "INTEGER", 1, 0),
+            ("rodex_sessions_codex_items_id", "INTEGER", 1, 0),
+            ("codex_item_alias_sha256_int_1", "BIGINT", 1, 0),
+            ("codex_item_alias_sha256_int_2", "BIGINT", 1, 0),
+            ("codex_item_alias_sha256_int_3", "BIGINT", 1, 0),
+            ("codex_item_alias_sha256_int_4", "BIGINT", 1, 0),
+            ("codex_item_alias", "TEXT", 1, 0),
+        ],
+    )
+    _verify_table_definition_contains(
+        connection,
+        RODEX_SESSIONS_CODEX_ITEM_ALIASES_TABLE,
+        tuple(
+            f"TYPEOF(CODEX_ITEM_ALIAS_SHA256_INT_{index}) = 'INTEGER'"
+            for index in range(1, 5)
+        ),
+    )
+    _verify_exact_foreign_keys(
+        connection,
+        RODEX_SESSIONS_CODEX_ITEM_ALIASES_TABLE,
+        (
+            (
+                (
+                    RODEX_SESSIONS_CODEX_ITEMS_TABLE,
+                    "rodex_sessions_id",
+                    "rodex_sessions_id",
+                ),
+                (
+                    RODEX_SESSIONS_CODEX_ITEMS_TABLE,
+                    "rodex_sessions_codex_threads_id",
+                    "rodex_sessions_codex_threads_id",
+                ),
+                (
+                    RODEX_SESSIONS_CODEX_ITEMS_TABLE,
+                    "rodex_sessions_codex_items_id",
+                    "id",
+                ),
+            ),
+            (
+                (
+                    RODEX_SESSIONS_CODEX_ITEMS_TABLE,
+                    "rodex_sessions_id",
+                    "rodex_sessions_id",
+                ),
+                (
+                    RODEX_SESSIONS_CODEX_ITEMS_TABLE,
+                    "rodex_sessions_codex_activity_scopes_id",
+                    "rodex_sessions_codex_activity_scopes_id",
+                ),
+                (
+                    RODEX_SESSIONS_CODEX_ITEMS_TABLE,
+                    "rodex_sessions_codex_items_id",
+                    "id",
+                ),
+            ),
+        ),
+    )
+
+
+def _verify_codex_tool_calls_table(connection: sqlite3.Connection) -> None:
+    _verify_table_columns(
+        connection,
+        RODEX_SESSIONS_CODEX_TOOL_CALLS_TABLE,
+        [
+            ("id", "INTEGER", 0, 1),
+            ("rodex_sessions_id", "INTEGER", 1, 0),
+            ("rodex_sessions_codex_threads_id", "INTEGER", 1, 0),
+            ("rodex_sessions_codex_activity_scopes_id", "INTEGER", 1, 0),
+            ("tool_names_id", "INTEGER", 0, 0),
+            ("tool_call_public_id_signed_bigint_1", "BIGINT", 1, 0),
+            ("tool_call_public_id_signed_bigint_2", "BIGINT", 1, 0),
+        ],
+    )
+    _verify_table_definition_contains(
+        connection,
+        RODEX_SESSIONS_CODEX_TOOL_CALLS_TABLE,
+        (
+            "TYPEOF(TOOL_CALL_PUBLIC_ID_SIGNED_BIGINT_1) = 'INTEGER'",
+            "TYPEOF(TOOL_CALL_PUBLIC_ID_SIGNED_BIGINT_2) = 'INTEGER'",
+            "DEFERRABLE INITIALLY DEFERRED",
+        ),
+    )
+    _verify_exact_foreign_keys(
+        connection,
+        RODEX_SESSIONS_CODEX_TOOL_CALLS_TABLE,
+        (
+            (
+                (
+                    RODEX_SESSIONS_CODEX_THREADS_TABLE,
+                    "rodex_sessions_id",
+                    "rodex_sessions_id",
+                ),
+                (
+                    RODEX_SESSIONS_CODEX_THREADS_TABLE,
+                    "rodex_sessions_codex_threads_id",
+                    "id",
+                ),
+            ),
+            (
+                (
+                    RODEX_SESSIONS_CODEX_ACTIVITY_SCOPES_TABLE,
+                    "rodex_sessions_id",
+                    "rodex_sessions_id",
+                ),
+                (
+                    RODEX_SESSIONS_CODEX_ACTIVITY_SCOPES_TABLE,
+                    "rodex_sessions_codex_threads_id",
+                    "rodex_sessions_codex_threads_id",
+                ),
+                (
+                    RODEX_SESSIONS_CODEX_ACTIVITY_SCOPES_TABLE,
+                    "rodex_sessions_codex_activity_scopes_id",
+                    "id",
+                ),
+            ),
+            ((TOOL_NAMES_TABLE, "tool_names_id", "id"),),
+        ),
+    )
+
+
+def _verify_codex_tool_call_aliases_table(connection: sqlite3.Connection) -> None:
+    _verify_table_columns(
+        connection,
+        RODEX_SESSIONS_CODEX_TOOL_CALL_ALIASES_TABLE,
+        [
+            ("id", "INTEGER", 0, 1),
+            ("rodex_sessions_id", "INTEGER", 1, 0),
+            ("rodex_sessions_codex_threads_id", "INTEGER", 1, 0),
+            ("rodex_sessions_codex_activity_scopes_id", "INTEGER", 1, 0),
+            ("rodex_sessions_codex_tool_calls_id", "INTEGER", 1, 0),
+            ("alias_kind", "TEXT", 1, 0),
+            ("codex_call_id_sha256_int_1", "BIGINT", 0, 0),
+            ("codex_call_id_sha256_int_2", "BIGINT", 0, 0),
+            ("codex_call_id_sha256_int_3", "BIGINT", 0, 0),
+            ("codex_call_id_sha256_int_4", "BIGINT", 0, 0),
+            ("codex_call_id", "TEXT", 0, 0),
+            ("rodex_sessions_codex_items_id", "INTEGER", 0, 0),
+            ("rodex_sessions_agent_trace_events_id", "INTEGER", 0, 0),
+            ("source_event_kind", "TEXT", 0, 0),
+        ],
+    )
+    _verify_table_definition_contains(
+        connection,
+        RODEX_SESSIONS_CODEX_TOOL_CALL_ALIASES_TABLE,
+        (
+            "ALIAS_KIND IN ('CALL_ID', 'ITEM_ID', 'SOURCE_EVENT')",
+            "ALIAS_KIND = 'CALL_ID' AND CODEX_CALL_ID IS NOT NULL",
+            "LENGTH(CODEX_CALL_ID) > 0",
+            "ALIAS_KIND = 'ITEM_ID' AND CODEX_CALL_ID IS NULL",
+            "ALIAS_KIND = 'SOURCE_EVENT' AND CODEX_CALL_ID IS NULL",
+            "SOURCE_EVENT_KIND = 'TOOL_CALL'",
+            "TYPEOF(CODEX_CALL_ID_SHA256_INT_1) = 'INTEGER'",
+            "TYPEOF(CODEX_CALL_ID_SHA256_INT_2) = 'INTEGER'",
+            "TYPEOF(CODEX_CALL_ID_SHA256_INT_3) = 'INTEGER'",
+            "TYPEOF(CODEX_CALL_ID_SHA256_INT_4) = 'INTEGER'",
+        ),
+    )
+    _verify_exact_foreign_keys(
+        connection,
+        RODEX_SESSIONS_CODEX_TOOL_CALL_ALIASES_TABLE,
+        (
+            (
+                (
+                    RODEX_SESSIONS_CODEX_ACTIVITY_SCOPES_TABLE,
+                    "rodex_sessions_id",
+                    "rodex_sessions_id",
+                ),
+                (
+                    RODEX_SESSIONS_CODEX_ACTIVITY_SCOPES_TABLE,
+                    "rodex_sessions_codex_threads_id",
+                    "rodex_sessions_codex_threads_id",
+                ),
+                (
+                    RODEX_SESSIONS_CODEX_ACTIVITY_SCOPES_TABLE,
+                    "rodex_sessions_codex_activity_scopes_id",
+                    "id",
+                ),
+            ),
+            (
+                (
+                    RODEX_SESSIONS_CODEX_TOOL_CALLS_TABLE,
+                    "rodex_sessions_id",
+                    "rodex_sessions_id",
+                ),
+                (
+                    RODEX_SESSIONS_CODEX_TOOL_CALLS_TABLE,
+                    "rodex_sessions_codex_activity_scopes_id",
+                    "rodex_sessions_codex_activity_scopes_id",
+                ),
+                (
+                    RODEX_SESSIONS_CODEX_TOOL_CALLS_TABLE,
+                    "rodex_sessions_codex_tool_calls_id",
+                    "id",
+                ),
+            ),
+            (
+                (
+                    RODEX_SESSIONS_CODEX_ITEMS_TABLE,
+                    "rodex_sessions_id",
+                    "rodex_sessions_id",
+                ),
+                (
+                    RODEX_SESSIONS_CODEX_ITEMS_TABLE,
+                    "rodex_sessions_codex_activity_scopes_id",
+                    "rodex_sessions_codex_activity_scopes_id",
+                ),
+                (
+                    RODEX_SESSIONS_CODEX_ITEMS_TABLE,
+                    "rodex_sessions_codex_items_id",
+                    "id",
+                ),
+            ),
+            (
+                (
+                    RODEX_SESSIONS_AGENT_TRACE_EVENTS_TABLE,
+                    "rodex_sessions_id",
+                    "rodex_sessions_id",
+                ),
+                (
+                    RODEX_SESSIONS_AGENT_TRACE_EVENTS_TABLE,
+                    "rodex_sessions_codex_activity_scopes_id",
+                    "rodex_sessions_codex_activity_scopes_id",
+                ),
+                (
+                    RODEX_SESSIONS_AGENT_TRACE_EVENTS_TABLE,
+                    "rodex_sessions_agent_trace_events_id",
+                    "id",
+                ),
+                (
+                    RODEX_SESSIONS_AGENT_TRACE_EVENTS_TABLE,
+                    "source_event_kind",
+                    "event_kind",
+                ),
+            ),
+        ),
+    )
+
+
+def _verify_agent_trace_detail_table(
+    connection: sqlite3.Connection,
+    table_name: str,
+    expected_columns: list[tuple[str, str, int, int]],
+) -> None:
+    _verify_table_columns(connection, table_name, expected_columns)
+    exact_scope_tables = {
+        RODEX_SESSIONS_AGENT_TRACE_MESSAGES_TABLE,
+        RODEX_SESSIONS_AGENT_TRACE_TOOL_CALLS_TABLE,
+        RODEX_SESSIONS_AGENT_TRACE_COMMAND_EXECUTIONS_TABLE,
+    }
+    expected_foreign_keys: list[tuple[tuple[str, str, str], ...]] = []
+    if table_name in exact_scope_tables:
+        expected_foreign_keys.append(
+            (
+                (
+                    RODEX_SESSIONS_AGENT_TRACE_EVENTS_TABLE,
+                    "rodex_sessions_id",
+                    "rodex_sessions_id",
+                ),
+                (
+                    RODEX_SESSIONS_AGENT_TRACE_EVENTS_TABLE,
+                    "rodex_sessions_codex_activity_scopes_id",
+                    "rodex_sessions_codex_activity_scopes_id",
+                ),
+                (
+                    RODEX_SESSIONS_AGENT_TRACE_EVENTS_TABLE,
+                    "rodex_sessions_agent_trace_events_id",
+                    "id",
+                ),
+                (
+                    RODEX_SESSIONS_AGENT_TRACE_EVENTS_TABLE,
+                    "event_kind",
+                    "event_kind",
+                ),
+            )
+        )
+    elif table_name == RODEX_SESSIONS_AGENT_TRACE_SUBAGENT_ACTIVITIES_TABLE:
+        expected_foreign_keys.append(
+            (
+                (
+                    RODEX_SESSIONS_AGENT_TRACE_EVENTS_TABLE,
+                    "rodex_sessions_id",
+                    "rodex_sessions_id",
+                ),
+                (
+                    RODEX_SESSIONS_AGENT_TRACE_EVENTS_TABLE,
+                    "rodex_sessions_agent_trace_events_id",
+                    "id",
+                ),
+                (
+                    RODEX_SESSIONS_AGENT_TRACE_EVENTS_TABLE,
+                    "event_kind",
+                    "event_kind",
+                ),
+            )
+        )
+    else:
+        expected_foreign_keys.append(
+            (
+                (
+                    RODEX_SESSIONS_AGENT_TRACE_EVENTS_TABLE,
+                    "rodex_sessions_agent_trace_events_id",
+                    "id",
+                ),
+                (
+                    RODEX_SESSIONS_AGENT_TRACE_EVENTS_TABLE,
+                    "event_kind",
+                    "event_kind",
+                ),
+            )
+        )
+    if table_name in exact_scope_tables:
+        expected_foreign_keys.append(
+            (
+                (
+                    RODEX_SESSIONS_CODEX_ITEMS_TABLE,
+                    "rodex_sessions_id",
+                    "rodex_sessions_id",
+                ),
+                (
+                    RODEX_SESSIONS_CODEX_ITEMS_TABLE,
+                    "rodex_sessions_codex_activity_scopes_id",
+                    "rodex_sessions_codex_activity_scopes_id",
+                ),
+                (
+                    RODEX_SESSIONS_CODEX_ITEMS_TABLE,
+                    "rodex_sessions_codex_items_id",
+                    "id",
+                ),
+            )
+        )
+    if table_name == RODEX_SESSIONS_AGENT_TRACE_CONTEXTS_TABLE:
+        expected_foreign_keys.extend(
+            (
+                ((MODEL_NAMES_TABLE, "model_names_id", "id"),),
+                (
+                    (
+                        REASONING_EFFORT_NAMES_TABLE,
+                        "reasoning_effort_names_id",
+                        "id",
+                    ),
+                ),
+            )
+        )
+    elif table_name == RODEX_SESSIONS_AGENT_TRACE_SUBAGENT_ACTIVITIES_TABLE:
+        expected_foreign_keys.append(
+            ((CODEX_THREADS_TABLE, "target_codex_threads_id", "id"),)
+        )
+    elif table_name == RODEX_SESSIONS_AGENT_TRACE_TOOL_CALLS_TABLE:
+        expected_foreign_keys.append(
+            (
+                (
+                    RODEX_SESSIONS_CODEX_TOOL_CALLS_TABLE,
+                    "rodex_sessions_id",
+                    "rodex_sessions_id",
+                ),
+                (
+                    RODEX_SESSIONS_CODEX_TOOL_CALLS_TABLE,
+                    "rodex_sessions_codex_activity_scopes_id",
+                    "rodex_sessions_codex_activity_scopes_id",
+                ),
+                (
+                    RODEX_SESSIONS_CODEX_TOOL_CALLS_TABLE,
+                    "rodex_sessions_codex_tool_calls_id",
+                    "id",
+                ),
+            )
+        )
+    _verify_exact_foreign_keys(connection, table_name, expected_foreign_keys)
+    required_fragments = {
+        RODEX_SESSIONS_AGENT_TRACE_MESSAGES_TABLE: (
+            "CHECK (MESSAGE_PHASE IN (",
+            "CHECK (MESSAGE_ROLE IN (",
+            "CHECK (CONTENT_BLOCK_COUNT >= 0)",
+            "CHECK (BODY_UTF8_BYTES >= 0)",
+        ),
+        RODEX_SESSIONS_AGENT_TRACE_TOOL_CALLS_TABLE: (
+            "ACTIVITY_KIND IN ('REQUEST', 'OUTPUT', 'STATUS')",
+            "CHECK (REQUEST_UTF8_BYTES >= 0)",
+            "CHECK (RESPONSE_UTF8_BYTES >= 0)",
+        ),
+        RODEX_SESSIONS_AGENT_TRACE_COMMAND_EXECUTIONS_TABLE: (
+            "CHECK (COMMAND_ARGUMENT_COUNT >= 0)",
+            "CHECK (STDOUT_UTF8_BYTES >= 0)",
+            "CHECK (STDERR_UTF8_BYTES >= 0)",
+        ),
+        RODEX_SESSIONS_AGENT_TRACE_CONTEXTS_TABLE: ("CHECK (WORKSPACE_ROOT_COUNT >= 0)",),
+        RODEX_SESSIONS_AGENT_TRACE_TOKEN_USAGE_TABLE: (
+            "INPUT_TOKENS IS NULL OR INPUT_TOKENS >= 0",
+            "CONTEXT_USED_PERCENT BETWEEN 0 AND 100",
+        ),
+        RODEX_SESSIONS_AGENT_TRACE_RATE_LIMIT_WINDOWS_TABLE: (
+            "CHECK (WINDOW_ORDINAL >= 0)",
+            "CHECK (LENGTH(LIMIT_ID) > 0)",
+        ),
+        RODEX_SESSIONS_AGENT_TRACE_SUBAGENT_ACTIVITIES_TABLE: (
+            "CHECK (LENGTH(ACTIVITY_KIND) > 0)",
+        ),
+    }
+    expected_event_kind = {
+        RODEX_SESSIONS_AGENT_TRACE_MESSAGES_TABLE: "MESSAGE",
+        RODEX_SESSIONS_AGENT_TRACE_TOOL_CALLS_TABLE: "TOOL_CALL",
+        RODEX_SESSIONS_AGENT_TRACE_COMMAND_EXECUTIONS_TABLE: "COMMAND_EXECUTION",
+        RODEX_SESSIONS_AGENT_TRACE_CONTEXTS_TABLE: "TURN_CONTEXT",
+        RODEX_SESSIONS_AGENT_TRACE_TOKEN_USAGE_TABLE: "TOKEN_USAGE",
+        RODEX_SESSIONS_AGENT_TRACE_RATE_LIMIT_WINDOWS_TABLE: "RATE_LIMIT",
+        RODEX_SESSIONS_AGENT_TRACE_SUBAGENT_ACTIVITIES_TABLE: "SUBAGENT_ACTIVITY",
+    }[table_name]
+    _verify_table_definition_contains(
+        connection,
+        table_name,
+        (*required_fragments[table_name], f"EVENT_KIND = '{expected_event_kind}'"),
     )
 
 
@@ -1768,9 +4243,43 @@ def _verify_single_foreign_key(
     table_name: str,
     expected: tuple[str, str, str],
 ) -> None:
-    foreign_keys = connection.execute(f"PRAGMA foreign_key_list({table_name})").fetchall()
-    observed = {(row[2], row[3], row[4]) for row in foreign_keys}
-    if observed != {expected}:
+    _verify_exact_foreign_keys(connection, table_name, ((expected,),))
+
+
+def _verify_exact_foreign_keys(
+    connection: sqlite3.Connection,
+    table_name: str,
+    expected: Sequence[Sequence[tuple[str, str, str]]],
+) -> None:
+    """Compare complete FK groups, preserving PRAGMA id/sequence ownership."""
+    rows = connection.execute(f"PRAGMA foreign_key_list({table_name})").fetchall()
+    grouped: dict[int, list[tuple[int, str, str, str, str, str, str]]] = {}
+    for row in rows:
+        grouped.setdefault(int(row[0]), []).append(
+            (
+                int(row[1]),
+                str(row[2]),
+                str(row[3]),
+                str(row[4]),
+                str(row[5]),
+                str(row[6]),
+                str(row[7]),
+            )
+        )
+    observed_groups: list[tuple[tuple[str, str, str], ...]] = []
+    for group in grouped.values():
+        ordered = sorted(group, key=lambda item: item[0])
+        if [item[0] for item in ordered] != list(range(len(ordered))):
+            raise RodexSessionError(f"{table_name} foreign key sequence is not contiguous")
+        if any(item[4:] != ("NO ACTION", "NO ACTION", "NONE") for item in ordered):
+            raise RodexSessionError(f"{table_name} foreign key actions mismatch")
+        observed_groups.append(tuple((item[1], item[2], item[3]) for item in ordered))
+    observed = sorted(observed_groups, key=repr)
+    canonical_expected = sorted(
+        (tuple(group) for group in expected),
+        key=repr,
+    )
+    if observed != canonical_expected:
         raise RodexSessionError(f"{table_name} foreign keys mismatch: {observed!r}")
 
 
@@ -1823,3 +4332,47 @@ def _verify_table_definition_contains(
     missing = [fragment for fragment in expected_fragments if fragment not in definition]
     if missing:
         raise RodexSessionError(f"{table_name} constraints are missing: {missing!r}")
+
+
+def _verify_schema_object_definition_contains(
+    connection: sqlite3.Connection,
+    object_type: str,
+    object_name: str,
+    expected_fragments: Sequence[str],
+) -> None:
+    row = connection.execute(
+        "SELECT sql FROM sqlite_master WHERE type = ? AND name = ?",
+        (object_type, object_name),
+    ).fetchone()
+    if row is None or row[0] is None:
+        raise RodexSessionError(f"{object_type} is missing: {object_name}")
+    definition = " ".join(str(row[0]).upper().split())
+    missing = [fragment for fragment in expected_fragments if fragment not in definition]
+    if missing:
+        raise RodexSessionError(
+            f"{object_name} definition is missing constraints: {missing!r}"
+        )
+
+
+def _verify_schema_object_definition_exact(
+    connection: sqlite3.Connection,
+    object_type: str,
+    object_name: str,
+    expected_sql: str,
+) -> None:
+    """Attest one generated schema object rather than trusting its name/fragments."""
+    row = connection.execute(
+        "SELECT sql FROM sqlite_master WHERE type = ? AND name = ?",
+        (object_type, object_name),
+    ).fetchone()
+    if row is None or row[0] is None:
+        raise RodexSessionError(f"{object_type} is missing: {object_name}")
+    observed = _normalise_schema_sql(str(row[0]))
+    expected = _normalise_schema_sql(expected_sql)
+    if observed != expected:
+        raise RodexSessionError(f"{object_name} definition mismatch")
+
+
+def _normalise_schema_sql(value: str) -> str:
+    normalised = " ".join(value.upper().split()).rstrip(";")
+    return normalised.replace(" IF NOT EXISTS ", " ")

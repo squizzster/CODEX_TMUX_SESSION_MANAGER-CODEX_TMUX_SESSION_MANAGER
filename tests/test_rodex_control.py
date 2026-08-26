@@ -321,6 +321,12 @@ def test_event_stream_emits_structured_collaboration_events_but_not_token_deltas
         )
     ]
     assert format_protocol_log_event({"method": "agentMessage/delta"}) is None
+    assert (
+        format_protocol_log_event({"method": "item/commandExecution/outputDelta"}) is None
+    )
+    assert format_protocol_log_event({"method": "item/completed", "params": {}}) == (
+        '{"method":"item/completed","params":{}}'
+    )
 
 
 def test_exact_start_uses_a_string_request_id_and_returns_both_codex_identities(

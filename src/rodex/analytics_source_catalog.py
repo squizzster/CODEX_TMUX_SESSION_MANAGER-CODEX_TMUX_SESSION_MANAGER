@@ -79,10 +79,47 @@ class AnalyticsSourceCatalog:
                 continue
         return tuple(sorted(set(candidates)))
 
+    def session_tree_candidate_paths(
+        self,
+        root_thread_id: CodexThreadId,
+        *,
+        first_linked_at_utc: str | None = None,
+    ) -> tuple[Path, ...]:
+        """List regular rollout files in one root's bounded cold-start date window."""
+        parsed_root_id = parse_codex_thread_id(root_thread_id)
+        expected_dates = _uuid_v7_date_window(parsed_root_id)
+        linked_date = _utc_date(first_linked_at_utc)
+        if not expected_dates and linked_date is not None:
+            expected_dates.update(
+                {
+                    linked_date - timedelta(days=1),
+                    linked_date,
+                    linked_date + timedelta(days=1),
+                }
+            )
+        candidates: list[Path] = []
+        for expected_date in sorted(expected_dates):
+            directory = self._sessions_root / expected_date.strftime("%Y/%m/%d")
+            try:
+                with os.scandir(directory) as entries:
+                    candidates.extend(
+                        Path(entry.path)
+                        for entry in entries
+                        if entry.name.endswith(".jsonl")
+                        and entry.is_file(follow_symlinks=False)
+                    )
+            except OSError:
+                continue
+        return tuple(sorted(set(candidates)))
+
     def remember_resolved_path(self, thread_id: CodexThreadId, path: Path) -> None:
         """Cache one metadata-authenticated path for the worker lifetime."""
+        parsed_thread_id = parse_codex_thread_id(thread_id)
         with self._lock:
-            self._resolved_paths[parse_codex_thread_id(thread_id)] = path
+            self._resolved_paths[parsed_thread_id] = path
+            self._dates_by_thread.setdefault(parsed_thread_id, set()).update(
+                _uuid_v7_date_window(parsed_thread_id)
+            )
 
     def _observe_thread(self, thread: Mapping[str, Any]) -> None:
         try:

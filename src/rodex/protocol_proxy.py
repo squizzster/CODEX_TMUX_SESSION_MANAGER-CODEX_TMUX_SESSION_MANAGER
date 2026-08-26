@@ -46,10 +46,14 @@ _EVENT_STREAM_CLOSED: Final = object()
 EVENT_STREAM_READY_METHOD: Final = "rodex/event-stream/ready"
 CONTROL_CONNECTION_PATH: Final = "/rodex-control"
 ANALYTICS_EVENT_STREAM_PATH: Final = "/rodex-analytics"
-ANALYTICS_LIFECYCLE_EVENT_METHODS: Final = frozenset(
+ANALYTICS_WAKE_EVENT_METHODS: Final = frozenset(
     {
         CODEX_APP_SERVER.thread_started_method,
+        CODEX_APP_SERVER.turn_started_method,
         CODEX_APP_SERVER.turn_completed_method,
+        "item/started",
+        "item/completed",
+        "thread/tokenUsage/updated",
     }
 )
 EVENT_STREAM_READY_MESSAGE: Final = json.dumps(
@@ -120,7 +124,7 @@ class CodexProtocolEventTap:
                 _update_known_threads(self._known_threads, event)
             subscribers = tuple(self._subscribers.items())
         is_analytics_event = (
-            event is not None and event.get("method") in ANALYTICS_LIFECYCLE_EVENT_METHODS
+            event is not None and event.get("method") in ANALYTICS_WAKE_EVENT_METHODS
         )
         for subscriber, analytics_only in subscribers:
             if analytics_only and not is_analytics_event:

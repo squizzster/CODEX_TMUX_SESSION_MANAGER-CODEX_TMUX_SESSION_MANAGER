@@ -38,8 +38,23 @@ def test_registry_has_one_way_domain_dependencies_without_the_old_monolith() -> 
     assert _relative_imports("errors") == set()
     assert _relative_imports("validation") == set()
     assert _relative_imports("schema") == {"errors", "identity", "statistics_fields"}
-    assert _relative_imports("statistics") == {
+    assert _relative_imports("execution") == {
         "errors",
+        "identity",
+        "schema",
+        "validation",
+    }
+    assert _relative_imports("agent_trace") == {
+        "errors",
+        "execution",
+        "identity",
+        "schema",
+        "validation",
+    }
+    assert _relative_imports("statistics") == {
+        "agent_trace",
+        "errors",
+        "execution",
         "identity",
         "schema",
         "statistics_fields",
@@ -48,6 +63,7 @@ def test_registry_has_one_way_domain_dependencies_without_the_old_monolith() -> 
     }
     assert _relative_imports("statistics_fields") == {"statistics_projection"}
     assert _relative_imports("analytics_registry") == {
+        "agent_trace",
         "errors",
         "identity",
         "schema",
@@ -57,17 +73,21 @@ def test_registry_has_one_way_domain_dependencies_without_the_old_monolith() -> 
     }
     assert _relative_imports("lifecycle") == {
         "errors",
+        "execution",
         "identity",
         "schema",
-        "statistics",
         "validation",
     }
+    assert "statistics" not in _relative_imports("lifecycle")
+    assert "statistics" not in _relative_imports("execution")
 
 
 def test_registry_modules_do_not_import_their_public_facade() -> None:
     for module_name in (
+        "agent_trace",
         "analytics_registry",
         "errors",
+        "execution",
         "identity",
         "lifecycle",
         "schema",
@@ -103,7 +123,7 @@ def test_runtime_analytics_uses_the_single_registry_boundary() -> None:
             "lookup_rodex_sessions_id_from_a_rodex_session_id",
             "publish_rodex_session_statistics",
             "read_rodex_session_statistics",
-            "record_rodex_session_statistics_worker_health",
+            "record_rodex_session_analytics_worker_health",
         }
     )
 
@@ -130,6 +150,8 @@ def test_registry_readers_use_only_the_existing_database_read_pipeline() -> None
         ("schema", "lookup_rodex_registry_id"),
         ("statistics", "read_rodex_session_statistics"),
         ("statistics", "read_rodex_session_turn_statistics"),
+        ("agent_trace", "read_rodex_agent_trace"),
+        ("execution", "list_rodex_session_codex_threads"),
     )
 
     for module_name, function_name in readers:

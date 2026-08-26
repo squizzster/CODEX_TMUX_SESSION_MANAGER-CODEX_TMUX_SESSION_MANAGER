@@ -639,7 +639,7 @@ class CodexControlClient:
         *,
         revalidate: Revalidate = lambda: None,
     ) -> None:
-        """Stream future structured lifecycle events for the verified thread."""
+        """Stream future bounded semantic events for the verified thread."""
         try:
             with self._open_events(control.protocol_event_socket_path) as events:
                 _expect_event_stream_ready(events)
@@ -747,18 +747,18 @@ class CodexControlClient:
 
 
 def format_protocol_log_event(payload: dict[str, Any]) -> str | None:
-    """Render useful lifecycle events as stable compact JSON lines."""
+    """Render only bounded semantic events as stable compact JSON lines."""
     method = payload.get("method")
     if not isinstance(method, str):
         return None
-    if method.endswith("/delta"):
-        return None
-    if not (
-        method.startswith("item/")
-        or method.startswith("turn/")
-        or method == CODEX_APP_SERVER.thread_status_changed_method
-        or method == "error"
-    ):
+    if method not in {
+        "item/started",
+        "item/completed",
+        CODEX_APP_SERVER.turn_started_method,
+        CODEX_APP_SERVER.turn_completed_method,
+        CODEX_APP_SERVER.thread_status_changed_method,
+        "error",
+    }:
         return None
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
 

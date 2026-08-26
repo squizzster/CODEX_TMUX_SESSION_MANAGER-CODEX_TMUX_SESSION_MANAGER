@@ -27,6 +27,8 @@ DETACH_COMMAND: Final = "_detach"
 HELP_COMMAND: Final = "_help"
 STATS_COMMAND: Final = "_stats"
 STATS_STATUS_COMMAND: Final = "_stats-status"
+AGENTS_COMMAND: Final = "_agents"
+TRACE_COMMAND: Final = "_trace"
 MOUSE_COMMAND: Final = "_mouse"
 FORCE_FLAG: Final = "--force"
 
@@ -37,6 +39,7 @@ class CommandRoute(StrEnum):
     SESSION = "session"
     MACHINE = "machine"
     STATISTICS = "statistics"
+    AGENT_TRACE = "agent_trace"
     SELECTOR = "selector"
     CODEX = "codex"
 
@@ -160,6 +163,19 @@ COMMAND_SPECS: Final = (
         STATS_STATUS_COMMAND,
         CommandRoute.STATISTICS,
         ("_stats-status SESSION", "Show analytics freshness and health."),
+    ),
+    CommandSpec(
+        AGENTS_COMMAND,
+        CommandRoute.AGENT_TRACE,
+        ("_agents SESSION [--json]", "Show the durable Codex agent lineage."),
+    ),
+    CommandSpec(
+        TRACE_COMMAND,
+        CommandRoute.AGENT_TRACE,
+        (
+            "_trace SESSION [--follow] [--limit N] [--include-bodies] [--json]",
+            "Read or follow rollout-authenticated agent trace events.",
+        ),
     ),
     CommandSpec(
         MOUSE_COMMAND,

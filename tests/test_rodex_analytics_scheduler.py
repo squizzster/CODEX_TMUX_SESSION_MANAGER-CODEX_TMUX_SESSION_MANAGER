@@ -67,7 +67,10 @@ def test_many_dirty_signals_coalesce_into_one_reconciliation() -> None:
     assert reconciliations == 2
 
 
-def test_publication_retry_repeats_only_inside_bounded_window_then_blocks() -> None:
+@pytest.mark.parametrize("retry_result", ["awaiting_append", "publication_retry"])
+def test_repeatable_result_retries_only_inside_bounded_window_then_blocks(
+    retry_result: str,
+) -> None:
     scheduler = AnalyticsEventScheduler(
         quiet_seconds=0.01,
         max_batch_seconds=0.05,
@@ -82,7 +85,7 @@ def test_publication_retry_repeats_only_inside_bounded_window_then_blocks() -> N
         reconciliations += 1
         if reconciliations == 2:
             retried.set()
-        return "publication_retry"
+        return retry_result
 
     thread = Thread(target=scheduler.run, args=(reconcile,))
     thread.start()
@@ -457,9 +460,13 @@ def test_dirty_identities_are_lossless_while_wake_queue_is_full() -> None:
             {"method": "turn/completed", "params": {"threadId": THREAD_ID}},
             THREAD_ID,
         ),
+        (
+            {"method": "item/completed", "params": {"threadId": THREAD_ID}},
+            THREAD_ID,
+        ),
     ],
 )
-def test_lifecycle_events_retain_their_exact_dirty_identity(
+def test_analytics_wake_events_retain_their_exact_dirty_identity(
     event: dict[str, object], expected: str
 ) -> None:
     scheduler = AnalyticsEventScheduler(quiet_seconds=0.01, max_batch_seconds=0.05)
@@ -481,9 +488,10 @@ def test_lifecycle_events_retain_their_exact_dirty_identity(
     assert batches[1].thread_ids == frozenset({uuid.UUID(expected)})
 
 
-def test_only_authoritative_lifecycle_messages_mark_analytics_dirty() -> None:
+def test_only_authoritative_semantic_messages_mark_analytics_dirty() -> None:
     assert _is_relevant_protocol_event('{"method":"turn/completed","params":{}}')
     assert _is_relevant_protocol_event(b'{"method":"thread/started","params":{}}')
+    assert _is_relevant_protocol_event(b'{"method":"item/completed","params":{}}')
     assert not _is_relevant_protocol_event(
         '{"method":"item/agentMessage/delta","params":{}}'
     )

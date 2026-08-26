@@ -7,13 +7,15 @@ from pathlib import Path
 
 from rodex_registry import (
     CodexThreadId,
+    CodexTurnId,
+    RodexSessionCodexThreadSummary,
     RodexSessionStatisticsConflictError,
-    RodexSessionStatisticsSourceSummary,
     RodexSessionTurnStatisticsAmbiguousError,
     lookup_owned_rodex_sessions_id_from_a_cool_name,
     parse_codex_thread_id,
+    parse_codex_turn_id,
+    read_rodex_session_codex_thread_summaries,
     read_rodex_session_statistics,
-    read_rodex_session_statistics_source_summaries,
     read_rodex_session_turn_statistics,
     session_statistics_as_dict,
     turn_statistics_as_dict,
@@ -43,7 +45,7 @@ def execute_statistics_command(arguments: list[str], database_path: Path) -> Non
             )
         session_name = arguments[1]
         as_json = False
-        turn_id: str | None = None
+        turn_id: CodexTurnId | None = None
         source_codex_thread_id: CodexThreadId | None = None
         index = 2
         while index < len(arguments):
@@ -52,7 +54,12 @@ def execute_statistics_command(arguments: list[str], database_path: Path) -> Non
                 as_json = True
                 index += 1
             elif option == "--turn" and turn_id is None and index + 1 < len(arguments):
-                turn_id = arguments[index + 1]
+                try:
+                    turn_id = parse_codex_turn_id(arguments[index + 1])
+                except ValueError as error:
+                    raise RodexLaunchError(
+                        "--turn requires a valid Codex turn ID"
+                    ) from error
                 index += 2
             elif (
                 option == "--thread"
@@ -123,7 +130,7 @@ def execute_statistics_command(arguments: list[str], database_path: Path) -> Non
     if turn_id is None:
         payload["statistics"] = session_statistics_as_dict(snapshot.projection)
         try:
-            summaries = read_rodex_session_statistics_source_summaries(
+            summaries = read_rodex_session_codex_thread_summaries(
                 session_id,
                 database_path,
                 expected_statistics_publication_sequence=(
@@ -134,7 +141,12 @@ def execute_statistics_command(arguments: list[str], database_path: Path) -> Non
             raise RodexLaunchError(
                 "statistics changed during the read; retry the command"
             ) from error
-        payload["threads"] = [_source_summary_as_dict(item) for item in summaries]
+        thread_ids_by_row_id = {
+            item.source.id: str(item.source.codex_thread_id) for item in summaries
+        }
+        payload["threads"] = [
+            _source_summary_as_dict(item, thread_ids_by_row_id) for item in summaries
+        ]
     else:
         turn = view.turn
         if turn is None:
@@ -142,11 +154,9 @@ def execute_statistics_command(arguments: list[str], database_path: Path) -> Non
                 f"turn is not present in the latest statistics snapshot: {turn_id}"
             )
         payload["turn"] = {
-            "rodex_sessions_statistics_sources_id": (
-                turn.rodex_sessions_statistics_sources_id
-            ),
             "codex_thread_id": str(turn.codex_thread_id),
-            "turn_id": turn.codex_turn_id,
+            "turn_id": str(turn.turn_public_id),
+            "codex_turn_id": turn.codex_turn_id,
             "started_at_utc": turn.started_at_utc,
             "terminal_at_utc": turn.terminal_at_utc,
             "outcome": turn.outcome,
@@ -160,7 +170,8 @@ def execute_statistics_command(arguments: list[str], database_path: Path) -> Non
 
 
 def _source_summary_as_dict(
-    summary: RodexSessionStatisticsSourceSummary,
+    summary: RodexSessionCodexThreadSummary,
+    thread_ids_by_row_id: dict[int, str],
 ) -> dict[str, object]:
     source = summary.source
     count_maps: dict[str, dict[str, int]] = {}
@@ -169,16 +180,16 @@ def _source_summary_as_dict(
             count.occurrence_count
         )
     return {
-        "rodex_sessions_statistics_sources_id": source.id,
         "codex_thread_id": str(source.codex_thread_id),
         "source_kind": source.source_kind,
-        "parent_rodex_sessions_statistics_sources_id": (
-            source.parent_rodex_sessions_statistics_sources_id
+        "parent_codex_thread_id": thread_ids_by_row_id.get(
+            source.parent_rodex_sessions_codex_threads_id
         ),
         "thread_depth": source.thread_depth,
         "agent_path": source.agent_path,
         "agent_nickname": source.agent_nickname,
         "subagent_history_start_ordinal": source.subagent_history_start_ordinal,
+        "history_inheritance_kind": source.history_inheritance_kind,
         "spawning_codex_turn_id": source.spawning_codex_turn_id,
         "first_linked_at_utc": source.first_linked_at_utc,
         "lifecycle": {
@@ -246,7 +257,7 @@ def _print_human_statistics(payload: dict[str, object]) -> None:
             activity = thread.get("activity", {})
             label = thread.get("agent_nickname") or thread.get("source_kind")
             print(
-                f"  {thread.get('rodex_sessions_statistics_sources_id')} {label}: "
+                f"  {thread.get('codex_thread_id')} {label}: "
                 f"turns={lifecycle.get('turns_started')} "
                 f"tokens={tokens.get('total_tokens')} "
                 f"commands={activity.get('commands_executed')} "

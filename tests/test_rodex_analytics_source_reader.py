@@ -110,7 +110,8 @@ def test_clean_replay_reads_full_history_again_without_forgetting_cursor(
     replay = reader.read(source)
 
     assert replay.analyzer_content == _root_content() + addition
-    assert replay.appended_analyzer_content == _root_content() + addition
+    assert replay.accepted_analyzer_content == _root_content()
+    assert replay.appended_analyzer_content == addition
 
 
 def test_clean_replay_rejects_changed_accepted_prefix_even_after_growth(
@@ -214,8 +215,9 @@ def test_subagent_cursor_filters_inherited_and_malformed_suffix_records(
     appended = reader.read(source)
 
     assert b'"ordinal": 2' not in appended.appended_analyzer_content
-    assert b"malformed_for_child" not in appended.appended_analyzer_content
+    assert b"malformed_for_child" in appended.appended_analyzer_content
     assert b'"ordinal": 4' in appended.appended_analyzer_content
+    assert appended.appended_source_line_ordinals == (5, 6)
     assert (
         appended.authenticated_source.analyzed_prefix_sha256
         == hashlib.sha256(initial_content + suffix).hexdigest()

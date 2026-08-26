@@ -15,9 +15,9 @@ import rodex_registry.statistics as statistics_module
 from rodex.cli import RodexLaunchError, run
 from rodex_registry import (
     COLLABORATION_MODEL_TOOL_NAMES,
+    RodexSessionCodexThreadObservation,
     RodexSessionError,
     RodexSessionStatisticsConflictError,
-    RodexSessionStatisticsSourceObservation,
     RodexSessionTurnStatisticsAmbiguousError,
     SessionStatisticsProjection,
     StatisticsNamedCount,
@@ -25,20 +25,30 @@ from rodex_registry import (
     TurnStatisticsProjection,
     create_a_rodex_session,
     generate_an_unregistered_rodex_session_id_candidate,
-    list_rodex_session_statistics_sources,
+    list_rodex_session_codex_threads,
     parse_session_statistics_snapshot,
     publish_rodex_session_statistics,
+    read_rodex_analytics_checkpoint,
+    read_rodex_session_codex_thread_summaries,
     read_rodex_session_statistics,
-    read_rodex_session_statistics_source_summaries,
     read_rodex_session_turn_statistics,
     record_a_rodex_session_runtime_resume,
-    record_rodex_session_statistics_worker_health,
+    record_rodex_session_analytics_worker_health,
     session_statistics_as_dict,
+    split_codex_turn_id_into_signed_bigints,
     turn_statistics_as_dict,
 )
 
 CODEX_SESSION_ID = uuid.UUID("01a00654-f2bc-7a30-834a-a5f886a65f82")
 REPLACEMENT_CODEX_SESSION_ID = uuid.UUID(int=CODEX_SESSION_ID.int + 1)
+TEST_TURN_NAMESPACE = uuid.UUID("00000000-0000-7000-8000-000000000000")
+
+
+def _test_turn_id(label: str) -> str:
+    try:
+        return str(uuid.UUID(label))
+    except ValueError:
+        return str(uuid.uuid5(TEST_TURN_NAMESPACE, label))
 
 
 def _columns(database: Path, table: str) -> list[str]:
@@ -54,7 +64,7 @@ def _index_columns(database: Path, index: str) -> list[str]:
 def _observation(root: Path, codex_session_id: uuid.UUID, marker: str = "a"):
     path = (root / f"rollout-{codex_session_id}.jsonl").resolve()
     content = marker.encode()
-    return RodexSessionStatisticsSourceObservation(
+    return RodexSessionCodexThreadObservation(
         codex_thread_id=codex_session_id,
         source_kind="root",
         parent_codex_thread_id=None,
@@ -75,7 +85,7 @@ def _observation(root: Path, codex_session_id: uuid.UUID, marker: str = "a"):
 def _child_observation(root: Path, child_thread_id: uuid.UUID):
     path = (root / f"rollout-{child_thread_id}.jsonl").resolve()
     content = b"child"
-    return RodexSessionStatisticsSourceObservation(
+    return RodexSessionCodexThreadObservation(
         codex_thread_id=child_thread_id,
         source_kind="subagent",
         parent_codex_thread_id=CODEX_SESSION_ID,
@@ -83,13 +93,14 @@ def _child_observation(root: Path, child_thread_id: uuid.UUID):
         agent_path="/root/review",
         agent_nickname="Curie",
         subagent_history_start_ordinal=12,
-        spawning_codex_turn_id="root",
+        spawning_codex_turn_id=_test_turn_id("root"),
         first_linked_at_utc="2026-08-16T12:01:00Z",
         rollout_file_path=path,
         analyzed_size_bytes=len(content),
         analyzed_mtime_ns=456,
         analyzed_prefix_sha256=hashlib.sha256(content).hexdigest(),
         verified_at_utc="2026-08-16T12:01:01Z",
+        history_inheritance_kind="inherited",
     )
 
 
@@ -109,7 +120,7 @@ def _turn(
     return replace(
         base,
         codex_thread_id=codex_session_id,
-        codex_turn_id=turn_id,
+        codex_turn_id=_test_turn_id(turn_id),
         outcome=outcome,
         terminal_at_utc=terminal_at,
         total_tokens=total_tokens,
@@ -231,11 +242,20 @@ def _publish(
     projection: SessionStatisticsProjection | None = None,
     expected_codex_session_id: uuid.UUID = CODEX_SESSION_ID,
     sources: tuple[uuid.UUID, ...] = (CODEX_SESSION_ID,),
+    observations: tuple[RodexSessionCodexThreadObservation, ...] | None = None,
     changed_source_thread_ids: frozenset[uuid.UUID] | None = None,
     changed_turn_keys: frozenset[tuple[uuid.UUID, str]] | None = None,
     removed_turn_keys: frozenset[tuple[uuid.UUID, str]] = frozenset(),
 ):
     supplied_projection = _projection(()) if projection is None else projection
+    selected_observations = (
+        tuple(
+            _observation(source_root, source, str(index))
+            for index, source in enumerate(sources)
+        )
+        if observations is None
+        else observations
+    )
     return publish_rodex_session_statistics(
         1,
         database,
@@ -246,13 +266,10 @@ def _publish(
         coverage_state="complete",
         statistics_projection=replace(
             supplied_projection,
-            analyzer_source_count=len(sources),
-            history_sessions_count=len(sources),
+            analyzer_source_count=len(selected_observations),
+            history_sessions_count=len(selected_observations),
         ),
-        analyzed_sources=[
-            _observation(source_root, source, str(index))
-            for index, source in enumerate(sources)
-        ],
+        analyzed_sources=selected_observations,
         changed_source_thread_ids=changed_source_thread_ids,
         changed_turn_keys=changed_turn_keys,
         removed_turn_keys=removed_turn_keys,
@@ -272,18 +289,22 @@ def test_schema_is_relational_queryable_and_contains_no_json_columns(
         "rodex_sessions_statistics_distributions",
         "rodex_sessions_statistics_named_counts",
         "rodex_sessions_statistics_audit_limits",
-        "rodex_sessions_statistics_sources",
-        "rodex_sessions_statistics_turns",
-        "rodex_sessions_statistics_subagent_spawns",
+        "rodex_sessions_codex_threads",
+        "rodex_sessions_codex_rollout_sources",
+        "rodex_sessions_codex_turns",
+        "rodex_sessions_codex_turn_states",
+        "rodex_sessions_statistics_turn_metrics",
+        "rodex_sessions_subagent_spawns",
         "rodex_sessions_statistics_turn_named_counts",
-        "rodex_sessions_statistics_workers",
+        "rodex_sessions_analytics_workers",
     )
     all_columns = {table: _columns(database, table) for table in table_names}
     assert not any(
         "json" in column.lower() for columns in all_columns.values() for column in columns
     )
     assert "total_tokens" in all_columns["rodex_sessions_statistics"]
-    assert "total_tokens" in all_columns["rodex_sessions_statistics_turns"]
+    assert "total_tokens" not in all_columns["rodex_sessions_codex_turns"]
+    assert "total_tokens" in all_columns["rodex_sessions_statistics_turn_metrics"]
     assert "statistics_publication_sequence" in all_columns["rodex_sessions_statistics"]
     assert "statistics_revision" not in all_columns["rodex_sessions_statistics"]
     for child_table in table_names[3:10]:
@@ -291,26 +312,32 @@ def test_schema_is_relational_queryable_and_contains_no_json_columns(
         assert "included_statistics_revision" not in all_columns[child_table]
     for statistics_table in (
         "rodex_sessions_statistics",
-        "rodex_sessions_statistics_turns",
+        "rodex_sessions_codex_turns",
     ):
         assert "collaboration_operations_count" not in all_columns[statistics_table]
         assert "collaboration_agents_started_count" not in all_columns[statistics_table]
-    assert all_columns["rodex_sessions_statistics_subagent_spawns"] == [
+    assert all_columns["rodex_sessions_subagent_spawns"] == [
         "id",
         "rodex_sessions_id",
-        "subagent_rodex_sessions_statistics_sources_id",
-        "parent_rodex_sessions_statistics_sources_id",
-        "spawning_rodex_sessions_statistics_turns_id",
+        "subagent_rodex_sessions_codex_threads_id",
+        "parent_rodex_sessions_codex_threads_id",
+        "spawning_rodex_sessions_codex_turns_id",
+        "agent_path",
+        "agent_nickname",
+        "history_inheritance_kind",
+        "inherited_history_start_ordinal",
     ]
     assert all_columns["model_names"] == ["id", "name_of_the_model"]
     assert all_columns["reasoning_effort_names"] == [
         "id",
         "name_of_the_reasoning_effort",
     ]
-    assert "model" not in all_columns["rodex_sessions_statistics_turns"]
-    assert "reasoning_effort" not in all_columns["rodex_sessions_statistics_turns"]
-    assert "model_names_id" in all_columns["rodex_sessions_statistics_turns"]
-    assert "reasoning_effort_names_id" in all_columns["rodex_sessions_statistics_turns"]
+    assert "model" not in all_columns["rodex_sessions_codex_turns"]
+    assert "reasoning_effort" not in all_columns["rodex_sessions_codex_turns"]
+    assert "model_names_id" not in all_columns["rodex_sessions_codex_turns"]
+    assert "reasoning_effort_names_id" not in all_columns["rodex_sessions_codex_turns"]
+    assert "model_names_id" in all_columns["rodex_sessions_codex_turn_states"]
+    assert "reasoning_effort_names_id" in all_columns["rodex_sessions_codex_turn_states"]
     assert _index_columns(database, "model_names_name_of_the_model_unique") == [
         "name_of_the_model"
     ]
@@ -350,10 +377,10 @@ def test_schema_is_relational_queryable_and_contains_no_json_columns(
     ) == ["rodex_sessions_id", "limit_ordinal"]
     assert _index_columns(
         database, "rodex_sessions_statistics_turn_named_counts_key_unique"
-    ) == ["rodex_sessions_statistics_turns_id", "count_kind", "count_name"]
+    ) == ["rodex_sessions_codex_turns_id", "count_kind", "count_name"]
     assert _index_columns(
         database,
-        "rodex_sessions_statistics_turns_session_id_unique",
+        "rodex_sessions_codex_turns_session_id_unique",
     ) == ["rodex_sessions_id", "id"]
     assert _index_columns(
         database, "rodex_sessions_statistics_turn_named_counts_session_kind"
@@ -367,7 +394,9 @@ def test_full_projection_round_trips_through_relational_rows(tmp_path: Path) -> 
 
     published = _publish(database, tmp_path, projection=projection)
     view = read_rodex_session_statistics(1, database)
-    exact = read_rodex_session_turn_statistics(1, "turn-exact", database).turn
+    exact = read_rodex_session_turn_statistics(
+        1, _test_turn_id("turn-exact"), database
+    ).turn
 
     assert published.statistics_publication_sequence == 1
     assert view.statistics is not None
@@ -428,17 +457,29 @@ def test_turn_model_and_effort_use_cached_independent_lookup_ids(
             "FROM reasoning_effort_names ORDER BY id"
         ).fetchall() == [(1, "xhigh"), (2, "medium")]
         assert connection.execute(
-            "SELECT turns.codex_turn_id, models.name_of_the_model, "
+            "SELECT turns.codex_turn_id_signed_bigint_1, "
+            "turns.codex_turn_id_signed_bigint_2, models.name_of_the_model, "
             "efforts.name_of_the_reasoning_effort "
-            "FROM rodex_sessions_statistics_turns AS turns "
-            "LEFT JOIN model_names AS models ON models.id = turns.model_names_id "
+            "FROM rodex_sessions_codex_turns AS turns "
+            "JOIN rodex_sessions_codex_turn_states AS states "
+            "ON states.rodex_sessions_codex_turns_id = turns.id "
+            "LEFT JOIN model_names AS models ON models.id = states.model_names_id "
             "LEFT JOIN reasoning_effort_names AS efforts "
-            "ON efforts.id = turns.reasoning_effort_names_id "
-            "ORDER BY turns.codex_turn_id"
+            "ON efforts.id = states.reasoning_effort_names_id "
+            "ORDER BY turns.codex_turn_id_signed_bigint_1, "
+            "turns.codex_turn_id_signed_bigint_2"
         ).fetchall() == [
-            ("turn-a", "gpt-a", "xhigh"),
-            ("turn-b", "gpt-a", "xhigh"),
-            ("turn-c", None, "medium"),
+            tuple((*split_codex_turn_id_into_signed_bigints(_test_turn_id(label)), *rest))
+            for label, rest in sorted(
+                (
+                    ("turn-a", ("gpt-a", "xhigh")),
+                    ("turn-b", ("gpt-a", "xhigh")),
+                    ("turn-c", (None, "medium")),
+                ),
+                key=lambda item: split_codex_turn_id_into_signed_bigints(
+                    _test_turn_id(item[0])
+                ),
+            )
         ]
         assert connection.execute(
             "SELECT COUNT(*) FROM rodex_sessions_statistics_named_counts "
@@ -453,17 +494,17 @@ def test_turn_model_and_effort_use_cached_independent_lookup_ids(
     assert rollups["reasoning_efforts"] == {"medium": 1, "xhigh": 2}
 
 
-def test_turn_identity_bigints_reject_non_integer_storage(tmp_path: Path) -> None:
+def test_canonical_turn_identity_cannot_be_mutated_in_place(tmp_path: Path) -> None:
     database = tmp_path / "rodex.sqlite3"
     create_a_rodex_session(database, codex_session_id=CODEX_SESSION_ID)
     _publish(database, tmp_path, projection=_projection((_turn("turn-exact"),)))
 
     with sqlite3.connect(database) as connection:
-        for part_number in range(1, 5):
-            column_name = f"codex_turn_id_sha256_int_{part_number}"
-            with pytest.raises(sqlite3.IntegrityError, match="CHECK constraint failed"):
+        for part_number in range(1, 3):
+            column_name = f"codex_turn_id_signed_bigint_{part_number}"
+            with pytest.raises(sqlite3.IntegrityError, match="turn identity is immutable"):
                 connection.execute(
-                    f"UPDATE rodex_sessions_statistics_turns SET {column_name} = 1.5"
+                    f"UPDATE rodex_sessions_codex_turns SET {column_name} = 1.5"
                 )
 
 
@@ -474,9 +515,9 @@ def test_statistics_reader_does_not_coerce_corrupt_source_identity(
     create_a_rodex_session(database, codex_session_id=CODEX_SESSION_ID)
     with sqlite3.connect(database) as connection:
         connection.execute("PRAGMA ignore_check_constraints = ON")
+        connection.execute("DROP TRIGGER codex_threads_reject_update")
         connection.execute(
-            "UPDATE rodex_sessions_statistics_sources "
-            "SET codex_thread_id_signed_bigint_1 = 1.5"
+            "UPDATE codex_threads SET codex_thread_public_id_signed_bigint_1 = 1.5"
         )
 
     with pytest.raises(ValueError, match="signed 64-bit"):
@@ -496,11 +537,16 @@ def test_sql_can_sum_group_and_filter_base_statistics(tmp_path: Path) -> None:
 
     with sqlite3.connect(database) as connection:
         assert connection.execute(
-            "SELECT SUM(total_tokens) FROM rodex_sessions_statistics_turns"
+            "SELECT SUM(total_tokens) FROM rodex_sessions_statistics_turn_metrics"
         ).fetchone() == (100,)
         assert connection.execute(
-            "SELECT outcome, SUM(total_tokens) FROM rodex_sessions_statistics_turns "
-            "GROUP BY outcome ORDER BY outcome"
+            "SELECT states.outcome, SUM(metrics.total_tokens) "
+            "FROM rodex_sessions_codex_turns AS turns "
+            "JOIN rodex_sessions_codex_turn_states AS states "
+            "ON states.rodex_sessions_codex_turns_id = turns.id "
+            "JOIN rodex_sessions_statistics_turn_metrics AS metrics "
+            "ON metrics.rodex_sessions_codex_turns_id = turns.id "
+            "GROUP BY states.outcome ORDER BY states.outcome"
         ).fetchall() == [("aborted", 60), ("completed", 40)]
         tool_total = connection.execute(
             "SELECT SUM(occurrence_count) "
@@ -554,30 +600,69 @@ def test_source_id_groups_subagent_lifecycle_and_resource_totals(tmp_path: Path)
         ),
     )
 
-    root, child = read_rodex_session_statistics_source_summaries(
+    root, child = read_rodex_session_codex_thread_summaries(
         1, database, expected_statistics_publication_sequence=1
     )
-    assert child.source.parent_rodex_sessions_statistics_sources_id == root.source.id
+    assert child.source.parent_rodex_sessions_codex_threads_id == root.source.id
     assert child.turns_started_count == 2
     assert child.turns_completed_count == 1
     assert child.turns_aborted_count == 1
     assert child.total_tokens == 80
     assert child.web_queries_count == 2
-    assert child.source.spawning_codex_turn_id == "root"
+    assert child.source.spawning_codex_turn_id == _test_turn_id("root")
     with sqlite3.connect(database) as connection:
         spawn = connection.execute(
-            "SELECT child.codex_thread_id_signed_bigint_1, "
-            "parent.codex_thread_id_signed_bigint_1, spawning_turn.codex_turn_id "
-            "FROM rodex_sessions_statistics_subagent_spawns AS spawns "
-            "JOIN rodex_sessions_statistics_sources AS child "
-            "ON child.id = spawns.subagent_rodex_sessions_statistics_sources_id "
-            "JOIN rodex_sessions_statistics_sources AS parent "
-            "ON parent.id = spawns.parent_rodex_sessions_statistics_sources_id "
-            "JOIN rodex_sessions_statistics_turns AS spawning_turn "
+            "SELECT child_id.codex_thread_public_id_signed_bigint_1, "
+            "parent_id.codex_thread_public_id_signed_bigint_1, "
+            "spawning_turn.codex_turn_id_signed_bigint_1, "
+            "spawning_turn.codex_turn_id_signed_bigint_2 "
+            "FROM rodex_sessions_subagent_spawns AS spawns "
+            "JOIN rodex_sessions_codex_threads AS child "
+            "ON child.id = spawns.subagent_rodex_sessions_codex_threads_id "
+            "JOIN rodex_sessions_codex_threads AS parent "
+            "ON parent.id = spawns.parent_rodex_sessions_codex_threads_id "
+            "JOIN codex_threads AS child_id "
+            "ON child_id.id = child.codex_threads_id "
+            "JOIN codex_threads AS parent_id "
+            "ON parent_id.id = parent.codex_threads_id "
+            "JOIN rodex_sessions_codex_turns AS spawning_turn "
             "ON spawning_turn.id = "
-            "spawns.spawning_rodex_sessions_statistics_turns_id"
+            "spawns.spawning_rodex_sessions_codex_turns_id"
         ).fetchone()
-        assert spawn is not None and spawn[2] == "root"
+        assert spawn is not None and spawn[2:] == split_codex_turn_id_into_signed_bigints(
+            _test_turn_id("root")
+        )
+        spawn_id = connection.execute(
+            "SELECT id FROM rodex_sessions_subagent_spawns"
+        ).fetchone()[0]
+        with pytest.raises(sqlite3.IntegrityError, match="spawn provenance is immutable"):
+            connection.execute(
+                "UPDATE rodex_sessions_subagent_spawns "
+                "SET agent_path = '/root/retargeted' WHERE id = ?",
+                (spawn_id,),
+            )
+        with pytest.raises(sqlite3.IntegrityError, match="spawn provenance is immutable"):
+            connection.execute(
+                "DELETE FROM rodex_sessions_subagent_spawns WHERE id = ?", (spawn_id,)
+            )
+        rollout_source_id = connection.execute(
+            "SELECT id FROM rodex_sessions_codex_rollout_sources ORDER BY id LIMIT 1"
+        ).fetchone()[0]
+        with pytest.raises(
+            sqlite3.IntegrityError, match="rollout-source provenance is immutable"
+        ):
+            connection.execute(
+                "UPDATE rodex_sessions_codex_rollout_sources "
+                "SET first_observed_at_utc = '2026-08-26T00:00:00Z' WHERE id = ?",
+                (rollout_source_id,),
+            )
+        with pytest.raises(
+            sqlite3.IntegrityError, match="rollout-source provenance is immutable"
+        ):
+            connection.execute(
+                "DELETE FROM rodex_sessions_codex_rollout_sources WHERE id = ?",
+                (rollout_source_id,),
+            )
         assert connection.execute(
             "SELECT COUNT(*) FROM rodex_sessions_statistics_named_counts "
             "WHERE count_kind = 'collaboration_tool'"
@@ -653,7 +738,7 @@ def test_exact_spawning_turn_is_derived_from_model_tools_and_spawn_relation(
         ),
     )
 
-    exact = read_rodex_session_turn_statistics(1, "root", database)
+    exact = read_rodex_session_turn_statistics(1, _test_turn_id("root"), database)
     assert exact.turn is not None
     assert exact.turn.projection.collaboration_operations_count == 4
     assert exact.turn.projection.collaboration_agents_started_count == 1
@@ -670,7 +755,7 @@ def test_delta_publication_preserves_identity_and_replaces_changed_children(
     database = tmp_path / "rodex.sqlite3"
     create_a_rodex_session(database, codex_session_id=CODEX_SESSION_ID)
     _publish(database, tmp_path, projection=_projection((_turn("a"), _turn("b"))))
-    first_a = read_rodex_session_turn_statistics(1, "a", database).turn
+    first_a = read_rodex_session_turn_statistics(1, _test_turn_id("a"), database).turn
     assert first_a is not None
 
     changed_a = replace(
@@ -685,16 +770,22 @@ def test_delta_publication_preserves_identity_and_replaces_changed_children(
         based_on=1,
         projection=second_projection,
         changed_source_thread_ids=frozenset(),
-        changed_turn_keys=frozenset({(CODEX_SESSION_ID, "a"), (CODEX_SESSION_ID, "c")}),
-        removed_turn_keys=frozenset({(CODEX_SESSION_ID, "b")}),
+        changed_turn_keys=frozenset(
+            {
+                (CODEX_SESSION_ID, _test_turn_id("a")),
+                (CODEX_SESSION_ID, _test_turn_id("c")),
+            }
+        ),
+        removed_turn_keys=frozenset({(CODEX_SESSION_ID, _test_turn_id("b"))}),
     )
 
-    second_a = read_rodex_session_turn_statistics(1, "a", database).turn
+    second_a = read_rodex_session_turn_statistics(1, _test_turn_id("a"), database).turn
     assert second_a is not None and second_a.id == first_a.id
+    assert second_a.turn_public_id == first_a.turn_public_id
     assert second_a.projection.total_tokens == 99
     assert second_a.projection.model == "gpt-next"
     assert second_a.projection.reasoning_effort == "medium"
-    assert read_rodex_session_turn_statistics(1, "b", database).turn is None
+    assert read_rodex_session_turn_statistics(1, _test_turn_id("b"), database).turn is None
     with sqlite3.connect(database) as connection:
         assert connection.execute(
             "SELECT COUNT(*) FROM rodex_sessions_statistics_named_counts "
@@ -713,7 +804,7 @@ def test_publication_failure_rolls_back_every_relational_fact(
     def fail_health(*_args: object, **_kwargs: object) -> None:
         raise RuntimeError("forced publication failure")
 
-    monkeypatch.setattr(statistics_module, "_upsert_statistics_worker", fail_health)
+    monkeypatch.setattr(statistics_module, "_upsert_analytics_worker", fail_health)
     changed = replace(
         _turn("stable", total_tokens=999),
         model="gpt-new",
@@ -728,12 +819,14 @@ def test_publication_failure_rolls_back_every_relational_fact(
         )
 
     current = read_rodex_session_statistics(1, database).statistics
-    stable = read_rodex_session_turn_statistics(1, "stable", database).turn
+    stable = read_rodex_session_turn_statistics(1, _test_turn_id("stable"), database).turn
     assert current is not None
     assert current.id == before.statistics_id
     assert current.statistics_publication_sequence == before.statistics_publication_sequence
     assert stable is not None and stable.projection.total_tokens == 10
-    assert read_rodex_session_turn_statistics(1, "new", database).turn is None
+    assert (
+        read_rodex_session_turn_statistics(1, _test_turn_id("new"), database).turn is None
+    )
     with sqlite3.connect(database) as connection:
         assert connection.execute(
             "SELECT COUNT(*) FROM model_names WHERE name_of_the_model = 'gpt-new'"
@@ -765,39 +858,49 @@ def test_same_turn_id_in_two_sources_requires_exact_source(tmp_path: Path) -> No
         tmux_session_name="first",
     )
     _publish(database, tmp_path, projection=_projection((_turn("shared"),)))
-    record_a_rodex_session_runtime_resume(
-        1,
-        tmp_path / "tmux.sock",
-        "replacement",
-        database,
-        codex_session_id=REPLACEMENT_CODEX_SESSION_ID,
-    )
-    projection = _projection(
+    canonical_projection = _projection(
         (
             _turn("shared", codex_session_id=CODEX_SESSION_ID, total_tokens=10),
             _turn("shared", codex_session_id=REPLACEMENT_CODEX_SESSION_ID, total_tokens=20),
         )
+    )
+    projection = replace(
+        canonical_projection,
+        collaboration_agents_started_count=1,
+        turn_statistics=(
+            replace(
+                canonical_projection.turn_statistics[0],
+                collaboration_agents_started_count=1,
+            ),
+            canonical_projection.turn_statistics[1],
+        ),
     )
     _publish(
         database,
         tmp_path,
         based_on=1,
         projection=projection,
-        expected_codex_session_id=REPLACEMENT_CODEX_SESSION_ID,
-        sources=(CODEX_SESSION_ID, REPLACEMENT_CODEX_SESSION_ID),
+        observations=(
+            _observation(tmp_path, CODEX_SESSION_ID),
+            replace(
+                _child_observation(tmp_path, REPLACEMENT_CODEX_SESSION_ID),
+                spawning_codex_turn_id=_test_turn_id("shared"),
+            ),
+        ),
     )
 
     with pytest.raises(RodexSessionTurnStatisticsAmbiguousError):
-        read_rodex_session_turn_statistics(1, "shared", database)
+        read_rodex_session_turn_statistics(1, _test_turn_id("shared"), database)
     exact = read_rodex_session_turn_statistics(
-        1, "shared", database, codex_thread_id=REPLACEMENT_CODEX_SESSION_ID
+        1,
+        _test_turn_id("shared"),
+        database,
+        codex_thread_id=REPLACEMENT_CODEX_SESSION_ID,
     ).turn
     assert exact is not None and exact.projection.total_tokens == 20
 
 
-def test_unanalyzed_source_and_digest_collision_are_atomic_conflicts(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_unanalyzed_source_is_an_atomic_conflict(tmp_path: Path) -> None:
     database = tmp_path / "rodex.sqlite3"
     create_a_rodex_session(
         database,
@@ -812,7 +915,7 @@ def test_unanalyzed_source_and_digest_collision_are_atomic_conflicts(
         database,
         codex_session_id=REPLACEMENT_CODEX_SESSION_ID,
     )
-    with pytest.raises(RodexSessionStatisticsConflictError, match="omit"):
+    with pytest.raises(RodexSessionStatisticsConflictError, match="outside"):
         _publish(
             database,
             tmp_path,
@@ -821,25 +924,6 @@ def test_unanalyzed_source_and_digest_collision_are_atomic_conflicts(
             sources=(REPLACEMENT_CODEX_SESSION_ID,),
         )
     assert read_rodex_session_statistics(1, database).statistics is None
-
-    monkeypatch.setattr(
-        statistics_module,
-        "_turn_id_sha256_signed_bigints",
-        lambda _value: (1, 2, 3, 4),
-    )
-    with pytest.raises(RodexSessionStatisticsConflictError, match="digest collision"):
-        _publish(
-            database,
-            tmp_path,
-            projection=_projection(
-                (
-                    _turn("first", codex_session_id=REPLACEMENT_CODEX_SESSION_ID),
-                    _turn("second", codex_session_id=REPLACEMENT_CODEX_SESSION_ID),
-                )
-            ),
-            expected_codex_session_id=REPLACEMENT_CODEX_SESSION_ID,
-            sources=(CODEX_SESSION_ID, REPLACEMENT_CODEX_SESSION_ID),
-        )
 
 
 def test_exact_turn_delta_does_not_touch_unchanged_large_history(tmp_path: Path) -> None:
@@ -853,18 +937,20 @@ def test_exact_turn_delta_does_not_touch_unchanged_large_history(tmp_path: Path)
         connection.executescript(
             "CREATE TABLE turn_write_audit(operation TEXT NOT NULL);"
             "CREATE TRIGGER audit_turn_insert "
-            "AFTER INSERT ON rodex_sessions_statistics_turns BEGIN "
+            "AFTER INSERT ON rodex_sessions_statistics_turn_metrics BEGIN "
             "INSERT INTO turn_write_audit VALUES ('insert'); END;"
             "CREATE TRIGGER audit_turn_update "
-            "AFTER UPDATE ON rodex_sessions_statistics_turns BEGIN "
+            "AFTER UPDATE ON rodex_sessions_statistics_turn_metrics BEGIN "
             "INSERT INTO turn_write_audit VALUES ('update'); END;"
             "CREATE TRIGGER audit_turn_delete "
-            "AFTER DELETE ON rodex_sessions_statistics_turns BEGIN "
+            "AFTER DELETE ON rodex_sessions_statistics_turn_metrics BEGIN "
             "INSERT INTO turn_write_audit VALUES ('delete'); END;"
         )
-    changed_key = (CODEX_SESSION_ID, "turn-550")
+    changed_key = (CODEX_SESSION_ID, _test_turn_id("turn-550"))
     changed_turns = tuple(
-        replace(turn, total_tokens=99) if turn.codex_turn_id == "turn-550" else turn
+        replace(turn, total_tokens=99)
+        if turn.codex_turn_id == _test_turn_id("turn-550")
+        else turn
         for turn in turns
     )
     complete_changed_projection = _projection(changed_turns)
@@ -873,7 +959,7 @@ def test_exact_turn_delta_does_not_touch_unchanged_large_history(tmp_path: Path)
         turn_statistics=tuple(
             turn
             for turn in complete_changed_projection.turn_statistics
-            if turn.codex_turn_id == "turn-550"
+            if turn.codex_turn_id == _test_turn_id("turn-550")
         ),
     )
     _publish(
@@ -886,7 +972,7 @@ def test_exact_turn_delta_does_not_touch_unchanged_large_history(tmp_path: Path)
     )
     with sqlite3.connect(database) as connection:
         assert connection.execute(
-            "SELECT COUNT(*) FROM rodex_sessions_statistics_turns"
+            "SELECT COUNT(*) FROM rodex_sessions_codex_turns"
         ).fetchone() == (1_100,)
         assert connection.execute("SELECT operation FROM turn_write_audit").fetchall() == [
             ("update",)
@@ -942,7 +1028,7 @@ def test_health_is_separate_and_preserves_last_good_statistics(tmp_path: Path) -
     database = tmp_path / "rodex.sqlite3"
     create_a_rodex_session(database, codex_session_id=CODEX_SESSION_ID)
     snapshot = _publish(database, tmp_path)
-    health = record_rodex_session_statistics_worker_health(
+    health = record_rodex_session_analytics_worker_health(
         1,
         database,
         expected_current_codex_session_id=CODEX_SESSION_ID,
@@ -973,7 +1059,7 @@ def test_analytics_hot_writes_do_not_reinitialise_the_schema(
     )
 
     published = _publish(database, tmp_path)
-    health = record_rodex_session_statistics_worker_health(
+    health = record_rodex_session_analytics_worker_health(
         1,
         database,
         expected_current_codex_session_id=CODEX_SESSION_ID,
@@ -994,9 +1080,10 @@ def test_foreign_keys_and_checks_reject_detached_relational_facts(tmp_path: Path
     _publish(database, tmp_path, projection=_projection((_turn("turn-a"),)))
 
     statements = (
-        "UPDATE rodex_sessions_statistics_turns SET cached_input_tokens = input_tokens + 1",
-        "UPDATE rodex_sessions_statistics_turns SET model_names_id = 999",
-        "UPDATE rodex_sessions_statistics_turns SET reasoning_effort_names_id = 999",
+        "UPDATE rodex_sessions_statistics_turn_metrics "
+        "SET cached_input_tokens = input_tokens + 1",
+        "UPDATE rodex_sessions_codex_turn_states SET model_names_id = 999",
+        "UPDATE rodex_sessions_codex_turn_states SET reasoning_effort_names_id = 999",
         "UPDATE rodex_sessions_statistics_named_counts SET occurrence_count = 0",
         "INSERT INTO model_names (name_of_the_model) VALUES ('   ')",
         "INSERT INTO reasoning_effort_names (name_of_the_reasoning_effort) VALUES ('')",
@@ -1041,13 +1128,20 @@ def test_cli_reconstructs_json_from_sql_without_runtime_dependencies(
     }
     assert aggregate["registered_thread_count"] == 1
     assert aggregate["analyzed_thread_count"] == 1
-    assert aggregate["threads"][0]["rodex_sessions_statistics_sources_id"] == 1
+    assert aggregate["threads"][0]["codex_thread_id"] == str(CODEX_SESSION_ID)
+    assert "rodex_sessions_codex_threads_id" not in aggregate["threads"][0]
     assert aggregate["threads"][0]["source_kind"] == "root"
     assert aggregate["threads"][0]["lifecycle"]["turns_started"] == 1
     assert aggregate["threads"][0]["token_usage"]["total_tokens"] == 42
     assert (
         run(
-            ["_stats", created.cool_name, "--turn", "turn-exact", "--json"],
+            [
+                "_stats",
+                created.cool_name,
+                "--turn",
+                _test_turn_id("turn-exact"),
+                "--json",
+            ],
             database_path=database,
         )
         == 0
@@ -1055,6 +1149,12 @@ def test_cli_reconstructs_json_from_sql_without_runtime_dependencies(
     exact = json.loads(capsys.readouterr().out)
     assert exact["statistics_publication_sequence"] == 1
     assert "included_statistics_publication_sequence" not in exact["turn"]
+    assert exact["turn"]["codex_turn_id"] == _test_turn_id("turn-exact")
+    assert exact["turn"]["turn_id"] != exact["turn"]["codex_turn_id"]
+    uuid.UUID(exact["turn"]["turn_id"])
+    assert not any(
+        key.startswith("rodex_sessions") and key.endswith("_id") for key in exact["turn"]
+    )
     assert exact["statistics"]["must_have_basic_stats"]["token_usage"]["total_tokens"] == 42
     assert exact["statistics"]["must_have_basic_stats"]["workspace_and_model"] == {
         "workspace_digest": "a" * 64,
@@ -1063,6 +1163,11 @@ def test_cli_reconstructs_json_from_sql_without_runtime_dependencies(
         "local_start_hour": 13,
     }
     with pytest.raises(RodexLaunchError, match="not present in the latest"):
+        run(
+            ["_stats", created.cool_name, "--turn", _test_turn_id("missing")],
+            database_path=database,
+        )
+    with pytest.raises(RodexLaunchError, match="valid Codex turn ID"):
         run(["_stats", created.cool_name, "--turn", "missing"], database_path=database)
 
 
@@ -1091,11 +1196,23 @@ def test_historical_source_cannot_move_to_another_lineage(tmp_path: Path) -> Non
         database,
         codex_session_id=REPLACEMENT_CODEX_SESSION_ID,
     )
-    with pytest.raises(RodexSessionError, match="statistics lineage"):
+    with pytest.raises(RodexSessionError, match="already belongs"):
         create_a_rodex_session(database, codex_session_id=CODEX_SESSION_ID)
     assert [
-        item.codex_thread_id for item in list_rodex_session_statistics_sources(1, database)
-    ] == [CODEX_SESSION_ID, REPLACEMENT_CODEX_SESSION_ID]
+        item.codex_thread_id for item in list_rodex_session_codex_threads(1, database)
+    ] == [REPLACEMENT_CODEX_SESSION_ID]
+    with sqlite3.connect(database) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM rodex_sessions_codex_threads WHERE rodex_sessions_id = 1"
+        ).fetchone() == (2,)
+    checkpoint = read_rodex_analytics_checkpoint(
+        1,
+        database,
+        expected_current_codex_session_id=REPLACEMENT_CODEX_SESSION_ID,
+    )
+    assert [source.codex_thread_id for source in checkpoint.sources] == [
+        REPLACEMENT_CODEX_SESSION_ID
+    ]
 
 
 def test_unregistered_codex_session_id_becomes_persisted_identity(tmp_path: Path) -> None:

@@ -22,6 +22,7 @@ from rodex.control import LiveRodexControl
 from rodex.process_contracts import AnalyticsWorkerConfig, SessionHostConfig
 from rodex.runtime import (
     RODEX_TMUX_HISTORY_LIMIT_LINES,
+    RODEX_TMUX_REQUIRED_CLIENT_FEATURES,
     CurrentTmuxPaneContext,
     LiveRodexRuntime,
     LiveTmuxSession,
@@ -33,6 +34,7 @@ from rodex.runtime import (
 )
 from rodex.tmux_status import (
     RODEX_STATUS_LEFT_FORMAT,
+    RODEX_STATUS_STYLE,
     STATUS_CLAIM_PRIORITY_OPTION,
     STATUS_CLAIM_PUBLISHER_OPTION,
     STATUS_CLAIM_TOKEN_OPTION,
@@ -479,7 +481,13 @@ def test_attach_uses_live_stdio_and_escapes_an_existing_tmux_client(
 
     launcher.attach(live)
 
-    assert runner.calls[-1][-3:] == ["attach-session", "-t", "=rodex-one"]
+    assert runner.calls[-1][-5:] == [
+        "-T",
+        RODEX_TMUX_REQUIRED_CLIENT_FEATURES,
+        "attach-session",
+        "-t",
+        "=rodex-one",
+    ]
     assert "capture_output" not in runner.options[-1]
     environment = runner.options[-1]["env"]
     assert isinstance(environment, dict)
@@ -718,15 +726,17 @@ def test_rename_and_session_ui_initialisation_use_the_real_tmux_session_name(
         "automatic-beluga",
     ]
     status_commands = [command[3:] for command in runner.calls[1:]]
-    unset_options = {
-        command[-1] for command in status_commands if command[:2] == ["set-option", "-u"]
-    }
-    assert unset_options == {
+    base_reset = next(
+        command
+        for command in status_commands
+        if command[:5] == ["if-shell", "-t", "=automatic-beluga:", "-F", "1"]
+    )
+    base_reset_steps = [shlex.split(step) for step in base_reset[-1].split(" ; ")]
+    assert {step[-1] for step in base_reset_steps if step[:2] == ["set-option", "-u"]} == {
         STATUS_CLAIM_PUBLISHER_OPTION,
         STATUS_CLAIM_TOKEN_OPTION,
         STATUS_CLAIM_PRIORITY_OPTION,
         "status-format",
-        "status-style",
     }
     assert [
         "set-option",
@@ -734,7 +744,14 @@ def test_rename_and_session_ui_initialisation_use_the_real_tmux_session_name(
         "=automatic-beluga:",
         "status-left",
         RODEX_STATUS_LEFT_FORMAT,
-    ] in status_commands
+    ] in base_reset_steps
+    assert [
+        "set-option",
+        "-t",
+        "=automatic-beluga:",
+        "status-style",
+        RODEX_STATUS_STYLE,
+    ] in base_reset_steps
     assert ["set-option", "-t", "=automatic-beluga:", "status-left-length", "160"] in (
         status_commands
     )
@@ -894,6 +911,8 @@ def test_real_tmux_fast_ctrl_b_d_detaches_without_ending_session(
                     tmux_binary,
                     "-S",
                     str(socket_path),
+                    "-T",
+                    RODEX_TMUX_REQUIRED_CLIENT_FEATURES,
                     "attach-session",
                     "-t",
                     f"={session_name}",
@@ -916,6 +935,15 @@ def test_real_tmux_fast_ctrl_b_d_detaches_without_ending_session(
             time.sleep(0.01)
         else:
             pytest.fail("tmux client did not attach")
+
+        client_features = tmux(
+            "list-clients",
+            "-t",
+            f"={session_name}",
+            "-F",
+            "#{client_termfeatures}",
+        ).stdout.strip()
+        assert "RGB" in client_features.split(",")
 
         os.write(terminal_master, b"\x02d")
         deadline = time.monotonic() + 2
@@ -1338,7 +1366,7 @@ def test_real_tmux_survives_rename_and_status_configuration(tmp_path: Path) -> N
         )
         assert "#[align=centre]" in animated_status
         wait_for_session_option("status-format[0]", populated=False)
-        assert session_option("status-style") == ""
+        assert session_option("status-style") == RODEX_STATUS_STYLE
         assert "#{status-left-style}" in session_option("status-format[0]", inherited=True)
 
         departed_while_shared = control_clients.pop()
@@ -1353,7 +1381,7 @@ def test_real_tmux_survives_rename_and_status_configuration(tmp_path: Path) -> N
         )
         assert "#[align=centre]" in private_animation
         wait_for_session_option("status-format[0]", populated=False)
-        assert session_option("status-style") == ""
+        assert session_option("status-style") == RODEX_STATUS_STYLE
         rendered_identity_status = tmux_format("#{T:status-left}")
         assert "Rodex: automatic-beluga" in rendered_identity_status
         assert "Mouse: ON" in rendered_identity_status

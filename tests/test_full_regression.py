@@ -56,11 +56,14 @@ def test_full_rodex_database_regression(tmp_path: Path) -> None:
         assert connection.execute(
             "SELECT name, seq FROM sqlite_sequence ORDER BY name"
         ).fetchall() == [
+            ("codex_threads", 2),
             ("cool_names", 2),
             ("rodex_registries", 1),
+            ("rodex_schema_generations", 1),
             ("rodex_sessions", 2),
+            ("rodex_sessions_codex_threads", 2),
+            ("rodex_sessions_current_codex_threads", 2),
             ("rodex_sessions_log", 2),
-            ("rodex_sessions_statistics_sources", 2),
             ("rodex_sessions_users", 1),
         ]
         assert connection.execute("PRAGMA integrity_check").fetchone() == ("ok",)

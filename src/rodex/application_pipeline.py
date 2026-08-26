@@ -8,6 +8,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Final, Protocol
 
+from .agent_trace_commands import execute_agent_trace_command
 from .command_contract import (
     CREATE_COMMAND,
     HELP_COMMAND,
@@ -43,6 +44,7 @@ ROUTE_PREPARATIONS: Final = {
     CommandRoute.HELP: PipelinePreparation.DIRECT,
     CommandRoute.CODEX: PipelinePreparation.DIRECT,
     CommandRoute.STATISTICS: PipelinePreparation.DIRECT,
+    CommandRoute.AGENT_TRACE: PipelinePreparation.DIRECT,
     CommandRoute.SELECTOR: PipelinePreparation.SELECTOR,
     CommandRoute.MACHINE: PipelinePreparation.RUNTIME,
     CommandRoute.SESSION: PipelinePreparation.RUNTIME,
@@ -186,6 +188,9 @@ class UnifiedRodexApplicationPipeline:
             return self._execute_codex(argv)
         if invocation.route is CommandRoute.STATISTICS:
             execute_statistics_command(argv, self._database_path)
+            return 0
+        if invocation.route is CommandRoute.AGENT_TRACE:
+            execute_agent_trace_command(argv, self._database_path)
             return 0
         if invocation.route is CommandRoute.SELECTOR:
             selector = argv[0]

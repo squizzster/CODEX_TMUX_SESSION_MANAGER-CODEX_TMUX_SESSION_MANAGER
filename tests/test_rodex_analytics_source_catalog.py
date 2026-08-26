@@ -48,3 +48,24 @@ def test_catalog_learns_non_v7_thread_date_from_ready_lifecycle_state(
 
     assert catalog.candidate_thread_ids() == frozenset({thread_id})
     assert catalog.candidate_paths(thread_id) == (expected,)
+
+
+def test_cold_session_tree_candidates_are_date_bounded_regular_files(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "sessions"
+    expected = root / "2026" / "08" / "16" / "rollout-child.jsonl"
+    expected.parent.mkdir(parents=True)
+    expected.write_text("{}\n", encoding="utf-8")
+    outside = root / "2026" / "08" / "20" / "rollout-outside.jsonl"
+    outside.parent.mkdir(parents=True)
+    outside.write_text("{}\n", encoding="utf-8")
+    linked = expected.parent / "rollout-symlink.jsonl"
+    linked.symlink_to(outside)
+
+    candidates = AnalyticsSourceCatalog(root).session_tree_candidate_paths(
+        CODEX_UUID_V7,
+        first_linked_at_utc="2026-08-20T12:00:00Z",
+    )
+
+    assert candidates == (expected,)

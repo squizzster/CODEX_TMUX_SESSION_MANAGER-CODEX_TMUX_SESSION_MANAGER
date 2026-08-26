@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Final
 
-from .identity import CodexThreadId, parse_codex_thread_id
+from .identity import CodexThreadId, parse_codex_thread_id, parse_codex_turn_id
 
 __all__ = [
     "COLLABORATION_MODEL_TOOL_NAMES",
@@ -1112,7 +1112,14 @@ def _turn(value: object, index: int) -> TurnStatisticsProjection:
         raise StatisticsProjectionError(
             f"{path}.session_id must be a valid Codex thread ID"
         ) from error
-    turn_id = _required_text(turn["turn_id"], f"{path}.turn_id")
+    try:
+        turn_id = str(
+            parse_codex_turn_id(_required_text(turn["turn_id"], f"{path}.turn_id"))
+        )
+    except ValueError as error:
+        raise StatisticsProjectionError(
+            f"{path}.turn_id must be a valid Codex turn ID"
+        ) from error
     started_at = _optional_timestamp(turn["started_at"], f"{path}.started_at")
     terminal_at = _optional_timestamp(turn["terminal_at"], f"{path}.terminal_at")
     outcome = _required_text(turn["outcome"], f"{path}.outcome")

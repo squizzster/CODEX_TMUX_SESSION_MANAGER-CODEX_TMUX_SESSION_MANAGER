@@ -33,6 +33,18 @@ def fetch_all(database: Path, query: str) -> list[tuple[object, ...]]:
         return connection.execute(query).fetchall()
 
 
+def seed_current_schema_generation(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        "CREATE TABLE rodex_schema_generations ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "schema_generation INTEGER NOT NULL CHECK (schema_generation >= 1), "
+        "CHECK (id = 1))"
+    )
+    connection.execute(
+        "INSERT INTO rodex_schema_generations (schema_generation) VALUES (12)"
+    )
+
+
 def codex_session_id(sequence: int) -> uuid.UUID:
     return uuid.UUID(int=(1 << 120) + sequence)
 
@@ -124,7 +136,7 @@ def test_initialise_rejects_a_nonregular_database_path(tmp_path: Path) -> None:
         initialise_rodex_database(database)
 
 
-def test_rodex_sessions_table_has_the_complete_root_identity(tmp_path: Path) -> None:
+def test_session_and_codex_identities_have_separate_canonical_rows(tmp_path: Path) -> None:
     database = initialise_rodex_database(tmp_path / "rodex.sqlite3")
 
     columns = fetch_all(database, "PRAGMA table_info(rodex_sessions)")
@@ -132,8 +144,6 @@ def test_rodex_sessions_table_has_the_complete_root_identity(tmp_path: Path) -> 
     assert [(row[1], row[2], row[3], row[5]) for row in columns] == [
         ("id", "INTEGER", 0, 1),
         ("rodex_session_id_signed_bigint", "BIGINT", 1, 0),
-        ("codex_session_id_signed_bigint_1", "BIGINT", 1, 0),
-        ("codex_session_id_signed_bigint_2", "BIGINT", 1, 0),
         ("cool_names_id", "INTEGER", 1, 0),
         ("user_defined_cool_names_id", "INTEGER", 0, 0),
     ]
@@ -143,6 +153,14 @@ def test_rodex_sessions_table_has_the_complete_root_identity(tmp_path: Path) -> 
         ("cool_names", "user_defined_cool_names_id", "id"),
     }
     assert columns[-1][4] == "NULL"
+    assert [
+        (row[1], row[2], row[3], row[5])
+        for row in fetch_all(database, "PRAGMA table_info(codex_threads)")
+    ] == [
+        ("id", "INTEGER", 0, 1),
+        ("codex_thread_public_id_signed_bigint_1", "BIGINT", 1, 0),
+        ("codex_thread_public_id_signed_bigint_2", "BIGINT", 1, 0),
+    ]
 
 
 def test_identity_bigint_columns_reject_non_integer_storage(tmp_path: Path) -> None:
@@ -151,22 +169,74 @@ def test_identity_bigint_columns_reject_non_integer_storage(tmp_path: Path) -> N
     identity_columns = (
         ("rodex_registries", "rodex_registry_id_signed_bigint"),
         ("rodex_sessions", "rodex_session_id_signed_bigint"),
-        ("rodex_sessions", "codex_session_id_signed_bigint_1"),
-        ("rodex_sessions", "codex_session_id_signed_bigint_2"),
         (
-            "rodex_sessions_statistics_sources",
-            "codex_thread_id_signed_bigint_1",
+            "codex_threads",
+            "codex_thread_public_id_signed_bigint_1",
         ),
         (
-            "rodex_sessions_statistics_sources",
-            "codex_thread_id_signed_bigint_2",
+            "codex_threads",
+            "codex_thread_public_id_signed_bigint_2",
         ),
     )
 
     with sqlite3.connect(database) as connection:
         for table_name, column_name in identity_columns:
-            with pytest.raises(sqlite3.IntegrityError, match="CHECK constraint failed"):
+            expected = (
+                "thread identity is immutable"
+                if table_name == "codex_threads"
+                else "CHECK constraint failed"
+            )
+            with pytest.raises(sqlite3.IntegrityError, match=expected):
                 connection.execute(f"UPDATE {table_name} SET {column_name} = 1.5")
+
+
+def test_canonical_trace_vocabulary_rows_are_append_only(tmp_path: Path) -> None:
+    database = initialise_rodex_database(tmp_path / "rodex.sqlite3")
+
+    with sqlite3.connect(database) as connection:
+        dimensions = (
+            ("model_names", "name_of_the_model", "gpt-test", "model name"),
+            (
+                "reasoning_effort_names",
+                "name_of_the_reasoning_effort",
+                "xhigh-test",
+                "reasoning-effort name",
+            ),
+            ("tool_names", "tool_name", "test_tool", "tool name"),
+        )
+        for table_name, column_name, value, diagnostic in dimensions:
+            row_id = connection.execute(
+                f"INSERT INTO {table_name} ({column_name}) VALUES (?) RETURNING id",
+                (value,),
+            ).fetchone()[0]
+            with pytest.raises(sqlite3.IntegrityError, match=diagnostic):
+                connection.execute(
+                    f"UPDATE {table_name} SET {column_name} = ? WHERE id = ?",
+                    (f"changed-{value}", row_id),
+                )
+            with pytest.raises(sqlite3.IntegrityError, match=diagnostic):
+                connection.execute(f"DELETE FROM {table_name} WHERE id = ?", (row_id,))
+
+
+def test_codex_thread_membership_is_append_only(tmp_path: Path) -> None:
+    database = tmp_path / "rodex.sqlite3"
+    create_a_rodex_session(database, codex_session_id=codex_session_id(1))
+
+    with sqlite3.connect(database) as connection:
+        membership_id = connection.execute(
+            "SELECT id FROM rodex_sessions_codex_threads"
+        ).fetchone()[0]
+        with pytest.raises(sqlite3.IntegrityError, match="membership is immutable"):
+            connection.execute(
+                "UPDATE rodex_sessions_codex_threads "
+                "SET first_linked_at_utc = '2026-08-26T00:00:00Z' WHERE id = ?",
+                (membership_id,),
+            )
+        with pytest.raises(sqlite3.IntegrityError, match="membership is immutable"):
+            connection.execute(
+                "DELETE FROM rodex_sessions_codex_threads WHERE id = ?",
+                (membership_id,),
+            )
 
 
 def test_identity_readers_do_not_coerce_corrupt_storage(tmp_path: Path) -> None:
@@ -185,8 +255,8 @@ def test_identity_readers_do_not_coerce_corrupt_storage(tmp_path: Path) -> None:
         ),
         (
             "codex",
-            "rodex_sessions",
-            "codex_session_id_signed_bigint_1",
+            "codex_threads",
+            "codex_thread_public_id_signed_bigint_1",
             lambda path: lookup_codex_session_id_from_a_rodex_sessions_id(1, path),
         ),
     )
@@ -195,6 +265,8 @@ def test_identity_readers_do_not_coerce_corrupt_storage(tmp_path: Path) -> None:
         create_a_rodex_session(database, codex_session_id=codex_session_id(1))
         with sqlite3.connect(database) as connection:
             connection.execute("PRAGMA ignore_check_constraints = ON")
+            if table_name == "codex_threads":
+                connection.execute("DROP TRIGGER codex_threads_reject_update")
             connection.execute(f"UPDATE {table_name} SET {column_name} = 1.5")
 
         with pytest.raises(ValueError, match="signed 64-bit"):
@@ -224,7 +296,6 @@ def test_session_id_has_one_named_unique_index(tmp_path: Path) -> None:
 
     assert {(row[1], row[2]) for row in indexes} == {
         ("rodex_sessions_session_id_unique", 1),
-        ("rodex_sessions_codex_session_id_unique", 1),
         ("rodex_sessions_cool_names_id_unique", 1),
         ("rodex_sessions_user_defined_cool_names_id_unique", 1),
     }
@@ -243,6 +314,7 @@ def test_initialisation_is_idempotent(tmp_path: Path) -> None:
 def test_initialisation_rejects_an_incompatible_root_table(tmp_path: Path) -> None:
     database = tmp_path / "rodex.sqlite3"
     with sqlite3.connect(database) as connection:
+        seed_current_schema_generation(connection)
         connection.execute("CREATE TABLE rodex_sessions (id INTEGER PRIMARY KEY)")
 
     with pytest.raises(RodexSessionError, match="schema mismatch"):
@@ -252,12 +324,11 @@ def test_initialisation_rejects_an_incompatible_root_table(tmp_path: Path) -> No
 def test_initialisation_rejects_an_id_without_autoincrement(tmp_path: Path) -> None:
     database = tmp_path / "rodex.sqlite3"
     with sqlite3.connect(database) as connection:
+        seed_current_schema_generation(connection)
         connection.execute(
             "CREATE TABLE rodex_sessions ("
             "id INTEGER PRIMARY KEY, "
             "rodex_session_id_signed_bigint BIGINT NOT NULL, "
-            "codex_session_id_signed_bigint_1 BIGINT NOT NULL, "
-            "codex_session_id_signed_bigint_2 BIGINT NOT NULL, "
             "cool_names_id INTEGER NOT NULL, "
             "user_defined_cool_names_id INTEGER DEFAULT NULL, "
             "FOREIGN KEY (cool_names_id) REFERENCES cool_names (id), "
@@ -273,12 +344,11 @@ def test_initialisation_rejects_missing_identity_type_constraints(
 ) -> None:
     database = tmp_path / "rodex.sqlite3"
     with sqlite3.connect(database) as connection:
+        seed_current_schema_generation(connection)
         connection.execute(
             "CREATE TABLE rodex_sessions ("
             "id INTEGER PRIMARY KEY AUTOINCREMENT, "
             "rodex_session_id_signed_bigint BIGINT NOT NULL, "
-            "codex_session_id_signed_bigint_1 BIGINT NOT NULL, "
-            "codex_session_id_signed_bigint_2 BIGINT NOT NULL, "
             "cool_names_id INTEGER NOT NULL, "
             "user_defined_cool_names_id INTEGER DEFAULT NULL, "
             "FOREIGN KEY (cool_names_id) REFERENCES cool_names (id), "
@@ -292,15 +362,12 @@ def test_initialisation_rejects_missing_identity_type_constraints(
 def test_initialisation_repairs_a_missing_unique_index(tmp_path: Path) -> None:
     database = tmp_path / "rodex.sqlite3"
     with sqlite3.connect(database) as connection:
+        seed_current_schema_generation(connection)
         connection.execute(
             "CREATE TABLE rodex_sessions ("
             "id INTEGER PRIMARY KEY AUTOINCREMENT, "
             "rodex_session_id_signed_bigint BIGINT NOT NULL "
             "CHECK (typeof(rodex_session_id_signed_bigint) = 'integer'), "
-            "codex_session_id_signed_bigint_1 BIGINT NOT NULL "
-            "CHECK (typeof(codex_session_id_signed_bigint_1) = 'integer'), "
-            "codex_session_id_signed_bigint_2 BIGINT NOT NULL "
-            "CHECK (typeof(codex_session_id_signed_bigint_2) = 'integer'), "
             "cool_names_id INTEGER NOT NULL, "
             "user_defined_cool_names_id INTEGER DEFAULT NULL, "
             "FOREIGN KEY (cool_names_id) REFERENCES cool_names (id), "
@@ -545,7 +612,7 @@ def test_default_database_path_uses_xdg_state_home(
     state_home = tmp_path / "state"
     monkeypatch.setenv("XDG_STATE_HOME", str(state_home))
 
-    assert default_rodex_database_path() == state_home / "rodex" / "rodex-v10.sqlite3"
+    assert default_rodex_database_path() == state_home / "rodex" / "rodex-v12.sqlite3"
 
 
 def test_default_database_path_uses_home_state_directory_without_xdg_override(
@@ -557,12 +624,12 @@ def test_default_database_path_uses_home_state_directory_without_xdg_override(
     monkeypatch.setattr(Path, "home", lambda: home)
 
     assert default_rodex_database_path() == (
-        home / ".local" / "state" / "rodex" / "rodex-v10.sqlite3"
+        home / ".local" / "state" / "rodex" / "rodex-v12.sqlite3"
     )
 
 
 @pytest.mark.evolutionary_regression
-def test_incompatible_schema_generation_leaves_v9_database_untouched(
+def test_incompatible_schema_generation_leaves_v10_database_untouched(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Current evidence: incompatible ALPHA schemas use a new durable filename.
@@ -574,17 +641,64 @@ def test_incompatible_schema_generation_leaves_v9_database_untouched(
     registry_directory = state_home / "rodex"
     registry_directory.mkdir(mode=0o700, parents=True)
     registry_directory.chmod(0o700)
-    legacy_database = registry_directory / "rodex-v9.sqlite3"
-    legacy_contents = b"legacy-v9-database-sentinel"
+    legacy_database = registry_directory / "rodex-v10.sqlite3"
+    legacy_contents = b"legacy-v10-database-sentinel"
     legacy_database.write_bytes(legacy_contents)
     legacy_database.chmod(0o600)
     monkeypatch.setenv("XDG_STATE_HOME", str(state_home))
 
     current_database = initialise_rodex_database()
 
-    assert current_database == registry_directory / "rodex-v10.sqlite3"
+    assert current_database == registry_directory / "rodex-v12.sqlite3"
     assert current_database.is_file()
     assert legacy_database.read_bytes() == legacy_contents
+
+
+def test_nonempty_unmarked_database_is_rejected_before_v12_tables_are_created(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "rodex.sqlite3"
+    with sqlite3.connect(database) as connection:
+        connection.execute("CREATE TABLE legacy_sentinel (value TEXT NOT NULL)")
+        connection.execute("INSERT INTO legacy_sentinel VALUES ('untouched')")
+
+    with pytest.raises(RodexSessionError, match="no schema-generation marker"):
+        initialise_rodex_database(database)
+
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("SELECT value FROM legacy_sentinel").fetchall() == [
+            ("untouched",)
+        ]
+        assert (
+            connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' "
+                "AND name = 'rodex_sessions'"
+            ).fetchone()
+            is None
+        )
+
+
+def test_wrong_explicit_schema_generation_is_rejected_without_repair(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "rodex.sqlite3"
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "CREATE TABLE rodex_schema_generations ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "schema_generation INTEGER NOT NULL CHECK (schema_generation >= 1), "
+            "CHECK (id = 1))"
+        )
+        connection.execute(
+            "INSERT INTO rodex_schema_generations (schema_generation) VALUES (10)"
+        )
+
+    with pytest.raises(RodexSessionError, match="schema generation does not match"):
+        initialise_rodex_database(database)
+
+    assert fetch_all(
+        database, "SELECT schema_generation FROM rodex_schema_generations"
+    ) == [(10,)]
 
 
 def test_default_database_path_honours_environment_override(

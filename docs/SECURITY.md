@@ -25,12 +25,15 @@ listener; control endpoints are Unix sockets below a private runtime root.
   and endpoint replacement, then released before terminal attachment.
 - Analytics reads only current-user-owned regular rollout files inside the configured
   sessions root, using no-follow and nonblocking opens before authenticating the Codex
-  session ID and stable complete-record prefix.
+  thread ID and stable complete-record prefix. Startup-only lineage discovery is bounded
+  to the root UUIDv7 three-day window and reads only candidate metadata lines.
 - tmux operations use argv execution and exact `=name` or `=name:` targets. Dynamic hook
   commands are shell-quoted; cleanup and failure handling target one named runtime.
 - `_cat`, `_tail`, and `_events` resolve the same owned, registered live identity before
-  reading. Terminal following emits only tmux's plain text and creates no extra socket,
-  pane pipe, process, or persistent conversation copy.
+  reading. `_agents`, `_trace`, and `_stats` resolve the owned durable identity and need
+  no live runtime; explicit trace body reads re-authenticate the recorded rollout prefix.
+  Terminal following emits only tmux's plain text and creates no persistent conversation
+  copy.
 - The install shim accepts only root- or current-user-owned, non-group/world-writable
   project code and `uv`. A system command must use an immutable root-owned installation.
 

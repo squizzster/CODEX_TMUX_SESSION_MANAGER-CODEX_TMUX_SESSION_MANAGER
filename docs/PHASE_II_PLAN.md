@@ -15,9 +15,10 @@ The product order is deliberate. Rodex first accommodates the user by keeping or
 Codex invocation and TUI behavior intact inside a durable, named tmux runtime. That
 foundation now forms a working local bridge: a person may attach and intervene while an
 authorized agent observes readable progress with `_tail`, observes protocol activity
-with `_events`, and uses exact-turn control without terminal keystroke injection. Future
-multi-agent orchestration should extend this bridge rather than create a second runtime
-or conversation model.
+with `_events`, follows durable lineage and typed activity with `_agents` and `_trace`,
+and uses exact-turn control without terminal keystroke injection. Future multi-agent
+orchestration should extend this bridge rather than create a second runtime or
+conversation model.
 
 ## Candidate order for review
 

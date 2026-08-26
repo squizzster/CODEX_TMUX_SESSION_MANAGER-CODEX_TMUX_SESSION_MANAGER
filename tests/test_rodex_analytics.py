@@ -33,16 +33,17 @@ from rodex_registry import (
     RodexAnalyticsRegistry,
     RodexRegistryId,
     RodexRuntimeId,
+    RodexSessionCodexThreadObservation,
     RodexSessionId,
     RodexSessionStatisticsConflictError,
-    RodexSessionStatisticsSourceObservation,
     SessionStatisticsProjection,
     StatisticsNamedCount,
     TurnStatisticsProjection,
     create_a_rodex_session,
-    list_rodex_session_statistics_sources,
+    list_rodex_session_codex_threads,
     lookup_rodex_registry_id,
     parse_session_statistics_snapshot,
+    read_rodex_agent_trace,
     read_rodex_session_statistics,
     read_rodex_session_turn_statistics,
     record_a_rodex_session_runtime_resume,
@@ -52,6 +53,11 @@ RODEX_SESSION_ID = RodexSessionId.parse("1234567890abcdef")
 CODEX_SESSION_ID = uuid.UUID("01a00654-f2bc-7a30-834a-a5f886a65f82")
 REPLACEMENT_CODEX_SESSION_ID = uuid.UUID(int=CODEX_SESSION_ID.int + 1)
 REPLACEMENT_RUNTIME_ID = RodexRuntimeId.parse("0000000000000002")
+TURN_TEST_ID = "00000000-0000-7000-8000-000000000001"
+TURN_NEXT_ID = "00000000-0000-7000-8000-000000000002"
+TURN_ONE_ID = "00000000-0000-7000-8000-000000000003"
+TURN_SECOND_ID = "00000000-0000-7000-8000-000000000004"
+CHILD_TURN_ID = "00000000-0000-7000-8000-000000000005"
 
 
 class FakeAnalyticsAdapter:
@@ -146,13 +152,13 @@ def _rollout(root: Path, codex_session_id: uuid.UUID) -> Path:
         {
             "timestamp": "2026-08-16T12:00:01Z",
             "type": "event_msg",
-            "payload": {"type": "task_started", "turn_id": "turn-test"},
+            "payload": {"type": "task_started", "turn_id": TURN_TEST_ID},
         },
         {
             "timestamp": "2026-08-16T12:00:02Z",
             "type": "turn_context",
             "payload": {
-                "turn_id": "turn-test",
+                "turn_id": TURN_TEST_ID,
                 "model": "gpt-test",
                 "effort": "xhigh",
             },
@@ -160,7 +166,7 @@ def _rollout(root: Path, codex_session_id: uuid.UUID) -> Path:
         {
             "timestamp": "2026-08-16T12:00:03Z",
             "type": "event_msg",
-            "payload": {"type": "task_complete", "turn_id": "turn-test"},
+            "payload": {"type": "task_complete", "turn_id": TURN_TEST_ID},
         },
     ]
     path.write_text(
@@ -177,6 +183,7 @@ def _subagent_rollout(
     parent_thread_id: uuid.UUID | None = None,
     depth: int = 1,
     linked_at_utc: str = "2026-08-16T12:00:00.500000Z",
+    inherited_history: bool = True,
 ) -> Path:
     direct_parent_thread_id = parent_thread_id or root_thread_id
     path = root / "2026" / "08" / "16" / f"rollout-child-{child_thread_id}.jsonl"
@@ -187,28 +194,40 @@ def _subagent_rollout(
         "agent_path": "/root/review",
         "agent_nickname": "Curie",
     }
+    session_payload = {
+        "session_id": str(root_thread_id),
+        "id": str(child_thread_id),
+        "parent_thread_id": str(direct_parent_thread_id),
+        "timestamp": linked_at_utc,
+        "source": {"subagent": {"thread_spawn": spawn}},
+        "thread_source": "subagent",
+        "agent_path": "/root/review",
+        "agent_nickname": "Curie",
+    }
+    if inherited_history:
+        session_payload.update(
+            {
+                "forked_from_id": str(direct_parent_thread_id),
+                "subagent_history_start_ordinal": 2,
+            }
+        )
     records = [
         {
             "timestamp": linked_at_utc,
             "ordinal": 0,
             "type": "session_meta",
-            "payload": {
-                "session_id": str(root_thread_id),
-                "id": str(child_thread_id),
-                "forked_from_id": str(direct_parent_thread_id),
-                "parent_thread_id": str(direct_parent_thread_id),
-                "timestamp": linked_at_utc,
-                "source": {"subagent": {"thread_spawn": spawn}},
-                "thread_source": "subagent",
-                "agent_path": "/root/review",
-                "agent_nickname": "Curie",
-                "subagent_history_start_ordinal": 2,
-            },
+            "payload": session_payload,
         },
-        {"ordinal": 1, "type": "event_msg", "payload": {"inherited": True}},
-        {"ordinal": 2, "type": "event_msg", "payload": {"inherited": True}},
-        {"ordinal": 3, "type": "event_msg", "payload": {"child": True}},
     ]
+    records.extend(
+        (
+            {"ordinal": 1, "type": "event_msg", "payload": {"inherited": True}},
+            {"ordinal": 2, "type": "event_msg", "payload": {"inherited": True}},
+            {"ordinal": 3, "type": "event_msg", "payload": {"child": True}},
+        )
+        if inherited_history
+        else ({"ordinal": 1, "type": "event_msg", "payload": {"child": True}},)
+    )
     path.write_text(
         "".join(json.dumps(record) + "\n" for record in records), encoding="utf-8"
     )
@@ -259,9 +278,9 @@ def _collaboration_source(
     linked_at_utc: str,
     parent_thread_id: uuid.UUID | None = None,
     depth: int = 0,
-) -> RodexSessionStatisticsSourceObservation:
+) -> RodexSessionCodexThreadObservation:
     is_subagent = parent_thread_id is not None
-    return RodexSessionStatisticsSourceObservation(
+    return RodexSessionCodexThreadObservation(
         codex_thread_id=thread_id,
         source_kind="subagent" if is_subagent else "root",
         parent_codex_thread_id=parent_thread_id,
@@ -276,6 +295,7 @@ def _collaboration_source(
         analyzed_mtime_ns=1,
         analyzed_prefix_sha256="0" * 64,
         verified_at_utc=linked_at_utc,
+        history_inheritance_kind="clean" if is_subagent else None,
     )
 
 
@@ -633,10 +653,19 @@ def test_worker_backfills_verified_rollout_and_projects_only_aggregates(
 
     assert adapter.analyses[0][0] == (rollout.read_bytes(),)
     assert adapter.analyses[0][1].startswith("posix:")
-    source = list_rodex_session_statistics_sources(1, config.rodex_database_path)[0]
+    source = list_rodex_session_codex_threads(1, config.rodex_database_path)[0]
     assert source.codex_thread_id == CODEX_SESSION_ID
     assert source.rollout_file_path == str(rollout.resolve())
     assert source.analyzed_prefix_sha256 is not None
+    trace = read_rodex_agent_trace(1, config.rodex_database_path)
+    assert trace.coverage_state == "complete"
+    assert [event["source_record_ordinal"] for event in trace.events] == [0, 1, 2, 3]
+    assert [event["event_kind"] for event in trace.events] == [
+        "session_metadata",
+        "turn_started",
+        "turn_context",
+        "turn_completed",
+    ]
 
 
 def test_worker_discovers_subagent_and_removes_inherited_parent_history(
@@ -673,7 +702,7 @@ def test_worker_discovers_subagent_and_removes_inherited_parent_history(
     assert view.statistics.projection.collaboration_agents_started_count == 1
     root, child = sorted(view.sources, key=lambda source: source.thread_depth)
     assert child.codex_thread_id == child_thread_id
-    assert child.parent_rodex_sessions_statistics_sources_id == root.id
+    assert child.parent_rodex_sessions_codex_threads_id == root.id
     assert child.agent_path == "/root/review"
     assert child.subagent_history_start_ordinal == 2
     view = read_rodex_session_statistics(1, config.rodex_database_path)
@@ -683,6 +712,115 @@ def test_worker_discovers_subagent_and_removes_inherited_parent_history(
     assert view.worker.worker_state == "up_to_date"
     assert view.statistics.projection.audit_privacy
     assert b'"type":"session_meta"' not in config.rodex_database_path.read_bytes()
+
+
+def test_cold_worker_bounded_scan_recovers_child_without_uuid_bearing_event(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    _rollout(config.codex_sessions_root, CODEX_SESSION_ID)
+    child_thread_id = uuid.UUID(int=CODEX_SESSION_ID.int + 100)
+    _subagent_rollout(config.codex_sessions_root, CODEX_SESSION_ID, child_thread_id)
+    unrelated_root = uuid.UUID(int=CODEX_SESSION_ID.int + 200)
+    unrelated_child = uuid.UUID(int=CODEX_SESSION_ID.int + 300)
+    _subagent_rollout(config.codex_sessions_root, unrelated_root, unrelated_child)
+    _create(config)
+    worker = AnalyticsRolloutWorker(config, adapter_factory=FakeAnalyticsAdapter)
+
+    assert worker.poll_once() == "up_to_date"
+
+    sources = list_rodex_session_codex_threads(1, config.rodex_database_path)
+    assert {source.codex_thread_id for source in sources} == {
+        CODEX_SESSION_ID,
+        child_thread_id,
+    }
+    assert worker._session_tree_bootstrap_complete
+
+
+def test_cold_worker_exactly_follows_a_clean_subagent_activity_target(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    root_rollout = _rollout(config.codex_sessions_root, CODEX_SESSION_ID)
+    child_thread_id = uuid.UUID(int=CODEX_SESSION_ID.int + 100)
+    with root_rollout.open("a", encoding="utf-8") as stream:
+        stream.write(
+            json.dumps(
+                {
+                    "timestamp": "2026-08-16T12:00:04Z",
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "sub_agent_activity",
+                        "agent_thread_id": str(child_thread_id),
+                        "status": "started",
+                        "agent_path": "/root/review",
+                    },
+                }
+            )
+            + "\n"
+        )
+    _subagent_rollout(
+        config.codex_sessions_root,
+        CODEX_SESSION_ID,
+        child_thread_id,
+        inherited_history=False,
+    )
+    _create(config)
+    adapter = FakeAnalyticsAdapter()
+    worker = AnalyticsRolloutWorker(config, adapter_factory=lambda: adapter)
+
+    assert worker.poll_once() == "up_to_date"
+
+    child_records = [json.loads(line) for line in adapter.analyses[0][0][1].splitlines()]
+    assert [record.get("ordinal") for record in child_records] == [0, 1]
+    _, child = sorted(
+        list_rodex_session_codex_threads(1, config.rodex_database_path),
+        key=lambda source: source.thread_depth,
+    )
+    assert child.codex_thread_id == child_thread_id
+    assert child.subagent_history_start_ordinal == 0
+
+
+def test_cold_restart_recovers_an_unresolved_activity_target_without_scanning(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    root_rollout = _rollout(config.codex_sessions_root, CODEX_SESSION_ID)
+    child_thread_id = uuid.UUID(int=CODEX_SESSION_ID.int + 100)
+    with root_rollout.open("a", encoding="utf-8") as stream:
+        stream.write(
+            json.dumps(
+                {
+                    "timestamp": "2026-08-16T12:00:04Z",
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "sub_agent_activity",
+                        "agent_thread_id": str(child_thread_id),
+                        "status": "started",
+                    },
+                }
+            )
+            + "\n"
+        )
+    _create(config)
+    first_worker = AnalyticsRolloutWorker(config, adapter_factory=FakeAnalyticsAdapter)
+
+    assert first_worker.poll_once() == "pending_append"
+    assert first_worker.poll_once(AnalyticsDirtyBatch(frozenset())) == "catching_up"
+
+    _subagent_rollout(
+        config.codex_sessions_root,
+        CODEX_SESSION_ID,
+        child_thread_id,
+        inherited_history=False,
+    )
+    restarted = AnalyticsRolloutWorker(config, adapter_factory=FakeAnalyticsAdapter)
+
+    assert restarted.poll_once() == "up_to_date"
+    assert [
+        source.codex_thread_id
+        for source in list_rodex_session_codex_threads(1, config.rodex_database_path)
+    ] == [CODEX_SESSION_ID, child_thread_id]
 
 
 def test_live_batch_loads_checkpoint_once_and_reads_only_its_exact_source(
@@ -769,9 +907,9 @@ def test_mixed_batch_publishes_resolved_source_and_retains_unresolved_identity(
         }
     )
     root_addition = (
-        b'{"timestamp":"2026-08-16T12:01:00Z","type":"event_msg",'
-        b'"payload":{"type":"task_started","turn_id":"turn-next"}}\n'
-    )
+        '{"timestamp":"2026-08-16T12:01:00Z","type":"event_msg",'
+        f'"payload":{{"type":"task_started","turn_id":"{TURN_NEXT_ID}"}}}}\n'
+    ).encode()
     with root_rollout.open("ab") as output:
         output.write(root_addition)
 
@@ -859,9 +997,73 @@ def test_new_child_batch_reads_its_exact_parent_dependency_without_full_replay(
     assert view.statistics.statistics_publication_sequence == 2
     assert view.statistics.projection.collaboration_agents_started_count == 1
     assert len(view.sources) == 2
-    exact = read_rodex_session_turn_statistics(1, "turn-test", config.rodex_database_path)
+    exact = read_rodex_session_turn_statistics(1, TURN_TEST_ID, config.rodex_database_path)
     assert exact.turn is not None
     assert exact.turn.projection.collaboration_agents_started_count == 1
+
+
+def test_new_historical_child_resolves_against_a_non_latest_resident_parent_turn(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    root_rollout = _rollout(config.codex_sessions_root, CODEX_SESSION_ID)
+    with root_rollout.open("a", encoding="utf-8") as output:
+        output.writelines(
+            json.dumps(record) + "\n"
+            for record in (
+                {
+                    "timestamp": "2026-08-16T12:01:01Z",
+                    "type": "event_msg",
+                    "payload": {"type": "task_started", "turn_id": TURN_SECOND_ID},
+                },
+                {
+                    "timestamp": "2026-08-16T12:01:02Z",
+                    "type": "turn_context",
+                    "payload": {
+                        "turn_id": TURN_SECOND_ID,
+                        "model": "gpt-test",
+                        "effort": "xhigh",
+                    },
+                },
+                {
+                    "timestamp": "2026-08-16T12:01:03Z",
+                    "type": "event_msg",
+                    "payload": {"type": "task_complete", "turn_id": TURN_SECOND_ID},
+                },
+            )
+        )
+    _create(config)
+    worker = AnalyticsRolloutWorker(config)
+    assert worker.poll_once() == "up_to_date"
+
+    child_thread_id = uuid.UUID(int=CODEX_SESSION_ID.int + 100)
+    _subagent_rollout(
+        config.codex_sessions_root,
+        CODEX_SESSION_ID,
+        child_thread_id,
+        linked_at_utc="2026-08-16T12:00:02.500000Z",
+    )
+    worker.observe_protocol_event(
+        {
+            "method": "thread/started",
+            "params": {
+                "thread": {
+                    "id": str(child_thread_id),
+                    "createdAt": "2026-08-16T12:00:02.500000Z",
+                }
+            },
+        }
+    )
+
+    assert (
+        worker.poll_once(AnalyticsDirtyBatch(frozenset({child_thread_id}))) == "up_to_date"
+    )
+    child = next(
+        source
+        for source in list_rodex_session_codex_threads(1, config.rodex_database_path)
+        if source.codex_thread_id == child_thread_id
+    )
+    assert child.spawning_codex_turn_id == TURN_TEST_ID
 
 
 def test_same_burst_nested_children_resolve_in_parent_first_topology(
@@ -891,7 +1093,7 @@ def test_same_burst_nested_children_resolve_in_parent_first_topology(
                     "timestamp": "2026-08-16T12:00:01.700000Z",
                     "ordinal": 4,
                     "type": "event_msg",
-                    "payload": {"type": "task_started", "turn_id": "child-turn"},
+                    "payload": {"type": "task_started", "turn_id": CHILD_TURN_ID},
                 }
             )
             + "\n"
@@ -902,7 +1104,7 @@ def test_same_burst_nested_children_resolve_in_parent_first_topology(
                     "timestamp": "2026-08-16T12:00:02.500000Z",
                     "ordinal": 5,
                     "type": "event_msg",
-                    "payload": {"type": "task_complete", "turn_id": "child-turn"},
+                    "payload": {"type": "task_complete", "turn_id": CHILD_TURN_ID},
                 }
             )
             + "\n"
@@ -1002,7 +1204,7 @@ def test_unchanged_rollout_does_not_recalculate_but_append_does(tmp_path: Path) 
     with rollout.open("a", encoding="utf-8") as output:
         output.write(
             '{"timestamp":"2026-08-16T12:00:01Z","type":"event_msg",'
-            '"payload":{"type":"task_started","turn_id":"turn-1"}}\n'
+            f'"payload":{{"type":"task_started","turn_id":"{TURN_ONE_ID}"}}}}\n'
         )
     assert worker.poll_once() == "up_to_date"
 
@@ -1048,6 +1250,7 @@ def test_restarted_worker_warms_state_once_then_consumes_only_suffix(
         AnalyticsRolloutWorker(config, adapter_factory=lambda: first_adapter).poll_once()
         == "up_to_date"
     )
+    accepted_baseline = rollout.read_bytes()
     restarted_adapter = FakeAnalyticsAdapter()
     restarted = AnalyticsRolloutWorker(config, adapter_factory=lambda: restarted_adapter)
 
@@ -1058,10 +1261,223 @@ def test_restarted_worker_warms_state_once_then_consumes_only_suffix(
     assert restarted.poll_once() == "up_to_date"
 
     assert restarted_adapter.appended_analyses == [
-        (restarted_adapter.analyses[0][0][0],),
+        (accepted_baseline,),
+        (b"",),
         (addition,),
     ]
-    assert restarted_adapter.accepted_batches == 2
+    assert restarted_adapter.accepted_batches == 3
+
+
+def test_cold_restart_after_offline_append_publishes_only_trace_and_turn_delta(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+    rollout = _rollout(config.codex_sessions_root, CODEX_SESSION_ID)
+    _create(config)
+    assert AnalyticsRolloutWorker(config).poll_once() == "up_to_date"
+    with rollout.open("a", encoding="utf-8") as output:
+        output.writelines(
+            json.dumps(record) + "\n"
+            for record in (
+                {
+                    "timestamp": "2026-08-16T12:01:01Z",
+                    "type": "event_msg",
+                    "payload": {"type": "task_started", "turn_id": TURN_SECOND_ID},
+                },
+                {
+                    "timestamp": "2026-08-16T12:01:02Z",
+                    "type": "turn_context",
+                    "payload": {
+                        "turn_id": TURN_SECOND_ID,
+                        "model": "gpt-test",
+                        "effort": "xhigh",
+                    },
+                },
+                {
+                    "timestamp": "2026-08-16T12:01:03Z",
+                    "type": "event_msg",
+                    "payload": {"type": "task_complete", "turn_id": TURN_SECOND_ID},
+                },
+            )
+        )
+    publications: list[RodexAnalyticsPublication] = []
+    original_publish = RodexAnalyticsRegistry.publish
+
+    def remember_publication(
+        registry: RodexAnalyticsRegistry,
+        publication: RodexAnalyticsPublication,
+    ) -> object:
+        publications.append(publication)
+        return original_publish(registry, publication)
+
+    monkeypatch.setattr(RodexAnalyticsRegistry, "publish", remember_publication)
+
+    assert AnalyticsRolloutWorker(config).poll_once() == "up_to_date"
+
+    assert len(publications) == 1
+    publication = publications[0]
+    assert publication.changed_turn_keys == {(CODEX_SESSION_ID, TURN_SECOND_ID)}
+    assert [
+        turn.codex_turn_id for turn in publication.statistics_projection.turn_statistics
+    ] == [TURN_SECOND_ID]
+    assert publication.agent_trace_publication is not None
+    assert len(publication.agent_trace_publication.events) == 3
+    assert {
+        event.codex_turn_id for event in publication.agent_trace_publication.events
+    } == {TURN_SECOND_ID}
+
+
+def test_restarted_worker_rebuilds_active_trace_turn_before_suffix(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    rollout = _rollout(config.codex_sessions_root, CODEX_SESSION_ID)
+    lines = rollout.read_text(encoding="utf-8").splitlines(keepends=True)
+    rollout.write_text("".join(lines[:-1]), encoding="utf-8")
+    _create(config)
+    first = AnalyticsRolloutWorker(config, adapter_factory=FakeAnalyticsAdapter)
+    assert first.poll_once() == "up_to_date"
+
+    restarted = AnalyticsRolloutWorker(config, adapter_factory=FakeAnalyticsAdapter)
+    assert restarted.poll_once() == "up_to_date"
+    addition = (
+        b'{"timestamp":"2026-08-16T12:00:04Z","type":"event_msg",'
+        b'"payload":{"type":"item_completed","item":{"type":"AgentMessage",'
+        b'"content":[{"text":"done"}]}}}\n'
+    )
+    with rollout.open("ab") as output:
+        output.write(addition)
+
+    assert restarted.poll_once() == "up_to_date"
+
+    trace = read_rodex_agent_trace(1, config.rodex_database_path)
+    assert trace.events[-1]["event_kind"] == "message"
+    assert trace.events[-1]["codex_turn_id"] == TURN_TEST_ID
+
+
+def test_restarted_worker_rejects_rewritten_durable_prefix_before_reanalysis(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    rollout = _rollout(config.codex_sessions_root, CODEX_SESSION_ID)
+    _create(config)
+    first_adapter = FakeAnalyticsAdapter()
+    assert (
+        AnalyticsRolloutWorker(config, adapter_factory=lambda: first_adapter).poll_once()
+        == "up_to_date"
+    )
+    original = rollout.read_bytes()
+    rewritten = original.replace(b'"model": "gpt-test"', b'"model": "bad-test"')
+    assert len(rewritten) == len(original)
+    rollout.write_bytes(rewritten + b'{"type":"compacted","payload":{}}\n')
+    restarted_adapter = FakeAnalyticsAdapter()
+
+    state = AnalyticsRolloutWorker(
+        config, adapter_factory=lambda: restarted_adapter
+    ).poll_once()
+
+    assert state == "clean_replay"
+    assert restarted_adapter.analyses == []
+    statistics = read_rodex_session_statistics(1, config.rodex_database_path).statistics
+    assert statistics is not None
+    assert statistics.statistics_publication_sequence == 1
+
+
+@pytest.mark.parametrize(
+    "checkpoint_mutation",
+    (
+        "DELETE FROM rodex_sessions_agent_trace_publications",
+        "UPDATE rodex_sessions_agent_trace_publications "
+        "SET trace_schema_version = 'incompatible-v0'",
+    ),
+)
+def test_restarted_worker_rejects_non_atomic_or_incompatible_publication_heads(
+    tmp_path: Path,
+    checkpoint_mutation: str,
+) -> None:
+    config = _config(tmp_path)
+    _rollout(config.codex_sessions_root, CODEX_SESSION_ID)
+    _create(config)
+    assert AnalyticsRolloutWorker(
+        config, adapter_factory=FakeAnalyticsAdapter
+    ).poll_once() == ("up_to_date")
+    before = read_rodex_session_statistics(1, config.rodex_database_path)
+    assert before.statistics is not None
+    with sqlite3.connect(config.rodex_database_path) as connection:
+        connection.execute(checkpoint_mutation)
+    restarted_adapter = FakeAnalyticsAdapter()
+
+    state = AnalyticsRolloutWorker(
+        config,
+        adapter_factory=lambda: restarted_adapter,
+    ).poll_once()
+
+    assert state == "clean_replay"
+    assert restarted_adapter.analyses == []
+    after = read_rodex_session_statistics(1, config.rodex_database_path)
+    assert after.statistics is not None
+    assert (
+        after.statistics.statistics_publication_sequence
+        == before.statistics.statistics_publication_sequence
+    )
+
+
+def test_dirty_wake_before_append_retries_without_sql_write_churn(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    rollout = _rollout(config.codex_sessions_root, CODEX_SESSION_ID)
+    _create(config)
+    worker = AnalyticsRolloutWorker(config, adapter_factory=FakeAnalyticsAdapter)
+    assert worker.poll_once() == "up_to_date"
+    dirty = AnalyticsDirtyBatch(frozenset({CODEX_SESSION_ID}))
+
+    assert worker.poll_once(dirty) == "awaiting_append"
+    assert worker.poll_once(AnalyticsDirtyBatch(frozenset())) == "awaiting_append"
+    before = read_rodex_session_statistics(1, config.rodex_database_path).statistics
+    assert before is not None and before.statistics_publication_sequence == 1
+
+    with rollout.open("ab") as output:
+        output.write(b'{"type":"compacted","payload":{}}\n')
+    assert worker.poll_once(AnalyticsDirtyBatch(frozenset())) == "up_to_date"
+    after = read_rodex_session_statistics(1, config.rodex_database_path).statistics
+    assert after is not None and after.statistics_publication_sequence == 2
+
+
+def test_stale_publication_head_reloads_sql_cursor_before_accepting_later_append(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    rollout = _rollout(config.codex_sessions_root, CODEX_SESSION_ID)
+    _create(config)
+    leading = AnalyticsRolloutWorker(config, adapter_factory=FakeAnalyticsAdapter)
+    stale_adapters: list[FakeAnalyticsAdapter] = []
+
+    def stale_adapter_factory() -> FakeAnalyticsAdapter:
+        adapter = FakeAnalyticsAdapter()
+        stale_adapters.append(adapter)
+        return adapter
+
+    stale = AnalyticsRolloutWorker(config, adapter_factory=stale_adapter_factory)
+    assert leading.poll_once() == "up_to_date"
+    assert stale.poll_once() == "up_to_date"
+    accepted_baseline = rollout.read_bytes()
+    leader_append = b'{"type":"leader-append","payload":{}}\n'
+    with rollout.open("ab") as output:
+        output.write(leader_append)
+
+    assert leading.poll_once() == "up_to_date"
+    assert stale.poll_once() == "clean_replay"
+    later_append = b'{"type":"later-append","payload":{}}\n'
+    with rollout.open("ab") as output:
+        output.write(later_append)
+    assert stale.poll_once() == "up_to_date"
+
+    statistics = read_rodex_session_statistics(1, config.rodex_database_path).statistics
+    assert statistics is not None
+    assert statistics.statistics_publication_sequence == 3
+    assert len(stale_adapters) == 2
+    assert stale_adapters[-1].appended_analyses == [
+        (accepted_baseline + leader_append,),
+        (later_append,),
+    ]
 
 
 def test_worker_analyzes_only_through_final_complete_newline(tmp_path: Path) -> None:
@@ -1079,7 +1495,7 @@ def test_worker_analyzes_only_through_final_complete_newline(tmp_path: Path) -> 
     assert len(adapter.analyses) == 1
     assert adapter.analyses[0][0][0].endswith(b"\n")
     assert b"incomplete" not in adapter.analyses[0][0][0]
-    source = list_rodex_session_statistics_sources(1, config.rodex_database_path)[0]
+    source = list_rodex_session_codex_threads(1, config.rodex_database_path)[0]
     assert source.analyzed_size_bytes is not None
     assert source.analyzed_size_bytes < rollout.stat().st_size
 
@@ -1147,13 +1563,49 @@ def test_worker_does_not_adopt_a_replacement_codex_identity(
     assert worker.poll_once() == "clean_replay"
 
     assert len(adapter.analyses) == 2
-    sources = list_rodex_session_statistics_sources(1, config.rodex_database_path)
-    assert [source.codex_thread_id for source in sources] == [
-        CODEX_SESSION_ID,
-        REPLACEMENT_CODEX_SESSION_ID,
-    ]
+    sources = list_rodex_session_codex_threads(1, config.rodex_database_path)
+    assert [source.codex_thread_id for source in sources] == [REPLACEMENT_CODEX_SESSION_ID]
+    with sqlite3.connect(config.rodex_database_path) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM rodex_sessions_codex_threads WHERE rodex_sessions_id = 1"
+        ).fetchone() == (2,)
+    assert sources[0].verified_at_utc is None
+
+    replacement_config = replace(
+        config,
+        runtime_id=REPLACEMENT_RUNTIME_ID,
+        codex_session_id=REPLACEMENT_CODEX_SESSION_ID,
+    )
+
+    class ReplacementAnalyticsAdapter(FakeAnalyticsAdapter):
+        def analyze_rollouts(
+            self,
+            sources: list[AnalyticsAnalyzerSource],
+            user_id: str,
+        ) -> AnalyticsCalculation:
+            calculation = super().analyze_rollouts(sources, user_id)
+            return replace(
+                calculation,
+                statistics_projection=replace(
+                    calculation.statistics_projection,
+                    turn_statistics=tuple(
+                        replace(turn, codex_thread_id=REPLACEMENT_CODEX_SESSION_ID)
+                        for turn in calculation.statistics_projection.turn_statistics
+                    ),
+                ),
+            )
+
+    replacement_adapter = ReplacementAnalyticsAdapter()
+    replacement_worker = AnalyticsRolloutWorker(
+        replacement_config,
+        adapter_factory=lambda: replacement_adapter,
+    )
+
+    assert replacement_worker.poll_once() == "up_to_date"
+
+    sources = list_rodex_session_codex_threads(1, config.rodex_database_path)
+    assert [source.codex_thread_id for source in sources] == [REPLACEMENT_CODEX_SESSION_ID]
     assert sources[0].verified_at_utc is not None
-    assert sources[1].verified_at_utc is None
 
 
 def test_registry_fence_rejects_a_stale_runtime_for_every_analytics_operation(
@@ -1332,6 +1784,40 @@ def test_transient_publication_retry_reuses_the_prepared_analysis(
     view = read_rodex_session_statistics(1, config.rodex_database_path)
     assert view.statistics is not None
     assert view.statistics.statistics_publication_sequence == 1
+
+
+def test_prepared_retry_reauthenticates_source_before_sql_publish(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+    rollout = _rollout(config.codex_sessions_root, CODEX_SESSION_ID)
+    _create(config)
+    adapter = FakeAnalyticsAdapter()
+    worker = AnalyticsRolloutWorker(config, adapter_factory=lambda: adapter)
+    from rodex_registry import analytics_registry as registry_module
+
+    lower_publish_calls = 0
+
+    def lock_once(*args: object, **kwargs: object) -> object:
+        nonlocal lower_publish_calls
+        lower_publish_calls += 1
+        error = sqlite3.OperationalError("database is locked")
+        error.sqlite_errorcode = sqlite3.SQLITE_BUSY
+        raise error
+
+    monkeypatch.setattr(registry_module, "publish_rodex_session_statistics", lock_once)
+    assert worker.poll_once() == "publication_retry"
+    original = rollout.read_bytes()
+    rewritten = original.replace(b'"model": "gpt-test"', b'"model": "bad-test"')
+    assert len(rewritten) == len(original)
+    rollout.write_bytes(rewritten)
+
+    assert worker.poll_once(AnalyticsDirtyBatch(frozenset())) == "clean_replay"
+
+    assert lower_publish_calls == 1
+    assert len(adapter.analyses) == 1
+    assert read_rodex_session_statistics(1, config.rodex_database_path).statistics is None
 
 
 def test_failed_analysis_resets_resident_state_for_one_clean_replay(
@@ -1649,7 +2135,9 @@ def test_real_adapter_uses_existing_in_memory_analyzer_api(tmp_path: Path) -> No
         calculation.statistics_projection.turn_statistics[0].codex_thread_id
         == CODEX_SESSION_ID
     )
-    assert calculation.statistics_projection.turn_statistics[0].codex_turn_id == "turn-test"
+    assert (
+        calculation.statistics_projection.turn_statistics[0].codex_turn_id == TURN_TEST_ID
+    )
     assert calculation.statistics_projection.turn_statistics[0].model == "gpt-test"
     assert calculation.statistics_projection.turn_statistics[0].reasoning_effort == "xhigh"
 
@@ -1663,7 +2151,7 @@ def test_real_worker_publishes_exact_turn_projection_into_rodex_sql(
 
     assert AnalyticsRolloutWorker(config).poll_once() == "up_to_date"
 
-    exact = read_rodex_session_turn_statistics(1, "turn-test", config.rodex_database_path)
+    exact = read_rodex_session_turn_statistics(1, TURN_TEST_ID, config.rodex_database_path)
     assert exact.statistics is not None
     assert exact.statistics.statistics_projection_schema_version == "rodex-statistics-v7"
     assert exact.worker is not None
@@ -1735,13 +2223,13 @@ def test_real_worker_publishes_only_the_incrementally_changed_turn(
         {
             "timestamp": "2026-08-16T12:01:01Z",
             "type": "event_msg",
-            "payload": {"type": "task_started", "turn_id": "turn-second"},
+            "payload": {"type": "task_started", "turn_id": TURN_SECOND_ID},
         },
         {
             "timestamp": "2026-08-16T12:01:02Z",
             "type": "turn_context",
             "payload": {
-                "turn_id": "turn-second",
+                "turn_id": TURN_SECOND_ID,
                 "model": "gpt-test",
                 "effort": "xhigh",
             },
@@ -1749,7 +2237,7 @@ def test_real_worker_publishes_only_the_incrementally_changed_turn(
         {
             "timestamp": "2026-08-16T12:01:03Z",
             "type": "event_msg",
-            "payload": {"type": "task_complete", "turn_id": "turn-second"},
+            "payload": {"type": "task_complete", "turn_id": TURN_SECOND_ID},
         },
     ]
     with rollout.open("a", encoding="utf-8") as output:
@@ -1761,10 +2249,10 @@ def test_real_worker_publishes_only_the_incrementally_changed_turn(
 
     assert len(publications) == 2
     incremental = publications[1]
-    assert incremental.changed_turn_keys == {(CODEX_SESSION_ID, "turn-second")}
+    assert incremental.changed_turn_keys == {(CODEX_SESSION_ID, TURN_SECOND_ID)}
     assert [
         turn.codex_turn_id for turn in incremental.statistics_projection.turn_statistics
-    ] == ["turn-second"]
+    ] == [TURN_SECOND_ID]
     assert lookup_resolutions == [
         ("model_names", "gpt-test"),
         ("reasoning_effort_names", "xhigh"),
@@ -1772,7 +2260,7 @@ def test_real_worker_publishes_only_the_incrementally_changed_turn(
     assert (
         read_rodex_session_turn_statistics(
             1,
-            "turn-test",
+            TURN_TEST_ID,
             config.rodex_database_path,
         ).turn
         is not None
@@ -1780,7 +2268,7 @@ def test_real_worker_publishes_only_the_incrementally_changed_turn(
     assert (
         read_rodex_session_turn_statistics(
             1,
-            "turn-second",
+            TURN_SECOND_ID,
             config.rodex_database_path,
         ).turn
         is not None

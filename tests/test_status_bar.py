@@ -12,6 +12,7 @@ from rodex.status_bar import (
     RODEX_STATUS_COLOURS,
     RODEX_STATUS_LEFT_FORMAT,
     RODEX_STATUS_RIGHT_FORMAT,
+    RODEX_STATUS_STYLE,
     StatusBarPart,
     StatusBarSegment,
     TmuxStatusBar,
@@ -30,9 +31,12 @@ def test_base_status_selects_ctrl_b_banner_from_tmux_client_prefix_state() -> No
 
 
 def test_status_palette_has_one_authoritative_value_per_colour_role() -> None:
+    assert RODEX_STATUS_COLOURS.base_foreground == "black"
+    assert RODEX_STATUS_COLOURS.base_background == "#FDF7FF"
+    assert RODEX_STATUS_STYLE == "bg=#FDF7FF,fg=black"
     assert RODEX_STATUS_COLOURS.primary_blue == "#1402D8"
-    assert RODEX_STATUS_COLOURS.tool_count == "cyan"
-    assert RODEX_STATUS_COLOURS.mouse_mode == "yellow"
+    assert RODEX_STATUS_COLOURS.tool_count == "#006D77"
+    assert RODEX_STATUS_COLOURS.mouse_mode == "#8A4B00"
     assert RODEX_STATUS_COLOURS.context_compaction_foregrounds[0] == "colour45"
     assert "colour231" in RODEX_STATUS_COLOURS.context_compaction_foregrounds
     assert len(RODEX_STATUS_COLOURS.context_compaction_foregrounds) == 14
@@ -101,7 +105,10 @@ def test_status_renderers_do_not_define_raw_tmux_colours_outside_the_theme() -> 
 @pytest.mark.evolutionary_regression
 def test_context_palette_does_not_change_the_independent_mouse_colour() -> None:
     """Current evidence: context cannot recolour Mouse; supersede only by contract."""
-    assert "#[fg=yellow]#[bold]| Mouse: #{?mouse,ON,OFF}" in (RODEX_BASE_STATUS_LEFT_FORMAT)
+    assert (
+        f"#[fg={RODEX_STATUS_COLOURS.mouse_mode}]#[bold]| Mouse: #{{?mouse,ON,OFF}}"
+        in RODEX_BASE_STATUS_LEFT_FORMAT
+    )
 
 
 @pytest.mark.parametrize(

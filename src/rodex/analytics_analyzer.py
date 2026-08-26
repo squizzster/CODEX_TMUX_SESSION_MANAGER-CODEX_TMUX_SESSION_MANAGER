@@ -751,6 +751,7 @@ class StatefulCodexProtocolAnalyticsAdapter:
         """Acknowledge candidate bytes only after their SQL projection commits."""
         for state in self._sources.values():
             state.pending_content = b""
+        self._candidate_calculation = None
 
     def _consume_record(
         self,

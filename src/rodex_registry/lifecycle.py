@@ -30,6 +30,7 @@ from .errors import (
     RodexSessionError,
     RodexSessionIdCollisionError,
 )
+from .execution import register_codex_root_thread_in_transaction
 from .identity import (
     CodexSessionId,
     RodexRuntimeId,
@@ -41,7 +42,10 @@ from .identity import (
     split_codex_session_id_into_signed_bigints,
 )
 from .schema import (
+    CODEX_THREADS_TABLE,
     RODEX_RUNTIME_INSTANCES_TABLE,
+    RODEX_SESSIONS_CODEX_THREADS_TABLE,
+    RODEX_SESSIONS_CURRENT_CODEX_THREADS_TABLE,
     RODEX_SESSIONS_LOG_TABLE,
     RODEX_SESSIONS_TABLE,
     RODEX_SESSIONS_USERS_TABLE,
@@ -49,7 +53,6 @@ from .schema import (
     existing_rodex_database_path,
     initialise_rodex_database,
 )
-from .statistics import register_codex_root_statistics_source_in_transaction
 from .validation import (
     _normalise_utc_datetime,
     _utc_now_timestamp,
@@ -190,14 +193,15 @@ def create_a_rodex_session(
         rodex_sessions_users_id = _lookup_or_insert_rodex_sessions_user_id(
             connection, identity
         )
-        existing_session_id = select_lookup_id(
-            connection,
-            RODEX_SESSIONS_TABLE,
-            {
-                "codex_session_id_signed_bigint_1": codex_session_id_signed_bigint_1,
-                "codex_session_id_signed_bigint_2": codex_session_id_signed_bigint_2,
-            },
-        )
+        existing_row = connection.execute(
+            f"SELECT memberships.rodex_sessions_id FROM {CODEX_THREADS_TABLE} AS ids "
+            f"JOIN {RODEX_SESSIONS_CODEX_THREADS_TABLE} AS memberships "
+            "ON memberships.codex_threads_id = ids.id "
+            "WHERE ids.codex_thread_public_id_signed_bigint_1 = ? "
+            "AND ids.codex_thread_public_id_signed_bigint_2 = ?",
+            (codex_session_id_signed_bigint_1, codex_session_id_signed_bigint_2),
+        ).fetchone()
+        existing_session_id = None if existing_row is None else int(existing_row[0])
         if existing_session_id is not None:
             names_row = _select_rodex_session_names(connection, existing_session_id)
             if names_row is None:
@@ -224,13 +228,9 @@ def create_a_rodex_session(
             try:
                 cursor = connection.execute(
                     f"INSERT INTO {RODEX_SESSIONS_TABLE} "
-                    "(rodex_session_id_signed_bigint, "
-                    "codex_session_id_signed_bigint_1, codex_session_id_signed_bigint_2, "
-                    "cool_names_id) VALUES (?, ?, ?, ?)",
+                    "(rodex_session_id_signed_bigint, cool_names_id) VALUES (?, ?)",
                     (
                         stored_session_id,
-                        codex_session_id_signed_bigint_1,
-                        codex_session_id_signed_bigint_2,
                         allocated_name.id,
                     ),
                 )
@@ -268,7 +268,7 @@ def create_a_rodex_session(
                     created_at_utc,
                 ),
             )
-            register_codex_root_statistics_source_in_transaction(
+            register_codex_root_thread_in_transaction(
                 connection,
                 session.rodex_sessions_id,
                 parsed_codex_session_id,
@@ -526,16 +526,14 @@ def record_a_rodex_session_runtime_resume(
     with open_rodex_transaction(path) as connection:
         if codex_session_id_halves is not None:
             parsed_codex_session_id = parse_codex_session_id(codex_session_id)
-            codex_cursor = connection.execute(
-                f"UPDATE {RODEX_SESSIONS_TABLE} "
-                "SET codex_session_id_signed_bigint_1 = ?, "
-                "codex_session_id_signed_bigint_2 = ? "
-                "WHERE id = ?",
-                (*codex_session_id_halves, session_id),
-            )
-            if codex_cursor.rowcount != 1:
+            if (
+                connection.execute(
+                    f"SELECT 1 FROM {RODEX_SESSIONS_TABLE} WHERE id = ?", (session_id,)
+                ).fetchone()
+                is None
+            ):
                 raise RodexSessionError(f"Rodex session does not exist: {session_id}")
-            register_codex_root_statistics_source_in_transaction(
+            register_codex_root_thread_in_transaction(
                 connection,
                 session_id,
                 parsed_codex_session_id,
@@ -642,8 +640,14 @@ def lookup_codex_session_id_from_a_rodex_sessions_id(
     path = existing_rodex_database_path(database_path)
     with open_rodex_read_transaction(path) as connection:
         row = connection.execute(
-            f"SELECT codex_session_id_signed_bigint_1, codex_session_id_signed_bigint_2 "
-            f"FROM {RODEX_SESSIONS_TABLE} WHERE id = ?",
+            "SELECT identities.codex_thread_public_id_signed_bigint_1, "
+            "identities.codex_thread_public_id_signed_bigint_2 "
+            f"FROM {RODEX_SESSIONS_CURRENT_CODEX_THREADS_TABLE} AS current "
+            f"JOIN {RODEX_SESSIONS_CODEX_THREADS_TABLE} AS memberships "
+            "ON memberships.id = current.rodex_sessions_codex_threads_id "
+            f"JOIN {CODEX_THREADS_TABLE} AS identities "
+            "ON identities.id = memberships.codex_threads_id "
+            "WHERE current.rodex_sessions_id = ?",
             (session_id,),
         ).fetchone()
     if row is None:
@@ -846,14 +850,21 @@ def list_rodex_session_runtimes_for_a_user(
             return []
         rows = connection.execute(
             f"SELECT sessions.id, permanent.cool_name, user_defined.cool_name, "
-            "sessions.codex_session_id_signed_bigint_1, "
-            "sessions.codex_session_id_signed_bigint_2, tmux.tmux_server_socket_path, "
+            "identities.codex_thread_public_id_signed_bigint_1, "
+            "identities.codex_thread_public_id_signed_bigint_2, "
+            "tmux.tmux_server_socket_path, "
             "tmux.tmux_session_name "
             f"FROM {RODEX_SESSIONS_TABLE} AS sessions "
             f"JOIN {RODEX_SESSIONS_LOG_TABLE} AS log "
             "ON log.rodex_sessions_id = sessions.id "
             f"JOIN {RODEX_TMUX_SESSIONS_TABLE} AS tmux "
             "ON tmux.rodex_sessions_id = sessions.id "
+            f"JOIN {RODEX_SESSIONS_CURRENT_CODEX_THREADS_TABLE} AS current "
+            "ON current.rodex_sessions_id = sessions.id "
+            f"JOIN {RODEX_SESSIONS_CODEX_THREADS_TABLE} AS memberships "
+            "ON memberships.id = current.rodex_sessions_codex_threads_id "
+            f"JOIN {CODEX_THREADS_TABLE} AS identities "
+            "ON identities.id = memberships.codex_threads_id "
             "JOIN cool_names AS permanent ON permanent.id = sessions.cool_names_id "
             "LEFT JOIN cool_names AS user_defined "
             "ON user_defined.id = sessions.user_defined_cool_names_id "
@@ -917,9 +928,13 @@ def lookup_rodex_sessions_id_from_a_codex_session_id(
     path = existing_rodex_database_path(database_path)
     with open_rodex_read_transaction(path) as connection:
         row = connection.execute(
-            f"SELECT id FROM {RODEX_SESSIONS_TABLE} "
-            "WHERE codex_session_id_signed_bigint_1 = ? "
-            "AND codex_session_id_signed_bigint_2 = ?",
+            f"SELECT current.rodex_sessions_id FROM {CODEX_THREADS_TABLE} AS ids "
+            f"JOIN {RODEX_SESSIONS_CODEX_THREADS_TABLE} AS memberships "
+            "ON memberships.codex_threads_id = ids.id "
+            f"JOIN {RODEX_SESSIONS_CURRENT_CODEX_THREADS_TABLE} AS current "
+            "ON current.rodex_sessions_codex_threads_id = memberships.id "
+            "WHERE ids.codex_thread_public_id_signed_bigint_1 = ? "
+            "AND ids.codex_thread_public_id_signed_bigint_2 = ?",
             (codex_session_id_part_1, codex_session_id_part_2),
         ).fetchone()
     return None if row is None else int(row[0])
@@ -940,11 +955,17 @@ def lookup_owned_rodex_sessions_id_from_a_codex_session_id(
     with open_rodex_read_transaction(path) as connection:
         row = connection.execute(
             f"SELECT sessions.id, log.rodex_sessions_users_id "
-            f"FROM {RODEX_SESSIONS_TABLE} AS sessions "
+            f"FROM {CODEX_THREADS_TABLE} AS ids "
+            f"JOIN {RODEX_SESSIONS_CODEX_THREADS_TABLE} AS memberships "
+            "ON memberships.codex_threads_id = ids.id "
+            f"JOIN {RODEX_SESSIONS_CURRENT_CODEX_THREADS_TABLE} AS current "
+            "ON current.rodex_sessions_codex_threads_id = memberships.id "
+            f"JOIN {RODEX_SESSIONS_TABLE} AS sessions "
+            "ON sessions.id = current.rodex_sessions_id "
             f"JOIN {RODEX_SESSIONS_LOG_TABLE} AS log "
             "ON log.rodex_sessions_id = sessions.id "
-            "WHERE sessions.codex_session_id_signed_bigint_1 = ? "
-            "AND sessions.codex_session_id_signed_bigint_2 = ?",
+            "WHERE ids.codex_thread_public_id_signed_bigint_1 = ? "
+            "AND ids.codex_thread_public_id_signed_bigint_2 = ?",
             (codex_session_id_part_1, codex_session_id_part_2),
         ).fetchone()
         if row is None:

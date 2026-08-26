@@ -26,6 +26,8 @@ class AnalyticsAppendSource:
     source_kind: str
     subagent_history_start_ordinal: int | None
     allowed_root: Path
+    accepted_prefix_size_bytes: int | None = None
+    accepted_prefix_sha256: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,7 +49,10 @@ class AnalyticsSourceRead:
     """Immutable analyzer content plus only the newly accepted content."""
 
     analyzer_content: bytes
+    has_accepted_baseline: bool
+    accepted_analyzer_content: bytes
     appended_analyzer_content: bytes
+    appended_source_line_ordinals: tuple[int, ...]
     authenticated_source: AuthenticatedRolloutPrefix
     _candidate_cursor: _AppendCursor
 
@@ -100,15 +105,43 @@ class AnalyticsSourceReader:
         finally:
             os.close(descriptor)
         _require_stable_source(before, after, path_state)
+        if cursor is None:
+            _require_durable_prefix(normalized, added)
         if cursor is None or self._replay_required:
-            next_cursor, appended = _new_cursor(normalized, resolved, after, added)
+            append_after_size = (
+                normalized.accepted_prefix_size_bytes
+                if cursor is None
+                else cursor.raw_complete_size
+            )
+            (
+                next_cursor,
+                analyzer_content,
+                accepted_content,
+                appended,
+                appended_ordinals,
+            ) = _new_cursor(
+                normalized,
+                resolved,
+                after,
+                added,
+                append_after_size=append_after_size,
+            )
             if cursor is not None:
                 _require_accepted_prefix(cursor, added)
         else:
-            next_cursor, appended = _advance_cursor(cursor, resolved, after, added)
+            next_cursor, appended, appended_ordinals = _advance_cursor(
+                cursor, resolved, after, added
+            )
+            analyzer_content = appended
+            accepted_content = b""
         return AnalyticsSourceRead(
-            analyzer_content=appended,
+            analyzer_content=analyzer_content,
+            has_accepted_baseline=(
+                cursor is not None or normalized.accepted_prefix_size_bytes is not None
+            ),
+            accepted_analyzer_content=accepted_content,
             appended_analyzer_content=appended,
+            appended_source_line_ordinals=appended_ordinals,
             authenticated_source=next_cursor.authenticated_source,
             _candidate_cursor=next_cursor,
         )
@@ -204,7 +237,29 @@ def _normalise_source(source: AnalyticsAppendSource) -> AnalyticsAppendSource:
         source_kind=source.source_kind,
         subagent_history_start_ordinal=source.subagent_history_start_ordinal,
         allowed_root=source.allowed_root,
+        accepted_prefix_size_bytes=source.accepted_prefix_size_bytes,
+        accepted_prefix_sha256=source.accepted_prefix_sha256,
     )
+
+
+def _require_durable_prefix(source: AnalyticsAppendSource, content: bytes) -> None:
+    size = source.accepted_prefix_size_bytes
+    digest = source.accepted_prefix_sha256
+    if size is None and digest is None:
+        return
+    if (
+        isinstance(size, bool)
+        or not isinstance(size, int)
+        or size < 0
+        or not isinstance(digest, str)
+        or len(digest) != 64
+        or any(character not in "0123456789abcdef" for character in digest)
+    ):
+        raise AnalyticsSourceReadError("durable rollout checkpoint is invalid")
+    if len(content) < size or hashlib.sha256(content[:size]).hexdigest() != digest:
+        raise AnalyticsSourceReadError(
+            "rollout accepted prefix changed since the durable checkpoint"
+        )
 
 
 def _append_start(
@@ -244,11 +299,28 @@ def _new_cursor(
     resolved: Path,
     state: os.stat_result,
     content: bytes,
-) -> tuple[_AppendCursor, bytes]:
+    *,
+    append_after_size: int | None,
+) -> tuple[_AppendCursor, bytes, bytes, bytes, tuple[int, ...]]:
     raw_complete, tail = _split_complete_prefix(content)
     if not _content_declares_thread(raw_complete, source.codex_thread_id):
         raise AnalyticsSourceReadError("rollout has an unexpected Codex identity")
-    analyzer_content = _filter_analyzer_lines(source, raw_complete, line_offset=0)
+    analyzer_content, _analyzer_ordinals = _filter_analyzer_lines(
+        source, raw_complete, line_offset=0
+    )
+    accepted_size = 0 if append_after_size is None else append_after_size
+    if accepted_size < 0 or accepted_size > len(raw_complete):
+        raise AnalyticsSourceReadError(
+            "durable rollout checkpoint is outside the complete-record prefix"
+        )
+    accepted_content, _accepted_ordinals = _filter_analyzer_lines(
+        source, raw_complete[:accepted_size], line_offset=0
+    )
+    appended_content, appended_ordinals = _filter_analyzer_lines(
+        source,
+        raw_complete[accepted_size:],
+        line_offset=raw_complete[:accepted_size].count(b"\n"),
+    )
     if source.source_kind == "subagent" and analyzer_content.count(b"\n") == 1:
         raise AnalyticsSourceReadError(
             "sub-agent rollout contains no child history records"
@@ -268,7 +340,13 @@ def _new_cursor(
         complete_line_count=raw_complete.count(b"\n"),
         digest=digest,
     )
-    return cursor, analyzer_content
+    return (
+        cursor,
+        analyzer_content,
+        accepted_content,
+        appended_content,
+        appended_ordinals,
+    )
 
 
 def _advance_cursor(
@@ -276,10 +354,10 @@ def _advance_cursor(
     resolved: Path,
     state: os.stat_result,
     added: bytes,
-) -> tuple[_AppendCursor, bytes]:
+) -> tuple[_AppendCursor, bytes, tuple[int, ...]]:
     combined = cursor.incomplete_tail + added
     complete_addition, tail = _split_optional_complete_prefix(combined)
-    analyzer_addition = _filter_analyzer_lines(
+    analyzer_addition, analyzer_ordinals = _filter_analyzer_lines(
         cursor.source,
         complete_addition,
         line_offset=cursor.complete_line_count,
@@ -305,6 +383,7 @@ def _advance_cursor(
             digest=digest,
         ),
         analyzer_addition,
+        analyzer_ordinals,
     )
 
 
@@ -358,24 +437,34 @@ def _filter_analyzer_lines(
     content: bytes,
     *,
     line_offset: int,
-) -> bytes:
+) -> tuple[bytes, tuple[int, ...]]:
+    line_count = content.count(b"\n")
     if source.source_kind == "root" or not content:
-        return content
+        return content, tuple(range(line_offset, line_offset + line_count))
     cutoff = source.subagent_history_start_ordinal
     assert cutoff is not None
     retained: list[bytes] = []
+    retained_ordinals: list[int] = []
     for local_index, line in enumerate(content.splitlines(keepends=True)):
-        if line_offset + local_index == 0:
+        physical_ordinal = line_offset + local_index
+        if physical_ordinal == 0:
             retained.append(line)
+            retained_ordinals.append(physical_ordinal)
             continue
         try:
             record = json.loads(line)
         except (json.JSONDecodeError, UnicodeError):
+            if physical_ordinal > cutoff:
+                retained.append(line)
+                retained_ordinals.append(physical_ordinal)
             continue
         ordinal = record.get("ordinal") if isinstance(record, dict) else None
-        if isinstance(ordinal, int) and not isinstance(ordinal, bool) and ordinal > cutoff:
+        if not isinstance(ordinal, int) or isinstance(ordinal, bool) or ordinal < 0:
+            ordinal = physical_ordinal
+        if ordinal > cutoff:
             retained.append(line)
-    return b"".join(retained)
+            retained_ordinals.append(physical_ordinal)
+    return b"".join(retained), tuple(retained_ordinals)
 
 
 def _content_declares_thread(content: bytes, expected: CodexThreadId) -> bool:

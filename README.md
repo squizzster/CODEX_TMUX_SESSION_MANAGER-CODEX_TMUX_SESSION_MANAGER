@@ -44,6 +44,8 @@ Both sides retain the same Rodex, runtime, Codex, and workspace context.
   transient composer redraws.
 - Starts, steers, waits for, interrupts, and reads results by exact Codex turn ID.
 - Maintains queryable session and exact-turn statistics from authenticated rollouts.
+- Tracks root/sub-agent lineage and typed rollout-derived messages, commands, tools,
+  contexts, token usage, rate limits, and agent activity in a durable agent trace.
 - Refuses unregistered tmux name collisions and verifies Rodex and Codex identities
   before attaching to or controlling a live runtime.
 - Serializes concurrent opens of one ended name and tolerates the bounded Codex-writer
@@ -136,6 +138,10 @@ preference. See the current [tmux manual](https://man.openbsd.org/tmux.1) and
 | `./rodex _tail edgar-work` | Print the latest ten terminal lines, then follow settled readable output. |
 | `./rodex _tail -n 25 edgar-work` | Select a different initial line count and continue following. |
 | `./rodex _events edgar-work` | Stream filtered live protocol events as JSON lines. |
+| `./rodex _agents edgar-work --json` | Show the durable root/sub-agent lineage and rollout checkpoint state. |
+| `./rodex _trace edgar-work --json` | Read a transactionally consistent durable agent-trace snapshot. |
+| `./rodex _trace edgar-work --follow` | Follow newly committed typed trace events as JSON lines. |
+| `./rodex _trace edgar-work --include-bodies` | Re-authenticate rollout prefixes and explicitly resolve command/message/tool bodies. |
 | `./rodex _inspect edgar-work --json` | Read live thread state and its exact active turn ID. |
 | `printf '%s' "$PROMPT" \| ./rodex _start edgar-work --dispatch DISPATCH_ID --stdin --json` | Start an idle thread with caller-owned correlation. |
 | `printf '%s' "$PROMPT" \| ./rodex _steer edgar-work --turn TURN_ID --dispatch DISPATCH_ID --stdin --json` | Steer one exact active turn with caller-owned correlation. |
@@ -225,8 +231,8 @@ codebase for later re-enablement; input currently passes directly to the Codex T
 ## Local data
 
 The durable per-user registry defaults to
-`$XDG_STATE_HOME/rodex/rodex-v10.sqlite3`, or
-`~/.local/state/rodex/rodex-v10.sqlite3` when `XDG_STATE_HOME` is unset. Set
+`$XDG_STATE_HOME/rodex/rodex-v12.sqlite3`, or
+`~/.local/state/rodex/rodex-v12.sqlite3` when `XDG_STATE_HOME` is unset. Set
 `RODEX_DATABASE_PATH` to select another database.
 
 Rodex session IDs are random 64-bit values rendered only as 16 lowercase hex
@@ -237,12 +243,14 @@ agent-facing integrity discriminators, not bearer secrets: the 16-character form
 the transcription burden of a UUID while retaining the full `2^64` candidate space.
 Session and runtime allocation use the same bounded ten-candidate indexed-selection
 pipeline. SQLite stores each Rodex-owned ID losslessly in one signed `BIGINT` and
-enforces its domain uniqueness. Codex session IDs remain Codex-owned 128-bit values and
-are stored losslessly across two `BIGINT` columns.
+enforces its domain uniqueness. Codex session IDs remain Codex-owned 128-bit values.
+Each is stored once in the canonical `codex_threads` table across two `BIGINT` columns;
+memberships, current-root selection, activities, and lineage use integer foreign keys.
 
-Version 10 is an incompatible ALPHA schema with no v9 reader or migration path. Rodex
-leaves `rodex-v9.sqlite3` and earlier generations untouched; explicitly selecting one
-fails exact schema verification rather than falling back or rewriting it.
+Version 12 is an incompatible ALPHA schema with no earlier-generation reader or
+migration path. Rodex leaves `rodex-v11.sqlite3` and earlier generations untouched. An
+internal generation marker rejects nonempty unmarked databases and wrong generations
+before any v12 domain table is created.
 
 Short-lived Unix sockets and app-server logs use `$XDG_RUNTIME_DIR/rodex`, normally
 `/run/user/<uid>/rodex`. When `XDG_RUNTIME_DIR` is unset or that socket path would be
@@ -258,22 +266,50 @@ Each live session host refreshes every required runtime pathname hourly. This pr
 weeks-long detached sessions from age-based temporary-file cleanup without making dead
 sockets persistent; refreshes stop when the owning session ends.
 
-The Rodex registry also stores authenticated rollout provenance, independent analytics
-worker health, and the latest successful derived statistics snapshot. Each session host
-runs a low-priority, fail-open sidecar whose event scheduler blocks while idle, batches
+The Rodex registry also stores accepted append-stream provenance, independent analytics
+worker checkpoints and health, the latest successful derived statistics snapshot, and
+an append-only typed agent trace. Each session host runs a low-priority, fail-open
+sidecar whose event scheduler blocks while idle, batches
 activity for a 0.5-second quiet period with a five-second ceiling, and resolves only the
-exact Codex thread identities named by lifecycle events. A resident analyzer consumes
-only newline-complete appended bytes after initial registration; it neither recursively
+exact Codex thread identities named by bounded semantic wake events. A resident analyzer
+consumes only newline-complete appended bytes after initial registration; it neither recursively
 scans the sessions tree nor repeatedly reloads unchanged rollout prefixes. Bounded
 catch-up and one clean replay cover races and recoverable faults without an unbounded
 polling or retry loop.
 
-Rodex persists typed session/turn columns plus normalized distribution and named-count
-rows. Model and reasoning effort remain separate nullable turn facts whose stable
+Cold lineage recovery first uses exact 128-bit child identities named by lifecycle or
+parent activity. For historical runs whose spawn result carried only an agent path, one
+startup-only fallback enumerates regular JSONL files in the root UUIDv7 three-day window,
+reads only each first `session_meta` line, and accepts only the authenticated root/parent
+closure. Paths are then cached; resident append wakes never repeat this directory scan.
+
+On worker startup or clean recovery, Rodex performs one full-prefix read to authenticate
+the durable byte count and SHA-256 before analysis. The resident hot path relies on
+Codex's trusted append-only rollout contract and then returns to suffix-only reads; it
+does not claim hostile in-place mutation detection on every append. Unchanged semantic
+wakeups perform no projection write, and an event-before-append race receives only the
+scheduler's bounded retry window.
+
+Rodex persists stable thread/turn/item identity, replaceable typed statistics metrics,
+normalized distribution and named-count rows, and typed trace detail tables. Model and
+reasoning effort remain separate nullable turn-state facts whose stable
 integer IDs reference dedicated lookup tables; their session counts are derived from
 those exact turn rows. Metrics therefore remain directly queryable and JSON output can
-be rebuilt deterministically. Rodex never stores copied prompts, responses, commands,
-tool output, raw events, or redundant statistics JSON. Canonical rollout paths and
+be rebuilt deterministically. Trace SQL stores event metadata, byte counts, and
+accepted rollout coordinates—not copied message, command, tool, or output bodies.
+Codex thread identities retain all 128 bits once in canonical rows; unresolved
+sub-agent activity targets point to those rows before verified membership exists.
+Turns, Codex items, trace events, and canonical tool calls use separate opaque 128-bit
+public identities, while relational joins and pagination keep compact internal integer
+foreign keys. Exact-turn statistics expose opaque `turn_id` and semantic
+`codex_turn_id` separately. Item aliases carry their canonical activity scope; thread
+memberships, rollout-source provenance, lineage, item/tool-call aliases, and every
+published typed trace detail reject update and delete. A canonical tool call may fill
+its initially unknown tool name once; its identity and verified name are then final.
+Trace publication totals advance incrementally rather than recounting the historical
+ledger.
+`_trace --include-bodies` deliberately re-reads and re-hashes the recorded prefix;
+hidden reasoning and encrypted values remain redacted. Canonical rollout paths and
 SHA-256 digests are sensitive local metadata, so the database remains private to its
 POSIX user. Codex remains responsible for raw history. Each session's
 `statistics_publication_sequence` starts at one and advances only when a changed,

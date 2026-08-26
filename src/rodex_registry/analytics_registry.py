@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Self
 
+from .agent_trace import RodexAgentTracePublication
 from .errors import RodexAnalyticsPublicationRetryableError
 from .identity import (
     CodexSessionId,
@@ -21,11 +22,11 @@ from .schema import existing_rodex_database_path
 from .statistics import (
     RodexAnalyticsCheckpoint,
     RodexAnalyticsPublishReceipt,
-    RodexSessionStatisticsSourceObservation,
-    RodexSessionStatisticsWorker,
+    RodexSessionAnalyticsWorker,
+    RodexSessionCodexThreadObservation,
     publish_rodex_session_statistics,
     read_rodex_analytics_checkpoint,
-    record_rodex_session_statistics_worker_health,
+    record_rodex_session_analytics_worker_health,
 )
 from .statistics_projection import SessionStatisticsProjection
 from .validation import _validate_session_id
@@ -40,10 +41,11 @@ class RodexAnalyticsPublication:
     calculated_at_utc: str
     coverage_state: str
     statistics_projection: SessionStatisticsProjection
-    analyzed_sources: tuple[RodexSessionStatisticsSourceObservation, ...]
+    analyzed_sources: tuple[RodexSessionCodexThreadObservation, ...]
     changed_source_thread_ids: frozenset[CodexThreadId] | None = None
     changed_turn_keys: frozenset[tuple[CodexThreadId, str]] | None = None
     removed_turn_keys: frozenset[tuple[CodexThreadId, str]] = frozenset()
+    agent_trace_publication: RodexAgentTracePublication | None = None
 
 
 class RodexAnalyticsRegistry:
@@ -140,6 +142,7 @@ class RodexAnalyticsRegistry:
                 removed_turn_keys=publication.removed_turn_keys,
                 model_name_ids=model_name_ids,
                 reasoning_effort_name_ids=reasoning_effort_name_ids,
+                agent_trace_publication=publication.agent_trace_publication,
             )
         except sqlite3.OperationalError as error:
             error_code = getattr(error, "sqlite_errorcode", 0)
@@ -161,7 +164,7 @@ class RodexAnalyticsRegistry:
         failed: bool = False,
         next_retry_at_utc: str | None = None,
         prior_consecutive_failures: int | None = None,
-    ) -> RodexSessionStatisticsWorker:
+    ) -> RodexSessionAnalyticsWorker:
         """Persist one health transition while preserving last-good statistics."""
         consecutive_failures = (
             None
@@ -170,7 +173,7 @@ class RodexAnalyticsRegistry:
             if failed
             else 0
         )
-        return record_rodex_session_statistics_worker_health(
+        return record_rodex_session_analytics_worker_health(
             self._identity.rodex_sessions_id,
             self._database_path,
             expected_current_codex_session_id=self._identity.codex_session_id,

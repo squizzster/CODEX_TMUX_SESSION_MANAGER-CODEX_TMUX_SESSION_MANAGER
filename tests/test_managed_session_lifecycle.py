@@ -48,10 +48,10 @@ def test_canonical_unregistered_codex_identity_is_selected_without_opening_sql(
         lambda *_arguments: pytest.fail("an absent registry must not be opened"),
     )
 
-    selection = ManagedSessionLifecycle().resolve_selector(selector.upper(), database)
+    selection = ManagedSessionLifecycle().resolve_selector(selector, database)
 
     assert selection == UnregisteredCodexSessionSelection(
-        selector.upper(), parse_codex_session_id(selector)
+        selector, parse_codex_session_id(selector)
     )
     assert not database.exists()
 

@@ -14,6 +14,9 @@ from rodex.analytics_analyzer import (
 )
 
 THREAD_ID = uuid.UUID("01a00654-f2bc-7a30-834a-a5f886a65f82")
+TURN_A_ID = "00000000-0000-7000-8000-000000000001"
+TURN_B_ID = "00000000-0000-7000-8000-000000000002"
+CHILD_TURN_ID = "00000000-0000-7000-8000-000000000003"
 
 
 def _content(records: list[dict[str, object]]) -> bytes:
@@ -30,13 +33,13 @@ def _records() -> list[dict[str, object]]:
         {
             "timestamp": "2026-08-16T12:00:01Z",
             "type": "event_msg",
-            "payload": {"type": "task_started", "turn_id": "turn-a"},
+            "payload": {"type": "task_started", "turn_id": TURN_A_ID},
         },
         {
             "timestamp": "2026-08-16T12:00:02Z",
             "type": "turn_context",
             "payload": {
-                "turn_id": "turn-a",
+                "turn_id": TURN_A_ID,
                 "model": "gpt-test",
                 "effort": "xhigh",
             },
@@ -60,7 +63,7 @@ def _records() -> list[dict[str, object]]:
             "type": "event_msg",
             "payload": {
                 "type": "task_complete",
-                "turn_id": "turn-a",
+                "turn_id": TURN_A_ID,
                 "duration_ms": 4_000,
             },
         },
@@ -102,19 +105,19 @@ def test_incremental_projection_materializes_only_the_changed_turn(
         {
             "timestamp": "2026-08-16T12:01:01Z",
             "type": "event_msg",
-            "payload": {"type": "task_started", "turn_id": "turn-b"},
+            "payload": {"type": "task_started", "turn_id": TURN_B_ID},
         },
         {
             "timestamp": "2026-08-16T12:01:02Z",
             "type": "turn_context",
-            "payload": {"turn_id": "turn-b", "model": "gpt-test", "effort": "xhigh"},
+            "payload": {"turn_id": TURN_B_ID, "model": "gpt-test", "effort": "xhigh"},
         },
         {
             "timestamp": "2026-08-16T12:01:03Z",
             "type": "event_msg",
             "payload": {
                 "type": "task_complete",
-                "turn_id": "turn-b",
+                "turn_id": TURN_B_ID,
                 "duration_ms": 2_000,
             },
         },
@@ -147,7 +150,7 @@ def test_incremental_projection_materializes_only_the_changed_turn(
 
     assert [
         turn.codex_turn_id for turn in incremental.statistics_projection.turn_statistics
-    ] == ["turn-b"]
+    ] == [TURN_B_ID]
     assert turn_reports == 1
     assert (
         replace(
@@ -199,12 +202,12 @@ def test_stateful_analyzer_matches_full_replay_for_multiple_threads() -> None:
             {
                 "timestamp": "2026-08-16T12:00:03Z",
                 "type": "event_msg",
-                "payload": {"type": "task_started", "turn_id": "child-turn"},
+                "payload": {"type": "task_started", "turn_id": CHILD_TURN_ID},
             },
             {
                 "timestamp": "2026-08-16T12:00:04Z",
                 "type": "event_msg",
-                "payload": {"type": "task_complete", "turn_id": "child-turn"},
+                "payload": {"type": "task_complete", "turn_id": CHILD_TURN_ID},
             },
         ]
     )

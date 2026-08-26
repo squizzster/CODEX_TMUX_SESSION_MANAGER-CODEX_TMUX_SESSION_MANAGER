@@ -18,7 +18,7 @@ from rodex_registry import CodexThreadId, parse_codex_thread_id
 from .app_server_contract import CODEX_APP_SERVER
 from .protocol_proxy import (
     ANALYTICS_EVENT_STREAM_PATH,
-    ANALYTICS_LIFECYCLE_EVENT_METHODS,
+    ANALYTICS_WAKE_EVENT_METHODS,
     EVENT_STREAM_READY_METHOD,
 )
 
@@ -31,7 +31,9 @@ _DIRTY: Final = object()
 _STOP: Final = object()
 _STREAM_CLOSED: Final = object()
 _SIGNAL_QUEUE_CAPACITY: Final = 2
-_WINDOW_RETRY_RESULTS: Final = frozenset({"catching_up", "publication_retry"})
+_WINDOW_RETRY_RESULTS: Final = frozenset(
+    {"awaiting_append", "catching_up", "publication_retry"}
+)
 _ONE_SHOT_RETRY_RESULT: Final = "clean_replay"
 _POST_RECONCILIATION_RETRY_RESULTS: Final = frozenset(
     {"publication_retry", _ONE_SHOT_RETRY_RESULT}
@@ -401,16 +403,14 @@ class AnalyticsProtocolEventSubscriber:
 
 def _is_relevant_protocol_event(message: str | bytes) -> bool:
     decoded = _decode_protocol_event(message)
-    return (
-        decoded is not None and decoded.get("method") in ANALYTICS_LIFECYCLE_EVENT_METHODS
-    )
+    return decoded is not None and decoded.get("method") in ANALYTICS_WAKE_EVENT_METHODS
 
 
 def _analytics_event_thread_id(
     event: Mapping[str, Any],
 ) -> CodexThreadId | None:
     method = event.get("method")
-    if method not in ANALYTICS_LIFECYCLE_EVENT_METHODS:
+    if method not in ANALYTICS_WAKE_EVENT_METHODS:
         return None
     params = event.get("params")
     if not isinstance(params, Mapping):

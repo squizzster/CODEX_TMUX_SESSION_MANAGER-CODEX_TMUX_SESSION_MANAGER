@@ -98,6 +98,44 @@ def test_publication_retry_repeats_only_inside_bounded_window_then_blocks() -> N
     assert not thread.is_alive()
 
 
+@pytest.mark.parametrize("retry_result", ["publication_retry", "clean_replay"])
+def test_slow_recovery_result_still_receives_a_finite_retry_window(
+    retry_result: str,
+) -> None:
+    scheduler = AnalyticsEventScheduler(
+        quiet_seconds=0,
+        max_batch_seconds=0.05,
+        retry_initial_seconds=0.01,
+        max_retry_window_seconds=0.04,
+    )
+    startup_complete = Event()
+    retry_completed = Event()
+    reconciliations = 0
+
+    def reconcile(batch: AnalyticsDirtyBatch) -> str:
+        nonlocal reconciliations
+        reconciliations += 1
+        if batch.full_reconcile:
+            startup_complete.set()
+            return "up_to_date"
+        if batch.thread_ids:
+            Event().wait(0.06)
+            return retry_result
+        retry_completed.set()
+        return "up_to_date"
+
+    thread = Thread(target=scheduler.run, args=(reconcile,))
+    thread.start()
+    assert startup_complete.wait(timeout=1)
+    scheduler.offer_dirty(THREAD_ID)
+
+    assert retry_completed.wait(timeout=1)
+    scheduler.close()
+    thread.join(timeout=1)
+    assert not thread.is_alive()
+    assert reconciliations == 3
+
+
 def test_clean_replay_runs_once_then_parks_without_repeating() -> None:
     scheduler = AnalyticsEventScheduler(
         quiet_seconds=0.01,

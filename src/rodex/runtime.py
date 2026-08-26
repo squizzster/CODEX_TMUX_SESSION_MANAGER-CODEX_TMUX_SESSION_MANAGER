@@ -50,17 +50,8 @@ from .protocol_proxy import (
     TmuxToolCallStatus,
     ToolCallCounter,
 )
-from .status_bar import (
-    RODEX_STATUS_LEFT_FORMAT,
-    RODEX_STATUS_LEFT_LENGTH,
-    RODEX_STATUS_RIGHT_FORMAT,
-    RODEX_STATUS_RIGHT_LENGTH,
-    context_status_segment,
-)
+from .status_bar import context_status_segment
 from .tmux_status import (
-    STATUS_CLAIM_PRIORITY_OPTION,
-    STATUS_CLAIM_PUBLISHER_OPTION,
-    STATUS_CLAIM_TOKEN_OPTION,
     TmuxStatusPipeline,
 )
 
@@ -723,22 +714,6 @@ class RodexRuntimeLauncher:
 
     def initialise_session_ui(self, runtime: LiveTmuxSession) -> None:
         """Install a fresh Rodex UI after creating one new tmux runtime."""
-        target = _exact_tmux_pane_target(runtime.tmux_session_name)
-        for transient_option in (
-            STATUS_CLAIM_PUBLISHER_OPTION,
-            STATUS_CLAIM_TOKEN_OPTION,
-            STATUS_CLAIM_PRIORITY_OPTION,
-            "status-format",
-            "status-style",
-        ):
-            self._tmux(
-                runtime,
-                "set-option",
-                "-u",
-                "-t",
-                target,
-                transient_option,
-            )
         self._configure_static_status(runtime, publish_base_status=True)
         self.refresh_name_bound_hooks(runtime)
         self._install_input_guards(runtime)
@@ -774,42 +749,9 @@ class RodexRuntimeLauncher:
         publish_base_status: bool,
     ) -> None:
         target = _exact_tmux_pane_target(runtime.tmux_session_name)
-        self._tmux(runtime, "set-option", "-t", target, "status", "on")
         status = TmuxStatusPipeline(lambda *args: self._tmux(runtime, *args), target)
-        if publish_base_status:
-            self._tmux(
-                runtime,
-                "set-option",
-                "-t",
-                target,
-                "status-left",
-                RODEX_STATUS_LEFT_FORMAT,
-            )
-        else:
-            status.reconcile_base_status()
-        self._tmux(
-            runtime,
-            "set-option",
-            "-t",
-            target,
-            "status-left-length",
-            RODEX_STATUS_LEFT_LENGTH,
-        )
-        self._tmux(
-            runtime,
-            "set-option",
-            "-t",
-            target,
-            "status-right",
-            RODEX_STATUS_RIGHT_FORMAT,
-        )
-        self._tmux(
-            runtime,
-            "set-option",
-            "-t",
-            target,
-            "status-right-length",
-            RODEX_STATUS_RIGHT_LENGTH,
+        status.configure_base_status(
+            reset_transient_claims=publish_base_status,
         )
 
     def _install_input_guards(self, runtime: LiveTmuxSession) -> None:

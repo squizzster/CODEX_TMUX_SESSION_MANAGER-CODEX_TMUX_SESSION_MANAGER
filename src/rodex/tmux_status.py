@@ -1,4 +1,4 @@
-"""One publisher-aware pipeline for Rodex tmux status-left rendering."""
+"""One publisher-aware pipeline for the complete Rodex tmux status presentation."""
 
 from __future__ import annotations
 
@@ -10,7 +10,14 @@ from enum import IntEnum
 from pathlib import Path
 from typing import Any, Final
 
-from .status_bar import RODEX_STATUS_COLOURS, RODEX_STATUS_LEFT_FORMAT
+from .status_bar import (
+    RODEX_STATUS_COLOURS,
+    RODEX_STATUS_LEFT_FORMAT,
+    RODEX_STATUS_LEFT_LENGTH,
+    RODEX_STATUS_RIGHT_FORMAT,
+    RODEX_STATUS_RIGHT_LENGTH,
+    RODEX_STATUS_STYLE,
+)
 
 
 class TmuxStatusOption:
@@ -84,6 +91,12 @@ class TmuxStatusPresentation:
             raise ValueError("status presentation requires non-empty configured surfaces")
 
 
+RODEX_BASE_STATUS_PRESENTATION: Final = TmuxStatusPresentation(
+    status_left=RODEX_STATUS_LEFT_FORMAT,
+    status_style=RODEX_STATUS_STYLE,
+)
+
+
 class TmuxStatusClaimCommands:
     """Build the authoritative atomic tmux commands for status claim transitions."""
 
@@ -154,28 +167,17 @@ class TmuxStatusClaimCommands:
                     STATUS_CLAIM_PUBLISHER_OPTION,
                     STATUS_CLAIM_TOKEN_OPTION,
                     STATUS_CLAIM_PRIORITY_OPTION,
-                    "status-format",
-                    "status-style",
                 )
             ),
-            (
-                "set-option",
-                "-t",
-                self._pane_target,
-                "status-left",
-                RODEX_STATUS_LEFT_FORMAT,
+            *self._presentation_commands(
+                RODEX_BASE_STATUS_PRESENTATION,
+                reset_surfaces=True,
             ),
         )
 
     def set_base_status(self) -> str:
-        return shlex.join(
-            (
-                "set-option",
-                "-t",
-                self._pane_target,
-                "status-left",
-                RODEX_STATUS_LEFT_FORMAT,
-            )
+        return _tmux_command_sequence(
+            *self._presentation_commands(RODEX_BASE_STATUS_PRESENTATION)
         )
 
     def _presentation_commands(
@@ -186,12 +188,27 @@ class TmuxStatusClaimCommands:
     ) -> tuple[tuple[str, ...], ...]:
         commands: list[tuple[str, ...]] = []
         if reset_surfaces:
-            commands.extend(
-                (
-                    ("set-option", "-u", "-t", self._pane_target, "status-format"),
-                    ("set-option", "-u", "-t", self._pane_target, "status-style"),
+            commands.append(("set-option", "-u", "-t", self._pane_target, "status-format"))
+            if presentation.status_left is None:
+                commands.append(
+                    (
+                        "set-option",
+                        "-t",
+                        self._pane_target,
+                        "status-left",
+                        RODEX_BASE_STATUS_PRESENTATION.status_left,
+                    )
                 )
-            )
+            if presentation.status_style is None:
+                commands.append(
+                    (
+                        "set-option",
+                        "-t",
+                        self._pane_target,
+                        "status-style",
+                        RODEX_BASE_STATUS_PRESENTATION.status_style,
+                    )
+                )
         for option_name, value in (
             ("status-left", presentation.status_left),
             ("status-style", presentation.status_style),
@@ -203,12 +220,26 @@ class TmuxStatusClaimCommands:
 
 
 class TmuxStatusPipeline:
-    """Atomically publish, arbitrate, and restore pane status claims."""
+    """Configure the bar and atomically publish, arbitrate, and restore claims."""
 
     def __init__(self, tmux: BoundTmuxCommand, pane_target: str) -> None:
         self._tmux = tmux
         self._pane_target = pane_target
         self._commands = TmuxStatusClaimCommands(pane_target)
+
+    def configure_base_status(self, *, reset_transient_claims: bool) -> None:
+        """Install the complete Rodex bar without trampling a retained live claim."""
+        self._tmux("set-option", "-t", self._pane_target, "status", "on")
+        if reset_transient_claims:
+            self.reset_to_base_status()
+        else:
+            self.reconcile_base_status()
+        for option_name, value in (
+            ("status-left-length", RODEX_STATUS_LEFT_LENGTH),
+            ("status-right", RODEX_STATUS_RIGHT_FORMAT),
+            ("status-right-length", RODEX_STATUS_RIGHT_LENGTH),
+        ):
+            self._tmux("set-option", "-t", self._pane_target, option_name, value)
 
     def publish_transient(
         self,

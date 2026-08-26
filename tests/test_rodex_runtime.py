@@ -33,6 +33,7 @@ from rodex.runtime import (
 )
 from rodex.tmux_status import (
     RODEX_STATUS_LEFT_FORMAT,
+    RODEX_STATUS_STYLE,
     STATUS_CLAIM_PRIORITY_OPTION,
     STATUS_CLAIM_PUBLISHER_OPTION,
     STATUS_CLAIM_TOKEN_OPTION,
@@ -718,15 +719,17 @@ def test_rename_and_session_ui_initialisation_use_the_real_tmux_session_name(
         "automatic-beluga",
     ]
     status_commands = [command[3:] for command in runner.calls[1:]]
-    unset_options = {
-        command[-1] for command in status_commands if command[:2] == ["set-option", "-u"]
-    }
-    assert unset_options == {
+    base_reset = next(
+        command
+        for command in status_commands
+        if command[:5] == ["if-shell", "-t", "=automatic-beluga:", "-F", "1"]
+    )
+    base_reset_steps = [shlex.split(step) for step in base_reset[-1].split(" ; ")]
+    assert {step[-1] for step in base_reset_steps if step[:2] == ["set-option", "-u"]} == {
         STATUS_CLAIM_PUBLISHER_OPTION,
         STATUS_CLAIM_TOKEN_OPTION,
         STATUS_CLAIM_PRIORITY_OPTION,
         "status-format",
-        "status-style",
     }
     assert [
         "set-option",
@@ -734,7 +737,14 @@ def test_rename_and_session_ui_initialisation_use_the_real_tmux_session_name(
         "=automatic-beluga:",
         "status-left",
         RODEX_STATUS_LEFT_FORMAT,
-    ] in status_commands
+    ] in base_reset_steps
+    assert [
+        "set-option",
+        "-t",
+        "=automatic-beluga:",
+        "status-style",
+        RODEX_STATUS_STYLE,
+    ] in base_reset_steps
     assert ["set-option", "-t", "=automatic-beluga:", "status-left-length", "160"] in (
         status_commands
     )
@@ -1338,7 +1348,7 @@ def test_real_tmux_survives_rename_and_status_configuration(tmp_path: Path) -> N
         )
         assert "#[align=centre]" in animated_status
         wait_for_session_option("status-format[0]", populated=False)
-        assert session_option("status-style") == ""
+        assert session_option("status-style") == RODEX_STATUS_STYLE
         assert "#{status-left-style}" in session_option("status-format[0]", inherited=True)
 
         departed_while_shared = control_clients.pop()
@@ -1353,7 +1363,7 @@ def test_real_tmux_survives_rename_and_status_configuration(tmp_path: Path) -> N
         )
         assert "#[align=centre]" in private_animation
         wait_for_session_option("status-format[0]", populated=False)
-        assert session_option("status-style") == ""
+        assert session_option("status-style") == RODEX_STATUS_STYLE
         rendered_identity_status = tmux_format("#{T:status-left}")
         assert "Rodex: automatic-beluga" in rendered_identity_status
         assert "Mouse: ON" in rendered_identity_status

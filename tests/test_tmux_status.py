@@ -9,7 +9,11 @@ from pathlib import Path
 
 import pytest
 
-from rodex.status_bar import RODEX_STATUS_LEFT_FORMAT
+from rodex.status_bar import (
+    RODEX_STATUS_LEFT_FORMAT,
+    RODEX_STATUS_RIGHT_FORMAT,
+    RODEX_STATUS_STYLE,
+)
 from rodex.tmux_status import (
     STATUS_CLAIM_PRIORITY_OPTION,
     STATUS_CLAIM_PUBLISHER_OPTION,
@@ -94,6 +98,21 @@ def publish(
     )
 
 
+def test_status_pipeline_configures_the_complete_base_bar() -> None:
+    tmux = FakeTmux()
+
+    TmuxStatusPipeline(tmux, "%4").configure_base_status(reset_transient_claims=True)
+
+    assert tmux.status_left == RODEX_STATUS_LEFT_FORMAT
+    assert tmux.options == {
+        "status": "on",
+        "status-left-length": "160",
+        "status-right": RODEX_STATUS_RIGHT_FORMAT,
+        "status-right-length": "64",
+        "status-style": RODEX_STATUS_STYLE,
+    }
+
+
 def test_status_pipeline_publishes_and_exact_token_restores_atomically() -> None:
     tmux = FakeTmux()
     status = TmuxStatusPipeline(tmux, "%4")
@@ -109,6 +128,7 @@ def test_status_pipeline_publishes_and_exact_token_restores_atomically() -> None
         STATUS_CLAIM_PRIORITY_OPTION: "010",
         STATUS_CLAIM_PUBLISHER_OPTION: "completion",
         STATUS_CLAIM_TOKEN_OPTION: "completion-1",
+        "status-style": RODEX_STATUS_STYLE,
     }
     assert tmux.status_left == "completion message"
     assert tmux.commands[0][:5] == [
@@ -122,7 +142,7 @@ def test_status_pipeline_publishes_and_exact_token_restores_atomically() -> None
     status.restore_if_token_matches("stale-token")
     assert tmux.status_left == "completion message"
     status.restore_if_token_matches("completion-1")
-    assert tmux.options == {}
+    assert tmux.options == {"status-style": RODEX_STATUS_STYLE}
     assert tmux.status_left == RODEX_STATUS_LEFT_FORMAT
 
 
@@ -184,12 +204,13 @@ def test_safety_warning_preempts_full_line_animation_and_owns_restoration() -> N
 
     assert tmux.options[STATUS_CLAIM_TOKEN_OPTION] == "warning-1"
     assert "status-format[0]" not in tmux.options
-    assert "status-style" not in tmux.options
+    assert tmux.options["status-style"] == RODEX_STATUS_STYLE
     assert tmux.status_left == "safety warning"
     status.restore_if_token_matches("animation-1")
     assert tmux.status_left == "safety warning"
     status.restore_if_token_matches("warning-1")
     assert tmux.status_left == RODEX_STATUS_LEFT_FORMAT
+    assert tmux.options == {"status-style": RODEX_STATUS_STYLE}
 
 
 def test_real_tmux_concurrent_publishers_leave_a_matching_atomic_claim(

@@ -15,6 +15,7 @@ from rodex.status_animation import (
     status_frames,
 )
 from rodex.tmux_status import (
+    RODEX_STATUS_STYLE,
     STATUS_CLAIM_PRIORITY_OPTION,
     STATUS_CLAIM_PUBLISHER_OPTION,
     STATUS_CLAIM_TOKEN_OPTION,
@@ -135,8 +136,23 @@ def test_animation_uses_scheduled_frames_and_restores_the_entire_status_format()
     )
     assert len(restore_commands) == 1
     assert restore_commands[0][3:6] == ["if-shell", "-t", "=automatic-beluga:"]
-    assert "set-option -u -t =automatic-beluga: status-format" in restore_commands[0][-1]
+    restore_steps = [shlex.split(step) for step in restore_commands[0][-1].split(" ; ")]
+    assert [
+        "set-option",
+        "-u",
+        "-t",
+        "=automatic-beluga:",
+        "status-format",
+    ] in restore_steps
+    assert [
+        "set-option",
+        "-t",
+        "=automatic-beluga:",
+        "status-style",
+        RODEX_STATUS_STYLE,
+    ] in restore_steps
     assert "status-format[0]" not in restore_commands[0][-1]
+    assert tmux.options["status-style"] == RODEX_STATUS_STYLE
     assert [command[-1] for command in refresh_commands] == [
         "/dev/pts/10",
         "/dev/pts/11",

@@ -13,6 +13,7 @@ from rodex.tmux_completion_observer import (
 )
 from rodex.tmux_status import (
     RODEX_STATUS_LEFT_FORMAT,
+    RODEX_STATUS_STYLE,
     STATUS_CLAIM_PRIORITY_OPTION,
     STATUS_CLAIM_PUBLISHER_OPTION,
     STATUS_CLAIM_TOKEN_OPTION,
@@ -142,7 +143,7 @@ def test_observer_clears_ribbon_when_prompt_leaves_prefix(tmp_path: Path) -> Non
     observer.inspect_redraw()
 
     assert not observer.completion_visible
-    assert runner.status_options == {}
+    assert runner.status_options == {"status-style": RODEX_STATUS_STYLE}
     assert RODEX_STATUS_LEFT_FORMAT in runner.commands[-1][-1]
     assert not any(
         "display-message" in command and "-p" not in command for command in runner.commands

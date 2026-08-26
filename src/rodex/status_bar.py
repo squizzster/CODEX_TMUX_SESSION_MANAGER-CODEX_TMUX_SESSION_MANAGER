@@ -21,6 +21,8 @@ class StatusBarPart(StrEnum):
 class StatusBarColours:
     """One authoritative palette for every Rodex-owned status colour role."""
 
+    base_foreground: str
+    base_background: str
     primary_blue: str
     tool_count: str
     mouse_mode: str
@@ -40,6 +42,8 @@ class StatusBarColours:
 
     def __post_init__(self) -> None:
         scalar_colours = (
+            self.base_foreground,
+            self.base_background,
             self.primary_blue,
             self.tool_count,
             self.mouse_mode,
@@ -157,6 +161,8 @@ class _ContextColourBand:
 RODEX_CONTEXT_STATUS_OPTION: Final = "@rodex_context_status"
 RODEX_TOOL_CALL_STATUS_OPTION: Final = "@rodex_tool_calls"
 RODEX_STATUS_COLOURS: Final = StatusBarColours(
+    base_foreground="black",
+    base_background="#B6FF00",
     primary_blue="#1402D8",
     tool_count="cyan",
     mouse_mode="yellow",
@@ -240,6 +246,9 @@ RODEX_STATUS_COLOURS: Final = StatusBarColours(
         "colour22",
         "colour22",
     ),
+)
+RODEX_STATUS_STYLE: Final = (
+    f"bg={RODEX_STATUS_COLOURS.base_background},fg={RODEX_STATUS_COLOURS.base_foreground}"
 )
 
 _CONTEXT_FALLBACK_SEGMENT: Final = StatusBarSegment(

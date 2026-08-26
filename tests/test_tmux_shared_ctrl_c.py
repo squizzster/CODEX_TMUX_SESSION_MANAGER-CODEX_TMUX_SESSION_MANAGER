@@ -18,6 +18,7 @@ from rodex.runtime import LiveTmuxSession, RodexRuntimeLauncher
 from rodex.tmux_shared_ctrl_c import handle_shared_ctrl_c
 from rodex.tmux_status import (
     RODEX_STATUS_LEFT_FORMAT,
+    RODEX_STATUS_STYLE,
     STATUS_CLAIM_PRIORITY_OPTION,
     STATUS_CLAIM_PUBLISHER_OPTION,
     STATUS_CLAIM_TOKEN_OPTION,
@@ -133,12 +134,13 @@ def test_first_shared_ctrl_c_publishes_a_temporary_status_warning(tmp_path: Path
         STATUS_CLAIM_PRIORITY_OPTION: "100",
         STATUS_CLAIM_PUBLISHER_OPTION: "shared-ctrl-c",
         STATUS_CLAIM_TOKEN_OPTION: "warning-token",
+        "status-style": RODEX_STATUS_STYLE,
     }
 
     expiry_callbacks[0]()
 
     assert runner.confirmation == ""
-    assert runner.status_options == {}
+    assert runner.status_options == {"status-style": RODEX_STATUS_STYLE}
     assert runner.status_left == RODEX_STATUS_LEFT_FORMAT
 
 

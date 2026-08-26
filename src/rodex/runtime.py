@@ -75,6 +75,7 @@ _RUNTIME_ID_OPTION: Final = "@rodex_runtime_id"
 _INTERNAL_SESSION_ID_OPTION: Final = "@rodex_sessions_id"
 RODEX_REGISTRATION_PENDING: Final = "pending"
 RODEX_REGISTRATION_REGISTERED: Final = "registered"
+RODEX_TMUX_REQUIRED_CLIENT_FEATURES: Final = "RGB"
 # One switch owns installation of the tmux `/rodex` bindings and completion pipe.
 RODEX_TMUX_SLASH_ENABLED: Final = False
 Runner = Callable[..., subprocess.CompletedProcess[str]]
@@ -813,6 +814,8 @@ class RodexRuntimeLauncher:
         environment.pop("TMUX", None)
         self._tmux(
             runtime,
+            "-T",
+            RODEX_TMUX_REQUIRED_CLIENT_FEATURES,
             "attach-session",
             "-t",
             _exact_tmux_session_target(runtime.tmux_session_name),

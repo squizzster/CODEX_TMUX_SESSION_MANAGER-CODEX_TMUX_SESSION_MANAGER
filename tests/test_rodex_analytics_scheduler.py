@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import queue
 import uuid
 from pathlib import Path
 from threading import Event, Thread
@@ -99,7 +98,7 @@ def test_publication_retry_repeats_only_inside_bounded_window_then_blocks() -> N
     assert not thread.is_alive()
 
 
-def test_degraded_generation_parks_without_a_timed_clean_replay() -> None:
+def test_clean_replay_runs_once_then_parks_without_repeating() -> None:
     scheduler = AnalyticsEventScheduler(
         quiet_seconds=0.01,
         max_batch_seconds=0.05,
@@ -113,14 +112,14 @@ def test_degraded_generation_parks_without_a_timed_clean_replay() -> None:
         nonlocal reconciliations
         reconciliations += 1
         reconciled.set()
-        return "degraded"
+        return "clean_replay"
 
     thread = Thread(target=scheduler.run, args=(reconcile,))
     thread.start()
     assert reconciled.wait(timeout=1)
     Event().wait(0.06)
 
-    assert reconciliations == 1
+    assert reconciliations == 2
     scheduler.close()
     thread.join(timeout=1)
     assert not thread.is_alive()
@@ -145,6 +144,21 @@ def test_queued_terminal_preempts_due_reconciliation_work() -> None:
     scheduler.run(reconcile)
 
     assert reconciliations == 1
+
+
+def test_terminal_queued_before_run_skips_startup_reconciliation() -> None:
+    scheduler = AnalyticsEventScheduler()
+    reconciliations = 0
+
+    def reconcile(_batch: AnalyticsDirtyBatch) -> str:
+        nonlocal reconciliations
+        reconciliations += 1
+        return "up_to_date"
+
+    scheduler.close()
+    scheduler.run(reconcile)
+
+    assert reconciliations == 0
 
 
 def test_catching_up_generation_can_resolve_after_its_first_retry() -> None:
@@ -336,7 +350,9 @@ def test_continuously_ready_queue_cannot_starve_the_hard_batch_deadline() -> Non
             return
 
         def get_nowait(self) -> object:
-            raise queue.Empty
+            clock[0] += 0.01
+            scheduler.offer_dirty(THREAD_ID)
+            return object()
 
         def get(self, timeout: float | None = None) -> object:
             clock[0] += 0.01
@@ -364,7 +380,7 @@ def test_continuously_ready_queue_cannot_starve_the_hard_batch_deadline() -> Non
     with pytest.raises(HardDeadlineObserved):
         scheduler.run(reconcile)
 
-    assert 5.0 <= clock[0] <= 5.02
+    assert 5.0 <= clock[0] <= 5.05
 
 
 def test_dirty_identities_are_lossless_while_wake_queue_is_full() -> None:

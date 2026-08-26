@@ -462,6 +462,9 @@ class AnalyticsRolloutWorker:
         except RodexAnalyticsPublicationRetryableError:
             return "publication_retry"
         except Exception as error:
+            if batch is not None:
+                self._pending_resolution_thread_ids.update(batch.thread_ids)
+            self._pending_resolution_thread_ids.update(self._deferred_dirty_thread_ids)
             self._project_health(
                 "degraded",
                 _diagnostic_code(error),
@@ -473,7 +476,7 @@ class AnalyticsRolloutWorker:
             self._deferred_dirty_thread_ids.clear()
             self._source_reader.require_clean_replay()
             self._requires_full_reconcile = True
-            return "degraded"
+            return "clean_replay"
 
     def run_until_stopped(
         self,

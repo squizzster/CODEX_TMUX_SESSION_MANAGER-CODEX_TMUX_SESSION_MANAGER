@@ -30,7 +30,9 @@ ANALYTICS_SUBSCRIBER_START_TIMEOUT_SECONDS: Final = 5.0
 _DIRTY: Final = object()
 _STOP: Final = object()
 _STREAM_CLOSED: Final = object()
-_TIMED_RETRY_RESULTS: Final = frozenset({"catching_up", "publication_retry"})
+_SIGNAL_QUEUE_CAPACITY: Final = 2
+_WINDOW_RETRY_RESULTS: Final = frozenset({"catching_up", "publication_retry"})
+_ONE_SHOT_RETRY_RESULT: Final = "clean_replay"
 
 
 class AnalyticsEventStreamClosed(RuntimeError):
@@ -81,9 +83,11 @@ class AnalyticsBurstWindow:
 class _AnalyticsRetryWindow:
     """Bound exact catch-up retries without creating permanent idle I/O."""
 
+    generation_started_at: float
     deadline: float
     next_retry_at: float
     next_delay_seconds: float
+    repeatable: bool
 
     @classmethod
     def start(
@@ -93,16 +97,23 @@ class _AnalyticsRetryWindow:
         generation_started_at: float,
         initial_seconds: float,
         max_window_seconds: float,
+        repeatable: bool,
     ) -> _AnalyticsRetryWindow:
         deadline = generation_started_at + max_window_seconds
         return cls(
+            generation_started_at=generation_started_at,
             deadline=deadline,
             next_retry_at=min(now + initial_seconds, deadline),
             next_delay_seconds=initial_seconds * 2,
+            repeatable=repeatable,
         )
 
     def retain_after(self, result: object, now: float) -> bool:
-        if result not in _TIMED_RETRY_RESULTS or now >= self.deadline:
+        if (
+            not self.repeatable
+            or result not in _WINDOW_RETRY_RESULTS
+            or now >= self.deadline
+        ):
             return False
         self.next_retry_at = min(now + self.next_delay_seconds, self.deadline)
         self.next_delay_seconds *= 2
@@ -135,7 +146,7 @@ class AnalyticsEventScheduler:
         self._max_retry_window_seconds = max_retry_window_seconds
         self._monotonic = monotonic
         self._event_observer = event_observer
-        self._signals: queue.Queue[object] = queue.Queue(maxsize=2)
+        self._signals: queue.Queue[object] = queue.Queue(maxsize=_SIGNAL_QUEUE_CAPACITY)
         self._pending_thread_ids: set[CodexThreadId] = set()
         self._pending_first_at: float | None = None
         self._pending_last_at: float | None = None
@@ -174,6 +185,11 @@ class AnalyticsEventScheduler:
 
     def run(self, reconcile: Callable[[AnalyticsDirtyBatch], object]) -> None:
         """Reconcile bursts and bound exact catch-up retries to one short window."""
+        terminal = self._queued_terminal()
+        if terminal is _STOP:
+            return
+        if terminal is _STREAM_CLOSED:
+            raise AnalyticsEventStreamClosed("analytics event stream closed")
         startup_started_at = self._monotonic()
         retry_window = self._retry_window_for(
             reconcile(AnalyticsDirtyBatch(frozenset(), full_reconcile=True)),
@@ -195,9 +211,17 @@ class AnalyticsEventScheduler:
                 )
                 continue
             if retry_window is not None and now >= retry_window.next_retry_at:
+                completed_repeatable_retry = retry_window.repeatable
+                generation_started_at = retry_window.generation_started_at
                 result = reconcile(AnalyticsDirtyBatch(frozenset()))
                 if not retry_window.retain_after(result, self._monotonic()):
-                    retry_window = None
+                    if not completed_repeatable_retry and result == _ONE_SHOT_RETRY_RESULT:
+                        retry_window = None
+                    else:
+                        retry_window = self._retry_window_for(
+                            result,
+                            generation_started_at=generation_started_at,
+                        )
                 continue
             retry_deadline = None if retry_window is None else retry_window.next_retry_at
             deadlines = tuple(
@@ -215,13 +239,14 @@ class AnalyticsEventScheduler:
                 raise AnalyticsEventStreamClosed("analytics event stream closed")
 
     def _queued_terminal(self) -> object | None:
-        while True:
+        for _ in range(_SIGNAL_QUEUE_CAPACITY):
             try:
                 signal = self._signals.get_nowait()
             except queue.Empty:
                 return None
             if signal is _STOP or signal is _STREAM_CLOSED:
                 return signal
+        return None
 
     def _retry_window_for(
         self,
@@ -229,7 +254,7 @@ class AnalyticsEventScheduler:
         *,
         generation_started_at: float,
     ) -> _AnalyticsRetryWindow | None:
-        if result not in _TIMED_RETRY_RESULTS:
+        if result not in _WINDOW_RETRY_RESULTS and result != _ONE_SHOT_RETRY_RESULT:
             return None
         now = self._monotonic()
         if now >= generation_started_at + self._max_retry_window_seconds:
@@ -239,6 +264,7 @@ class AnalyticsEventScheduler:
             generation_started_at=generation_started_at,
             initial_seconds=self._retry_initial_seconds,
             max_window_seconds=self._max_retry_window_seconds,
+            repeatable=result in _WINDOW_RETRY_RESULTS,
         )
 
     def _offer_terminal(self, signal: object) -> None:

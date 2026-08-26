@@ -567,7 +567,7 @@ def test_worker_with_the_wrong_session_id_cannot_publish_for_an_existing_session
         adapter_factory=lambda: adapters.append(FakeAnalyticsAdapter()) or adapters[-1],
     ).poll_once()
 
-    assert state == "degraded"
+    assert state == "clean_replay"
     assert adapters == []
     assert read_rodex_session_statistics(1, config.rodex_database_path).statistics is None
 
@@ -976,8 +976,12 @@ def test_new_topology_is_promoted_only_after_its_source_batch_is_accepted(
 
     monkeypatch.setattr(worker._source_reader, "read", fail_new_child_read)
 
-    assert worker.poll_once(AnalyticsDirtyBatch(frozenset({child_thread_id}))) == "degraded"
+    assert (
+        worker.poll_once(AnalyticsDirtyBatch(frozenset({child_thread_id})))
+        == "clean_replay"
+    )
     assert child_thread_id not in worker._verified_sources
+    assert child_thread_id in worker._pending_resolution_thread_ids
     monkeypatch.setattr(worker._source_reader, "read", original_read)
 
     assert (
@@ -1100,7 +1104,7 @@ def test_same_size_rewrite_with_restored_mtime_invalidates_append_cursor(
         ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns),
     )
 
-    assert worker.poll_once() == "degraded"
+    assert worker.poll_once() == "clean_replay"
     assert len(adapter.analyses) == 1
     view = read_rodex_session_statistics(1, config.rodex_database_path)
     assert view.statistics is not None
@@ -1140,7 +1144,7 @@ def test_worker_does_not_adopt_a_replacement_codex_identity(
     with original_rollout.open("a", encoding="utf-8") as output:
         output.write('{"type":"event_msg","payload":{"changed":true}}\n')
 
-    assert worker.poll_once() == "degraded"
+    assert worker.poll_once() == "clean_replay"
 
     assert len(adapter.analyses) == 2
     sources = list_rodex_session_statistics_sources(1, config.rodex_database_path)
@@ -1262,7 +1266,7 @@ def test_analyzer_failure_preserves_last_good_aggregate_and_increments_health(
         output.write("{}\n")
     adapter.fail = True
 
-    assert worker.poll_once() == "degraded"
+    assert worker.poll_once() == "clean_replay"
 
     view = read_rodex_session_statistics(1, config.rodex_database_path)
     assert view.statistics is not None
@@ -1342,7 +1346,7 @@ def test_failed_analysis_resets_resident_state_for_one_clean_replay(
     adapters = iter((failed, recovered))
     worker = AnalyticsRolloutWorker(config, adapter_factory=lambda: next(adapters))
 
-    assert worker.poll_once() == "degraded"
+    assert worker.poll_once() == "clean_replay"
     assert worker.poll_once() == "up_to_date"
 
     assert recovered.analyses[0][0] == (rollout.read_bytes(),)
@@ -1391,7 +1395,7 @@ def test_analyzer_schema_drift_degrades_without_replacing_relational_snapshot(
     ).poll_once()
     after = read_rodex_session_statistics(1, config.rodex_database_path)
 
-    assert state == "degraded"
+    assert state == "clean_replay"
     assert after.statistics == before
     assert after.worker is not None and after.worker.worker_state == "degraded"
     assert after.worker.diagnostic_code == "analytics_error"
@@ -1456,7 +1460,7 @@ def test_stale_worker_cannot_publish_snapshot_or_health_after_replacement(
 
     state = AnalyticsRolloutWorker(config, adapter_factory=lambda: adapter).poll_once()
 
-    assert state == "degraded"
+    assert state == "clean_replay"
     view = read_rodex_session_statistics(1, config.rodex_database_path)
     assert view.statistics is None
     assert view.worker is None

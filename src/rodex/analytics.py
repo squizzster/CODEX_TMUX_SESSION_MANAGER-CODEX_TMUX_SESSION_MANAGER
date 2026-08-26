@@ -96,6 +96,7 @@ class StableRolloutRead:
 
     analyzer_content: bytes
     appended_analyzer_content: bytes
+    verified_source: VerifiedRollout
     prepared_read: AnalyticsSourceRead
     observation: RodexSessionStatisticsSourceObservation
     authenticated_source: AuthenticatedRolloutPrefix
@@ -325,6 +326,7 @@ class AnalyticsRolloutWorker:
                     for item in stable_reads
                 )
                 self._source_reader.accept([item.prepared_read for item in stable_reads])
+                self._promote_verified_sources(stable_reads)
                 self._requires_full_reconcile = False
                 if any(source_growth):
                     if self._schedule_followup is not None:
@@ -442,6 +444,7 @@ class AnalyticsRolloutWorker:
             }
             adapter.accept_batch()
             self._source_reader.accept([item.prepared_read for item in stable_reads])
+            self._promote_verified_sources(stable_reads)
             self._requires_full_reconcile = False
             if append_arrived_during_analysis:
                 if self._schedule_followup is not None:
@@ -457,7 +460,7 @@ class AnalyticsRolloutWorker:
         except RodexDatabaseNotFoundError:
             return "catching_up"
         except RodexAnalyticsPublicationRetryableError:
-            return "degraded"
+            return "publication_retry"
         except Exception as error:
             self._project_health(
                 "degraded",
@@ -519,9 +522,6 @@ class AnalyticsRolloutWorker:
         )
         if verified_sources is None:
             return None
-        self._verified_sources = {
-            verified.codex_thread_id: verified for verified in verified_sources
-        }
         reads: list[StableRolloutRead] = []
         for verified in verified_sources:
             captured = self._source_reader.read(
@@ -597,10 +597,6 @@ class AnalyticsRolloutWorker:
             if not added:
                 break
 
-        resolved_candidates = set(candidates).difference(pending_candidates)
-        self._verified_sources.update(
-            (thread_id, candidates[thread_id]) for thread_id in resolved_candidates
-        )
         selected: dict[CodexThreadId, VerifiedRollout] = {}
         unresolved = unavailable | set(pending_candidates)
         newly_discovered_thread_ids = set(candidates)
@@ -614,7 +610,7 @@ class AnalyticsRolloutWorker:
                 continue
             parent_thread_id = source.parent_codex_thread_id
             while parent_thread_id is not None:
-                parent = self._verified_sources.get(parent_thread_id)
+                parent = closure.get(parent_thread_id)
                 if parent is None:
                     raise RodexAnalyticsError(
                         f"verified source lost its ancestor: {source.codex_thread_id}"
@@ -669,6 +665,7 @@ class AnalyticsRolloutWorker:
         }
         adapter.accept_batch()
         self._source_reader.accept([item.prepared_read for item in prepared.stable_reads])
+        self._promote_verified_sources(prepared.stable_reads)
         self._requires_full_reconcile = False
         self._prepared_publication = None
         followup_thread_ids = set(prepared.followup_thread_ids)
@@ -687,6 +684,14 @@ class AnalyticsRolloutWorker:
         if followup_thread_ids:
             return "pending_append"
         return "up_to_date"
+
+    def _promote_verified_sources(
+        self,
+        stable_reads: Sequence[StableRolloutRead],
+    ) -> None:
+        for item in stable_reads:
+            source = item.verified_source
+            self._verified_sources[source.codex_thread_id] = source
 
     def _update_latest_turns(
         self,
@@ -1554,6 +1559,7 @@ def _stable_rollout_read(
     return StableRolloutRead(
         analyzer_content=captured.analyzer_content,
         appended_analyzer_content=captured.appended_analyzer_content,
+        verified_source=verified,
         prepared_read=captured,
         observation=RodexSessionStatisticsSourceObservation(
             codex_thread_id=verified.codex_thread_id,

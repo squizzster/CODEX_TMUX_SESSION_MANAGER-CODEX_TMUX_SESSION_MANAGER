@@ -30,6 +30,7 @@ ANALYTICS_SUBSCRIBER_START_TIMEOUT_SECONDS: Final = 5.0
 _DIRTY: Final = object()
 _STOP: Final = object()
 _STREAM_CLOSED: Final = object()
+_TIMED_RETRY_RESULTS: Final = frozenset({"catching_up", "publication_retry"})
 
 
 class AnalyticsEventStreamClosed(RuntimeError):
@@ -101,7 +102,7 @@ class _AnalyticsRetryWindow:
         )
 
     def retain_after(self, result: object, now: float) -> bool:
-        if result not in {"catching_up", "degraded"} or now >= self.deadline:
+        if result not in _TIMED_RETRY_RESULTS or now >= self.deadline:
             return False
         self.next_retry_at = min(now + self.next_delay_seconds, self.deadline)
         self.next_delay_seconds *= 2
@@ -179,27 +180,30 @@ class AnalyticsEventScheduler:
             generation_started_at=startup_started_at,
         )
         while True:
+            terminal = self._queued_terminal()
+            if terminal is _STOP:
+                return
+            if terminal is _STREAM_CLOSED:
+                raise AnalyticsEventStreamClosed("analytics event stream closed")
             now = self._monotonic()
             pending_deadline = self._pending_deadline()
-            if retry_window is not None and now >= retry_window.next_retry_at:
-                result = reconcile(AnalyticsDirtyBatch(frozenset()))
-                if not retry_window.retain_after(result, self._monotonic()):
-                    retry_window = None
-                continue
-            if (
-                retry_window is None
-                and pending_deadline is not None
-                and now >= pending_deadline
-            ):
+            if pending_deadline is not None and now >= pending_deadline:
                 batch, generation_started_at = self._take_pending_batch()
                 retry_window = self._retry_window_for(
                     reconcile(batch),
                     generation_started_at=generation_started_at,
                 )
                 continue
-            deadline = (
-                retry_window.next_retry_at if retry_window is not None else pending_deadline
+            if retry_window is not None and now >= retry_window.next_retry_at:
+                result = reconcile(AnalyticsDirtyBatch(frozenset()))
+                if not retry_window.retain_after(result, self._monotonic()):
+                    retry_window = None
+                continue
+            retry_deadline = None if retry_window is None else retry_window.next_retry_at
+            deadlines = tuple(
+                item for item in (pending_deadline, retry_deadline) if item is not None
             )
+            deadline = min(deadlines) if deadlines else None
             timeout = None if deadline is None else max(0.0, deadline - now)
             try:
                 signal = self._signals.get(timeout=timeout)
@@ -210,13 +214,22 @@ class AnalyticsEventScheduler:
             if signal is _STREAM_CLOSED:
                 raise AnalyticsEventStreamClosed("analytics event stream closed")
 
+    def _queued_terminal(self) -> object | None:
+        while True:
+            try:
+                signal = self._signals.get_nowait()
+            except queue.Empty:
+                return None
+            if signal is _STOP or signal is _STREAM_CLOSED:
+                return signal
+
     def _retry_window_for(
         self,
         result: object,
         *,
         generation_started_at: float,
     ) -> _AnalyticsRetryWindow | None:
-        if result not in {"catching_up", "degraded"}:
+        if result not in _TIMED_RETRY_RESULTS:
             return None
         now = self._monotonic()
         if now >= generation_started_at + self._max_retry_window_seconds:

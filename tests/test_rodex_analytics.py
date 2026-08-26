@@ -940,6 +940,52 @@ def test_same_burst_nested_children_resolve_in_parent_first_topology(
     assert len(view.sources) == 3
 
 
+def test_new_topology_is_promoted_only_after_its_source_batch_is_accepted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+    _rollout(config.codex_sessions_root, CODEX_SESSION_ID)
+    _create(config)
+    worker = AnalyticsRolloutWorker(config)
+    assert worker.poll_once() == "up_to_date"
+    child_thread_id = uuid.UUID(int=CODEX_SESSION_ID.int + 100)
+    _subagent_rollout(
+        config.codex_sessions_root,
+        CODEX_SESSION_ID,
+        child_thread_id,
+        linked_at_utc="2026-08-16T12:00:01.500000Z",
+    )
+    worker.observe_protocol_event(
+        {
+            "method": "thread/started",
+            "params": {
+                "thread": {
+                    "id": str(child_thread_id),
+                    "createdAt": "2026-08-16T12:00:01.500000Z",
+                }
+            },
+        }
+    )
+    original_read = worker._source_reader.read
+
+    def fail_new_child_read(source: object) -> object:
+        if source.codex_thread_id == child_thread_id:  # type: ignore[attr-defined]
+            raise OSError("new child read failed")
+        return original_read(source)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(worker._source_reader, "read", fail_new_child_read)
+
+    assert worker.poll_once(AnalyticsDirtyBatch(frozenset({child_thread_id}))) == "degraded"
+    assert child_thread_id not in worker._verified_sources
+    monkeypatch.setattr(worker._source_reader, "read", original_read)
+
+    assert (
+        worker.poll_once(AnalyticsDirtyBatch(frozenset({child_thread_id}))) == "up_to_date"
+    )
+    assert child_thread_id in worker._verified_sources
+
+
 def test_unchanged_rollout_does_not_recalculate_but_append_does(tmp_path: Path) -> None:
     config = _config(tmp_path)
     rollout = _rollout(config.codex_sessions_root, CODEX_SESSION_ID)
@@ -1271,7 +1317,7 @@ def test_transient_publication_retry_reuses_the_prepared_analysis(
 
     monkeypatch.setattr(RodexAnalyticsRegistry, "publish", record_publication)
 
-    assert worker.poll_once() == "degraded"
+    assert worker.poll_once() == "publication_retry"
     assert adapter.accepted_batches == 0
     assert worker.poll_once(AnalyticsDirtyBatch(frozenset())) == "up_to_date"
 

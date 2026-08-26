@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import queue
 import uuid
 from pathlib import Path
 from threading import Event, Thread
@@ -67,7 +68,7 @@ def test_many_dirty_signals_coalesce_into_one_reconciliation() -> None:
     assert reconciliations == 2
 
 
-def test_degraded_generation_retries_only_inside_bounded_window_then_blocks() -> None:
+def test_publication_retry_repeats_only_inside_bounded_window_then_blocks() -> None:
     scheduler = AnalyticsEventScheduler(
         quiet_seconds=0.01,
         max_batch_seconds=0.05,
@@ -82,7 +83,7 @@ def test_degraded_generation_retries_only_inside_bounded_window_then_blocks() ->
         reconciliations += 1
         if reconciliations == 2:
             retried.set()
-        return "degraded"
+        return "publication_retry"
 
     thread = Thread(target=scheduler.run, args=(reconcile,))
     thread.start()
@@ -96,6 +97,54 @@ def test_degraded_generation_retries_only_inside_bounded_window_then_blocks() ->
     scheduler.close()
     thread.join(timeout=1)
     assert not thread.is_alive()
+
+
+def test_degraded_generation_parks_without_a_timed_clean_replay() -> None:
+    scheduler = AnalyticsEventScheduler(
+        quiet_seconds=0.01,
+        max_batch_seconds=0.05,
+        retry_initial_seconds=0.01,
+        max_retry_window_seconds=0.04,
+    )
+    reconciled = Event()
+    reconciliations = 0
+
+    def reconcile(_batch: AnalyticsDirtyBatch) -> str:
+        nonlocal reconciliations
+        reconciliations += 1
+        reconciled.set()
+        return "degraded"
+
+    thread = Thread(target=scheduler.run, args=(reconcile,))
+    thread.start()
+    assert reconciled.wait(timeout=1)
+    Event().wait(0.06)
+
+    assert reconciliations == 1
+    scheduler.close()
+    thread.join(timeout=1)
+    assert not thread.is_alive()
+
+
+def test_queued_terminal_preempts_due_reconciliation_work() -> None:
+    scheduler = AnalyticsEventScheduler(
+        quiet_seconds=0,
+        max_batch_seconds=0.05,
+        retry_initial_seconds=0.01,
+        max_retry_window_seconds=0.04,
+    )
+    reconciliations = 0
+
+    def reconcile(_batch: AnalyticsDirtyBatch) -> str:
+        nonlocal reconciliations
+        reconciliations += 1
+        scheduler.offer_dirty(THREAD_ID)
+        scheduler.close()
+        return "catching_up"
+
+    scheduler.run(reconcile)
+
+    assert reconciliations == 1
 
 
 def test_catching_up_generation_can_resolve_after_its_first_retry() -> None:
@@ -138,7 +187,7 @@ def test_catching_up_generation_can_resolve_after_its_first_retry() -> None:
     ]
 
 
-def test_new_dirty_generation_restores_one_retry() -> None:
+def test_new_dirty_generation_restores_a_bounded_retry_window() -> None:
     scheduler = AnalyticsEventScheduler(
         quiet_seconds=0.01,
         max_batch_seconds=0.05,
@@ -156,7 +205,7 @@ def test_new_dirty_generation_restores_one_retry() -> None:
             twice.set()
         if reconciliations == 4:
             fourth.set()
-        return "degraded"
+        return "publication_retry"
 
     thread = Thread(target=scheduler.run, args=(reconcile,))
     thread.start()
@@ -167,6 +216,42 @@ def test_new_dirty_generation_restores_one_retry() -> None:
     scheduler.close()
     thread.join(timeout=1)
     assert not thread.is_alive()
+
+
+def test_due_dirty_generation_preempts_an_older_retry_window() -> None:
+    scheduler = AnalyticsEventScheduler(
+        quiet_seconds=0.005,
+        max_batch_seconds=0.02,
+        retry_initial_seconds=0.05,
+        max_retry_window_seconds=0.1,
+    )
+    startup_complete = Event()
+    dirty_reconciled = Event()
+    batches: list[AnalyticsDirtyBatch] = []
+
+    def reconcile(batch: AnalyticsDirtyBatch) -> str:
+        batches.append(batch)
+        if batch.full_reconcile:
+            startup_complete.set()
+            return "catching_up"
+        if batch.thread_ids:
+            dirty_reconciled.set()
+            return "up_to_date"
+        return "catching_up"
+
+    thread = Thread(target=scheduler.run, args=(reconcile,))
+    thread.start()
+    assert startup_complete.wait(timeout=1)
+    scheduler.offer_dirty(THREAD_ID)
+
+    assert dirty_reconciled.wait(timeout=0.04)
+    scheduler.close()
+    thread.join(timeout=1)
+    assert not thread.is_alive()
+    assert batches == [
+        AnalyticsDirtyBatch(frozenset(), full_reconcile=True),
+        AnalyticsDirtyBatch(frozenset({uuid.UUID(THREAD_ID)})),
+    ]
 
 
 def test_subscriber_start_delivers_ready_snapshot_before_return(
@@ -249,6 +334,9 @@ def test_continuously_ready_queue_cannot_starve_the_hard_batch_deadline() -> Non
     class ContinuouslyReadyQueue:
         def put_nowait(self, _signal: object) -> None:
             return
+
+        def get_nowait(self) -> object:
+            raise queue.Empty
 
         def get(self, timeout: float | None = None) -> object:
             clock[0] += 0.01

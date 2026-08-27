@@ -279,8 +279,14 @@ RODEX_SESSIONS_AGENT_TRACE_SUBAGENT_ACTIVITIES_TABLE: Final = (
 RODEX_SESSIONS_AGENT_TRACE_MESSAGES_EVENT_UNIQUE_INDEX: Final = (
     "rodex_sessions_agent_trace_messages_event_unique"
 )
+RODEX_SESSIONS_AGENT_TRACE_MESSAGES_SESSION_SCOPE_ID_UNIQUE_INDEX: Final = (
+    "rodex_sessions_agent_trace_messages_session_scope_id_unique"
+)
 RODEX_SESSIONS_AGENT_TRACE_TOOL_CALLS_EVENT_UNIQUE_INDEX: Final = (
     "rodex_sessions_agent_trace_tool_call_activities_event_unique"
+)
+RODEX_SESSIONS_AGENT_TRACE_TOOL_CALLS_SESSION_SCOPE_ID_UNIQUE_INDEX: Final = (
+    "rodex_sessions_agent_trace_tool_call_activities_session_scope_id_unique"
 )
 RODEX_SESSIONS_AGENT_TRACE_TOOL_CALLS_CALL_INDEX: Final = (
     "rodex_sessions_agent_trace_tool_call_activities_call"
@@ -300,8 +306,45 @@ RODEX_SESSIONS_AGENT_TRACE_RATE_LIMIT_WINDOWS_EVENT_ORDINAL_UNIQUE_INDEX: Final 
 RODEX_SESSIONS_AGENT_TRACE_SUBAGENT_ACTIVITIES_EVENT_UNIQUE_INDEX: Final = (
     "rodex_sessions_agent_trace_subagent_activities_event_unique"
 )
+RODEX_SESSIONS_AGENT_TRACE_SUBAGENT_ACTIVITIES_SESSION_SCOPE_ID_UNIQUE_INDEX: Final = (
+    "rodex_sessions_agent_trace_subagent_activities_session_scope_id_unique"
+)
 RODEX_SESSIONS_AGENT_TRACE_SUBAGENT_ACTIVITIES_TARGET_INDEX: Final = (
     "rodex_sessions_agent_trace_subagent_activities_target"
+)
+RODEX_SESSIONS_AGENT_REQUESTS_TABLE: Final = "rodex_sessions_agent_requests"
+RODEX_SESSIONS_AGENT_REQUESTS_PUBLIC_ID_UNIQUE_INDEX: Final = (
+    "rodex_sessions_agent_requests_public_id_unique"
+)
+RODEX_SESSIONS_AGENT_REQUESTS_SESSION_ID_UNIQUE_INDEX: Final = (
+    "rodex_sessions_agent_requests_session_id_unique"
+)
+RODEX_SESSIONS_AGENT_REQUESTS_TOOL_ACTIVITY_UNIQUE_INDEX: Final = (
+    "rodex_sessions_agent_requests_tool_activity_unique"
+)
+RODEX_SESSIONS_AGENT_REQUESTS_SUBAGENT_ACTIVITY_UNIQUE_INDEX: Final = (
+    "rodex_sessions_agent_requests_subagent_activity_unique"
+)
+RODEX_SESSIONS_AGENT_REQUESTS_PARENT_MESSAGE_INDEX: Final = (
+    "rodex_sessions_agent_requests_parent_message"
+)
+RODEX_SESSIONS_AGENT_REQUESTS_TARGET_ORDER_INDEX: Final = (
+    "rodex_sessions_agent_requests_target_order"
+)
+RODEX_SESSIONS_AGENT_REQUESTS_VALIDATE_INSERT_TRIGGER: Final = (
+    "rodex_sessions_agent_requests_validate_insert"
+)
+RODEX_SESSIONS_AGENT_REQUEST_TARGET_TURNS_TABLE: Final = (
+    "rodex_sessions_agent_request_target_turns"
+)
+RODEX_SESSIONS_AGENT_REQUEST_TARGET_TURNS_REQUEST_UNIQUE_INDEX: Final = (
+    "rodex_sessions_agent_request_target_turns_request_unique"
+)
+RODEX_SESSIONS_AGENT_REQUEST_TARGET_TURNS_TURN_UNIQUE_INDEX: Final = (
+    "rodex_sessions_agent_request_target_turns_turn_unique"
+)
+RODEX_SESSIONS_AGENT_REQUEST_TARGET_TURNS_VALIDATE_INSERT_TRIGGER: Final = (
+    "rodex_sessions_agent_request_target_turns_validate_insert"
 )
 RODEX_SESSIONS_COOL_NAMES_UNIQUE_INDEX: Final = "rodex_sessions_cool_names_id_unique"
 RODEX_SESSIONS_USER_DEFINED_COOL_NAMES_UNIQUE_INDEX: Final = (
@@ -1747,14 +1790,203 @@ CREATE TABLE IF NOT EXISTS {RODEX_SESSIONS_AGENT_TRACE_SUBAGENT_ACTIVITIES_TABLE
         event_kind = 'subagent_activity'
     ),
     rodex_sessions_id INTEGER NOT NULL,
+    rodex_sessions_codex_activity_scopes_id INTEGER NOT NULL,
     target_codex_threads_id INTEGER DEFAULT NULL,
+    rodex_sessions_codex_tool_calls_id INTEGER DEFAULT NULL,
     activity_kind TEXT NOT NULL CHECK (length(activity_kind) > 0),
     agent_path TEXT DEFAULT NULL,
-    FOREIGN KEY (rodex_sessions_id, rodex_sessions_agent_trace_events_id, event_kind)
+    FOREIGN KEY (rodex_sessions_id, rodex_sessions_codex_activity_scopes_id,
+        rodex_sessions_agent_trace_events_id, event_kind)
         REFERENCES {RODEX_SESSIONS_AGENT_TRACE_EVENTS_TABLE}
-            (rodex_sessions_id, id, event_kind),
+            (rodex_sessions_id, rodex_sessions_codex_activity_scopes_id,
+                id, event_kind),
+    FOREIGN KEY (rodex_sessions_id, rodex_sessions_codex_activity_scopes_id,
+        rodex_sessions_codex_tool_calls_id)
+        REFERENCES {RODEX_SESSIONS_CODEX_TOOL_CALLS_TABLE}
+            (rodex_sessions_id, rodex_sessions_codex_activity_scopes_id, id),
     FOREIGN KEY (target_codex_threads_id) REFERENCES {CODEX_THREADS_TABLE} (id)
 )
+"""
+_CREATE_AGENT_REQUESTS_TABLE = f"""
+CREATE TABLE IF NOT EXISTS {RODEX_SESSIONS_AGENT_REQUESTS_TABLE} (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent_request_public_id_signed_bigint_1 BIGINT NOT NULL CHECK (
+        typeof(agent_request_public_id_signed_bigint_1) = 'integer'
+    ),
+    agent_request_public_id_signed_bigint_2 BIGINT NOT NULL CHECK (
+        typeof(agent_request_public_id_signed_bigint_2) = 'integer'
+    ),
+    rodex_sessions_id INTEGER NOT NULL,
+    rodex_sessions_codex_activity_scopes_id INTEGER NOT NULL,
+    parent_rodex_sessions_agent_trace_messages_id INTEGER NOT NULL,
+    rodex_sessions_agent_trace_tool_call_activities_id INTEGER NOT NULL,
+    rodex_sessions_agent_trace_subagent_activities_id INTEGER NOT NULL,
+    target_codex_threads_id INTEGER NOT NULL,
+    FOREIGN KEY (rodex_sessions_id, rodex_sessions_codex_activity_scopes_id,
+        parent_rodex_sessions_agent_trace_messages_id)
+        REFERENCES {RODEX_SESSIONS_AGENT_TRACE_MESSAGES_TABLE}
+            (rodex_sessions_id, rodex_sessions_codex_activity_scopes_id, id),
+    FOREIGN KEY (rodex_sessions_id, rodex_sessions_codex_activity_scopes_id,
+        rodex_sessions_agent_trace_tool_call_activities_id)
+        REFERENCES {RODEX_SESSIONS_AGENT_TRACE_TOOL_CALLS_TABLE}
+            (rodex_sessions_id, rodex_sessions_codex_activity_scopes_id, id),
+    FOREIGN KEY (rodex_sessions_id, rodex_sessions_codex_activity_scopes_id,
+        rodex_sessions_agent_trace_subagent_activities_id)
+        REFERENCES {RODEX_SESSIONS_AGENT_TRACE_SUBAGENT_ACTIVITIES_TABLE}
+            (rodex_sessions_id, rodex_sessions_codex_activity_scopes_id, id),
+    FOREIGN KEY (target_codex_threads_id) REFERENCES {CODEX_THREADS_TABLE} (id)
+)
+"""
+_CREATE_AGENT_REQUESTS_VALIDATE_INSERT_TRIGGER = f"""
+CREATE TRIGGER IF NOT EXISTS {RODEX_SESSIONS_AGENT_REQUESTS_VALIDATE_INSERT_TRIGGER}
+BEFORE INSERT ON {RODEX_SESSIONS_AGENT_REQUESTS_TABLE}
+WHEN NOT EXISTS (
+    SELECT 1
+    FROM {RODEX_SESSIONS_CODEX_ACTIVITY_SCOPES_TABLE} AS scope
+    JOIN {RODEX_SESSIONS_AGENT_TRACE_MESSAGES_TABLE} AS parent_message
+        ON parent_message.id =
+            NEW.parent_rodex_sessions_agent_trace_messages_id
+    JOIN {RODEX_SESSIONS_AGENT_TRACE_EVENTS_TABLE} AS parent_event
+        ON parent_event.id = parent_message.rodex_sessions_agent_trace_events_id
+    JOIN {RODEX_SESSIONS_AGENT_TRACE_TOOL_CALLS_TABLE} AS tool_activity
+        ON tool_activity.id =
+            NEW.rodex_sessions_agent_trace_tool_call_activities_id
+    JOIN {RODEX_SESSIONS_CODEX_TOOL_CALLS_TABLE} AS tool_call
+        ON tool_call.id = tool_activity.rodex_sessions_codex_tool_calls_id
+    JOIN {TOOL_NAMES_TABLE} AS tool_name ON tool_name.id = tool_call.tool_names_id
+    JOIN {RODEX_SESSIONS_AGENT_TRACE_EVENTS_TABLE} AS tool_event
+        ON tool_event.id = tool_activity.rodex_sessions_agent_trace_events_id
+    JOIN {RODEX_SESSIONS_AGENT_TRACE_SUBAGENT_ACTIVITIES_TABLE} AS subagent_activity
+        ON subagent_activity.id =
+            NEW.rodex_sessions_agent_trace_subagent_activities_id
+    JOIN {RODEX_SESSIONS_AGENT_TRACE_EVENTS_TABLE} AS subagent_event
+        ON subagent_event.id =
+            subagent_activity.rodex_sessions_agent_trace_events_id
+    WHERE scope.id = NEW.rodex_sessions_codex_activity_scopes_id
+        AND scope.rodex_sessions_id = NEW.rodex_sessions_id
+        AND scope.rodex_sessions_codex_turns_id IS NOT NULL
+        AND parent_message.rodex_sessions_id = NEW.rodex_sessions_id
+        AND parent_message.rodex_sessions_codex_activity_scopes_id = scope.id
+        AND parent_message.message_role = 'user'
+        AND parent_message.body_capture_state = 'rollout_reference'
+        AND parent_message.rodex_sessions_codex_items_id IS NOT NULL
+        AND tool_activity.rodex_sessions_id = NEW.rodex_sessions_id
+        AND tool_activity.rodex_sessions_codex_activity_scopes_id = scope.id
+        AND tool_activity.activity_kind = 'request'
+        AND subagent_activity.rodex_sessions_id = NEW.rodex_sessions_id
+        AND subagent_activity.rodex_sessions_codex_activity_scopes_id = scope.id
+        AND subagent_activity.target_codex_threads_id =
+            NEW.target_codex_threads_id
+        AND subagent_activity.rodex_sessions_codex_tool_calls_id = tool_call.id
+        AND (
+            (tool_name.tool_name = 'collaboration.spawn_agent'
+                AND subagent_activity.activity_kind = 'started')
+            OR
+            (tool_name.tool_name = 'collaboration.followup_task'
+                AND subagent_activity.activity_kind = 'interacted')
+        )
+        AND (
+            parent_event.source_record_ordinal <
+                subagent_event.source_record_ordinal
+            OR (
+                parent_event.source_record_ordinal =
+                    subagent_event.source_record_ordinal
+                AND parent_event.derived_event_ordinal <
+                    subagent_event.derived_event_ordinal
+            )
+        )
+        AND (
+            tool_event.source_record_ordinal <
+                subagent_event.source_record_ordinal
+            OR (
+                tool_event.source_record_ordinal =
+                    subagent_event.source_record_ordinal
+                AND tool_event.derived_event_ordinal <
+                    subagent_event.derived_event_ordinal
+            )
+        )
+        AND NOT EXISTS (
+            SELECT 1
+            FROM {RODEX_SESSIONS_AGENT_TRACE_MESSAGES_TABLE} AS later_message
+            JOIN {RODEX_SESSIONS_AGENT_TRACE_EVENTS_TABLE} AS later_event
+                ON later_event.id =
+                    later_message.rodex_sessions_agent_trace_events_id
+            WHERE later_message.rodex_sessions_id = NEW.rodex_sessions_id
+                AND later_message.rodex_sessions_codex_activity_scopes_id =
+                    scope.id
+                AND later_message.message_role = 'user'
+                AND (
+                    later_event.source_record_ordinal >
+                        parent_event.source_record_ordinal
+                    OR (
+                        later_event.source_record_ordinal =
+                            parent_event.source_record_ordinal
+                        AND later_event.derived_event_ordinal >
+                            parent_event.derived_event_ordinal
+                    )
+                )
+                AND (
+                    later_event.source_record_ordinal <
+                        subagent_event.source_record_ordinal
+                    OR (
+                        later_event.source_record_ordinal =
+                            subagent_event.source_record_ordinal
+                        AND later_event.derived_event_ordinal <
+                            subagent_event.derived_event_ordinal
+                    )
+                )
+        )
+)
+BEGIN
+    SELECT RAISE(ABORT, 'agent request provenance is inconsistent');
+END
+"""
+_CREATE_AGENT_REQUEST_TARGET_TURNS_TABLE = f"""
+CREATE TABLE IF NOT EXISTS {RODEX_SESSIONS_AGENT_REQUEST_TARGET_TURNS_TABLE} (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    rodex_sessions_id INTEGER NOT NULL,
+    rodex_sessions_agent_requests_id INTEGER NOT NULL,
+    target_rodex_sessions_codex_turns_id INTEGER NOT NULL,
+    association_kind TEXT NOT NULL DEFAULT 'next_observed_turn' CHECK (
+        association_kind = 'next_observed_turn'
+    ),
+    FOREIGN KEY (rodex_sessions_id, rodex_sessions_agent_requests_id)
+        REFERENCES {RODEX_SESSIONS_AGENT_REQUESTS_TABLE} (rodex_sessions_id, id),
+    FOREIGN KEY (rodex_sessions_id, target_rodex_sessions_codex_turns_id)
+        REFERENCES {RODEX_SESSIONS_CODEX_TURNS_TABLE} (rodex_sessions_id, id)
+)
+"""
+_CREATE_AGENT_REQUEST_TARGET_TURNS_VALIDATE_INSERT_TRIGGER = f"""
+CREATE TRIGGER IF NOT EXISTS
+    {RODEX_SESSIONS_AGENT_REQUEST_TARGET_TURNS_VALIDATE_INSERT_TRIGGER}
+BEFORE INSERT ON {RODEX_SESSIONS_AGENT_REQUEST_TARGET_TURNS_TABLE}
+WHEN NOT EXISTS (
+    SELECT 1
+    FROM {RODEX_SESSIONS_AGENT_REQUESTS_TABLE} AS request
+    JOIN {RODEX_SESSIONS_AGENT_TRACE_SUBAGENT_ACTIVITIES_TABLE} AS activity
+        ON activity.id =
+            request.rodex_sessions_agent_trace_subagent_activities_id
+    JOIN {RODEX_SESSIONS_AGENT_TRACE_EVENTS_TABLE} AS request_event
+        ON request_event.id = activity.rodex_sessions_agent_trace_events_id
+    JOIN {RODEX_SESSIONS_CODEX_THREADS_TABLE} AS target_membership
+        ON target_membership.rodex_sessions_id = request.rodex_sessions_id
+        AND target_membership.codex_threads_id = request.target_codex_threads_id
+    JOIN {RODEX_SESSIONS_CODEX_TURNS_TABLE} AS target_turn
+        ON target_turn.id = NEW.target_rodex_sessions_codex_turns_id
+        AND target_turn.rodex_sessions_id = request.rodex_sessions_id
+        AND target_turn.rodex_sessions_codex_threads_id = target_membership.id
+    JOIN {RODEX_SESSIONS_CODEX_TURN_STATES_TABLE} AS target_state
+        ON target_state.rodex_sessions_codex_turns_id = target_turn.id
+    WHERE request.id = NEW.rodex_sessions_agent_requests_id
+        AND request.rodex_sessions_id = NEW.rodex_sessions_id
+        AND request_event.event_time_utc IS NOT NULL
+        AND target_state.started_at_utc IS NOT NULL
+        AND julianday(target_state.started_at_utc) >=
+            julianday(request_event.event_time_utc)
+)
+BEGIN
+    SELECT RAISE(ABORT, 'agent request target turn is inconsistent');
+END
 """
 
 
@@ -2523,7 +2755,14 @@ def initialise_rodex_database(database_path: str | os.PathLike[str] | None = Non
                     ("rodex_sessions_agent_trace_events_id", "INTEGER", 1, 0),
                     ("event_kind", "TEXT", 1, 0),
                     ("rodex_sessions_id", "INTEGER", 1, 0),
+                    (
+                        "rodex_sessions_codex_activity_scopes_id",
+                        "INTEGER",
+                        1,
+                        0,
+                    ),
                     ("target_codex_threads_id", "INTEGER", 0, 0),
+                    ("rodex_sessions_codex_tool_calls_id", "INTEGER", 0, 0),
                     ("activity_kind", "TEXT", 1, 0),
                     ("agent_path", "TEXT", 0, 0),
                 ],
@@ -2572,6 +2811,21 @@ def initialise_rodex_database(database_path: str | os.PathLike[str] | None = Non
                 RODEX_SESSIONS_AGENT_TRACE_SUBAGENT_ACTIVITIES_EVENT_UNIQUE_INDEX,
                 ["rodex_sessions_agent_trace_events_id"],
             ),
+            (
+                RODEX_SESSIONS_AGENT_TRACE_MESSAGES_TABLE,
+                RODEX_SESSIONS_AGENT_TRACE_MESSAGES_SESSION_SCOPE_ID_UNIQUE_INDEX,
+                ["rodex_sessions_id", "rodex_sessions_codex_activity_scopes_id", "id"],
+            ),
+            (
+                RODEX_SESSIONS_AGENT_TRACE_TOOL_CALLS_TABLE,
+                RODEX_SESSIONS_AGENT_TRACE_TOOL_CALLS_SESSION_SCOPE_ID_UNIQUE_INDEX,
+                ["rodex_sessions_id", "rodex_sessions_codex_activity_scopes_id", "id"],
+            ),
+            (
+                RODEX_SESSIONS_AGENT_TRACE_SUBAGENT_ACTIVITIES_TABLE,
+                RODEX_SESSIONS_AGENT_TRACE_SUBAGENT_ACTIVITIES_SESSION_SCOPE_ID_UNIQUE_INDEX,
+                ["rodex_sessions_id", "rodex_sessions_codex_activity_scopes_id", "id"],
+            ),
         ):
             connection.execute(
                 f"CREATE UNIQUE INDEX IF NOT EXISTS {index_name} "
@@ -2603,6 +2857,102 @@ def initialise_rodex_database(database_path: str | os.PathLike[str] | None = Non
             RODEX_SESSIONS_AGENT_TRACE_SUBAGENT_ACTIVITIES_TARGET_INDEX,
             ["target_codex_threads_id"],
             unique=False,
+        )
+        connection.execute(_CREATE_AGENT_REQUESTS_TABLE)
+        _verify_agent_requests_table(connection)
+        for index_name, index_columns, unique in (
+            (
+                RODEX_SESSIONS_AGENT_REQUESTS_PUBLIC_ID_UNIQUE_INDEX,
+                [
+                    "agent_request_public_id_signed_bigint_1",
+                    "agent_request_public_id_signed_bigint_2",
+                ],
+                True,
+            ),
+            (
+                RODEX_SESSIONS_AGENT_REQUESTS_SESSION_ID_UNIQUE_INDEX,
+                ["rodex_sessions_id", "id"],
+                True,
+            ),
+            (
+                RODEX_SESSIONS_AGENT_REQUESTS_TOOL_ACTIVITY_UNIQUE_INDEX,
+                ["rodex_sessions_agent_trace_tool_call_activities_id"],
+                True,
+            ),
+            (
+                RODEX_SESSIONS_AGENT_REQUESTS_SUBAGENT_ACTIVITY_UNIQUE_INDEX,
+                ["rodex_sessions_agent_trace_subagent_activities_id"],
+                True,
+            ),
+            (
+                RODEX_SESSIONS_AGENT_REQUESTS_PARENT_MESSAGE_INDEX,
+                ["parent_rodex_sessions_agent_trace_messages_id"],
+                False,
+            ),
+            (
+                RODEX_SESSIONS_AGENT_REQUESTS_TARGET_ORDER_INDEX,
+                ["rodex_sessions_id", "target_codex_threads_id", "id"],
+                False,
+            ),
+        ):
+            connection.execute(
+                f"CREATE {'UNIQUE ' if unique else ''}INDEX IF NOT EXISTS "
+                f"{index_name} ON {RODEX_SESSIONS_AGENT_REQUESTS_TABLE} "
+                f"({', '.join(index_columns)})"
+            )
+            _verify_index(
+                connection,
+                RODEX_SESSIONS_AGENT_REQUESTS_TABLE,
+                index_name,
+                index_columns,
+                unique=unique,
+            )
+        connection.execute(_CREATE_AGENT_REQUESTS_VALIDATE_INSERT_TRIGGER)
+        _verify_schema_object_definition_exact(
+            connection,
+            "trigger",
+            RODEX_SESSIONS_AGENT_REQUESTS_VALIDATE_INSERT_TRIGGER,
+            _CREATE_AGENT_REQUESTS_VALIDATE_INSERT_TRIGGER,
+        )
+        _create_and_verify_append_only_triggers(
+            connection,
+            RODEX_SESSIONS_AGENT_REQUESTS_TABLE,
+            "agent request identity and provenance are immutable",
+        )
+        connection.execute(_CREATE_AGENT_REQUEST_TARGET_TURNS_TABLE)
+        _verify_agent_request_target_turns_table(connection)
+        for index_name, index_columns in (
+            (
+                RODEX_SESSIONS_AGENT_REQUEST_TARGET_TURNS_REQUEST_UNIQUE_INDEX,
+                ["rodex_sessions_agent_requests_id"],
+            ),
+            (
+                RODEX_SESSIONS_AGENT_REQUEST_TARGET_TURNS_TURN_UNIQUE_INDEX,
+                ["target_rodex_sessions_codex_turns_id"],
+            ),
+        ):
+            connection.execute(
+                f"CREATE UNIQUE INDEX IF NOT EXISTS {index_name} ON "
+                f"{RODEX_SESSIONS_AGENT_REQUEST_TARGET_TURNS_TABLE} "
+                f"({', '.join(index_columns)})"
+            )
+            _verify_unique_index(
+                connection,
+                RODEX_SESSIONS_AGENT_REQUEST_TARGET_TURNS_TABLE,
+                index_name,
+                index_columns,
+            )
+        connection.execute(_CREATE_AGENT_REQUEST_TARGET_TURNS_VALIDATE_INSERT_TRIGGER)
+        _verify_schema_object_definition_exact(
+            connection,
+            "trigger",
+            RODEX_SESSIONS_AGENT_REQUEST_TARGET_TURNS_VALIDATE_INSERT_TRIGGER,
+            _CREATE_AGENT_REQUEST_TARGET_TURNS_VALIDATE_INSERT_TRIGGER,
+        )
+        _create_and_verify_append_only_triggers(
+            connection,
+            RODEX_SESSIONS_AGENT_REQUEST_TARGET_TURNS_TABLE,
+            "agent request target-turn association is immutable",
         )
     return path
 
@@ -4050,13 +4400,19 @@ def _verify_agent_trace_detail_table(
     expected_columns: list[tuple[str, str, int, int]],
 ) -> None:
     _verify_table_columns(connection, table_name, expected_columns)
-    exact_scope_tables = {
+    exact_event_scope_tables = {
+        RODEX_SESSIONS_AGENT_TRACE_MESSAGES_TABLE,
+        RODEX_SESSIONS_AGENT_TRACE_TOOL_CALLS_TABLE,
+        RODEX_SESSIONS_AGENT_TRACE_COMMAND_EXECUTIONS_TABLE,
+        RODEX_SESSIONS_AGENT_TRACE_SUBAGENT_ACTIVITIES_TABLE,
+    }
+    item_scope_tables = {
         RODEX_SESSIONS_AGENT_TRACE_MESSAGES_TABLE,
         RODEX_SESSIONS_AGENT_TRACE_TOOL_CALLS_TABLE,
         RODEX_SESSIONS_AGENT_TRACE_COMMAND_EXECUTIONS_TABLE,
     }
     expected_foreign_keys: list[tuple[tuple[str, str, str], ...]] = []
-    if table_name in exact_scope_tables:
+    if table_name in exact_event_scope_tables:
         expected_foreign_keys.append(
             (
                 (
@@ -4068,26 +4424,6 @@ def _verify_agent_trace_detail_table(
                     RODEX_SESSIONS_AGENT_TRACE_EVENTS_TABLE,
                     "rodex_sessions_codex_activity_scopes_id",
                     "rodex_sessions_codex_activity_scopes_id",
-                ),
-                (
-                    RODEX_SESSIONS_AGENT_TRACE_EVENTS_TABLE,
-                    "rodex_sessions_agent_trace_events_id",
-                    "id",
-                ),
-                (
-                    RODEX_SESSIONS_AGENT_TRACE_EVENTS_TABLE,
-                    "event_kind",
-                    "event_kind",
-                ),
-            )
-        )
-    elif table_name == RODEX_SESSIONS_AGENT_TRACE_SUBAGENT_ACTIVITIES_TABLE:
-        expected_foreign_keys.append(
-            (
-                (
-                    RODEX_SESSIONS_AGENT_TRACE_EVENTS_TABLE,
-                    "rodex_sessions_id",
-                    "rodex_sessions_id",
                 ),
                 (
                     RODEX_SESSIONS_AGENT_TRACE_EVENTS_TABLE,
@@ -4116,7 +4452,7 @@ def _verify_agent_trace_detail_table(
                 ),
             )
         )
-    if table_name in exact_scope_tables:
+    if table_name in item_scope_tables:
         expected_foreign_keys.append(
             (
                 (
@@ -4150,8 +4486,27 @@ def _verify_agent_trace_detail_table(
             )
         )
     elif table_name == RODEX_SESSIONS_AGENT_TRACE_SUBAGENT_ACTIVITIES_TABLE:
-        expected_foreign_keys.append(
-            ((CODEX_THREADS_TABLE, "target_codex_threads_id", "id"),)
+        expected_foreign_keys.extend(
+            (
+                ((CODEX_THREADS_TABLE, "target_codex_threads_id", "id"),),
+                (
+                    (
+                        RODEX_SESSIONS_CODEX_TOOL_CALLS_TABLE,
+                        "rodex_sessions_id",
+                        "rodex_sessions_id",
+                    ),
+                    (
+                        RODEX_SESSIONS_CODEX_TOOL_CALLS_TABLE,
+                        "rodex_sessions_codex_activity_scopes_id",
+                        "rodex_sessions_codex_activity_scopes_id",
+                    ),
+                    (
+                        RODEX_SESSIONS_CODEX_TOOL_CALLS_TABLE,
+                        "rodex_sessions_codex_tool_calls_id",
+                        "id",
+                    ),
+                ),
+            )
         )
     elif table_name == RODEX_SESSIONS_AGENT_TRACE_TOOL_CALLS_TABLE:
         expected_foreign_keys.append(
@@ -4217,6 +4572,154 @@ def _verify_agent_trace_detail_table(
         connection,
         table_name,
         (*required_fragments[table_name], f"EVENT_KIND = '{expected_event_kind}'"),
+    )
+
+
+def _verify_agent_requests_table(connection: sqlite3.Connection) -> None:
+    _verify_table_columns(
+        connection,
+        RODEX_SESSIONS_AGENT_REQUESTS_TABLE,
+        [
+            ("id", "INTEGER", 0, 1),
+            ("agent_request_public_id_signed_bigint_1", "BIGINT", 1, 0),
+            ("agent_request_public_id_signed_bigint_2", "BIGINT", 1, 0),
+            ("rodex_sessions_id", "INTEGER", 1, 0),
+            ("rodex_sessions_codex_activity_scopes_id", "INTEGER", 1, 0),
+            (
+                "parent_rodex_sessions_agent_trace_messages_id",
+                "INTEGER",
+                1,
+                0,
+            ),
+            (
+                "rodex_sessions_agent_trace_tool_call_activities_id",
+                "INTEGER",
+                1,
+                0,
+            ),
+            (
+                "rodex_sessions_agent_trace_subagent_activities_id",
+                "INTEGER",
+                1,
+                0,
+            ),
+            ("target_codex_threads_id", "INTEGER", 1, 0),
+        ],
+    )
+    _verify_exact_foreign_keys(
+        connection,
+        RODEX_SESSIONS_AGENT_REQUESTS_TABLE,
+        (
+            (
+                (
+                    RODEX_SESSIONS_AGENT_TRACE_MESSAGES_TABLE,
+                    "rodex_sessions_id",
+                    "rodex_sessions_id",
+                ),
+                (
+                    RODEX_SESSIONS_AGENT_TRACE_MESSAGES_TABLE,
+                    "rodex_sessions_codex_activity_scopes_id",
+                    "rodex_sessions_codex_activity_scopes_id",
+                ),
+                (
+                    RODEX_SESSIONS_AGENT_TRACE_MESSAGES_TABLE,
+                    "parent_rodex_sessions_agent_trace_messages_id",
+                    "id",
+                ),
+            ),
+            (
+                (
+                    RODEX_SESSIONS_AGENT_TRACE_TOOL_CALLS_TABLE,
+                    "rodex_sessions_id",
+                    "rodex_sessions_id",
+                ),
+                (
+                    RODEX_SESSIONS_AGENT_TRACE_TOOL_CALLS_TABLE,
+                    "rodex_sessions_codex_activity_scopes_id",
+                    "rodex_sessions_codex_activity_scopes_id",
+                ),
+                (
+                    RODEX_SESSIONS_AGENT_TRACE_TOOL_CALLS_TABLE,
+                    "rodex_sessions_agent_trace_tool_call_activities_id",
+                    "id",
+                ),
+            ),
+            (
+                (
+                    RODEX_SESSIONS_AGENT_TRACE_SUBAGENT_ACTIVITIES_TABLE,
+                    "rodex_sessions_id",
+                    "rodex_sessions_id",
+                ),
+                (
+                    RODEX_SESSIONS_AGENT_TRACE_SUBAGENT_ACTIVITIES_TABLE,
+                    "rodex_sessions_codex_activity_scopes_id",
+                    "rodex_sessions_codex_activity_scopes_id",
+                ),
+                (
+                    RODEX_SESSIONS_AGENT_TRACE_SUBAGENT_ACTIVITIES_TABLE,
+                    "rodex_sessions_agent_trace_subagent_activities_id",
+                    "id",
+                ),
+            ),
+            ((CODEX_THREADS_TABLE, "target_codex_threads_id", "id"),),
+        ),
+    )
+    _verify_table_definition_contains(
+        connection,
+        RODEX_SESSIONS_AGENT_REQUESTS_TABLE,
+        (
+            "TYPEOF(AGENT_REQUEST_PUBLIC_ID_SIGNED_BIGINT_1) = 'INTEGER'",
+            "TYPEOF(AGENT_REQUEST_PUBLIC_ID_SIGNED_BIGINT_2) = 'INTEGER'",
+        ),
+    )
+
+
+def _verify_agent_request_target_turns_table(connection: sqlite3.Connection) -> None:
+    _verify_table_columns(
+        connection,
+        RODEX_SESSIONS_AGENT_REQUEST_TARGET_TURNS_TABLE,
+        [
+            ("id", "INTEGER", 0, 1),
+            ("rodex_sessions_id", "INTEGER", 1, 0),
+            ("rodex_sessions_agent_requests_id", "INTEGER", 1, 0),
+            ("target_rodex_sessions_codex_turns_id", "INTEGER", 1, 0),
+            ("association_kind", "TEXT", 1, 0),
+        ],
+    )
+    _verify_exact_foreign_keys(
+        connection,
+        RODEX_SESSIONS_AGENT_REQUEST_TARGET_TURNS_TABLE,
+        (
+            (
+                (
+                    RODEX_SESSIONS_AGENT_REQUESTS_TABLE,
+                    "rodex_sessions_id",
+                    "rodex_sessions_id",
+                ),
+                (
+                    RODEX_SESSIONS_AGENT_REQUESTS_TABLE,
+                    "rodex_sessions_agent_requests_id",
+                    "id",
+                ),
+            ),
+            (
+                (
+                    RODEX_SESSIONS_CODEX_TURNS_TABLE,
+                    "rodex_sessions_id",
+                    "rodex_sessions_id",
+                ),
+                (
+                    RODEX_SESSIONS_CODEX_TURNS_TABLE,
+                    "target_rodex_sessions_codex_turns_id",
+                    "id",
+                ),
+            ),
+        ),
+    )
+    _verify_table_definition_contains(
+        connection,
+        RODEX_SESSIONS_AGENT_REQUEST_TARGET_TURNS_TABLE,
+        ("ASSOCIATION_KIND = 'NEXT_OBSERVED_TURN'",),
     )
 
 

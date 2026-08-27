@@ -45,6 +45,7 @@ def _spawn_event(
     method: str = "item/started",
     item_id: str = "call-spawn-1",
     activity_kind: str = "started",
+    turn_id: str = "turn-1",
 ) -> dict[str, object]:
     return {
         "emittedAtMs": 1787794770053,
@@ -52,7 +53,7 @@ def _spawn_event(
         "params": {
             "startedAtMs": 1787794770052,
             "threadId": str(ROOT_THREAD_ID),
-            "turnId": "turn-1",
+            "turnId": turn_id,
             "item": {
                 "type": "subAgentActivity",
                 "id": item_id,
@@ -132,7 +133,7 @@ def test_observed_subagent_activity_projection_is_exact_and_content_free() -> No
     projected = project_subagent_activity_event(event)
 
     assert projected == {
-        "schema": "rodex-agent-observer-v1",
+        "schema": "rodex-agent-observer-v2",
         "kind": "app_server_subagent_activity",
         "method": "item/started",
         "thread_id": str(ROOT_THREAD_ID),
@@ -192,7 +193,7 @@ def test_agent_message_projection_accepts_only_completed_agent_authored_text() -
     projected = project_agent_message_event(_agent_message_event())
 
     assert projected == {
-        "schema": "rodex-agent-observer-v1",
+        "schema": "rodex-agent-observer-v2",
         "kind": "app_server_agent_message",
         "thread_id": str(CHILD_THREAD_ID),
         "turn_id": "turn-child",
@@ -218,7 +219,7 @@ def test_user_message_projection_preserves_exact_text_blocks_and_provenance() ->
     )
 
     assert project_user_message_event(event) == {
-        "schema": "rodex-agent-observer-v1",
+        "schema": "rodex-agent-observer-v2",
         "kind": "app_server_user_message",
         "thread_id": str(ROOT_THREAD_ID),
         "turn_id": "turn-1",
@@ -395,12 +396,12 @@ def test_same_turn_parent_request_is_sent_exactly_without_entering_process_args(
     path, parent_request = sent[0]
     assert path == observer_control_socket_path(tmp_path / "events-runtime-a.sock")
     assert parent_request == {
-        "schema": "rodex-agent-observer-v1",
+        "schema": "rodex-agent-observer-v2",
         "kind": "parent_request",
         "thread_id": str(ROOT_THREAD_ID),
         "turn_id": "turn-1",
         "target_thread_id": str(CHILD_THREAD_ID),
-        "spawn_item_id": "call-spawn-1",
+        "activity_item_id": "call-spawn-1",
         "item": {
             "type": "userMessage",
             "id": "user-message-1",
@@ -445,6 +446,63 @@ def test_parent_request_is_not_correlated_across_turns_or_roots(tmp_path: Path) 
     assert len(sent) == 1
     assert sent[0][1]["kind"] == "app_server_subagent_activity"
     assert "parent_request_follows" not in sent[0][1]
+
+
+def test_same_agent_followup_receives_its_new_exact_parent_request(tmp_path: Path) -> None:
+    sent: list[tuple[Path, dict[str, object]]] = []
+
+    def runner(command: list[str], **_options: object) -> subprocess.CompletedProcess[str]:
+        operation = command[3]
+        if operation == "show-options":
+            return subprocess.CompletedProcess(command, 0, "%9\n", "")
+        if operation == "display-message":
+            return subprocess.CompletedProcess(command, 0, "%9|%7|0\n", "")
+        raise AssertionError(f"unexpected tmux mutation: {command}")
+
+    controller = AgentObserverPaneController(
+        "/usr/bin/tmux",
+        tmp_path / "tmux.sock",
+        "%7",
+        tmp_path / "events.sock",
+        runner=runner,
+        cursor_reader=lambda *_args: TRACE_CURSOR,
+        event_sender=lambda path, event: sent.append((path, event)),
+    )
+    controller.activate(
+        database_path=tmp_path / "rodex.sqlite3",
+        rodex_sessions_id=3,
+        rodex_session_id="1234567890abcdef",
+        root_thread_id=ROOT_THREAD_ID,
+    )
+    controller.observe_protocol_event(_spawn_event())
+    sent.clear()
+
+    controller.observe_protocol_event(
+        _user_message_event(
+            turn_id="turn-2",
+            item_id="user-message-2",
+            text="Now analyze the stock market, Iran, tariffs, and Truth Social.",
+        )
+    )
+    controller.observe_protocol_event(
+        _spawn_event(
+            method="item/completed",
+            item_id="call-followup-1",
+            activity_kind="interacted",
+            turn_id="turn-2",
+        )
+    )
+
+    assert [event["kind"] for _, event in sent] == [
+        "app_server_subagent_activity",
+        "parent_request",
+    ]
+    assert sent[0][1]["parent_request_follows"] is True
+    assert sent[1][1]["item"] == {
+        "type": "userMessage",
+        "id": "user-message-2",
+        "text_blocks": ["Now analyze the stock market, Iran, tariffs, and Truth Social."],
+    }
 
 
 def test_existing_observer_retries_live_event_until_control_socket_is_ready(
@@ -498,12 +556,12 @@ def test_observer_view_renders_exact_parent_request_after_tracked_spawn() -> Non
     initial["parent_request_follows"] = True
     view = AgentObserverView(root_thread_id=ROOT_THREAD_ID, initial_event=initial)
     request_event = {
-        "schema": "rodex-agent-observer-v1",
+        "schema": "rodex-agent-observer-v2",
         "kind": "parent_request",
         "thread_id": str(ROOT_THREAD_ID),
         "turn_id": "turn-1",
         "target_thread_id": str(CHILD_THREAD_ID),
-        "spawn_item_id": "call-spawn-1",
+        "activity_item_id": "call-spawn-1",
         "item": parent["item"],
     }
 
@@ -529,12 +587,12 @@ def test_observer_view_rejects_cross_root_activity_and_parent_request() -> None:
     assert (
         view.accept_parent_request_event(
             {
-                "schema": "rodex-agent-observer-v1",
+                "schema": "rodex-agent-observer-v2",
                 "kind": "parent_request",
                 "thread_id": str(OTHER_THREAD_ID),
                 "turn_id": "turn-1",
                 "target_thread_id": str(CHILD_THREAD_ID),
-                "spawn_item_id": "call-spawn-1",
+                "activity_item_id": "call-spawn-1",
                 "item": {
                     "type": "userMessage",
                     "id": "user-message-1",
@@ -734,6 +792,48 @@ def test_non_start_activity_does_not_report_scope_unavailable() -> None:
     assert view.initial_lines == ("• live-review · interacted",)
 
 
+def test_observer_view_starts_a_new_same_agent_turn_for_followup_request() -> None:
+    initial = project_subagent_activity_event(_spawn_event())
+    followup = project_subagent_activity_event(
+        _spawn_event(
+            method="item/completed",
+            item_id="call-followup-1",
+            activity_kind="interacted",
+            turn_id="turn-2",
+        )
+    )
+    parent = project_user_message_event(
+        _user_message_event(
+            turn_id="turn-2",
+            item_id="user-message-2",
+            text="Second scope on the same agent.",
+        )
+    )
+    assert initial is not None
+    assert followup is not None
+    assert parent is not None
+    followup["parent_request_follows"] = True
+    view = AgentObserverView(root_thread_id=ROOT_THREAD_ID, initial_event=initial)
+
+    assert view.accept_app_server_event(followup) == ["↻ live-review received follow-up"]
+    assert view.accept_parent_request_event(
+        {
+            "schema": "rodex-agent-observer-v2",
+            "kind": "parent_request",
+            "thread_id": str(ROOT_THREAD_ID),
+            "turn_id": "turn-2",
+            "target_thread_id": str(CHILD_THREAD_ID),
+            "activity_item_id": "call-followup-1",
+            "item": parent["item"],
+        }
+    ) == [
+        "",
+        "REQUEST · exact parent message",
+        "  Second scope on the same agent.",
+    ]
+    assert view.monitoring is True
+
+
 def test_app_item_completion_cannot_suppress_the_final_durable_trace_read() -> None:
     initial = project_subagent_activity_event(_spawn_event())
     completed = project_subagent_activity_event(_spawn_event(method="item/completed"))
@@ -788,7 +888,7 @@ def test_trace_publication_notification_is_a_nonblocking_datagram(tmp_path: Path
         receiver.close()
 
     assert payload == {
-        "schema": "rodex-agent-observer-v1",
+        "schema": "rodex-agent-observer-v2",
         "kind": "trace_published",
         "trace_publication_sequence": 17,
         "caught_up": True,

@@ -31,7 +31,7 @@ from rodex_registry import (
 
 from .protocol_proxy import AGENT_OBSERVER_EVENT_STREAM_PATH
 
-OBSERVER_SCHEMA: Final = "rodex-agent-observer-v1"
+OBSERVER_SCHEMA: Final = "rodex-agent-observer-v2"
 OBSERVER_CONTROL_SOCKET_PREFIX: Final = "agent-observer-"
 OBSERVER_PRIMARY_PANE_OPTION: Final = "@rodex_agent_observer_pane_id"
 OBSERVER_OWNER_PANE_OPTION: Final = "@rodex_agent_observer_for"
@@ -208,7 +208,7 @@ def project_agent_message_event(
 def project_user_message_event(
     event: Mapping[str, object] | None,
 ) -> dict[str, object] | None:
-    """Project exact completed parent-user text for same-turn spawn correlation."""
+    """Project exact completed parent-user text for same-turn request correlation."""
     if event is None or event.get("method") != "item/completed":
         return None
     params = event.get("params")
@@ -367,7 +367,10 @@ class AgentObserverPaneController:
             cursor = self._cursor_reader(self._rodex_sessions_id, self._database_path)
             projected["after_event_id"] = None if cursor is None else str(cursor)
             self._known_activity_item_ids.add(item_id)
-        request_event = self._parent_request_event(projected) if is_new_spawn else None
+        is_request_activity = is_new_spawn or item["activity_kind"] == "interacted"
+        request_event = (
+            self._parent_request_event(projected) if is_request_activity else None
+        )
         if request_event is not None:
             projected["parent_request_follows"] = True
         self._tracked_target_thread_ids.add(target_thread_id)
@@ -393,24 +396,24 @@ class AgentObserverPaneController:
 
     def _parent_request_event(
         self,
-        spawn_event: Mapping[str, object],
+        activity_event: Mapping[str, object],
     ) -> dict[str, object] | None:
         parent_user_message = self._latest_parent_user_message
         if parent_user_message is None or parent_user_message.get(
             "turn_id"
-        ) != spawn_event.get("turn_id"):
+        ) != activity_event.get("turn_id"):
             return None
-        spawn_item = spawn_event.get("item")
+        activity_item = activity_event.get("item")
         user_item = parent_user_message.get("item")
-        if not isinstance(spawn_item, Mapping) or not isinstance(user_item, Mapping):
+        if not isinstance(activity_item, Mapping) or not isinstance(user_item, Mapping):
             return None
         return {
             "schema": OBSERVER_SCHEMA,
             "kind": "parent_request",
-            "thread_id": spawn_event["thread_id"],
-            "turn_id": spawn_event.get("turn_id"),
-            "target_thread_id": spawn_item["agent_thread_id"],
-            "spawn_item_id": spawn_item["id"],
+            "thread_id": activity_event["thread_id"],
+            "turn_id": activity_event.get("turn_id"),
+            "target_thread_id": activity_item["agent_thread_id"],
+            "activity_item_id": activity_item["id"],
             "item": dict(user_item),
         }
 
@@ -621,7 +624,7 @@ class AgentObserverView:
         self._seen_activity_item_ids.add(item_id)
         self._target_states[target_thread_id] = activity_kind
         self._target_paths[target_thread_id] = agent_path
-        if activity_kind == "started":
+        if activity_kind in {"started", "interacted"}:
             self._durable_terminal_target_ids.discard(target_thread_id)
             self._terminal_drain_complete = False
             self._turn_started_at.pop(target_thread_id, None)
@@ -630,6 +633,7 @@ class AgentObserverView:
             self._weekly_limit_used_percent.pop(target_thread_id, None)
             self._last_context.pop(target_thread_id, None)
             self._work_line_is_last = False
+        if activity_kind == "started":
             if event.get("parent_request_follows") is True:
                 return [f"▶ {_agent_display_name(agent_path)} started"]
             return [
@@ -638,11 +642,13 @@ class AgentObserverView:
                 "SCOPE UNAVAILABLE",
                 f"  {_SCOPE_UNAVAILABLE_DETAIL}",
             ]
+        if activity_kind == "interacted" and event.get("parent_request_follows") is True:
+            return [f"↻ {_agent_display_name(agent_path)} received follow-up"]
         self._work_line_is_last = False
         return [f"• {_agent_display_name(agent_path)} · {activity_kind}"]
 
     def accept_parent_request_event(self, event: Mapping[str, object]) -> list[str]:
-        """Render exact same-turn parent-user text for an already tracked spawn."""
+        """Render exact same-turn parent-user text for an already tracked request."""
         if (
             event.get("schema") != OBSERVER_SCHEMA
             or event.get("kind") != "parent_request"

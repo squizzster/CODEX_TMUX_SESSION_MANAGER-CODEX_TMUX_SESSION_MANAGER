@@ -24,7 +24,7 @@ from rodex_registry import (
 
 from .agent_trace_privacy import contains_codex_encrypted_value
 
-AGENT_TRACE_SCHEMA_VERSION = "rodex-agent-trace-v1"
+AGENT_TRACE_SCHEMA_VERSION = "rodex-agent-trace-v2"
 type AgentTraceSource = (
     tuple[CodexThreadId, bytes] | tuple[CodexThreadId, bytes, int | Sequence[int]]
 )
@@ -483,6 +483,7 @@ def _subagent_detail(
         activity_kind=_text(_first_present(item, "kind", "status", "activity"))
         or "unknown",
         agent_path=_text(_first_present(item, "agent_path", "agentPath")),
+        collaboration_call_id=_text(item.get("id")),
     )
 
 

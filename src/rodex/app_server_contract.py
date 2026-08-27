@@ -39,6 +39,7 @@ class CodexAppServerContract:
     turn_steer_method: str = "turn/steer"
     turn_interrupt_method: str = "turn/interrupt"
     turn_completed_method: str = "turn/completed"
+    warning_method: str = "warning"
 
     def command(self, codex_binary: str, socket_path: Path) -> tuple[str, ...]:
         return (

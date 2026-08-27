@@ -1,4 +1,4 @@
-"""Transparent Codex WebSocket proxy with small protocol-derived signals."""
+"""Codex WebSocket proxy with Rodex-only TUI notices and derived signals."""
 
 from __future__ import annotations
 
@@ -45,6 +45,8 @@ ContextStatusCallback = Callable[[str], None]
 _EVENT_STREAM_CLOSED: Final = object()
 EVENT_STREAM_READY_METHOD: Final = "rodex/event-stream/ready"
 CONTROL_CONNECTION_PATH: Final = "/rodex-control"
+TUI_NOTICE_CONNECTION_PATH: Final = "/rodex-tui-notice"
+TUI_NOTICE_METHOD: Final = "rodex/tui-notice"
 ANALYTICS_EVENT_STREAM_PATH: Final = "/rodex-analytics"
 AGENT_OBSERVER_EVENT_STREAM_PATH: Final = "/rodex-agent-observer"
 ANALYTICS_WAKE_EVENT_METHODS: Final = frozenset(
@@ -68,6 +70,43 @@ EVENT_STREAM_READY_MESSAGE: Final = json.dumps(
 
 class RodexProtocolProxyError(RuntimeError):
     """The local Codex protocol proxy could not start or stop cleanly."""
+
+
+def publish_tui_notice(
+    proxy_socket_path: Path,
+    message: str,
+    *,
+    connector: Callable[..., Any] = unix_connect,
+) -> bool:
+    """Ask Rodex's proxy to show one TUI-owned warning without an App Server turn."""
+    if not message.strip():
+        return False
+    request_id = 0
+    request = json.dumps(
+        {
+            "method": TUI_NOTICE_METHOD,
+            "id": request_id,
+            "params": {"message": message},
+        },
+        separators=(",", ":"),
+    )
+    try:
+        with connector(
+            str(proxy_socket_path),
+            uri=f"ws://localhost{TUI_NOTICE_CONNECTION_PATH}",
+            compression=None,
+            open_timeout=1,
+            close_timeout=1,
+            max_size=None,
+        ) as connection:
+            connection.send(request)
+            response = _json_object(connection.recv(timeout=1))
+    except (ConnectionClosed, OSError, TimeoutError):
+        return False
+    if response is None or response.get("id") != request_id:
+        return False
+    result = response.get("result")
+    return isinstance(result, dict) and result.get("delivered") is True
 
 
 class CodexProtocolEventTap:
@@ -433,7 +472,7 @@ class CodexContextStatusObserver:
 
 
 class CodexProtocolProxy:
-    """Forward one local WebSocket endpoint to the private Codex app-server."""
+    """Forward App Server traffic and accept isolated Rodex TUI notices."""
 
     def __init__(
         self,
@@ -447,7 +486,10 @@ class CodexProtocolProxy:
         self._tool_call_counter = tool_call_counter
         self._on_primary_server_message = on_primary_server_message
         self._connection_lock = Lock()
+        self._primary_send_lock = Lock()
         self._primary_connection_claimed = False
+        self._primary_tui_connection: Any | None = None
+        self._primary_thread_id: str | None = None
         self._primary_connection_released = Event()
         self._primary_connection_released.set()
         self._server: Any | None = None
@@ -508,10 +550,12 @@ class CodexProtocolProxy:
             )
 
     def _handle_connection(self, tui_connection: Any) -> None:
-        is_primary_connection = (
-            _connection_path(tui_connection) != CONTROL_CONNECTION_PATH
-            and self._claim_primary_connection()
-        )
+        if _connection_path(tui_connection) == TUI_NOTICE_CONNECTION_PATH:
+            self._handle_tui_notice_connection(tui_connection)
+            return
+        is_primary_connection = _connection_path(
+            tui_connection
+        ) != CONTROL_CONNECTION_PATH and self._claim_primary_connection(tui_connection)
         try:
             with unix_connect(
                 str(self._app_server_socket_path),
@@ -530,15 +574,21 @@ class CodexProtocolProxy:
                 tui_to_server.start()
                 try:
                     for message in app_server_connection:
-                        tui_connection.send(message)
+                        event = _json_object(message) if is_primary_connection else None
                         if is_primary_connection:
-                            event = _json_object(message)
+                            if not self._send_primary_tui_message(message):
+                                break
+                            self._observe_primary_thread(event)
                             self._tool_call_counter.observe_protocol_event(event)
                             if self._on_primary_server_message is not None:
                                 self._on_primary_server_message(message, event)
+                        else:
+                            tui_connection.send(message)
                 except (ConnectionClosed, OSError):
                     pass
                 finally:
+                    if is_primary_connection:
+                        self._release_primary_connection(tui_connection)
                     tui_connection.close()
                     app_server_connection.close()
                     tui_to_server.join(timeout=2)
@@ -546,20 +596,85 @@ class CodexProtocolProxy:
             tui_connection.close()
         finally:
             if is_primary_connection:
-                self._release_primary_connection()
+                self._release_primary_connection(tui_connection)
 
-    def _claim_primary_connection(self) -> bool:
+    def _handle_tui_notice_connection(self, connection: Any) -> None:
+        request_id: object = None
+        delivered = False
+        try:
+            request = _json_object(connection.recv(timeout=1))
+            if request is not None:
+                request_id = request.get("id")
+                params = request.get("params")
+                message = params.get("message") if isinstance(params, dict) else None
+                if (
+                    request.get("method") == TUI_NOTICE_METHOD
+                    and isinstance(message, str)
+                    and message.strip()
+                ):
+                    delivered = self._send_primary_tui_message(
+                        self._warning_notification(message)
+                    )
+            connection.send(
+                json.dumps(
+                    {"id": request_id, "result": {"delivered": delivered}},
+                    separators=(",", ":"),
+                )
+            )
+        except (ConnectionClosed, OSError, TimeoutError):
+            return
+        finally:
+            connection.close()
+
+    def _warning_notification(self, message: str) -> str:
+        with self._connection_lock:
+            thread_id = self._primary_thread_id
+        return json.dumps(
+            {
+                "method": CODEX_APP_SERVER.warning_method,
+                "params": {"threadId": thread_id, "message": message},
+            },
+            separators=(",", ":"),
+        )
+
+    def _send_primary_tui_message(self, message: str | bytes) -> bool:
+        with self._primary_send_lock:
+            with self._connection_lock:
+                connection = self._primary_tui_connection
+            if connection is None:
+                return False
+            try:
+                connection.send(message)
+            except (ConnectionClosed, OSError):
+                return False
+        return True
+
+    def _observe_primary_thread(self, event: dict[str, Any] | None) -> None:
+        if event is None or event.get("method") != CODEX_APP_SERVER.thread_started_method:
+            return
+        params = event.get("params")
+        thread_id = _started_thread_id(params) if isinstance(params, dict) else None
+        if thread_id is not None:
+            with self._connection_lock:
+                self._primary_thread_id = thread_id
+
+    def _claim_primary_connection(self, tui_connection: Any) -> bool:
         with self._connection_lock:
             if self._primary_connection_claimed:
                 return False
             self._primary_connection_claimed = True
+            self._primary_tui_connection = tui_connection
+            self._primary_thread_id = None
             self._primary_connection_released.clear()
             return True
 
-    def _release_primary_connection(self) -> None:
-        with self._connection_lock:
-            self._primary_connection_claimed = False
-            self._primary_connection_released.set()
+    def _release_primary_connection(self, tui_connection: Any) -> None:
+        with self._primary_send_lock, self._connection_lock:
+            if self._primary_tui_connection is tui_connection:
+                self._primary_connection_claimed = False
+                self._primary_tui_connection = None
+                self._primary_thread_id = None
+                self._primary_connection_released.set()
 
 
 def _forward_messages(source: Any, destination: Any) -> None:

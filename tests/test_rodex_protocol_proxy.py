@@ -15,12 +15,15 @@ from rodex.protocol_proxy import (
     CONTROL_CONNECTION_PATH,
     EVENT_STREAM_READY_MESSAGE,
     TOOL_CALL_ITEM_TYPES,
+    TUI_NOTICE_CONNECTION_PATH,
+    TUI_NOTICE_METHOD,
     CodexContextStatusObserver,
     CodexProtocolEventTap,
     CodexProtocolProxy,
     TmuxContextStatus,
     TmuxToolCallStatus,
     ToolCallCounter,
+    publish_tui_notice,
 )
 from rodex.status_bar import RODEX_STATUS_COLOURS
 
@@ -252,6 +255,116 @@ def test_proxy_forwards_both_directions_and_counts_server_tool_items(
     assert observed_events == [server_message]
     assert decode_calls == 1
     assert not proxy_socket.exists()
+
+
+def test_proxy_delivers_rodex_notice_to_tui_without_forwarding_it_upstream(
+    tmp_path: Path,
+) -> None:
+    app_socket = tmp_path / "app.sock"
+    proxy_socket = tmp_path / "proxy.sock"
+    release_upstream = Event()
+    received_by_server: list[str | bytes] = []
+    thread_started = json.dumps(
+        {
+            "method": "thread/started",
+            "params": {"thread": {"id": "thread-1"}},
+        }
+    )
+
+    def app_server(connection: object) -> None:
+        received_by_server.append(connection.recv())  # type: ignore[attr-defined]
+        connection.send(thread_started)  # type: ignore[attr-defined]
+        release_upstream.wait(2)
+
+    upstream = unix_serve(app_server, path=str(app_socket), compression=None)
+    upstream_thread = Thread(target=upstream.serve_forever, daemon=True)
+    upstream_thread.start()
+    observed_events: list[str | bytes] = []
+    proxy = CodexProtocolProxy(
+        proxy_socket,
+        app_socket,
+        ToolCallCounter(lambda _count: None),
+        lambda message, _event: observed_events.append(message),
+    )
+    client_message = json.dumps({"method": "initialize", "id": 1, "params": {}})
+    try:
+        proxy.start()
+        with unix_connect(
+            str(proxy_socket), uri="ws://localhost/rpc", compression=None
+        ) as tui:
+            tui.send(client_message)
+            assert tui.recv(timeout=1) == thread_started
+
+            assert publish_tui_notice(proxy_socket, "Rodex: Codex update available")
+            assert json.loads(tui.recv(timeout=1)) == {
+                "method": "warning",
+                "params": {
+                    "threadId": "thread-1",
+                    "message": "Rodex: Codex update available",
+                },
+            }
+    finally:
+        release_upstream.set()
+        proxy.close()
+        upstream.shutdown(close_connections=True)
+        upstream_thread.join(timeout=5)
+
+    assert received_by_server == [client_message]
+    assert observed_events == [thread_started]
+
+
+def test_tui_notice_reports_undelivered_without_a_primary_tui(tmp_path: Path) -> None:
+    app_socket = tmp_path / "app.sock"
+    proxy_socket = tmp_path / "proxy.sock"
+    upstream = unix_serve(lambda _connection: None, path=str(app_socket), compression=None)
+    upstream_thread = Thread(target=upstream.serve_forever, daemon=True)
+    upstream_thread.start()
+    proxy = CodexProtocolProxy(
+        proxy_socket,
+        app_socket,
+        ToolCallCounter(lambda _count: None),
+    )
+    try:
+        proxy.start()
+        assert not publish_tui_notice(proxy_socket, "Rodex: notice")
+    finally:
+        proxy.close()
+        upstream.shutdown(close_connections=True)
+        upstream_thread.join(timeout=5)
+
+
+def test_tui_notice_client_uses_the_rodex_only_proxy_path(tmp_path: Path) -> None:
+    calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+    class Connection:
+        def __enter__(self) -> Connection:
+            return self
+
+        def __exit__(self, *_error: object) -> None:
+            return None
+
+        def send(self, message: str) -> None:
+            assert json.loads(message) == {
+                "method": TUI_NOTICE_METHOD,
+                "id": 0,
+                "params": {"message": "Rodex: notice"},
+            }
+
+        def recv(self, timeout: float) -> str:
+            assert timeout == 1
+            return '{"id":0,"result":{"delivered":true}}'
+
+    def connector(*args: object, **kwargs: object) -> Connection:
+        calls.append((args, kwargs))
+        return Connection()
+
+    assert publish_tui_notice(
+        tmp_path / "proxy.sock",
+        "Rodex: notice",
+        connector=connector,
+    )
+    assert calls[0][0] == (str(tmp_path / "proxy.sock"),)
+    assert calls[0][1]["uri"] == f"ws://localhost{TUI_NOTICE_CONNECTION_PATH}"
 
 
 @pytest.mark.evolutionary_regression

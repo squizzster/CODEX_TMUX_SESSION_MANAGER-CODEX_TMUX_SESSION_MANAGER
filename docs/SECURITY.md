@@ -17,6 +17,13 @@ listener; control endpoints are Unix sockets below a private runtime root.
   private parent or root-owned sticky storage. Sockets and logs are mode `0600`.
 - Codex/App Server, proxy, event, and control traffic uses Unix-domain WebSockets only;
   Rodex opens no TCP listener.
+- The mode-`0600` proxy socket accepts a private Rodex update-notice endpoint. It sends
+  the validated nonempty notice only to the current primary TUI as a native warning; it
+  opens no upstream App Server connection and excludes the notice from protocol
+  subscribers, SQLite, Codex thread content, and model turns.
+- Managed Codex startup update prompts are disabled. Rodex's replacement check runs only
+  read-only, bounded version commands, caches the npm result for 24 hours, fails open,
+  and never installs or invokes an update.
 - SQLite databases are current-user-owned regular files at mode `0600` below a private
   directory. Final symlinks and nonregular paths are rejected. WAL plus a busy timeout
   separates normal readers from analytics writes.

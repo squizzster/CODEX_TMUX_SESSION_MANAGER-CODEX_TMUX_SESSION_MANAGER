@@ -30,6 +30,9 @@ Both sides retain the same Rodex, runtime, Codex, and workspace context.
   lowercase hexadecimal ID.
 - Assigns every session a permanent, unique two-word name.
 - Reattaches a live session or transparently resumes its saved Codex session.
+- Suppresses Codex's blocking startup updater in managed sessions and reports a newer
+  stable release as a native, scrollable TUI warning without updating Codex or starting
+  a model turn.
 - Adopts a persisted standalone Codex UUID into a newly named Rodex session.
 - Recovers an empty, unsaved Codex session under the same Rodex identity.
 - Atomically reserves an optional user-defined display name with session creation
@@ -88,6 +91,20 @@ mouse preference instead of overriding it. In a shared session, one `Ctrl-C` war
 another press may end the session for everyone and offers `Ctrl-b d` as the detach-only
 route; the same client must press it again within two seconds to pass the key to Codex.
 Custom prefixes and user-owned root `C-b` bindings are left unchanged.
+
+Managed launches disable Codex's own interactive startup update check because it can
+appear before runtime registration and block Rodex attachment. Immediately before each
+attach, Rodex compares the installed Codex version with a cached npm release lookup. The
+npm lookup has a three-second bound and each successful result is cached for 24 hours;
+all lookup and delivery failures are non-fatal. When a newer stable release exists, the
+proxy gives the primary TUI a native warning:
+
+```text
+Rodex: Codex update available: 0.149.1 -> 0.150.1 (run 'codex update' outside Rodex)
+```
+
+The notice enters ordinary TUI scrollback but is not sent to the App Server, persisted in
+the Codex thread, or treated as a model turn. Rodex never installs the update.
 
 The Rodex identity is blue (`#1402D8`). The context indicator shows a rounded whole
 percentage using the same last-token-usage divided by model-context-window calculation as

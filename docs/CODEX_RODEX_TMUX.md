@@ -42,9 +42,9 @@ command carries the same classified specification through parsing and execution.
 1. Bare `./rodex` (or explicit `./rodex _create`) validates the `codex` and `tmux`
    executables.
 2. tmux starts a small supervisor directly; Rodex never types with `send-keys`.
-3. The supervisor starts one private Codex app-server and a transparent Rodex
-   WebSocket proxy on short Unix sockets, then connects the inline Codex TUI through
-   it with `--no-alt-screen`.
+3. The supervisor starts one private Codex app-server and the Rodex WebSocket proxy on
+   short Unix sockets, then connects the inline Codex TUI through it with
+   `--no-alt-screen` and Codex's interactive startup updater disabled.
 4. Rodex asks that private app-server for its one loaded Codex session ID.
 5. One SQLite transaction creates the Rodex/runtime identities, canonical root-thread
    membership, name, user/log, and tmux rows.
@@ -52,6 +52,14 @@ command carries the same classified specification through parsing and execution.
    live private/shared attachment state in its status bar.
 7. Rodex attaches to the ordinary Codex prompt; forwarded arguments and slash commands
    work.
+
+Immediately before attachment, Rodex compares `codex --version` with the cached result
+of a bounded `npm view @openai/codex version` lookup. When a newer stable release exists,
+it sends the primary TUI a native `warning` notification through a private Rodex-only
+proxy endpoint. That endpoint terminates at the proxy: it opens no upstream App Server
+connection, emits no protocol event to subscribers, persists no thread content, and
+starts no model turn. Rodex never installs an update, and lookup or delivery failure
+never prevents attachment.
 
 The empty invocation is the default managed-create command. Every nonempty invocation
 outside the exact underscore Rodex command namespace is handed to Codex unchanged, with
@@ -88,16 +96,19 @@ command's default behavior.
 source: it remains open to emit selected future protocol events as JSON lines. `_tail`
 is useful to a person or agent observing readable progress; `_events`, `_inspect`,
 exact `_wait`, and `_result` carry machine lifecycle truth.
-The proxy continues to forward protocol frames and selected live events without
-screen-scraping, reconstructing terminal rows, or persisting conversation content.
+The proxy continues to forward ordinary protocol frames and selected live events
+without screen-scraping, reconstructing terminal rows, or persisting conversation
+content.
 
-The proxy forwards protocol frames unchanged in both directions, counts unique tool
-starts, and fans structured TUI events to bounded live subscribers. The subscribed
-primary connection, normally the managed TUI, receives lifecycle, approval, and
-user-input requests; short-lived control clients do not become subscribers by reading or
-mutating. Each uses a separate upstream App Server connection over private Unix sockets.
-tmux user options advertise the sockets and live identities. Tool counts cover one
-runtime.
+The proxy forwards ordinary protocol frames unchanged in both directions, counts unique
+tool starts, and fans structured TUI events to bounded live subscribers. Its sole
+Rodex-local exception is the update-notice endpoint: a notice becomes a downstream-only
+native warning on the subscribed primary TUI and therefore a TUI-owned scrollback line
+that survives redraw. The subscribed primary connection, normally the managed TUI,
+receives lifecycle, approval, and user-input requests; short-lived control clients do
+not become subscribers by reading or mutating. Each ordinary client uses a separate
+upstream App Server connection over private Unix sockets. tmux user options advertise
+the sockets and live identities. Tool counts cover one runtime.
 
 The separate tmux input proxy and completion observer for `/rodex` are retained but
 temporarily disabled by `RODEX_TMUX_SLASH_ENABLED`. Runtime status setup removes their

@@ -46,6 +46,7 @@ _EVENT_STREAM_CLOSED: Final = object()
 EVENT_STREAM_READY_METHOD: Final = "rodex/event-stream/ready"
 CONTROL_CONNECTION_PATH: Final = "/rodex-control"
 ANALYTICS_EVENT_STREAM_PATH: Final = "/rodex-analytics"
+AGENT_OBSERVER_EVENT_STREAM_PATH: Final = "/rodex-agent-observer"
 ANALYTICS_WAKE_EVENT_METHODS: Final = frozenset(
     {
         CODEX_APP_SERVER.thread_started_method,
@@ -155,9 +156,12 @@ class CodexProtocolEventTap:
 
     def _handle_subscriber(self, connection: Any) -> None:
         subscriber: queue.Queue[str | bytes | object] = queue.Queue(self._queue_size)
-        analytics_only = _connection_path(connection) == ANALYTICS_EVENT_STREAM_PATH
+        semantic_only = _connection_path(connection) in {
+            ANALYTICS_EVENT_STREAM_PATH,
+            AGENT_OBSERVER_EVENT_STREAM_PATH,
+        }
         with self._subscribers_lock:
-            self._subscribers[subscriber] = analytics_only
+            self._subscribers[subscriber] = semantic_only
             ready_message = json.dumps(
                 {
                     "method": EVENT_STREAM_READY_METHOD,

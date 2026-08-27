@@ -485,6 +485,26 @@ def read_rodex_agent_trace(
     )
 
 
+def read_rodex_agent_trace_cursor(
+    session_id: int,
+    database_path: str | os.PathLike[str] | None = None,
+) -> uuid.UUID | None:
+    """Return the latest durable event identity using the session-order index."""
+    _validate_session_id(session_id)
+    path = existing_rodex_database_path(database_path)
+    with open_rodex_read_transaction(path) as connection:
+        row = connection.execute(
+            f"SELECT trace_event_public_id_signed_bigint_1, "
+            "trace_event_public_id_signed_bigint_2 FROM "
+            f"{RODEX_SESSIONS_AGENT_TRACE_EVENTS_TABLE} "
+            "WHERE rodex_sessions_id = ? ORDER BY id DESC LIMIT 1",
+            (session_id,),
+        ).fetchone()
+    if row is None:
+        return None
+    return join_signed_bigints_into_a_codex_thread_id(row[0], row[1])
+
+
 def _resolve_optional_trace_turn_id(
     connection: sqlite3.Connection,
     session_id: int,

@@ -714,6 +714,32 @@ def test_worker_discovers_subagent_and_removes_inherited_parent_history(
     assert b'"type":"session_meta"' not in config.rodex_database_path.read_bytes()
 
 
+def test_worker_notifies_the_observer_only_after_durable_trace_publication(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    _rollout(config.codex_sessions_root, CODEX_SESSION_ID)
+    _create(config)
+    notifications: list[tuple[Path, int, bool]] = []
+    worker = AnalyticsRolloutWorker(
+        config,
+        adapter_factory=FakeAnalyticsAdapter,
+        trace_publication_notifier=lambda path, sequence, caught_up: notifications.append(
+            (path, sequence, caught_up)
+        ),
+    )
+
+    assert worker.poll_once() == "up_to_date"
+
+    trace = read_rodex_agent_trace(1, config.rodex_database_path)
+    assert notifications == [
+        (config.protocol_event_socket_path, trace.trace_publication_sequence, True)
+    ]
+
+    assert worker.poll_once() == "up_to_date"
+    assert len(notifications) == 1
+
+
 def test_cold_worker_bounded_scan_recovers_child_without_uuid_bearing_event(
     tmp_path: Path,
 ) -> None:

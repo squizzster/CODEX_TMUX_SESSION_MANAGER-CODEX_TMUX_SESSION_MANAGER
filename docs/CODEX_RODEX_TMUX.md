@@ -103,6 +103,19 @@ The separate tmux input proxy and completion observer for `/rodex` are retained 
 temporarily disabled by `RODEX_TMUX_SLASH_ENABLED`. Runtime status setup removes their
 Enter/Tab bindings and pane pipe, so all input currently passes directly to Codex.
 
+## Live agent observer pane
+
+An exact primary-thread `item/started → subAgentActivity(kind=started)` event enters the
+dedicated live agent observer pipeline. The session host creates or reuses one marked
+top-third pane while preserving the lower Codex pane's focus. That pane directly runs
+`rodex.agent_observer`; tmux input is disabled, so it is a presentation surface rather
+than a shell. It consumes the App Server's privacy-reduced agent identity, path, and
+activity kind plus typed trace metadata from SQLite. The analytics worker wakes it only
+after a durable publication commit, so indexed cursor reads need no polling timer.
+The pane survives agent completion for reuse and exits when the runtime event stream
+closes. Prompt text, message bodies, command text, tool payloads, output bodies, and
+hidden reasoning never enter its display contract.
+
 ## Persistent analytics and agent trace
 
 Each session host supervises one low-priority analytics subprocess keyed by its Rodex

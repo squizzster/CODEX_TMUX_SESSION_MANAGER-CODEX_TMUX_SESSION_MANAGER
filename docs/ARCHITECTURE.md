@@ -11,21 +11,11 @@ Rodex matches a durable session and 64-bit runtime ID to its Codex thread/sessio
 ## Runtime shape
 
 ```text
-user terminal
-    │
-    ▼
-Rodex CLI ───────────────► SQLite registry
-    │                         ▲
-    │                         │ durable identity
-    ▼
-private tmux server
-    │  ├── advertises sockets, Rodex/registry/runtime/Codex IDs and registration state
-    │  └──► verified snapshots/following ──► _cat / _tail
-    ▼
-session host ─┬► Codex TUI ──► protocol proxy ──► Codex app-server
-             │                  ├──► context status ──► tmux base status
-             │                  └──► live event tap ──► events/wait/control clients
-             └► analytics worker ──► analyzer + trace normalizer ──► SQLite
+user → Rodex CLI → private tmux → session host → Codex TUI → proxy → app-server
+         ├──► SQLite registry          │               ├──► status / live clients
+         └──► _cat / _tail             │               └──► agent observer pane
+                                       └──► analytics + trace → SQLite
+                                                                  └──► post-commit observer wake
 ```
 
 ## Application control plane
@@ -38,12 +28,10 @@ argv → classify once → select route and preparation → execute one domain
 ```
 
 `rodex.cli` only maps process inputs/errors and composes dependencies. The pipeline owns
-classification and exhaustive routing. Selector preparation carries either one owned
-integer identity or one canonical unregistered Codex identity into
-`ManagedSessionLifecycle`; display text is not resolved again. The latter requires a
-transient App Server check before registration. Missing/unmatched selectors return to
-Codex after private-tmux collision policy. Direct statistics and trace commands read
-SQLite without acquiring a live runtime.
+classification and exhaustive routing. Selector preparation carries one owned identity or
+one canonical unregistered Codex identity into `ManagedSessionLifecycle`; display text
+is not resolved again. Unregistered candidates require a transient App Server check.
+Missing/unmatched selectors return to Codex after collision policy. Direct reads need no runtime.
 
 ## Component boundaries
 
@@ -57,6 +45,7 @@ SQLite without acquiring a live runtime.
 | `rodex.session_read_pipeline` / `session_tail` | Own verified live reads and tail-compatible terminal following. |
 | `rodex.runtime` / `process_contracts` / `session_host` | Own typed app-server/tmux discovery, processes, attachment, and supervision. |
 | `rodex.status_bar` / `tmux_status` / `status_animation` | Own base status, palette, arbitration, and cancellable transitions. |
+| `rodex.agent_observer` | Own the input-disabled tmux pane, privacy-reduced live agent items, and indexed durable-trace display. |
 | `rodex.analytics` / `analytics_source_*` | Authenticate bounded rollout sources and supervise fail-open suffix analysis. |
 | `rodex.agent_trace` | Normalize authenticated rollout records into typed trace facts. |
 | `rodex.control` | Verify and control one exact loaded Codex thread. |
@@ -69,11 +58,10 @@ SQLite without acquiring a live runtime.
 
 `rodex_sessions.id` is the private relational key. Rodex session, registry, and runtime
 IDs are distinct random 64-bit domains with one 16-character lowercase hex wire form.
-`codex_threads` stores each Codex-owned 128-bit UUID once as two signed `BIGINT` halves;
-memberships, current-root selection, lineage, activities, and projections use integer
-foreign keys. Turns, items, trace events, and tool calls receive separate opaque
-128-bit public IDs. Provenance and mutable activity never replace canonical identity.
-Detailed rules live in [SQL_SCHEMA.md](SQL_SCHEMA.md).
+`codex_threads` stores each 128-bit UUID once as signed `BIGINT` halves; dependents use
+integer foreign keys. Turns, items, trace events, and tool calls have separate opaque
+128-bit public IDs. Provenance and activity never replace canonical identity. Detailed
+rules live in [SQL_SCHEMA.md](SQL_SCHEMA.md).
 
 ## Authoritative lifecycle
 
@@ -136,6 +124,11 @@ instead of recounting history; trace coverage remains cumulatively gapped after 
 durable gap or retained unrecognized record. Explicit body reads resolve authenticated
 prefixes across both current and historical memberships. Failures preserve the last good
 view and cannot affect the TUI. Statistics and trace reads need neither Codex nor tmux.
+After each committed trace publication, the worker sends the observer its exact
+publication sequence and catch-up state. The observer coalesces wakes, advances through
+the existing `(rodex_sessions_id, id)` cursor index, and considers an agent display
+drained only after durable terminal events and an up-to-date publication; App lifecycle
+updates never trigger SQL reads.
 
 ## Live control
 

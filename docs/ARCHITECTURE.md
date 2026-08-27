@@ -21,17 +21,16 @@ user → Rodex CLI → private tmux → session host → Codex TUI ↔ proxy ↔
 ## Application control plane
 
 ```text
-argv → classify once → select route and preparation → execute one domain
-                       ├─ direct: help, Codex passthrough, statistics, agent trace
-                       ├─ selector: resolve owned session or canonical Codex candidate
-                       └─ runtime: acquire tmux/Codex services for session, machine, or launch
+argv → Rodex contract → Codex 0.150.1 contract → execute one domain
+                        ├─ direct: local reads or Codex passthrough
+                        ├─ selector: owned session or canonical Codex candidate
+                        └─ runtime: managed interactive, session, or machine work
 ```
 
-`rodex.cli` only maps process inputs/errors and composes dependencies. The pipeline owns
-classification and exhaustive routing. Selector preparation carries one owned identity or
-one canonical unregistered Codex identity into `ManagedSessionLifecycle`; display text
-is not resolved again. Unregistered candidates require a transient App Server check.
-Missing/unmatched selectors return to Codex after collision policy. Direct reads need no runtime.
+`rodex.cli` composes dependencies and the characterized Codex grammar. The pipeline owns
+typed routing. A sole interactive token gets one selector lookup; an unmatched token
+remains the managed prompt. Canonical unregistered identities require a transient App
+Server check. Direct reads and Codex passthrough need no runtime.
 
 ## Component boundaries
 
@@ -39,7 +38,7 @@ Missing/unmatched selectors return to Codex after collision policy. Direct reads
 |---|---|
 | `rodex.cli` | Adapt process arguments/errors and compose application dependencies. |
 | `rodex.application_pipeline` | Classify, prepare, and dispatch every invocation through one typed route. |
-| `rodex.command_contract` | Own command vocabulary, routes, generated help, and machine-command grammar. |
+| `codex_cli_contract` / `rodex.command_contract` | Own current Codex grammar/routing and local command/help grammar. |
 | `rodex.managed_session_lifecycle` / `cool_name` | Own selector resolution, naming, create, attach, resume, recovery, and collision policy. |
 | `rodex.session_commands` / `statistics_commands` / `agent_trace_commands` / `machine_commands` | Execute the four command domains behind the shared CLI contract. |
 | `rodex.session_read_pipeline` / `session_tail` | Own verified live reads and tail-compatible terminal following. |
@@ -67,7 +66,7 @@ rules live in [SQL_SCHEMA.md](SQL_SCHEMA.md).
 
 ## Authoritative lifecycle
 
-### New session (bare `rodex`, `_create`, or `_detach`)
+### New session (native interactive syntax, `_create`, or `_detach`)
 
 1. Allocate unregistered Rodex session and runtime IDs through the same bounded,
    indexed ten-candidate pipeline.
@@ -93,7 +92,7 @@ rules live in [SQL_SCHEMA.md](SQL_SCHEMA.md).
 Parse only canonical hyphenated UUIDs and resolve an existing owned link first. A
 short-lived, version-checked App Server must read the exact persisted, non-ephemeral
 candidate before normal creation with `resume <UUID>`; missing candidates clean up and
-return to Codex. Verify the loaded UUID before commit and attach.
+continue as a managed initial prompt. Verify the loaded UUID before commit and attach.
 
 Managed opens hold one per-session lock through live resolution, resume, and endpoint replacement, releasing it before tmux attach. Concurrent shells converge on one verified runtime. An exact relocated `pending` runtime repairs interrupted launch. Only the exact Codex `active writer` shutdown conflict receives a bounded retry.
 

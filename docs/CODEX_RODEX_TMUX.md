@@ -29,18 +29,18 @@ than being inferred or adopted. Private proxy/event sockets and runtime logs rem
 implementation details rather than agent context.
 New runtimes also report `runtime_id` and whether it matches the persisted incarnation.
 
-Every process invocation passes through one application control plane. The command
-contract classifies argv once; the selected direct, selector, or runtime preparation
-branch then supplies one domain executor. `rodex.cli` only composes process dependencies
-and maps top-level failures. A matching bare selector becomes one typed owned-session
-identity before lifecycle work; an unregistered canonical Codex UUID becomes a distinct
-typed candidate and must pass a transient App Server persistence check. An exact machine
-command carries the same classified specification through parsing and execution.
+Every process invocation passes through one application control plane. The Rodex command
+contract claims exact local commands first; the declarative Codex 0.150.1 CLI contract
+then classifies native interactive syntax or direct passthrough once. The selected direct,
+selector, or runtime preparation branch supplies one domain executor. `rodex.cli` only
+composes these contracts and process dependencies. A matching bare selector becomes one
+typed owned-session identity before lifecycle work; an unregistered canonical Codex UUID
+becomes a distinct candidate for the transient App Server persistence check.
 
 ## Basic launch pipeline
 
-1. Bare `./rodex` (or explicit `./rodex _create`) validates the `codex` and `tmux`
-   executables.
+1. Bare `./rodex`, explicit `./rodex _create`, or characterized native interactive
+   Codex syntax validates the `codex` and `tmux` executables.
 2. tmux starts a small supervisor directly; Rodex never types with `send-keys`.
 3. The supervisor starts one private Codex app-server and the Rodex WebSocket proxy on
    short Unix sockets, then connects the inline Codex TUI through it with
@@ -50,8 +50,8 @@ command carries the same classified specification through parsing and execution.
    membership, name, user/log, and tmux rows.
 6. tmux is renamed to the cool name and displays its Rodex identity, tool count, and
    live private/shared attachment state in its status bar.
-7. Rodex attaches to the ordinary Codex prompt; forwarded arguments and slash commands
-   work.
+7. Rodex attaches to the ordinary Codex prompt; an initial prompt and interactive
+   options have already reached that TUI unchanged and exactly once.
 
 Immediately before attachment, Rodex compares `codex --version` with the cached result
 of a bounded `npm view @openai/codex version` lookup. When a newer stable release exists,
@@ -61,12 +61,13 @@ connection, emits no protocol event to subscribers, persists no thread content, 
 starts no model turn. Rodex never installs an update, and lookup or delivery failure
 never prevents attachment.
 
-The empty invocation is the default managed-create command. Every nonempty invocation
-outside the exact underscore Rodex command namespace is handed to Codex unchanged, with
-two single-selector exceptions: an existing Rodex name follows the reattachment pipeline,
-and a canonical Codex UUID opens its existing link or attempts persisted-thread adoption.
-Direct passthrough uses process replacement so Codex retains native stdin, stdout,
-stderr, signals, and exit status.
+The empty invocation is the default managed-create command. Current
+`codex [OPTIONS] [PROMPT]` syntax follows the same managed path with its original argv.
+A sole bare token first follows the name/UUID selector pipeline and becomes an initial
+prompt when unresolved; `rodex -- TOKEN` bypasses selector and subcommand interpretation.
+Current Codex subcommands, help/version, external remote options, malformed current
+syntax, multiple positionals, and unknown option-shaped invocations use direct process
+replacement, retaining native stdin, stdout, stderr, signals, and exit status.
 
 `./rodex _help` prints the Rodex command namespace locally. It does not resolve Codex,
 tmux, or the session database.
@@ -227,8 +228,8 @@ resume before it has an analytics sidecar.
   ordinary new-session pipeline with `resume <UUID>`, receives Rodex's normal 64-bit
   session/runtime identities and unique two-word name, and must load the same UUID before
   its affiliation commits.
-- An exact missing-thread response cleans up the catalog process/socket/log and retains
-  ordinary Codex passthrough without creating a Rodex database row or tmux session.
+- An exact missing-thread response cleans up the catalog process/socket/log, then treats
+  the UUID text as a managed initial prompt instead of adopting it.
 - If its stored tmux endpoint is live, Rodex first verifies its registered Rodex session
   ID, registry ID, and Codex session ID. A missing or mismatched marker fails closed
   without attach or rename.

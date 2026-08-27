@@ -13,6 +13,7 @@ from typing import Final
 
 import coolname
 
+from codex_cli_contract import CODEX_CLI_0_150_1_COMMAND_TOKENS
 from rodex_sql import (
     INDEX_RE_TRY_ATTEMPTS,
     index_re_try_attempt_numbers,
@@ -23,47 +24,10 @@ from rodex_sql import (
 
 COOL_NAMES_TABLE: Final = "cool_names"
 COOL_NAMES_MD5_INTS_UNIQUE_INDEX: Final = "cool_names_md5_ints_unique"
-RODEX_RESERVED_WORDS: Final = frozenset(
-    {
-        "a",
-        "alias",
-        "app-server",
-        "apply",
-        "archive",
-        "cloud",
-        "completion",
-        "create",
-        "debug",
-        "delete",
-        "detach",
-        "doctor",
-        "e",
-        "exec",
-        "exec-server",
-        "execpolicy",
-        "features",
-        "fork",
-        "help",
-        "login",
-        "logout",
-        "mcp",
-        "mcp-server",
-        "plugin",
-        "remote-control",
-        "responses-api-proxy",
-        "resume",
-        "review",
-        "running",
-        "sandbox",
-        "send",
-        "sessions",
-        "stdio-to-uds",
-        "tail",
-        "unarchive",
-        "update",
-        "wait",
-    }
+_RODEX_LOCAL_RESERVED_WORDS: Final = frozenset(
+    {"alias", "create", "detach", "running", "send", "tail", "wait"}
 )
+RODEX_RESERVED_WORDS: Final = CODEX_CLI_0_150_1_COMMAND_TOKENS | _RODEX_LOCAL_RESERVED_WORDS
 _SAFE_RODEX_DISPLAY_NAME: Final = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$")
 
 _HALF_BITS: Final = 64

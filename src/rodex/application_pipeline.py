@@ -8,6 +8,13 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Final, Protocol
 
+from codex_cli_contract import (
+    CODEX_CLI_0_150_1,
+    CodexCliContract,
+    CodexCliInvocation,
+    CodexCliRoute,
+)
+
 from .agent_trace_commands import execute_agent_trace_command
 from .command_contract import (
     CREATE_COMMAND,
@@ -46,6 +53,7 @@ ROUTE_PREPARATIONS: Final = {
     CommandRoute.STATISTICS: PipelinePreparation.DIRECT,
     CommandRoute.AGENT_TRACE: PipelinePreparation.DIRECT,
     CommandRoute.SELECTOR: PipelinePreparation.SELECTOR,
+    CommandRoute.MANAGED_CODEX: PipelinePreparation.RUNTIME,
     CommandRoute.MACHINE: PipelinePreparation.RUNTIME,
     CommandRoute.SESSION: PipelinePreparation.RUNTIME,
     CommandRoute.LAUNCH: PipelinePreparation.RUNTIME,
@@ -82,15 +90,15 @@ class SessionLifecycle(Protocol):
         configured_codex: str,
     ) -> int: ...
 
-    def guard_unregistered_selector_collision(
+    def execute_managed_interactive(
         self,
-        selector: str,
+        codex_arguments: tuple[str, ...],
+        database_path: Path,
+        launcher: RodexRuntimeLauncher,
         *,
+        codex_binary: str | None,
         configured_codex: str,
-        configured_tmux: str,
-        resolve_executable: ExecutableResolver,
-        runtime_launcher_factory: RuntimeLauncherFactory,
-    ) -> None: ...
+    ) -> int: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -101,6 +109,7 @@ class RodexInvocation:
     route: CommandRoute
     preparation: PipelinePreparation
     classification: ClassifiedRodexCommand | None = None
+    codex_invocation: CodexCliInvocation | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,10 +130,12 @@ class PreparedRodexInvocation:
     selected_session: SessionSelection | None = None
 
 
-def select_rodex_invocation(arguments: Sequence[str]) -> RodexInvocation:
+def select_rodex_invocation(
+    arguments: Sequence[str],
+    codex_cli_contract: CodexCliContract = CODEX_CLI_0_150_1,
+) -> RodexInvocation:
     """Normalize argv and select exactly one exhaustive application route."""
     normalized = tuple(arguments) if arguments else (CREATE_COMMAND,)
-    command = normalized[0]
     classification = classify_rodex_command(normalized)
     if classification is not None:
         route = classification.route
@@ -134,16 +145,26 @@ def select_rodex_invocation(arguments: Sequence[str]) -> RodexInvocation:
             ROUTE_PREPARATIONS[route],
             classification,
         )
-    if len(normalized) == 1 and not command.startswith(("-", "_")):
+    codex_invocation = codex_cli_contract.classify(normalized)
+    if codex_invocation.route is CodexCliRoute.PASSTHROUGH:
+        return RodexInvocation(
+            normalized,
+            CommandRoute.CODEX,
+            PipelinePreparation.DIRECT,
+            codex_invocation=codex_invocation,
+        )
+    if codex_invocation.selector_candidate is not None:
         return RodexInvocation(
             normalized,
             CommandRoute.SELECTOR,
             PipelinePreparation.SELECTOR,
+            codex_invocation=codex_invocation,
         )
     return RodexInvocation(
         normalized,
-        CommandRoute.CODEX,
-        PipelinePreparation.DIRECT,
+        CommandRoute.MANAGED_CODEX,
+        PipelinePreparation.RUNTIME,
+        codex_invocation=codex_invocation,
     )
 
 
@@ -162,6 +183,7 @@ class UnifiedRodexApplicationPipeline:
         resolve_executable: ExecutableResolver,
         runtime_launcher_factory: RuntimeLauncherFactory,
         session_lifecycle: SessionLifecycle,
+        codex_cli_contract: CodexCliContract = CODEX_CLI_0_150_1,
     ) -> None:
         self._database_path = database_path
         self._configured_codex = configured_codex
@@ -172,10 +194,11 @@ class UnifiedRodexApplicationPipeline:
         self._resolve_executable = resolve_executable
         self._runtime_launcher_factory = runtime_launcher_factory
         self._session_lifecycle = session_lifecycle
+        self._codex_cli_contract = codex_cli_contract
 
     def execute(self, arguments: Sequence[str]) -> int:
         """Run the one route selected for this invocation."""
-        invocation = select_rodex_invocation(arguments)
+        invocation = select_rodex_invocation(arguments, self._codex_cli_contract)
         prepared = self._prepare(invocation)
         if isinstance(prepared, int):
             return prepared
@@ -193,12 +216,11 @@ class UnifiedRodexApplicationPipeline:
             execute_agent_trace_command(argv, self._database_path)
             return 0
         if invocation.route is CommandRoute.SELECTOR:
-            selector = argv[0]
-            selection = prepared.selected_session
-            if selection is None:
-                return self._execute_codex_selector(selector, argv)
             services = prepared.runtime
             assert services is not None
+            selection = prepared.selected_session
+            if selection is None:
+                return self._execute_managed_codex(invocation, services)
             outcome = self._session_lifecycle.execute_selector(
                 selection,
                 self._database_path,
@@ -208,8 +230,8 @@ class UnifiedRodexApplicationPipeline:
             )
             if outcome is SelectorExecution.OPENED:
                 return 0
-            assert outcome is SelectorExecution.PASSTHROUGH
-            return self._execute_codex_selector(selector, argv)
+            assert outcome is SelectorExecution.MANAGED_PROMPT
+            return self._execute_managed_codex(invocation, services)
 
         services = prepared.runtime
         assert services is not None
@@ -240,6 +262,8 @@ class UnifiedRodexApplicationPipeline:
                 codex_binary=services.codex_binary,
                 configured_codex=self._configured_codex,
             )
+        if invocation.route is CommandRoute.MANAGED_CODEX:
+            return self._execute_managed_codex(invocation, services)
         raise AssertionError(  # pragma: no cover - route map and branches are exhaustive.
             f"unhandled Rodex application route: {invocation.route}"
         )
@@ -253,8 +277,6 @@ class UnifiedRodexApplicationPipeline:
             selection = self._session_lifecycle.resolve_selector(
                 selector, self._database_path
             )
-            if selection is None:
-                return PreparedRodexInvocation(invocation, None)
             return PreparedRodexInvocation(
                 invocation,
                 self._acquire_runtime(),
@@ -296,16 +318,21 @@ class UnifiedRodexApplicationPipeline:
             )
         return self._codex_delegator(codex_binary, arguments)
 
-    def _execute_codex_selector(self, selector: str, arguments: list[str]) -> int:
-        """Preserve one unmatched selector through the ordinary Codex route."""
-        self._session_lifecycle.guard_unregistered_selector_collision(
-            selector,
+    def _execute_managed_codex(
+        self,
+        invocation: RodexInvocation,
+        services: RuntimeServices,
+    ) -> int:
+        codex_invocation = invocation.codex_invocation
+        assert codex_invocation is not None
+        assert codex_invocation.route is CodexCliRoute.MANAGED_INTERACTIVE
+        return self._session_lifecycle.execute_managed_interactive(
+            codex_invocation.arguments,
+            self._database_path,
+            services.launcher,
+            codex_binary=services.codex_binary,
             configured_codex=self._configured_codex,
-            configured_tmux=self._configured_tmux,
-            resolve_executable=self._resolve_executable,
-            runtime_launcher_factory=self._runtime_launcher_factory,
         )
-        return self._execute_codex(arguments)
 
     def _acquire_runtime(self) -> RuntimeServices:
         tmux_binary = self._resolve_executable(self._configured_tmux)

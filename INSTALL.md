@@ -5,7 +5,8 @@ that sends every invocation to that checkout through its `uv` environment.
 
 After installation, `rodex` is intended to replace `codex` in normal terminal use:
 Rodex's exact underscore commands stay local, a managed name opens its durable session,
-and other nonempty invocations are delegated to Codex unchanged.
+current interactive options and an optional prompt start a managed session, and Codex
+subcommands or uncertain option forms are delegated unchanged.
 
 ## Requirements
 

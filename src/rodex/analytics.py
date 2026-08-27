@@ -40,6 +40,7 @@ from rodex_registry import (
 )
 from rodex_sql import RodexDatabaseNotFoundError
 
+from .agent_observer import notify_agent_observer_trace_publication
 from .agent_trace import AGENT_TRACE_SCHEMA_VERSION, StatefulAgentTraceNormalizer
 from .analytics_analyzer import (
     AnalyticsAnalyzerSource,
@@ -269,6 +270,9 @@ class AnalyticsRolloutWorker:
         *,
         adapter_factory: AnalyticsBoundaryFactory = (StatefulCodexProtocolAnalyticsAdapter),
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
+        trace_publication_notifier: Callable[[Path, int, bool], None] = (
+            notify_agent_observer_trace_publication
+        ),
     ) -> None:
         if not config.is_activated:
             raise ValueError("analytics worker requires committed runtime identity")
@@ -276,6 +280,7 @@ class AnalyticsRolloutWorker:
         self._adapter_factory = adapter_factory
         self._adapter: AnalyticsBoundary | None = None
         self._now = now
+        self._trace_publication_notifier = trace_publication_notifier
         assert config.rodex_sessions_id is not None
         assert config.codex_session_id is not None
         self._session_id = config.rodex_sessions_id
@@ -923,10 +928,18 @@ class AnalyticsRolloutWorker:
                 "rollout_not_found",
                 self._expected_codex_session_id,
             )
-            return "catching_up"
-        if followup_thread_ids:
-            return "pending_append"
-        return "up_to_date"
+            outcome = "catching_up"
+        elif followup_thread_ids:
+            outcome = "pending_append"
+        else:
+            outcome = "up_to_date"
+        with suppress(Exception):
+            self._trace_publication_notifier(
+                self._config.protocol_event_socket_path,
+                receipt.trace_publication_sequence,
+                outcome == "up_to_date",
+            )
+        return outcome
 
     def _promote_verified_sources(
         self,

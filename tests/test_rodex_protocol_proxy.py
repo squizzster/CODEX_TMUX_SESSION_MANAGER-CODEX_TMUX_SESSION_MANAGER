@@ -10,6 +10,7 @@ from websockets.sync.client import unix_connect
 from websockets.sync.server import unix_serve
 
 from rodex.protocol_proxy import (
+    AGENT_OBSERVER_EVENT_STREAM_PATH,
     ANALYTICS_EVENT_STREAM_PATH,
     CONTROL_CONNECTION_PATH,
     EVENT_STREAM_READY_MESSAGE,
@@ -328,7 +329,9 @@ def test_event_tap_streams_runtime_events_and_removes_its_socket(tmp_path: Path)
     assert not event_socket.exists()
 
 
-def test_event_tap_sends_only_semantic_wake_events_to_analytics(tmp_path: Path) -> None:
+def test_event_tap_sends_only_semantic_wake_events_to_internal_workers(
+    tmp_path: Path,
+) -> None:
     event_socket = tmp_path / "events.sock"
     tap = CodexProtocolEventTap(event_socket)
     thread_started = json.dumps(
@@ -353,10 +356,16 @@ def test_event_tap_sends_only_semantic_wake_events_to_analytics(tmp_path: Path) 
                 compression=None,
             ) as analytics,
             unix_connect(
+                str(event_socket),
+                uri=f"ws://localhost{AGENT_OBSERVER_EVENT_STREAM_PATH}",
+                compression=None,
+            ) as observer,
+            unix_connect(
                 str(event_socket), uri="ws://localhost/events", compression=None
             ) as external,
         ):
             assert analytics.recv(timeout=1) == EVENT_STREAM_READY_MESSAGE
+            assert observer.recv(timeout=1) == EVENT_STREAM_READY_MESSAGE
             assert external.recv(timeout=1) == EVENT_STREAM_READY_MESSAGE
 
             tap.publish(thread_started)
@@ -369,6 +378,11 @@ def test_event_tap_sends_only_semantic_wake_events_to_analytics(tmp_path: Path) 
             assert analytics.recv(timeout=1) == turn_completed
             with pytest.raises(TimeoutError):
                 analytics.recv(timeout=0.05)
+            assert observer.recv(timeout=1) == thread_started
+            assert observer.recv(timeout=1) == item_completed
+            assert observer.recv(timeout=1) == turn_completed
+            with pytest.raises(TimeoutError):
+                observer.recv(timeout=0.05)
             assert [external.recv(timeout=1) for _ in range(4)] == [
                 thread_started,
                 token_delta,

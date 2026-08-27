@@ -13,6 +13,7 @@ from .agent_trace import (
     TraceTokenUsage,
     TraceToolCall,
     read_rodex_agent_trace,
+    read_rodex_agent_trace_cursor,
 )
 from .analytics_registry import RodexAnalyticsPublication, RodexAnalyticsRegistry
 from .errors import (
@@ -231,6 +232,7 @@ __all__ = [
     "parse_turn_statistics_snapshot",
     "publish_rodex_session_statistics",
     "read_rodex_agent_trace",
+    "read_rodex_agent_trace_cursor",
     "read_rodex_analytics_checkpoint",
     "read_rodex_session_codex_thread_summaries",
     "read_rodex_session_statistics",

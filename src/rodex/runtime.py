@@ -31,6 +31,7 @@ from rodex_registry.identity import (
     parse_rodex_runtime_id,
 )
 
+from .agent_observer import AgentObserverPaneController
 from .analytics import (
     AnalyticsSubprocessSupervisor,
     default_codex_sessions_root,
@@ -1184,6 +1185,7 @@ def run_session_host(
     context_status_observer: CodexContextStatusObserver | None = None
     runtime_path_keepalive: _RuntimePathKeepalive | None = None
     analytics_supervisor: AnalyticsSubprocessSupervisor | None = None
+    agent_observer_controller: AgentObserverPaneController | None = None
     registration_deadline = (
         None
         if analytics_config is None
@@ -1213,6 +1215,13 @@ def run_session_host(
             _wait_for_app_server_socket(app_server, app_server_socket_path)
             app_server_socket_path.chmod(0o600)
             tmux_pane_target = os.environ.get("TMUX_PANE", "")
+            if analytics_config is not None and tmux_pane_target:
+                agent_observer_controller = AgentObserverPaneController(
+                    tmux_binary,
+                    tmux_server_socket_path,
+                    tmux_pane_target,
+                    protocol_event_socket_path,
+                )
             tool_call_status = TmuxToolCallStatus(
                 tmux_binary,
                 tmux_server_socket_path,
@@ -1236,6 +1245,9 @@ def run_session_host(
                 event: dict[str, Any] | None,
             ) -> None:
                 live_context_observer.observe_protocol_event(event)
+                if agent_observer_controller is not None:
+                    with suppress(Exception):
+                        agent_observer_controller.observe_protocol_event(event)
                 live_event_tap.publish_protocol_event(message, event)
 
             protocol_proxy = CodexProtocolProxy(
@@ -1321,6 +1333,29 @@ def run_session_host(
                                 )
                                 candidate_supervisor.start()
                                 analytics_supervisor = candidate_supervisor
+                                if agent_observer_controller is not None:
+                                    with suppress(Exception):
+                                        assert (
+                                            activated_analytics.rodex_sessions_id
+                                            is not None
+                                        )
+                                        assert (
+                                            activated_analytics.codex_session_id is not None
+                                        )
+                                        agent_observer_controller.activate(
+                                            database_path=(
+                                                activated_analytics.rodex_database_path
+                                            ),
+                                            rodex_sessions_id=(
+                                                activated_analytics.rodex_sessions_id
+                                            ),
+                                            rodex_session_id=str(
+                                                activated_analytics.rodex_session_id
+                                            ),
+                                            root_thread_id=(
+                                                activated_analytics.codex_session_id
+                                            ),
+                                        )
                             except Exception:
                                 # Persistent statistics are strictly off the interactive
                                 # path; a failed sidecar must not break the Codex TUI.
@@ -1390,8 +1425,12 @@ def run_session_host(
                 except Exception:
                     pass
                 finally:
-                    if runtime_path_keepalive is not None:
-                        runtime_path_keepalive.close()
+                    try:
+                        if agent_observer_controller is not None:
+                            agent_observer_controller.close()
+                    finally:
+                        if runtime_path_keepalive is not None:
+                            runtime_path_keepalive.close()
             finally:
                 try:
                     if tui is not None:

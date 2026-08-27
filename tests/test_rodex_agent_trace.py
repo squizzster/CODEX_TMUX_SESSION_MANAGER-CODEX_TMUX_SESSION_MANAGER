@@ -14,6 +14,7 @@ from rodex.errors import RodexLaunchError
 from rodex_registry import (
     create_a_rodex_session,
     read_rodex_agent_trace,
+    read_rodex_agent_trace_cursor,
     record_a_rodex_session_runtime_resume,
     split_codex_item_id_into_signed_bigints,
     split_codex_thread_id_into_signed_bigints,
@@ -50,6 +51,29 @@ def _publish_trace(database: Path, publication: RodexAgentTracePublication) -> o
             model_name_ids={},
             reasoning_effort_name_ids={},
         )
+
+
+def test_trace_cursor_is_empty_then_tracks_the_latest_public_event(tmp_path: Path) -> None:
+    database = tmp_path / "rodex.sqlite3"
+    create_a_rodex_session(database, codex_session_id=THREAD_ID)
+    assert read_rodex_agent_trace_cursor(1, database) is None
+    publication = RodexAgentTracePublication(
+        None,
+        "test-v1",
+        "2026-08-26T12:00:00Z",
+        "complete",
+        (
+            RodexAgentTraceEvent(THREAD_ID, None, 1, 0, "session_metadata", None),
+            RodexAgentTraceEvent(THREAD_ID, None, 2, 0, "compaction", None),
+        ),
+    )
+    _publish_trace(database, publication)
+
+    snapshot = read_rodex_agent_trace(1, database)
+
+    assert read_rodex_agent_trace_cursor(1, database) == uuid.UUID(
+        snapshot.events[-1]["event_id"]
+    )
 
 
 def test_stateful_trace_links_later_item_batches_to_the_accepted_turn() -> None:

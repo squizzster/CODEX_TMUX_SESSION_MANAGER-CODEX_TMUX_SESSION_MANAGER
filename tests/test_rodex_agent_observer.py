@@ -19,6 +19,7 @@ from rodex.agent_observer import (
     observer_control_socket_path,
     project_agent_message_event,
     project_subagent_activity_event,
+    project_user_message_event,
 )
 from rodex.protocol_proxy import CodexProtocolEventTap
 from rodex_registry import (
@@ -83,6 +84,29 @@ def _agent_message_event(
                 "id": item_id,
                 "phase": phase,
                 "text": text,
+            },
+        },
+    }
+
+
+def _user_message_event(
+    *,
+    thread_id: uuid.UUID = ROOT_THREAD_ID,
+    turn_id: str = "turn-1",
+    item_id: str = "user-message-1",
+    text: str = "Please review the parser exactly as requested.",
+) -> dict[str, object]:
+    return {
+        "emittedAtMs": 1787794769000,
+        "method": "item/completed",
+        "params": {
+            "completedAtMs": 1787794768999,
+            "threadId": str(thread_id),
+            "turnId": turn_id,
+            "item": {
+                "type": "userMessage",
+                "id": item_id,
+                "content": [{"type": "text", "text": text}],
             },
         },
     }
@@ -185,6 +209,36 @@ def test_agent_message_projection_accepts_only_completed_agent_authored_text() -
     started = _agent_message_event()
     started["method"] = "item/started"
     assert project_agent_message_event(started) is None
+
+
+def test_user_message_projection_preserves_exact_text_blocks_and_provenance() -> None:
+    event = _user_message_event(text="First line.\nSecond line — unchanged.")
+    event["params"]["item"]["content"].append(  # type: ignore[index,union-attr]
+        {"type": "image", "url": "ignored-without-inference"}
+    )
+
+    assert project_user_message_event(event) == {
+        "schema": "rodex-agent-observer-v1",
+        "kind": "app_server_user_message",
+        "thread_id": str(ROOT_THREAD_ID),
+        "turn_id": "turn-1",
+        "item": {
+            "type": "userMessage",
+            "id": "user-message-1",
+            "text_blocks": ["First line.\nSecond line — unchanged."],
+        },
+    }
+    assert project_user_message_event(_agent_message_event()) is None
+
+
+def test_observer_control_socket_is_stable_and_unique_per_runtime(tmp_path: Path) -> None:
+    first = observer_control_socket_path(tmp_path / "events-first.sock")
+    second = observer_control_socket_path(tmp_path / "events-second.sock")
+
+    assert first == observer_control_socket_path(tmp_path / "events-first.sock")
+    assert first != second
+    assert first.parent == second.parent == tmp_path
+    assert first.name.startswith("agent-observer-")
 
 
 def test_exact_spawn_creates_a_disabled_top_third_without_changing_focus(
@@ -296,6 +350,103 @@ def test_existing_observer_pane_is_reused_and_receives_exact_new_spawn(
     assert "scope" not in sent[0][1]
 
 
+def test_same_turn_parent_request_is_sent_exactly_without_entering_process_args(
+    tmp_path: Path,
+) -> None:
+    calls: list[list[str]] = []
+    sent: list[tuple[Path, dict[str, object]]] = []
+    request = 'Ask the agent exactly: "How many languages are spoken?"'
+
+    def runner(command: list[str], **_options: object) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        operation = command[3]
+        if operation == "show-options":
+            return subprocess.CompletedProcess(command, 0, "", "")
+        if operation == "display-message":
+            return subprocess.CompletedProcess(command, 0, "/workspace\n", "")
+        if operation == "split-window":
+            return subprocess.CompletedProcess(command, 0, "%9\n", "")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    controller = AgentObserverPaneController(
+        "/usr/bin/tmux",
+        tmp_path / "tmux.sock",
+        "%7",
+        tmp_path / "events-runtime-a.sock",
+        runner=runner,
+        cursor_reader=lambda *_args: TRACE_CURSOR,
+        event_sender=lambda path, event: sent.append((path, event)),
+        python_executable="/usr/bin/python3",
+    )
+    controller.activate(
+        database_path=tmp_path / "rodex.sqlite3",
+        rodex_sessions_id=3,
+        rodex_session_id="1234567890abcdef",
+        root_thread_id=ROOT_THREAD_ID,
+    )
+
+    controller.observe_protocol_event(_user_message_event(text=request))
+    controller.observe_protocol_event(_spawn_event())
+
+    split = next(command for command in calls if command[3] == "split-window")
+    assert request not in split[-1]
+    assert "parent_request_follows" in split[-1]
+    assert len(sent) == 1
+    path, parent_request = sent[0]
+    assert path == observer_control_socket_path(tmp_path / "events-runtime-a.sock")
+    assert parent_request == {
+        "schema": "rodex-agent-observer-v1",
+        "kind": "parent_request",
+        "thread_id": str(ROOT_THREAD_ID),
+        "turn_id": "turn-1",
+        "target_thread_id": str(CHILD_THREAD_ID),
+        "spawn_item_id": "call-spawn-1",
+        "item": {
+            "type": "userMessage",
+            "id": "user-message-1",
+            "text_blocks": [request],
+        },
+    }
+
+
+def test_parent_request_is_not_correlated_across_turns_or_roots(tmp_path: Path) -> None:
+    sent: list[tuple[Path, dict[str, object]]] = []
+
+    def runner(command: list[str], **_options: object) -> subprocess.CompletedProcess[str]:
+        operation = command[3]
+        if operation == "show-options":
+            return subprocess.CompletedProcess(command, 0, "%9\n", "")
+        if operation == "display-message":
+            return subprocess.CompletedProcess(command, 0, "%9|%7|0\n", "")
+        raise AssertionError(f"unexpected tmux mutation: {command}")
+
+    controller = AgentObserverPaneController(
+        "/usr/bin/tmux",
+        tmp_path / "tmux.sock",
+        "%7",
+        tmp_path / "events.sock",
+        runner=runner,
+        cursor_reader=lambda *_args: TRACE_CURSOR,
+        event_sender=lambda path, event: sent.append((path, event)),
+    )
+    controller.activate(
+        database_path=tmp_path / "rodex.sqlite3",
+        rodex_sessions_id=3,
+        rodex_session_id="1234567890abcdef",
+        root_thread_id=ROOT_THREAD_ID,
+    )
+
+    controller.observe_protocol_event(_user_message_event(turn_id="turn-before"))
+    controller.observe_protocol_event(
+        _user_message_event(thread_id=OTHER_THREAD_ID, text="other root")
+    )
+    controller.observe_protocol_event(_spawn_event())
+
+    assert len(sent) == 1
+    assert sent[0][1]["kind"] == "app_server_subagent_activity"
+    assert "parent_request_follows" not in sent[0][1]
+
+
 def test_existing_observer_retries_live_event_until_control_socket_is_ready(
     tmp_path: Path,
 ) -> None:
@@ -335,6 +486,64 @@ def test_existing_observer_retries_live_event_until_control_socket_is_ready(
 
     assert payload["item"]["id"] == "call-during-startup"
     assert payload["after_event_id"] == str(TRACE_CURSOR)
+
+
+def test_observer_view_renders_exact_parent_request_after_tracked_spawn() -> None:
+    initial = project_subagent_activity_event(_spawn_event())
+    parent = project_user_message_event(
+        _user_message_event(text="First line exactly.\nSecond line exactly.")
+    )
+    assert initial is not None
+    assert parent is not None
+    initial["parent_request_follows"] = True
+    view = AgentObserverView(root_thread_id=ROOT_THREAD_ID, initial_event=initial)
+    request_event = {
+        "schema": "rodex-agent-observer-v1",
+        "kind": "parent_request",
+        "thread_id": str(ROOT_THREAD_ID),
+        "turn_id": "turn-1",
+        "target_thread_id": str(CHILD_THREAD_ID),
+        "spawn_item_id": "call-spawn-1",
+        "item": parent["item"],
+    }
+
+    assert view.initial_lines == ("▶ live-review started",)
+    assert view.accept_parent_request_event(request_event) == [
+        "",
+        "REQUEST · exact parent message",
+        "  First line exactly.",
+        "  Second line exactly.",
+    ]
+    assert view.accept_parent_request_event(request_event) == []
+
+
+def test_observer_view_rejects_cross_root_activity_and_parent_request() -> None:
+    wrong_root_spawn = _spawn_event()
+    wrong_root_spawn["params"]["threadId"] = str(OTHER_THREAD_ID)  # type: ignore[index]
+    initial = project_subagent_activity_event(wrong_root_spawn)
+    assert initial is not None
+    view = AgentObserverView(root_thread_id=ROOT_THREAD_ID, initial_event=initial)
+
+    assert view.initial_lines == ()
+    assert view.target_thread_ids == frozenset()
+    assert (
+        view.accept_parent_request_event(
+            {
+                "schema": "rodex-agent-observer-v1",
+                "kind": "parent_request",
+                "thread_id": str(OTHER_THREAD_ID),
+                "turn_id": "turn-1",
+                "target_thread_id": str(CHILD_THREAD_ID),
+                "spawn_item_id": "call-spawn-1",
+                "item": {
+                    "type": "userMessage",
+                    "id": "user-message-1",
+                    "text_blocks": ["must not cross roots"],
+                },
+            }
+        )
+        == []
+    )
 
 
 def test_observer_view_renders_only_exact_target_trace_metadata() -> None:
@@ -518,9 +727,7 @@ def test_observer_view_fails_closed_when_v2_spawn_has_no_plaintext_scope() -> No
 
 
 def test_non_start_activity_does_not_report_scope_unavailable() -> None:
-    interacted = project_subagent_activity_event(
-        _spawn_event(activity_kind="interacted")
-    )
+    interacted = project_subagent_activity_event(_spawn_event(activity_kind="interacted"))
     assert interacted is not None
     view = AgentObserverView(root_thread_id=ROOT_THREAD_ID, initial_event=interacted)
 
@@ -588,8 +795,35 @@ def test_trace_publication_notification_is_a_nonblocking_datagram(tmp_path: Path
     }
 
 
+def test_two_runtime_observer_notifications_are_socket_isolated(tmp_path: Path) -> None:
+    first_event_socket = tmp_path / "events-runtime-one.sock"
+    second_event_socket = tmp_path / "events-runtime-two.sock"
+    first_control = observer_control_socket_path(first_event_socket)
+    second_control = observer_control_socket_path(second_event_socket)
+    first_receiver = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+    second_receiver = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+    first_receiver.bind(str(first_control))
+    second_receiver.bind(str(second_control))
+    first_receiver.settimeout(1)
+    second_receiver.settimeout(1)
+    try:
+        notify_agent_observer_trace_publication(first_event_socket, 11, False)
+        notify_agent_observer_trace_publication(second_event_socket, 22, True)
+        first_payload = json.loads(first_receiver.recv(4096))
+        second_payload = json.loads(second_receiver.recv(4096))
+    finally:
+        first_receiver.close()
+        second_receiver.close()
+
+    assert first_control != second_control
+    assert first_payload["trace_publication_sequence"] == 11
+    assert first_payload["caught_up"] is False
+    assert second_payload["trace_publication_sequence"] == 22
+    assert second_payload["caught_up"] is True
+
+
 @pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux is not installed")
-def test_real_tmux_observer_is_not_a_shell_and_exits_with_its_runtime(
+def test_real_tmux_observer_renders_request_and_exits_with_its_runtime(
     tmp_path: Path,
 ) -> None:
     tmux = shutil.which("tmux")
@@ -660,6 +894,8 @@ def test_real_tmux_observer_is_not_a_shell_and_exits_with_its_runtime(
             rodex_session_id="1234567890abcdef",
             root_thread_id=ROOT_THREAD_ID,
         )
+        exact_request = "Review the real tmux boundary exactly as requested."
+        controller.observe_protocol_event(_user_message_event(text=exact_request))
         controller.observe_protocol_event(_spawn_event())
 
         panes = _wait_for_tmux_panes(tmux, tmux_socket, 2)
@@ -676,14 +912,14 @@ def test_real_tmux_observer_is_not_a_shell_and_exits_with_its_runtime(
             observer[0],
             "RODEX · LIVE AGENT",
         )
-        assert "SCOPE UNAVAILABLE" in (
-            _wait_for_captured_text(
-                tmux,
-                tmux_socket,
-                observer[0],
-                "SCOPE UNAVAILABLE",
-            )
+        rendered_request = _wait_for_captured_text(
+            tmux,
+            tmux_socket,
+            observer[0],
+            exact_request,
         )
+        assert "REQUEST · exact parent message" in rendered_request
+        assert "SCOPE UNAVAILABLE" not in rendered_request
 
         publication = RodexAgentTracePublication(
             None,

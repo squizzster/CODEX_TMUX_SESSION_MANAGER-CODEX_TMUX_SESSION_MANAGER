@@ -130,12 +130,17 @@ the existing `(rodex_sessions_id, id)` cursor index, and considers an agent disp
 drained only after durable terminal events and an up-to-date publication; App lifecycle
 updates never trigger SQL reads. At the live boundary, `subAgentActivity` supplies the
 stable child identity and lifecycle state but no delegated plaintext on Codex 0.149.1's
-MultiAgent V2 path. The observer represents that absence explicitly and admits only
-completed messages authored by a followed child across the content-display boundary;
-system/developer messages, unrelated user content, encrypted collaboration payloads,
-hidden reasoning, commands, and tool payloads do not cross it. Exact scope remains a
-future capability gated on an authenticated App Server field tied to the same spawn and a
-non-mocked live-spawn acceptance test.
+MultiAgent V2 path. The session host separately correlates the latest completed parent
+`userMessage` only when it precedes the spawn on the same exact root turn, preserving its
+text as parent-request provenance without claiming it is the encrypted delegated prompt.
+This correlation is bounded runtime memory and causes no SQL work. The host projects
+lifecycle and request events through a private control socket derived uniquely from that
+runtime's protocol-event socket; the view enforces the root identity again. Completed
+messages authored by a followed child cross the direct content-display boundary.
+System/developer messages, user content from another turn or root, encrypted
+collaboration payloads, hidden reasoning, commands, and tool payloads do not cross it.
+Exact delegated scope remains a future capability gated on an authenticated App Server
+field tied to the same spawn.
 
 ## Live control
 

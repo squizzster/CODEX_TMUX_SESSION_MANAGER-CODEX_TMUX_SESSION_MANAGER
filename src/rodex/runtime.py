@@ -31,7 +31,7 @@ from rodex_registry.identity import (
     parse_rodex_runtime_id,
 )
 
-from .agent_observer import AgentObserverPaneController
+from .agent_observer import AgentObserverPaneController, observer_control_socket_path
 from .analytics import (
     AnalyticsSubprocessSupervisor,
     default_codex_sessions_root,
@@ -523,6 +523,9 @@ class RodexRuntimeLauncher:
         _require_short_unix_socket_path(runtime.app_server_socket_path)
         _require_short_unix_socket_path(runtime.protocol_proxy_socket_path)
         _require_short_unix_socket_path(runtime.protocol_event_socket_path)
+        _require_short_unix_socket_path(
+            observer_control_socket_path(runtime.protocol_event_socket_path)
+        )
 
         analytics_config: AnalyticsWorkerConfig | None = None
         if rodex_session_id is not None:

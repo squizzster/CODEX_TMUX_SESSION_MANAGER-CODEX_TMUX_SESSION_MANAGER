@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import queue
@@ -31,7 +32,7 @@ from rodex_registry import (
 from .protocol_proxy import AGENT_OBSERVER_EVENT_STREAM_PATH
 
 OBSERVER_SCHEMA: Final = "rodex-agent-observer-v1"
-OBSERVER_CONTROL_SOCKET_NAME: Final = "agent-observer.sock"
+OBSERVER_CONTROL_SOCKET_PREFIX: Final = "agent-observer-"
 OBSERVER_PRIMARY_PANE_OPTION: Final = "@rodex_agent_observer_pane_id"
 OBSERVER_OWNER_PANE_OPTION: Final = "@rodex_agent_observer_for"
 OBSERVER_TRACE_PAGE_SIZE: Final = 500
@@ -48,8 +49,13 @@ EventSender = Callable[[Path, dict[str, object]], None]
 
 
 def observer_control_socket_path(protocol_event_socket_path: Path) -> Path:
-    """Return the private runtime socket used for observer wake notifications."""
-    return protocol_event_socket_path.with_name(OBSERVER_CONTROL_SOCKET_NAME)
+    """Return one private observer-control socket per exact runtime event socket."""
+    runtime_digest = hashlib.sha256(
+        os.fsencode(os.path.abspath(protocol_event_socket_path))
+    ).hexdigest()[:16]
+    return protocol_event_socket_path.with_name(
+        f"{OBSERVER_CONTROL_SOCKET_PREFIX}{runtime_digest}.sock"
+    )
 
 
 def _send_observer_datagram(path: Path, event: dict[str, object]) -> None:
@@ -199,6 +205,48 @@ def project_agent_message_event(
     }
 
 
+def project_user_message_event(
+    event: Mapping[str, object] | None,
+) -> dict[str, object] | None:
+    """Project exact completed parent-user text for same-turn spawn correlation."""
+    if event is None or event.get("method") != "item/completed":
+        return None
+    params = event.get("params")
+    if not isinstance(params, Mapping):
+        return None
+    item = params.get("item")
+    if not isinstance(item, Mapping) or item.get("type") != "userMessage":
+        return None
+    item_id = item.get("id")
+    content = item.get("content")
+    if not isinstance(item_id, str) or not item_id or not isinstance(content, list):
+        return None
+    text_blocks = [
+        block.get("text")
+        for block in content
+        if isinstance(block, Mapping)
+        and block.get("type") == "text"
+        and isinstance(block.get("text"), str)
+    ]
+    if not text_blocks or not any(text_blocks):
+        return None
+    thread_id = _optional_uuid_text(params.get("threadId"))
+    turn_id = params.get("turnId")
+    if thread_id is None or not isinstance(turn_id, str) or not turn_id:
+        return None
+    return {
+        "schema": OBSERVER_SCHEMA,
+        "kind": "app_server_user_message",
+        "thread_id": thread_id,
+        "turn_id": turn_id,
+        "item": {
+            "type": "userMessage",
+            "id": item_id,
+            "text_blocks": text_blocks,
+        },
+    }
+
+
 def notify_agent_observer_trace_publication(
     protocol_event_socket_path: Path,
     trace_publication_sequence: int,
@@ -263,6 +311,7 @@ class AgentObserverPaneController:
         self._observer_pane_target: str | None = None
         self._known_activity_item_ids: set[str] = set()
         self._tracked_target_thread_ids: set[str] = set()
+        self._latest_parent_user_message: dict[str, object] | None = None
 
     def activate(
         self,
@@ -288,6 +337,14 @@ class AgentObserverPaneController:
 
     def observe_protocol_event(self, event: Mapping[str, object] | None) -> None:
         """Create, reuse, or update the observer from one typed App Server item."""
+        parent_user_message = project_user_message_event(event)
+        if parent_user_message is not None:
+            root_thread_id = self._root_thread_id
+            if root_thread_id is not None and parent_user_message["thread_id"] == str(
+                root_thread_id
+            ):
+                self._latest_parent_user_message = parent_user_message
+            return
         projected = project_subagent_activity_event(event)
         if projected is None or self._database_path is None:
             return
@@ -310,23 +367,21 @@ class AgentObserverPaneController:
             cursor = self._cursor_reader(self._rodex_sessions_id, self._database_path)
             projected["after_event_id"] = None if cursor is None else str(cursor)
             self._known_activity_item_ids.add(item_id)
+        request_event = self._parent_request_event(projected) if is_new_spawn else None
+        if request_event is not None:
+            projected["parent_request_follows"] = True
         self._tracked_target_thread_ids.add(target_thread_id)
         pane_target = self._locate_observer_pane()
         if pane_target is None:
             if not is_new_spawn:
                 return
             self._observer_pane_target = self._create_observer_pane(projected)
+            if self._observer_pane_target is not None and request_event is not None:
+                self._send_observer_event(request_event)
             return
-        try:
-            assert self._event_sender is not None
-            self._event_sender(
-                observer_control_socket_path(self._protocol_event_socket_path),
-                projected,
-            )
-        except OSError:
-            # The raw event stream provides the same exact update if the datagram
-            # endpoint is still starting or has just closed.
-            return
+        self._send_observer_event(projected)
+        if request_event is not None:
+            self._send_observer_event(request_event)
 
     def close(self) -> None:
         """Release only in-process state; tmux owns the persistent presentation pane."""
@@ -334,6 +389,40 @@ class AgentObserverPaneController:
             self._event_dispatcher.close()
         self._known_activity_item_ids.clear()
         self._tracked_target_thread_ids.clear()
+        self._latest_parent_user_message = None
+
+    def _parent_request_event(
+        self,
+        spawn_event: Mapping[str, object],
+    ) -> dict[str, object] | None:
+        parent_user_message = self._latest_parent_user_message
+        if parent_user_message is None or parent_user_message.get(
+            "turn_id"
+        ) != spawn_event.get("turn_id"):
+            return None
+        spawn_item = spawn_event.get("item")
+        user_item = parent_user_message.get("item")
+        if not isinstance(spawn_item, Mapping) or not isinstance(user_item, Mapping):
+            return None
+        return {
+            "schema": OBSERVER_SCHEMA,
+            "kind": "parent_request",
+            "thread_id": spawn_event["thread_id"],
+            "turn_id": spawn_event.get("turn_id"),
+            "target_thread_id": spawn_item["agent_thread_id"],
+            "spawn_item_id": spawn_item["id"],
+            "item": dict(user_item),
+        }
+
+    def _send_observer_event(self, event: dict[str, object]) -> None:
+        try:
+            assert self._event_sender is not None
+            self._event_sender(
+                observer_control_socket_path(self._protocol_event_socket_path),
+                event,
+            )
+        except OSError:
+            return
 
     def _locate_observer_pane(self) -> str | None:
         candidate = self._observer_pane_target
@@ -476,6 +565,7 @@ class AgentObserverView:
         self._target_paths: dict[str, str] = {}
         self._seen_activity_item_ids: set[str] = set()
         self._seen_agent_message_ids: set[str] = set()
+        self._seen_parent_request_item_ids: set[str] = set()
         self._turn_started_at: dict[str, str] = {}
         self._completed_tool_call_ids: dict[str, set[str]] = {}
         self._latest_total_tokens: dict[str, int] = {}
@@ -505,6 +595,8 @@ class AgentObserverView:
         if event.get("schema") != OBSERVER_SCHEMA:
             return []
         if event.get("kind") != "app_server_subagent_activity":
+            return []
+        if event.get("thread_id") != self._root_thread_id:
             return []
         item = event.get("item")
         if not isinstance(item, Mapping):
@@ -538,6 +630,8 @@ class AgentObserverView:
             self._weekly_limit_used_percent.pop(target_thread_id, None)
             self._last_context.pop(target_thread_id, None)
             self._work_line_is_last = False
+            if event.get("parent_request_follows") is True:
+                return [f"▶ {_agent_display_name(agent_path)} started"]
             return [
                 f"▶ {_agent_display_name(agent_path)} started",
                 "",
@@ -546,6 +640,37 @@ class AgentObserverView:
             ]
         self._work_line_is_last = False
         return [f"• {_agent_display_name(agent_path)} · {activity_kind}"]
+
+    def accept_parent_request_event(self, event: Mapping[str, object]) -> list[str]:
+        """Render exact same-turn parent-user text for an already tracked spawn."""
+        if (
+            event.get("schema") != OBSERVER_SCHEMA
+            or event.get("kind") != "parent_request"
+            or event.get("thread_id") != self._root_thread_id
+        ):
+            return []
+        target_thread_id = event.get("target_thread_id")
+        if target_thread_id not in self._target_states:
+            return []
+        item = event.get("item")
+        if not isinstance(item, Mapping) or item.get("type") != "userMessage":
+            return []
+        item_id = item.get("id")
+        text_blocks = item.get("text_blocks")
+        if (
+            not isinstance(item_id, str)
+            or not item_id
+            or item_id in self._seen_parent_request_item_ids
+            or not isinstance(text_blocks, list)
+            or not all(isinstance(block, str) for block in text_blocks)
+        ):
+            return []
+        rendered = _render_exact_text_blocks(text_blocks)
+        if not rendered:
+            return []
+        self._seen_parent_request_item_ids.add(item_id)
+        self._work_line_is_last = False
+        return ["", "REQUEST · exact parent message", *rendered]
 
     def accept_agent_message_event(self, event: Mapping[str, object]) -> list[str]:
         """Render exact assistant-authored text for an agent already being followed."""
@@ -732,6 +857,17 @@ def _plain_terminal_text(value: str) -> str:
     )
 
 
+def _render_exact_text_blocks(text_blocks: list[str]) -> list[str]:
+    rendered: list[str] = []
+    for text in text_blocks:
+        plain_text = _plain_terminal_text(text)
+        lines = plain_text.splitlines()
+        if not lines and plain_text:
+            lines = [plain_text]
+        rendered.extend(f"  {line}" for line in lines)
+    return rendered
+
+
 def _weekly_limit_used_percent(value: object) -> float | None:
     if not isinstance(value, list):
         return None
@@ -804,9 +940,7 @@ def _observer_runtime_liveness(
                     continue
                 if not isinstance(decoded, dict):
                     continue
-                projected = project_subagent_activity_event(decoded)
-                if projected is None:
-                    projected = project_agent_message_event(decoded)
+                projected = project_agent_message_event(decoded)
                 if projected is not None:
                     events.put(projected)
     except (ConnectionClosed, OSError):
@@ -922,6 +1056,8 @@ def main(arguments: list[str] | None = None) -> int:
                     _print_lines(view.accept_app_server_event(event))
                 elif kind == "app_server_agent_message":
                     _print_lines(view.accept_agent_message_event(event))
+                elif kind == "parent_request":
+                    _print_lines(view.accept_parent_request_event(event))
                 elif kind == "trace_published":
                     sequence = event.get("trace_publication_sequence")
                     caught_up = event.get("caught_up")

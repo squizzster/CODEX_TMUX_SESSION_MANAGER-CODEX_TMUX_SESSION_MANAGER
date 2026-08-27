@@ -112,24 +112,32 @@ top-third pane while preserving the lower Codex pane's focus. That pane directly
 than a shell. It consumes the App Server's exact agent identity, path, activity kind, and
 completed tracked-agent messages plus typed trace metadata from SQLite. Codex 0.149.1's
 MultiAgent V2 spawn event contains no delegated plaintext; the corresponding parent and
-child rollout content is encrypted. The observer therefore presents `SCOPE UNAVAILABLE`
-for that exact spawn rather than deriving scope from the child's behaviour or first reply.
-The agent's commentary and final response appear as `UPDATE` and `ANSWER`. Message text
-has no fixed display width or truncation and wraps only at the actual tmux pane edge;
-terminal control sequences are removed.
+child rollout content is encrypted. Separately, the primary App Server stream supplies
+the completed parent `userMessage`. The session host keeps only the latest exact root-turn
+message in memory and, when that same turn starts a child, sends its unchanged text to the
+pane as `REQUEST · exact parent message`. This is useful provenance, not a claim that the
+parent request and encrypted delegated prompt are byte-identical. Without the exact
+same-turn message, the observer presents `SCOPE UNAVAILABLE` rather than deriving scope
+from the child's behaviour or first reply. The agent's commentary and final response
+appear as `UPDATE` and `ANSWER`. Message text has no fixed display width or truncation and
+wraps only at the actual tmux pane edge; terminal control sequences are removed.
 
-Exact scope display remains disabled until a supported App Server contract supplies
-authenticated plaintext tied to the same spawn and child identity. Enabling it requires a
-non-mocked live-spawn acceptance test; a schema field or synthetic event alone is not
-sufficient evidence.
+The session host is the sole projector of sub-agent lifecycle events into the observer.
+Each runtime derives a distinct private control socket from its exact protocol-event
+socket; the observer also rejects a lifecycle or request event whose root identity does
+not match. Parent request text crosses that private socket after pane startup, so it does
+not enter the observer process arguments and is not duplicated into SQLite. The direct
+event-stream subscription supplies only tracked child messages and runtime liveness.
+Exact delegated-scope display remains disabled until a supported App Server contract
+supplies authenticated plaintext tied to the same spawn and child identity.
 
 The analytics worker wakes the observer only after a durable publication commit, so
 indexed cursor reads need no polling timer. Completed tool outputs update one live `WORK`
 count, while committed context, lifecycle, tokens, and weekly rate-limit facts form the
 quiet summary. The pane survives agent completion for reuse and exits when the runtime
-event stream closes. Unrelated parent/user messages, developer and system instructions,
-command text, tool payloads, output bodies, and hidden reasoning remain outside the
-display contract.
+event stream closes. Parent messages from another root or turn, developer and system
+instructions, command text, tool payloads, output bodies, and hidden reasoning remain
+outside the display contract.
 
 ## Persistent analytics and agent trace
 

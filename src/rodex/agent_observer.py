@@ -36,19 +36,7 @@ OBSERVER_OWNER_PANE_OPTION: Final = "@rodex_agent_observer_for"
 OBSERVER_TRACE_PAGE_SIZE: Final = 500
 _PANE_ID_PATTERN: Final = re.compile(r"%[0-9]+")
 _RODEX_SESSION_ID_PATTERN: Final = re.compile(r"[0-9a-f]{16}")
-_COLLABORATION_METHODS: Final = frozenset({"item/started", "item/completed"})
-_COLLABORATION_CALL_STATUSES: Final = frozenset({"inProgress", "completed", "failed"})
-_COLLABORATION_AGENT_STATUSES: Final = frozenset(
-    {
-        "pendingInit",
-        "running",
-        "interrupted",
-        "completed",
-        "errored",
-        "shutdown",
-        "notFound",
-    }
-)
+_SUBAGENT_ACTIVITY_METHODS: Final = frozenset({"item/started", "item/completed"})
 Runner = Callable[..., subprocess.CompletedProcess[str]]
 CursorReader = Callable[[int, Path], uuid.UUID | None]
 EventSender = Callable[[Path, dict[str, object]], None]
@@ -118,11 +106,11 @@ class _ObserverEventDispatcher:
                     break
 
 
-def project_collaboration_event(
+def project_subagent_activity_event(
     event: Mapping[str, object] | None,
 ) -> dict[str, object] | None:
-    """Project one exact App Server collaboration item without prompt/message bodies."""
-    if event is None or event.get("method") not in _COLLABORATION_METHODS:
+    """Project one observed App Server sub-agent activity without content fields."""
+    if event is None or event.get("method") not in _SUBAGENT_ACTIVITY_METHODS:
         return None
     method = event["method"]
     params = event.get("params")
@@ -131,11 +119,10 @@ def project_collaboration_event(
     item = params.get("item")
     if not isinstance(item, Mapping):
         return None
-    if item.get("type") != "collabAgentToolCall":
+    if item.get("type") != "subAgentActivity":
         return None
     item_id = item.get("id")
-    tool = item.get("tool")
-    if not isinstance(item_id, str) or not item_id or not isinstance(tool, str) or not tool:
+    if not isinstance(item_id, str) or not item_id:
         return None
     thread_id = _optional_uuid_text(params.get("threadId"))
     if thread_id is None:
@@ -143,57 +130,27 @@ def project_collaboration_event(
     turn_id = params.get("turnId")
     if turn_id is not None and (not isinstance(turn_id, str) or not turn_id):
         return None
-    status = item.get("status")
-    if status is not None and status not in _COLLABORATION_CALL_STATUSES:
+    agent_thread_id = _optional_uuid_text(item.get("agentThreadId"))
+    if agent_thread_id is None:
         return None
-    sender_thread_id = item.get("senderThreadId")
-    if sender_thread_id is not None:
-        sender_thread_id = _optional_uuid_text(sender_thread_id)
-        if sender_thread_id is None:
-            return None
-    receiver_thread_ids = item.get("receiverThreadIds", [])
-    if not isinstance(receiver_thread_ids, list):
+    agent_path = item.get("agentPath")
+    if not isinstance(agent_path, str) or not agent_path:
         return None
-    projected_receivers: list[str] = []
-    for receiver_thread_id in receiver_thread_ids:
-        projected_receiver = _optional_uuid_text(receiver_thread_id)
-        if projected_receiver is None:
-            return None
-        projected_receivers.append(projected_receiver)
-    model = item.get("model")
-    if model is not None and not isinstance(model, str):
+    activity_kind = item.get("kind")
+    if not isinstance(activity_kind, str) or not activity_kind:
         return None
-    reasoning_effort = item.get("reasoningEffort")
-    if reasoning_effort is not None and not isinstance(reasoning_effort, str):
-        return None
-    agent_states = item.get("agentsStates", {})
-    if not isinstance(agent_states, Mapping):
-        return None
-    projected_states: dict[str, str] = {}
-    for target, raw_state in agent_states.items():
-        target_id = _optional_uuid_text(target)
-        if target_id is None or not isinstance(raw_state, Mapping):
-            return None
-        agent_status = raw_state.get("status")
-        if agent_status not in _COLLABORATION_AGENT_STATUSES:
-            return None
-        projected_states[target_id] = str(agent_status)
     return {
         "schema": OBSERVER_SCHEMA,
-        "kind": "app_server_collaboration",
+        "kind": "app_server_subagent_activity",
         "method": method,
         "thread_id": thread_id,
         "turn_id": turn_id,
         "item": {
-            "type": "collabAgentToolCall",
+            "type": "subAgentActivity",
             "id": item_id,
-            "tool": tool,
-            "status": status,
-            "sender_thread_id": sender_thread_id,
-            "receiver_thread_ids": projected_receivers,
-            "model": model,
-            "reasoning_effort": reasoning_effort,
-            "agent_states": projected_states,
+            "activity_kind": activity_kind,
+            "agent_thread_id": agent_thread_id,
+            "agent_path": agent_path,
         },
     }
 
@@ -226,7 +183,7 @@ def notify_agent_observer_trace_publication(
 
 
 class AgentObserverPaneController:
-    """React to exact collaboration events at the live tmux boundary."""
+    """React to exact sub-agent activity at the live tmux boundary."""
 
     def __init__(
         self,
@@ -260,7 +217,7 @@ class AgentObserverPaneController:
         self._rodex_session_id: str | None = None
         self._root_thread_id: uuid.UUID | None = None
         self._observer_pane_target: str | None = None
-        self._known_collaboration_item_ids: set[str] = set()
+        self._known_activity_item_ids: set[str] = set()
         self._tracked_target_thread_ids: set[str] = set()
 
     def activate(
@@ -287,7 +244,7 @@ class AgentObserverPaneController:
 
     def observe_protocol_event(self, event: Mapping[str, object] | None) -> None:
         """Create, reuse, or update the observer from one typed App Server item."""
-        projected = project_collaboration_event(event)
+        projected = project_subagent_activity_event(event)
         if projected is None or self._database_path is None:
             return
         root_thread_id = self._root_thread_id
@@ -296,23 +253,20 @@ class AgentObserverPaneController:
         item = projected["item"]
         assert isinstance(item, dict)
         item_id = str(item["id"])
-        receivers = item["receiver_thread_ids"]
-        assert isinstance(receivers, list)
+        target_thread_id = str(item["agent_thread_id"])
         is_new_spawn = (
-            projected["method"] == "item/started" and item["tool"] == "spawnAgent"
+            projected["method"] == "item/started" and item["activity_kind"] == "started"
         )
-        is_known = item_id in self._known_collaboration_item_ids
-        receiver_is_tracked = bool(
-            self._tracked_target_thread_ids.intersection(str(value) for value in receivers)
-        )
-        if not is_new_spawn and not is_known and not receiver_is_tracked:
+        is_known = item_id in self._known_activity_item_ids
+        target_is_tracked = target_thread_id in self._tracked_target_thread_ids
+        if not is_new_spawn and not is_known and not target_is_tracked:
             return
         if is_new_spawn:
             assert self._rodex_sessions_id is not None
             cursor = self._cursor_reader(self._rodex_sessions_id, self._database_path)
             projected["after_event_id"] = None if cursor is None else str(cursor)
-            self._known_collaboration_item_ids.add(item_id)
-        self._tracked_target_thread_ids.update(str(value) for value in receivers)
+            self._known_activity_item_ids.add(item_id)
+        self._tracked_target_thread_ids.add(target_thread_id)
         pane_target = self._locate_observer_pane()
         if pane_target is None:
             if not is_new_spawn:
@@ -334,7 +288,7 @@ class AgentObserverPaneController:
         """Release only in-process state; tmux owns the persistent presentation pane."""
         if self._event_dispatcher is not None:
             self._event_dispatcher.close()
-        self._known_collaboration_item_ids.clear()
+        self._known_activity_item_ids.clear()
         self._tracked_target_thread_ids.clear()
 
     def _locate_observer_pane(self) -> str | None:
@@ -499,10 +453,10 @@ class AgentObserverView:
         return tuple(self._initial_lines)
 
     def accept_app_server_event(self, event: Mapping[str, object]) -> list[str]:
-        """Accept one already-sanitized collaboration event."""
+        """Accept one already-sanitized sub-agent activity event."""
         if event.get("schema") != OBSERVER_SCHEMA:
             return []
-        if event.get("kind") != "app_server_collaboration":
+        if event.get("kind") != "app_server_subagent_activity":
             return []
         item = event.get("item")
         if not isinstance(item, Mapping):
@@ -521,43 +475,29 @@ class AgentObserverView:
         if not was_monitoring and isinstance(cursor, str):
             self._after_event_id = uuid.UUID(cursor)
         item_id = item.get("id")
-        tool = item.get("tool")
-        status = item.get("status")
-        if not isinstance(item_id, str) or not isinstance(tool, str):
+        activity_kind = item.get("activity_kind")
+        target_thread_id = item.get("agent_thread_id")
+        agent_path = item.get("agent_path")
+        if (
+            not isinstance(item_id, str)
+            or not isinstance(activity_kind, str)
+            or not isinstance(target_thread_id, str)
+            or not isinstance(agent_path, str)
+        ):
             return []
-        if status is not None and not isinstance(status, str):
-            return []
-        receivers = item.get("receiver_thread_ids", [])
-        if not isinstance(receivers, list):
-            return []
-        receiver_ids = frozenset(target for target in receivers if isinstance(target, str))
-        new_receiver_ids = receiver_ids - self.target_thread_ids
-        for target in receiver_ids:
-            self._target_states.setdefault(target, None)
-        for target in new_receiver_ids:
-            self._durable_terminal_target_ids.discard(target)
-        if new_receiver_ids:
+        is_new_target = target_thread_id not in self._target_states
+        self._target_states[target_thread_id] = activity_kind
+        self._target_paths[target_thread_id] = agent_path
+        if is_new_target:
+            self._durable_terminal_target_ids.discard(target_thread_id)
             self._terminal_drain_complete = False
-        states = item.get("agent_states", {})
-        if isinstance(states, Mapping):
-            for target, agent_status in states.items():
-                if isinstance(target, str) and isinstance(agent_status, str):
-                    self._target_states[target] = agent_status
-        model = item.get("model")
-        effort = item.get("reasoning_effort")
         details = [
-            f"APP {event.get('method')} {tool}",
-            f"call={item_id}",
-            f"status={status or '--'}",
+            f"APP {event.get('method')} subAgentActivity",
+            f"event={item_id}",
+            f"kind={activity_kind}",
+            f"target={_short_identity(target_thread_id)}",
+            f"path={agent_path}",
         ]
-        if model:
-            details.append(f"model={model}")
-        if effort:
-            details.append(f"effort={effort}")
-        if receivers:
-            details.append(
-                "targets=" + ",".join(_short_identity(str(target)) for target in receivers)
-            )
         return [" | ".join(details)]
 
     def accept_trace_snapshot(self, snapshot: RodexAgentTraceSnapshot) -> list[str]:
@@ -749,7 +689,7 @@ def _observer_runtime_liveness(
                     continue
                 if not isinstance(decoded, dict):
                     continue
-                projected = project_collaboration_event(decoded)
+                projected = project_subagent_activity_event(decoded)
                 if projected is not None:
                     events.put(projected)
     except (ConnectionClosed, OSError):
@@ -872,7 +812,7 @@ def main(arguments: list[str] | None = None) -> int:
             trace_publications: list[tuple[int, bool]] = []
             for event in batch:
                 kind = event.get("kind")
-                if kind == "app_server_collaboration":
+                if kind == "app_server_subagent_activity":
                     _print_lines(view.accept_app_server_event(event))
                 elif kind == "trace_published":
                     sequence = event.get("trace_publication_sequence")

@@ -17,7 +17,7 @@ from rodex.agent_observer import (
     AgentObserverView,
     notify_agent_observer_trace_publication,
     observer_control_socket_path,
-    project_collaboration_event,
+    project_subagent_activity_event,
 )
 from rodex.protocol_proxy import CodexProtocolEventTap
 from rodex_registry import (
@@ -40,61 +40,50 @@ def _spawn_event(
     *,
     method: str = "item/started",
     item_id: str = "call-spawn-1",
-    status: str = "inProgress",
-    agent_status: str = "running",
+    activity_kind: str = "started",
 ) -> dict[str, object]:
     return {
+        "emittedAtMs": 1787794770053,
         "method": method,
         "params": {
+            "startedAtMs": 1787794770052,
             "threadId": str(ROOT_THREAD_ID),
             "turnId": "turn-1",
             "item": {
-                "type": "collabAgentToolCall",
+                "type": "subAgentActivity",
                 "id": item_id,
-                "tool": "spawnAgent",
-                "status": status,
-                "senderThreadId": str(ROOT_THREAD_ID),
-                "receiverThreadIds": [str(CHILD_THREAD_ID)],
-                "model": "gpt-5.6-luna",
-                "reasoningEffort": "max",
-                "prompt": "must not enter the observer",
-                "agentsStates": {
-                    str(CHILD_THREAD_ID): {
-                        "status": agent_status,
-                        "message": "private",
-                    }
-                },
+                "agentPath": "/root/live-review",
+                "agentThreadId": str(CHILD_THREAD_ID),
+                "kind": activity_kind,
             },
         },
     }
 
 
-def test_collaboration_projection_is_exact_typed_and_excludes_content() -> None:
-    projected = project_collaboration_event(_spawn_event())
+def test_observed_subagent_activity_projection_is_exact_and_content_free() -> None:
+    event = _spawn_event()
+    event["params"]["item"]["private"] = "must not enter the observer"  # type: ignore[index]
+
+    projected = project_subagent_activity_event(event)
 
     assert projected == {
         "schema": "rodex-agent-observer-v1",
-        "kind": "app_server_collaboration",
+        "kind": "app_server_subagent_activity",
         "method": "item/started",
         "thread_id": str(ROOT_THREAD_ID),
         "turn_id": "turn-1",
         "item": {
-            "type": "collabAgentToolCall",
+            "type": "subAgentActivity",
             "id": "call-spawn-1",
-            "tool": "spawnAgent",
-            "status": "inProgress",
-            "sender_thread_id": str(ROOT_THREAD_ID),
-            "receiver_thread_ids": [str(CHILD_THREAD_ID)],
-            "model": "gpt-5.6-luna",
-            "reasoning_effort": "max",
-            "agent_states": {str(CHILD_THREAD_ID): "running"},
+            "activity_kind": "started",
+            "agent_thread_id": str(CHILD_THREAD_ID),
+            "agent_path": "/root/live-review",
         },
     }
-    assert "prompt" not in json.dumps(projected)
-    assert "private" not in json.dumps(projected)
+    assert "must not enter the observer" not in json.dumps(projected)
 
 
-def test_collaboration_projection_rejects_near_matches() -> None:
+def test_subagent_activity_projection_rejects_near_matches() -> None:
     wrong_method = _spawn_event()
     wrong_method["method"] = "item/outputDelta"
     wrong_type = _spawn_event()
@@ -102,9 +91,9 @@ def test_collaboration_projection_rejects_near_matches() -> None:
     missing_id = _spawn_event()
     missing_id["params"]["item"]["id"] = ""  # type: ignore[index]
 
-    assert project_collaboration_event(wrong_method) is None
-    assert project_collaboration_event(wrong_type) is None
-    assert project_collaboration_event(missing_id) is None
+    assert project_subagent_activity_event(wrong_method) is None
+    assert project_subagent_activity_event(wrong_type) is None
+    assert project_subagent_activity_event(missing_id) is None
 
 
 def test_exact_spawn_creates_a_disabled_top_third_without_changing_focus(
@@ -117,7 +106,7 @@ def test_exact_spawn_creates_a_disabled_top_third_without_changing_focus(
         calls.append(command)
         operation = command[3]
         if operation == "show-options":
-            return subprocess.CompletedProcess(command, 1, "", "missing")
+            return subprocess.CompletedProcess(command, 0, "", "")
         if operation == "display-message":
             return subprocess.CompletedProcess(command, 0, "/workspace\n", "")
         if operation == "split-window":
@@ -163,7 +152,8 @@ def test_exact_spawn_creates_a_disabled_top_third_without_changing_focus(
     assert "exec /usr/bin/python3 -m rodex.agent_observer" in split[-1]
     assert "--initial-event" in split[-1]
     assert str(TRACE_CURSOR) in split[-1]
-    assert "must not enter the observer" not in split[-1]
+    assert "subAgentActivity" in split[-1]
+    assert "/root/live-review" in split[-1]
     assert [command[3:] for command in calls[-4:]] == [
         ["set-option", "-p", "-t", "%7", "@rodex_agent_observer_pane_id", "%9"],
         ["set-option", "-p", "-t", "%9", "@rodex_agent_observer_for", "%7"],
@@ -255,7 +245,7 @@ def test_existing_observer_retries_live_event_until_control_socket_is_ready(
 
 
 def test_observer_view_renders_only_exact_target_trace_metadata() -> None:
-    initial = project_collaboration_event(_spawn_event())
+    initial = project_subagent_activity_event(_spawn_event())
     assert initial is not None
     initial["after_event_id"] = str(TRACE_CURSOR)
     view = AgentObserverView(
@@ -321,15 +311,9 @@ def test_observer_view_renders_only_exact_target_trace_metadata() -> None:
     assert view.monitoring is False
 
 
-def test_app_completion_cannot_suppress_the_final_durable_trace_read() -> None:
-    initial = project_collaboration_event(_spawn_event())
-    completed = project_collaboration_event(
-        _spawn_event(
-            method="item/completed",
-            status="completed",
-            agent_status="completed",
-        )
-    )
+def test_app_item_completion_cannot_suppress_the_final_durable_trace_read() -> None:
+    initial = project_subagent_activity_event(_spawn_event())
+    completed = project_subagent_activity_event(_spawn_event(method="item/completed"))
     assert initial is not None
     assert completed is not None
     view = AgentObserverView(

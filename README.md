@@ -47,7 +47,7 @@ Both sides retain the same Rodex, runtime, Codex, and workspace context.
 - Tracks root/sub-agent lineage and typed rollout-derived messages, commands, tools,
   contexts, token usage, rate limits, and agent activity in a durable agent trace.
 - Opens and reuses a noninteractive top-third agent observer on an exact live
-  `spawnAgent` event while leaving the Codex pane focused in the lower two-thirds.
+  `subAgentActivity(kind=started)` event while leaving Codex focused below.
 - Refuses unregistered tmux name collisions and verifies Rodex and Codex identities
   before attaching to or controlling a live runtime.
 - Serializes concurrent opens of one ended name and tolerates the bounded Codex-writer
@@ -98,16 +98,16 @@ freshest post-compaction percentage, or `Context: --` until one arrives.
 ### Live agent observer pane
 
 After runtime registration, an exact App Server
-`item/started → collabAgentToolCall → spawnAgent` event creates a top pane at one-third
-of the window. The existing Codex pane remains active in the lower two-thirds. The top
-pane directly runs Rodex's dedicated observer process, has tmux input disabled, and
-cannot execute shell commands. It remains after an agent turn finishes and is reused by
-later agent activity; it exits with the Rodex runtime so it cannot keep a session alive.
+`item/started → subAgentActivity(kind=started)` event creates a top pane at one-third of
+the window. The existing Codex pane remains active in the lower two-thirds. The top pane
+directly runs Rodex's dedicated observer process, has tmux input disabled, and cannot
+execute shell commands. It remains after an agent turn finishes and is reused by later
+agent activity; it exits with the Rodex runtime so it cannot keep a session alive.
 
 The observer labels immediate identity and lifecycle facts as `APP` and committed v12
-trace facts as `SQL`. App Server receiver UUIDs, requested model/effort, call status, and
-typed agent states determine what is followed. SQLite supplies typed context, lifecycle,
-message metadata, tool/command metadata, token use, rate limits, and compaction events.
+trace facts as `SQL`. The App Server's exact agent UUID, path, and activity kind determine
+what is followed. SQLite supplies typed model/effort context, lifecycle, message metadata,
+tool/command metadata, token use, rate limits, and compaction events.
 It never displays prompts, message bodies, command text, tool payloads, output bodies, or
 hidden reasoning. The analytics worker sends a nonblocking wake only after its existing
 transaction commits; the observer then advances from an indexed opaque event cursor.

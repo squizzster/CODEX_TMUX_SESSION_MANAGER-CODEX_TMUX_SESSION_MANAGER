@@ -105,13 +105,13 @@ Enter/Tab bindings and pane pipe, so all input currently passes directly to Code
 
 ## Live agent observer pane
 
-An exact primary-thread `spawnAgent` item start enters the dedicated live agent observer
-pipeline. The session host creates or reuses one marked top-third pane while preserving
-the lower Codex pane's focus. That pane directly runs `rodex.agent_observer`; tmux input
-is disabled, so it is a presentation surface rather than a shell. It consumes
-privacy-reduced collaboration identity/lifecycle fields from the semantic event stream
-and typed trace metadata from SQLite. The analytics worker wakes it only after a durable
-publication commit, so the observer uses indexed cursor reads without a polling timer.
+An exact primary-thread `item/started → subAgentActivity(kind=started)` event enters the
+dedicated live agent observer pipeline. The session host creates or reuses one marked
+top-third pane while preserving the lower Codex pane's focus. That pane directly runs
+`rodex.agent_observer`; tmux input is disabled, so it is a presentation surface rather
+than a shell. It consumes the App Server's privacy-reduced agent identity, path, and
+activity kind plus typed trace metadata from SQLite. The analytics worker wakes it only
+after a durable publication commit, so indexed cursor reads need no polling timer.
 The pane survives agent completion for reuse and exits when the runtime event stream
 closes. Prompt text, message bodies, command text, tool payloads, output bodies, and
 hidden reasoning never enter its display contract.

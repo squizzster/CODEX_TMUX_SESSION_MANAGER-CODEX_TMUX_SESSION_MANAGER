@@ -1874,7 +1874,7 @@ def test_runtime_path_keepalives_share_runtime_paths_independently(
         (["--model", "example"], False),
     ],
 )
-def test_session_host_connects_the_tui_through_the_protocol_proxy(
+def test_session_host_skips_updater_and_connects_tui_through_protocol_proxy(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     codex_arguments: list[str],
@@ -2066,6 +2066,8 @@ def test_session_host_connects_the_tui_through_the_protocol_proxy(
     assert tui_commands == [
         [
             "/usr/bin/codex",
+            "--config",
+            "check_for_update_on_startup=false",
             "--no-alt-screen",
             "--remote",
             f"unix://{proxy_socket}",

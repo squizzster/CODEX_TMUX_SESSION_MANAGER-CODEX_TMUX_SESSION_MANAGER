@@ -1286,6 +1286,10 @@ def run_session_host(
                 raise
             tui_command = [
                 codex_binary,
+                # Rodex checks App Server compatibility itself. An interactive
+                # updater here would block thread registration before attach.
+                "--config",
+                "check_for_update_on_startup=false",
                 "--no-alt-screen",
                 "--remote",
                 f"unix://{protocol_proxy_socket_path}",

@@ -17,6 +17,7 @@ from rodex.agent_observer import (
     AgentObserverView,
     notify_agent_observer_trace_publication,
     observer_control_socket_path,
+    project_agent_message_event,
     project_subagent_activity_event,
 )
 from rodex.protocol_proxy import CodexProtocolEventTap
@@ -26,6 +27,7 @@ from rodex_registry import (
     RodexAgentTraceSnapshot,
     TraceSubagentActivity,
     create_a_rodex_session,
+    split_codex_thread_id_into_signed_bigints,
 )
 from rodex_registry.agent_trace import publish_agent_trace_in_transaction
 from rodex_sql import open_rodex_transaction
@@ -55,6 +57,31 @@ def _spawn_event(
                 "agentPath": "/root/live-review",
                 "agentThreadId": str(CHILD_THREAD_ID),
                 "kind": activity_kind,
+            },
+        },
+    }
+
+
+def _agent_message_event(
+    *,
+    thread_id: uuid.UUID = CHILD_THREAD_ID,
+    item_id: str = "message-1",
+    item_type: str = "agentMessage",
+    phase: str = "commentary",
+    text: str = "I am checking the official source now.",
+) -> dict[str, object]:
+    return {
+        "emittedAtMs": 1787794775000,
+        "method": "item/completed",
+        "params": {
+            "completedAtMs": 1787794774999,
+            "threadId": str(thread_id),
+            "turnId": "turn-child",
+            "item": {
+                "type": item_type,
+                "id": item_id,
+                "phase": phase,
+                "text": text,
             },
         },
     }
@@ -94,6 +121,29 @@ def test_subagent_activity_projection_rejects_near_matches() -> None:
     assert project_subagent_activity_event(wrong_method) is None
     assert project_subagent_activity_event(wrong_type) is None
     assert project_subagent_activity_event(missing_id) is None
+
+
+def test_agent_message_projection_accepts_only_completed_agent_authored_text() -> None:
+    projected = project_agent_message_event(_agent_message_event())
+
+    assert projected == {
+        "schema": "rodex-agent-observer-v1",
+        "kind": "app_server_agent_message",
+        "thread_id": str(CHILD_THREAD_ID),
+        "turn_id": "turn-child",
+        "item": {
+            "type": "agentMessage",
+            "id": "message-1",
+            "phase": "commentary",
+            "text": "I am checking the official source now.",
+        },
+    }
+    assert (
+        project_agent_message_event(_agent_message_event(item_type="userMessage")) is None
+    )
+    started = _agent_message_event()
+    started["method"] = "item/started"
+    assert project_agent_message_event(started) is None
 
 
 def test_exact_spawn_creates_a_disabled_top_third_without_changing_focus(
@@ -250,21 +300,27 @@ def test_observer_view_renders_only_exact_target_trace_metadata() -> None:
     initial["after_event_id"] = str(TRACE_CURSOR)
     view = AgentObserverView(
         root_thread_id=ROOT_THREAD_ID,
-        rodex_session_id="1234567890abcdef",
         initial_event=initial,
     )
-    target_event_id = uuid.UUID("10000000-0000-4000-8000-000000000002")
-    terminal_event_id = uuid.UUID("10000000-0000-4000-8000-000000000004")
+    terminal_event_id = uuid.UUID("10000000-0000-4000-8000-000000000008")
     snapshot = RodexAgentTraceSnapshot(
         trace_publication_sequence=8,
         trace_schema_version="rodex-agent-trace-v1",
         calculated_at_utc="2026-08-27T00:00:02Z",
         coverage_state="complete",
-        durable_event_count=4,
+        durable_event_count=7,
         unrecognized_record_count=0,
         events=(
             {
-                "event_id": str(target_event_id),
+                "event_id": "10000000-0000-4000-8000-000000000002",
+                "codex_thread_id": str(CHILD_THREAD_ID),
+                "codex_turn_id": "turn-child",
+                "event_kind": "turn_started",
+                "event_time_utc": "2026-08-27T00:00:00Z",
+                "detail": None,
+            },
+            {
+                "event_id": "10000000-0000-4000-8000-000000000003",
                 "codex_thread_id": str(CHILD_THREAD_ID),
                 "codex_turn_id": "turn-child",
                 "event_kind": "turn_context",
@@ -280,12 +336,45 @@ def test_observer_view_renders_only_exact_target_trace_metadata() -> None:
                 },
             },
             {
-                "event_id": "10000000-0000-4000-8000-000000000003",
+                "event_id": "10000000-0000-4000-8000-000000000004",
                 "codex_thread_id": str(OTHER_THREAD_ID),
                 "codex_turn_id": "turn-other",
                 "event_kind": "command_execution",
                 "event_time_utc": "2026-08-27T00:00:01Z",
                 "detail": {"command_status": "completed"},
+            },
+            {
+                "event_id": "10000000-0000-4000-8000-000000000005",
+                "codex_thread_id": str(CHILD_THREAD_ID),
+                "codex_turn_id": "turn-child",
+                "event_kind": "tool_call",
+                "event_time_utc": "2026-08-27T00:00:01Z",
+                "detail": {
+                    "activity_kind": "output",
+                    "tool_call_id": "tool-1",
+                    "tool_name": "exec",
+                },
+            },
+            {
+                "event_id": "10000000-0000-4000-8000-000000000006",
+                "codex_thread_id": str(CHILD_THREAD_ID),
+                "codex_turn_id": "turn-child",
+                "event_kind": "token_usage",
+                "event_time_utc": "2026-08-27T00:00:01Z",
+                "detail": {"total_tokens": 1234},
+            },
+            {
+                "event_id": "10000000-0000-4000-8000-000000000007",
+                "codex_thread_id": str(CHILD_THREAD_ID),
+                "codex_turn_id": "turn-child",
+                "event_kind": "rate_limit",
+                "event_time_utc": "2026-08-27T00:00:01Z",
+                "detail": {
+                    "windows": [
+                        {"window_minutes": 300, "used_percent": 10.0},
+                        {"window_minutes": 10080, "used_percent": 44.0},
+                    ]
+                },
             },
             {
                 "event_id": str(terminal_event_id),
@@ -300,15 +389,51 @@ def test_observer_view_renders_only_exact_target_trace_metadata() -> None:
 
     lines = view.accept_trace_snapshot(snapshot)
 
-    rendered = "\n".join(lines)
-    assert "gpt-5.6-luna" in rendered
-    assert "effort=max" in rendered
-    assert str(OTHER_THREAD_ID) not in rendered
-    assert "turn completed" in rendered
+    assert view.initial_lines == ("▶ live-review started",)
+    assert lines == [
+        "  Model: gpt-5.6-luna · effort: MAX",
+        "  ✓ Tool 1 finished",
+        "",
+        "✓ live-review finished · 2s · 1 tool · 1,234 tokens · weekly limit 44% used",
+    ]
     assert view.after_event_id == terminal_event_id
     assert view.monitoring is True
     view.accept_trace_publication_wake(8, caught_up=True)
     assert view.monitoring is False
+
+
+def test_observer_view_shows_agent_english_but_not_other_threads_or_control_codes() -> None:
+    initial = project_subagent_activity_event(_spawn_event())
+    commentary = project_agent_message_event(
+        _agent_message_event(text="Checking GOV.UK.\n\x1b[31mOne moment…\x1b[0m")
+    )
+    final = project_agent_message_event(
+        _agent_message_event(
+            item_id="message-2",
+            phase="final_answer",
+            text="The Rt Hon Andy Burnham MP — Prime Minister.",
+        )
+    )
+    other = project_agent_message_event(_agent_message_event(thread_id=OTHER_THREAD_ID))
+    assert initial is not None
+    assert commentary is not None
+    assert final is not None
+    assert other is not None
+    view = AgentObserverView(root_thread_id=ROOT_THREAD_ID, initial_event=initial)
+
+    assert view.accept_agent_message_event(commentary) == [
+        "",
+        "Agent:",
+        "  Checking GOV.UK.",
+        "  One moment…",
+    ]
+    assert view.accept_agent_message_event(commentary) == []
+    assert view.accept_agent_message_event(other) == []
+    assert view.accept_agent_message_event(final) == [
+        "",
+        "Answer:",
+        "  The Rt Hon Andy Burnham MP — Prime Minister.",
+    ]
 
 
 def test_app_item_completion_cannot_suppress_the_final_durable_trace_read() -> None:
@@ -318,7 +443,6 @@ def test_app_item_completion_cannot_suppress_the_final_durable_trace_read() -> N
     assert completed is not None
     view = AgentObserverView(
         root_thread_id=ROOT_THREAD_ID,
-        rodex_session_id="1234567890abcdef",
         initial_event=initial,
     )
 
@@ -383,6 +507,19 @@ def test_real_tmux_observer_is_not_a_shell_and_exits_with_its_runtime(
     event_socket = tmp_path / "e.sock"
     database = tmp_path / "r.sqlite3"
     create_a_rodex_session(database, codex_session_id=ROOT_THREAD_ID)
+    with open_rodex_transaction(database) as connection:
+        child_identity_id = connection.execute(
+            "INSERT INTO codex_threads "
+            "(codex_thread_public_id_signed_bigint_1, "
+            "codex_thread_public_id_signed_bigint_2) VALUES (?, ?) RETURNING id",
+            split_codex_thread_id_into_signed_bigints(CHILD_THREAD_ID),
+        ).fetchone()[0]
+        connection.execute(
+            "INSERT INTO rodex_sessions_codex_threads "
+            "(rodex_sessions_id, codex_threads_id, first_linked_at_utc) "
+            "VALUES (1, ?, ?)",
+            (child_identity_id, "2026-08-27T00:00:00Z"),
+        )
     tap = CodexProtocolEventTap(event_socket)
     controller: AgentObserverPaneController | None = None
     tap.start()
@@ -442,11 +579,11 @@ def test_real_tmux_observer_is_not_a_shell_and_exits_with_its_runtime(
         assert observer[3] == "0"
         assert primary_state[5] == "1"
         assert abs(int(observer[4]) * 2 - int(primary_state[4])) <= 2
-        assert "RODEX AGENT OBSERVER" in _wait_for_captured_text(
+        assert "RODEX · LIVE AGENT" in _wait_for_captured_text(
             tmux,
             tmux_socket,
             observer[0],
-            "RODEX AGENT OBSERVER",
+            "RODEX · LIVE AGENT",
         )
 
         publication = RodexAgentTracePublication(
@@ -468,6 +605,22 @@ def test_real_tmux_observer_is_not_a_shell_and_exits_with_its_runtime(
                         "/root/live-review",
                     ),
                 ),
+                RodexAgentTraceEvent(
+                    CHILD_THREAD_ID,
+                    "00000000-0000-7000-8000-000000000002",
+                    1,
+                    0,
+                    "turn_started",
+                    "2026-08-27T00:00:01Z",
+                ),
+                RodexAgentTraceEvent(
+                    CHILD_THREAD_ID,
+                    "00000000-0000-7000-8000-000000000002",
+                    2,
+                    0,
+                    "turn_completed",
+                    "2026-08-27T00:00:03Z",
+                ),
             ),
         )
         with open_rodex_transaction(database) as connection:
@@ -487,9 +640,9 @@ def test_real_tmux_observer_is_not_a_shell_and_exits_with_its_runtime(
             tmux,
             tmux_socket,
             observer[0],
-            "agent started",
+            "live-review finished",
         )
-        assert "agent started" in captured
+        assert "live-review finished" in captured
 
         subprocess.run(
             [

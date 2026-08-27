@@ -14,6 +14,7 @@ import sys
 import uuid
 from collections.abc import Callable, Mapping
 from contextlib import suppress
+from datetime import datetime
 from pathlib import Path
 from threading import Event, Lock, Thread
 from typing import Final
@@ -37,6 +38,7 @@ OBSERVER_TRACE_PAGE_SIZE: Final = 500
 _PANE_ID_PATTERN: Final = re.compile(r"%[0-9]+")
 _RODEX_SESSION_ID_PATTERN: Final = re.compile(r"[0-9a-f]{16}")
 _SUBAGENT_ACTIVITY_METHODS: Final = frozenset({"item/started", "item/completed"})
+_ANSI_ESCAPE_PATTERN: Final = re.compile(r"\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
 Runner = Callable[..., subprocess.CompletedProcess[str]]
 CursorReader = Callable[[int, Path], uuid.UUID | None]
 EventSender = Callable[[Path, dict[str, object]], None]
@@ -151,6 +153,45 @@ def project_subagent_activity_event(
             "activity_kind": activity_kind,
             "agent_thread_id": agent_thread_id,
             "agent_path": agent_path,
+        },
+    }
+
+
+def project_agent_message_event(
+    event: Mapping[str, object] | None,
+) -> dict[str, object] | None:
+    """Project completed agent-authored text without prompts or reasoning content."""
+    if event is None or event.get("method") != "item/completed":
+        return None
+    params = event.get("params")
+    if not isinstance(params, Mapping):
+        return None
+    item = params.get("item")
+    if not isinstance(item, Mapping) or item.get("type") != "agentMessage":
+        return None
+    item_id = item.get("id")
+    text = item.get("text")
+    if not isinstance(item_id, str) or not item_id or not isinstance(text, str) or not text:
+        return None
+    thread_id = _optional_uuid_text(params.get("threadId"))
+    if thread_id is None:
+        return None
+    turn_id = params.get("turnId")
+    if turn_id is not None and (not isinstance(turn_id, str) or not turn_id):
+        return None
+    phase = item.get("phase")
+    if phase is not None and not isinstance(phase, str):
+        return None
+    return {
+        "schema": OBSERVER_SCHEMA,
+        "kind": "app_server_agent_message",
+        "thread_id": thread_id,
+        "turn_id": turn_id,
+        "item": {
+            "type": "agentMessage",
+            "id": item_id,
+            "phase": phase,
+            "text": text,
         },
     }
 
@@ -415,25 +456,28 @@ class AgentObserverPaneController:
 
 
 class AgentObserverView:
-    """State and privacy-safe rendering for one observer pane."""
+    """Render exact agent activity as a concise, human-readable feed."""
 
     def __init__(
         self,
         *,
         root_thread_id: uuid.UUID,
-        rodex_session_id: str,
         initial_event: Mapping[str, object],
     ) -> None:
         self._root_thread_id = str(root_thread_id)
-        self._rodex_session_id = rodex_session_id
         self._after_event_id: uuid.UUID | None = None
         self._target_states: dict[str, str | None] = {}
         self._durable_terminal_target_ids: set[str] = set()
         self._terminal_drain_complete = False
         self._last_trace_publication_sequence = 0
         self._target_paths: dict[str, str] = {}
-        self._seen_app_events: set[str] = set()
-        self._coverage: tuple[str | None, int] | None = None
+        self._seen_activity_item_ids: set[str] = set()
+        self._seen_agent_message_ids: set[str] = set()
+        self._turn_started_at: dict[str, str] = {}
+        self._completed_tool_call_ids: dict[str, set[str]] = {}
+        self._latest_total_tokens: dict[str, int] = {}
+        self._weekly_limit_used_percent: dict[str, float] = {}
+        self._last_context: dict[str, tuple[object, object]] = {}
         self._initial_lines = self.accept_app_server_event(initial_event)
 
     @property
@@ -461,16 +505,7 @@ class AgentObserverView:
         item = event.get("item")
         if not isinstance(item, Mapping):
             return []
-        fingerprint = json.dumps(
-            {key: value for key, value in event.items() if key != "after_event_id"},
-            ensure_ascii=False,
-            separators=(",", ":"),
-            sort_keys=True,
-        )
         was_monitoring = self.monitoring
-        if fingerprint in self._seen_app_events:
-            return []
-        self._seen_app_events.add(fingerprint)
         cursor = event.get("after_event_id")
         if not was_monitoring and isinstance(cursor, str):
             self._after_event_id = uuid.UUID(cursor)
@@ -485,33 +520,53 @@ class AgentObserverView:
             or not isinstance(agent_path, str)
         ):
             return []
-        is_new_target = target_thread_id not in self._target_states
+        if item_id in self._seen_activity_item_ids:
+            return []
+        self._seen_activity_item_ids.add(item_id)
         self._target_states[target_thread_id] = activity_kind
         self._target_paths[target_thread_id] = agent_path
-        if is_new_target:
+        if activity_kind == "started":
             self._durable_terminal_target_ids.discard(target_thread_id)
             self._terminal_drain_complete = False
-        details = [
-            f"APP {event.get('method')} subAgentActivity",
-            f"event={item_id}",
-            f"kind={activity_kind}",
-            f"target={_short_identity(target_thread_id)}",
-            f"path={agent_path}",
-        ]
-        return [" | ".join(details)]
+            self._turn_started_at.pop(target_thread_id, None)
+            self._completed_tool_call_ids[target_thread_id] = set()
+            self._latest_total_tokens.pop(target_thread_id, None)
+            self._weekly_limit_used_percent.pop(target_thread_id, None)
+            self._last_context.pop(target_thread_id, None)
+            return [f"▶ {_agent_display_name(agent_path)} started"]
+        return [f"• {_agent_display_name(agent_path)} · {activity_kind}"]
+
+    def accept_agent_message_event(self, event: Mapping[str, object]) -> list[str]:
+        """Render exact assistant-authored text for an agent already being followed."""
+        if event.get("schema") != OBSERVER_SCHEMA:
+            return []
+        if event.get("kind") != "app_server_agent_message":
+            return []
+        thread_id = event.get("thread_id")
+        item = event.get("item")
+        if thread_id not in self._target_states or not isinstance(item, Mapping):
+            return []
+        item_id = item.get("id")
+        text = item.get("text")
+        phase = item.get("phase")
+        if (
+            not isinstance(item_id, str)
+            or not isinstance(text, str)
+            or (phase is not None and not isinstance(phase, str))
+        ):
+            return []
+        if item_id in self._seen_agent_message_ids:
+            return []
+        self._seen_agent_message_ids.add(item_id)
+        plain_text = _plain_terminal_text(text).strip()
+        if not plain_text:
+            return []
+        label = "Answer" if phase == "final_answer" else "Agent"
+        return ["", f"{label}:", *[f"  {line}" for line in plain_text.splitlines()]]
 
     def accept_trace_snapshot(self, snapshot: RodexAgentTraceSnapshot) -> list[str]:
         """Advance through one durable page and render only exact tracked identities."""
         lines: list[str] = []
-        coverage = (snapshot.coverage_state, snapshot.unrecognized_record_count)
-        if coverage != self._coverage:
-            self._coverage = coverage
-            lines.append(
-                "SQL trace "
-                f"schema={snapshot.trace_schema_version or '--'} "
-                f"coverage={snapshot.coverage_state or '--'} "
-                f"unknown={snapshot.unrecognized_record_count}"
-            )
         for event in snapshot.events:
             event_id = event.get("event_id")
             if isinstance(event_id, str):
@@ -533,18 +588,91 @@ class AgentObserverView:
                         self._target_paths[target] = path
             if not relevant:
                 continue
-            if thread_id in self._target_states and event_kind in {
-                "turn_completed",
-                "turn_aborted",
-            }:
-                self._durable_terminal_target_ids.add(str(thread_id))
-                self._target_states[str(thread_id)] = (
-                    "turnCompleted" if event_kind == "turn_completed" else "turnAborted"
+            if not isinstance(thread_id, str) or not isinstance(event_kind, str):
+                continue
+            lines.extend(
+                self._accept_target_trace_event(
+                    thread_id,
+                    event_kind,
+                    event.get("event_time_utc"),
+                    detail if isinstance(detail, Mapping) else {},
                 )
-            rendered = _format_trace_event(event, self._target_paths)
-            if rendered is not None:
-                lines.append(rendered)
+            )
         return lines
+
+    def _accept_target_trace_event(
+        self,
+        thread_id: str,
+        event_kind: str,
+        event_time_utc: object,
+        detail: Mapping[str, object],
+    ) -> list[str]:
+        if event_kind == "turn_started":
+            if isinstance(event_time_utc, str):
+                self._turn_started_at[thread_id] = event_time_utc
+            self._durable_terminal_target_ids.discard(thread_id)
+            self._terminal_drain_complete = False
+            return []
+        if event_kind == "turn_context":
+            context = (detail.get("model"), detail.get("reasoning_effort"))
+            if context == self._last_context.get(thread_id):
+                return []
+            self._last_context[thread_id] = context
+            model, effort = context
+            if not isinstance(model, str) and not isinstance(effort, str):
+                return []
+            fields = []
+            if isinstance(model, str):
+                fields.append(f"Model: {model}")
+            if isinstance(effort, str):
+                fields.append(f"effort: {effort.upper()}")
+            return ["  " + " · ".join(fields)]
+        if event_kind == "tool_call" and detail.get("activity_kind") == "output":
+            tool_call_id = detail.get("tool_call_id")
+            if not isinstance(tool_call_id, str):
+                return []
+            completed = self._completed_tool_call_ids.setdefault(thread_id, set())
+            if tool_call_id in completed:
+                return []
+            completed.add(tool_call_id)
+            return [f"  ✓ Tool {len(completed)} finished"]
+        if event_kind == "token_usage":
+            total_tokens = detail.get("total_tokens")
+            if isinstance(total_tokens, int) and not isinstance(total_tokens, bool):
+                self._latest_total_tokens[thread_id] = total_tokens
+            return []
+        if event_kind == "rate_limit":
+            weekly_used = _weekly_limit_used_percent(detail.get("windows"))
+            if weekly_used is not None:
+                self._weekly_limit_used_percent[thread_id] = weekly_used
+            return []
+        if event_kind == "compaction":
+            return ["  ↻ Context compacted"]
+        if event_kind not in {"turn_completed", "turn_aborted"}:
+            return []
+        self._durable_terminal_target_ids.add(thread_id)
+        self._target_states[thread_id] = (
+            "turnCompleted" if event_kind == "turn_completed" else "turnAborted"
+        )
+        path = self._target_paths.get(thread_id, thread_id)
+        verb = "finished" if event_kind == "turn_completed" else "stopped"
+        summary = f"{'✓' if event_kind == 'turn_completed' else '■'} "
+        summary += f"{_agent_display_name(path)} {verb}"
+        details = []
+        elapsed = _format_elapsed(self._turn_started_at.get(thread_id), event_time_utc)
+        if elapsed is not None:
+            details.append(elapsed)
+        tool_count = len(self._completed_tool_call_ids.get(thread_id, set()))
+        details.append(f"{tool_count} {'tool' if tool_count == 1 else 'tools'}")
+        total_tokens = self._latest_total_tokens.get(thread_id)
+        if total_tokens is not None:
+            details.append(f"{total_tokens:,} tokens")
+        weekly_used = self._weekly_limit_used_percent.get(thread_id)
+        if weekly_used is not None:
+            details.append(f"weekly limit {_display_percentage(weekly_used)} used")
+        if details:
+            summary += " · " + " · ".join(details)
+        return ["", summary]
 
     def accept_trace_publication_wake(
         self,
@@ -565,90 +693,56 @@ class AgentObserverView:
 
     def header_lines(self) -> tuple[str, ...]:
         return (
-            "RODEX AGENT OBSERVER  ·  exact App Server + durable SQL trace",
-            f"Rodex {self._rodex_session_id}  ·  "
-            f"root {_short_identity(self._root_thread_id)}",
-            "No prompt, message body, command text, or hidden reasoning is displayed.",
+            "RODEX · LIVE AGENT",
+            "Agent replies and high-signal progress from exact live + durable events.",
         )
 
 
-def _format_trace_event(
-    event: Mapping[str, object],
-    target_paths: Mapping[str, str],
-) -> str | None:
-    kind = event.get("event_kind")
-    thread_id = str(event.get("codex_thread_id"))
-    detail = event.get("detail")
-    values = detail if isinstance(detail, Mapping) else {}
-    prefix = f"{_event_clock(event.get('event_time_utc'))} SQL {_short_identity(thread_id)}"
-    path = target_paths.get(thread_id)
-    if path:
-        prefix += f" {path}"
-    if kind == "turn_context":
-        fields = [
-            f"model={values.get('model') or '--'}",
-            f"effort={values.get('reasoning_effort') or '--'}",
-            f"cwd={values.get('working_directory') or '--'}",
-            f"sandbox={values.get('sandbox_mode') or '--'}",
-        ]
-        return f"{prefix} context | " + " | ".join(fields)
-    if kind in {"turn_started", "turn_completed", "turn_aborted"}:
-        return f"{prefix} {str(kind).replace('_', ' ')}"
-    if kind == "subagent_activity":
-        target = values.get("target_codex_thread_id")
-        return (
-            f"{prefix} agent {values.get('activity_kind') or '--'} | "
-            f"target={_short_identity(str(target))} | "
-            f"path={values.get('agent_path') or '--'}"
+def _agent_display_name(agent_path: str) -> str:
+    return agent_path.rstrip("/").rsplit("/", 1)[-1] or agent_path
+
+
+def _plain_terminal_text(value: str) -> str:
+    without_escapes = _ANSI_ESCAPE_PATTERN.sub("", value)
+    return "".join(
+        character
+        for character in without_escapes
+        if character in {"\n", "\t"} or 32 <= ord(character) != 127
+    )
+
+
+def _weekly_limit_used_percent(value: object) -> float | None:
+    if not isinstance(value, list):
+        return None
+    for window in value:
+        if not isinstance(window, Mapping) or window.get("window_minutes") != 10_080:
+            continue
+        used_percent = window.get("used_percent")
+        if isinstance(used_percent, (int, float)) and not isinstance(used_percent, bool):
+            return float(used_percent)
+    return None
+
+
+def _display_percentage(value: float) -> str:
+    return f"{value:g}%"
+
+
+def _format_elapsed(start: str | None, end: object) -> str | None:
+    if start is None or not isinstance(end, str):
+        return None
+    with suppress(ValueError):
+        seconds = round(
+            (
+                datetime.fromisoformat(end.replace("Z", "+00:00"))
+                - datetime.fromisoformat(start.replace("Z", "+00:00"))
+            ).total_seconds()
         )
-    if kind == "message":
-        return (
-            f"{prefix} message | role={values.get('message_role') or '--'} | "
-            f"phase={values.get('message_phase') or '--'} | "
-            f"blocks={values.get('content_block_count')} | "
-            f"bytes={values.get('body_utf8_bytes')} | "
-            f"capture={values.get('body_capture_state') or '--'}"
-        )
-    if kind == "tool_call":
-        return (
-            f"{prefix} tool {values.get('tool_name') or '--'} | "
-            f"activity={values.get('activity_kind') or '--'} | "
-            f"status={values.get('tool_status') or '--'} | "
-            f"request={values.get('request_utf8_bytes')}B | "
-            f"response={values.get('response_utf8_bytes')}B"
-        )
-    if kind == "command_execution":
-        return (
-            f"{prefix} command | status={values.get('command_status') or '--'} | "
-            f"exit={values.get('exit_code')} | duration={values.get('duration_ms')}ms | "
-            f"args={values.get('command_argument_count')} | "
-            f"out={values.get('aggregated_output_utf8_bytes')}B"
-        )
-    if kind == "token_usage":
-        return (
-            f"{prefix} tokens | total={values.get('total_tokens')} | "
-            f"in={values.get('input_tokens')} | "
-            f"cached={values.get('cached_input_tokens')} | "
-            f"out={values.get('output_tokens')} | "
-            f"reasoning={values.get('reasoning_output_tokens')} | "
-            f"context={values.get('context_used_percent')}%"
-        )
-    if kind == "rate_limit":
-        windows = values.get("windows", [])
-        if not isinstance(windows, list):
+        if seconds < 0:
             return None
-        rendered = []
-        for window in windows:
-            if isinstance(window, Mapping):
-                rendered.append(
-                    f"{window.get('limit_id')}={window.get('used_percent')}%/"
-                    f"{window.get('window_minutes')}m"
-                )
-        return f"{prefix} rate | " + ", ".join(rendered)
-    if kind == "compaction":
-        return f"{prefix} context compacted"
-    if kind == "session_metadata":
-        return f"{prefix} session metadata"
+        minutes, remaining_seconds = divmod(seconds, 60)
+        if minutes:
+            return f"{minutes}m {remaining_seconds}s"
+        return f"{remaining_seconds}s"
     return None
 
 
@@ -690,6 +784,8 @@ def _observer_runtime_liveness(
                 if not isinstance(decoded, dict):
                     continue
                 projected = project_subagent_activity_event(decoded)
+                if projected is None:
+                    projected = project_agent_message_event(decoded)
                 if projected is not None:
                     events.put(projected)
     except (ConnectionClosed, OSError):
@@ -734,16 +830,6 @@ def _optional_uuid_text(value: object) -> str | None:
     return None
 
 
-def _short_identity(value: str) -> str:
-    return value if len(value) <= 12 else f"{value[:8]}…{value[-4:]}"
-
-
-def _event_clock(value: object) -> str:
-    if isinstance(value, str) and len(value) >= 19 and value[10] == "T":
-        return value[11:19]
-    return "--:--:--"
-
-
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="python -m rodex.agent_observer")
     parser.add_argument("--rodex-database", required=True, type=Path)
@@ -769,7 +855,6 @@ def main(arguments: list[str] | None = None) -> int:
         _parser().error("--initial-event must be a JSON object")
     view = AgentObserverView(
         root_thread_id=namespace.root_thread_id,
-        rodex_session_id=namespace.rodex_session_id,
         initial_event=initial_event,
     )
     control_path = observer_control_socket_path(namespace.protocol_event_socket)
@@ -814,6 +899,8 @@ def main(arguments: list[str] | None = None) -> int:
                 kind = event.get("kind")
                 if kind == "app_server_subagent_activity":
                     _print_lines(view.accept_app_server_event(event))
+                elif kind == "app_server_agent_message":
+                    _print_lines(view.accept_agent_message_event(event))
                 elif kind == "trace_published":
                     sequence = event.get("trace_publication_sequence")
                     caught_up = event.get("caught_up")

@@ -34,11 +34,15 @@ listener; control endpoints are Unix sockets below a private runtime root.
   no live runtime; explicit trace body reads re-authenticate the recorded rollout prefix.
   Terminal following emits only tmux's plain text and creates no persistent conversation
   copy.
-- The input-disabled agent observer admits plaintext content only from a completed
-  `agentMessage` authored by a tracked child. MultiAgent V2 delegated payloads remain
-  encrypted and are represented as `SCOPE UNAVAILABLE`; Rodex does not infer or recover
-  them. It strips terminal control sequences and excludes unrelated user/system/developer
-  messages, hidden reasoning, commands, and tool payloads.
+- The input-disabled agent observer admits plaintext from a completed `agentMessage`
+  authored by a tracked child and from the latest completed parent `userMessage` only
+  when the same exact root turn subsequently spawns that child. The latter is labelled as
+  the exact parent request, not delegated scope. It travels after process startup through
+  a runtime-specific mode-`0600` control socket and is not copied into process arguments
+  or SQLite. MultiAgent V2 delegated payloads remain encrypted; Rodex does not infer or
+  recover them. The view verifies the root identity, strips terminal controls, and
+  excludes user messages from other roots or turns, system/developer messages, hidden
+  reasoning, commands, and tool payloads.
 - The install shim accepts only root- or current-user-owned, non-group/world-writable
   project code and `uv`. A system command must use an immutable root-owned installation.
 

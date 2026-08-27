@@ -17,6 +17,7 @@ from rodex_registry import (
 from rodex_sql import RodexSQLError
 
 from .application_pipeline import CodexDelegator, UnifiedRodexApplicationPipeline
+from .codex_update_notice import CodexUpdateNotice
 from .control import CodexControlClient, RodexControlError
 from .errors import RodexExecutableNotFoundError, RodexLaunchError
 from .managed_session_lifecycle import ManagedSessionLifecycle
@@ -54,7 +55,11 @@ def run(
         control_client=control_client,
         codex_delegator=codex_delegator,
         resolve_executable=shutil.which,
-        runtime_launcher_factory=RodexRuntimeLauncher,
+        runtime_launcher_factory=lambda codex_binary, tmux_binary: RodexRuntimeLauncher(
+            codex_binary,
+            tmux_binary,
+            attach_notice=CodexUpdateNotice(codex_binary).message_if_available,
+        ),
         session_lifecycle=ManagedSessionLifecycle(),
     )
     return application.execute(arguments)

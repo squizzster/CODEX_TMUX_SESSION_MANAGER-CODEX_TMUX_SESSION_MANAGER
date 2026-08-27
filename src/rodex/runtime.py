@@ -50,6 +50,7 @@ from .protocol_proxy import (
     TmuxContextStatus,
     TmuxToolCallStatus,
     ToolCallCounter,
+    publish_tui_notice,
 )
 from .status_bar import context_status_segment
 from .tmux_status import (
@@ -82,6 +83,7 @@ RODEX_TMUX_SLASH_ENABLED: Final = False
 Runner = Callable[..., subprocess.CompletedProcess[str]]
 Connector = Callable[..., Any]
 ProcessSpawner = Callable[..., subprocess.Popen[bytes]]
+TuiNoticePublisher = Callable[[Path, str], bool]
 
 
 class RodexRuntimeError(RuntimeError):
@@ -397,6 +399,8 @@ class RodexRuntimeLauncher:
         monotonic: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
         startup_timeout_seconds: float = DEFAULT_STARTUP_TIMEOUT_SECONDS,
+        attach_notice: Callable[[], str | None] | None = None,
+        tui_notice_publisher: TuiNoticePublisher = publish_tui_notice,
     ) -> None:
         self._codex_binary = codex_binary
         self._tmux_binary = tmux_binary
@@ -407,6 +411,8 @@ class RodexRuntimeLauncher:
         self._monotonic = monotonic
         self._sleep = sleep
         self._startup_timeout_seconds = startup_timeout_seconds
+        self._attach_notice = attach_notice
+        self._publish_tui_notice = tui_notice_publisher
 
     def codex_session_is_persisted(self, codex_session_id: CodexSessionId) -> bool:
         """Ask a transient App Server whether an exact thread is resumable."""
@@ -814,6 +820,13 @@ class RodexRuntimeLauncher:
 
     def attach(self, runtime: LiveTmuxSession) -> None:
         """Attach the calling terminal to the live Rodex tmux session."""
+        notice: str | None = None
+        if self._attach_notice is not None:
+            with suppress(Exception):
+                notice = self._attach_notice()
+        if notice and isinstance(runtime, LiveRodexRuntime):
+            with suppress(Exception):
+                self._publish_tui_notice(runtime.protocol_proxy_socket_path, notice)
         environment = os.environ.copy()
         environment.pop("TMUX", None)
         self._tmux(
@@ -1286,6 +1299,10 @@ def run_session_host(
                 raise
             tui_command = [
                 codex_binary,
+                # Rodex checks App Server compatibility itself. An interactive
+                # updater here would block thread registration before attach.
+                "--config",
+                "check_for_update_on_startup=false",
                 "--no-alt-screen",
                 "--remote",
                 f"unix://{protocol_proxy_socket_path}",

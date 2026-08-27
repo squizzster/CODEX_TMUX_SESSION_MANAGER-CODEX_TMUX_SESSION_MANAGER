@@ -40,6 +40,9 @@ rodex _help
 rodex _running
 ```
 
+Rodex may report that a newer Codex release exists, but it never installs one. Run
+`codex update` outside Rodex when you choose to update Codex.
+
 Rodex keeps its durable registry under `$XDG_STATE_HOME/rodex`, using
 `~/.local/state/rodex` when `XDG_STATE_HOME` is unset. See
 [Local data](README.md#local-data) for the database and runtime paths and their

@@ -217,6 +217,7 @@ def test_app_server_method_vocabulary_has_one_production_owner() -> None:
         CODEX_APP_SERVER.turn_steer_method,
         CODEX_APP_SERVER.turn_interrupt_method,
         CODEX_APP_SERVER.turn_completed_method,
+        CODEX_APP_SERVER.warning_method,
     }
     duplicates: list[tuple[str, str]] = []
     for path in source_root.glob("*.py"):

@@ -1,8 +1,8 @@
 # Agent instructions
 
-Retain these standards when architecture changes. This is a compact current blueprint, not a change log. Amend a standard only after an agent suggestion and user agreement.
-Consider one independent reviewing agent, critically assess its advice, retain ownership,
-and keep this file within 150 lines and 10,240 bytes.
+Keep this a current blueprint, not a change log. Amend a standard only after an agent
+suggestion and user agreement. Consider one independent reviewer, retain ownership, and
+keep this file within 150 lines and 10,240 bytes.
 
 # Rodex architecture
 
@@ -11,11 +11,11 @@ Rodex matches a durable session and 64-bit runtime ID to its Codex thread/sessio
 ## Runtime shape
 
 ```text
-user → Rodex CLI → private tmux → session host → Codex TUI → proxy → app-server
-         ├──► SQLite registry          │               ├──► status / live clients
-         └──► _cat / _tail             │               └──► agent observer pane
+user → Rodex CLI → private tmux → session host → Codex TUI ↔ proxy ↔ app-server
+         ├──► SQLite registry          │                 ├──► status / live clients
+         ├──► _cat / _tail             │                 └──► agent observer pane
+         └──► bounded update check ───────────────────► TUI-only warning
                                        └──► analytics + trace → SQLite
-                                                                  └──► post-commit observer wake
 ```
 
 ## Application control plane
@@ -49,7 +49,8 @@ Missing/unmatched selectors return to Codex after collision policy. Direct reads
 | `rodex.analytics` / `analytics_source_*` | Authenticate bounded rollout sources and supervise fail-open suffix analysis. |
 | `rodex.agent_trace` | Normalize authenticated rollout records into typed trace facts. |
 | `rodex.control` | Verify and control one exact loaded Codex thread. |
-| `rodex.app_server_contract` / `protocol_proxy` | Own App Server RPC/version contracts, forwarding, and bounded live signals. |
+| `rodex.codex_update_notice` | Compare stable Codex versions through bounded commands and a fail-open 24-hour npm cache. |
+| `rodex.app_server_contract` / `protocol_proxy` | Own App Server contracts, forwarding, bounded live signals, and downstream-only native TUI notices. |
 | `rodex_registry.execution` / `agent_trace` / `statistics` | Own canonical lineage, request/turn provenance, typed trace persistence, and relational projections. |
 | `rodex_registry.agent_observer` | Read one bounded projection for only the observer's exact current agent turns. |
 | `rodex_registry.schema` | Own and exactly attest the complete v14 relational schema. |
@@ -71,10 +72,13 @@ rules live in [SQL_SCHEMA.md](SQL_SCHEMA.md).
 1. Allocate unregistered Rodex session and runtime IDs through the same bounded,
    indexed ten-candidate pipeline.
 2. Configure tmux history, then create the detached session; mouse remains user-owned.
-3. Start and supervise one private app-server, proxy, inline Codex TUI, and analytics.
+3. Start and supervise one private app-server, proxy, updater-disabled inline Codex TUI,
+   and analytics.
 4. Observe its one Codex ID and advertise all identities as `pending`.
 5. Transactionally register identity, provenance, name, owner, and endpoint; confirm it.
-6. Rename tmux, configure status, and attach when requested.
+6. Rename tmux and configure status.
+7. Before an attach, check for a newer stable Codex release and, when present, ask the
+   proxy to emit a native warning only to the primary TUI; then attach regardless.
 
 ### Existing selector
 
@@ -103,56 +107,30 @@ Named segments own base status. `TmuxStatusPipeline` arbitrates animations and t
 Live reads share one verified session-read pipeline. `_cat` snapshots tmux; `_tail`
 emits committed history and settled visible changes outside the status/composer region;
 `_events` streams App Server events. Observation is not turn completion; controllers
-use `_inspect`, `_wait`, and `_result`.
+use `_inspect`, `_wait`, and `_result`. A Rodex update notice terminates at the proxy and
+becomes TUI-owned scrollback; it is absent from App Server traffic, `_events`, durable
+thread content, and model turns.
 
 ## Persistent analytics
 
-The worker has one blocking, protocol-event-driven scheduling spine. It coalesces a
-0.5-second quiet window up to a five-second ceiling and feeds newline-complete suffixes
-through per-source cursors into one resident analyzer and trace normalizer. Cold lineage
-recovery follows exact event-named UUIDs first; a startup-only fallback scans regular
-JSONL files in the root UUIDv7 three-day window, reads only first metadata lines, and
-accepts the authenticated parent closure. Resident wakes never repeat that scan or
-reload unchanged prefixes. Catch-up, stale-publication recovery, and clean replay remain
-bounded. Clean replay invalidates cached verified lineage and byte-reader state as one
-recovery boundary before source metadata is trusted again.
+One blocking scheduler coalesces protocol activity and sends authenticated source
+suffixes through cursors into a resident analyzer and trace normalizer. Cold lineage
+recovery prefers event-named UUIDs; its bounded startup fallback reads only candidate
+metadata. Resident wakes never repeat discovery or reload unchanged prefixes.
 
-Canonical execution identity, rollout provenance, worker checkpoints, replaceable
-statistics metrics, and the append-only typed trace have separate relational owners and
-no JSON/body copies. Canonical agent-request rows join the exact same-turn parent-message
-reference, collaboration invocation, activity, target thread, and an opaque public ID;
-separate rows associate requests FIFO with the target's next distinct observed turn. One
-fenced transaction publishes changed metrics, accepted source progress, trace suffix,
-request/turn associations, and worker health. Trace totals advance from the persisted
-head instead of recounting history; trace coverage remains cumulatively gapped after any
-durable gap or retained unrecognized record. Explicit body reads resolve authenticated
-prefixes across both current and historical memberships. Failures preserve the last good
-view and cannot affect the TUI. Statistics and trace reads need neither Codex nor tmux.
-After each committed trace publication, the worker sends the observer its exact
-publication sequence and catch-up state. The observer coalesces wakes, advances through
-the existing `(rodex_sessions_id, id)` cursor index, and considers an agent display
-drained only after durable terminal events and an up-to-date publication. It then reads
-one bounded projection for only its exact current target turns, including lineage,
-model/effort, detailed work counts, outcome, and tokens; completed presentations retire
-from later reads, and App lifecycle updates never trigger SQL reads. At the live
-boundary, `subAgentActivity` supplies the stable child
-identity and lifecycle state but no delegated plaintext on Codex 0.149.1's MultiAgent V2
-path. The session host separately correlates the latest completed parent `userMessage`
-only when it precedes the request on the same exact root turn, preserving its text as
-parent-request provenance without claiming it is the encrypted delegated prompt. The
-live text handoff is bounded runtime memory; durable normalization records the canonical
-request provenance without copying its plaintext body. The host projects lifecycle and
-request and tracked-child message events through a private control socket derived
-uniquely from that runtime's protocol-event socket. Its length-framed Unix stream has no
-datagram-size truncation boundary; the ordered dispatcher spans pane startup, and the
-view enforces the root identity again. Presentation state is keyed by exact child thread
-and turn, while unbound requests for the same child are retained FIFO. A delayed prior
-completion therefore cannot acquire a follow-up's request, invocation type, work, or
-tokens.
-System/developer messages, user content from another turn or root, encrypted
-collaboration payloads, hidden reasoning, commands, and tool payloads do not cross it.
-Exact delegated scope remains a future capability gated on an authenticated App Server
-field tied to the same spawn.
+Identity, provenance, checkpoints, replaceable statistics, and the append-only trace have
+separate relational owners. One fenced transaction publishes progress, trace, metrics,
+request/turn associations, and worker health. Failures preserve the last good view and
+cannot affect the TUI. See [SQL_SCHEMA.md](SQL_SCHEMA.md) for persistence rules.
+
+After each publication, the observer reads one bounded projection for its current agent
+turns. `subAgentActivity` supplies child identity and lifecycle but no delegated plaintext
+on Codex 0.149.1's MultiAgent V2 path. Only the latest completed same-root, same-turn
+parent `userMessage` may be labelled as parent-request provenance. Runtime-specific
+length-framed control messages are root-checked and keyed by exact child and turn;
+unbound requests remain FIFO. Other-root content, protected instructions, encrypted
+payloads, reasoning, commands, and tool payloads stay outside the boundary. Exact
+delegated scope requires a future authenticated field tied to the same spawn.
 
 ## Live control
 

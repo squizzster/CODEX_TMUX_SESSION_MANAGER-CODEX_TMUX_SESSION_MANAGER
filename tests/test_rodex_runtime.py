@@ -469,7 +469,17 @@ def test_attach_uses_live_stdio_and_escapes_an_existing_tmux_client(
 ) -> None:
     monkeypatch.setenv("TMUX", "/tmp/outer")
     runner = RuntimeRunner(tmp_path)
-    launcher = RodexRuntimeLauncher("codex", "tmux", runner=runner)
+    attach_events: list[str] = []
+    published_notices: list[tuple[Path, str]] = []
+    launcher = RodexRuntimeLauncher(
+        "codex",
+        "tmux",
+        runner=runner,
+        attach_notice=lambda: attach_events.append("notice") or "Codex update available",
+        tui_notice_publisher=lambda path, message: (
+            published_notices.append((path, message)) or True
+        ),
+    )
     live = LiveRodexRuntime(
         tmp_path / "tmux.sock",
         "rodex-one",
@@ -481,6 +491,8 @@ def test_attach_uses_live_stdio_and_escapes_an_existing_tmux_client(
 
     launcher.attach(live)
 
+    assert attach_events == ["notice"]
+    assert published_notices == [(tmp_path / "proxy.sock", "Codex update available")]
     assert runner.calls[-1][-5:] == [
         "-T",
         RODEX_TMUX_REQUIRED_CLIENT_FEATURES,
@@ -492,6 +504,52 @@ def test_attach_uses_live_stdio_and_escapes_an_existing_tmux_client(
     environment = runner.options[-1]["env"]
     assert isinstance(environment, dict)
     assert "TMUX" not in environment
+
+
+def test_attach_notice_failure_never_blocks_tmux_attachment(tmp_path: Path) -> None:
+    runner = RuntimeRunner(tmp_path)
+
+    def fail_notice() -> str | None:
+        raise OSError("npm unavailable")
+
+    launcher = RodexRuntimeLauncher(
+        "codex", "tmux", runner=runner, attach_notice=fail_notice
+    )
+
+    launcher.attach(LiveTmuxSession(tmp_path / "tmux.sock", "rodex-one"))
+
+    assert len(runner.calls) == 1
+    assert runner.calls[-1][-3:] == ["attach-session", "-t", "=rodex-one"]
+
+
+def test_tui_notice_delivery_failure_never_blocks_tmux_attachment(
+    tmp_path: Path,
+) -> None:
+    runner = RuntimeRunner(tmp_path)
+
+    def fail_delivery(_path: Path, _message: str) -> bool:
+        raise OSError("proxy unavailable")
+
+    launcher = RodexRuntimeLauncher(
+        "codex",
+        "tmux",
+        runner=runner,
+        attach_notice=lambda: "Codex update available",
+        tui_notice_publisher=fail_delivery,
+    )
+    runtime = LiveRodexRuntime(
+        tmp_path / "tmux.sock",
+        "rodex-one",
+        tmp_path / "app.sock",
+        tmp_path / "app.log",
+        tmp_path / "proxy.sock",
+        tmp_path / "events.sock",
+    )
+
+    launcher.attach(runtime)
+
+    assert len(runner.calls) == 1
+    assert runner.calls[-1][-3:] == ["attach-session", "-t", "=rodex-one"]
 
 
 def test_session_exists_checks_the_exact_recorded_tmux_endpoint(tmp_path: Path) -> None:
@@ -1874,7 +1932,7 @@ def test_runtime_path_keepalives_share_runtime_paths_independently(
         (["--model", "example"], False),
     ],
 )
-def test_session_host_connects_the_tui_through_the_protocol_proxy(
+def test_session_host_skips_updater_and_connects_tui_through_protocol_proxy(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     codex_arguments: list[str],
@@ -2066,6 +2124,8 @@ def test_session_host_connects_the_tui_through_the_protocol_proxy(
     assert tui_commands == [
         [
             "/usr/bin/codex",
+            "--config",
+            "check_for_update_on_startup=false",
             "--no-alt-screen",
             "--remote",
             f"unix://{proxy_socket}",

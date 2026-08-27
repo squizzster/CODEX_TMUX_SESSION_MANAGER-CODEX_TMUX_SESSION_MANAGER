@@ -109,13 +109,19 @@ An exact primary-thread `item/started → subAgentActivity(kind=started)` event 
 dedicated live agent observer pipeline. The session host creates or reuses one marked
 top-third pane while preserving the lower Codex pane's focus. That pane directly runs
 `rodex.agent_observer`; tmux input is disabled, so it is a presentation surface rather
-than a shell. It consumes the App Server's exact agent identity, path, activity kind,
-plaintext spawn prompt, and completed tracked-agent messages plus typed trace metadata
-from SQLite. Stable collaboration-call and receiver-thread identities join the prompt to
-the spawned child before or after the lifecycle event; the observer presents it verbatim
-as `SCOPE`. The agent's commentary and final response appear as `UPDATE` and `ANSWER`.
-Text has no fixed display width or truncation and wraps only at the actual tmux pane edge;
+than a shell. It consumes the App Server's exact agent identity, path, activity kind, and
+completed tracked-agent messages plus typed trace metadata from SQLite. Codex 0.149.1's
+MultiAgent V2 spawn event contains no delegated plaintext; the corresponding parent and
+child rollout content is encrypted. The observer therefore presents `SCOPE UNAVAILABLE`
+for that exact spawn rather than deriving scope from the child's behaviour or first reply.
+The agent's commentary and final response appear as `UPDATE` and `ANSWER`. Message text
+has no fixed display width or truncation and wraps only at the actual tmux pane edge;
 terminal control sequences are removed.
+
+Exact scope display remains disabled until a supported App Server contract supplies
+authenticated plaintext tied to the same spawn and child identity. Enabling it requires a
+non-mocked live-spawn acceptance test; a schema field or synthetic event alone is not
+sufficient evidence.
 
 The analytics worker wakes the observer only after a durable publication commit, so
 indexed cursor reads need no polling timer. Completed tool outputs update one live `WORK`

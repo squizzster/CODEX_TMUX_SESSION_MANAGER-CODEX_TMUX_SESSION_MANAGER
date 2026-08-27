@@ -47,7 +47,8 @@ Both sides retain the same Rodex, runtime, Codex, and workspace context.
 - Tracks root/sub-agent lineage and typed rollout-derived messages, commands, tools,
   contexts, token usage, rate limits, and agent activity in a durable agent trace.
 - Opens and reuses a noninteractive top-third agent observer on an exact live
-  `subAgentActivity(kind=started)` event while leaving Codex focused below.
+  `subAgentActivity(kind=started)` event, then shows its exact delegated scope and
+  human-readable live progress while leaving Codex focused below.
 - Refuses unregistered tmux name collisions and verifies Rodex and Codex identities
   before attaching to or controlling a live runtime.
 - Serializes concurrent opens of one ended name and tolerates the bounded Codex-writer
@@ -104,12 +105,18 @@ directly runs Rodex's dedicated observer process, has tmux input disabled, and c
 execute shell commands. It remains after an agent turn finishes and is reused by later
 agent activity; it exits with the Rodex runtime so it cannot keep a session alive.
 
-The observer labels immediate identity and lifecycle facts as `APP` and committed v12
-trace facts as `SQL`. The App Server's exact agent UUID, path, and activity kind determine
-what is followed. SQLite supplies typed model/effort context, lifecycle, message metadata,
-tool/command metadata, token use, rate limits, and compaction events.
-It never displays prompts, message bodies, command text, tool payloads, output bodies, or
-hidden reasoning. The analytics worker sends a nonblocking wake only after its existing
+The App Server's exact agent UUID, path, and activity kind determine what is followed.
+Its `collabAgentToolCall.prompt` provides the spawned agent's plaintext `SCOPE`; stable
+call and receiver-thread identities associate that scope with the child whether it arrives
+immediately before or after spawn activity. Completed `agentMessage` items provide the
+tracked agent's `UPDATE` and `ANSWER` text. Rodex renders both texts as supplied, leaving
+line wrapping to the actual tmux pane width and stripping only terminal control sequences.
+
+SQLite supplies typed model/effort context, lifecycle, completed-action counts, token use,
+rate limits, and compaction events. Repetitive tool completions update one `WORK` counter
+instead of adding one line per tool. The display excludes unrelated parent/user messages,
+developer and system instructions, hidden reasoning, command text, tool payloads, and
+output bodies. The analytics worker sends a nonblocking wake only after its existing
 transaction commits; the observer then advances from an indexed opaque event cursor.
 It regards an agent trace as drained only after durable terminal events and an exact
 up-to-date worker publication. App lifecycle updates never cause SQL reads. There is no

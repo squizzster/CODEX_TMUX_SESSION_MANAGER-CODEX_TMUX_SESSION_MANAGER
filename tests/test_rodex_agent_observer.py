@@ -18,6 +18,7 @@ from rodex.agent_observer import (
     notify_agent_observer_trace_publication,
     observer_control_socket_path,
     project_agent_message_event,
+    project_agent_scope_event,
     project_subagent_activity_event,
 )
 from rodex.protocol_proxy import CodexProtocolEventTap
@@ -26,6 +27,7 @@ from rodex_registry import (
     RodexAgentTracePublication,
     RodexAgentTraceSnapshot,
     TraceSubagentActivity,
+    TraceToolCall,
     create_a_rodex_session,
     split_codex_thread_id_into_signed_bigints,
 )
@@ -82,6 +84,43 @@ def _agent_message_event(
                 "id": item_id,
                 "phase": phase,
                 "text": text,
+            },
+        },
+    }
+
+
+def _scope_event(
+    *,
+    method: str = "item/started",
+    item_id: str = "call-spawn-1",
+    prompt: str = (
+        "Verify who is currently the Prime Minister of Ethiopia.\n"
+        "Use authoritative current sources."
+    ),
+    receiver_thread_ids: list[str] | None = None,
+) -> dict[str, object]:
+    return {
+        "emittedAtMs": 1787794770000,
+        "method": method,
+        "params": {
+            "startedAtMs": 1787794769999,
+            "threadId": str(ROOT_THREAD_ID),
+            "turnId": "turn-1",
+            "item": {
+                "type": "collabAgentToolCall",
+                "id": item_id,
+                "tool": "spawnAgent",
+                "status": "inProgress",
+                "senderThreadId": str(ROOT_THREAD_ID),
+                "receiverThreadIds": (
+                    [str(CHILD_THREAD_ID)]
+                    if receiver_thread_ids is None
+                    else receiver_thread_ids
+                ),
+                "agentsStates": {},
+                "prompt": prompt,
+                "model": "gpt-5.6-luna",
+                "reasoningEffort": "max",
             },
         },
     }
@@ -146,6 +185,38 @@ def test_agent_message_projection_accepts_only_completed_agent_authored_text() -
     assert project_agent_message_event(started) is None
 
 
+def test_agent_scope_projection_uses_only_exact_plaintext_spawn_prompt() -> None:
+    projected = project_agent_scope_event(_scope_event())
+
+    assert projected == {
+        "schema": "rodex-agent-observer-v1",
+        "kind": "app_server_agent_scope",
+        "method": "item/started",
+        "thread_id": str(ROOT_THREAD_ID),
+        "turn_id": "turn-1",
+        "item": {
+            "type": "collabAgentToolCall",
+            "id": "call-spawn-1",
+            "receiver_thread_ids": [str(CHILD_THREAD_ID)],
+            "prompt": (
+                "Verify who is currently the Prime Minister of Ethiopia.\n"
+                "Use authoritative current sources."
+            ),
+        },
+    }
+    wrong_tool = _scope_event()
+    wrong_tool["params"]["item"]["tool"] = "sendInput"  # type: ignore[index]
+    encrypted_only = _scope_event()
+    encrypted_only["params"]["item"]["prompt"] = None  # type: ignore[index]
+    wrong_sender = _scope_event()
+    wrong_sender["params"]["item"]["senderThreadId"] = str(  # type: ignore[index]
+        OTHER_THREAD_ID
+    )
+    assert project_agent_scope_event(wrong_tool) is None
+    assert project_agent_scope_event(encrypted_only) is None
+    assert project_agent_scope_event(wrong_sender) is None
+
+
 def test_exact_spawn_creates_a_disabled_top_third_without_changing_focus(
     tmp_path: Path,
 ) -> None:
@@ -184,6 +255,7 @@ def test_exact_spawn_creates_a_disabled_top_third_without_changing_focus(
         root_thread_id=ROOT_THREAD_ID,
     )
 
+    controller.observe_protocol_event(_scope_event())
     controller.observe_protocol_event(_spawn_event())
 
     split = next(command for command in calls if command[3] == "split-window")
@@ -204,6 +276,7 @@ def test_exact_spawn_creates_a_disabled_top_third_without_changing_focus(
     assert str(TRACE_CURSOR) in split[-1]
     assert "subAgentActivity" in split[-1]
     assert "/root/live-review" in split[-1]
+    assert "Verify who is currently the Prime Minister of Ethiopia." in split[-1]
     assert [command[3:] for command in calls[-4:]] == [
         ["set-option", "-p", "-t", "%7", "@rodex_agent_observer_pane_id", "%9"],
         ["set-option", "-p", "-t", "%9", "@rodex_agent_observer_for", "%7"],
@@ -244,6 +317,7 @@ def test_existing_observer_pane_is_reused_and_receives_exact_new_spawn(
         root_thread_id=ROOT_THREAD_ID,
     )
 
+    controller.observe_protocol_event(_scope_event(item_id="call-spawn-2"))
     controller.observe_protocol_event(_spawn_event(item_id="call-spawn-2"))
 
     assert not any(command[3] == "split-window" for command in calls)
@@ -251,6 +325,45 @@ def test_existing_observer_pane_is_reused_and_receives_exact_new_spawn(
     assert sent[0][0] == observer_control_socket_path(tmp_path / "events.sock")
     assert sent[0][1]["after_event_id"] == str(TRACE_CURSOR)
     assert sent[0][1]["item"]["id"] == "call-spawn-2"  # type: ignore[index]
+    assert sent[0][1]["scope"]["prompt"].startswith("Verify who")  # type: ignore[index]
+
+
+def test_existing_observer_receives_scope_that_arrives_after_spawn(
+    tmp_path: Path,
+) -> None:
+    sent: list[tuple[Path, dict[str, object]]] = []
+
+    def runner(command: list[str], **_options: object) -> subprocess.CompletedProcess[str]:
+        operation = command[3]
+        if operation == "show-options":
+            return subprocess.CompletedProcess(command, 0, "%9\n", "")
+        if operation == "display-message":
+            return subprocess.CompletedProcess(command, 0, "%9|%7|0\n", "")
+        raise AssertionError(f"unexpected tmux mutation: {command}")
+
+    controller = AgentObserverPaneController(
+        "/usr/bin/tmux",
+        tmp_path / "tmux.sock",
+        "%7",
+        tmp_path / "events.sock",
+        runner=runner,
+        cursor_reader=lambda *_args: TRACE_CURSOR,
+        event_sender=lambda path, event: sent.append((path, event)),
+    )
+    controller.activate(
+        database_path=tmp_path / "rodex.sqlite3",
+        rodex_sessions_id=3,
+        rodex_session_id="1234567890abcdef",
+        root_thread_id=ROOT_THREAD_ID,
+    )
+
+    controller.observe_protocol_event(_spawn_event())
+    controller.observe_protocol_event(_scope_event(method="item/completed"))
+
+    assert [event["kind"] for _, event in sent] == [
+        "app_server_subagent_activity",
+        "app_server_agent_scope",
+    ]
 
 
 def test_existing_observer_retries_live_event_until_control_socket_is_ready(
@@ -296,19 +409,22 @@ def test_existing_observer_retries_live_event_until_control_socket_is_ready(
 
 def test_observer_view_renders_only_exact_target_trace_metadata() -> None:
     initial = project_subagent_activity_event(_spawn_event())
+    scope = project_agent_scope_event(_scope_event())
     assert initial is not None
+    assert scope is not None
+    initial["scope"] = scope["item"]
     initial["after_event_id"] = str(TRACE_CURSOR)
     view = AgentObserverView(
         root_thread_id=ROOT_THREAD_ID,
         initial_event=initial,
     )
-    terminal_event_id = uuid.UUID("10000000-0000-4000-8000-000000000008")
+    terminal_event_id = uuid.UUID("10000000-0000-4000-8000-000000000009")
     snapshot = RodexAgentTraceSnapshot(
         trace_publication_sequence=8,
         trace_schema_version="rodex-agent-trace-v1",
         calculated_at_utc="2026-08-27T00:00:02Z",
         coverage_state="complete",
-        durable_event_count=7,
+        durable_event_count=8,
         unrecognized_record_count=0,
         events=(
             {
@@ -359,12 +475,24 @@ def test_observer_view_renders_only_exact_target_trace_metadata() -> None:
                 "event_id": "10000000-0000-4000-8000-000000000006",
                 "codex_thread_id": str(CHILD_THREAD_ID),
                 "codex_turn_id": "turn-child",
+                "event_kind": "tool_call",
+                "event_time_utc": "2026-08-27T00:00:01Z",
+                "detail": {
+                    "activity_kind": "output",
+                    "tool_call_id": "tool-2",
+                    "tool_name": "exec",
+                },
+            },
+            {
+                "event_id": "10000000-0000-4000-8000-000000000007",
+                "codex_thread_id": str(CHILD_THREAD_ID),
+                "codex_turn_id": "turn-child",
                 "event_kind": "token_usage",
                 "event_time_utc": "2026-08-27T00:00:01Z",
                 "detail": {"total_tokens": 1234},
             },
             {
-                "event_id": "10000000-0000-4000-8000-000000000007",
+                "event_id": "10000000-0000-4000-8000-000000000008",
                 "codex_thread_id": str(CHILD_THREAD_ID),
                 "codex_turn_id": "turn-child",
                 "event_kind": "rate_limit",
@@ -389,12 +517,24 @@ def test_observer_view_renders_only_exact_target_trace_metadata() -> None:
 
     lines = view.accept_trace_snapshot(snapshot)
 
-    assert view.initial_lines == ("▶ live-review started",)
-    assert lines == [
-        "  Model: gpt-5.6-luna · effort: MAX",
-        "  ✓ Tool 1 finished",
+    assert view.initial_lines == (
+        "▶ live-review started",
         "",
-        "✓ live-review finished · 2s · 1 tool · 1,234 tokens · weekly limit 44% used",
+        "SCOPE",
+        "  Verify who is currently the Prime Minister of Ethiopia.",
+        "  Use authoritative current sources.",
+    )
+    assert lines == [
+        "",
+        "MODEL",
+        "  gpt-5.6-luna · MAX",
+        "",
+        "WORK",
+        "  1 action completed",
+        "\x1b[1A\r\x1b[2K  2 actions completed",
+        "",
+        "✓ live-review finished · 2s · 2 actions · 1,234 tokens",
+        "  Weekly limit: 44% used",
     ]
     assert view.after_event_id == terminal_event_id
     assert view.monitoring is True
@@ -423,7 +563,7 @@ def test_observer_view_shows_agent_english_but_not_other_threads_or_control_code
 
     assert view.accept_agent_message_event(commentary) == [
         "",
-        "Agent:",
+        "UPDATE",
         "  Checking GOV.UK.",
         "  One moment…",
     ]
@@ -431,9 +571,39 @@ def test_observer_view_shows_agent_english_but_not_other_threads_or_control_code
     assert view.accept_agent_message_event(other) == []
     assert view.accept_agent_message_event(final) == [
         "",
-        "Answer:",
+        "ANSWER",
         "  The Rt Hon Andy Burnham MP — Prime Minister.",
     ]
+
+
+def test_observer_view_preserves_exact_scope_lines_for_terminal_native_wrapping() -> None:
+    prompt = "X" * 200
+    initial = project_subagent_activity_event(_spawn_event())
+    scope = project_agent_scope_event(_scope_event(prompt=prompt))
+    assert initial is not None
+    assert scope is not None
+    initial["scope"] = scope["item"]
+
+    view = AgentObserverView(root_thread_id=ROOT_THREAD_ID, initial_event=initial)
+
+    assert view.initial_lines[-1] == f"  {prompt}"
+    assert len(view.initial_lines[-1]) == 202
+
+
+def test_observer_view_accepts_late_scope_once_for_the_exact_target() -> None:
+    initial = project_subagent_activity_event(_spawn_event())
+    scope = project_agent_scope_event(_scope_event(method="item/completed"))
+    assert initial is not None
+    assert scope is not None
+    view = AgentObserverView(root_thread_id=ROOT_THREAD_ID, initial_event=initial)
+
+    assert view.accept_agent_scope_event(scope) == [
+        "",
+        "SCOPE",
+        "  Verify who is currently the Prime Minister of Ethiopia.",
+        "  Use authoritative current sources.",
+    ]
+    assert view.accept_agent_scope_event(scope) == []
 
 
 def test_app_item_completion_cannot_suppress_the_final_durable_trace_read() -> None:
@@ -569,6 +739,7 @@ def test_real_tmux_observer_is_not_a_shell_and_exits_with_its_runtime(
             rodex_session_id="1234567890abcdef",
             root_thread_id=ROOT_THREAD_ID,
         )
+        controller.observe_protocol_event(_scope_event())
         controller.observe_protocol_event(_spawn_event())
 
         panes = _wait_for_tmux_panes(tmux, tmux_socket, 2)
@@ -584,6 +755,14 @@ def test_real_tmux_observer_is_not_a_shell_and_exits_with_its_runtime(
             tmux_socket,
             observer[0],
             "RODEX · LIVE AGENT",
+        )
+        assert "Verify who is currently the Prime Minister of Ethiopia." in (
+            _wait_for_captured_text(
+                tmux,
+                tmux_socket,
+                observer[0],
+                "Verify who is currently the Prime Minister of Ethiopia.",
+            )
         )
 
         publication = RodexAgentTracePublication(
@@ -615,8 +794,44 @@ def test_real_tmux_observer_is_not_a_shell_and_exits_with_its_runtime(
                 ),
                 RodexAgentTraceEvent(
                     CHILD_THREAD_ID,
-                    "00000000-0000-7000-8000-000000000002",
+                    "00000000-0000-7000-8000-000000000003",
                     2,
+                    0,
+                    "tool_call",
+                    "2026-08-27T00:00:02Z",
+                    TraceToolCall(
+                        "tool-1",
+                        None,
+                        "exec",
+                        "completed",
+                        0,
+                        10,
+                        "rollout_reference",
+                        "output",
+                    ),
+                ),
+                RodexAgentTraceEvent(
+                    CHILD_THREAD_ID,
+                    "00000000-0000-7000-8000-000000000004",
+                    3,
+                    0,
+                    "tool_call",
+                    "2026-08-27T00:00:02Z",
+                    TraceToolCall(
+                        "tool-2",
+                        None,
+                        "exec",
+                        "completed",
+                        0,
+                        10,
+                        "rollout_reference",
+                        "output",
+                    ),
+                ),
+                RodexAgentTraceEvent(
+                    CHILD_THREAD_ID,
+                    "00000000-0000-7000-8000-000000000005",
+                    4,
                     0,
                     "turn_completed",
                     "2026-08-27T00:00:03Z",
@@ -643,6 +858,8 @@ def test_real_tmux_observer_is_not_a_shell_and_exits_with_its_runtime(
             "live-review finished",
         )
         assert "live-review finished" in captured
+        assert "2 actions completed" in captured
+        assert "1 action completed" not in captured
 
         subprocess.run(
             [

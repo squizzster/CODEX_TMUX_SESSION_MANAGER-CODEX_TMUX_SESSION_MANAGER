@@ -196,6 +196,60 @@ def project_agent_message_event(
     }
 
 
+def project_agent_scope_event(
+    event: Mapping[str, object] | None,
+) -> dict[str, object] | None:
+    """Project the exact plaintext scope attached to one agent spawn call."""
+    if event is None or event.get("method") not in _SUBAGENT_ACTIVITY_METHODS:
+        return None
+    params = event.get("params")
+    if not isinstance(params, Mapping):
+        return None
+    item = params.get("item")
+    if not isinstance(item, Mapping):
+        return None
+    if item.get("type") != "collabAgentToolCall" or item.get("tool") != "spawnAgent":
+        return None
+    item_id = item.get("id")
+    prompt = item.get("prompt")
+    if (
+        not isinstance(item_id, str)
+        or not item_id
+        or not isinstance(prompt, str)
+        or not prompt
+    ):
+        return None
+    thread_id = _optional_uuid_text(params.get("threadId"))
+    sender_thread_id = _optional_uuid_text(item.get("senderThreadId"))
+    if thread_id is None or sender_thread_id != thread_id:
+        return None
+    turn_id = params.get("turnId")
+    if turn_id is not None and (not isinstance(turn_id, str) or not turn_id):
+        return None
+    raw_receiver_thread_ids = item.get("receiverThreadIds")
+    if not isinstance(raw_receiver_thread_ids, list):
+        return None
+    receiver_thread_ids: list[str] = []
+    for value in raw_receiver_thread_ids:
+        receiver_thread_id = _optional_uuid_text(value)
+        if receiver_thread_id is None:
+            return None
+        receiver_thread_ids.append(receiver_thread_id)
+    return {
+        "schema": OBSERVER_SCHEMA,
+        "kind": "app_server_agent_scope",
+        "method": event["method"],
+        "thread_id": thread_id,
+        "turn_id": turn_id,
+        "item": {
+            "type": "collabAgentToolCall",
+            "id": item_id,
+            "receiver_thread_ids": receiver_thread_ids,
+            "prompt": prompt,
+        },
+    }
+
+
 def notify_agent_observer_trace_publication(
     protocol_event_socket_path: Path,
     trace_publication_sequence: int,
@@ -260,6 +314,8 @@ class AgentObserverPaneController:
         self._observer_pane_target: str | None = None
         self._known_activity_item_ids: set[str] = set()
         self._tracked_target_thread_ids: set[str] = set()
+        self._scopes_by_activity_item_id: dict[str, dict[str, object]] = {}
+        self._scopes_by_target_thread_id: dict[str, dict[str, object]] = {}
 
     def activate(
         self,
@@ -285,6 +341,10 @@ class AgentObserverPaneController:
 
     def observe_protocol_event(self, event: Mapping[str, object] | None) -> None:
         """Create, reuse, or update the observer from one typed App Server item."""
+        scope = project_agent_scope_event(event)
+        if scope is not None:
+            self._observe_scope_event(scope)
+            return
         projected = project_subagent_activity_event(event)
         if projected is None or self._database_path is None:
             return
@@ -307,6 +367,11 @@ class AgentObserverPaneController:
             cursor = self._cursor_reader(self._rodex_sessions_id, self._database_path)
             projected["after_event_id"] = None if cursor is None else str(cursor)
             self._known_activity_item_ids.add(item_id)
+            scope = self._scopes_by_target_thread_id.get(
+                target_thread_id
+            ) or self._scopes_by_activity_item_id.get(item_id)
+            if scope is not None:
+                projected["scope"] = scope["item"]
         self._tracked_target_thread_ids.add(target_thread_id)
         pane_target = self._locate_observer_pane()
         if pane_target is None:
@@ -325,12 +390,45 @@ class AgentObserverPaneController:
             # endpoint is still starting or has just closed.
             return
 
+    def _observe_scope_event(self, projected: dict[str, object]) -> None:
+        if self._database_path is None:
+            return
+        root_thread_id = self._root_thread_id
+        if root_thread_id is None or projected["thread_id"] != str(root_thread_id):
+            return
+        item = projected["item"]
+        assert isinstance(item, dict)
+        item_id = str(item["id"])
+        receiver_thread_ids = item["receiver_thread_ids"]
+        assert isinstance(receiver_thread_ids, list)
+        self._scopes_by_activity_item_id[item_id] = projected
+        for receiver_thread_id in receiver_thread_ids:
+            self._scopes_by_target_thread_id[str(receiver_thread_id)] = projected
+        applies_to_tracked_target = (
+            bool(self._tracked_target_thread_ids.intersection(receiver_thread_ids))
+            or item_id in self._known_activity_item_ids
+        )
+        if not applies_to_tracked_target:
+            return
+        if self._locate_observer_pane() is None:
+            return
+        try:
+            assert self._event_sender is not None
+            self._event_sender(
+                observer_control_socket_path(self._protocol_event_socket_path),
+                projected,
+            )
+        except OSError:
+            return
+
     def close(self) -> None:
         """Release only in-process state; tmux owns the persistent presentation pane."""
         if self._event_dispatcher is not None:
             self._event_dispatcher.close()
         self._known_activity_item_ids.clear()
         self._tracked_target_thread_ids.clear()
+        self._scopes_by_activity_item_id.clear()
+        self._scopes_by_target_thread_id.clear()
 
     def _locate_observer_pane(self) -> str | None:
         candidate = self._observer_pane_target
@@ -472,12 +570,15 @@ class AgentObserverView:
         self._last_trace_publication_sequence = 0
         self._target_paths: dict[str, str] = {}
         self._seen_activity_item_ids: set[str] = set()
+        self._activity_targets_by_item_id: dict[str, str] = {}
+        self._seen_scope_item_ids: set[str] = set()
         self._seen_agent_message_ids: set[str] = set()
         self._turn_started_at: dict[str, str] = {}
         self._completed_tool_call_ids: dict[str, set[str]] = {}
         self._latest_total_tokens: dict[str, int] = {}
         self._weekly_limit_used_percent: dict[str, float] = {}
         self._last_context: dict[str, tuple[object, object]] = {}
+        self._work_line_is_last = False
         self._initial_lines = self.accept_app_server_event(initial_event)
 
     @property
@@ -523,6 +624,7 @@ class AgentObserverView:
         if item_id in self._seen_activity_item_ids:
             return []
         self._seen_activity_item_ids.add(item_id)
+        self._activity_targets_by_item_id[item_id] = target_thread_id
         self._target_states[target_thread_id] = activity_kind
         self._target_paths[target_thread_id] = agent_path
         if activity_kind == "started":
@@ -533,8 +635,69 @@ class AgentObserverView:
             self._latest_total_tokens.pop(target_thread_id, None)
             self._weekly_limit_used_percent.pop(target_thread_id, None)
             self._last_context.pop(target_thread_id, None)
-            return [f"▶ {_agent_display_name(agent_path)} started"]
+            self._work_line_is_last = False
+            lines = [f"▶ {_agent_display_name(agent_path)} started"]
+            scope = event.get("scope")
+            if isinstance(scope, Mapping):
+                lines.extend(
+                    self._accept_scope_item(
+                        scope,
+                        expected_target_thread_id=target_thread_id,
+                    )
+                )
+            return lines
+        self._work_line_is_last = False
         return [f"• {_agent_display_name(agent_path)} · {activity_kind}"]
+
+    def accept_agent_scope_event(self, event: Mapping[str, object]) -> list[str]:
+        """Render an exact delegated scope for an agent already being followed."""
+        if event.get("schema") != OBSERVER_SCHEMA:
+            return []
+        if event.get("kind") != "app_server_agent_scope":
+            return []
+        if event.get("thread_id") != self._root_thread_id:
+            return []
+        item = event.get("item")
+        if not isinstance(item, Mapping):
+            return []
+        return self._accept_scope_item(item)
+
+    def _accept_scope_item(
+        self,
+        item: Mapping[str, object],
+        *,
+        expected_target_thread_id: str | None = None,
+    ) -> list[str]:
+        item_id = item.get("id")
+        prompt = item.get("prompt")
+        receiver_thread_ids = item.get("receiver_thread_ids")
+        if (
+            not isinstance(item_id, str)
+            or not isinstance(prompt, str)
+            or not isinstance(receiver_thread_ids, list)
+            or not all(isinstance(value, str) for value in receiver_thread_ids)
+        ):
+            return []
+        target_thread_ids = self.target_thread_ids.intersection(receiver_thread_ids)
+        activity_target = self._activity_targets_by_item_id.get(item_id)
+        if activity_target is not None:
+            target_thread_ids = target_thread_ids.union({activity_target})
+        if expected_target_thread_id is not None:
+            if (
+                expected_target_thread_id not in target_thread_ids
+                and activity_target != expected_target_thread_id
+            ):
+                return []
+        elif not target_thread_ids:
+            return []
+        if item_id in self._seen_scope_item_ids:
+            return []
+        plain_prompt = _plain_terminal_text(prompt)
+        if not plain_prompt.strip():
+            return []
+        self._seen_scope_item_ids.add(item_id)
+        self._work_line_is_last = False
+        return ["", "SCOPE", *[f"  {line}" for line in plain_prompt.splitlines()]]
 
     def accept_agent_message_event(self, event: Mapping[str, object]) -> list[str]:
         """Render exact assistant-authored text for an agent already being followed."""
@@ -561,8 +724,9 @@ class AgentObserverView:
         plain_text = _plain_terminal_text(text).strip()
         if not plain_text:
             return []
-        label = "Answer" if phase == "final_answer" else "Agent"
-        return ["", f"{label}:", *[f"  {line}" for line in plain_text.splitlines()]]
+        self._work_line_is_last = False
+        label = "ANSWER" if phase == "final_answer" else "UPDATE"
+        return ["", label, *[f"  {line}" for line in plain_text.splitlines()]]
 
     def accept_trace_snapshot(self, snapshot: RodexAgentTraceSnapshot) -> list[str]:
         """Advance through one durable page and render only exact tracked identities."""
@@ -623,10 +787,11 @@ class AgentObserverView:
                 return []
             fields = []
             if isinstance(model, str):
-                fields.append(f"Model: {model}")
+                fields.append(model)
             if isinstance(effort, str):
-                fields.append(f"effort: {effort.upper()}")
-            return ["  " + " · ".join(fields)]
+                fields.append(effort.upper())
+            self._work_line_is_last = False
+            return ["", "MODEL", "  " + " · ".join(fields)]
         if event_kind == "tool_call" and detail.get("activity_kind") == "output":
             tool_call_id = detail.get("tool_call_id")
             if not isinstance(tool_call_id, str):
@@ -635,7 +800,12 @@ class AgentObserverView:
             if tool_call_id in completed:
                 return []
             completed.add(tool_call_id)
-            return [f"  ✓ Tool {len(completed)} finished"]
+            count = len(completed)
+            progress = f"  {count} {'action' if count == 1 else 'actions'} completed"
+            if self._work_line_is_last:
+                return [f"\x1b[1A\r\x1b[2K{progress}"]
+            self._work_line_is_last = True
+            return ["", "WORK", progress]
         if event_kind == "token_usage":
             total_tokens = detail.get("total_tokens")
             if isinstance(total_tokens, int) and not isinstance(total_tokens, bool):
@@ -647,10 +817,12 @@ class AgentObserverView:
                 self._weekly_limit_used_percent[thread_id] = weekly_used
             return []
         if event_kind == "compaction":
-            return ["  ↻ Context compacted"]
+            self._work_line_is_last = False
+            return ["", "UPDATE", "  Context compacted"]
         if event_kind not in {"turn_completed", "turn_aborted"}:
             return []
         self._durable_terminal_target_ids.add(thread_id)
+        self._work_line_is_last = False
         self._target_states[thread_id] = (
             "turnCompleted" if event_kind == "turn_completed" else "turnAborted"
         )
@@ -663,16 +835,17 @@ class AgentObserverView:
         if elapsed is not None:
             details.append(elapsed)
         tool_count = len(self._completed_tool_call_ids.get(thread_id, set()))
-        details.append(f"{tool_count} {'tool' if tool_count == 1 else 'tools'}")
+        details.append(f"{tool_count} {'action' if tool_count == 1 else 'actions'}")
         total_tokens = self._latest_total_tokens.get(thread_id)
         if total_tokens is not None:
             details.append(f"{total_tokens:,} tokens")
-        weekly_used = self._weekly_limit_used_percent.get(thread_id)
-        if weekly_used is not None:
-            details.append(f"weekly limit {_display_percentage(weekly_used)} used")
         if details:
             summary += " · " + " · ".join(details)
-        return ["", summary]
+        lines = ["", summary]
+        weekly_used = self._weekly_limit_used_percent.get(thread_id)
+        if weekly_used is not None:
+            lines.append(f"  Weekly limit: {_display_percentage(weekly_used)} used")
+        return lines
 
     def accept_trace_publication_wake(
         self,
@@ -783,7 +956,9 @@ def _observer_runtime_liveness(
                     continue
                 if not isinstance(decoded, dict):
                     continue
-                projected = project_subagent_activity_event(decoded)
+                projected = project_agent_scope_event(decoded)
+                if projected is None:
+                    projected = project_subagent_activity_event(decoded)
                 if projected is None:
                     projected = project_agent_message_event(decoded)
                 if projected is not None:
@@ -897,7 +1072,9 @@ def main(arguments: list[str] | None = None) -> int:
             trace_publications: list[tuple[int, bool]] = []
             for event in batch:
                 kind = event.get("kind")
-                if kind == "app_server_subagent_activity":
+                if kind == "app_server_agent_scope":
+                    _print_lines(view.accept_agent_scope_event(event))
+                elif kind == "app_server_subagent_activity":
                     _print_lines(view.accept_app_server_event(event))
                 elif kind == "app_server_agent_message":
                     _print_lines(view.accept_agent_message_event(event))

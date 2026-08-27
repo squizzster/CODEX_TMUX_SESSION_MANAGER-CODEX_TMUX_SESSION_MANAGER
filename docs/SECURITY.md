@@ -34,6 +34,10 @@ listener; control endpoints are Unix sockets below a private runtime root.
   no live runtime; explicit trace body reads re-authenticate the recorded rollout prefix.
   Terminal following emits only tmux's plain text and creates no persistent conversation
   copy.
+- The input-disabled agent observer admits plaintext content only from an exact
+  `collabAgentToolCall.prompt` joined to a tracked spawn or a completed `agentMessage`
+  authored by that child. It strips terminal control sequences and excludes unrelated
+  user/system/developer messages, hidden reasoning, commands, and tool payloads.
 - The install shim accepts only root- or current-user-owned, non-group/world-writable
   project code and `uv`. A system command must use an immutable root-owned installation.
 

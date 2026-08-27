@@ -45,7 +45,7 @@ Missing/unmatched selectors return to Codex after collision policy. Direct reads
 | `rodex.session_read_pipeline` / `session_tail` | Own verified live reads and tail-compatible terminal following. |
 | `rodex.runtime` / `process_contracts` / `session_host` | Own typed app-server/tmux discovery, processes, attachment, and supervision. |
 | `rodex.status_bar` / `tmux_status` / `status_animation` | Own base status, palette, arbitration, and cancellable transitions. |
-| `rodex.agent_observer` | Own the input-disabled tmux pane, exact spawn-scope/agent-message projection, and indexed durable-trace presentation. |
+| `rodex.agent_observer` | Own the input-disabled tmux pane, exact sub-agent activity/message projection, explicit scope-unavailable state, and indexed durable-trace presentation. |
 | `rodex.analytics` / `analytics_source_*` | Authenticate bounded rollout sources and supervise fail-open suffix analysis. |
 | `rodex.agent_trace` | Normalize authenticated rollout records into typed trace facts. |
 | `rodex.control` | Verify and control one exact loaded Codex thread. |
@@ -128,11 +128,14 @@ After each committed trace publication, the worker sends the observer its exact
 publication sequence and catch-up state. The observer coalesces wakes, advances through
 the existing `(rodex_sessions_id, id)` cursor index, and considers an agent display
 drained only after durable terminal events and an up-to-date publication; App lifecycle
-updates never trigger SQL reads. At the live boundary, stable collaboration-call and
-receiver-thread identities join `collabAgentToolCall.prompt` to `subAgentActivity`.
-Only that exact delegated scope and completed messages authored by a followed child cross
-the content-display boundary; system/developer messages, unrelated user content, hidden
-reasoning, commands, and tool payloads do not.
+updates never trigger SQL reads. At the live boundary, `subAgentActivity` supplies the
+stable child identity and lifecycle state but no delegated plaintext on Codex 0.149.1's
+MultiAgent V2 path. The observer represents that absence explicitly and admits only
+completed messages authored by a followed child across the content-display boundary;
+system/developer messages, unrelated user content, encrypted collaboration payloads,
+hidden reasoning, commands, and tool payloads do not cross it. Exact scope remains a
+future capability gated on an authenticated App Server field tied to the same spawn and a
+non-mocked live-spawn acceptance test.
 
 ## Live control
 

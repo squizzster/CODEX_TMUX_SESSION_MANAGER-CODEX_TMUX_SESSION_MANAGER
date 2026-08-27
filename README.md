@@ -47,8 +47,8 @@ Both sides retain the same Rodex, runtime, Codex, and workspace context.
 - Tracks root/sub-agent lineage and typed rollout-derived messages, commands, tools,
   contexts, token usage, rate limits, and agent activity in a durable agent trace.
 - Opens and reuses a noninteractive top-third agent observer on an exact live
-  `subAgentActivity(kind=started)` event, then shows its exact delegated scope and
-  human-readable live progress while leaving Codex focused below.
+  `subAgentActivity(kind=started)` event, then shows human-readable live progress while
+  leaving Codex focused below and explicitly reports when Codex withholds scope text.
 - Refuses unregistered tmux name collisions and verifies Rodex and Codex identities
   before attaching to or controlling a live runtime.
 - Serializes concurrent opens of one ended name and tolerates the bounded Codex-writer
@@ -106,11 +106,12 @@ execute shell commands. It remains after an agent turn finishes and is reused by
 agent activity; it exits with the Rodex runtime so it cannot keep a session alive.
 
 The App Server's exact agent UUID, path, and activity kind determine what is followed.
-Its `collabAgentToolCall.prompt` provides the spawned agent's plaintext `SCOPE`; stable
-call and receiver-thread identities associate that scope with the child whether it arrives
-immediately before or after spawn activity. Completed `agentMessage` items provide the
-tracked agent's `UPDATE` and `ANSWER` text. Rodex renders both texts as supplied, leaving
-line wrapping to the actual tmux pane width and stripping only terminal control sequences.
+Codex 0.149.1's MultiAgent V2 spawn event does not expose the delegated plaintext, while
+its local parent and child records retain that payload encrypted. Rodex therefore prints
+`SCOPE UNAVAILABLE` instead of guessing, reconstructing, or mislabelling the child's first
+update. Completed `agentMessage` items provide the tracked agent's `UPDATE` and `ANSWER`
+text. Rodex sanitizes terminal controls without fixed-width truncation and leaves line
+wrapping to the actual tmux pane width.
 
 SQLite supplies typed model/effort context, lifecycle, completed-action counts, token use,
 rate limits, and compaction events. Repetitive tool completions update one `WORK` counter

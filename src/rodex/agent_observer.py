@@ -39,6 +39,9 @@ _PANE_ID_PATTERN: Final = re.compile(r"%[0-9]+")
 _RODEX_SESSION_ID_PATTERN: Final = re.compile(r"[0-9a-f]{16}")
 _SUBAGENT_ACTIVITY_METHODS: Final = frozenset({"item/started", "item/completed"})
 _ANSI_ESCAPE_PATTERN: Final = re.compile(r"\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
+_SCOPE_UNAVAILABLE_DETAIL: Final = (
+    "Codex did not expose the delegated plaintext for this spawn."
+)
 Runner = Callable[..., subprocess.CompletedProcess[str]]
 CursorReader = Callable[[int, Path], uuid.UUID | None]
 EventSender = Callable[[Path, dict[str, object]], None]
@@ -196,60 +199,6 @@ def project_agent_message_event(
     }
 
 
-def project_agent_scope_event(
-    event: Mapping[str, object] | None,
-) -> dict[str, object] | None:
-    """Project the exact plaintext scope attached to one agent spawn call."""
-    if event is None or event.get("method") not in _SUBAGENT_ACTIVITY_METHODS:
-        return None
-    params = event.get("params")
-    if not isinstance(params, Mapping):
-        return None
-    item = params.get("item")
-    if not isinstance(item, Mapping):
-        return None
-    if item.get("type") != "collabAgentToolCall" or item.get("tool") != "spawnAgent":
-        return None
-    item_id = item.get("id")
-    prompt = item.get("prompt")
-    if (
-        not isinstance(item_id, str)
-        or not item_id
-        or not isinstance(prompt, str)
-        or not prompt
-    ):
-        return None
-    thread_id = _optional_uuid_text(params.get("threadId"))
-    sender_thread_id = _optional_uuid_text(item.get("senderThreadId"))
-    if thread_id is None or sender_thread_id != thread_id:
-        return None
-    turn_id = params.get("turnId")
-    if turn_id is not None and (not isinstance(turn_id, str) or not turn_id):
-        return None
-    raw_receiver_thread_ids = item.get("receiverThreadIds")
-    if not isinstance(raw_receiver_thread_ids, list):
-        return None
-    receiver_thread_ids: list[str] = []
-    for value in raw_receiver_thread_ids:
-        receiver_thread_id = _optional_uuid_text(value)
-        if receiver_thread_id is None:
-            return None
-        receiver_thread_ids.append(receiver_thread_id)
-    return {
-        "schema": OBSERVER_SCHEMA,
-        "kind": "app_server_agent_scope",
-        "method": event["method"],
-        "thread_id": thread_id,
-        "turn_id": turn_id,
-        "item": {
-            "type": "collabAgentToolCall",
-            "id": item_id,
-            "receiver_thread_ids": receiver_thread_ids,
-            "prompt": prompt,
-        },
-    }
-
-
 def notify_agent_observer_trace_publication(
     protocol_event_socket_path: Path,
     trace_publication_sequence: int,
@@ -314,8 +263,6 @@ class AgentObserverPaneController:
         self._observer_pane_target: str | None = None
         self._known_activity_item_ids: set[str] = set()
         self._tracked_target_thread_ids: set[str] = set()
-        self._scopes_by_activity_item_id: dict[str, dict[str, object]] = {}
-        self._scopes_by_target_thread_id: dict[str, dict[str, object]] = {}
 
     def activate(
         self,
@@ -341,10 +288,6 @@ class AgentObserverPaneController:
 
     def observe_protocol_event(self, event: Mapping[str, object] | None) -> None:
         """Create, reuse, or update the observer from one typed App Server item."""
-        scope = project_agent_scope_event(event)
-        if scope is not None:
-            self._observe_scope_event(scope)
-            return
         projected = project_subagent_activity_event(event)
         if projected is None or self._database_path is None:
             return
@@ -367,11 +310,6 @@ class AgentObserverPaneController:
             cursor = self._cursor_reader(self._rodex_sessions_id, self._database_path)
             projected["after_event_id"] = None if cursor is None else str(cursor)
             self._known_activity_item_ids.add(item_id)
-            scope = self._scopes_by_target_thread_id.get(
-                target_thread_id
-            ) or self._scopes_by_activity_item_id.get(item_id)
-            if scope is not None:
-                projected["scope"] = scope["item"]
         self._tracked_target_thread_ids.add(target_thread_id)
         pane_target = self._locate_observer_pane()
         if pane_target is None:
@@ -390,45 +328,12 @@ class AgentObserverPaneController:
             # endpoint is still starting or has just closed.
             return
 
-    def _observe_scope_event(self, projected: dict[str, object]) -> None:
-        if self._database_path is None:
-            return
-        root_thread_id = self._root_thread_id
-        if root_thread_id is None or projected["thread_id"] != str(root_thread_id):
-            return
-        item = projected["item"]
-        assert isinstance(item, dict)
-        item_id = str(item["id"])
-        receiver_thread_ids = item["receiver_thread_ids"]
-        assert isinstance(receiver_thread_ids, list)
-        self._scopes_by_activity_item_id[item_id] = projected
-        for receiver_thread_id in receiver_thread_ids:
-            self._scopes_by_target_thread_id[str(receiver_thread_id)] = projected
-        applies_to_tracked_target = (
-            bool(self._tracked_target_thread_ids.intersection(receiver_thread_ids))
-            or item_id in self._known_activity_item_ids
-        )
-        if not applies_to_tracked_target:
-            return
-        if self._locate_observer_pane() is None:
-            return
-        try:
-            assert self._event_sender is not None
-            self._event_sender(
-                observer_control_socket_path(self._protocol_event_socket_path),
-                projected,
-            )
-        except OSError:
-            return
-
     def close(self) -> None:
         """Release only in-process state; tmux owns the persistent presentation pane."""
         if self._event_dispatcher is not None:
             self._event_dispatcher.close()
         self._known_activity_item_ids.clear()
         self._tracked_target_thread_ids.clear()
-        self._scopes_by_activity_item_id.clear()
-        self._scopes_by_target_thread_id.clear()
 
     def _locate_observer_pane(self) -> str | None:
         candidate = self._observer_pane_target
@@ -570,8 +475,6 @@ class AgentObserverView:
         self._last_trace_publication_sequence = 0
         self._target_paths: dict[str, str] = {}
         self._seen_activity_item_ids: set[str] = set()
-        self._activity_targets_by_item_id: dict[str, str] = {}
-        self._seen_scope_item_ids: set[str] = set()
         self._seen_agent_message_ids: set[str] = set()
         self._turn_started_at: dict[str, str] = {}
         self._completed_tool_call_ids: dict[str, set[str]] = {}
@@ -624,7 +527,6 @@ class AgentObserverView:
         if item_id in self._seen_activity_item_ids:
             return []
         self._seen_activity_item_ids.add(item_id)
-        self._activity_targets_by_item_id[item_id] = target_thread_id
         self._target_states[target_thread_id] = activity_kind
         self._target_paths[target_thread_id] = agent_path
         if activity_kind == "started":
@@ -636,68 +538,14 @@ class AgentObserverView:
             self._weekly_limit_used_percent.pop(target_thread_id, None)
             self._last_context.pop(target_thread_id, None)
             self._work_line_is_last = False
-            lines = [f"▶ {_agent_display_name(agent_path)} started"]
-            scope = event.get("scope")
-            if isinstance(scope, Mapping):
-                lines.extend(
-                    self._accept_scope_item(
-                        scope,
-                        expected_target_thread_id=target_thread_id,
-                    )
-                )
-            return lines
+            return [
+                f"▶ {_agent_display_name(agent_path)} started",
+                "",
+                "SCOPE UNAVAILABLE",
+                f"  {_SCOPE_UNAVAILABLE_DETAIL}",
+            ]
         self._work_line_is_last = False
         return [f"• {_agent_display_name(agent_path)} · {activity_kind}"]
-
-    def accept_agent_scope_event(self, event: Mapping[str, object]) -> list[str]:
-        """Render an exact delegated scope for an agent already being followed."""
-        if event.get("schema") != OBSERVER_SCHEMA:
-            return []
-        if event.get("kind") != "app_server_agent_scope":
-            return []
-        if event.get("thread_id") != self._root_thread_id:
-            return []
-        item = event.get("item")
-        if not isinstance(item, Mapping):
-            return []
-        return self._accept_scope_item(item)
-
-    def _accept_scope_item(
-        self,
-        item: Mapping[str, object],
-        *,
-        expected_target_thread_id: str | None = None,
-    ) -> list[str]:
-        item_id = item.get("id")
-        prompt = item.get("prompt")
-        receiver_thread_ids = item.get("receiver_thread_ids")
-        if (
-            not isinstance(item_id, str)
-            or not isinstance(prompt, str)
-            or not isinstance(receiver_thread_ids, list)
-            or not all(isinstance(value, str) for value in receiver_thread_ids)
-        ):
-            return []
-        target_thread_ids = self.target_thread_ids.intersection(receiver_thread_ids)
-        activity_target = self._activity_targets_by_item_id.get(item_id)
-        if activity_target is not None:
-            target_thread_ids = target_thread_ids.union({activity_target})
-        if expected_target_thread_id is not None:
-            if (
-                expected_target_thread_id not in target_thread_ids
-                and activity_target != expected_target_thread_id
-            ):
-                return []
-        elif not target_thread_ids:
-            return []
-        if item_id in self._seen_scope_item_ids:
-            return []
-        plain_prompt = _plain_terminal_text(prompt)
-        if not plain_prompt.strip():
-            return []
-        self._seen_scope_item_ids.add(item_id)
-        self._work_line_is_last = False
-        return ["", "SCOPE", *[f"  {line}" for line in plain_prompt.splitlines()]]
 
     def accept_agent_message_event(self, event: Mapping[str, object]) -> list[str]:
         """Render exact assistant-authored text for an agent already being followed."""
@@ -956,9 +804,7 @@ def _observer_runtime_liveness(
                     continue
                 if not isinstance(decoded, dict):
                     continue
-                projected = project_agent_scope_event(decoded)
-                if projected is None:
-                    projected = project_subagent_activity_event(decoded)
+                projected = project_subagent_activity_event(decoded)
                 if projected is None:
                     projected = project_agent_message_event(decoded)
                 if projected is not None:
@@ -1072,9 +918,7 @@ def main(arguments: list[str] | None = None) -> int:
             trace_publications: list[tuple[int, bool]] = []
             for event in batch:
                 kind = event.get("kind")
-                if kind == "app_server_agent_scope":
-                    _print_lines(view.accept_agent_scope_event(event))
-                elif kind == "app_server_subagent_activity":
+                if kind == "app_server_subagent_activity":
                     _print_lines(view.accept_app_server_event(event))
                 elif kind == "app_server_agent_message":
                     _print_lines(view.accept_agent_message_event(event))

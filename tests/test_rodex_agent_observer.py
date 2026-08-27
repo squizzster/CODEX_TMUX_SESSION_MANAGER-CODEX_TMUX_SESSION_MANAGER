@@ -18,7 +18,6 @@ from rodex.agent_observer import (
     notify_agent_observer_trace_publication,
     observer_control_socket_path,
     project_agent_message_event,
-    project_agent_scope_event,
     project_subagent_activity_event,
 )
 from rodex.protocol_proxy import CodexProtocolEventTap
@@ -89,41 +88,17 @@ def _agent_message_event(
     }
 
 
-def _scope_event(
-    *,
-    method: str = "item/started",
-    item_id: str = "call-spawn-1",
-    prompt: str = (
-        "Verify who is currently the Prime Minister of Ethiopia.\n"
-        "Use authoritative current sources."
-    ),
-    receiver_thread_ids: list[str] | None = None,
-) -> dict[str, object]:
-    return {
-        "emittedAtMs": 1787794770000,
-        "method": method,
-        "params": {
-            "startedAtMs": 1787794769999,
-            "threadId": str(ROOT_THREAD_ID),
-            "turnId": "turn-1",
-            "item": {
-                "type": "collabAgentToolCall",
-                "id": item_id,
-                "tool": "spawnAgent",
-                "status": "inProgress",
-                "senderThreadId": str(ROOT_THREAD_ID),
-                "receiverThreadIds": (
-                    [str(CHILD_THREAD_ID)]
-                    if receiver_thread_ids is None
-                    else receiver_thread_ids
-                ),
-                "agentsStates": {},
-                "prompt": prompt,
-                "model": "gpt-5.6-luna",
-                "reasoningEffort": "max",
-            },
-        },
+def _unsupported_plaintext_spawn_event() -> dict[str, object]:
+    event = _spawn_event()
+    event["params"]["item"] = {  # type: ignore[index]
+        "type": "collabAgentToolCall",
+        "id": "call-spawn-1",
+        "tool": "spawnAgent",
+        "prompt": "Synthetic plaintext must not enter the observer.",
+        "senderThreadId": str(ROOT_THREAD_ID),
+        "receiverThreadIds": [str(CHILD_THREAD_ID)],
     }
+    return event
 
 
 def test_observed_subagent_activity_projection_is_exact_and_content_free() -> None:
@@ -152,14 +127,41 @@ def test_observed_subagent_activity_projection_is_exact_and_content_free() -> No
 def test_subagent_activity_projection_rejects_near_matches() -> None:
     wrong_method = _spawn_event()
     wrong_method["method"] = "item/outputDelta"
-    wrong_type = _spawn_event()
-    wrong_type["params"]["item"]["type"] = "dynamicToolCall"  # type: ignore[index]
+    wrong_type = _unsupported_plaintext_spawn_event()
     missing_id = _spawn_event()
     missing_id["params"]["item"]["id"] = ""  # type: ignore[index]
 
     assert project_subagent_activity_event(wrong_method) is None
     assert project_subagent_activity_event(wrong_type) is None
     assert project_subagent_activity_event(missing_id) is None
+
+
+def test_unsupported_plaintext_spawn_item_cannot_trigger_the_observer(
+    tmp_path: Path,
+) -> None:
+    sent: list[tuple[Path, dict[str, object]]] = []
+
+    def runner(command: list[str], **_options: object) -> subprocess.CompletedProcess[str]:
+        raise AssertionError(f"unsupported spawn item reached tmux: {command}")
+
+    controller = AgentObserverPaneController(
+        "/usr/bin/tmux",
+        tmp_path / "tmux.sock",
+        "%7",
+        tmp_path / "events.sock",
+        runner=runner,
+        event_sender=lambda path, event: sent.append((path, event)),
+    )
+    controller.activate(
+        database_path=tmp_path / "rodex.sqlite3",
+        rodex_sessions_id=3,
+        rodex_session_id="1234567890abcdef",
+        root_thread_id=ROOT_THREAD_ID,
+    )
+
+    controller.observe_protocol_event(_unsupported_plaintext_spawn_event())
+
+    assert sent == []
 
 
 def test_agent_message_projection_accepts_only_completed_agent_authored_text() -> None:
@@ -183,38 +185,6 @@ def test_agent_message_projection_accepts_only_completed_agent_authored_text() -
     started = _agent_message_event()
     started["method"] = "item/started"
     assert project_agent_message_event(started) is None
-
-
-def test_agent_scope_projection_uses_only_exact_plaintext_spawn_prompt() -> None:
-    projected = project_agent_scope_event(_scope_event())
-
-    assert projected == {
-        "schema": "rodex-agent-observer-v1",
-        "kind": "app_server_agent_scope",
-        "method": "item/started",
-        "thread_id": str(ROOT_THREAD_ID),
-        "turn_id": "turn-1",
-        "item": {
-            "type": "collabAgentToolCall",
-            "id": "call-spawn-1",
-            "receiver_thread_ids": [str(CHILD_THREAD_ID)],
-            "prompt": (
-                "Verify who is currently the Prime Minister of Ethiopia.\n"
-                "Use authoritative current sources."
-            ),
-        },
-    }
-    wrong_tool = _scope_event()
-    wrong_tool["params"]["item"]["tool"] = "sendInput"  # type: ignore[index]
-    encrypted_only = _scope_event()
-    encrypted_only["params"]["item"]["prompt"] = None  # type: ignore[index]
-    wrong_sender = _scope_event()
-    wrong_sender["params"]["item"]["senderThreadId"] = str(  # type: ignore[index]
-        OTHER_THREAD_ID
-    )
-    assert project_agent_scope_event(wrong_tool) is None
-    assert project_agent_scope_event(encrypted_only) is None
-    assert project_agent_scope_event(wrong_sender) is None
 
 
 def test_exact_spawn_creates_a_disabled_top_third_without_changing_focus(
@@ -255,7 +225,6 @@ def test_exact_spawn_creates_a_disabled_top_third_without_changing_focus(
         root_thread_id=ROOT_THREAD_ID,
     )
 
-    controller.observe_protocol_event(_scope_event())
     controller.observe_protocol_event(_spawn_event())
 
     split = next(command for command in calls if command[3] == "split-window")
@@ -276,7 +245,7 @@ def test_exact_spawn_creates_a_disabled_top_third_without_changing_focus(
     assert str(TRACE_CURSOR) in split[-1]
     assert "subAgentActivity" in split[-1]
     assert "/root/live-review" in split[-1]
-    assert "Verify who is currently the Prime Minister of Ethiopia." in split[-1]
+    assert "prompt" not in split[-1]
     assert [command[3:] for command in calls[-4:]] == [
         ["set-option", "-p", "-t", "%7", "@rodex_agent_observer_pane_id", "%9"],
         ["set-option", "-p", "-t", "%9", "@rodex_agent_observer_for", "%7"],
@@ -317,7 +286,6 @@ def test_existing_observer_pane_is_reused_and_receives_exact_new_spawn(
         root_thread_id=ROOT_THREAD_ID,
     )
 
-    controller.observe_protocol_event(_scope_event(item_id="call-spawn-2"))
     controller.observe_protocol_event(_spawn_event(item_id="call-spawn-2"))
 
     assert not any(command[3] == "split-window" for command in calls)
@@ -325,45 +293,7 @@ def test_existing_observer_pane_is_reused_and_receives_exact_new_spawn(
     assert sent[0][0] == observer_control_socket_path(tmp_path / "events.sock")
     assert sent[0][1]["after_event_id"] == str(TRACE_CURSOR)
     assert sent[0][1]["item"]["id"] == "call-spawn-2"  # type: ignore[index]
-    assert sent[0][1]["scope"]["prompt"].startswith("Verify who")  # type: ignore[index]
-
-
-def test_existing_observer_receives_scope_that_arrives_after_spawn(
-    tmp_path: Path,
-) -> None:
-    sent: list[tuple[Path, dict[str, object]]] = []
-
-    def runner(command: list[str], **_options: object) -> subprocess.CompletedProcess[str]:
-        operation = command[3]
-        if operation == "show-options":
-            return subprocess.CompletedProcess(command, 0, "%9\n", "")
-        if operation == "display-message":
-            return subprocess.CompletedProcess(command, 0, "%9|%7|0\n", "")
-        raise AssertionError(f"unexpected tmux mutation: {command}")
-
-    controller = AgentObserverPaneController(
-        "/usr/bin/tmux",
-        tmp_path / "tmux.sock",
-        "%7",
-        tmp_path / "events.sock",
-        runner=runner,
-        cursor_reader=lambda *_args: TRACE_CURSOR,
-        event_sender=lambda path, event: sent.append((path, event)),
-    )
-    controller.activate(
-        database_path=tmp_path / "rodex.sqlite3",
-        rodex_sessions_id=3,
-        rodex_session_id="1234567890abcdef",
-        root_thread_id=ROOT_THREAD_ID,
-    )
-
-    controller.observe_protocol_event(_spawn_event())
-    controller.observe_protocol_event(_scope_event(method="item/completed"))
-
-    assert [event["kind"] for _, event in sent] == [
-        "app_server_subagent_activity",
-        "app_server_agent_scope",
-    ]
+    assert "scope" not in sent[0][1]
 
 
 def test_existing_observer_retries_live_event_until_control_socket_is_ready(
@@ -409,10 +339,7 @@ def test_existing_observer_retries_live_event_until_control_socket_is_ready(
 
 def test_observer_view_renders_only_exact_target_trace_metadata() -> None:
     initial = project_subagent_activity_event(_spawn_event())
-    scope = project_agent_scope_event(_scope_event())
     assert initial is not None
-    assert scope is not None
-    initial["scope"] = scope["item"]
     initial["after_event_id"] = str(TRACE_CURSOR)
     view = AgentObserverView(
         root_thread_id=ROOT_THREAD_ID,
@@ -520,9 +447,8 @@ def test_observer_view_renders_only_exact_target_trace_metadata() -> None:
     assert view.initial_lines == (
         "▶ live-review started",
         "",
-        "SCOPE",
-        "  Verify who is currently the Prime Minister of Ethiopia.",
-        "  Use authoritative current sources.",
+        "SCOPE UNAVAILABLE",
+        "  Codex did not expose the delegated plaintext for this spawn.",
     )
     assert lines == [
         "",
@@ -576,34 +502,29 @@ def test_observer_view_shows_agent_english_but_not_other_threads_or_control_code
     ]
 
 
-def test_observer_view_preserves_exact_scope_lines_for_terminal_native_wrapping() -> None:
-    prompt = "X" * 200
+def test_observer_view_fails_closed_when_v2_spawn_has_no_plaintext_scope() -> None:
+    # Captured Codex 0.149.1 MultiAgentV2 shape with test identities substituted.
     initial = project_subagent_activity_event(_spawn_event())
-    scope = project_agent_scope_event(_scope_event(prompt=prompt))
     assert initial is not None
-    assert scope is not None
-    initial["scope"] = scope["item"]
 
     view = AgentObserverView(root_thread_id=ROOT_THREAD_ID, initial_event=initial)
 
-    assert view.initial_lines[-1] == f"  {prompt}"
-    assert len(view.initial_lines[-1]) == 202
-
-
-def test_observer_view_accepts_late_scope_once_for_the_exact_target() -> None:
-    initial = project_subagent_activity_event(_spawn_event())
-    scope = project_agent_scope_event(_scope_event(method="item/completed"))
-    assert initial is not None
-    assert scope is not None
-    view = AgentObserverView(root_thread_id=ROOT_THREAD_ID, initial_event=initial)
-
-    assert view.accept_agent_scope_event(scope) == [
+    assert view.initial_lines == (
+        "▶ live-review started",
         "",
-        "SCOPE",
-        "  Verify who is currently the Prime Minister of Ethiopia.",
-        "  Use authoritative current sources.",
-    ]
-    assert view.accept_agent_scope_event(scope) == []
+        "SCOPE UNAVAILABLE",
+        "  Codex did not expose the delegated plaintext for this spawn.",
+    )
+
+
+def test_non_start_activity_does_not_report_scope_unavailable() -> None:
+    interacted = project_subagent_activity_event(
+        _spawn_event(activity_kind="interacted")
+    )
+    assert interacted is not None
+    view = AgentObserverView(root_thread_id=ROOT_THREAD_ID, initial_event=interacted)
+
+    assert view.initial_lines == ("• live-review · interacted",)
 
 
 def test_app_item_completion_cannot_suppress_the_final_durable_trace_read() -> None:
@@ -739,7 +660,6 @@ def test_real_tmux_observer_is_not_a_shell_and_exits_with_its_runtime(
             rodex_session_id="1234567890abcdef",
             root_thread_id=ROOT_THREAD_ID,
         )
-        controller.observe_protocol_event(_scope_event())
         controller.observe_protocol_event(_spawn_event())
 
         panes = _wait_for_tmux_panes(tmux, tmux_socket, 2)
@@ -756,12 +676,12 @@ def test_real_tmux_observer_is_not_a_shell_and_exits_with_its_runtime(
             observer[0],
             "RODEX · LIVE AGENT",
         )
-        assert "Verify who is currently the Prime Minister of Ethiopia." in (
+        assert "SCOPE UNAVAILABLE" in (
             _wait_for_captured_text(
                 tmux,
                 tmux_socket,
                 observer[0],
-                "Verify who is currently the Prime Minister of Ethiopia.",
+                "SCOPE UNAVAILABLE",
             )
         )
 

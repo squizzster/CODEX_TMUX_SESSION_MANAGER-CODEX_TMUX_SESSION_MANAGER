@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -52,11 +52,7 @@ from .runtime import (
     RodexCodexSessionNotFoundError,
     RodexRuntimeError,
     RodexRuntimeLauncher,
-    default_tmux_server_socket_path,
 )
-
-ExecutableResolver = Callable[[str], str | None]
-RuntimeLauncherFactory = Callable[[str, str], RodexRuntimeLauncher]
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,16 +78,17 @@ class SelectorExecution(StrEnum):
     """The complete outcome of executing one bare Rodex selector."""
 
     OPENED = "opened"
-    PASSTHROUGH = "passthrough"
+    MANAGED_PROMPT = "managed_prompt"
 
 
 @dataclass(frozen=True, slots=True)
 class ManagedSessionLaunchRequest:
-    """The launch-domain meaning parsed from one `_create` or `_detach` command."""
+    """The complete launch-domain meaning of an explicit or native invocation."""
 
     codex_arguments: tuple[str, ...]
     requested_name: str | None
     detach: bool
+    resolve_codex_arguments_as_session: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -145,11 +142,12 @@ class ManagedSessionLifecycle:
                 f"Codex executable was not found: {configured_codex}"
             )
         if not launcher.codex_session_is_persisted(selection.codex_session_id):
-            return SelectorExecution.PASSTHROUGH
+            return SelectorExecution.MANAGED_PROMPT
         request = ManagedSessionLaunchRequest(
             ("resume", str(selection.codex_session_id)),
             requested_name=None,
             detach=False,
+            resolve_codex_arguments_as_session=False,
         )
         try:
             _create_managed_session(
@@ -161,7 +159,7 @@ class ManagedSessionLifecycle:
             )
         except RodexCodexSessionNotFoundError:
             # The persisted thread can disappear between the read and exact resume.
-            return SelectorExecution.PASSTHROUGH
+            return SelectorExecution.MANAGED_PROMPT
         return SelectorExecution.OPENED
 
     def execute_launch(
@@ -174,10 +172,54 @@ class ManagedSessionLifecycle:
         configured_codex: str,
     ) -> int:
         request = _parse_launch_arguments(arguments)
-        selection = _resolve_session_arguments(
-            request.codex_arguments,
+        return self._execute_launch_request(
+            request,
             resolved_database,
-            self,
+            runtime_launcher,
+            codex_binary=codex_binary,
+            configured_codex=configured_codex,
+        )
+
+    def execute_managed_interactive(
+        self,
+        codex_arguments: tuple[str, ...],
+        resolved_database: Path,
+        runtime_launcher: RodexRuntimeLauncher,
+        *,
+        codex_binary: str | None,
+        configured_codex: str,
+    ) -> int:
+        """Launch native Codex interactive syntax under a generated Rodex identity."""
+        return self._execute_launch_request(
+            ManagedSessionLaunchRequest(
+                codex_arguments,
+                requested_name=None,
+                detach=False,
+                resolve_codex_arguments_as_session=False,
+            ),
+            resolved_database,
+            runtime_launcher,
+            codex_binary=codex_binary,
+            configured_codex=configured_codex,
+        )
+
+    def _execute_launch_request(
+        self,
+        request: ManagedSessionLaunchRequest,
+        resolved_database: Path,
+        runtime_launcher: RodexRuntimeLauncher,
+        *,
+        codex_binary: str | None,
+        configured_codex: str,
+    ) -> int:
+        selection = (
+            _resolve_session_arguments(
+                request.codex_arguments,
+                resolved_database,
+                self,
+            )
+            if request.resolve_codex_arguments_as_session
+            else None
         )
         if selection is not None:
             _open_selected_session(
@@ -196,30 +238,6 @@ class ManagedSessionLifecycle:
             codex_binary=codex_binary,
             configured_codex=configured_codex,
         )
-
-    def guard_unregistered_selector_collision(
-        self,
-        selector: str,
-        *,
-        configured_codex: str,
-        configured_tmux: str,
-        resolve_executable: ExecutableResolver,
-        runtime_launcher_factory: RuntimeLauncherFactory,
-    ) -> None:
-        socket_path = default_tmux_server_socket_path()
-        if not socket_path.exists():
-            return
-        tmux_binary = resolve_executable(configured_tmux)
-        if tmux_binary is None:
-            return
-        active_launcher = runtime_launcher_factory(configured_codex, tmux_binary)
-        candidate = LiveTmuxSession(socket_path, selector)
-        if active_launcher.session_exists(candidate):
-            raise RodexLaunchError(
-                f"live tmux session {selector!r} exists on Rodex's private server "
-                "but is not registered in this Rodex database; refusing Codex "
-                "passthrough and unsafe adoption"
-            )
 
 
 def _create_managed_session(

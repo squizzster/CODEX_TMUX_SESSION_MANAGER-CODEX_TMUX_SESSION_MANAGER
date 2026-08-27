@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Final
 
+from codex_cli_contract import CODEX_CLI_0_150_1
+
 RUNNING_COMMAND: Final = "_running"
 CONTEXT_COMMAND: Final = "_context"
 ALIAS_COMMAND: Final = "_alias"
@@ -41,6 +43,7 @@ class CommandRoute(StrEnum):
     STATISTICS = "statistics"
     AGENT_TRACE = "agent_trace"
     SELECTOR = "selector"
+    MANAGED_CODEX = "managed_codex"
     CODEX = "codex"
 
 
@@ -190,7 +193,9 @@ RODEX_COMMANDS: Final = frozenset(COMMANDS_BY_TOKEN)
 
 def _help_text() -> str:
     lines = [
-        "usage: rodex [COMMAND [ARGUMENTS]]",
+        "usage: rodex [CODEX_OPTIONS] [PROMPT]",
+        "       rodex CODEX_COMMAND [ARGUMENTS]",
+        "       rodex RODEX_COMMAND [ARGUMENTS]",
         "",
         "Rodex commands:",
         "  (no command)                       Create and attach to a managed session.",
@@ -205,7 +210,12 @@ def _help_text() -> str:
             "",
             "Use a Rodex session name or canonical Codex UUID as the sole argument "
             "to attach, resume, recover, or adopt it.",
-            "Every unmatched invocation is passed unchanged to Codex.",
+            "A sole unmatched token, current interactive options, or an optional "
+            "prompt starts a managed session.",
+            "Use '--' before one token to force prompt meaning without selector or "
+            "subcommand interpretation.",
+            f"Codex {CODEX_CLI_0_150_1.characterized_release} subcommands and "
+            "uncertain option forms pass unchanged to Codex.",
             "",
         )
     )

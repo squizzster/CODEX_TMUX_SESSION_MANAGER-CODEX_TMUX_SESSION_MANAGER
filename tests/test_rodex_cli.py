@@ -14,6 +14,7 @@ from typing import Any
 import pytest
 
 import rodex.session_commands as session_commands_module
+from codex_cli_contract import CODEX_CLI_0_150_1_COMMAND_TOKENS
 from rodex.app_server_contract import RodexAppServerCompatibilityError
 from rodex.cli import RodexExecutableNotFoundError, RodexLaunchError, main, run
 from rodex.control import (
@@ -459,12 +460,13 @@ def test_help_prints_rodex_commands_without_codex_tmux_or_database(
 
     output = capsys.readouterr()
     assert output.err == ""
-    assert output.out.startswith("usage: rodex [COMMAND [ARGUMENTS]]\n")
+    assert output.out.startswith("usage: rodex [CODEX_OPTIONS] [PROMPT]\n")
     assert "_help" in output.out
     assert "_create" in output.out
     assert "_running" in output.out
     assert "_context" in output.out
-    assert "Every unmatched invocation is passed unchanged to Codex." in output.out
+    assert "current interactive options" in output.out
+    assert "Codex 0.150.1 subcommands" in output.out
     assert "canonical Codex UUID" in output.out
     assert delegator.calls == []
     assert not database.exists()
@@ -656,30 +658,69 @@ def test_cli_does_not_resolve_away_an_explicit_database_symlink(
         run(["_stats-status", "unused"], database_path=linked)
 
 
-def test_unknown_bare_name_refuses_a_live_unregistered_tmux_collision(
+def test_initial_prompt_starts_one_managed_session_without_codex_passthrough(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    socket_path = tmp_path / "tmux.sock"
-    socket_path.touch()
+    database = tmp_path / "rodex.sqlite3"
+    launcher = StubLauncher(tmp_path)
     delegator = RecordingCodexDelegator()
-    monkeypatch.setattr(
-        "rodex.managed_session_lifecycle.default_tmux_server_socket_path",
-        lambda: socket_path,
-    )
     monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
     monkeypatch.setattr(
-        "rodex.managed_session_lifecycle.RodexRuntimeLauncher.session_exists",
-        lambda *_args: True,
+        "cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga"
     )
 
-    with pytest.raises(RodexLaunchError, match="not registered"):
+    assert (
         run(
-            ["legendary-mink"],
-            database_path=tmp_path / "rodex.sqlite3",
+            ["Project: CODEX_TMUX_SESSION_MANAGER"],
+            database_path=database,
+            launcher=launcher,  # type: ignore[arg-type]
             codex_delegator=delegator,
         )
+        == 0
+    )
 
+    assert launcher.started == [
+        (Path.cwd(), ["Project: CODEX_TMUX_SESSION_MANAGER"]),
+    ]
+    assert launcher.attached == launcher.configured
+    assert delegator.calls == []
+    assert database.exists()
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ["--model", "gpt-5.6-sol", "Project: CODEX_TMUX_SESSION_MANAGER"],
+        ["-C", "/tmp/project", "inspect this project"],
+        ["--image", "one.png", "two.png", "--", "inspect these images"],
+        ["--", "exec"],
+    ],
+)
+def test_native_interactive_options_reach_managed_codex_unchanged(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    arguments: list[str],
+) -> None:
+    launcher = StubLauncher(tmp_path)
+    delegator = RecordingCodexDelegator()
+    monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
+    monkeypatch.setattr(
+        "cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga"
+    )
+
+    assert (
+        run(
+            arguments,
+            database_path=tmp_path / "rodex.sqlite3",
+            launcher=launcher,  # type: ignore[arg-type]
+            codex_delegator=delegator,
+        )
+        == 0
+    )
+
+    assert launcher.started == [(Path.cwd(), arguments)]
+    assert launcher.attached == launcher.configured
     assert delegator.calls == []
 
 
@@ -1923,30 +1964,7 @@ def test_default_and_explicit_create_link_identities_before_attach(
         ["-h"],
         ["--version"],
         ["-V"],
-        ["exec"],
-        ["review"],
-        ["login"],
-        ["logout"],
-        ["mcp"],
-        ["plugin"],
-        ["mcp-server"],
-        ["app-server"],
-        ["remote-control"],
-        ["completion"],
-        ["update"],
-        ["doctor"],
-        ["sandbox"],
-        ["debug"],
-        ["apply"],
-        ["resume"],
-        ["archive"],
-        ["delete"],
-        ["unarchive"],
-        ["fork"],
-        ["cloud"],
-        ["exec-server"],
-        ["features"],
-        ["help"],
+        *[[command] for command in sorted(CODEX_CLI_0_150_1_COMMAND_TOKENS)],
         ["exec", "--json", "run tests"],
         ["review", "--uncommitted"],
         ["features", "list"],
@@ -1958,15 +1976,13 @@ def test_default_and_explicit_create_link_identities_before_attach(
         ["--remote", "unix:///tmp/codex.sock"],
         ["--remote=unix:///tmp/codex.sock"],
         ["--future-codex-option"],
-        ["--model", "example"],
         ["future-codex-command", "argument"],
         ["--create", "project_1234"],
         ["--detach"],
         ["--force"],
-        ["running"],
     ],
 )
-def test_non_rodex_invocations_delegate_unchanged_without_tmux_or_database(
+def test_codex_passthrough_invocations_delegate_unchanged_without_tmux_or_database(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     arguments: list[str],
@@ -2217,25 +2233,32 @@ def test_explicit_create_forwards_ordinary_codex_options(
     assert names.display_name == "project_1234"
 
 
-def test_codex_short_config_passes_through_without_starting_rodex(
+def test_codex_short_config_starts_a_managed_interactive_session(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     database = tmp_path / "rodex.sqlite3"
+    launcher = StubLauncher(tmp_path)
     delegator = RecordingCodexDelegator()
     monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
+    monkeypatch.setattr(
+        "cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga"
+    )
 
     assert (
         run(
             ["-c", 'model="gpt-5.6-luna"'],
             database_path=database,
+            launcher=launcher,  # type: ignore[arg-type]
             codex_delegator=delegator,
         )
         == 0
     )
 
-    assert delegator.calls == [("/usr/bin/codex", ["-c", 'model="gpt-5.6-luna"'])]
-    assert not database.exists()
+    assert launcher.started == [(Path.cwd(), ["-c", 'model="gpt-5.6-luna"'])]
+    assert launcher.attached == launcher.configured
+    assert delegator.calls == []
+    assert database.exists()
 
 
 @pytest.mark.parametrize(
@@ -2718,15 +2741,14 @@ def test_persisted_unregistered_codex_uuid_becomes_a_managed_rodex_session(
     assert f"] -> Codex {REPLACEMENT_CODEX_SESSION_ID}" in capsys.readouterr().out
 
 
-def test_missing_canonical_codex_uuid_passes_through_unchanged(
+def test_missing_canonical_codex_uuid_becomes_a_managed_initial_prompt(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     database = tmp_path / "rodex.sqlite3"
     monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
     monkeypatch.setattr(
-        "rodex.managed_session_lifecycle.default_tmux_server_socket_path",
-        lambda: tmp_path / "absent.sock",
+        "cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga"
     )
     session_selector = str(REPLACEMENT_CODEX_SESSION_ID)
     launcher = StubLauncher(tmp_path)
@@ -2739,24 +2761,25 @@ def test_missing_canonical_codex_uuid_passes_through_unchanged(
             launcher=launcher,  # type: ignore[arg-type]
             codex_delegator=delegator,
         )
-        == delegator.returncode
+        == 0
     )
 
     assert launcher.persistence_checks == [REPLACEMENT_CODEX_SESSION_ID]
-    assert launcher.started == []
-    assert not database.exists()
-    assert delegator.calls == [("/usr/bin/codex", [session_selector])]
+    assert launcher.started == [(Path.cwd(), [session_selector])]
+    assert launcher.attached == launcher.configured
+    assert database.exists()
+    assert delegator.calls == []
 
 
-def test_noncanonical_codex_uuid_spelling_passes_through_unchanged(
+def test_noncanonical_codex_uuid_spelling_becomes_a_managed_initial_prompt(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     database = tmp_path / "rodex.sqlite3"
+    launcher = StubLauncher(tmp_path)
     monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
     monkeypatch.setattr(
-        "rodex.managed_session_lifecycle.default_tmux_server_socket_path",
-        lambda: tmp_path / "absent.sock",
+        "cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga"
     )
     delegator = RecordingCodexDelegator(returncode=23)
 
@@ -2764,13 +2787,17 @@ def test_noncanonical_codex_uuid_spelling_passes_through_unchanged(
         run(
             [CODEX_SESSION_ID.hex],
             database_path=database,
+            launcher=launcher,  # type: ignore[arg-type]
             codex_delegator=delegator,
         )
-        == delegator.returncode
+        == 0
     )
 
-    assert not database.exists()
-    assert delegator.calls == [("/usr/bin/codex", [CODEX_SESSION_ID.hex])]
+    assert launcher.persistence_checks == []
+    assert launcher.started == [(Path.cwd(), [CODEX_SESSION_ID.hex])]
+    assert launcher.attached == launcher.configured
+    assert database.exists()
+    assert delegator.calls == []
 
 
 def test_ended_cool_name_argument_transparently_resumes_its_codex_session(

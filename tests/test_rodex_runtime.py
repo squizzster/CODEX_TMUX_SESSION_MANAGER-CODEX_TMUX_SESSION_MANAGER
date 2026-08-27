@@ -1930,6 +1930,10 @@ def test_runtime_path_keepalives_share_runtime_paths_independently(
     [
         (["resume", "01a00654-f2bc-7a30-834a-a5f886a65f82"], True),
         (["--model", "example"], False),
+        (
+            ["--model", "gpt-5.6-sol", "Project: CODEX_TMUX_SESSION_MANAGER"],
+            False,
+        ),
     ],
 )
 def test_session_host_skips_updater_and_connects_tui_through_protocol_proxy(

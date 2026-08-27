@@ -52,6 +52,7 @@ select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
 
 [tool.uv.build-backend]
 module-name = [
+    "codex_cli_contract",
     "cool_name",
     "rodex",
     "rodex_registry",

@@ -6,11 +6,11 @@ import pytest
 
 import rodex.managed_session_lifecycle as lifecycle_module
 from rodex.managed_session_lifecycle import (
+    ManagedSessionLaunchRequest,
     ManagedSessionLifecycle,
     OwnedSessionSelection,
     UnregisteredCodexSessionSelection,
 )
-from rodex.runtime import LiveTmuxSession
 from rodex_registry import parse_codex_session_id
 
 
@@ -56,7 +56,7 @@ def test_canonical_unregistered_codex_identity_is_selected_without_opening_sql(
     assert not database.exists()
 
 
-def test_noncanonical_selector_without_registry_remains_codex_passthrough(
+def test_noncanonical_selector_without_registry_remains_unresolved(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     database = tmp_path / "absent.sqlite3"
@@ -70,41 +70,35 @@ def test_noncanonical_selector_without_registry_remains_codex_passthrough(
     assert not database.exists()
 
 
-def test_collision_policy_uses_the_application_runtime_dependencies(
+def test_native_interactive_launch_is_not_reclassified_as_a_session_selector(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    socket_path = tmp_path / "tmux.sock"
-    socket_path.touch()
-    trace: list[object] = []
+    requests: list[ManagedSessionLaunchRequest] = []
     monkeypatch.setattr(
         lifecycle_module,
-        "default_tmux_server_socket_path",
-        lambda: socket_path,
+        "_resolve_session_arguments",
+        lambda *_arguments: pytest.fail("native syntax was already classified"),
+    )
+    monkeypatch.setattr(
+        lifecycle_module,
+        "_create_managed_session",
+        lambda request, *_args, **_kwargs: requests.append(request) or 31,
     )
 
-    def resolve_executable(command: str) -> str:
-        trace.append(("resolve", command))
-        return "/configured/tmux"
-
-    class CollisionLauncher:
-        def session_exists(self, runtime: LiveTmuxSession) -> bool:
-            trace.append(("session_exists", runtime))
-            return False
-
-    def launcher_factory(codex_binary: str, tmux_binary: str) -> CollisionLauncher:
-        trace.append(("launcher", codex_binary, tmux_binary))
-        return CollisionLauncher()
-
-    ManagedSessionLifecycle().guard_unregistered_selector_collision(
-        "worker",
-        configured_codex="configured-codex",
-        configured_tmux="configured-tmux",
-        resolve_executable=resolve_executable,
-        runtime_launcher_factory=launcher_factory,  # type: ignore[arg-type]
+    status = ManagedSessionLifecycle().execute_managed_interactive(
+        ("Project: CODEX_TMUX_SESSION_MANAGER",),
+        tmp_path / "rodex.sqlite3",
+        object(),  # type: ignore[arg-type]
+        codex_binary="/usr/bin/codex",
+        configured_codex="codex",
     )
 
-    assert trace == [
-        ("resolve", "configured-tmux"),
-        ("launcher", "configured-codex", "/configured/tmux"),
-        ("session_exists", LiveTmuxSession(socket_path, "worker")),
+    assert status == 31
+    assert requests == [
+        ManagedSessionLaunchRequest(
+            ("Project: CODEX_TMUX_SESSION_MANAGER",),
+            requested_name=None,
+            detach=False,
+            resolve_codex_arguments_as_session=False,
+        )
     ]

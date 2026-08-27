@@ -9,6 +9,7 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
+from codex_cli_contract import CODEX_CLI_0_150_1
 from cool_name import CoolNameError
 from rodex_registry import (
     RodexSessionError,
@@ -61,6 +62,7 @@ def run(
             attach_notice=CodexUpdateNotice(codex_binary).message_if_available,
         ),
         session_lifecycle=ManagedSessionLifecycle(),
+        codex_cli_contract=CODEX_CLI_0_150_1,
     )
     return application.execute(arguments)
 

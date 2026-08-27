@@ -3,7 +3,8 @@
 Rodex makes a durable tmux-hosted Codex session feel like Codex itself. Start normally
 with `./rodex`, work in the ordinary Codex TUI, detach when needed, and return later by
 a memorable name such as `automatic-beluga`. Rodex-specific commands live in an
-underscore namespace; other nonempty invocations pass to Codex unchanged.
+underscore namespace. Current Codex interactive options and an optional initial prompt
+run inside managed Rodex; Codex subcommands and uncertain future options pass through.
 
 > **Development status: ALPHA.** Rodex is a Linux/POSIX pre-release under active
 > validation. Interfaces may still change, but identity, lifecycle, installation,
@@ -25,6 +26,8 @@ Both sides retain the same Rodex, runtime, Codex, and workspace context.
 ## What Rodex does
 
 - Opens the ordinary interactive Codex TUI inside a private tmux runtime.
+- Accepts the current native `codex [OPTIONS] [PROMPT]` shape and forwards its arguments
+  unchanged into that managed TUI.
 - Keeps Rodex and Codex session identities distinct and linked.
 - Gives each Rodex session and runtime incarnation its own exact 16-character
   lowercase hexadecimal ID.
@@ -53,17 +56,17 @@ Both sides retain the same Rodex, runtime, Codex, and workspace context.
   `subAgentActivity(kind=started)` event, then shows invocation semantics, the exact
   same-turn parent request when present, agent-authored prose, and durable outcomes while
   leaving Codex focused below.
-- Refuses unregistered tmux name collisions and verifies Rodex and Codex identities
+- Never adopts unregistered tmux sessions and verifies Rodex and Codex identities
   before attaching to or controlling a live runtime.
 - Serializes concurrent opens of one ended name and tolerates the bounded Codex-writer
   shutdown handoff without creating duplicate runtimes.
 
-Rodex does not generally reinterpret ordinary nonempty Codex CLI invocations. With no
-arguments it creates and attaches to a managed session. Exact underscore Rodex commands
-stay local, an existing Rodex name opens that session, and a canonical Codex UUID opens
-its linked Rodex session or adopts the persisted standalone thread. Every other nonempty
-invocation replaces itself with Codex while preserving arguments, terminal streams,
-signals, and exit status.
+One declarative Codex 0.150.1 CLI contract owns this boundary. Exact underscore Rodex
+commands stay local. Native interactive options and an optional prompt create and attach
+to a managed session, while a sole bare token first gets the chance to resolve an
+existing Rodex name or persisted Codex UUID. Current Codex subcommands, help/version,
+external `--remote`, malformed shapes, and unknown option-shaped syntax replace Rodex
+with Codex while preserving arguments, terminal streams, signals, and exit status.
 
 ## Requirements
 
@@ -81,6 +84,13 @@ git clone https://github.com/squizzster/CODEX_TMUX_SESSION_MANAGER-CODEX_TMUX_SE
 cd rodex
 uv sync
 ./rodex
+```
+
+Start with an initial prompt exactly as you would with Codex:
+
+```bash
+./rodex 'Project: CODEX_TMUX_SESSION_MANAGER'
+./rodex --model gpt-5.6-sol 'Review this project'
 ```
 
 At the `›` prompt, use Codex normally. Detach without ending the session with
@@ -195,6 +205,8 @@ preference. See the current [tmux manual](https://man.openbsd.org/tmux.1) and
 |---|---|
 | `./rodex _help` | Show Rodex's own command help without starting Codex or tmux. |
 | `./rodex` | Create and attach to a new Rodex/Codex tmux session. |
+| `./rodex 'Project: CODEX_TMUX_SESSION_MANAGER'` | Create a managed session and submit the initial prompt once through Codex's native TUI startup. |
+| `./rodex --model gpt-5.6-sol 'Review this project'` | Forward current interactive options and a prompt unchanged into the managed TUI. |
 | `./rodex _create` | Create and attach to a new Rodex/Codex session. |
 | `./rodex _create project_1234` | Create a session with a preferred display name. |
 | `./rodex _detach` | Create without attaching and print expanded identity JSON. |
@@ -285,17 +297,22 @@ ASCII letters, digits, underscores, or hyphens and begin with a letter or digit.
 existing reserved-name vocabulary remains case-insensitive and includes Codex
 top-level commands and aliases.
 
-No arguments is the default managed-create route and is equivalent to `_create`. A
-single argument is the other exception to ordinary Codex passthrough. An existing Rodex
-name or linked Codex UUID opens that session. An unregistered canonical Codex UUID is
-checked through a short-lived App Server `thread/read`; a persisted, non-ephemeral thread
-is resumed exactly, verified, assigned normal Rodex session/runtime IDs and a unique
-two-word name, registered, and attached. A missing UUID and every other unmatched
-invocation pass unchanged to Codex without creating a Rodex database row or tmux session.
-A bare name colliding with an unregistered session on Rodex's private tmux server instead
-fails explicitly and is shown by `_running`; Rodex never adopts or deletes that tmux
-session automatically. An existing Rodex name wins even if a later Codex release
-introduces a command with the same spelling.
+No arguments is the default managed-create route and is equivalent to `_create`. The
+characterized Codex 0.150.1 interactive grammar—current options plus zero or one prompt—
+uses the same managed route and reaches Codex unchanged. A sole bare token first resolves
+an existing Rodex name or linked Codex UUID; otherwise it becomes the initial prompt.
+An unregistered canonical Codex UUID is checked through a short-lived App Server
+`thread/read`; a persisted, non-ephemeral thread is resumed and adopted, while a missing
+UUID becomes a normal managed prompt. `rodex -- TOKEN` forces prompt meaning without
+selector or subcommand interpretation.
+
+Current Codex subcommands and aliases pass through directly, as do help/version,
+external remote connections, malformed current syntax, multiple positional arguments,
+and every unknown option-shaped invocation. This preserves Codex's own diagnostics and
+future option handling. A future bare zero-argument subcommand is inherently
+indistinguishable from a one-word prompt until the single CLI contract is updated.
+Current command names are reserved from new Rodex aliases; an older colliding alias can
+still be migrated with `_alias OLD SAFE_NAME`.
 
 The in-TUI `/rodex` command and its completion ribbon are temporarily disabled through
 `RODEX_TMUX_SLASH_ENABLED` in `rodex.runtime`. The implementation remains in the

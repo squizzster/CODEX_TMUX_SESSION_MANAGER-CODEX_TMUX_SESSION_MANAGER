@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from codex_cli_contract import CODEX_CLI_0_150_1_COMMAND_TOKENS
 from cool_name import (
     RODEX_RESERVED_WORDS,
     CoolNameGenerationError,
@@ -130,49 +131,10 @@ def test_reserved_names_are_case_insensitive_and_automatic_allocation_skips_them
         requested_word_counts.append(word_count)
         return "RUNNING" if word_count == 2 else "fresh-three-name"
 
+    assert CODEX_CLI_0_150_1_COMMAND_TOKENS <= RODEX_RESERVED_WORDS
     assert (
-        frozenset(
-            {
-                "a",
-                "alias",
-                "app-server",
-                "apply",
-                "archive",
-                "cloud",
-                "completion",
-                "create",
-                "debug",
-                "delete",
-                "detach",
-                "doctor",
-                "e",
-                "exec",
-                "exec-server",
-                "execpolicy",
-                "features",
-                "fork",
-                "help",
-                "login",
-                "logout",
-                "mcp",
-                "mcp-server",
-                "plugin",
-                "remote-control",
-                "responses-api-proxy",
-                "resume",
-                "review",
-                "running",
-                "sandbox",
-                "send",
-                "sessions",
-                "stdio-to-uds",
-                "tail",
-                "unarchive",
-                "update",
-                "wait",
-            }
-        )
-        == RODEX_RESERVED_WORDS
+        frozenset({"alias", "create", "detach", "running", "send", "tail", "wait"})
+        == RODEX_RESERVED_WORDS - CODEX_CLI_0_150_1_COMMAND_TOKENS
     )
     assert is_reserved_rodex_name("Alias")
     assert is_reserved_rodex_name("EXEC")

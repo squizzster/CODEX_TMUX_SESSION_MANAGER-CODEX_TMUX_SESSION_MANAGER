@@ -78,7 +78,38 @@ def test_launchers_route_bare_rodex_to_managed_tmux_before_database_access(
 
 
 @pytest.mark.parametrize("launcher_relative", LAUNCHERS)
-def test_launchers_preserve_nonempty_codex_passthrough_without_tmux(
+def test_launchers_route_an_initial_prompt_to_managed_tmux(
+    tmp_path: Path,
+    launcher_relative: str,
+) -> None:
+    project_root = Path(__file__).parents[1]
+    launcher = project_root / launcher_relative
+    database = tmp_path / "rodex.sqlite3"
+    fake_codex = tmp_path / "codex-must-not-run-directly"
+    fake_codex.write_text("#!/bin/sh\nexit 91\n", encoding="utf-8")
+    fake_codex.chmod(0o755)
+    environment = os.environ.copy()
+    environment["RODEX_PROJECT_DIR"] = str(project_root)
+    environment["RODEX_DATABASE_PATH"] = str(database)
+    environment["RODEX_CODEX_BINARY"] = str(fake_codex)
+    environment["RODEX_TMUX_BINARY"] = "rodex-test-missing-tmux"
+
+    result = subprocess.run(
+        [launcher, "Project: CODEX_TMUX_SESSION_MANAGER"],
+        check=False,
+        env=environment,
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 127
+    assert result.stdout == ""
+    assert "tmux executable was not found: rodex-test-missing-tmux" in result.stderr
+    assert not database.exists()
+
+
+@pytest.mark.parametrize("launcher_relative", LAUNCHERS)
+def test_launchers_preserve_codex_subcommand_passthrough_without_tmux(
     tmp_path: Path,
     launcher_relative: str,
 ) -> None:
@@ -131,7 +162,7 @@ def test_launchers_print_rodex_help_without_codex_tmux_or_database(
     )
 
     assert result.returncode == 0
-    assert result.stdout.startswith("usage: rodex [COMMAND [ARGUMENTS]]\n")
+    assert result.stdout.startswith("usage: rodex [CODEX_OPTIONS] [PROMPT]\n")
     assert "_create" in result.stdout
     assert result.stderr == ""
     assert not database.exists()

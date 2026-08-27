@@ -62,6 +62,19 @@ from rodex_registry import parse_codex_session_id
             PipelinePreparation.DIRECT,
         ),
         (["--version"], ("--version",), CommandRoute.CODEX, PipelinePreparation.DIRECT),
+        (
+            ["--model", "example", "initial prompt"],
+            ("--model", "example", "initial prompt"),
+            CommandRoute.MANAGED_CODEX,
+            PipelinePreparation.RUNTIME,
+        ),
+        (["exec"], ("exec",), CommandRoute.CODEX, PipelinePreparation.DIRECT),
+        (
+            ["--future-codex-option"],
+            ("--future-codex-option",),
+            CommandRoute.CODEX,
+            PipelinePreparation.DIRECT,
+        ),
     ],
 )
 def test_invocation_selection_is_single_typed_and_exhaustive(
@@ -161,23 +174,26 @@ def _pipeline(
             )
             return 19
 
-        def guard_unregistered_selector_collision(
+        def execute_managed_interactive(
             self,
-            selector: str,
+            codex_arguments: tuple[str, ...],
+            database_path: Path,
+            launcher: Any,
             *,
+            codex_binary: str | None,
             configured_codex: str,
-            configured_tmux: str,
-            resolve_executable: object,
-            runtime_launcher_factory: object,
-        ) -> None:
+        ) -> int:
             trace.append(
                 (
-                    "collision_guard",
-                    selector,
+                    "managed_codex",
+                    codex_arguments,
+                    database_path,
+                    launcher,
+                    codex_binary,
                     configured_codex,
-                    configured_tmux,
                 )
             )
+            return 29
 
     return UnifiedRodexApplicationPipeline(
         database_path=tmp_path / "rodex.sqlite3",
@@ -214,6 +230,7 @@ def test_statistics_route_uses_database_context_without_acquiring_runtime(
         (["_cat", "worker"], "session", 0),
         (["_inspect", "worker", "--json"], "machine", 23),
         (["_create"], "launch", 19),
+        (["--model", "example", "initial prompt"], "managed_codex", 29),
     ],
 )
 def test_runtime_routes_acquire_once_and_execute_exactly_one_domain(
@@ -245,7 +262,15 @@ def test_runtime_routes_acquire_once_and_execute_exactly_one_domain(
         not {
             entry[0]  # type: ignore[index]
             for entry in trace[2:]
-            if entry[0] in {"session", "machine", "launch", "statistics", "codex"}  # type: ignore[index]
+            if entry[0]  # type: ignore[index]
+            in {
+                "session",
+                "machine",
+                "launch",
+                "managed_codex",
+                "statistics",
+                "codex",
+            }
         }
         - {executor_name}
     )
@@ -276,23 +301,30 @@ def test_selector_resolves_before_runtime_and_never_probes_another_domain(
     ]
 
 
-def test_unmatched_selector_returns_to_the_codex_route_without_tmux(
+def test_unmatched_selector_becomes_one_managed_initial_prompt(
     tmp_path: Path,
 ) -> None:
     database = tmp_path / "rodex.sqlite3"
     database.touch()
     trace: list[object] = []
 
-    assert _pipeline(tmp_path, trace).execute(["worker"]) == 17
+    assert _pipeline(tmp_path, trace).execute(["worker"]) == 29
     assert trace == [
         ("selector_resolver", "worker", database),
-        ("collision_guard", "worker", "codex", "tmux"),
+        ("resolve_executable", "tmux"),
         ("resolve_executable", "codex"),
-        ("codex", "/bin/codex", ("worker",)),
+        (
+            "managed_codex",
+            ("worker",),
+            database,
+            "launcher",
+            "/bin/codex",
+            "codex",
+        ),
     ]
 
 
-def test_unregistered_codex_uuid_can_return_to_passthrough_after_runtime_probe(
+def test_unregistered_codex_uuid_can_become_a_managed_prompt_after_runtime_probe(
     tmp_path: Path,
 ) -> None:
     database = tmp_path / "rodex.sqlite3"
@@ -307,9 +339,9 @@ def test_unregistered_codex_uuid_can_return_to_passthrough_after_runtime_probe(
             tmp_path,
             trace,
             selected_session=selection,
-            selector_outcome=SelectorExecution.PASSTHROUGH,
+            selector_outcome=SelectorExecution.MANAGED_PROMPT,
         ).execute([selector])
-        == 17
+        == 29
     )
 
     assert trace == [
@@ -324,9 +356,14 @@ def test_unregistered_codex_uuid_can_return_to_passthrough_after_runtime_probe(
             True,
             "codex",
         ),
-        ("collision_guard", selector, "codex", "tmux"),
-        ("resolve_executable", "codex"),
-        ("codex", "/bin/codex", (selector,)),
+        (
+            "managed_codex",
+            (selector,),
+            database,
+            "launcher",
+            "/bin/codex",
+            "codex",
+        ),
     ]
 
 

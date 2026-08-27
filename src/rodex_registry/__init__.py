@@ -1,5 +1,9 @@
 """Public contracts for the durable Rodex registry."""
 
+from .agent_observer import (
+    RodexAgentObserverTurnEvidence,
+    read_rodex_agent_observer_turn_evidence,
+)
 from .agent_trace import (
     RodexAgentTraceEvent,
     RodexAgentTracePublication,
@@ -140,6 +144,7 @@ __all__ = [
     "CodexSessionId",
     "CodexThreadId",
     "CodexTurnId",
+    "RodexAgentObserverTurnEvidence",
     "RodexAgentTraceEvent",
     "RodexAgentTracePublication",
     "RodexAgentTraceSnapshot",
@@ -231,6 +236,7 @@ __all__ = [
     "parse_session_statistics_snapshot",
     "parse_turn_statistics_snapshot",
     "publish_rodex_session_statistics",
+    "read_rodex_agent_observer_turn_evidence",
     "read_rodex_agent_trace",
     "read_rodex_agent_trace_cursor",
     "read_rodex_analytics_checkpoint",

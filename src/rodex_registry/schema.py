@@ -1887,12 +1887,12 @@ WHEN NOT EXISTS (
         )
         AND (
             parent_event.source_record_ordinal <
-                subagent_event.source_record_ordinal
+                tool_event.source_record_ordinal
             OR (
                 parent_event.source_record_ordinal =
-                    subagent_event.source_record_ordinal
+                    tool_event.source_record_ordinal
                 AND parent_event.derived_event_ordinal <
-                    subagent_event.derived_event_ordinal
+                    tool_event.derived_event_ordinal
             )
         )
         AND (
@@ -1927,12 +1927,12 @@ WHEN NOT EXISTS (
                 )
                 AND (
                     later_event.source_record_ordinal <
-                        subagent_event.source_record_ordinal
+                        tool_event.source_record_ordinal
                     OR (
                         later_event.source_record_ordinal =
-                            subagent_event.source_record_ordinal
+                            tool_event.source_record_ordinal
                         AND later_event.derived_event_ordinal <
-                            subagent_event.derived_event_ordinal
+                            tool_event.derived_event_ordinal
                     )
                 )
         )
@@ -1983,6 +1983,70 @@ WHEN NOT EXISTS (
         AND target_state.started_at_utc IS NOT NULL
         AND julianday(target_state.started_at_utc) >=
             julianday(request_event.event_time_utc)
+        AND NOT EXISTS (
+            SELECT 1
+            FROM {RODEX_SESSIONS_AGENT_REQUESTS_TABLE} AS earlier_request
+            JOIN {RODEX_SESSIONS_AGENT_TRACE_SUBAGENT_ACTIVITIES_TABLE}
+                AS earlier_activity
+                ON earlier_activity.id =
+                    earlier_request.rodex_sessions_agent_trace_subagent_activities_id
+            JOIN {RODEX_SESSIONS_AGENT_TRACE_EVENTS_TABLE} AS earlier_request_event
+                ON earlier_request_event.id =
+                    earlier_activity.rodex_sessions_agent_trace_events_id
+            LEFT JOIN {RODEX_SESSIONS_AGENT_REQUEST_TARGET_TURNS_TABLE}
+                AS earlier_request_link
+                ON earlier_request_link.rodex_sessions_agent_requests_id =
+                    earlier_request.id
+            WHERE earlier_request.rodex_sessions_id = request.rodex_sessions_id
+                AND earlier_request.target_codex_threads_id =
+                    request.target_codex_threads_id
+                AND earlier_request_link.id IS NULL
+                AND earlier_request_event.event_time_utc IS NOT NULL
+                AND (
+                    julianday(earlier_request_event.event_time_utc) <
+                        julianday(request_event.event_time_utc)
+                    OR (
+                        julianday(earlier_request_event.event_time_utc) =
+                            julianday(request_event.event_time_utc)
+                        AND (
+                            earlier_request_event.id < request_event.id
+                            OR (
+                                earlier_request_event.id = request_event.id
+                                AND earlier_request.id < request.id
+                            )
+                        )
+                    )
+                )
+        )
+        AND NOT EXISTS (
+            SELECT 1
+            FROM {RODEX_SESSIONS_CODEX_THREADS_TABLE} AS earlier_membership
+            JOIN {RODEX_SESSIONS_CODEX_TURNS_TABLE} AS earlier_turn
+                ON earlier_turn.rodex_sessions_codex_threads_id =
+                    earlier_membership.id
+            JOIN {RODEX_SESSIONS_CODEX_TURN_STATES_TABLE} AS earlier_state
+                ON earlier_state.rodex_sessions_codex_turns_id = earlier_turn.id
+            LEFT JOIN {RODEX_SESSIONS_AGENT_REQUEST_TARGET_TURNS_TABLE}
+                AS earlier_turn_link
+                ON earlier_turn_link.target_rodex_sessions_codex_turns_id =
+                    earlier_turn.id
+            WHERE earlier_membership.rodex_sessions_id = request.rodex_sessions_id
+                AND earlier_membership.codex_threads_id =
+                    request.target_codex_threads_id
+                AND earlier_turn_link.id IS NULL
+                AND earlier_state.started_at_utc IS NOT NULL
+                AND julianday(earlier_state.started_at_utc) >=
+                    julianday(request_event.event_time_utc)
+                AND (
+                    julianday(earlier_state.started_at_utc) <
+                        julianday(target_state.started_at_utc)
+                    OR (
+                        julianday(earlier_state.started_at_utc) =
+                            julianday(target_state.started_at_utc)
+                        AND earlier_turn.id < target_turn.id
+                    )
+                )
+        )
 )
 BEGIN
     SELECT RAISE(ABORT, 'agent request target turn is inconsistent');

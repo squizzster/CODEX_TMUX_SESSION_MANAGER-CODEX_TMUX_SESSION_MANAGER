@@ -1276,6 +1276,7 @@ def test_request_commits_before_target_registration_then_links_only_its_target_t
     create_a_rodex_session(database, codex_session_id=THREAD_ID)
     parent_turn_id = "00000000-0000-7000-8000-0000000000e1"
     target_turn_id = "00000000-0000-7000-8000-0000000000e2"
+    later_target_turn_id = "00000000-0000-7000-8000-0000000000e3"
     first_publication = RodexAgentTracePublication(
         None,
         "test-v2",
@@ -1397,12 +1398,53 @@ def test_request_commits_before_target_registration_then_links_only_its_target_t
             "codex_thread_public_id_signed_bigint_2 = ?",
             split_codex_thread_id_into_signed_bigints(CHILD_THREAD_ID),
         ).fetchone()[0]
-        connection.execute(
+        child_membership_id = connection.execute(
             "INSERT INTO rodex_sessions_codex_threads "
             "(rodex_sessions_id, codex_threads_id, first_linked_at_utc) "
-            "VALUES (1, ?, '2026-08-27T03:25:31Z')",
+            "VALUES (1, ?, '2026-08-27T03:25:31Z') RETURNING id",
             (child_identity_id,),
-        )
+        ).fetchone()[0]
+        target_turn_rows = []
+        for public_id, codex_turn_id, started_at in (
+            (
+                uuid.UUID(int=902),
+                target_turn_id,
+                "2026-08-27T03:25:31.100Z",
+            ),
+            (
+                uuid.UUID(int=903),
+                later_target_turn_id,
+                "2026-08-27T03:25:31.200Z",
+            ),
+        ):
+            turn_row = connection.execute(
+                "INSERT INTO rodex_sessions_codex_turns "
+                "(rodex_sessions_id, rodex_sessions_codex_threads_id, "
+                "turn_public_id_signed_bigint_1, turn_public_id_signed_bigint_2, "
+                "codex_turn_id_signed_bigint_1, codex_turn_id_signed_bigint_2) "
+                "VALUES (1, ?, ?, ?, ?, ?) RETURNING id",
+                (
+                    child_membership_id,
+                    *split_codex_thread_id_into_signed_bigints(public_id),
+                    *split_codex_turn_id_into_signed_bigints(codex_turn_id),
+                ),
+            ).fetchone()[0]
+            connection.execute(
+                "INSERT INTO rodex_sessions_codex_turn_states "
+                "(rodex_sessions_id, rodex_sessions_codex_turns_id, "
+                "started_at_utc, outcome) VALUES (1, ?, ?, 'open')",
+                (turn_row, started_at),
+            )
+            target_turn_rows.append(turn_row)
+        with pytest.raises(
+            sqlite3.IntegrityError, match="agent request target turn is inconsistent"
+        ):
+            connection.execute(
+                "INSERT INTO rodex_sessions_agent_request_target_turns "
+                "(rodex_sessions_id, rodex_sessions_agent_requests_id, "
+                "target_rodex_sessions_codex_turns_id) VALUES (1, ?, ?)",
+                (request_row[0], target_turn_rows[1]),
+            )
     second_publication = RodexAgentTracePublication(
         1,
         "test-v2",
@@ -1429,6 +1471,101 @@ def test_request_commits_before_target_registration_then_links_only_its_target_t
     )
     assert request_detail["target_codex_turn_id"] == target_turn_id
     assert request_detail["target_turn_association_kind"] == "next_observed_turn"
+
+
+def test_agent_request_parent_is_latest_user_message_before_the_tool_request(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "rodex.sqlite3"
+    create_a_rodex_session(database, codex_session_id=THREAD_ID)
+    parent_turn_id = "00000000-0000-7000-8000-0000000000f0"
+    publication = normalize_rollout_trace(
+        (
+            (
+                THREAD_ID,
+                _content(
+                    {
+                        "ordinal": 1,
+                        "timestamp": "2026-08-27T04:00:00Z",
+                        "type": "event_msg",
+                        "payload": {"type": "task_started", "turn_id": parent_turn_id},
+                    },
+                    {
+                        "ordinal": 2,
+                        "timestamp": "2026-08-27T04:00:01Z",
+                        "type": "event_msg",
+                        "payload": {
+                            "type": "item_completed",
+                            "item": {
+                                "type": "UserMessage",
+                                "id": "00000000-0000-7000-8000-0000000000f1",
+                                "content": [{"type": "text", "text": "actual request"}],
+                            },
+                        },
+                    },
+                    {
+                        "ordinal": 3,
+                        "timestamp": "2026-08-27T04:00:02Z",
+                        "type": "response_item",
+                        "payload": {
+                            "type": "function_call",
+                            "namespace": "collaboration",
+                            "name": "spawn_agent",
+                            "call_id": "call-parent-order",
+                            "arguments": "encrypted",
+                        },
+                    },
+                    {
+                        "ordinal": 4,
+                        "timestamp": "2026-08-27T04:00:03Z",
+                        "type": "event_msg",
+                        "payload": {
+                            "type": "item_completed",
+                            "item": {
+                                "type": "UserMessage",
+                                "id": "00000000-0000-7000-8000-0000000000f2",
+                                "content": [
+                                    {"type": "text", "text": "arrived after invocation"}
+                                ],
+                            },
+                        },
+                    },
+                    {
+                        "ordinal": 5,
+                        "timestamp": "2026-08-27T04:00:04Z",
+                        "type": "event_msg",
+                        "payload": {
+                            "type": "item_completed",
+                            "item": {
+                                "type": "SubAgentActivity",
+                                "id": "call-parent-order",
+                                "kind": "started",
+                                "agent_thread_id": str(CHILD_THREAD_ID),
+                                "agent_path": "/root/parent-order",
+                            },
+                        },
+                    },
+                ),
+            ),
+        ),
+        based_on_trace_publication_sequence=None,
+        calculated_at_utc="2026-08-27T04:00:05Z",
+    )
+
+    _publish_trace(database, publication)
+
+    with sqlite3.connect(database) as connection:
+        parent_ordinal = connection.execute(
+            "SELECT parent_event.source_record_ordinal "
+            "FROM rodex_sessions_agent_requests AS requests "
+            "JOIN rodex_sessions_agent_trace_messages AS parent_message "
+            "ON parent_message.id = "
+            "requests.parent_rodex_sessions_agent_trace_messages_id "
+            "JOIN rodex_sessions_agent_trace_events AS parent_event "
+            "ON parent_event.id = parent_message.rodex_sessions_agent_trace_events_id"
+        ).fetchone()[0]
+
+    assert parent_ordinal == 2
 
 
 def test_include_body_adapter_is_allowlisted_and_redacts_hidden_or_encrypted_data() -> None:

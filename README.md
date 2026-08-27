@@ -47,8 +47,9 @@ Both sides retain the same Rodex, runtime, Codex, and workspace context.
 - Tracks root/sub-agent lineage and typed rollout-derived messages, commands, tools,
   contexts, token usage, rate limits, and agent activity in a durable agent trace.
 - Opens and reuses a noninteractive top-third agent observer on an exact live
-  `subAgentActivity(kind=started)` event, then shows human-readable live progress while
-  leaving Codex focused below, including the exact same-turn parent request when present.
+  `subAgentActivity(kind=started)` event, then shows invocation semantics, the exact
+  same-turn parent request when present, agent-authored prose, and durable outcomes while
+  leaving Codex focused below.
 - Refuses unregistered tmux name collisions and verifies Rodex and Codex identities
   before attaching to or controlling a live runtime.
 - Serializes concurrent opens of one ended name and tolerates the bounded Codex-writer
@@ -106,28 +107,44 @@ execute shell commands. It remains after an agent turn finishes and is reused by
 agent activity; it exits with the Rodex runtime so it cannot keep a session alive.
 
 The App Server's exact agent UUID, path, and activity kind determine what is followed.
-Codex 0.149.1's MultiAgent V2 spawn event does not expose the delegated plaintext, while
-its local parent and child records retain that payload encrypted. Rodex does receive the
-completed parent `userMessage` that preceded the spawn. When it belongs to the same exact
-root turn, the observer reproduces its text unchanged as `REQUEST · exact parent message`;
-it does not relabel that request as the delegated prompt. Without that exact correlation,
-Rodex prints `SCOPE UNAVAILABLE` instead of guessing from the child's behaviour or first
-reply. Completed `agentMessage` items provide the tracked agent's `UPDATE` and `ANSWER`
-text. Rodex sanitizes terminal controls without fixed-width truncation and leaves line
-wrapping to the actual tmux pane width.
+The pane reports whether Codex invoked `spawn_agent` or `followup_task`, then uses durable
+lineage to distinguish a new clean agent, a new inherited agent, and the same agent
+continuing with a new turn. Codex 0.149.1's MultiAgent V2 activity does not expose the
+delegated plaintext, while its local parent and child records retain that payload
+encrypted. The pane says so explicitly; it never reconstructs scope from the child's
+behaviour or first reply.
 
-SQLite supplies typed model/effort context, lifecycle, completed-action counts, token use,
-rate limits, and compaction events. Repetitive tool completions update one `WORK` counter
-instead of adding one line per tool. The display excludes unrelated parent/user messages,
-developer and system instructions, hidden reasoning, command text, tool payloads, and
-output bodies. Each runtime owns a distinct private observer-control socket, preventing
-one Rodex session from delivering lifecycle or publication events into another session's
-pane. Parent-request correlation is in-memory and adds no SQLite writes or polling. The
-analytics worker sends a nonblocking wake only after its existing transaction commits;
-the observer then advances from an indexed opaque event cursor. It regards an agent trace
-as drained only after durable terminal events and an exact up-to-date worker publication.
-App lifecycle updates never cause SQL reads. There is no timer-based SQL polling, and
-burst notifications are coalesced before a read.
+Rodex does receive the completed parent `userMessage` that preceded an agent request.
+When it belongs to the same exact root turn, the observer reproduces its text unchanged
+as `REQUEST · exact parent message`; it does not relabel that request as the delegated
+prompt. Without that exact correlation, Rodex prints `REQUEST UNAVAILABLE`. Completed
+tracked-child `agentMessage` items appear as agent-attributed `AGENT UPDATE` commentary
+and `AGENT ANSWER` final text. The completion block restates invocation type, work,
+token breakdown, weekly-limit use when available, and the exact parent-request recap.
+Rodex sanitizes terminal controls without fixed-width truncation and leaves wrapping to
+the actual tmux pane width.
+
+SQLite supplies exact turn model/effort, clean/inherited lineage, lifecycle, command,
+file, web, query, result, compaction, and token metrics. Changed durable progress adds one
+natural-width `WORK` block without cursor-up rewriting; interleaved agents and successive
+turns retain independent presentation state. Multiple not-yet-observed requests for one
+agent remain FIFO, so a delayed earlier turn cannot consume a later follow-up's request.
+The display excludes unrelated parent/user messages, developer and system instructions,
+hidden reasoning, command text, tool payloads, and output bodies. Each runtime owns a
+distinct private observer-control socket. Length-framed Unix stream messages preserve
+long exact agent prose without datagram truncation, while preventing one Rodex session
+from delivering lifecycle or publication events into another pane. The analytics
+transaction also canonicalizes each spawn/follow-up request and later associates it FIFO
+with the target agent's next distinct observed turn; it stores identity and provenance,
+not a second plaintext body.
+
+The analytics worker sends a nonblocking wake only after its existing transaction
+commits. The observer advances from an indexed opaque event cursor, then performs one
+bounded read-only projection for only active or terminal-pending exact agent turns;
+completed displays retire from later reads. It regards a display as drained only after
+durable terminal events and an exact up-to-date worker publication. App lifecycle
+updates never cause SQL reads. There is no timer-based SQL polling, and burst
+notifications are coalesced before a read.
 
 An already-running session host has its old code in memory. End and resume that Rodex
 session once after installing this version; detach and reattach alone does not reload it.
@@ -270,8 +287,8 @@ codebase for later re-enablement; input currently passes directly to the Codex T
 ## Local data
 
 The durable per-user registry defaults to
-`$XDG_STATE_HOME/rodex/rodex-v12.sqlite3`, or
-`~/.local/state/rodex/rodex-v12.sqlite3` when `XDG_STATE_HOME` is unset. Set
+`$XDG_STATE_HOME/rodex/rodex-v14.sqlite3`, or
+`~/.local/state/rodex/rodex-v14.sqlite3` when `XDG_STATE_HOME` is unset. Set
 `RODEX_DATABASE_PATH` to select another database.
 
 Rodex session IDs are random 64-bit values rendered only as 16 lowercase hex
@@ -286,10 +303,10 @@ enforces its domain uniqueness. Codex session IDs remain Codex-owned 128-bit val
 Each is stored once in the canonical `codex_threads` table across two `BIGINT` columns;
 memberships, current-root selection, activities, and lineage use integer foreign keys.
 
-Version 12 is an incompatible ALPHA schema with no earlier-generation reader or
-migration path. Rodex leaves `rodex-v11.sqlite3` and earlier generations untouched. An
+Version 14 is an incompatible ALPHA schema with no earlier-generation reader or
+migration path. Rodex leaves `rodex-v13.sqlite3` and earlier generations untouched. An
 internal generation marker rejects nonempty unmarked databases and wrong generations
-before any v12 domain table is created.
+before any v14 domain table is created.
 
 Short-lived Unix sockets and app-server logs use `$XDG_RUNTIME_DIR/rodex`, normally
 `/run/user/<uid>/rodex`. When `XDG_RUNTIME_DIR` is unset or that socket path would be

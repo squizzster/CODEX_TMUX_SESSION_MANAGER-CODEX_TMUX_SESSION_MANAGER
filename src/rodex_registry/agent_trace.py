@@ -860,7 +860,6 @@ def _insert_trace_detail(
             connection,
             session_id=session_id,
             scope_id=scope_id,
-            subagent_event_id=event_id,
             subagent_activity_id=int(inserted_activity[0]),
             target_codex_threads_id=target_codex_threads_id,
             collaboration_tool_call_id=collaboration_tool_call_id,
@@ -915,7 +914,6 @@ def _insert_agent_request_from_activity(
     *,
     session_id: int,
     scope_id: int,
-    subagent_event_id: int,
     subagent_activity_id: int,
     target_codex_threads_id: int,
     collaboration_tool_call_id: int,
@@ -923,11 +921,14 @@ def _insert_agent_request_from_activity(
 ) -> bool:
     """Create one canonical request from exact message/call/activity provenance."""
     tool_activity = connection.execute(
-        "SELECT activities.id, names.tool_name "
+        "SELECT activities.id, names.tool_name, "
+        "events.source_record_ordinal, events.derived_event_ordinal "
         f"FROM {RODEX_SESSIONS_AGENT_TRACE_TOOL_CALLS_TABLE} AS activities "
         f"JOIN {RODEX_SESSIONS_CODEX_TOOL_CALLS_TABLE} AS calls "
         "ON calls.id = activities.rodex_sessions_codex_tool_calls_id "
         f"JOIN {TOOL_NAMES_TABLE} AS names ON names.id = calls.tool_names_id "
+        f"JOIN {RODEX_SESSIONS_AGENT_TRACE_EVENTS_TABLE} AS events "
+        "ON events.id = activities.rodex_sessions_agent_trace_events_id "
         "WHERE activities.rodex_sessions_id = ? "
         "AND activities.rodex_sessions_codex_activity_scopes_id = ? "
         "AND activities.rodex_sessions_codex_tool_calls_id = ? "
@@ -942,15 +943,6 @@ def _insert_agent_request_from_activity(
     }.get(str(tool_activity[1]))
     if expected_activity_kind is None or activity_kind != expected_activity_kind:
         return False
-    subagent_event = connection.execute(
-        f"SELECT source_record_ordinal, derived_event_ordinal FROM "
-        f"{RODEX_SESSIONS_AGENT_TRACE_EVENTS_TABLE} WHERE id = ?",
-        (subagent_event_id,),
-    ).fetchone()
-    if subagent_event is None:
-        raise RodexSessionStatisticsConflictError(
-            "sub-agent request activity lost its trace event"
-        )
     parent_message = connection.execute(
         "SELECT messages.id "
         f"FROM {RODEX_SESSIONS_AGENT_TRACE_MESSAGES_TABLE} AS messages "
@@ -969,9 +961,9 @@ def _insert_agent_request_from_activity(
         (
             session_id,
             scope_id,
-            int(subagent_event[0]),
-            int(subagent_event[0]),
-            int(subagent_event[1]),
+            int(tool_activity[2]),
+            int(tool_activity[2]),
+            int(tool_activity[3]),
         ),
     ).fetchone()
     if parent_message is None:

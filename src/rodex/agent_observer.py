@@ -10,11 +10,14 @@ import queue
 import re
 import shlex
 import socket
+import struct
 import subprocess
 import sys
 import uuid
+from collections import deque
 from collections.abc import Callable, Mapping
 from contextlib import suppress
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from threading import Event, Lock, Thread
@@ -24,7 +27,9 @@ from websockets.exceptions import ConnectionClosed
 from websockets.sync.client import unix_connect
 
 from rodex_registry import (
+    RodexAgentObserverTurnEvidence,
     RodexAgentTraceSnapshot,
+    read_rodex_agent_observer_turn_evidence,
     read_rodex_agent_trace,
     read_rodex_agent_trace_cursor,
 )
@@ -41,11 +46,12 @@ _RODEX_SESSION_ID_PATTERN: Final = re.compile(r"[0-9a-f]{16}")
 _SUBAGENT_ACTIVITY_METHODS: Final = frozenset({"item/started", "item/completed"})
 _ANSI_ESCAPE_PATTERN: Final = re.compile(r"\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
 _SCOPE_UNAVAILABLE_DETAIL: Final = (
-    "Codex did not expose the delegated plaintext for this spawn."
+    "Rodex could not correlate an exact same-turn parent message for this request."
 )
 Runner = Callable[..., subprocess.CompletedProcess[str]]
 CursorReader = Callable[[int, Path], uuid.UUID | None]
 EventSender = Callable[[Path, dict[str, object]], None]
+_OBSERVER_FRAME_LENGTH = struct.Struct("!Q")
 
 
 def observer_control_socket_path(protocol_event_socket_path: Path) -> Path:
@@ -58,16 +64,34 @@ def observer_control_socket_path(protocol_event_socket_path: Path) -> Path:
     )
 
 
-def _send_observer_datagram(path: Path, event: dict[str, object]) -> None:
+def _observer_event_frame(event: dict[str, object]) -> bytes:
     payload = json.dumps(
         event,
         ensure_ascii=False,
         separators=(",", ":"),
         sort_keys=True,
     ).encode("utf-8")
-    with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as sender:
+    return _OBSERVER_FRAME_LENGTH.pack(len(payload)) + payload
+
+
+def _send_observer_event_frame(path: Path, event: dict[str, object]) -> None:
+    frame = _observer_event_frame(event)
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sender:
+        sender.settimeout(1)
+        sender.connect(str(path))
+        sender.sendall(frame)
+
+
+def _try_send_observer_event_frame(path: Path, event: dict[str, object]) -> None:
+    """Send one small wake without waiting on the analytics publication path."""
+    frame = _observer_event_frame(event)
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sender:
         sender.setblocking(False)
-        sender.sendto(payload, str(path))
+        result = sender.connect_ex(str(path))
+        if result != 0:
+            raise OSError(result, os.strerror(result), str(path))
+        if sender.send(frame) != len(frame):
+            raise BlockingIOError("observer control frame was not accepted atomically")
 
 
 class _ObserverEventDispatcher:
@@ -108,7 +132,7 @@ class _ObserverEventDispatcher:
             retry_delay = 0.01
             while not self._stop.is_set():
                 try:
-                    _send_observer_datagram(path, event)
+                    _send_observer_event_frame(path, event)
                 except OSError:
                     if self._stop.wait(retry_delay):
                         return
@@ -268,7 +292,7 @@ def notify_agent_observer_trace_publication(
         "caught_up": caught_up,
     }
     with suppress(OSError):
-        _send_observer_datagram(
+        _try_send_observer_event_frame(
             observer_control_socket_path(protocol_event_socket_path),
             event,
         )
@@ -337,6 +361,15 @@ class AgentObserverPaneController:
 
     def observe_protocol_event(self, event: Mapping[str, object] | None) -> None:
         """Create, reuse, or update the observer from one typed App Server item."""
+        agent_message = project_agent_message_event(event)
+        if agent_message is not None:
+            target_thread_id = agent_message["thread_id"]
+            if (
+                target_thread_id in self._tracked_target_thread_ids
+                and self._locate_observer_pane() is not None
+            ):
+                self._send_observer_event(agent_message)
+            return
         parent_user_message = project_user_message_event(event)
         if parent_user_message is not None:
             root_thread_id = self._root_thread_id
@@ -550,6 +583,31 @@ class AgentObserverPaneController:
         )
 
 
+@dataclass(slots=True)
+class _PendingAgentRequest:
+    activity_item_id: str
+    request_kind: str
+    text_blocks: tuple[str, ...] = ()
+
+
+@dataclass(slots=True)
+class _AgentTurnPresentation:
+    activity_item_id: str | None = None
+    request_kind: str | None = None
+    request_text_blocks: tuple[str, ...] = ()
+    started_at_utc: str | None = None
+    completed_tool_call_ids: set[str] = field(default_factory=set)
+    token_usage: dict[str, int] = field(default_factory=dict)
+    weekly_limit_used_percent: float | None = None
+    last_context: tuple[object, object] | None = None
+    evidence: RodexAgentObserverTurnEvidence | None = None
+    lineage_rendered: bool = False
+    last_work_signature: tuple[str, ...] | None = None
+
+
+AgentTurnKey = tuple[str, str]
+
+
 class AgentObserverView:
     """Render exact agent activity as a concise, human-readable feed."""
 
@@ -562,19 +620,18 @@ class AgentObserverView:
         self._root_thread_id = str(root_thread_id)
         self._after_event_id: uuid.UUID | None = None
         self._target_states: dict[str, str | None] = {}
-        self._durable_terminal_target_ids: set[str] = set()
+        self._active_request_ids: set[tuple[str, str]] = set()
         self._terminal_drain_complete = False
         self._last_trace_publication_sequence = 0
         self._target_paths: dict[str, str] = {}
         self._seen_activity_item_ids: set[str] = set()
         self._seen_agent_message_ids: set[str] = set()
-        self._seen_parent_request_item_ids: set[str] = set()
-        self._turn_started_at: dict[str, str] = {}
-        self._completed_tool_call_ids: dict[str, set[str]] = {}
-        self._latest_total_tokens: dict[str, int] = {}
-        self._weekly_limit_used_percent: dict[str, float] = {}
-        self._last_context: dict[str, tuple[object, object]] = {}
-        self._work_line_is_last = False
+        self._seen_parent_request_keys: set[tuple[str, str, str]] = set()
+        self._pending_requests: dict[str, deque[_PendingAgentRequest]] = {}
+        self._turn_presentations: dict[AgentTurnKey, _AgentTurnPresentation] = {}
+        self._activity_turn_keys: dict[tuple[str, str], AgentTurnKey] = {}
+        self._turns_needing_evidence: set[AgentTurnKey] = set()
+        self._pending_terminal_events: dict[AgentTurnKey, tuple[str, object]] = {}
         self._initial_lines = self.accept_app_server_event(initial_event)
 
     @property
@@ -584,6 +641,11 @@ class AgentObserverView:
     @property
     def target_thread_ids(self) -> frozenset[str]:
         return frozenset(self._target_states)
+
+    @property
+    def target_turn_keys(self) -> tuple[tuple[str, str], ...]:
+        """Return only active or terminal-pending exact agent turns."""
+        return tuple(sorted(self._turns_needing_evidence))
 
     @property
     def monitoring(self) -> bool:
@@ -625,26 +687,37 @@ class AgentObserverView:
         self._target_states[target_thread_id] = activity_kind
         self._target_paths[target_thread_id] = agent_path
         if activity_kind in {"started", "interacted"}:
-            self._durable_terminal_target_ids.discard(target_thread_id)
+            pending = self._pending_requests.setdefault(target_thread_id, deque())
+            pending.append(
+                _PendingAgentRequest(
+                    activity_item_id=item_id,
+                    request_kind=("initial" if activity_kind == "started" else "follow_up"),
+                )
+            )
+            self._active_request_ids.add((target_thread_id, item_id))
             self._terminal_drain_complete = False
-            self._turn_started_at.pop(target_thread_id, None)
-            self._completed_tool_call_ids[target_thread_id] = set()
-            self._latest_total_tokens.pop(target_thread_id, None)
-            self._weekly_limit_used_percent.pop(target_thread_id, None)
-            self._last_context.pop(target_thread_id, None)
-            self._work_line_is_last = False
         if activity_kind == "started":
-            if event.get("parent_request_follows") is True:
-                return [f"▶ {_agent_display_name(agent_path)} started"]
-            return [
-                f"▶ {_agent_display_name(agent_path)} started",
+            lines = [
+                f"▶ {_agent_display_name(agent_path)} · agent started",
                 "",
-                "SCOPE UNAVAILABLE",
-                f"  {_SCOPE_UNAVAILABLE_DETAIL}",
+                "INVOKED · spawn_agent",
+                "  New agent thread · context inheritance awaiting verification",
+                "  Delegated prompt: exact text not exposed by Codex",
             ]
-        if activity_kind == "interacted" and event.get("parent_request_follows") is True:
-            return [f"↻ {_agent_display_name(agent_path)} received follow-up"]
-        self._work_line_is_last = False
+            if event.get("parent_request_follows") is True:
+                return lines
+            return [*lines, "", "REQUEST UNAVAILABLE", f"  {_SCOPE_UNAVAILABLE_DETAIL}"]
+        if activity_kind == "interacted":
+            lines = [
+                f"↻ {_agent_display_name(agent_path)} · follow-up requested",
+                "",
+                "INVOKED · followup_task",
+                "  Existing agent thread · existing context continues",
+                "  Delegated prompt: exact text not exposed by Codex",
+            ]
+            if event.get("parent_request_follows") is True:
+                return lines
+            return [*lines, "", "REQUEST UNAVAILABLE", f"  {_SCOPE_UNAVAILABLE_DETAIL}"]
         return [f"• {_agent_display_name(agent_path)} · {activity_kind}"]
 
     def accept_parent_request_event(self, event: Mapping[str, object]) -> list[str]:
@@ -656,17 +729,36 @@ class AgentObserverView:
         ):
             return []
         target_thread_id = event.get("target_thread_id")
-        if target_thread_id not in self._target_states:
+        activity_item_id = event.get("activity_item_id")
+        pending_requests = self._pending_requests.get(str(target_thread_id), ())
+        pending_request = next(
+            (
+                request
+                for request in pending_requests
+                if request.activity_item_id == activity_item_id
+            ),
+            None,
+        )
+        matching_turn_key = self._activity_turn_keys.get(
+            (str(target_thread_id), str(activity_item_id))
+        )
+        matching_turn = self._turn_presentations.get(matching_turn_key)
+        if (
+            target_thread_id not in self._target_states
+            or not isinstance(activity_item_id, str)
+            or (pending_request is None and matching_turn is None)
+        ):
             return []
         item = event.get("item")
         if not isinstance(item, Mapping) or item.get("type") != "userMessage":
             return []
         item_id = item.get("id")
         text_blocks = item.get("text_blocks")
+        request_key = (str(target_thread_id), activity_item_id, str(item_id))
         if (
             not isinstance(item_id, str)
             or not item_id
-            or item_id in self._seen_parent_request_item_ids
+            or request_key in self._seen_parent_request_keys
             or not isinstance(text_blocks, list)
             or not all(isinstance(block, str) for block in text_blocks)
         ):
@@ -674,8 +766,12 @@ class AgentObserverView:
         rendered = _render_exact_text_blocks(text_blocks)
         if not rendered:
             return []
-        self._seen_parent_request_item_ids.add(item_id)
-        self._work_line_is_last = False
+        self._seen_parent_request_keys.add(request_key)
+        if pending_request is not None:
+            pending_request.text_blocks = tuple(text_blocks)
+        else:
+            assert matching_turn is not None
+            matching_turn.request_text_blocks = tuple(text_blocks)
         return ["", "REQUEST · exact parent message", *rendered]
 
     def accept_agent_message_event(self, event: Mapping[str, object]) -> list[str]:
@@ -685,8 +781,14 @@ class AgentObserverView:
         if event.get("kind") != "app_server_agent_message":
             return []
         thread_id = event.get("thread_id")
+        turn_id = event.get("turn_id")
         item = event.get("item")
-        if thread_id not in self._target_states or not isinstance(item, Mapping):
+        if (
+            thread_id not in self._target_states
+            or not isinstance(turn_id, str)
+            or not turn_id
+            or not isinstance(item, Mapping)
+        ):
             return []
         item_id = item.get("id")
         text = item.get("text")
@@ -703,8 +805,19 @@ class AgentObserverView:
         plain_text = _plain_terminal_text(text).strip()
         if not plain_text:
             return []
-        self._work_line_is_last = False
-        label = "ANSWER" if phase == "final_answer" else "UPDATE"
+        turn_key = (str(thread_id), turn_id)
+        if (
+            turn_key not in self._turn_presentations
+            or self._turn_presentations[turn_key].activity_item_id is None
+        ):
+            self._bind_turn(*turn_key)
+        path = self._target_paths.get(str(thread_id), str(thread_id))
+        agent_name = _agent_display_name(path)
+        label = (
+            f"AGENT ANSWER · {agent_name} · final answer returned"
+            if phase == "final_answer"
+            else f"AGENT UPDATE · {agent_name} · commentary returned"
+        )
         return ["", label, *[f"  {line}" for line in plain_text.splitlines()]]
 
     def accept_trace_snapshot(self, snapshot: RodexAgentTraceSnapshot) -> list[str]:
@@ -729,6 +842,13 @@ class AgentObserverView:
                     path = detail.get("agent_path")
                     if isinstance(path, str):
                         self._target_paths[target] = path
+                    request_kind = detail.get("request_kind")
+                    target_turn_id = detail.get("target_codex_turn_id")
+                    if isinstance(target_turn_id, str):
+                        turn = self._bind_turn(target, target_turn_id)
+                        if isinstance(request_kind, str):
+                            turn.request_kind = request_kind
+                continue
             if not relevant:
                 continue
             if not isinstance(thread_id, str) or not isinstance(event_kind, str):
@@ -738,9 +858,43 @@ class AgentObserverView:
                     thread_id,
                     event_kind,
                     event.get("event_time_utc"),
+                    event.get("codex_turn_id"),
                     detail if isinstance(detail, Mapping) else {},
                 )
             )
+        return lines
+
+    def accept_turn_evidence(
+        self,
+        evidence_items: tuple[RodexAgentObserverTurnEvidence, ...],
+    ) -> list[str]:
+        """Render bounded SQL facts for exact target turns after a publication wake."""
+        lines: list[str] = []
+        for evidence in evidence_items:
+            thread_id = str(evidence.codex_thread_id)
+            turn_key = (thread_id, evidence.codex_turn_id)
+            if turn_key not in self._turns_needing_evidence:
+                continue
+            turn = self._turn_presentations.setdefault(turn_key, _AgentTurnPresentation())
+            turn.evidence = evidence
+            self._target_paths[thread_id] = evidence.agent_path
+            if not turn.lineage_rendered:
+                turn.lineage_rendered = True
+                lines.extend(self._lineage_lines(turn_key, evidence))
+            self._remember_evidence_tokens(turn, evidence)
+            work_fields = _work_fields_from_evidence(evidence)
+            if work_fields:
+                lines.extend(self._render_work(turn_key, work_fields))
+        return lines
+
+    def flush_pending_terminal_events(self) -> list[str]:
+        """Render terminal summaries after the matching statistics read."""
+        lines: list[str] = []
+        pending = tuple(self._pending_terminal_events.items())
+        self._pending_terminal_events.clear()
+        for turn_key, (event_kind, event_time_utc) in pending:
+            lines.extend(self._terminal_lines(turn_key, event_kind, event_time_utc))
+            self._turns_needing_evidence.discard(turn_key)
         return lines
 
     def _accept_target_trace_event(
@@ -748,19 +902,25 @@ class AgentObserverView:
         thread_id: str,
         event_kind: str,
         event_time_utc: object,
+        codex_turn_id: object,
         detail: Mapping[str, object],
     ) -> list[str]:
+        if not isinstance(codex_turn_id, str) or not codex_turn_id:
+            return []
+        turn_key = (thread_id, codex_turn_id)
+        turn_was_known = turn_key in self._turn_presentations
+        turn = self._turn_presentations.setdefault(turn_key, _AgentTurnPresentation())
         if event_kind == "turn_started":
             if isinstance(event_time_utc, str):
-                self._turn_started_at[thread_id] = event_time_utc
-            self._durable_terminal_target_ids.discard(thread_id)
+                turn.started_at_utc = event_time_utc
+            turn = self._bind_turn(thread_id, codex_turn_id)
             self._terminal_drain_complete = False
             return []
         if event_kind == "turn_context":
             context = (detail.get("model"), detail.get("reasoning_effort"))
-            if context == self._last_context.get(thread_id):
+            if context == turn.last_context:
                 return []
-            self._last_context[thread_id] = context
+            turn.last_context = context
             model, effort = context
             if not isinstance(model, str) and not isinstance(effort, str):
                 return []
@@ -769,62 +929,194 @@ class AgentObserverView:
                 fields.append(model)
             if isinstance(effort, str):
                 fields.append(effort.upper())
-            self._work_line_is_last = False
-            return ["", "MODEL", "  " + " · ".join(fields)]
+            path = self._target_paths.get(thread_id, thread_id)
+            return [
+                "",
+                f"MODEL · {_agent_display_name(path)}",
+                "  " + " · ".join(fields),
+            ]
         if event_kind == "tool_call" and detail.get("activity_kind") == "output":
             tool_call_id = detail.get("tool_call_id")
             if not isinstance(tool_call_id, str):
                 return []
-            completed = self._completed_tool_call_ids.setdefault(thread_id, set())
+            completed = turn.completed_tool_call_ids
             if tool_call_id in completed:
                 return []
             completed.add(tool_call_id)
-            count = len(completed)
-            progress = f"  {count} {'action' if count == 1 else 'actions'} completed"
-            if self._work_line_is_last:
-                return [f"\x1b[1A\r\x1b[2K{progress}"]
-            self._work_line_is_last = True
-            return ["", "WORK", progress]
+            return []
         if event_kind == "token_usage":
-            total_tokens = detail.get("total_tokens")
-            if isinstance(total_tokens, int) and not isinstance(total_tokens, bool):
-                self._latest_total_tokens[thread_id] = total_tokens
+            usage = {
+                name: value
+                for name in (
+                    "input_tokens",
+                    "cached_input_tokens",
+                    "output_tokens",
+                    "reasoning_output_tokens",
+                    "total_tokens",
+                )
+                if isinstance((value := detail.get(name)), int)
+                and not isinstance(value, bool)
+            }
+            if usage:
+                turn.token_usage = usage
             return []
         if event_kind == "rate_limit":
             weekly_used = _weekly_limit_used_percent(detail.get("windows"))
             if weekly_used is not None:
-                self._weekly_limit_used_percent[thread_id] = weekly_used
+                turn.weekly_limit_used_percent = weekly_used
             return []
         if event_kind == "compaction":
-            self._work_line_is_last = False
-            return ["", "UPDATE", "  Context compacted"]
+            path = self._target_paths.get(thread_id, thread_id)
+            return [
+                "",
+                f"CONTEXT · {_agent_display_name(path)}",
+                "  Context compacted",
+            ]
         if event_kind not in {"turn_completed", "turn_aborted"}:
             return []
-        self._durable_terminal_target_ids.add(thread_id)
-        self._work_line_is_last = False
+        if thread_id in self._pending_requests and (
+            not turn_was_known or turn.activity_item_id is None
+        ):
+            turn = self._bind_turn(thread_id, codex_turn_id)
+            turn_key = (thread_id, codex_turn_id)
         self._target_states[thread_id] = (
             "turnCompleted" if event_kind == "turn_completed" else "turnAborted"
         )
+        if turn.activity_item_id is not None:
+            self._active_request_ids.discard((thread_id, turn.activity_item_id))
+        self._turns_needing_evidence.add(turn_key)
+        self._pending_terminal_events[turn_key] = (event_kind, event_time_utc)
+        return []
+
+    def _lineage_lines(
+        self,
+        turn_key: AgentTurnKey,
+        evidence: RodexAgentObserverTurnEvidence,
+    ) -> list[str]:
+        thread_id, _turn_id = turn_key
+        turn = self._turn_presentations[turn_key]
         path = self._target_paths.get(thread_id, thread_id)
+        agent_name = _agent_display_name(path)
+        if turn.request_kind == "follow_up":
+            description = "SAME AGENT · NEW TURN · existing agent context continues"
+        elif evidence.history_inheritance_kind == "inherited":
+            ordinal = evidence.inherited_history_start_ordinal
+            suffix = "" if ordinal is None else f" at source ordinal {ordinal}"
+            description = (
+                "NEW INHERITED AGENT · separate thread/turn · "
+                f"inherited-history cutoff{suffix}"
+            )
+        else:
+            description = (
+                "NEW CLEAN AGENT · separate thread/turn · no parent history inherited"
+            )
+        return ["", f"CONTEXT · {agent_name}", f"  {description}"]
+
+    def _render_work(self, turn_key: AgentTurnKey, fields: tuple[str, ...]) -> list[str]:
+        turn = self._turn_presentations[turn_key]
+        if fields == turn.last_work_signature:
+            return []
+        turn.last_work_signature = fields
+        progress = "  " + " · ".join(fields)
+        thread_id, _turn_id = turn_key
+        path = self._target_paths.get(thread_id, thread_id)
+        return ["", f"WORK · {_agent_display_name(path)}", progress]
+
+    def _remember_evidence_tokens(
+        self,
+        turn: _AgentTurnPresentation,
+        evidence: RodexAgentObserverTurnEvidence,
+    ) -> None:
+        usage = {
+            name: value
+            for name in (
+                "input_tokens",
+                "cached_input_tokens",
+                "output_tokens",
+                "reasoning_output_tokens",
+                "total_tokens",
+            )
+            if isinstance((value := getattr(evidence, name)), int)
+        }
+        if usage:
+            turn.token_usage = usage
+
+    def _terminal_lines(
+        self,
+        turn_key: AgentTurnKey,
+        event_kind: str,
+        event_time_utc: object,
+    ) -> list[str]:
+        thread_id, _turn_id = turn_key
+        turn = self._turn_presentations[turn_key]
+        path = self._target_paths.get(thread_id, thread_id)
+        agent_name = _agent_display_name(path)
         verb = "finished" if event_kind == "turn_completed" else "stopped"
         summary = f"{'✓' if event_kind == 'turn_completed' else '■'} "
-        summary += f"{_agent_display_name(path)} {verb}"
+        summary += f"{agent_name} {verb}"
         details = []
-        elapsed = _format_elapsed(self._turn_started_at.get(thread_id), event_time_utc)
+        elapsed = _format_elapsed(turn.started_at_utc, event_time_utc)
         if elapsed is not None:
             details.append(elapsed)
-        tool_count = len(self._completed_tool_call_ids.get(thread_id, set()))
-        details.append(f"{tool_count} {'action' if tool_count == 1 else 'actions'}")
-        total_tokens = self._latest_total_tokens.get(thread_id)
-        if total_tokens is not None:
-            details.append(f"{total_tokens:,} tokens")
         if details:
             summary += " · " + " · ".join(details)
         lines = ["", summary]
-        weekly_used = self._weekly_limit_used_percent.get(thread_id)
+        invocation = self._invocation_summary(turn_key)
+        if invocation is not None:
+            lines.append(f"  Invocation: {invocation}")
+        evidence = turn.evidence
+        work_fields = (
+            _work_fields_from_evidence(evidence)
+            if evidence is not None
+            else _fallback_work_fields(turn.completed_tool_call_ids)
+        )
+        if work_fields:
+            lines.append("  Work: " + " · ".join(work_fields))
+        usage = turn.token_usage
+        if usage:
+            lines.append("  " + _token_summary(usage))
+        weekly_used = turn.weekly_limit_used_percent
         if weekly_used is not None:
             lines.append(f"  Weekly limit: {_display_percentage(weekly_used)} used")
+        request = turn.request_text_blocks
+        if request:
+            lines.extend(
+                [
+                    "",
+                    "REQUEST RECAP · exact parent message",
+                    *_render_exact_text_blocks(list(request)),
+                ]
+            )
         return lines
+
+    def _invocation_summary(self, turn_key: AgentTurnKey) -> str | None:
+        turn = self._turn_presentations[turn_key]
+        request_kind = turn.request_kind
+        evidence = turn.evidence
+        if request_kind == "follow_up":
+            return "followup_task · SAME AGENT · existing context"
+        if request_kind != "initial":
+            return None
+        if evidence is None:
+            return "spawn_agent · new agent thread"
+        if evidence.history_inheritance_kind == "inherited":
+            return "spawn_agent · NEW INHERITED AGENT"
+        return "spawn_agent · NEW CLEAN AGENT"
+
+    def _bind_turn(self, thread_id: str, turn_id: str) -> _AgentTurnPresentation:
+        turn_key = (thread_id, turn_id)
+        turn = self._turn_presentations.setdefault(turn_key, _AgentTurnPresentation())
+        pending_requests = self._pending_requests.get(thread_id)
+        if turn.activity_item_id is None and pending_requests:
+            pending = pending_requests.popleft()
+            turn.activity_item_id = pending.activity_item_id
+            turn.request_kind = pending.request_kind
+            turn.request_text_blocks = pending.text_blocks
+            self._activity_turn_keys[(thread_id, pending.activity_item_id)] = turn_key
+            if not pending_requests:
+                self._pending_requests.pop(thread_id, None)
+        self._turns_needing_evidence.add(turn_key)
+        return turn
 
     def accept_trace_publication_wake(
         self,
@@ -836,17 +1128,13 @@ class AgentObserverView:
         if trace_publication_sequence < self._last_trace_publication_sequence:
             return
         self._last_trace_publication_sequence = trace_publication_sequence
-        if (
-            caught_up
-            and self._target_states
-            and self.target_thread_ids <= self._durable_terminal_target_ids
-        ):
+        if caught_up and not self._active_request_ids and not self._pending_terminal_events:
             self._terminal_drain_complete = True
 
     def header_lines(self) -> tuple[str, ...]:
         return (
-            "RODEX · LIVE AGENT",
-            "Agent replies and high-signal progress from exact live + durable events.",
+            "RODEX · LIVE AGENTS",
+            "Developer view of invocation, exact requests, agent replies, and outcomes.",
         )
 
 
@@ -872,6 +1160,48 @@ def _render_exact_text_blocks(text_blocks: list[str]) -> list[str]:
             lines = [plain_text]
         rendered.extend(f"  {line}" for line in lines)
     return rendered
+
+
+def _work_fields_from_evidence(
+    evidence: RodexAgentObserverTurnEvidence,
+) -> tuple[str, ...]:
+    fields: list[str] = []
+    values = (
+        (evidence.actions_completed_count, "action", "actions"),
+        (evidence.commands_executed_count, "command", "commands"),
+        (evidence.file_change_operations_count, "file change", "file changes"),
+        (evidence.web_operations_count, "web operation", "web operations"),
+        (evidence.web_queries_count, "query", "queries"),
+        (evidence.web_result_records_count, "result record", "result records"),
+        (evidence.compactions_count, "compaction", "compactions"),
+    )
+    for count, singular, plural in values:
+        if count is None or count <= 0:
+            continue
+        fields.append(f"{count} {singular if count == 1 else plural}")
+    return tuple(fields)
+
+
+def _fallback_work_fields(completed: set[str]) -> tuple[str, ...]:
+    count = len(completed)
+    return (f"{count} {'action' if count == 1 else 'actions'}",)
+
+
+def _token_summary(usage: Mapping[str, int]) -> str:
+    fields: list[str] = []
+    total = usage.get("total_tokens")
+    cached = usage.get("cached_input_tokens")
+    output = usage.get("output_tokens")
+    reasoning = usage.get("reasoning_output_tokens")
+    if total is not None:
+        fields.append(f"{total:,} processed")
+    if cached is not None:
+        fields.append(f"{cached:,} cached input")
+    if output is not None:
+        fields.append(f"{output:,} output")
+    if reasoning is not None:
+        fields.append(f"{reasoning:,} reasoning")
+    return "Tokens: " + " · ".join(fields)
 
 
 def _weekly_limit_used_percent(value: object) -> float | None:
@@ -916,9 +1246,17 @@ def _observer_control_receiver(
 ) -> None:
     while not stop.is_set():
         try:
-            payload = control_socket.recv(64 * 1024)
+            connection, _address = control_socket.accept()
         except OSError:
             return
+        with connection:
+            connection.settimeout(1)
+            try:
+                header = _receive_exactly(connection, _OBSERVER_FRAME_LENGTH.size)
+                payload_size = _OBSERVER_FRAME_LENGTH.unpack(header)[0]
+                payload = _receive_exactly(connection, payload_size)
+            except (EOFError, OSError):
+                continue
         try:
             event = json.loads(payload)
         except (json.JSONDecodeError, UnicodeDecodeError):
@@ -927,10 +1265,21 @@ def _observer_control_receiver(
             events.put(event)
 
 
+def _receive_exactly(connection: socket.socket, size: int) -> bytes:
+    payload = bytearray()
+    while len(payload) < size:
+        chunk = connection.recv(min(size - len(payload), 64 * 1024))
+        if not chunk:
+            raise EOFError("observer control frame ended early")
+        payload.extend(chunk)
+    return bytes(payload)
+
+
 def _observer_runtime_liveness(
     protocol_event_socket_path: Path,
     events: queue.Queue[dict[str, object]],
 ) -> None:
+    """Keep the pane tied to its runtime; live content arrives on the control socket."""
     try:
         with unix_connect(
             str(protocol_event_socket_path),
@@ -939,16 +1288,7 @@ def _observer_runtime_liveness(
             max_size=None,
         ) as connection:
             while True:
-                message = connection.recv()
-                try:
-                    decoded = json.loads(message)
-                except (json.JSONDecodeError, UnicodeDecodeError, TypeError):
-                    continue
-                if not isinstance(decoded, dict):
-                    continue
-                projected = project_agent_message_event(decoded)
-                if projected is not None:
-                    events.put(projected)
+                connection.recv()
     except (ConnectionClosed, OSError):
         pass
     finally:
@@ -959,6 +1299,8 @@ def _read_and_render_available_trace(
     view: AgentObserverView,
     rodex_sessions_id: int,
     database_path: Path,
+    *,
+    flush_terminal_events: bool,
 ) -> None:
     if not view.monitoring or not view.target_thread_ids:
         return
@@ -971,7 +1313,15 @@ def _read_and_render_available_trace(
         )
         _print_lines(view.accept_trace_snapshot(snapshot))
         if len(snapshot.events) < OBSERVER_TRACE_PAGE_SIZE:
-            return
+            break
+    evidence = read_rodex_agent_observer_turn_evidence(
+        rodex_sessions_id,
+        view.target_turn_keys,
+        database_path,
+    )
+    _print_lines(view.accept_turn_evidence(evidence))
+    if flush_terminal_events:
+        _print_lines(view.flush_pending_terminal_events())
 
 
 def _print_lines(lines: tuple[str, ...] | list[str]) -> None:
@@ -1020,9 +1370,10 @@ def main(arguments: list[str] | None = None) -> int:
     )
     control_path = observer_control_socket_path(namespace.protocol_event_socket)
     control_path.unlink(missing_ok=True)
-    controls = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+    controls = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     controls.bind(str(control_path))
     control_path.chmod(0o600)
+    controls.listen()
     events: queue.Queue[dict[str, object]] = queue.Queue()
     stop = Event()
     control_thread = Thread(
@@ -1045,6 +1396,7 @@ def main(arguments: list[str] | None = None) -> int:
             view,
             namespace.rodex_sessions_id,
             namespace.rodex_database,
+            flush_terminal_events=False,
         )
         while True:
             batch = [events.get()]
@@ -1081,6 +1433,7 @@ def main(arguments: list[str] | None = None) -> int:
                 view,
                 namespace.rodex_sessions_id,
                 namespace.rodex_database,
+                flush_terminal_events=caught_up,
             )
             view.accept_trace_publication_wake(
                 trace_publication_sequence,

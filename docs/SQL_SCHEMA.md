@@ -62,14 +62,14 @@ modified only by an agent suggestion followed by user agreement.
 - In ALPHA, schema changes may reset a disposable database only after an explicit
   decision. Additive, verified schema extensions preserve existing contents.
 
-## Current v12 execution, statistics, and agent-trace projection
+## Current v14 execution, request, statistics, and agent-trace projection
 
 - `rodex_registries` contains the database instance's one durable 64-bit ID row. Live tmux
   identity includes it so another registry cannot adopt the same session/Codex pair.
 - `rodex_sessions` contains one signed-BIGINT Rodex session ID and
   permanent/optional display-name links. The public Rodex
   session ID is always serialized as a 16-character lowercase hex string, never a JSON
-  number. The incompatible ALPHA v12 generation is stored in `rodex-v12.sqlite3`.
+  number. The incompatible ALPHA v14 generation is stored in `rodex-v14.sqlite3`.
   `rodex_schema_generations` marks the exact generation inside the database; Rodex
   rejects nonempty unmarked databases and wrong generations before creating any domain
   table. Earlier generation files remain untouched and are not read or migrated.
@@ -150,6 +150,24 @@ modified only by an agent suggestion followed by user agreement.
   history provenance are immutable properties of this spawn relationship. The schema
   cannot attach a child to its own turn, an unrelated source's turn, or another
   session's turn, and rejects update or delete of a published lineage edge.
+- `rodex_sessions_agent_requests` is the canonical identity for one observed agent
+  request. It receives its own opaque 128-bit public ID and joins one exact parent
+  user-message reference, collaboration tool request activity, spawn/follow-up activity,
+  activity scope, and target `codex_threads` row. Semantic uniqueness is enforced
+  independently for the tool activity and sub-agent activity. An insert trigger proves
+  same session/scope/turn ownership, requires the latest user message preceding the
+  collaboration tool request (which must itself precede the activity), and
+  accepts only `collaboration.spawn_agent → started` or
+  `collaboration.followup_task → interacted`. The row records identity and provenance;
+  plaintext bodies remain authenticated rollout references.
+- `rodex_sessions_agent_request_target_turns` separately associates one canonical
+  request with one target agent turn. The normalizer pairs unmatched requests and later
+  unclaimed turns FIFO per exact target thread. Unique indexes enforce one target turn
+  per request and one request per target turn; a trigger proves target membership and
+  time ordering, rejects a later request while an earlier request remains unmatched, and
+  rejects a later eligible turn while an earlier one remains unclaimed. A follow-up on
+  an existing agent therefore becomes another request row and another turn association
+  without changing the agent's canonical thread or earlier history.
 - `rodex_sessions_analytics_workers` is independent one-to-one health. Its bounded
   diagnostic code cannot contain free-form errors or paths. Failure never fabricates or
   overwrites a statistics snapshot.

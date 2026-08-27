@@ -36,13 +36,15 @@ listener; control endpoints are Unix sockets below a private runtime root.
   copy.
 - The input-disabled agent observer admits plaintext from a completed `agentMessage`
   authored by a tracked child and from the latest completed parent `userMessage` only
-  when the same exact root turn subsequently spawns that child. The latter is labelled as
-  the exact parent request, not delegated scope. It travels after process startup through
-  a runtime-specific mode-`0600` control socket and is not copied into process arguments
-  or SQLite. MultiAgent V2 delegated payloads remain encrypted; Rodex does not infer or
-  recover them. The view verifies the root identity, strips terminal controls, and
-  excludes user messages from other roots or turns, system/developer messages, hidden
-  reasoning, commands, and tool payloads.
+  when the same exact root turn subsequently requests that agent. The latter is labelled
+  as the exact parent request, not delegated scope. Its live text travels after process
+  startup through length-framed messages on a runtime-specific mode-`0600` Unix stream
+  socket and is not copied into process arguments or a second SQLite body. SQL records
+  the canonical request and its provenance through authenticated trace references.
+  MultiAgent V2 delegated payloads remain encrypted; Rodex does not infer or recover
+  them. The view verifies the root identity, strips terminal controls, and excludes user
+  messages from other roots or turns, system/developer messages, hidden reasoning,
+  commands, and tool payloads.
 - The install shim accepts only root- or current-user-owned, non-group/world-writable
   project code and `uv`. A system command must use an immutable root-owned installation.
 

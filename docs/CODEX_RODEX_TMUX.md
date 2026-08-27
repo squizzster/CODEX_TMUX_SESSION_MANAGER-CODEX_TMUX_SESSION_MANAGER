@@ -110,32 +110,53 @@ dedicated live agent observer pipeline. The session host creates or reuses one m
 top-third pane while preserving the lower Codex pane's focus. That pane directly runs
 `rodex.agent_observer`; tmux input is disabled, so it is a presentation surface rather
 than a shell. It consumes the App Server's exact agent identity, path, activity kind, and
-completed tracked-agent messages plus typed trace metadata from SQLite. Codex 0.149.1's
-MultiAgent V2 spawn event contains no delegated plaintext; the corresponding parent and
-child rollout content is encrypted. Separately, the primary App Server stream supplies
-the completed parent `userMessage`. The session host keeps only the latest exact root-turn
-message in memory and, when that same turn starts a child, sends its unchanged text to the
-pane as `REQUEST · exact parent message`. This is useful provenance, not a claim that the
-parent request and encrypted delegated prompt are byte-identical. Without the exact
-same-turn message, the observer presents `SCOPE UNAVAILABLE` rather than deriving scope
-from the child's behaviour or first reply. The agent's commentary and final response
-appear as `UPDATE` and `ANSWER`. Message text has no fixed display width or truncation and
-wraps only at the actual tmux pane edge; terminal control sequences are removed.
+completed tracked-agent messages plus typed turn evidence from SQLite.
 
-The session host is the sole projector of sub-agent lifecycle events into the observer.
+The view first names the technical invocation: `spawn_agent` creates a new agent thread,
+whereas `followup_task` requests a new turn from the same existing agent and continues
+its context. Once durable lineage arrives, a spawn is identified as `NEW CLEAN AGENT` or
+`NEW INHERITED AGENT`; a follow-up is identified as `SAME AGENT · NEW TURN`. These are
+separate from the human-language evidence. Codex 0.149.1's MultiAgent V2 activity exposes
+no delegated plaintext; the corresponding parent and child rollout content is encrypted.
+The pane states that limitation and never derives scope from the child's behaviour.
+
+Separately, the primary App Server stream supplies the completed parent `userMessage`.
+The session host keeps only the latest exact root-turn message in memory and, when that
+same turn requests an agent, sends its unchanged text to the pane as
+`REQUEST · exact parent message`. This is useful provenance, not a claim that the parent
+request and encrypted delegated prompt are byte-identical. Without the exact same-turn
+message, the observer presents `REQUEST UNAVAILABLE`. Tracked-child commentary and final
+responses appear as agent-attributed `AGENT UPDATE` and `AGENT ANSWER`. Message text has
+no fixed display width or truncation and wraps only at the actual tmux pane edge;
+terminal control sequences are removed.
+
+The session host is the sole projector of sub-agent lifecycle, exact parent-request, and
+tracked-child message events into the observer. It already sees the primary App Server
+stream before pane creation, so its ordered dispatcher carries even a fast first agent
+reply across the observer socket-startup boundary without relying on subscriber replay.
 Each runtime derives a distinct private control socket from its exact protocol-event
-socket; the observer also rejects a lifecycle or request event whose root identity does
-not match. Parent request text crosses that private socket after pane startup, so it does
-not enter the observer process arguments and is not duplicated into SQLite. The direct
-event-stream subscription supplies only tracked child messages and runtime liveness.
+socket. Events cross it as length-framed Unix stream messages, preserving exact long
+agent prose without a datagram-size ceiling; the observer also rejects a lifecycle or
+request event whose root identity does not match. Parent request text crosses that
+private socket after pane startup, so it does not enter the observer process arguments
+and is not duplicated as a SQLite plaintext body. The direct event-stream subscription
+supplies runtime liveness only.
 Exact delegated-scope display remains disabled until a supported App Server contract
 supplies authenticated plaintext tied to the same spawn and child identity.
 
 The analytics worker wakes the observer only after a durable publication commit, so
-indexed cursor reads need no polling timer. Completed tool outputs update one live `WORK`
-count, while committed context, lifecycle, tokens, and weekly rate-limit facts form the
-quiet summary. The pane survives agent completion for reuse and exits when the runtime
-event stream closes. Parent messages from another root or turn, developer and system
+indexed cursor reads need no polling timer. The observer reads only active or
+terminal-pending exact agent turns in one bounded read-only transaction and retires each
+completed presentation afterward. Committed metrics summarize actions,
+commands, file changes, web operations, queries, result records, compactions, and token
+use; each exact `(agent thread, agent turn)` owns separate progress, request, token, and
+completion state. Unbound requests to one existing agent remain in invocation order
+until their distinct turns become observable, preventing delayed earlier events from
+acquiring a later follow-up's human request. Natural-width progress blocks never depend
+on moving the terminal cursor across wrapped rows. Completion repeats the invocation
+semantics and exact parent request so a short pane still leaves a useful handoff in tmux
+history. The pane survives agent completion for reuse and exits when the runtime event
+stream closes. Parent messages from another root or turn, developer and system
 instructions, command text, tool payloads, output bodies, and hidden reasoning remain
 outside the display contract.
 
@@ -164,6 +185,13 @@ suffix, and healthy state. Statistics and trace publication heads are independen
 compare-and-set domains. Trace totals advance from persisted counts rather than
 recounting history; failures preserve every last-good projection and cannot affect the
 TUI.
+
+Agent requests are also canonical rows. Each joins the exact parent user-message
+reference, collaboration tool request, spawn/follow-up activity, activity scope, and
+target thread, with an independent opaque public identity. A separate association row
+links each request FIFO to that target agent's next distinct observed turn. Reusing an
+agent therefore creates another request and another turn association rather than
+overwriting its first request or pretending it is a new agent.
 
 Fixed statistics use typed scalar columns; repeating values use bounded distribution,
 category/name/count, and audit-limit rows. `_stats --json` reconstructs the analyzer

@@ -29,6 +29,8 @@ from .schema import (
     CODEX_THREADS_TABLE,
     MODEL_NAMES_TABLE,
     REASONING_EFFORT_NAMES_TABLE,
+    RODEX_SESSIONS_AGENT_REQUEST_TARGET_TURNS_TABLE,
+    RODEX_SESSIONS_AGENT_REQUESTS_TABLE,
     RODEX_SESSIONS_AGENT_TRACE_COMMAND_EXECUTIONS_TABLE,
     RODEX_SESSIONS_AGENT_TRACE_CONTEXTS_TABLE,
     RODEX_SESSIONS_AGENT_TRACE_EVENTS_TABLE,
@@ -149,6 +151,7 @@ class TraceSubagentActivity:
     target_codex_thread_id: CodexThreadId | None
     activity_kind: str
     agent_path: str | None
+    collaboration_call_id: str | None = None
 
 
 type TraceDetail = (
@@ -254,6 +257,7 @@ def publish_agent_trace_in_transaction(
     activity_scope_ids: dict[tuple[int, int | None], int] = {}
     inserted_event_count = 0
     inserted_unrecognized_count = 0
+    reconciliation_target_ids: set[int] = set()
     for event in publication.events:
         parsed_thread_id = parse_codex_thread_id(event.codex_thread_id)
         key = (
@@ -350,7 +354,7 @@ def publish_agent_trace_in_transaction(
         assert trace_event_public_id is not None
         inserted_event_count += 1
         inserted_unrecognized_count += kind == "unrecognized_record"
-        _insert_trace_detail(
+        request_target_id = _insert_trace_detail(
             connection,
             session_id,
             int(inserted[0]),
@@ -360,6 +364,18 @@ def publish_agent_trace_in_transaction(
             model_name_ids=model_name_ids,
             reasoning_effort_name_ids=reasoning_effort_name_ids,
             tool_name_ids=tool_name_ids,
+        )
+        if request_target_id is not None:
+            reconciliation_target_ids.add(request_target_id)
+        if kind == "turn_started":
+            reconciliation_target_ids.add(
+                _codex_threads_id_for_membership(connection, thread_row_id)
+            )
+    for target_codex_threads_id in reconciliation_target_ids:
+        _reconcile_agent_request_target_turns(
+            connection,
+            session_id=session_id,
+            target_codex_threads_id=target_codex_threads_id,
         )
     durable_event_count = prior_event_count + inserted_event_count
     unrecognized_count = prior_unrecognized_count + inserted_unrecognized_count
@@ -647,9 +663,9 @@ def _insert_trace_detail(
     model_name_ids: dict[str, int],
     reasoning_effort_name_ids: dict[str, int],
     tool_name_ids: dict[str, int],
-) -> None:
+) -> int | None:
     if detail is None:
-        return
+        return None
     item_id = (
         _resolve_or_insert_codex_item(
             connection,
@@ -812,21 +828,247 @@ def _insert_trace_detail(
                 connection, detail.target_codex_thread_id
             )
         )
-        connection.execute(
+        collaboration_tool_call_id = _resolve_existing_tool_call_by_call_id(
+            connection,
+            thread_row_id=thread_row_id,
+            scope_id=scope_id,
+            call_id=detail.collaboration_call_id,
+        )
+        inserted_activity = connection.execute(
             f"INSERT INTO {RODEX_SESSIONS_AGENT_TRACE_SUBAGENT_ACTIVITIES_TABLE} "
             "(rodex_sessions_agent_trace_events_id, rodex_sessions_id, "
-            "target_codex_threads_id, activity_kind, agent_path) "
-            "VALUES (?, ?, ?, ?, ?)",
+            "rodex_sessions_codex_activity_scopes_id, target_codex_threads_id, "
+            "rodex_sessions_codex_tool_calls_id, activity_kind, agent_path) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id",
             (
                 event_id,
                 session_id,
+                scope_id,
                 target_codex_threads_id,
+                collaboration_tool_call_id,
                 detail.activity_kind,
                 detail.agent_path,
             ),
+        ).fetchone()
+        if inserted_activity is None:
+            raise RodexSessionStatisticsConflictError(
+                "sub-agent trace activity insertion returned no identity"
+            )
+        if target_codex_threads_id is None or collaboration_tool_call_id is None:
+            return None
+        inserted_request = _insert_agent_request_from_activity(
+            connection,
+            session_id=session_id,
+            scope_id=scope_id,
+            subagent_activity_id=int(inserted_activity[0]),
+            target_codex_threads_id=target_codex_threads_id,
+            collaboration_tool_call_id=collaboration_tool_call_id,
+            activity_kind=detail.activity_kind,
         )
+        return target_codex_threads_id if inserted_request else None
     else:
         raise TypeError(f"unsupported agent trace detail: {type(detail).__name__}")
+    return None
+
+
+def _resolve_existing_tool_call_by_call_id(
+    connection: sqlite3.Connection,
+    *,
+    thread_row_id: int,
+    scope_id: int,
+    call_id: str | None,
+) -> int | None:
+    """Resolve only an already published exact call alias; never infer a match."""
+    if call_id is None:
+        return None
+    source_call_id = _normalise_required_text(call_id, "collaboration_call_id")
+    row = connection.execute(
+        "SELECT aliases.rodex_sessions_codex_tool_calls_id, "
+        "aliases.codex_call_id, calls.rodex_sessions_codex_activity_scopes_id "
+        f"FROM {RODEX_SESSIONS_CODEX_TOOL_CALL_ALIASES_TABLE} AS aliases "
+        f"JOIN {RODEX_SESSIONS_CODEX_TOOL_CALLS_TABLE} AS calls "
+        "ON calls.id = aliases.rodex_sessions_codex_tool_calls_id "
+        "WHERE aliases.rodex_sessions_codex_threads_id = ? "
+        "AND aliases.alias_kind = 'call_id' "
+        "AND aliases.codex_call_id_sha256_int_1 = ? "
+        "AND aliases.codex_call_id_sha256_int_2 = ? "
+        "AND aliases.codex_call_id_sha256_int_3 = ? "
+        "AND aliases.codex_call_id_sha256_int_4 = ?",
+        (thread_row_id, *_sha256_signed_bigints(source_call_id)),
+    ).fetchone()
+    if row is None:
+        return None
+    if str(row[1]) != source_call_id:
+        raise RodexSessionStatisticsConflictError(
+            "Codex collaboration call ID digest collision"
+        )
+    if int(row[2]) != scope_id:
+        raise RodexSessionStatisticsConflictError(
+            "sub-agent activity call belongs to a different parent turn"
+        )
+    return int(row[0])
+
+
+def _insert_agent_request_from_activity(
+    connection: sqlite3.Connection,
+    *,
+    session_id: int,
+    scope_id: int,
+    subagent_activity_id: int,
+    target_codex_threads_id: int,
+    collaboration_tool_call_id: int,
+    activity_kind: str,
+) -> bool:
+    """Create one canonical request from exact message/call/activity provenance."""
+    tool_activity = connection.execute(
+        "SELECT activities.id, names.tool_name, "
+        "events.source_record_ordinal, events.derived_event_ordinal "
+        f"FROM {RODEX_SESSIONS_AGENT_TRACE_TOOL_CALLS_TABLE} AS activities "
+        f"JOIN {RODEX_SESSIONS_CODEX_TOOL_CALLS_TABLE} AS calls "
+        "ON calls.id = activities.rodex_sessions_codex_tool_calls_id "
+        f"JOIN {TOOL_NAMES_TABLE} AS names ON names.id = calls.tool_names_id "
+        f"JOIN {RODEX_SESSIONS_AGENT_TRACE_EVENTS_TABLE} AS events "
+        "ON events.id = activities.rodex_sessions_agent_trace_events_id "
+        "WHERE activities.rodex_sessions_id = ? "
+        "AND activities.rodex_sessions_codex_activity_scopes_id = ? "
+        "AND activities.rodex_sessions_codex_tool_calls_id = ? "
+        "AND activities.activity_kind = 'request'",
+        (session_id, scope_id, collaboration_tool_call_id),
+    ).fetchone()
+    if tool_activity is None:
+        return False
+    expected_activity_kind = {
+        "collaboration.spawn_agent": "started",
+        "collaboration.followup_task": "interacted",
+    }.get(str(tool_activity[1]))
+    if expected_activity_kind is None or activity_kind != expected_activity_kind:
+        return False
+    parent_message = connection.execute(
+        "SELECT messages.id "
+        f"FROM {RODEX_SESSIONS_AGENT_TRACE_MESSAGES_TABLE} AS messages "
+        f"JOIN {RODEX_SESSIONS_AGENT_TRACE_EVENTS_TABLE} AS events "
+        "ON events.id = messages.rodex_sessions_agent_trace_events_id "
+        "WHERE messages.rodex_sessions_id = ? "
+        "AND messages.rodex_sessions_codex_activity_scopes_id = ? "
+        "AND messages.message_role = 'user' "
+        "AND messages.body_capture_state = 'rollout_reference' "
+        "AND messages.rodex_sessions_codex_items_id IS NOT NULL "
+        "AND (events.source_record_ordinal < ? OR "
+        "(events.source_record_ordinal = ? "
+        "AND events.derived_event_ordinal < ?)) "
+        "ORDER BY events.source_record_ordinal DESC, "
+        "events.derived_event_ordinal DESC, events.id DESC LIMIT 1",
+        (
+            session_id,
+            scope_id,
+            int(tool_activity[2]),
+            int(tool_activity[2]),
+            int(tool_activity[3]),
+        ),
+    ).fetchone()
+    if parent_message is None:
+        return False
+    for _attempt_number in index_re_try_attempt_numbers():
+        public_id = uuid.uuid4()
+        inserted = connection.execute(
+            f"INSERT OR IGNORE INTO {RODEX_SESSIONS_AGENT_REQUESTS_TABLE} "
+            "(agent_request_public_id_signed_bigint_1, "
+            "agent_request_public_id_signed_bigint_2, rodex_sessions_id, "
+            "rodex_sessions_codex_activity_scopes_id, "
+            "parent_rodex_sessions_agent_trace_messages_id, "
+            "rodex_sessions_agent_trace_tool_call_activities_id, "
+            "rodex_sessions_agent_trace_subagent_activities_id, "
+            "target_codex_threads_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+            "RETURNING id",
+            (
+                *split_codex_thread_id_into_signed_bigints(public_id),
+                session_id,
+                scope_id,
+                int(parent_message[0]),
+                int(tool_activity[0]),
+                subagent_activity_id,
+                target_codex_threads_id,
+            ),
+        ).fetchone()
+        if inserted is not None:
+            return True
+        stored = connection.execute(
+            f"SELECT id FROM {RODEX_SESSIONS_AGENT_REQUESTS_TABLE} "
+            "WHERE rodex_sessions_agent_trace_subagent_activities_id = ?",
+            (subagent_activity_id,),
+        ).fetchone()
+        if stored is not None:
+            return False
+    raise RodexSessionStatisticsConflictError(
+        "could not allocate an agent request public ID"
+    )
+
+
+def _codex_threads_id_for_membership(
+    connection: sqlite3.Connection, thread_row_id: int
+) -> int:
+    row = connection.execute(
+        f"SELECT codex_threads_id FROM {RODEX_SESSIONS_CODEX_THREADS_TABLE} WHERE id = ?",
+        (thread_row_id,),
+    ).fetchone()
+    if row is None:
+        raise RodexSessionStatisticsConflictError(
+            "Codex thread membership disappeared during trace publication"
+        )
+    return int(row[0])
+
+
+def _reconcile_agent_request_target_turns(
+    connection: sqlite3.Connection,
+    *,
+    session_id: int,
+    target_codex_threads_id: int,
+) -> None:
+    """FIFO-link unmatched requests to later distinct turns on one exact agent."""
+    pending = connection.execute(
+        "SELECT requests.id, request_events.event_time_utc "
+        f"FROM {RODEX_SESSIONS_AGENT_REQUESTS_TABLE} AS requests "
+        f"JOIN {RODEX_SESSIONS_AGENT_TRACE_SUBAGENT_ACTIVITIES_TABLE} AS activities "
+        "ON activities.id = "
+        "requests.rodex_sessions_agent_trace_subagent_activities_id "
+        f"JOIN {RODEX_SESSIONS_AGENT_TRACE_EVENTS_TABLE} AS request_events "
+        "ON request_events.id = activities.rodex_sessions_agent_trace_events_id "
+        f"LEFT JOIN {RODEX_SESSIONS_AGENT_REQUEST_TARGET_TURNS_TABLE} AS linked "
+        "ON linked.rodex_sessions_agent_requests_id = requests.id "
+        "WHERE requests.rodex_sessions_id = ? "
+        "AND requests.target_codex_threads_id = ? "
+        "AND request_events.event_time_utc IS NOT NULL "
+        "AND linked.id IS NULL "
+        "ORDER BY julianday(request_events.event_time_utc), "
+        "request_events.id, requests.id",
+        (session_id, target_codex_threads_id),
+    ).fetchall()
+    for request_id, request_time in pending:
+        target_turn = connection.execute(
+            "SELECT turns.id "
+            f"FROM {RODEX_SESSIONS_CODEX_THREADS_TABLE} AS membership "
+            f"JOIN {RODEX_SESSIONS_CODEX_TURNS_TABLE} AS turns "
+            "ON turns.rodex_sessions_codex_threads_id = membership.id "
+            f"JOIN {RODEX_SESSIONS_CODEX_TURN_STATES_TABLE} AS states "
+            "ON states.rodex_sessions_codex_turns_id = turns.id "
+            f"LEFT JOIN {RODEX_SESSIONS_AGENT_REQUEST_TARGET_TURNS_TABLE} AS linked "
+            "ON linked.target_rodex_sessions_codex_turns_id = turns.id "
+            "WHERE membership.rodex_sessions_id = ? "
+            "AND membership.codex_threads_id = ? "
+            "AND states.started_at_utc IS NOT NULL "
+            "AND julianday(states.started_at_utc) >= julianday(?) "
+            "AND linked.id IS NULL "
+            "ORDER BY julianday(states.started_at_utc), turns.id LIMIT 1",
+            (session_id, target_codex_threads_id, request_time),
+        ).fetchone()
+        if target_turn is None:
+            return
+        connection.execute(
+            f"INSERT INTO {RODEX_SESSIONS_AGENT_REQUEST_TARGET_TURNS_TABLE} "
+            "(rodex_sessions_id, rodex_sessions_agent_requests_id, "
+            "target_rodex_sessions_codex_turns_id) VALUES (?, ?, ?)",
+            (session_id, int(request_id), int(target_turn[0])),
+        )
 
 
 def _resolve_or_insert_codex_item(
@@ -1265,7 +1507,23 @@ usage.input_tokens, usage.cached_input_tokens, usage.output_tokens,
 usage.reasoning_output_tokens, usage.total_tokens, usage.context_used_percent,
 target_ids.codex_thread_public_id_signed_bigint_1,
 target_ids.codex_thread_public_id_signed_bigint_2,
-activities.activity_kind, activities.agent_path
+activities.activity_kind, activities.agent_path,
+agent_requests.agent_request_public_id_signed_bigint_1,
+agent_requests.agent_request_public_id_signed_bigint_2,
+CASE activities.activity_kind
+    WHEN 'started' THEN 'initial'
+    WHEN 'interacted' THEN 'follow_up'
+END,
+parent_request_items.item_public_id_signed_bigint_1,
+parent_request_items.item_public_id_signed_bigint_2,
+parent_request_events.trace_event_public_id_signed_bigint_1,
+parent_request_events.trace_event_public_id_signed_bigint_2,
+target_turns.turn_public_id_signed_bigint_1,
+target_turns.turn_public_id_signed_bigint_2,
+target_turns.codex_turn_id_signed_bigint_1,
+target_turns.codex_turn_id_signed_bigint_2,
+target_turn_states.outcome,
+request_target_turns.association_kind
 FROM {RODEX_SESSIONS_AGENT_TRACE_EVENTS_TABLE} AS events
 JOIN {RODEX_SESSIONS_CODEX_THREADS_TABLE} AS sources
     ON sources.id = events.rodex_sessions_codex_threads_id
@@ -1300,6 +1558,23 @@ LEFT JOIN {RODEX_SESSIONS_AGENT_TRACE_SUBAGENT_ACTIVITIES_TABLE} AS activities
     ON activities.rodex_sessions_agent_trace_events_id = events.id
 LEFT JOIN {CODEX_THREADS_TABLE} AS target_ids
     ON target_ids.id = activities.target_codex_threads_id
+LEFT JOIN {RODEX_SESSIONS_AGENT_REQUESTS_TABLE} AS agent_requests
+    ON agent_requests.rodex_sessions_agent_trace_subagent_activities_id = activities.id
+LEFT JOIN {RODEX_SESSIONS_AGENT_TRACE_MESSAGES_TABLE} AS parent_request_messages
+    ON parent_request_messages.id =
+        agent_requests.parent_rodex_sessions_agent_trace_messages_id
+LEFT JOIN {RODEX_SESSIONS_CODEX_ITEMS_TABLE} AS parent_request_items
+    ON parent_request_items.id =
+        parent_request_messages.rodex_sessions_codex_items_id
+LEFT JOIN {RODEX_SESSIONS_AGENT_TRACE_EVENTS_TABLE} AS parent_request_events
+    ON parent_request_events.id =
+        parent_request_messages.rodex_sessions_agent_trace_events_id
+LEFT JOIN {RODEX_SESSIONS_AGENT_REQUEST_TARGET_TURNS_TABLE} AS request_target_turns
+    ON request_target_turns.rodex_sessions_agent_requests_id = agent_requests.id
+LEFT JOIN {RODEX_SESSIONS_CODEX_TURNS_TABLE} AS target_turns
+    ON target_turns.id = request_target_turns.target_rodex_sessions_codex_turns_id
+LEFT JOIN {RODEX_SESSIONS_CODEX_TURN_STATES_TABLE} AS target_turn_states
+    ON target_turn_states.rodex_sessions_codex_turns_id = target_turns.id
 """
 
 
@@ -1388,6 +1663,14 @@ def _trace_event_row_as_dict(
             "target_codex_thread_id": target_id,
             "activity_kind": row[67],
             "agent_path": row[68],
+            "agent_request_id": _optional_public_id(row[69], row[70]),
+            "request_kind": row[71],
+            "parent_item_public_id": _optional_public_id(row[72], row[73]),
+            "parent_message_event_id": _optional_public_id(row[74], row[75]),
+            "target_turn_id": _optional_public_id(row[76], row[77]),
+            "target_codex_turn_id": _optional_codex_turn_id(row[78], row[79]),
+            "target_turn_outcome": row[80],
+            "target_turn_association_kind": row[81],
         }
     return event
 

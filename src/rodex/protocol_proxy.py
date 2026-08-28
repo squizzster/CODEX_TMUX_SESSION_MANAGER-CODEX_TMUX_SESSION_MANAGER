@@ -42,6 +42,9 @@ TOOL_CALL_ITEM_TYPES: Final = frozenset(
 ToolCountCallback = Callable[[int], None]
 ProtocolEventCallback = Callable[[str | bytes, dict[str, Any] | None], None]
 ContextStatusCallback = Callable[[str], None]
+ROLLOUT_CONTEXT_POLL_INTERVAL_SECONDS: Final = 0.25
+_ROLLOUT_CONTEXT_TAIL_BYTES: Final = 8 * 1024 * 1024
+_ROLLOUT_CONTEXT_LINE_BYTES: Final = 256 * 1024
 _EVENT_STREAM_CLOSED: Final = object()
 EVENT_STREAM_READY_METHOD: Final = "rodex/event-stream/ready"
 CONTROL_CONNECTION_PATH: Final = "/rodex-control"
@@ -332,17 +335,31 @@ class CodexContextStatusObserver:
         on_status_changed: ContextStatusCallback,
         *,
         animation_interval_seconds: float = CONTEXT_COMPACTION_FRAME_INTERVAL_SECONDS,
+        codex_sessions_root: Path | None = None,
+        rollout_poll_interval_seconds: float = ROLLOUT_CONTEXT_POLL_INTERVAL_SECONDS,
     ) -> None:
         if animation_interval_seconds <= 0 or not math.isfinite(animation_interval_seconds):
             raise ValueError("animation interval must be finite and positive")
+        if rollout_poll_interval_seconds <= 0 or not math.isfinite(
+            rollout_poll_interval_seconds
+        ):
+            raise ValueError("rollout poll interval must be finite and positive")
         self._on_status_changed = on_status_changed
         self._animation_interval_seconds = animation_interval_seconds
+        self._codex_sessions_root = (
+            None
+            if codex_sessions_root is None
+            else Path(codex_sessions_root).resolve(strict=False)
+        )
+        self._rollout_poll_interval_seconds = rollout_poll_interval_seconds
         self._primary_thread_id: str | None = None
         self._latest_context_status = context_status_segment(None)
         self._active_compaction_item_ids: set[str] = set()
         self._animation_generation = 0
         self._animation_stop: Event | None = None
         self._animation_threads: list[Thread] = []
+        self._rollout_stop: Event | None = None
+        self._rollout_thread: Thread | None = None
         self._closed = False
         self._lock = Lock()
 
@@ -362,7 +379,23 @@ class CodexContextStatusObserver:
             thread_id = _started_thread_id(params)
             if thread_id is not None:
                 with self._lock:
-                    self._accept_thread_locked(thread_id)
+                    if self._closed or not self._accept_thread_locked(thread_id):
+                        return
+                    rollout_path = _started_thread_rollout_path(
+                        params,
+                        thread_id=thread_id,
+                        codex_sessions_root=self._codex_sessions_root,
+                    )
+                    if rollout_path is not None and self._rollout_thread is None:
+                        rollout_stop = Event()
+                        self._rollout_stop = rollout_stop
+                        self._rollout_thread = Thread(
+                            target=self._follow_rollout_context,
+                            args=(thread_id, rollout_path, rollout_stop),
+                            name="rodex-rollout-context-follower",
+                            daemon=True,
+                        )
+                        self._rollout_thread.start()
             return
         if method == "thread/tokenUsage/updated":
             context_percent = _context_percent(params)
@@ -416,6 +449,20 @@ class CodexContextStatusObserver:
             self._animation_generation += 1
             self._publish_status_locked(self._latest_context_status)
 
+    def observe_rollout_context_percent(
+        self,
+        thread_id: str,
+        context_percent: float,
+    ) -> None:
+        """Accept one authenticated primary-rollout context snapshot."""
+        rendered_status = context_status_segment(context_percent)
+        with self._lock:
+            if self._closed or not self._accept_thread_locked(thread_id):
+                return
+            self._latest_context_status = rendered_status
+            if not self._active_compaction_item_ids:
+                self._publish_status_locked(rendered_status)
+
     def close(self) -> None:
         """Stop any live animation without delaying protocol shutdown."""
         with self._lock:
@@ -428,8 +475,16 @@ class CodexContextStatusObserver:
                 self._animation_stop.set()
                 self._animation_stop = None
             animation_threads = tuple(self._animation_threads)
+            rollout_stop = self._rollout_stop
+            rollout_thread = self._rollout_thread
+            self._rollout_stop = None
+            self._rollout_thread = None
+            if rollout_stop is not None:
+                rollout_stop.set()
         for animation_thread in animation_threads:
             animation_thread.join(timeout=1)
+        if rollout_thread is not None:
+            rollout_thread.join(timeout=1)
 
     def _accept_thread_locked(self, thread_id: str) -> bool:
         if self._primary_thread_id is None:
@@ -469,6 +524,49 @@ class CodexContextStatusObserver:
         except (OSError, subprocess.SubprocessError):
             # Status rendering must never interrupt the Codex protocol stream.
             return
+
+    def _follow_rollout_context(
+        self,
+        thread_id: str,
+        rollout_path: Path,
+        stop: Event,
+    ) -> None:
+        """Follow bounded JSONL additions without retaining arbitrary rollout bodies."""
+        while not stop.is_set():
+            try:
+                initial_percent, initial_offset = _latest_rollout_context(rollout_path)
+                if initial_percent is not None:
+                    self.observe_rollout_context_percent(thread_id, initial_percent)
+                with rollout_path.open("rb") as rollout:
+                    rollout.seek(initial_offset)
+                    discarding_long_line = False
+                    while not stop.is_set():
+                        line_start = rollout.tell()
+                        line = rollout.readline(_ROLLOUT_CONTEXT_LINE_BYTES + 1)
+                        if not line:
+                            stop.wait(self._rollout_poll_interval_seconds)
+                            continue
+                        if discarding_long_line:
+                            if line.endswith(b"\n"):
+                                discarding_long_line = False
+                            continue
+                        if line.endswith(b"\n"):
+                            context_percent = _rollout_context_percent(line)
+                            if context_percent is not None:
+                                self.observe_rollout_context_percent(
+                                    thread_id,
+                                    context_percent,
+                                )
+                            continue
+                        if len(line) > _ROLLOUT_CONTEXT_LINE_BYTES:
+                            discarding_long_line = True
+                            continue
+                        # The writer has not committed the newline yet. Re-read this
+                        # bounded partial record after the next append.
+                        rollout.seek(line_start)
+                        stop.wait(self._rollout_poll_interval_seconds)
+            except OSError:
+                stop.wait(self._rollout_poll_interval_seconds)
 
 
 class CodexProtocolProxy:
@@ -769,6 +867,28 @@ def _started_thread_id(params: dict[str, Any]) -> str | None:
     return _event_thread_id(params)
 
 
+def _started_thread_rollout_path(
+    params: dict[str, Any],
+    *,
+    thread_id: str,
+    codex_sessions_root: Path | None,
+) -> Path | None:
+    """Accept only the exact primary rollout path beneath the configured Codex root."""
+    if codex_sessions_root is None:
+        return None
+    thread = params.get("thread")
+    path_value = thread.get("path") if isinstance(thread, dict) else None
+    if not isinstance(path_value, str) or not path_value:
+        return None
+    candidate = Path(path_value)
+    if not candidate.is_absolute() or not candidate.name.endswith(f"-{thread_id}.jsonl"):
+        return None
+    resolved = candidate.resolve(strict=False)
+    if not resolved.is_relative_to(codex_sessions_root):
+        return None
+    return resolved
+
+
 def _update_known_threads(
     known_threads: dict[str, dict[str, object]], payload: dict[str, Any]
 ) -> None:
@@ -813,6 +933,55 @@ def _context_percent(params: dict[str, Any]) -> float | None:
         token_usage,
         "modelContextWindow",
         "model_context_window",
+    )
+    if total_tokens is None or context_window is None:
+        return None
+    if total_tokens < 0 or context_window <= 0:
+        return None
+    return 100.0 * total_tokens / context_window
+
+
+def _latest_rollout_context(rollout_path: Path) -> tuple[float | None, int]:
+    """Read only a bounded tail and return its newest complete token snapshot."""
+    with rollout_path.open("rb") as rollout:
+        rollout.seek(0, 2)
+        end_offset = rollout.tell()
+        start_offset = max(0, end_offset - _ROLLOUT_CONTEXT_TAIL_BYTES)
+        rollout.seek(start_offset)
+        tail = rollout.read(end_offset - start_offset)
+    lines = tail.split(b"\n")
+    if start_offset:
+        lines = lines[1:]
+    for line in reversed(lines):
+        if not line or len(line) > _ROLLOUT_CONTEXT_LINE_BYTES:
+            continue
+        context_percent = _rollout_context_percent(line)
+        if context_percent is not None:
+            return context_percent, end_offset
+    return None, end_offset
+
+
+def _rollout_context_percent(line: bytes) -> float | None:
+    try:
+        record = json.loads(line)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(record, dict) or record.get("type") != "event_msg":
+        return None
+    payload = record.get("payload")
+    if not isinstance(payload, dict) or payload.get("type") != "token_count":
+        return None
+    info = payload.get("info")
+    if not isinstance(info, dict):
+        return None
+    last_usage = info.get("last_token_usage")
+    if not isinstance(last_usage, dict):
+        return None
+    total_tokens = _finite_number(last_usage, "total_tokens", "totalTokens")
+    context_window = _finite_number(
+        info,
+        "model_context_window",
+        "modelContextWindow",
     )
     if total_tokens is None or context_window is None:
         return None

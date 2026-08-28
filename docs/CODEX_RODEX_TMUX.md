@@ -105,7 +105,10 @@ The proxy forwards ordinary protocol frames unchanged in both directions, counts
 tool starts, and fans structured TUI events to bounded live subscribers. Its sole
 Rodex-local exception is the update-notice endpoint: a notice becomes a downstream-only
 native warning on the subscribed primary TUI and therefore a TUI-owned scrollback line
-that survives redraw. The subscribed primary connection, normally the managed TUI,
+that survives redraw. For the status bar, the exact primary `thread/started` rollout path
+also supplies appended token snapshots between the App Server's turn-boundary usage
+notifications; the shared coordinator preserves compaction-animation priority. The
+subscribed primary connection, normally the managed TUI,
 receives lifecycle, approval, and user-input requests; short-lived control clients do
 not become subscribers by reading or mutating. Each ordinary client uses a separate
 upstream App Server connection over private Unix sockets. tmux user options advertise

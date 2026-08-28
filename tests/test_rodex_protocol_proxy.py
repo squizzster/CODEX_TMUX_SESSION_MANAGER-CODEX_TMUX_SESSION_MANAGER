@@ -61,6 +61,22 @@ def token_usage_updated(
     )
 
 
+def rollout_token_count(total_tokens: int, *, context_window: int = 258_400) -> str:
+    return json.dumps(
+        {
+            "timestamp": "2026-08-28T03:00:00Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "token_count",
+                "info": {
+                    "last_token_usage": {"total_tokens": total_tokens},
+                    "model_context_window": context_window,
+                },
+            },
+        }
+    )
+
+
 @pytest.mark.parametrize("item_type", sorted(TOOL_CALL_ITEM_TYPES))
 def test_counter_counts_each_protocol_tool_item_type(item_type: str) -> None:
     observed: list[int] = []
@@ -168,6 +184,77 @@ def test_context_observer_projects_last_usage_for_only_the_primary_thread() -> N
     assert "Context: 70% |" in observed[0]
 
 
+def test_context_observer_follows_primary_rollout_during_a_live_turn(
+    tmp_path: Path,
+) -> None:
+    sessions_root = tmp_path / "sessions"
+    rollout_path = sessions_root / "2026/08/28/rollout-2026-08-28T03-00-00-thread-1.jsonl"
+    rollout_path.parent.mkdir(parents=True)
+    rollout_path.write_text(rollout_token_count(25_840) + "\n", encoding="utf-8")
+    observed: list[str] = []
+    restored = Event()
+    advanced = Event()
+
+    def record_status(rendered_status: str) -> None:
+        observed.append(rendered_status)
+        if "Context: 10% |" in rendered_status:
+            restored.set()
+        if "Context: 70% |" in rendered_status:
+            advanced.set()
+
+    observer = CodexContextStatusObserver(
+        record_status,
+        codex_sessions_root=sessions_root,
+        rollout_poll_interval_seconds=0.005,
+    )
+    observer.observe_protocol_event(
+        {
+            "method": "thread/started",
+            "params": {
+                "thread": {"id": "thread-1", "path": str(rollout_path)},
+            },
+        }
+    )
+    try:
+        assert restored.wait(1)
+        with rollout_path.open("a", encoding="utf-8") as rollout:
+            rollout.write('{"type":"response_item","payload":{}}\n')
+            rollout.write(rollout_token_count(180_880) + "\n")
+        assert advanced.wait(1)
+    finally:
+        observer.close()
+
+    assert any("Context: 10% |" in status for status in observed)
+    assert any("Context: 70% |" in status for status in observed)
+
+
+def test_context_observer_rejects_a_rollout_outside_the_codex_sessions_root(
+    tmp_path: Path,
+) -> None:
+    sessions_root = tmp_path / "sessions"
+    sessions_root.mkdir()
+    rollout_path = tmp_path / "rollout-2026-08-28T03-00-00-thread-1.jsonl"
+    rollout_path.write_text(rollout_token_count(180_880) + "\n", encoding="utf-8")
+    observed: list[str] = []
+    observer = CodexContextStatusObserver(
+        observed.append,
+        codex_sessions_root=sessions_root,
+        rollout_poll_interval_seconds=0.005,
+    )
+
+    observer.observe_protocol_event(
+        {
+            "method": "thread/started",
+            "params": {
+                "thread": {"id": "thread-1", "path": str(rollout_path)},
+            },
+        }
+    )
+    observer.close()
+
+    assert observed == []
+
+
 def test_context_observer_animates_compaction_then_restores_fresh_usage() -> None:
     observed: list[str] = []
     two_frames_seen = Event()
@@ -185,7 +272,7 @@ def test_context_observer_animates_compaction_then_restores_fresh_usage() -> Non
     observer.observe_server_message(item_started("contextCompaction", "compact-1"))
     try:
         assert two_frames_seen.wait(1)
-        observer.observe_server_message(token_usage_updated(25_840))
+        observer.observe_rollout_context_percent("thread-1", 10.0)
         assert "COMPACTING" in observed[-1]
         observer.observe_server_message(
             item_started("contextCompaction", "compact-1").replace(

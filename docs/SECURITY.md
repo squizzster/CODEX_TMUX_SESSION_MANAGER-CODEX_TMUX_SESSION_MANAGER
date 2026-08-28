@@ -34,6 +34,9 @@ listener; control endpoints are Unix sockets below a private runtime root.
   sessions root, using no-follow and nonblocking opens before authenticating the Codex
   thread ID and stable complete-record prefix. Startup-only lineage discovery is bounded
   to the root UUIDv7 three-day window and reads only candidate metadata lines.
+- The live context follower accepts only an absolute, exact-thread rollout filename
+  beneath that configured sessions root. It reads a bounded tail and bounded appended
+  lines for `token_count` records only, retaining no rollout bodies.
 - tmux operations use argv execution and exact `=name` or `=name:` targets. Dynamic hook
   commands are shell-quoted; cleanup and failure handling target one named runtime.
 - `_cat`, `_tail`, and `_events` resolve the same owned, registered live identity before

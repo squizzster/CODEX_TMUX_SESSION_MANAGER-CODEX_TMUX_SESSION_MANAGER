@@ -150,16 +150,19 @@ modified only by an agent suggestion followed by user agreement.
   history provenance are immutable properties of this spawn relationship. The schema
   cannot attach a child to its own turn, an unrelated source's turn, or another
   session's turn, and rejects update or delete of a published lineage edge.
-- `rodex_sessions_agent_requests` is the canonical identity for one observed agent
-  request. It receives its own opaque 128-bit public ID and joins one exact parent
-  user-message reference, collaboration tool request activity, spawn/follow-up activity,
-  activity scope, and target `codex_threads` row. Semantic uniqueness is enforced
-  independently for the tool activity and sub-agent activity. An insert trigger proves
+- `rodex_sessions_agent_requests` is the canonical identity for one observed
+  **turn-producing** agent request. It receives its own opaque 128-bit public ID and
+  joins one exact parent user-message reference, collaboration tool request activity,
+  spawn/follow-up activity, activity scope, and target `codex_threads` row. Semantic
+  uniqueness is enforced independently for the tool activity and sub-agent activity. An
+  insert trigger proves
   same session/scope/turn ownership, requires the latest user message preceding the
   collaboration tool request (which must itself precede the activity), and
   accepts only `collaboration.spawn_agent → started` or
   `collaboration.followup_task → interacted`. The row records identity and provenance;
-  plaintext bodies remain authenticated rollout references.
+  plaintext bodies remain authenticated rollout references. A
+  `collaboration.send_message → interacted` activity deliberately has no request row:
+  it continues an existing agent turn rather than producing another one.
 - `rodex_sessions_agent_request_target_turns` separately associates one canonical
   request with one target agent turn. The normalizer pairs unmatched requests and later
   unclaimed turns FIFO per exact target thread. Unique indexes enforce one target turn
@@ -204,7 +207,13 @@ modified only by an agent suggestion followed by user agreement.
   `(Rodex session, event_id, event_kind)` to the same event tuple, preventing a detail
   from claiming another session. Its `target_codex_threads_id` can point to a canonical
   identity before verified session membership exists; later verification reuses that
-  row without updating the activity.
+  row without updating the activity. The activity also holds the exact canonical
+  collaboration tool-call foreign key resolved from its source call ID. The bounded
+  public trace read projects that linked tool identity, source call ID, argument byte
+  count, and capture state as `collaboration_invocation`. It projects `turn_request`
+  only when the narrower request row actually exists; it never derives a follow-up from
+  `activity_kind = interacted` alone. Existing v14 rows therefore expose historical
+  `send_message` operations correctly without migration or backfill.
   `rodex_sessions_codex_items` is the sole storage location for every observed Codex
   item identity. A strict canonical UUID is stored losslessly as two signed `BIGINT`
   halves; a non-UUID source identity is retained in

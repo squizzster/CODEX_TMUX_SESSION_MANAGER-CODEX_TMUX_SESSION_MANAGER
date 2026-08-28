@@ -124,37 +124,43 @@ top-third pane while preserving the lower Codex pane's focus. That pane directly
 than a shell. It consumes the App Server's exact agent identity, path, activity kind, and
 completed tracked-agent messages plus typed turn evidence from SQLite.
 
-The view first names the technical invocation: `spawn_agent` creates a new agent thread,
-whereas `followup_task` requests a new turn from the same existing agent and continues
-its context. Once durable lineage arrives, a spawn is identified as `NEW CLEAN AGENT` or
-`NEW INHERITED AGENT`; a follow-up is identified as `SAME AGENT · NEW TURN`. These are
-separate from the human-language evidence. Codex 0.149.1's MultiAgent V2 activity exposes
-no delegated plaintext; the corresponding parent and child rollout content is encrypted.
-The pane states that limitation and never derives scope from the child's behaviour.
+The current Codex App Server emits a `collabAgentToolCall` naming the exact collaboration
+tool and a `subAgentActivity` carrying lifecycle and target under the same call ID. Rodex
+correlates those items without treating generic `interacted` as a tool name. The view
+therefore distinguishes `spawn_agent` (new thread and turn), `followup_task` (same thread,
+new turn), and `send_message` (same thread and current turn). Once durable lineage
+arrives, a spawn is identified as `NEW CLEAN AGENT` or `NEW INHERITED AGENT`; a follow-up
+is identified as `SAME AGENT · NEW TURN`. A missing or unsupported call correlation is
+reported as unresolved rather than guessed.
+
+When the App Server supplies the collaboration `prompt`, the private live path renders
+it exactly as `DELEGATED TASK`, `FOLLOW-UP TASK`, or `MESSAGE`. The authenticated rollout
+and SQLite retain encrypted-body metadata rather than another plaintext copy. If live
+plaintext is unavailable, the pane reports the encrypted payload as unavailable and
+never reconstructs it from the child's behaviour or reply.
 
 Separately, the primary App Server stream supplies the completed parent `userMessage`.
 The session host keeps only the latest exact root-turn message in memory and, when that
 same turn requests an agent, sends its unchanged text to the pane as
-`REQUEST · exact parent message`. This is useful provenance, not a claim that the parent
-request and encrypted delegated prompt are byte-identical. Without the exact same-turn
-message, the observer presents `REQUEST UNAVAILABLE`. Tracked-child commentary and final
+`ROOT TURN REQUEST · exact user message`. This is explicitly root-turn provenance, not
+the collaboration payload. Without the exact same-turn message, the observer presents
+`ROOT TURN REQUEST UNAVAILABLE`. Tracked-child commentary and final
 responses appear as agent-attributed `AGENT UPDATE` and `AGENT ANSWER`. Message text has
 no fixed display width or truncation and wraps only at the actual tmux pane edge;
 terminal control sequences are removed.
 
-The session host is the sole projector of sub-agent lifecycle, exact parent-request, and
-tracked-child message events into the observer. It already sees the primary App Server
-stream before pane creation, so its ordered dispatcher carries even a fast first agent
-reply across the observer socket-startup boundary without relying on subscriber replay.
+The session host is the sole projector of collaboration invocation, sub-agent lifecycle,
+exact root-request context, and tracked-child message events into the observer. It
+already sees the primary App Server stream before pane creation, so its ordered
+dispatcher carries even a fast first agent reply across the observer socket-startup
+boundary without relying on subscriber replay.
 Each runtime derives a distinct private control socket from its exact protocol-event
 socket. Events cross it as length-framed Unix stream messages, preserving exact long
 agent prose without a datagram-size ceiling; the observer also rejects a lifecycle or
-request event whose root identity does not match. Parent request text crosses that
-private socket after pane startup, so it does not enter the observer process arguments
-and is not duplicated as a SQLite plaintext body. The direct event-stream subscription
-supplies runtime liveness only.
-Exact delegated-scope display remains disabled until a supported App Server contract
-supplies authenticated plaintext tied to the same spawn and child identity.
+request event whose root identity does not match. Root request and collaboration prompt
+text cross that private socket after pane startup, so it does not enter the observer
+process arguments and is not duplicated as a SQLite plaintext body. The direct
+event-stream subscription supplies runtime liveness only.
 
 The analytics worker wakes the observer only after a durable publication commit, so
 indexed cursor reads need no polling timer. The observer reads only active or
@@ -162,13 +168,15 @@ terminal-pending exact agent turns in one bounded read-only transaction and reti
 completed presentation afterward. Committed metrics summarize actions,
 commands, file changes, web operations, queries, result records, compactions, and token
 use; each exact `(agent thread, agent turn)` owns separate progress, request, token, and
-completion state. Unbound requests to one existing agent remain in invocation order
-until their distinct turns become observable, preventing delayed earlier events from
-acquiring a later follow-up's human request. Natural-width progress blocks never depend
-on moving the terminal cursor across wrapped rows. Completion repeats the invocation
-semantics and exact parent request so a short pane still leaves a useful handoff in tmux
-history. The pane survives agent completion for reuse and exits when the runtime event
-stream closes. Parent messages from another root or turn, developer and system
+completion state. Unbound turn-producing requests to one existing agent remain in
+invocation order until their distinct turns become observable, preventing delayed
+earlier events from acquiring a later follow-up's human request. A `send_message`
+interaction creates no pending target turn, cannot acquire a later turn, and receives no
+terminal recap. Natural-width progress blocks never depend on moving the terminal cursor
+across wrapped rows. Completion repeats the invocation semantics and exact root-request
+context so a short pane still leaves a useful handoff in tmux history. The pane survives
+agent completion for reuse and exits when the runtime event stream closes. Parent
+messages from another root or turn, developer and system
 instructions, command text, tool payloads, output bodies, and hidden reasoning remain
 outside the display contract.
 

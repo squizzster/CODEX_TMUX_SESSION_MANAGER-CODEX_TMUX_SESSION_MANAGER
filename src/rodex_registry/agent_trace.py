@@ -1510,9 +1510,9 @@ target_ids.codex_thread_public_id_signed_bigint_2,
 activities.activity_kind, activities.agent_path,
 agent_requests.agent_request_public_id_signed_bigint_1,
 agent_requests.agent_request_public_id_signed_bigint_2,
-CASE activities.activity_kind
-    WHEN 'started' THEN 'initial'
-    WHEN 'interacted' THEN 'follow_up'
+CASE invocation_tool_names.tool_name
+    WHEN 'collaboration.spawn_agent' THEN 'initial'
+    WHEN 'collaboration.followup_task' THEN 'follow_up'
 END,
 parent_request_items.item_public_id_signed_bigint_1,
 parent_request_items.item_public_id_signed_bigint_2,
@@ -1523,7 +1523,25 @@ target_turns.turn_public_id_signed_bigint_2,
 target_turns.codex_turn_id_signed_bigint_1,
 target_turns.codex_turn_id_signed_bigint_2,
 target_turn_states.outcome,
-request_target_turns.association_kind
+request_target_turns.association_kind,
+invocation_tool_calls.tool_call_public_id_signed_bigint_1,
+invocation_tool_calls.tool_call_public_id_signed_bigint_2,
+(SELECT aliases.codex_call_id
+    FROM {RODEX_SESSIONS_CODEX_TOOL_CALL_ALIASES_TABLE} AS aliases
+    WHERE aliases.rodex_sessions_codex_tool_calls_id = invocation_tool_calls.id
+        AND aliases.alias_kind = 'call_id'
+    ORDER BY aliases.id LIMIT 1),
+invocation_tool_names.tool_name,
+(SELECT request.request_utf8_bytes
+    FROM {RODEX_SESSIONS_AGENT_TRACE_TOOL_CALLS_TABLE} AS request
+    WHERE request.rodex_sessions_codex_tool_calls_id = invocation_tool_calls.id
+        AND request.activity_kind = 'request'
+    ORDER BY request.id LIMIT 1),
+(SELECT request.payload_capture_state
+    FROM {RODEX_SESSIONS_AGENT_TRACE_TOOL_CALLS_TABLE} AS request
+    WHERE request.rodex_sessions_codex_tool_calls_id = invocation_tool_calls.id
+        AND request.activity_kind = 'request'
+    ORDER BY request.id LIMIT 1)
 FROM {RODEX_SESSIONS_AGENT_TRACE_EVENTS_TABLE} AS events
 JOIN {RODEX_SESSIONS_CODEX_THREADS_TABLE} AS sources
     ON sources.id = events.rodex_sessions_codex_threads_id
@@ -1558,6 +1576,10 @@ LEFT JOIN {RODEX_SESSIONS_AGENT_TRACE_SUBAGENT_ACTIVITIES_TABLE} AS activities
     ON activities.rodex_sessions_agent_trace_events_id = events.id
 LEFT JOIN {CODEX_THREADS_TABLE} AS target_ids
     ON target_ids.id = activities.target_codex_threads_id
+LEFT JOIN {RODEX_SESSIONS_CODEX_TOOL_CALLS_TABLE} AS invocation_tool_calls
+    ON invocation_tool_calls.id = activities.rodex_sessions_codex_tool_calls_id
+LEFT JOIN {TOOL_NAMES_TABLE} AS invocation_tool_names
+    ON invocation_tool_names.id = invocation_tool_calls.tool_names_id
 LEFT JOIN {RODEX_SESSIONS_AGENT_REQUESTS_TABLE} AS agent_requests
     ON agent_requests.rodex_sessions_agent_trace_subagent_activities_id = activities.id
 LEFT JOIN {RODEX_SESSIONS_AGENT_TRACE_MESSAGES_TABLE} AS parent_request_messages
@@ -1659,18 +1681,33 @@ def _trace_event_row_as_dict(
         event["detail"] = {"windows": rate_windows}
     elif kind == "subagent_activity":
         target_id = _optional_public_id(row[65], row[66])
+        invocation = None
+        if row[82] is not None and row[83] is not None:
+            invocation = {
+                "tool_call_id": _optional_public_id(row[82], row[83]),
+                "source_call_id": row[84],
+                "tool_name": row[85],
+                "arguments_utf8_bytes": row[86],
+                "arguments_capture_state": row[87],
+            }
+        turn_request = None
+        if row[69] is not None and row[70] is not None:
+            turn_request = {
+                "request_id": _optional_public_id(row[69], row[70]),
+                "request_kind": row[71],
+                "root_request_item_public_id": _optional_public_id(row[72], row[73]),
+                "root_request_message_event_id": _optional_public_id(row[74], row[75]),
+                "target_turn_id": _optional_public_id(row[76], row[77]),
+                "target_codex_turn_id": _optional_codex_turn_id(row[78], row[79]),
+                "target_turn_outcome": row[80],
+                "target_turn_association_kind": row[81],
+            }
         event["detail"] = {
             "target_codex_thread_id": target_id,
             "activity_kind": row[67],
             "agent_path": row[68],
-            "agent_request_id": _optional_public_id(row[69], row[70]),
-            "request_kind": row[71],
-            "parent_item_public_id": _optional_public_id(row[72], row[73]),
-            "parent_message_event_id": _optional_public_id(row[74], row[75]),
-            "target_turn_id": _optional_public_id(row[76], row[77]),
-            "target_codex_turn_id": _optional_codex_turn_id(row[78], row[79]),
-            "target_turn_outcome": row[80],
-            "target_turn_association_kind": row[81],
+            "collaboration_invocation": invocation,
+            "turn_request": turn_request,
         }
     return event
 

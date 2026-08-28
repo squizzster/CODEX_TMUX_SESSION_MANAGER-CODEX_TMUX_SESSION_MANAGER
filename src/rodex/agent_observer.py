@@ -44,9 +44,19 @@ OBSERVER_TRACE_PAGE_SIZE: Final = 500
 _PANE_ID_PATTERN: Final = re.compile(r"%[0-9]+")
 _RODEX_SESSION_ID_PATTERN: Final = re.compile(r"[0-9a-f]{16}")
 _SUBAGENT_ACTIVITY_METHODS: Final = frozenset({"item/started", "item/completed"})
+_COLLABORATION_INVOCATION_METHODS: Final = frozenset({"item/started", "item/completed"})
+_COLLABORATION_TOOL_NAMES: Final = {
+    "spawnAgent": "collaboration.spawn_agent",
+    "followupTask": "collaboration.followup_task",
+    "sendMessage": "collaboration.send_message",
+}
+_TURN_REQUEST_KINDS: Final = {
+    "collaboration.spawn_agent": "initial",
+    "collaboration.followup_task": "follow_up",
+}
 _ANSI_ESCAPE_PATTERN: Final = re.compile(r"\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
 _SCOPE_UNAVAILABLE_DETAIL: Final = (
-    "Rodex could not correlate an exact same-turn parent message for this request."
+    "Rodex could not correlate an exact same-turn root user message."
 )
 Runner = Callable[..., subprocess.CompletedProcess[str]]
 CursorReader = Callable[[int, Path], uuid.UUID | None]
@@ -186,6 +196,66 @@ def project_subagent_activity_event(
             "activity_kind": activity_kind,
             "agent_thread_id": agent_thread_id,
             "agent_path": agent_path,
+        },
+    }
+
+
+def project_collaboration_invocation_event(
+    event: Mapping[str, object] | None,
+) -> dict[str, object] | None:
+    """Project one exact current-Codex collaboration invocation for live display."""
+    if event is None or event.get("method") not in _COLLABORATION_INVOCATION_METHODS:
+        return None
+    params = event.get("params")
+    if not isinstance(params, Mapping):
+        return None
+    item = params.get("item")
+    if not isinstance(item, Mapping) or item.get("type") != "collabAgentToolCall":
+        return None
+    item_id = item.get("id")
+    raw_tool_name = item.get("tool")
+    status = item.get("status")
+    prompt = item.get("prompt")
+    if (
+        not isinstance(item_id, str)
+        or not item_id
+        or not isinstance(raw_tool_name, str)
+        or not raw_tool_name
+        or not isinstance(status, str)
+        or not status
+        or (prompt is not None and not isinstance(prompt, str))
+    ):
+        return None
+    thread_id = _optional_uuid_text(params.get("threadId"))
+    sender_thread_id = _optional_uuid_text(item.get("senderThreadId"))
+    raw_receiver_ids = item.get("receiverThreadIds")
+    if (
+        thread_id is None
+        or sender_thread_id is None
+        or not isinstance(raw_receiver_ids, list)
+    ):
+        return None
+    receiver_thread_ids = [_optional_uuid_text(value) for value in raw_receiver_ids]
+    if any(value is None for value in receiver_thread_ids):
+        return None
+    turn_id = params.get("turnId")
+    if turn_id is not None and (not isinstance(turn_id, str) or not turn_id):
+        return None
+    return {
+        "schema": OBSERVER_SCHEMA,
+        "kind": "app_server_collaboration_invocation",
+        "method": event["method"],
+        "thread_id": thread_id,
+        "turn_id": turn_id,
+        "item": {
+            "type": "collabAgentToolCall",
+            "id": item_id,
+            "raw_tool_name": raw_tool_name,
+            "tool_name": _COLLABORATION_TOOL_NAMES.get(raw_tool_name),
+            "status": status,
+            "sender_thread_id": sender_thread_id,
+            "receiver_thread_ids": receiver_thread_ids,
+            "prompt": prompt,
         },
     }
 
@@ -336,6 +406,9 @@ class AgentObserverPaneController:
         self._known_activity_item_ids: set[str] = set()
         self._tracked_target_thread_ids: set[str] = set()
         self._latest_parent_user_message: dict[str, object] | None = None
+        self._collaboration_invocations: dict[str, dict[str, object]] = {}
+        self._subagent_activities: dict[str, dict[str, object]] = {}
+        self._sent_root_request_context_ids: set[str] = set()
 
     def activate(
         self,
@@ -361,6 +434,10 @@ class AgentObserverPaneController:
 
     def observe_protocol_event(self, event: Mapping[str, object] | None) -> None:
         """Create, reuse, or update the observer from one typed App Server item."""
+        collaboration_invocation = project_collaboration_invocation_event(event)
+        if collaboration_invocation is not None:
+            self._observe_collaboration_invocation(collaboration_invocation)
+            return
         agent_message = project_agent_message_event(event)
         if agent_message is not None:
             target_thread_id = agent_message["thread_id"]
@@ -388,6 +465,10 @@ class AgentObserverPaneController:
         assert isinstance(item, dict)
         item_id = str(item["id"])
         target_thread_id = str(item["agent_thread_id"])
+        self._subagent_activities[item_id] = projected
+        collaboration_invocation = self._collaboration_invocations.get(item_id)
+        if collaboration_invocation is not None:
+            projected["collaboration_invocation"] = collaboration_invocation["item"]
         is_new_spawn = (
             projected["method"] == "item/started" and item["activity_kind"] == "started"
         )
@@ -400,12 +481,17 @@ class AgentObserverPaneController:
             cursor = self._cursor_reader(self._rodex_sessions_id, self._database_path)
             projected["after_event_id"] = None if cursor is None else str(cursor)
             self._known_activity_item_ids.add(item_id)
-        is_request_activity = is_new_spawn or item["activity_kind"] == "interacted"
+        tool_name = _projected_invocation_tool_name(collaboration_invocation)
+        has_root_request_context = tool_name in _TURN_REQUEST_KINDS or tool_name == (
+            "collaboration.send_message"
+        )
         request_event = (
-            self._parent_request_event(projected) if is_request_activity else None
+            self._root_request_context_event(projected)
+            if has_root_request_context
+            else None
         )
         if request_event is not None:
-            projected["parent_request_follows"] = True
+            projected["root_request_context_follows"] = True
         self._tracked_target_thread_ids.add(target_thread_id)
         pane_target = self._locate_observer_pane()
         if pane_target is None:
@@ -413,10 +499,47 @@ class AgentObserverPaneController:
                 return
             self._observer_pane_target = self._create_observer_pane(projected)
             if self._observer_pane_target is not None and request_event is not None:
+                self._sent_root_request_context_ids.add(item_id)
                 self._send_observer_event(request_event)
             return
         self._send_observer_event(projected)
         if request_event is not None:
+            self._sent_root_request_context_ids.add(item_id)
+            self._send_observer_event(request_event)
+
+    def _observe_collaboration_invocation(
+        self,
+        invocation: dict[str, object],
+    ) -> None:
+        if invocation.get("thread_id") != str(self._root_thread_id):
+            return
+        item = invocation.get("item")
+        if not isinstance(item, dict):
+            return
+        if item.get("sender_thread_id") != str(self._root_thread_id):
+            return
+        item_id = str(item["id"])
+        self._collaboration_invocations[item_id] = invocation
+        activity = self._subagent_activities.get(item_id)
+        if activity is not None:
+            activity["collaboration_invocation"] = item
+        receiver_ids = item.get("receiver_thread_ids")
+        targets_tracked = isinstance(receiver_ids, list) and any(
+            target in self._tracked_target_thread_ids for target in receiver_ids
+        )
+        if activity is None and not targets_tracked:
+            return
+        pane_target = self._locate_observer_pane()
+        if pane_target is None:
+            return
+        request_event = None
+        if activity is not None and item_id not in self._sent_root_request_context_ids:
+            request_event = self._root_request_context_event(activity)
+            if request_event is not None:
+                invocation["root_request_context_follows"] = True
+        self._send_observer_event(invocation)
+        if request_event is not None:
+            self._sent_root_request_context_ids.add(item_id)
             self._send_observer_event(request_event)
 
     def close(self) -> None:
@@ -426,8 +549,11 @@ class AgentObserverPaneController:
         self._known_activity_item_ids.clear()
         self._tracked_target_thread_ids.clear()
         self._latest_parent_user_message = None
+        self._collaboration_invocations.clear()
+        self._subagent_activities.clear()
+        self._sent_root_request_context_ids.clear()
 
-    def _parent_request_event(
+    def _root_request_context_event(
         self,
         activity_event: Mapping[str, object],
     ) -> dict[str, object] | None:
@@ -442,7 +568,7 @@ class AgentObserverPaneController:
             return None
         return {
             "schema": OBSERVER_SCHEMA,
-            "kind": "parent_request",
+            "kind": "root_request_context",
             "thread_id": activity_event["thread_id"],
             "turn_id": activity_event.get("turn_id"),
             "target_thread_id": activity_item["agent_thread_id"],
@@ -606,6 +732,7 @@ class _AgentTurnPresentation:
 
 
 AgentTurnKey = tuple[str, str]
+AgentActivity = tuple[str, str, str]
 
 
 class AgentObserverView:
@@ -625,8 +752,15 @@ class AgentObserverView:
         self._last_trace_publication_sequence = 0
         self._target_paths: dict[str, str] = {}
         self._seen_activity_item_ids: set[str] = set()
+        self._activity_items: dict[str, AgentActivity] = {}
+        self._pending_live_invocations: dict[str, dict[str, object]] = {}
+        self._invocation_tool_names: dict[str, str] = {}
+        self._rendered_invocation_ids: set[str] = set()
+        self._rendered_prompt_ids: set[str] = set()
+        self._reported_unavailable_prompt_ids: set[str] = set()
         self._seen_agent_message_ids: set[str] = set()
         self._seen_parent_request_keys: set[tuple[str, str, str]] = set()
+        self._root_request_text_by_activity: dict[str, tuple[str, ...]] = {}
         self._pending_requests: dict[str, deque[_PendingAgentRequest]] = {}
         self._turn_presentations: dict[AgentTurnKey, _AgentTurnPresentation] = {}
         self._activity_turn_keys: dict[tuple[str, str], AgentTurnKey] = {}
@@ -656,7 +790,7 @@ class AgentObserverView:
         return tuple(self._initial_lines)
 
     def accept_app_server_event(self, event: Mapping[str, object]) -> list[str]:
-        """Accept one already-sanitized sub-agent activity event."""
+        """Accept one sanitized activity without inferring its collaboration tool."""
         if event.get("schema") != OBSERVER_SCHEMA:
             return []
         if event.get("kind") != "app_server_subagent_activity":
@@ -686,45 +820,160 @@ class AgentObserverView:
         self._seen_activity_item_ids.add(item_id)
         self._target_states[target_thread_id] = activity_kind
         self._target_paths[target_thread_id] = agent_path
-        if activity_kind in {"started", "interacted"}:
-            pending = self._pending_requests.setdefault(target_thread_id, deque())
-            pending.append(
-                _PendingAgentRequest(
-                    activity_item_id=item_id,
-                    request_kind=("initial" if activity_kind == "started" else "follow_up"),
-                )
+        self._activity_items[item_id] = (target_thread_id, agent_path, activity_kind)
+        invocation = event.get("collaboration_invocation")
+        if not isinstance(invocation, Mapping):
+            invocation = self._pending_live_invocations.pop(item_id, None)
+        if isinstance(invocation, Mapping):
+            return self._accept_collaboration_invocation(
+                item_id=item_id,
+                target_thread_id=target_thread_id,
+                agent_path=agent_path,
+                activity_kind=activity_kind,
+                invocation=invocation,
+                root_request_context_follows=(
+                    event.get("root_request_context_follows") is True
+                ),
             )
-            self._active_request_ids.add((target_thread_id, item_id))
-            self._terminal_drain_complete = False
-        if activity_kind == "started":
-            lines = [
-                f"▶ {_agent_display_name(agent_path)} · agent started",
-                "",
-                "INVOKED · spawn_agent",
-                "  New agent thread · context inheritance awaiting verification",
-                "  Delegated prompt: exact text not exposed by Codex",
+        if activity_kind in {"started", "interacted"}:
+            return [
+                f"• {_agent_display_name(agent_path)} · agent interaction observed",
+                "  Invocation awaiting authenticated rollout correlation",
             ]
-            if event.get("parent_request_follows") is True:
-                return lines
-            return [*lines, "", "REQUEST UNAVAILABLE", f"  {_SCOPE_UNAVAILABLE_DETAIL}"]
-        if activity_kind == "interacted":
-            lines = [
-                f"↻ {_agent_display_name(agent_path)} · follow-up requested",
-                "",
-                "INVOKED · followup_task",
-                "  Existing agent thread · existing context continues",
-                "  Delegated prompt: exact text not exposed by Codex",
-            ]
-            if event.get("parent_request_follows") is True:
-                return lines
-            return [*lines, "", "REQUEST UNAVAILABLE", f"  {_SCOPE_UNAVAILABLE_DETAIL}"]
         return [f"• {_agent_display_name(agent_path)} · {activity_kind}"]
 
-    def accept_parent_request_event(self, event: Mapping[str, object]) -> list[str]:
-        """Render exact same-turn parent-user text for an already tracked request."""
+    def accept_collaboration_invocation_event(
+        self,
+        event: Mapping[str, object],
+    ) -> list[str]:
+        """Accept one exact live tool item and correlate it by collaboration call ID."""
         if (
             event.get("schema") != OBSERVER_SCHEMA
-            or event.get("kind") != "parent_request"
+            or event.get("kind") != "app_server_collaboration_invocation"
+            or event.get("thread_id") != self._root_thread_id
+        ):
+            return []
+        item = event.get("item")
+        if not isinstance(item, dict):
+            return []
+        item_id = item.get("id")
+        if (
+            not isinstance(item_id, str)
+            or not item_id
+            or item.get("sender_thread_id") != self._root_thread_id
+        ):
+            return []
+        activity = self._activity_items.get(item_id)
+        if activity is None:
+            self._pending_live_invocations[item_id] = item
+            return []
+        target_thread_id, agent_path, activity_kind = activity
+        return self._accept_collaboration_invocation(
+            item_id=item_id,
+            target_thread_id=target_thread_id,
+            agent_path=agent_path,
+            activity_kind=activity_kind,
+            invocation=item,
+            root_request_context_follows=(
+                event.get("root_request_context_follows") is True
+            ),
+        )
+
+    def _accept_collaboration_invocation(
+        self,
+        *,
+        item_id: str,
+        target_thread_id: str,
+        agent_path: str,
+        activity_kind: str,
+        invocation: Mapping[str, object],
+        root_request_context_follows: bool,
+    ) -> list[str]:
+        tool_name = invocation.get("tool_name")
+        prompt = invocation.get("prompt")
+        capture_state = invocation.get("arguments_capture_state")
+        sender_thread_id = invocation.get("sender_thread_id")
+        if (
+            not isinstance(tool_name, str)
+            or tool_name not in {*_TURN_REQUEST_KINDS, "collaboration.send_message"}
+            or (prompt is not None and not isinstance(prompt, str))
+            or (sender_thread_id is not None and sender_thread_id != self._root_thread_id)
+        ):
+            return [
+                f"• {_agent_display_name(agent_path)} · agent interaction observed",
+                "  Invocation tool is unavailable or unsupported",
+            ]
+        prior_tool_name = self._invocation_tool_names.setdefault(item_id, tool_name)
+        if prior_tool_name != tool_name:
+            return [
+                "",
+                f"INVOCATION CONFLICT · {_agent_display_name(agent_path)}",
+                f"  Live/durable tool disagreement: {prior_tool_name} != {tool_name}",
+            ]
+        request_kind = _TURN_REQUEST_KINDS.get(tool_name)
+        if request_kind is not None:
+            self._queue_turn_request(
+                target_thread_id,
+                item_id,
+                request_kind,
+            )
+        lines: list[str] = []
+        if item_id not in self._rendered_invocation_ids:
+            self._rendered_invocation_ids.add(item_id)
+            lines.extend(
+                _invocation_lines(
+                    agent_path,
+                    tool_name,
+                    activity_kind=activity_kind,
+                )
+            )
+            if not root_request_context_follows and request_kind is not None:
+                lines.extend(
+                    ["", "ROOT TURN REQUEST UNAVAILABLE", f"  {_SCOPE_UNAVAILABLE_DETAIL}"]
+                )
+        if isinstance(prompt, str) and prompt and item_id not in self._rendered_prompt_ids:
+            self._rendered_prompt_ids.add(item_id)
+            lines.extend(_exact_collaboration_prompt_lines(tool_name, prompt))
+        elif (
+            capture_state == "encrypted"
+            and item_id not in self._reported_unavailable_prompt_ids
+            and item_id not in self._rendered_prompt_ids
+        ):
+            self._reported_unavailable_prompt_ids.add(item_id)
+            lines.extend(_unavailable_collaboration_prompt_lines(tool_name))
+        return lines
+
+    def _queue_turn_request(
+        self,
+        target_thread_id: str,
+        activity_item_id: str,
+        request_kind: str,
+    ) -> None:
+        request_id = (target_thread_id, activity_item_id)
+        if request_id in self._active_request_ids or request_id in self._activity_turn_keys:
+            return
+        pending = self._pending_requests.setdefault(target_thread_id, deque())
+        pending.append(
+            _PendingAgentRequest(
+                activity_item_id=activity_item_id,
+                request_kind=request_kind,
+                text_blocks=self._root_request_text_by_activity.get(
+                    activity_item_id,
+                    (),
+                ),
+            )
+        )
+        self._active_request_ids.add(request_id)
+        self._terminal_drain_complete = False
+
+    def accept_root_request_context_event(
+        self,
+        event: Mapping[str, object],
+    ) -> list[str]:
+        """Render exact root-turn provenance without calling it the agent payload."""
+        if (
+            event.get("schema") != OBSERVER_SCHEMA
+            or event.get("kind") != "root_request_context"
             or event.get("thread_id") != self._root_thread_id
         ):
             return []
@@ -746,7 +995,7 @@ class AgentObserverView:
         if (
             target_thread_id not in self._target_states
             or not isinstance(activity_item_id, str)
-            or (pending_request is None and matching_turn is None)
+            or activity_item_id not in self._activity_items
         ):
             return []
         item = event.get("item")
@@ -767,12 +1016,17 @@ class AgentObserverView:
         if not rendered:
             return []
         self._seen_parent_request_keys.add(request_key)
+        self._root_request_text_by_activity[activity_item_id] = tuple(text_blocks)
         if pending_request is not None:
             pending_request.text_blocks = tuple(text_blocks)
-        else:
-            assert matching_turn is not None
+        elif matching_turn is not None:
             matching_turn.request_text_blocks = tuple(text_blocks)
-        return ["", "REQUEST · exact parent message", *rendered]
+        return [
+            "",
+            "ROOT TURN REQUEST · exact user message",
+            "  Parent-turn provenance; not the collaboration payload.",
+            *rendered,
+        ]
 
     def accept_agent_message_event(self, event: Mapping[str, object]) -> list[str]:
         """Render exact assistant-authored text for an agent already being followed."""
@@ -842,8 +1096,44 @@ class AgentObserverView:
                     path = detail.get("agent_path")
                     if isinstance(path, str):
                         self._target_paths[target] = path
-                    request_kind = detail.get("request_kind")
-                    target_turn_id = detail.get("target_codex_turn_id")
+                    else:
+                        path = self._target_paths.get(target, target)
+                    activity_kind = detail.get("activity_kind")
+                    invocation = detail.get("collaboration_invocation")
+                    turn_request = detail.get("turn_request")
+                    if isinstance(invocation, Mapping):
+                        source_call_id = invocation.get("source_call_id")
+                        if isinstance(source_call_id, str) and isinstance(
+                            activity_kind,
+                            str,
+                        ):
+                            self._activity_items.setdefault(
+                                source_call_id,
+                                (target, path, activity_kind),
+                            )
+                            lines.extend(
+                                self._accept_collaboration_invocation(
+                                    item_id=source_call_id,
+                                    target_thread_id=target,
+                                    agent_path=path,
+                                    activity_kind=activity_kind,
+                                    invocation=invocation,
+                                    root_request_context_follows=(
+                                        source_call_id
+                                        in self._root_request_text_by_activity
+                                    ),
+                                )
+                            )
+                    request_kind = (
+                        turn_request.get("request_kind")
+                        if isinstance(turn_request, Mapping)
+                        else None
+                    )
+                    target_turn_id = (
+                        turn_request.get("target_codex_turn_id")
+                        if isinstance(turn_request, Mapping)
+                        else None
+                    )
                     if isinstance(target_turn_id, str):
                         turn = self._bind_turn(target, target_turn_id)
                         if isinstance(request_kind, str):
@@ -1083,7 +1373,8 @@ class AgentObserverView:
             lines.extend(
                 [
                     "",
-                    "REQUEST RECAP · exact parent message",
+                    "ROOT TURN REQUEST RECAP · exact user message",
+                    "  Parent-turn provenance; not the collaboration payload.",
                     *_render_exact_text_blocks(list(request)),
                 ]
             )
@@ -1094,7 +1385,7 @@ class AgentObserverView:
         request_kind = turn.request_kind
         evidence = turn.evidence
         if request_kind == "follow_up":
-            return "followup_task · SAME AGENT · existing context"
+            return "followup_task · SAME AGENT · NEW TURN · existing context"
         if request_kind != "initial":
             return None
         if evidence is None:
@@ -1134,12 +1425,82 @@ class AgentObserverView:
     def header_lines(self) -> tuple[str, ...]:
         return (
             "RODEX · LIVE AGENTS",
-            "Developer view of invocation, exact requests, agent replies, and outcomes.",
+            "Developer view of exact invocations, request context, replies, and outcomes.",
         )
 
 
 def _agent_display_name(agent_path: str) -> str:
     return agent_path.rstrip("/").rsplit("/", 1)[-1] or agent_path
+
+
+def _invocation_lines(
+    agent_path: str,
+    tool_name: str,
+    *,
+    activity_kind: str,
+) -> list[str]:
+    agent_name = _agent_display_name(agent_path)
+    if tool_name == "collaboration.spawn_agent":
+        return [
+            f"▶ {agent_name} · agent started",
+            "",
+            "INVOKED · spawn_agent",
+            "  New agent thread · context inheritance awaiting verification",
+        ]
+    if tool_name == "collaboration.followup_task":
+        return [
+            f"↻ {agent_name} · new turn requested",
+            "",
+            "INVOKED · followup_task",
+            "  Existing agent thread · new agent turn requested · context continues",
+        ]
+    if tool_name == "collaboration.send_message":
+        return [
+            f"→ {agent_name} · message sent",
+            "",
+            "INVOKED · send_message",
+            "  Existing agent thread · current agent turn continues",
+            "  No new turn requested",
+        ]
+    return [f"• {agent_name} · {activity_kind}"]
+
+
+def _exact_collaboration_prompt_lines(tool_name: str, prompt: str) -> list[str]:
+    label = {
+        "collaboration.spawn_agent": "DELEGATED TASK",
+        "collaboration.followup_task": "FOLLOW-UP TASK",
+        "collaboration.send_message": "MESSAGE",
+    }[tool_name]
+    return [
+        "",
+        f"{label} · exact collaboration prompt",
+        *_render_exact_text_blocks([prompt]),
+    ]
+
+
+def _unavailable_collaboration_prompt_lines(tool_name: str) -> list[str]:
+    label = {
+        "collaboration.spawn_agent": "DELEGATED TASK",
+        "collaboration.followup_task": "FOLLOW-UP TASK",
+        "collaboration.send_message": "MESSAGE",
+    }[tool_name]
+    return [
+        "",
+        f"{label} UNAVAILABLE",
+        "  Encrypted in the authenticated rollout; plaintext not exposed",
+    ]
+
+
+def _projected_invocation_tool_name(
+    invocation: Mapping[str, object] | None,
+) -> str | None:
+    if invocation is None:
+        return None
+    item = invocation.get("item")
+    if not isinstance(item, Mapping):
+        return None
+    tool_name = item.get("tool_name")
+    return tool_name if isinstance(tool_name, str) else None
 
 
 def _plain_terminal_text(value: str) -> str:
@@ -1412,10 +1773,12 @@ def main(arguments: list[str] | None = None) -> int:
                 kind = event.get("kind")
                 if kind == "app_server_subagent_activity":
                     _print_lines(view.accept_app_server_event(event))
+                elif kind == "app_server_collaboration_invocation":
+                    _print_lines(view.accept_collaboration_invocation_event(event))
                 elif kind == "app_server_agent_message":
                     _print_lines(view.accept_agent_message_event(event))
-                elif kind == "parent_request":
-                    _print_lines(view.accept_parent_request_event(event))
+                elif kind == "root_request_context":
+                    _print_lines(view.accept_root_request_context_event(event))
                 elif kind == "trace_published":
                     sequence = event.get("trace_publication_sequence")
                     caught_up = event.get("caught_up")

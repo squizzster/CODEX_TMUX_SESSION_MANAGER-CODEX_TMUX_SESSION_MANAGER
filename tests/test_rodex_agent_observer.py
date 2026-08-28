@@ -18,6 +18,7 @@ from rodex.agent_observer import (
     notify_agent_observer_trace_publication,
     observer_control_socket_path,
     project_agent_message_event,
+    project_collaboration_invocation_event,
     project_subagent_activity_event,
     project_user_message_event,
 )
@@ -176,17 +177,63 @@ def _user_message_event(
     }
 
 
-def _unsupported_plaintext_spawn_event() -> dict[str, object]:
-    event = _spawn_event()
-    event["params"]["item"] = {  # type: ignore[index]
-        "type": "collabAgentToolCall",
-        "id": "call-spawn-1",
-        "tool": "spawnAgent",
-        "prompt": "Synthetic plaintext must not enter the observer.",
-        "senderThreadId": str(ROOT_THREAD_ID),
-        "receiverThreadIds": [str(CHILD_THREAD_ID)],
+def _collaboration_invocation_event(
+    *,
+    method: str = "item/started",
+    item_id: str = "call-spawn-1",
+    tool: str = "spawnAgent",
+    prompt: str | None = "Review the parser implementation.",
+    turn_id: str = "turn-1",
+    status: str = "completed",
+) -> dict[str, object]:
+    return {
+        "method": method,
+        "params": {
+            "threadId": str(ROOT_THREAD_ID),
+            "turnId": turn_id,
+            "item": {
+                "type": "collabAgentToolCall",
+                "id": item_id,
+                "tool": tool,
+                "prompt": prompt,
+                "status": status,
+                "senderThreadId": str(ROOT_THREAD_ID),
+                "receiverThreadIds": [str(CHILD_THREAD_ID)],
+            },
+        },
     }
-    return event
+
+
+def _projected_activity(
+    *,
+    method: str = "item/started",
+    item_id: str = "call-spawn-1",
+    activity_kind: str = "started",
+    tool: str = "spawnAgent",
+    prompt: str | None = "Review the parser implementation.",
+    turn_id: str = "turn-1",
+) -> dict[str, object]:
+    activity = project_subagent_activity_event(
+        _spawn_event(
+            method=method,
+            item_id=item_id,
+            activity_kind=activity_kind,
+            turn_id=turn_id,
+        )
+    )
+    invocation = project_collaboration_invocation_event(
+        _collaboration_invocation_event(
+            method=method,
+            item_id=item_id,
+            tool=tool,
+            prompt=prompt,
+            turn_id=turn_id,
+        )
+    )
+    assert activity is not None
+    assert invocation is not None
+    activity["collaboration_invocation"] = invocation["item"]
+    return activity
 
 
 def test_observed_subagent_activity_projection_is_exact_and_content_free() -> None:
@@ -215,7 +262,7 @@ def test_observed_subagent_activity_projection_is_exact_and_content_free() -> No
 def test_subagent_activity_projection_rejects_near_matches() -> None:
     wrong_method = _spawn_event()
     wrong_method["method"] = "item/outputDelta"
-    wrong_type = _unsupported_plaintext_spawn_event()
+    wrong_type = _collaboration_invocation_event()
     missing_id = _spawn_event()
     missing_id["params"]["item"]["id"] = ""  # type: ignore[index]
 
@@ -224,7 +271,34 @@ def test_subagent_activity_projection_rejects_near_matches() -> None:
     assert project_subagent_activity_event(missing_id) is None
 
 
-def test_unsupported_plaintext_spawn_item_cannot_trigger_the_observer(
+def test_current_codex_collaboration_invocation_projection_is_exact() -> None:
+    projected = project_collaboration_invocation_event(
+        _collaboration_invocation_event(
+            tool="sendMessage",
+            prompt="Please send a concise checkpoint.",
+        )
+    )
+
+    assert projected == {
+        "schema": "rodex-agent-observer-v2",
+        "kind": "app_server_collaboration_invocation",
+        "method": "item/started",
+        "thread_id": str(ROOT_THREAD_ID),
+        "turn_id": "turn-1",
+        "item": {
+            "type": "collabAgentToolCall",
+            "id": "call-spawn-1",
+            "raw_tool_name": "sendMessage",
+            "tool_name": "collaboration.send_message",
+            "status": "completed",
+            "sender_thread_id": str(ROOT_THREAD_ID),
+            "receiver_thread_ids": [str(CHILD_THREAD_ID)],
+            "prompt": "Please send a concise checkpoint.",
+        },
+    }
+
+
+def test_collaboration_invocation_waits_for_its_correlated_activity(
     tmp_path: Path,
 ) -> None:
     sent: list[tuple[Path, dict[str, object]]] = []
@@ -247,7 +321,7 @@ def test_unsupported_plaintext_spawn_item_cannot_trigger_the_observer(
         root_thread_id=ROOT_THREAD_ID,
     )
 
-    controller.observe_protocol_event(_unsupported_plaintext_spawn_event())
+    controller.observe_protocol_event(_collaboration_invocation_event())
 
     assert sent == []
 
@@ -450,17 +524,18 @@ def test_same_turn_parent_request_is_sent_exactly_without_entering_process_args(
     )
 
     controller.observe_protocol_event(_user_message_event(text=request))
+    controller.observe_protocol_event(_collaboration_invocation_event())
     controller.observe_protocol_event(_spawn_event())
 
     split = next(command for command in calls if command[3] == "split-window")
     assert request not in split[-1]
-    assert "parent_request_follows" in split[-1]
+    assert "root_request_context_follows" in split[-1]
     assert len(sent) == 1
-    path, parent_request = sent[0]
+    path, root_request_context = sent[0]
     assert path == observer_control_socket_path(tmp_path / "events-runtime-a.sock")
-    assert parent_request == {
+    assert root_request_context == {
         "schema": "rodex-agent-observer-v2",
-        "kind": "parent_request",
+        "kind": "root_request_context",
         "thread_id": str(ROOT_THREAD_ID),
         "turn_id": "turn-1",
         "target_thread_id": str(CHILD_THREAD_ID),
@@ -504,11 +579,12 @@ def test_parent_request_is_not_correlated_across_turns_or_roots(tmp_path: Path) 
     controller.observe_protocol_event(
         _user_message_event(thread_id=OTHER_THREAD_ID, text="other root")
     )
+    controller.observe_protocol_event(_collaboration_invocation_event())
     controller.observe_protocol_event(_spawn_event())
 
     assert len(sent) == 1
     assert sent[0][1]["kind"] == "app_server_subagent_activity"
-    assert "parent_request_follows" not in sent[0][1]
+    assert "root_request_context_follows" not in sent[0][1]
 
 
 def test_same_agent_followup_receives_its_new_exact_parent_request(tmp_path: Path) -> None:
@@ -537,6 +613,7 @@ def test_same_agent_followup_receives_its_new_exact_parent_request(tmp_path: Pat
         rodex_session_id="1234567890abcdef",
         root_thread_id=ROOT_THREAD_ID,
     )
+    controller.observe_protocol_event(_collaboration_invocation_event())
     controller.observe_protocol_event(_spawn_event())
     sent.clear()
 
@@ -545,6 +622,15 @@ def test_same_agent_followup_receives_its_new_exact_parent_request(tmp_path: Pat
             turn_id="turn-2",
             item_id="user-message-2",
             text="Now analyze the stock market, Iran, tariffs, and Truth Social.",
+        )
+    )
+    controller.observe_protocol_event(
+        _collaboration_invocation_event(
+            method="item/completed",
+            item_id="call-followup-1",
+            tool="followupTask",
+            prompt="Now analyze the stock market, Iran, tariffs, and Truth Social.",
+            turn_id="turn-2",
         )
     )
     controller.observe_protocol_event(
@@ -557,11 +643,12 @@ def test_same_agent_followup_receives_its_new_exact_parent_request(tmp_path: Pat
     )
 
     assert [event["kind"] for _, event in sent] == [
+        "app_server_collaboration_invocation",
         "app_server_subagent_activity",
-        "parent_request",
+        "root_request_context",
     ]
-    assert sent[0][1]["parent_request_follows"] is True
-    assert sent[1][1]["item"] == {
+    assert sent[1][1]["root_request_context_follows"] is True
+    assert sent[2][1]["item"] == {
         "type": "userMessage",
         "id": "user-message-2",
         "text_blocks": ["Now analyze the stock market, Iran, tariffs, and Truth Social."],
@@ -670,17 +757,17 @@ def test_existing_observer_retries_live_event_until_control_socket_is_ready(
 
 
 def test_observer_view_renders_exact_parent_request_after_tracked_spawn() -> None:
-    initial = project_subagent_activity_event(_spawn_event())
+    initial = _projected_activity()
     parent = project_user_message_event(
         _user_message_event(text="First line exactly.\nSecond line exactly.")
     )
     assert initial is not None
     assert parent is not None
-    initial["parent_request_follows"] = True
+    initial["root_request_context_follows"] = True
     view = AgentObserverView(root_thread_id=ROOT_THREAD_ID, initial_event=initial)
     request_event = {
         "schema": "rodex-agent-observer-v2",
-        "kind": "parent_request",
+        "kind": "root_request_context",
         "thread_id": str(ROOT_THREAD_ID),
         "turn_id": "turn-1",
         "target_thread_id": str(CHILD_THREAD_ID),
@@ -693,23 +780,26 @@ def test_observer_view_renders_exact_parent_request_after_tracked_spawn() -> Non
         "",
         "INVOKED · spawn_agent",
         "  New agent thread · context inheritance awaiting verification",
-        "  Delegated prompt: exact text not exposed by Codex",
-    )
-    assert view.accept_parent_request_event(request_event) == [
         "",
-        "REQUEST · exact parent message",
+        "DELEGATED TASK · exact collaboration prompt",
+        "  Review the parser implementation.",
+    )
+    assert view.accept_root_request_context_event(request_event) == [
+        "",
+        "ROOT TURN REQUEST · exact user message",
+        "  Parent-turn provenance; not the collaboration payload.",
         "  First line exactly.",
         "  Second line exactly.",
     ]
-    assert view.accept_parent_request_event(request_event) == []
+    assert view.accept_root_request_context_event(request_event) == []
 
 
 def test_parent_request_can_arrive_after_durable_turn_binding_without_being_lost() -> None:
-    initial = project_subagent_activity_event(_spawn_event())
+    initial = _projected_activity()
     parent = project_user_message_event(_user_message_event(text="Exact delayed request."))
     assert initial is not None
     assert parent is not None
-    initial["parent_request_follows"] = True
+    initial["root_request_context_follows"] = True
     view = AgentObserverView(root_thread_id=ROOT_THREAD_ID, initial_event=initial)
     view.accept_trace_snapshot(
         RodexAgentTraceSnapshot(
@@ -732,10 +822,10 @@ def test_parent_request_can_arrive_after_durable_turn_binding_without_being_lost
         )
     )
 
-    lines = view.accept_parent_request_event(
+    lines = view.accept_root_request_context_event(
         {
             "schema": "rodex-agent-observer-v2",
-            "kind": "parent_request",
+            "kind": "root_request_context",
             "thread_id": str(ROOT_THREAD_ID),
             "turn_id": "turn-1",
             "target_thread_id": str(CHILD_THREAD_ID),
@@ -746,7 +836,8 @@ def test_parent_request_can_arrive_after_durable_turn_binding_without_being_lost
 
     assert lines == [
         "",
-        "REQUEST · exact parent message",
+        "ROOT TURN REQUEST · exact user message",
+        "  Parent-turn provenance; not the collaboration payload.",
         "  Exact delayed request.",
     ]
 
@@ -761,10 +852,10 @@ def test_observer_view_rejects_cross_root_activity_and_parent_request() -> None:
     assert view.initial_lines == ()
     assert view.target_thread_ids == frozenset()
     assert (
-        view.accept_parent_request_event(
+        view.accept_root_request_context_event(
             {
                 "schema": "rodex-agent-observer-v2",
-                "kind": "parent_request",
+                "kind": "root_request_context",
                 "thread_id": str(OTHER_THREAD_ID),
                 "turn_id": "turn-1",
                 "target_thread_id": str(CHILD_THREAD_ID),
@@ -781,7 +872,7 @@ def test_observer_view_rejects_cross_root_activity_and_parent_request() -> None:
 
 
 def test_observer_view_renders_only_exact_target_trace_metadata() -> None:
-    initial = project_subagent_activity_event(_spawn_event())
+    initial = _projected_activity(prompt=None)
     assert initial is not None
     initial["after_event_id"] = str(TRACE_CURSOR)
     view = AgentObserverView(
@@ -892,10 +983,9 @@ def test_observer_view_renders_only_exact_target_trace_metadata() -> None:
         "",
         "INVOKED · spawn_agent",
         "  New agent thread · context inheritance awaiting verification",
-        "  Delegated prompt: exact text not exposed by Codex",
         "",
-        "REQUEST UNAVAILABLE",
-        "  Rodex could not correlate an exact same-turn parent message for this request.",
+        "ROOT TURN REQUEST UNAVAILABLE",
+        "  Rodex could not correlate an exact same-turn root user message.",
     )
     assert lines == [
         "",
@@ -917,7 +1007,7 @@ def test_observer_view_renders_only_exact_target_trace_metadata() -> None:
 
 
 def test_observer_view_shows_agent_english_but_not_other_threads_or_control_codes() -> None:
-    initial = project_subagent_activity_event(_spawn_event())
+    initial = _projected_activity()
     commentary = project_agent_message_event(
         _agent_message_event(text="Checking GOV.UK.\n\x1b[31mOne moment…\x1b[0m")
     )
@@ -950,51 +1040,145 @@ def test_observer_view_shows_agent_english_but_not_other_threads_or_control_code
     ]
 
 
-def test_observer_view_fails_closed_when_v2_spawn_has_no_plaintext_scope() -> None:
-    # Captured Codex 0.149.1 MultiAgentV2 shape with test identities substituted.
+def test_observer_view_fails_closed_when_activity_has_no_exact_invocation() -> None:
+    # A subagent activity alone carries lifecycle, not the exact invocation tool.
     initial = project_subagent_activity_event(_spawn_event())
     assert initial is not None
 
     view = AgentObserverView(root_thread_id=ROOT_THREAD_ID, initial_event=initial)
 
     assert view.initial_lines == (
-        "▶ live-review · agent started",
-        "",
-        "INVOKED · spawn_agent",
-        "  New agent thread · context inheritance awaiting verification",
-        "  Delegated prompt: exact text not exposed by Codex",
-        "",
-        "REQUEST UNAVAILABLE",
-        "  Rodex could not correlate an exact same-turn parent message for this request.",
+        "• live-review · agent interaction observed",
+        "  Invocation awaiting authenticated rollout correlation",
     )
 
 
-def test_non_start_activity_does_not_report_scope_unavailable() -> None:
+def test_interacted_activity_does_not_guess_followup_task() -> None:
     interacted = project_subagent_activity_event(_spawn_event(activity_kind="interacted"))
     assert interacted is not None
     view = AgentObserverView(root_thread_id=ROOT_THREAD_ID, initial_event=interacted)
 
     assert view.initial_lines == (
-        "↻ live-review · follow-up requested",
-        "",
-        "INVOKED · followup_task",
-        "  Existing agent thread · existing context continues",
-        "  Delegated prompt: exact text not exposed by Codex",
-        "",
-        "REQUEST UNAVAILABLE",
-        "  Rodex could not correlate an exact same-turn parent message for this request.",
+        "• live-review · agent interaction observed",
+        "  Invocation awaiting authenticated rollout correlation",
     )
 
 
-def test_observer_view_starts_a_new_same_agent_turn_for_followup_request() -> None:
-    initial = project_subagent_activity_event(_spawn_event())
-    followup = project_subagent_activity_event(
+def test_send_message_continues_the_current_turn_without_queuing_another() -> None:
+    view = AgentObserverView(
+        root_thread_id=ROOT_THREAD_ID,
+        initial_event=_projected_activity(),
+    )
+    view.accept_trace_snapshot(
+        RodexAgentTraceSnapshot(
+            1,
+            "rodex-agent-trace-v2",
+            "2026-08-27T23:54:00Z",
+            "complete",
+            1,
+            0,
+            (
+                {
+                    "event_id": "10000000-0000-4000-8000-000000000060",
+                    "codex_thread_id": str(CHILD_THREAD_ID),
+                    "codex_turn_id": "turn-child-1",
+                    "event_kind": "turn_started",
+                    "event_time_utc": "2026-08-27T23:54:00Z",
+                    "detail": None,
+                },
+            ),
+        )
+    )
+    live_invocation = project_collaboration_invocation_event(
+        _collaboration_invocation_event(
+            method="item/completed",
+            item_id="call_fnfkboC80cNGCck6HG8rT3Z5",
+            tool="sendMessage",
+            prompt="Please send a concise checkpoint while continuing your work.",
+        )
+    )
+    activity = project_subagent_activity_event(
         _spawn_event(
             method="item/completed",
-            item_id="call-followup-1",
+            item_id="call_fnfkboC80cNGCck6HG8rT3Z5",
             activity_kind="interacted",
-            turn_id="turn-2",
         )
+    )
+    assert live_invocation is not None
+    assert activity is not None
+
+    assert view.accept_collaboration_invocation_event(live_invocation) == []
+    assert view.accept_app_server_event(activity) == [
+        "→ live-review · message sent",
+        "",
+        "INVOKED · send_message",
+        "  Existing agent thread · current agent turn continues",
+        "  No new turn requested",
+        "",
+        "MESSAGE · exact collaboration prompt",
+        "  Please send a concise checkpoint while continuing your work.",
+    ]
+    assert view.target_turn_keys == ((str(CHILD_THREAD_ID), "turn-child-1"),)
+
+    lines = view.accept_trace_snapshot(
+        RodexAgentTraceSnapshot(
+            2,
+            "rodex-agent-trace-v2",
+            "2026-08-27T23:54:16Z",
+            "complete",
+            3,
+            0,
+            (
+                {
+                    "event_id": "10000000-0000-4000-8000-000000000061",
+                    "codex_thread_id": str(ROOT_THREAD_ID),
+                    "codex_turn_id": "turn-root",
+                    "event_kind": "subagent_activity",
+                    "event_time_utc": "2026-08-27T23:54:14Z",
+                    "detail": {
+                        "target_codex_thread_id": str(CHILD_THREAD_ID),
+                        "activity_kind": "interacted",
+                        "agent_path": "/root/live-review",
+                        "collaboration_invocation": {
+                            "tool_call_id": "10000000-0000-4000-8000-000000000062",
+                            "source_call_id": "call_fnfkboC80cNGCck6HG8rT3Z5",
+                            "tool_name": "collaboration.send_message",
+                            "arguments_utf8_bytes": 378,
+                            "arguments_capture_state": "encrypted",
+                        },
+                        "turn_request": None,
+                    },
+                },
+                {
+                    "event_id": "10000000-0000-4000-8000-000000000063",
+                    "codex_thread_id": str(CHILD_THREAD_ID),
+                    "codex_turn_id": "turn-child-1",
+                    "event_kind": "turn_completed",
+                    "event_time_utc": "2026-08-27T23:54:16Z",
+                    "detail": None,
+                },
+            ),
+        )
+    )
+
+    assert "INVOKED · followup_task" not in lines
+    terminal_lines = view.flush_pending_terminal_events()
+    assert [line for line in terminal_lines if line.startswith("  Invocation:")] == [
+        "  Invocation: spawn_agent · new agent thread"
+    ]
+    view.accept_trace_publication_wake(2, caught_up=True)
+    assert view.monitoring is False
+
+
+def test_observer_view_starts_a_new_same_agent_turn_for_followup_request() -> None:
+    initial = _projected_activity()
+    followup = _projected_activity(
+        method="item/completed",
+        item_id="call-followup-1",
+        activity_kind="interacted",
+        tool="followupTask",
+        prompt="Second scope on the same agent.",
+        turn_id="turn-2",
     )
     parent = project_user_message_event(
         _user_message_event(
@@ -1006,7 +1190,7 @@ def test_observer_view_starts_a_new_same_agent_turn_for_followup_request() -> No
     assert initial is not None
     assert followup is not None
     assert parent is not None
-    followup["parent_request_follows"] = True
+    followup["root_request_context_follows"] = True
     view = AgentObserverView(root_thread_id=ROOT_THREAD_ID, initial_event=initial)
     view.accept_trace_snapshot(
         RodexAgentTraceSnapshot(
@@ -1028,18 +1212,29 @@ def test_observer_view_starts_a_new_same_agent_turn_for_followup_request() -> No
             ),
         )
     )
+    send_message = _projected_activity(
+        method="item/completed",
+        item_id="call-send-before-followup",
+        activity_kind="interacted",
+        tool="sendMessage",
+        prompt="Send a checkpoint before the follow-up turn.",
+        turn_id="turn-2",
+    )
+    assert "INVOKED · send_message" in view.accept_app_server_event(send_message)
 
     assert view.accept_app_server_event(followup) == [
-        "↻ live-review · follow-up requested",
+        "↻ live-review · new turn requested",
         "",
         "INVOKED · followup_task",
-        "  Existing agent thread · existing context continues",
-        "  Delegated prompt: exact text not exposed by Codex",
+        "  Existing agent thread · new agent turn requested · context continues",
+        "",
+        "FOLLOW-UP TASK · exact collaboration prompt",
+        "  Second scope on the same agent.",
     ]
-    assert view.accept_parent_request_event(
+    assert view.accept_root_request_context_event(
         {
             "schema": "rodex-agent-observer-v2",
-            "kind": "parent_request",
+            "kind": "root_request_context",
             "thread_id": str(ROOT_THREAD_ID),
             "turn_id": "turn-2",
             "target_thread_id": str(CHILD_THREAD_ID),
@@ -1048,7 +1243,8 @@ def test_observer_view_starts_a_new_same_agent_turn_for_followup_request() -> No
         }
     ) == [
         "",
-        "REQUEST · exact parent message",
+        "ROOT TURN REQUEST · exact user message",
+        "  Parent-turn provenance; not the collaboration payload.",
         "  Second scope on the same agent.",
     ]
     assert view.monitoring is True
@@ -1081,14 +1277,14 @@ def test_observer_view_starts_a_new_same_agent_turn_for_followup_request() -> No
 
 
 def test_unseen_first_turn_stays_bound_to_first_request_after_followup_arrives() -> None:
-    initial = project_subagent_activity_event(_spawn_event())
-    followup = project_subagent_activity_event(
-        _spawn_event(
-            method="item/completed",
-            item_id="call-followup-before-first-turn",
-            activity_kind="interacted",
-            turn_id="turn-2",
-        )
+    initial = _projected_activity()
+    followup = _projected_activity(
+        method="item/completed",
+        item_id="call-followup-before-first-turn",
+        activity_kind="interacted",
+        tool="followupTask",
+        prompt="Second request already queued on the same agent.",
+        turn_id="turn-2",
     )
     first_parent = project_user_message_event(
         _user_message_event(text="First request before its agent turn is observed.")
@@ -1104,13 +1300,13 @@ def test_unseen_first_turn_stays_bound_to_first_request_after_followup_arrives()
     assert followup is not None
     assert first_parent is not None
     assert second_parent is not None
-    initial["parent_request_follows"] = True
-    followup["parent_request_follows"] = True
+    initial["root_request_context_follows"] = True
+    followup["root_request_context_follows"] = True
     view = AgentObserverView(root_thread_id=ROOT_THREAD_ID, initial_event=initial)
-    view.accept_parent_request_event(
+    view.accept_root_request_context_event(
         {
             "schema": "rodex-agent-observer-v2",
-            "kind": "parent_request",
+            "kind": "root_request_context",
             "thread_id": str(ROOT_THREAD_ID),
             "turn_id": "turn-1",
             "target_thread_id": str(CHILD_THREAD_ID),
@@ -1119,10 +1315,10 @@ def test_unseen_first_turn_stays_bound_to_first_request_after_followup_arrives()
         }
     )
     view.accept_app_server_event(followup)
-    view.accept_parent_request_event(
+    view.accept_root_request_context_event(
         {
             "schema": "rodex-agent-observer-v2",
-            "kind": "parent_request",
+            "kind": "root_request_context",
             "thread_id": str(ROOT_THREAD_ID),
             "turn_id": "turn-2",
             "target_thread_id": str(CHILD_THREAD_ID),
@@ -1184,7 +1380,7 @@ def test_unseen_first_turn_stays_bound_to_first_request_after_followup_arrives()
 
     assert [line for line in lines if line.startswith("  Invocation:")] == [
         "  Invocation: spawn_agent · new agent thread",
-        "  Invocation: followup_task · SAME AGENT · existing context",
+        "  Invocation: followup_task · SAME AGENT · NEW TURN · existing context",
     ]
     assert lines.index("  First request before its agent turn is observed.") < lines.index(
         "  Second request already queued on the same agent."
@@ -1194,16 +1390,16 @@ def test_unseen_first_turn_stays_bound_to_first_request_after_followup_arrives()
 
 
 def test_delayed_old_terminal_and_new_followup_keep_exact_turn_evidence_isolated() -> None:
-    initial = project_subagent_activity_event(_spawn_event())
+    initial = _projected_activity()
     first_parent = project_user_message_event(_user_message_event(text="First request."))
     assert initial is not None
     assert first_parent is not None
-    initial["parent_request_follows"] = True
+    initial["root_request_context_follows"] = True
     view = AgentObserverView(root_thread_id=ROOT_THREAD_ID, initial_event=initial)
-    view.accept_parent_request_event(
+    view.accept_root_request_context_event(
         {
             "schema": "rodex-agent-observer-v2",
-            "kind": "parent_request",
+            "kind": "root_request_context",
             "thread_id": str(ROOT_THREAD_ID),
             "turn_id": "turn-1",
             "target_thread_id": str(CHILD_THREAD_ID),
@@ -1231,13 +1427,13 @@ def test_delayed_old_terminal_and_new_followup_keep_exact_turn_evidence_isolated
             ),
         )
     )
-    followup = project_subagent_activity_event(
-        _spawn_event(
-            method="item/completed",
-            item_id="call-followup-1",
-            activity_kind="interacted",
-            turn_id="turn-2",
-        )
+    followup = _projected_activity(
+        method="item/completed",
+        item_id="call-followup-1",
+        activity_kind="interacted",
+        tool="followupTask",
+        prompt="Second request.",
+        turn_id="turn-2",
     )
     second_parent = project_user_message_event(
         _user_message_event(
@@ -1248,12 +1444,12 @@ def test_delayed_old_terminal_and_new_followup_keep_exact_turn_evidence_isolated
     )
     assert followup is not None
     assert second_parent is not None
-    followup["parent_request_follows"] = True
+    followup["root_request_context_follows"] = True
     view.accept_app_server_event(followup)
-    view.accept_parent_request_event(
+    view.accept_root_request_context_event(
         {
             "schema": "rodex-agent-observer-v2",
-            "kind": "parent_request",
+            "kind": "root_request_context",
             "thread_id": str(ROOT_THREAD_ID),
             "turn_id": "turn-2",
             "target_thread_id": str(CHILD_THREAD_ID),
@@ -1312,24 +1508,24 @@ def test_delayed_old_terminal_and_new_followup_keep_exact_turn_evidence_isolated
 
     assert [line for line in lines if line.startswith("  Invocation:")] == [
         "  Invocation: spawn_agent · new agent thread",
-        "  Invocation: followup_task · SAME AGENT · existing context",
+        "  Invocation: followup_task · SAME AGENT · NEW TURN · existing context",
     ]
-    assert lines.count("REQUEST RECAP · exact parent message") == 2
+    assert lines.count("ROOT TURN REQUEST RECAP · exact user message") == 2
     assert lines.index("  First request.") < lines.index("  Second request.")
     assert view.target_turn_keys == ()
 
 
 def test_unavailable_followup_never_recaps_the_previous_turn_request() -> None:
-    initial = project_subagent_activity_event(_spawn_event())
+    initial = _projected_activity()
     parent = project_user_message_event(_user_message_event(text="Previous request."))
     assert initial is not None
     assert parent is not None
-    initial["parent_request_follows"] = True
+    initial["root_request_context_follows"] = True
     view = AgentObserverView(root_thread_id=ROOT_THREAD_ID, initial_event=initial)
-    view.accept_parent_request_event(
+    view.accept_root_request_context_event(
         {
             "schema": "rodex-agent-observer-v2",
-            "kind": "parent_request",
+            "kind": "root_request_context",
             "thread_id": str(ROOT_THREAD_ID),
             "turn_id": "turn-1",
             "target_thread_id": str(CHILD_THREAD_ID),
@@ -1366,13 +1562,13 @@ def test_unavailable_followup_never_recaps_the_previous_turn_request() -> None:
         )
     )
     view.flush_pending_terminal_events()
-    followup = project_subagent_activity_event(
-        _spawn_event(
-            method="item/completed",
-            item_id="call-followup-2",
-            activity_kind="interacted",
-            turn_id="turn-2",
-        )
+    followup = _projected_activity(
+        method="item/completed",
+        item_id="call-followup-2",
+        activity_kind="interacted",
+        tool="followupTask",
+        prompt=None,
+        turn_id="turn-2",
     )
     assert followup is not None
     request_lines = view.accept_app_server_event(followup)
@@ -1407,24 +1603,24 @@ def test_unavailable_followup_never_recaps_the_previous_turn_request() -> None:
 
     terminal_lines = view.flush_pending_terminal_events()
 
-    assert "REQUEST UNAVAILABLE" in request_lines
-    assert "REQUEST RECAP · exact parent message" not in terminal_lines
+    assert "ROOT TURN REQUEST UNAVAILABLE" in request_lines
+    assert "ROOT TURN REQUEST RECAP · exact user message" not in terminal_lines
     assert "  Previous request." not in terminal_lines
 
 
 def test_observer_view_renders_exact_clean_lineage_work_and_terminal_recap() -> None:
-    initial = project_subagent_activity_event(_spawn_event())
+    initial = _projected_activity()
     parent = project_user_message_event(
         _user_message_event(text="Challenge the prior theory exactly.\nKeep its caveats.")
     )
     assert initial is not None
     assert parent is not None
-    initial["parent_request_follows"] = True
+    initial["root_request_context_follows"] = True
     view = AgentObserverView(root_thread_id=ROOT_THREAD_ID, initial_event=initial)
-    view.accept_parent_request_event(
+    view.accept_root_request_context_event(
         {
             "schema": "rodex-agent-observer-v2",
-            "kind": "parent_request",
+            "kind": "root_request_context",
             "thread_id": str(ROOT_THREAD_ID),
             "turn_id": "turn-1",
             "target_thread_id": str(CHILD_THREAD_ID),
@@ -1489,14 +1685,15 @@ def test_observer_view_renders_exact_clean_lineage_work_and_terminal_recap() -> 
         "437 result records · 1 compaction",
         "  Tokens: 1,200 processed · 900 cached input · 100 output · 40 reasoning",
         "",
-        "REQUEST RECAP · exact parent message",
+        "ROOT TURN REQUEST RECAP · exact user message",
+        "  Parent-turn provenance; not the collaboration payload.",
         "  Challenge the prior theory exactly.",
         "  Keep its caveats.",
     ]
 
 
 def test_observer_view_renders_inherited_agent_without_calling_it_same_agent() -> None:
-    initial = project_subagent_activity_event(_spawn_event())
+    initial = _projected_activity()
     assert initial is not None
     view = AgentObserverView(root_thread_id=ROOT_THREAD_ID, initial_event=initial)
     view.accept_trace_snapshot(
@@ -1644,15 +1841,16 @@ def test_agent_observer_evidence_reader_uses_exact_thread_and_turn(tmp_path: Pat
 
 
 def test_interleaved_agents_never_rewrite_another_agents_work_line() -> None:
-    initial = project_subagent_activity_event(_spawn_event())
+    initial = _projected_activity()
     assert initial is not None
     view = AgentObserverView(root_thread_id=ROOT_THREAD_ID, initial_event=initial)
-    second_event = _spawn_event(item_id="call-spawn-2")
-    second_event["params"]["item"]["agentThreadId"] = str(OTHER_THREAD_ID)  # type: ignore[index]
-    second_event["params"]["item"]["agentPath"] = "/root/second-review"  # type: ignore[index]
-    projected_second = project_subagent_activity_event(second_event)
-    assert projected_second is not None
-    projected_second["parent_request_follows"] = True
+    projected_second = _projected_activity(
+        item_id="call-spawn-2",
+        prompt="Review the second agent.",
+    )
+    projected_second["item"]["agent_thread_id"] = str(OTHER_THREAD_ID)  # type: ignore[index]
+    projected_second["item"]["agent_path"] = "/root/second-review"  # type: ignore[index]
+    projected_second["root_request_context_follows"] = True
     view.accept_app_server_event(projected_second)
     view.accept_trace_snapshot(
         RodexAgentTraceSnapshot(
@@ -1709,7 +1907,7 @@ def test_interleaved_agents_never_rewrite_another_agents_work_line() -> None:
 
 
 def test_app_item_completion_cannot_suppress_the_final_durable_trace_read() -> None:
-    initial = project_subagent_activity_event(_spawn_event())
+    initial = _projected_activity()
     completed = project_subagent_activity_event(_spawn_event(method="item/completed"))
     assert initial is not None
     assert completed is not None
@@ -1876,6 +2074,9 @@ def test_real_tmux_observer_renders_request_and_exits_with_its_runtime(
         )
         exact_request = "Review the real tmux boundary exactly as requested."
         controller.observe_protocol_event(_user_message_event(text=exact_request))
+        controller.observe_protocol_event(
+            _collaboration_invocation_event(prompt=exact_request)
+        )
         controller.observe_protocol_event(_spawn_event())
 
         panes = _wait_for_tmux_panes(tmux, tmux_socket, 2)
@@ -1898,7 +2099,13 @@ def test_real_tmux_observer_renders_request_and_exits_with_its_runtime(
             observer[0],
             exact_request,
         )
-        assert "REQUEST · exact parent message" in rendered_request
+        rendered_request = _wait_for_captured_text(
+            tmux,
+            tmux_socket,
+            observer[0],
+            "ROOT TURN REQUEST · exact user message",
+        )
+        assert exact_request in rendered_request
         assert "REQUEST UNAVAILABLE" not in rendered_request
 
         child_turn_id = "00000000-0000-7000-8000-000000000002"

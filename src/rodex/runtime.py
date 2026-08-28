@@ -1250,7 +1250,14 @@ def run_session_host(
                 tmux_pane_target,
             )
             context_status.update(context_status_segment(None))
-            live_context_observer = CodexContextStatusObserver(context_status.update)
+            live_context_observer = CodexContextStatusObserver(
+                context_status.update,
+                codex_sessions_root=(
+                    analytics_config.codex_sessions_root
+                    if analytics_config is not None
+                    else default_codex_sessions_root()
+                ),
+            )
             context_status_observer = live_context_observer
             live_event_tap = CodexProtocolEventTap(protocol_event_socket_path)
             protocol_event_tap = live_event_tap

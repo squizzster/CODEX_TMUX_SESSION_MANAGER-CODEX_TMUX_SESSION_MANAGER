@@ -53,8 +53,9 @@ Both sides retain the same Rodex, runtime, Codex, and workspace context.
 - Tracks root/sub-agent lineage and typed rollout-derived messages, commands, tools,
   contexts, token usage, rate limits, and agent activity in a durable agent trace.
 - Opens and reuses a noninteractive top-third agent observer on an exact live
-  `subAgentActivity(kind=started)` event, then shows invocation semantics, the exact
-  same-turn parent request when present, agent-authored prose, and durable outcomes while
+  `subAgentActivity(kind=started)` event, correlates the current Codex collaboration
+  tool by exact call ID, then shows invocation semantics, collaboration prompt when
+  exposed, root-turn request context, agent-authored prose, and durable outcomes while
   leaving Codex focused below.
 - Never adopts unregistered tmux sessions and verifies Rodex and Codex identities
   before attaching to or controlling a live runtime.
@@ -120,9 +121,11 @@ The Rodex identity is blue (`#1402D8`). The context indicator shows a rounded wh
 percentage using the same last-token-usage divided by model-context-window calculation as
 Rodex analytics. It is blue below 70%, tmux yellow from 70%, and tmux red from 75%.
 These are empirical bands rather than a claim that Codex compacts at one exact
-percentage. While the App Server reports a live context compaction item, the same slot
-animates `COMPACTING` with a bright cyan-to-white activity pulse; it returns to the
-freshest post-compaction percentage, or `Context: --` until one arrives.
+percentage. The exact primary rollout path supplied by `thread/started` provides live
+token snapshots during a long turn; App Server usage notifications reconcile the same
+value at their lifecycle boundary. While the App Server reports a live context compaction
+item, the same slot animates `COMPACTING` with a bright cyan-to-white activity pulse; it
+returns to the freshest post-compaction percentage, or `Context: --` until one arrives.
 
 ### Live agent observer pane
 
@@ -133,21 +136,25 @@ directly runs Rodex's dedicated observer process, has tmux input disabled, and c
 execute shell commands. It remains after an agent turn finishes and is reused by later
 agent activity; it exits with the Rodex runtime so it cannot keep a session alive.
 
-The App Server's exact agent UUID, path, and activity kind determine what is followed.
-The pane reports whether Codex invoked `spawn_agent` or `followup_task`, then uses durable
-lineage to distinguish a new clean agent, a new inherited agent, and the same agent
-continuing with a new turn. Codex 0.149.1's MultiAgent V2 activity does not expose the
-delegated plaintext, while its local parent and child records retain that payload
-encrypted. The pane says so explicitly; it never reconstructs scope from the child's
-behaviour or first reply.
+The App Server's exact agent UUID and path determine what is followed. Its current
+`collabAgentToolCall` item names `spawnAgent`, `followupTask`, or `sendMessage` and may
+carry the exact collaboration `prompt`; the matching `subAgentActivity` supplies target
+and lifecycle under the same call ID. The committed trace independently retains that
+call-to-tool relationship. A spawn starts a new agent thread, a follow-up starts a new
+turn on the existing agent, and a message continues the current turn without queuing
+another. Missing correlation remains explicitly unresolved rather than being guessed
+from the generic `interacted` activity kind.
 
-Rodex does receive the completed parent `userMessage` that preceded an agent request.
+Rodex also receives the completed root `userMessage` that preceded the collaboration.
 When it belongs to the same exact root turn, the observer reproduces its text unchanged
-as `REQUEST · exact parent message`; it does not relabel that request as the delegated
-prompt. Without that exact correlation, Rodex prints `REQUEST UNAVAILABLE`. Completed
-tracked-child `agentMessage` items appear as agent-attributed `AGENT UPDATE` commentary
+as `ROOT TURN REQUEST · exact user message` and identifies it as provenance rather than
+the collaboration payload. When Codex exposes `prompt`, the pane separately renders the
+exact delegated task, follow-up task, or message; otherwise it reports the authenticated
+rollout payload as encrypted and unavailable. Completed tracked-child `agentMessage`
+items appear as agent-attributed `AGENT UPDATE` commentary
 and `AGENT ANSWER` final text. The completion block restates invocation type, work,
-token breakdown, weekly-limit use when available, and the exact parent-request recap.
+token breakdown, weekly-limit use when available, and the exact root-request-context
+recap.
 Rodex sanitizes terminal controls without fixed-width truncation and leaves wrapping to
 the actual tmux pane width.
 
@@ -156,14 +163,19 @@ file, web, query, result, compaction, and token metrics. Changed durable progres
 natural-width `WORK` block without cursor-up rewriting; interleaved agents and successive
 turns retain independent presentation state. Multiple not-yet-observed requests for one
 agent remain FIFO, so a delayed earlier turn cannot consume a later follow-up's request.
+`send_message` never enters that queue, consumes a target turn, delays observer drain,
+or manufactures a terminal recap.
+
 The display excludes unrelated parent/user messages, developer and system instructions,
 hidden reasoning, command text, tool payloads, and output bodies. Each runtime owns a
 distinct private observer-control socket. Length-framed Unix stream messages preserve
 long exact agent prose without datagram truncation, while preventing one Rodex session
 from delivering lifecycle or publication events into another pane. The analytics
-transaction also canonicalizes each spawn/follow-up request and later associates it FIFO
-with the target agent's next distinct observed turn; it stores identity and provenance,
-not a second plaintext body.
+transaction also canonicalizes each turn-producing spawn/follow-up request and later
+associates it FIFO with the target agent's next distinct observed turn. The same trace
+read exposes the exact linked `send_message` invocation without creating a request row.
+SQLite stores identity, encrypted-body metadata, and provenance, not a second plaintext
+body.
 
 The analytics worker sends a nonblocking wake only after its existing transaction
 commits. The observer advances from an indexed opaque event cursor, then performs one

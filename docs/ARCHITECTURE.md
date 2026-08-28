@@ -99,7 +99,7 @@ Managed opens hold one per-session lock through live resolution, resume, and end
 `_running` follows the same ownership and live-endpoint rules. `_alias` changes use the
 same naming pipeline and compensate a tmux rename if the database transition fails.
 
-Named segments own base status. `TmuxStatusPipeline` arbitrates animations and transient claims so refreshes cannot clear higher-priority warnings. Per-client prefix state preserves fast keys; shared `Ctrl-C` requires same-client confirmation; `/rodex` remains disabled. Context usage and compaction signals come from the primary protocol observer, while durable analytics remains downstream.
+Named segments own base status. `TmuxStatusPipeline` arbitrates animations and transient claims so refreshes cannot clear higher-priority warnings. Per-client prefix state preserves fast keys; shared `Ctrl-C` requires same-client confirmation; `/rodex` remains disabled. One primary context coordinator combines live token snapshots from the exact rollout path named by `thread/started` with App Server usage and compaction events; durable analytics remains downstream.
 
 ## Live observation
 
@@ -123,13 +123,15 @@ request/turn associations, and worker health. Failures preserve the last good vi
 cannot affect the TUI. See [SQL_SCHEMA.md](SQL_SCHEMA.md) for persistence rules.
 
 After each publication, the observer reads one bounded projection for its current agent
-turns. `subAgentActivity` supplies child identity and lifecycle but no delegated plaintext
-on Codex 0.149.1's MultiAgent V2 path. Only the latest completed same-root, same-turn
-parent `userMessage` may be labelled as parent-request provenance. Runtime-specific
-length-framed control messages are root-checked and keyed by exact child and turn;
-unbound requests remain FIFO. Other-root content, protected instructions, encrypted
-payloads, reasoning, commands, and tool payloads stay outside the boundary. Exact
-delegated scope requires a future authenticated field tied to the same spawn.
+turns. Codex 0.150.1's `collabAgentToolCall` supplies the exact collaboration tool and,
+when available, its plaintext prompt; `subAgentActivity` supplies child identity and
+lifecycle under the same call ID. The durable trace retains that exact relationship while
+keeping rollout arguments encrypted. Only spawn and follow-up operations enter the FIFO
+target-turn association; `send_message` continues the current turn. The latest completed
+same-root, same-turn `userMessage` is separately labelled as root-request provenance.
+Runtime-specific length-framed control messages are root- and sender-checked and keyed by
+exact activity identity. Other-root content, protected instructions, encrypted payloads,
+reasoning, arbitrary tool arguments, and output payloads stay outside the boundary.
 
 ## Live control
 

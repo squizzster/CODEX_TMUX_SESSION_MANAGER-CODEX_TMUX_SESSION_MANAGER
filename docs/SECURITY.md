@@ -34,6 +34,9 @@ listener; control endpoints are Unix sockets below a private runtime root.
   sessions root, using no-follow and nonblocking opens before authenticating the Codex
   thread ID and stable complete-record prefix. Startup-only lineage discovery is bounded
   to the root UUIDv7 three-day window and reads only candidate metadata lines.
+- The live context follower accepts only an absolute, exact-thread rollout filename
+  beneath that configured sessions root. It reads a bounded tail and bounded appended
+  lines for `token_count` records only, retaining no rollout bodies.
 - tmux operations use argv execution and exact `=name` or `=name:` targets. Dynamic hook
   commands are shell-quoted; cleanup and failure handling target one named runtime.
 - `_cat`, `_tail`, and `_events` resolve the same owned, registered live identity before
@@ -42,16 +45,19 @@ listener; control endpoints are Unix sockets below a private runtime root.
   Terminal following emits only tmux's plain text and creates no persistent conversation
   copy.
 - The input-disabled agent observer admits plaintext from a completed `agentMessage`
-  authored by a tracked child and from the latest completed parent `userMessage` only
-  when the same exact root turn subsequently requests that agent. The latter is labelled
-  as the exact parent request, not delegated scope. Its live text travels after process
-  startup through length-framed messages on a runtime-specific mode-`0600` Unix stream
-  socket and is not copied into process arguments or a second SQLite body. SQL records
-  the canonical request and its provenance through authenticated trace references.
-  MultiAgent V2 delegated payloads remain encrypted; Rodex does not infer or recover
-  them. The view verifies the root identity, strips terminal controls, and excludes user
-  messages from other roots or turns, system/developer messages, hidden reasoning,
-  commands, and tool payloads.
+  authored by a tracked child, the current App Server's explicit collaboration `prompt`,
+  and the latest completed root `userMessage` when the same exact turn performs that
+  collaboration. Prompt text is tied to the exact `collabAgentToolCall` identity; root
+  user text is separately labelled as provenance, never as the collaboration payload.
+  Live text travels after process startup through length-framed messages on a
+  runtime-specific mode-`0600` Unix stream socket and is not copied into process
+  arguments or a second SQLite body. SQL records canonical tool/activity identity,
+  encrypted-body metadata, and turn-request provenance through authenticated trace
+  references. When Codex does not expose plaintext, Rodex reports it unavailable rather
+  than inferring or recovering it. The view verifies the root and sender identities,
+  strips terminal controls, and excludes user messages from other roots or turns,
+  system/developer messages, hidden reasoning, commands, arbitrary tool arguments, and
+  output payloads.
 - The install shim accepts only root- or current-user-owned, non-group/world-writable
   project code and `uv`. A system command must use an immutable root-owned installation.
 

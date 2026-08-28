@@ -1247,26 +1247,115 @@ def test_initial_and_followup_requests_are_distinct_and_link_distinct_agent_turn
         for event in read_rodex_agent_trace(1, database).events
         if event["event_kind"] == "subagent_activity"
     ]
-    assert [event["detail"]["agent_request_id"] for event in request_events] == [
+    turn_requests = [event["detail"]["turn_request"] for event in request_events]
+    assert [request["request_id"] for request in turn_requests] == [
         str(request_public_ids[0]),
         str(request_public_ids[1]),
     ]
-    assert [event["detail"]["request_kind"] for event in request_events] == [
+    assert [request["request_kind"] for request in turn_requests] == [
         "initial",
         "follow_up",
+    ]
+    assert [
+        event["detail"]["collaboration_invocation"]["tool_name"] for event in request_events
+    ] == [
+        "collaboration.spawn_agent",
+        "collaboration.followup_task",
     ]
     assert [event["detail"]["target_codex_thread_id"] for event in request_events] == [
         str(CHILD_THREAD_ID),
         str(CHILD_THREAD_ID),
     ]
-    assert [event["detail"]["target_codex_turn_id"] for event in request_events] == [
+    assert [request["target_codex_turn_id"] for request in turn_requests] == [
         str(child_turn_ids[0]),
         str(child_turn_ids[1]),
     ]
-    assert [event["detail"]["target_turn_outcome"] for event in request_events] == [
+    assert [request["target_turn_outcome"] for request in turn_requests] == [
         "completed",
         "open",
     ]
+
+
+def test_send_message_activity_exposes_invocation_without_a_turn_request(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "rodex.sqlite3"
+    create_a_rodex_session(database, codex_session_id=THREAD_ID)
+    parent_turn_id = "00000000-0000-7000-8000-0000000000d0"
+    call_id = "call_fnfkboC80cNGCck6HG8rT3Z5"
+    arguments = '{"target":"/root/review","message":"gAAAA_TEST_TOKEN"}'
+    publication = normalize_rollout_trace(
+        (
+            (
+                THREAD_ID,
+                _content(
+                    {
+                        "ordinal": 1,
+                        "timestamp": "2026-08-27T23:54:00Z",
+                        "type": "event_msg",
+                        "payload": {"type": "task_started", "turn_id": parent_turn_id},
+                    },
+                    {
+                        "ordinal": 2,
+                        "timestamp": "2026-08-27T23:54:14.419Z",
+                        "type": "response_item",
+                        "payload": {
+                            "type": "function_call",
+                            "namespace": "collaboration",
+                            "name": "send_message",
+                            "call_id": call_id,
+                            "arguments": arguments,
+                        },
+                    },
+                    {
+                        "ordinal": 3,
+                        "timestamp": "2026-08-27T23:54:14.421Z",
+                        "type": "event_msg",
+                        "payload": {
+                            "type": "item_completed",
+                            "item": {
+                                "type": "SubAgentActivity",
+                                "id": call_id,
+                                "kind": "interacted",
+                                "agent_thread_id": str(CHILD_THREAD_ID),
+                                "agent_path": "/root/review",
+                            },
+                        },
+                    },
+                ),
+            ),
+        ),
+        based_on_trace_publication_sequence=None,
+        calculated_at_utc="2026-08-27T23:54:15Z",
+    )
+
+    _publish_trace(database, publication)
+
+    with sqlite3.connect(database) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM rodex_sessions_agent_requests"
+        ).fetchone() == (0,)
+        assert connection.execute(
+            "SELECT COUNT(*) FROM rodex_sessions_agent_request_target_turns"
+        ).fetchone() == (0,)
+    detail = next(
+        event["detail"]
+        for event in read_rodex_agent_trace(1, database).events
+        if event["event_kind"] == "subagent_activity"
+    )
+    assert detail == {
+        "target_codex_thread_id": str(CHILD_THREAD_ID),
+        "activity_kind": "interacted",
+        "agent_path": "/root/review",
+        "collaboration_invocation": {
+            "tool_call_id": detail["collaboration_invocation"]["tool_call_id"],
+            "source_call_id": call_id,
+            "tool_name": "collaboration.send_message",
+            "arguments_utf8_bytes": len(arguments.encode()),
+            "arguments_capture_state": "encrypted",
+        },
+        "turn_request": None,
+    }
 
 
 def test_request_commits_before_target_registration_then_links_only_its_target_turn(
@@ -1469,8 +1558,11 @@ def test_request_commits_before_target_registration_then_links_only_its_target_t
         for event in read_rodex_agent_trace(1, database).events
         if event["event_kind"] == "subagent_activity"
     )
-    assert request_detail["target_codex_turn_id"] == target_turn_id
-    assert request_detail["target_turn_association_kind"] == "next_observed_turn"
+    assert request_detail["turn_request"]["target_codex_turn_id"] == target_turn_id
+    assert (
+        request_detail["turn_request"]["target_turn_association_kind"]
+        == "next_observed_turn"
+    )
 
 
 def test_agent_request_parent_is_latest_user_message_before_the_tool_request(

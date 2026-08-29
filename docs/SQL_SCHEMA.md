@@ -133,18 +133,18 @@ suggestion followed by user agreement.
 - Rodex does not implicitly reset, rewrite, or repair incompatible schema generations.
   Additive, verified schema extensions preserve current-generation contents.
 
-## Current v14 execution, request, statistics, and agent-trace projection
+## Current v16 execution, request, statistics, and agent-trace projection
 
 - `rodex_registries` contains the database instance's one durable 64-bit ID row. Live tmux
   identity includes it so another registry cannot adopt the same session/Codex pair.
 - `rodex_sessions` contains one signed-BIGINT Rodex session ID and
   permanent/optional display-name links. The public Rodex
   session ID is always serialized as a 16-character lowercase hex string, never a JSON
-  number. The incompatible ALPHA v14 generation is stored in `rodex-v14.sqlite3`.
+  number. The incompatible ALPHA v16 generation is stored in `rodex-v16.sqlite3`.
   `rodex_schema_generations` marks the exact generation inside the database; Rodex
   rejects nonempty unmarked databases and wrong generations before creating any domain
-  table. Files for other generations remain outside the current v14 database path and
-  are not read.
+  table. Files for other generations remain outside the current v16 database path and
+  are not read. The prior `rodex-v14.sqlite3` remains untouched by v16 bootstrap.
 - `rodex_runtime_instances` contains one signed-`BIGINT` random 64-bit `runtime_id` and
   its start time for a Rodex session. Unique indexes fence both session cardinality and
   runtime ID reuse. Allocation uses the same ten-candidate indexed-selection pipeline

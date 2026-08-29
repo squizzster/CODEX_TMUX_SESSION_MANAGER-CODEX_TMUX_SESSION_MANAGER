@@ -33,9 +33,10 @@ listener; control endpoints are Unix sockets below a private runtime root.
   through `/proc/self/fd/<validated-database-fd>`.
 - Only an explicit first-use bootstrap transaction may create the parent, transition
   lock, or database. Ordinary readers and writers require an existing database and lock
-  and never create missing filesystem state. Runtime terminal subscription is separate:
-  it is available only after a transaction has admitted the exact opened descriptor and
-  cannot admit a pathname itself.
+  and never create missing filesystem state. The sole runtime terminal-subscription
+  operation enters that existing-only read boundary itself, admits the exact opened
+  descriptor in the calling process, and installs the subscriber before the read
+  transaction exits. It never trusts a prior process's guard state or a pathname alone.
 - Rodex revalidates the retained and pathname identities, ownership, type, mode, symlink
   state, and SQLite-reported main path before connect, after connect, before `BEGIN`, and
   before `COMMIT`. Every ordinary transaction and integrity audit holds a shared `flock`
@@ -46,15 +47,17 @@ listener; control endpoints are Unix sockets below a private runtime root.
   deferred transaction and see a normal committed-WAL snapshot.
 - One process-lifetime Linux inotify manager watches each admitted database's parent name
   and inode using one blocking worker, one inotify descriptor, and one wake pipe. It does
-  not poll or write storage. A move, delete, replacement, parent move, watched
-  parent/database owner or mode change, unmount, ignored watch, queue overflow, watcher
-  error, or synchronous identity mismatch permanently latches `database_moved`, interrupts
-  active connections, and notifies subscribers. Rapid move-away-and-back still latches.
-  There is no reset while the process continues; manager descriptors and its worker are
-  closed only during process exit.
-- A live session host subscribes to that already-admitted terminal signal and shuts down
-  its TUI, proxy, and sidecars when it fires. One-shot commands exit nonzero. Both report
-  `please restart Rodex`; no caller follows or accepts replacement storage. The explicit
+  not poll or write storage. A database/name move, delete, replacement, or attribute
+  change; a parent move, delete, or unmount; an ignored watch, queue overflow, watcher error,
+  or synchronous identity mismatch permanently latches `database_moved`, interrupts active
+  connections, and notifies subscribers. Parent ownership and mode are rejected at the next
+  canonical transaction boundary. Rapid move-away-and-back still latches. There is no reset
+  while the process continues; manager descriptors and its worker are closed only during
+  process exit.
+- A live session host enters the canonical existing-only read boundary and installs its
+  terminal subscription before spawning the App Server, proxy, or TUI. It shuts those
+  children and sidecars down when the latch fires. One-shot commands exit nonzero. Both
+  report `please restart Rodex`; no caller follows or accepts replacement storage. The explicit
   integrity audit uses the same existing-only shared-lock boundary, includes committed
   WAL, performs no DDL, and rejects unexpected views as well as tables, indexes, and
   triggers. Live storage relocation and implicit repair are unsupported. Direct same-uid

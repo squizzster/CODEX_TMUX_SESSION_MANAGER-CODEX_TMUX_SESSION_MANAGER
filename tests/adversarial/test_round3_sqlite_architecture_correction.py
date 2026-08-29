@@ -9,6 +9,7 @@ from contextlib import closing
 from datetime import UTC, datetime
 from pathlib import Path
 from threading import enumerate as enumerate_threads
+from typing import Any
 
 import pytest
 
@@ -19,7 +20,6 @@ import rodex_sql.transactions as transactions_module
 from rodex.cli import main
 from rodex_sql import (
     RodexDatabaseMovedError,
-    database_terminal_signal,
     open_rodex_bootstrap_transaction,
     open_rodex_read_transaction,
     open_rodex_transaction,
@@ -27,6 +27,12 @@ from rodex_sql import (
 from rodex_sql.private_database_path import open_private_database_boundary
 
 guard_module = importlib.import_module("rodex_sql.database_location_guard")
+
+
+def _database_guard(path: Path) -> Any:
+    guard = guard_module._known_database_location_guard(path)
+    assert guard is not None
+    return guard
 
 
 def _marker_database(path: Path) -> None:
@@ -52,7 +58,7 @@ def test_round3_move_spanning_every_transaction_boundary_is_terminal_and_rolls_b
     database = tmp_path / "registry.sqlite3"
     moved = tmp_path / "moved.sqlite3"
     _marker_database(database)
-    guard = database_terminal_signal(database)
+    guard = _database_guard(database)
     real_identity = transactions_module.require_database_identity
     real_main_path = transactions_module.require_sqlite_main_path
     moved_once = False
@@ -103,7 +109,7 @@ def test_round3_rapid_move_away_and_back_still_latches_terminal_failure(
     database = tmp_path / "registry.sqlite3"
     away = tmp_path / "away.sqlite3"
     _marker_database(database)
-    guard = database_terminal_signal(database)
+    guard = _database_guard(database)
 
     with (
         pytest.raises(RodexDatabaseMovedError, match="please restart Rodex"),
@@ -137,7 +143,7 @@ def test_round3_parent_move_away_and_back_latches_the_database(tmp_path: Path) -
 def test_round3_inotify_queue_overflow_is_permanently_terminal(tmp_path: Path) -> None:
     database = tmp_path / "registry.sqlite3"
     _marker_database(database)
-    guard = database_terminal_signal(database)
+    guard = _database_guard(database)
 
     guard._manager.inject_overflow_for_testing()
 
@@ -156,7 +162,7 @@ def test_round3_location_guard_subscription_is_once_and_immediate_after_latch(
     database = tmp_path / "registry.sqlite3"
     away = tmp_path / "away.sqlite3"
     _marker_database(database)
-    guard = database_terminal_signal(database)
+    guard = _database_guard(database)
     notices: list[tuple[Path, str]] = []
     unsubscribe = guard.subscribe_terminal(
         lambda path, reason: notices.append((path, reason))
@@ -173,6 +179,24 @@ def test_round3_location_guard_subscription_is_once_and_immediate_after_latch(
     unsubscribe()
 
 
+def test_round3_failed_late_subscription_is_not_retained(tmp_path: Path) -> None:
+    database = tmp_path / "registry.sqlite3"
+    away = tmp_path / "away.sqlite3"
+    _marker_database(database)
+    guard = _database_guard(database)
+    database.replace(away)
+    with pytest.raises(RodexDatabaseMovedError):
+        guard.require_available("test")
+
+    def reject_terminal(_path: Path, _reason: str) -> None:
+        raise RuntimeError("subscriber cannot start")
+
+    with pytest.raises(RuntimeError, match="subscriber cannot start"):
+        guard.subscribe_terminal(reject_terminal)
+
+    assert guard._subscribers == {}
+
+
 def test_round3_guard_establishment_performs_no_writes_or_polling(tmp_path: Path) -> None:
     database = tmp_path / "registry.sqlite3"
     _marker_database(database)
@@ -181,7 +205,7 @@ def test_round3_guard_establishment_performs_no_writes_or_polling(tmp_path: Path
         for path in tmp_path.iterdir()
     }
 
-    guard = database_terminal_signal(database)
+    guard = _database_guard(database)
 
     after = {
         path.name: (path.stat().st_size, path.stat().st_mtime_ns)
@@ -207,8 +231,8 @@ def test_round3_sibling_guard_does_not_inherit_pre_registration_parent_events(
     with open_rodex_read_transaction(second) as connection:
         assert connection.execute("SELECT value FROM marker").fetchone() == ("stable",)
 
-    assert not database_terminal_signal(first).terminal_event.is_set()
-    assert not database_terminal_signal(second).terminal_event.is_set()
+    assert not _database_guard(first).terminal_event.is_set()
+    assert not _database_guard(second).terminal_event.is_set()
 
 
 def test_round3_external_process_swap_back_latches_terminal_failure(
@@ -217,7 +241,7 @@ def test_round3_external_process_swap_back_latches_terminal_failure(
     database = tmp_path / "registry.sqlite3"
     away = tmp_path / "away.sqlite3"
     _marker_database(database)
-    guard = database_terminal_signal(database)
+    guard = _database_guard(database)
 
     subprocess.run(
         [
@@ -239,7 +263,7 @@ def test_round3_known_location_is_never_recreated_after_move(tmp_path: Path) -> 
     database = tmp_path / "registry.sqlite3"
     away = tmp_path / "away.sqlite3"
     _marker_database(database)
-    database_terminal_signal(database)
+    _database_guard(database)
     database.replace(away)
 
     with (
@@ -342,7 +366,7 @@ def test_round3_cli_reports_terminal_storage_failure_with_restart_guidance(
     database = tmp_path / "registry.sqlite3"
     away = tmp_path / "away.sqlite3"
     _marker_database(database)
-    database_terminal_signal(database)
+    _database_guard(database)
     database.replace(away)
     away.replace(database)
     monkeypatch.setenv("RODEX_DATABASE_PATH", os.fspath(database))

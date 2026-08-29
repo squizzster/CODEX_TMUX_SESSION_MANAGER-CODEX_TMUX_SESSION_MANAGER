@@ -117,9 +117,11 @@ SQLite. Projection bounds text before JSON encoding and control frames are cappe
 On primary connection loss, `PrimaryConnectionLifecycleCoordinator` independently calls
 every reset participant, records failures, and completes the lifecycle transition even
 when one reset fails. The reducer alone advances the observer transport epoch. This is
-separate from terminal host shutdown. After a Rodex transaction admits
-the database, runtime subscribes to `database_terminal_signal`; a moved, replaced, or
-invalidated database latches a restart-required reason. `RuntimeShutdownCoordinator`
+separate from terminal host shutdown. Before spawning children, runtime calls
+`subscribe_rodex_database_terminal`, whose existing-only read boundary admits the exact
+database and subscribes to its terminal latch in the host process as one operation. A
+moved, replaced, or invalidated database latches a restart-required reason.
+`RuntimeShutdownCoordinator`
 wakes every registered boundary, terminates the TUI, and the host closes analytics,
 runtime keepalive, proxy, observer, event tap, app-server, and private sockets.
 

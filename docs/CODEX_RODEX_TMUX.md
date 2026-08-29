@@ -340,9 +340,11 @@ Codex, tmux, or analyzer processes.
   its private sockets and log hourly. A refresh failure ends that runtime rather than
   leaving a detached session that cannot be addressed. Normal cleanup eligibility
   resumes when the live hosts exit.
-- After a Rodex transaction admits the registered database, the host subscribes to
-  `database_terminal_signal`. Database move, replacement, invalidation, or notification
-  overflow permanently latches restart guidance. `RuntimeShutdownCoordinator` wakes
+- Before spawning children, the host calls `subscribe_rodex_database_terminal`. Its
+  existing-only read boundary admits the exact registered database and subscribes to
+  the terminal latch in the host process as one operation. Database move, replacement,
+  invalidation, or notification overflow permanently latches restart guidance.
+  `RuntimeShutdownCoordinator` wakes
   each registered boundary, terminates the TUI, and lets the host close analytics,
   keepalive, proxy, observer, event tap, app-server, and sockets; it never follows a
   replacement path or attempts in-process recovery.

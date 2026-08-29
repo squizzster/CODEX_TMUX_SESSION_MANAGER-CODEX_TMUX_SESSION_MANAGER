@@ -5,12 +5,12 @@ from pathlib import Path
 
 import pytest
 
+import rodex_sql.transactions as transactions_module
 from rodex_sql import (
     INDEX_RE_TRY_ATTEMPTS,
     RodexDatabaseNotFoundError,
     RodexDatabaseNotInitializedError,
     RodexSQLError,
-    database_terminal_signal,
     index_re_try_attempt_numbers,
     open_rodex_bootstrap_transaction,
     open_rodex_read_transaction,
@@ -18,6 +18,7 @@ from rodex_sql import (
     require_active_rodex_transaction,
     select_lookup_id,
     select_or_insert_lookup_id,
+    subscribe_rodex_database_terminal,
 )
 
 
@@ -118,20 +119,86 @@ def test_existing_transaction_does_not_initialize_an_unadmitted_file(
     )
 
 
-def test_terminal_signal_subscribes_only_after_transaction_admission(
+def test_terminal_subscription_uses_the_existing_only_boundary(
     tmp_path: Path,
 ) -> None:
     database = tmp_path / "nested" / "database.sqlite3"
+    callbacks: list[tuple[Path, str]] = []
 
-    with pytest.raises(RodexSQLError, match="has not been admitted"):
-        database_terminal_signal(database)
+    with pytest.raises(RodexDatabaseNotFoundError, match="database does not exist"):
+        subscribe_rodex_database_terminal(
+            database,
+            lambda path, reason: callbacks.append((path, reason)),
+        )
     assert not database.parent.exists()
 
     with open_rodex_bootstrap_transaction(database):
         pass
-    signal = database_terminal_signal(database)
-    assert signal.path == database
-    assert not signal.terminal_event.is_set()
+    unsubscribe = subscribe_rodex_database_terminal(
+        database,
+        lambda path, reason: callbacks.append((path, reason)),
+    )
+    unsubscribe()
+    assert callbacks == []
+
+
+def test_terminal_subscription_admits_before_guard_lookup_and_subscription(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database = tmp_path / "database.sqlite3"
+    lifecycle: list[str] = []
+
+    class FakeReadTransaction:
+        def __enter__(self) -> object:
+            lifecycle.append("read-enter")
+            return object()
+
+        def __exit__(self, *_exc: object) -> None:
+            lifecycle.append("read-exit")
+
+    class FakeGuard:
+        def require_available(self, stage: str) -> None:
+            assert stage == "terminal_subscription"
+            lifecycle.append("guard-require")
+
+        def subscribe_terminal(self, _callback: object) -> object:
+            lifecycle.append("guard-subscribe")
+
+            def unsubscribe() -> None:
+                lifecycle.append("guard-unsubscribe")
+
+            return unsubscribe
+
+    def open_read(path: Path) -> FakeReadTransaction:
+        assert path == database
+        lifecycle.append("read-open")
+        return FakeReadTransaction()
+
+    def known_guard(path: Path) -> FakeGuard:
+        assert path == database
+        lifecycle.append("guard-lookup")
+        return FakeGuard()
+
+    monkeypatch.setattr(transactions_module, "open_rodex_read_transaction", open_read)
+    monkeypatch.setattr(
+        transactions_module,
+        "_known_database_location_guard",
+        known_guard,
+    )
+
+    unsubscribe = subscribe_rodex_database_terminal(database, lambda *_args: None)
+
+    assert lifecycle == [
+        "read-open",
+        "read-enter",
+        "guard-lookup",
+        "guard-require",
+        "guard-subscribe",
+        "read-exit",
+    ]
+    unsubscribe()
+    assert lifecycle[-1] == "guard-unsubscribe"
 
 
 @pytest.mark.evolutionary_regression

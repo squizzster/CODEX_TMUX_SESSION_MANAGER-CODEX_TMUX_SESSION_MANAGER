@@ -5,7 +5,7 @@ from __future__ import annotations
 import fcntl
 import sqlite3
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import Final
@@ -90,6 +90,29 @@ def open_rodex_maintenance_lock(
     except RodexSQLError:
         if known_guard is not None:
             known_guard.require_available("maintenance_error")
+        raise
+
+
+def subscribe_rodex_database_terminal(
+    database_path: str | Path,
+    callback: Callable[[Path, str], None],
+) -> Callable[[], None]:
+    """Admit existing storage locally and subscribe to its permanent latch."""
+    path = normalise_rodex_database_path(database_path)
+    unsubscribe: Callable[[], None] | None = None
+    try:
+        with open_rodex_read_transaction(path):
+            guard = _known_database_location_guard(path)
+            if guard is None:
+                raise RodexSQLError(
+                    f"database transaction did not admit its location guard: {path}"
+                )
+            guard.require_available("terminal_subscription")
+            unsubscribe = guard.subscribe_terminal(callback)
+        return unsubscribe
+    except BaseException:
+        if unsubscribe is not None:
+            unsubscribe()
         raise
 
 

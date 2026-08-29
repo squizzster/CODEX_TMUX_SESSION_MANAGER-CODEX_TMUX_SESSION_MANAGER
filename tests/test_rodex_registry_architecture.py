@@ -210,10 +210,10 @@ def test_sql_package_exposes_one_entry_for_each_storage_responsibility() -> None
         "open_rodex_transaction",
         "open_rodex_read_transaction",
         "open_rodex_maintenance_lock",
-        "database_terminal_signal",
         "require_active_rodex_transaction",
         "select_lookup_id",
         "select_or_insert_lookup_id",
+        "subscribe_rodex_database_terminal",
     }.issubset(rodex_sql.__all__)
     assert not {
         "DatabaseLocationGuard",
@@ -222,6 +222,7 @@ def test_sql_package_exposes_one_entry_for_each_storage_responsibility() -> None
         "require_existing_rodex_database_path",
         "open_rodex_audit_transaction",
         "close_database_location_guards_for_testing",
+        "database_terminal_signal",
     }.intersection(rodex_sql.__all__)
     assert "default_rodex_database_path" not in rodex_registry.__all__
 
@@ -294,6 +295,11 @@ def test_terminal_guard_has_no_runtime_reset_or_alternate_subscription_path() ->
     assert "require_existing_rodex_database_path" not in all_source
     assert "prepare_rodex_database_path" not in all_source
     assert "open_rodex_audit_transaction" not in all_source
-    assert _top_level_callers("database_terminal_signal") == {
+    assert _top_level_callers("database_terminal_signal") == set()
+    assert _top_level_callers("subscribe_rodex_database_terminal") == {
         ("rodex/runtime.py", "run_session_host")
     }
+    assert (
+        "rodex_sql/transactions.py",
+        "subscribe_rodex_database_terminal",
+    ) in _top_level_callers("open_rodex_read_transaction")

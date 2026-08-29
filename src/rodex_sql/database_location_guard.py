@@ -95,13 +95,17 @@ class DatabaseLocationGuard:
             self._next_subscriber_id += 1
             self._subscribers[subscriber_id] = callback
             reason = self._terminal_reason
-        if reason is not None:
-            callback(self.path, reason)
 
         def unsubscribe() -> None:
             with self._lock:
                 self._subscribers.pop(subscriber_id, None)
 
+        if reason is not None:
+            try:
+                callback(self.path, reason)
+            except BaseException:
+                unsubscribe()
+                raise
         return unsubscribe
 
     def register_connection(self, connection: object) -> None:
@@ -334,14 +338,7 @@ class _InotifyGuardManager:
         for watched in tuple(self._watches.get(watch, ())):
             if watched.kind == "parent":
                 self_event = (
-                    mask
-                    & (
-                        _IN_ATTRIB
-                        | _IN_DELETE_SELF
-                        | _IN_MOVE_SELF
-                        | _IN_UNMOUNT
-                        | _IN_IGNORED
-                    )
+                    mask & (_IN_DELETE_SELF | _IN_MOVE_SELF | _IN_UNMOUNT | _IN_IGNORED)
                     and not name
                 )
                 named_event = name == watched.database_name and mask & (
@@ -365,20 +362,6 @@ class _InotifyGuardManager:
 
 _MANAGER_LOCK: Final = Lock()
 _MANAGER: _InotifyGuardManager | None = None
-
-
-def database_terminal_signal(
-    database_path: str | os.PathLike[str],
-) -> DatabaseLocationGuard:
-    """Return the terminal signal for a location admitted by a transaction."""
-    path = normalise_rodex_database_path(database_path)
-    guard = _known_database_location_guard(path)
-    if guard is None:
-        raise RodexSQLError(
-            f"database location has not been admitted by a Rodex transaction: {path}"
-        )
-    guard.require_available("terminal_subscription")
-    return guard
 
 
 def _admit_opened_database(opened: ValidatedDatabaseFile) -> DatabaseLocationGuard:

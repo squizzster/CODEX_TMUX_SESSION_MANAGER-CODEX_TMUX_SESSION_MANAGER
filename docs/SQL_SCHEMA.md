@@ -44,17 +44,18 @@ suggestion followed by user agreement.
   database-inode watches, not another thread or descriptor set. The worker blocks in
   `select`, performs no polling and no disk writes, and queued events are also drained
   synchronously at transaction identity fences.
-- A database/name move, delete, replacement, parent move, watched parent/database
-  ownership or mode change, unmount, ignored watch, inotify overflow, or watcher failure
-  permanently latches that location for the life of the process. The latch interrupts
-  registered SQLite connections and notifies subscribers. It cannot be reset or replaced
-  while execution continues; its worker and three manager descriptors are reclaimed only
-  at process exit.
-- `database_terminal_signal` is subscription-only. A long-lived runtime can obtain it only
-  after a transaction has admitted that database; the function never opens or admits a
-  path. A latch shuts down the live runtime, and both long-lived and one-shot commands
-  report `database_moved: ...; please restart Rodex` rather than following replacement
-  storage.
+- A database/name move, delete, replacement or attribute change; a parent move, delete, or
+  unmount; an ignored watch, inotify overflow, or watcher failure permanently latches that
+  location for the life of the process. Parent ownership and mode are revalidated at the
+  next canonical transaction boundary. The latch interrupts registered SQLite connections
+  and notifies subscribers. It cannot be reset or replaced while execution continues; its
+  worker and three manager descriptors are reclaimed only at process exit.
+- `subscribe_rodex_database_terminal` is the sole runtime subscription operation. It
+  enters the canonical existing-only read boundary in the calling process, admits the
+  exact opened descriptor, and installs the subscriber before leaving that transaction.
+  A session host completes this operation before spawning its App Server, proxy, or TUI. A
+  latch shuts down the live runtime, and both long-lived and one-shot commands report
+  `database_moved: ...; please restart Rodex` rather than following replacement storage.
 - The explicit integrity audit uses the same existing-only, shared-lock, read-only
   transaction. Its normal WAL-aware snapshot includes committed WAL content, executes no
   DDL, and compares every non-internal table, index, trigger, and view with the canonical

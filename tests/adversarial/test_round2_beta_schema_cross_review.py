@@ -422,6 +422,8 @@ def test_round2_integrity_audit_uses_a_read_only_wal_aware_transaction(
     with sqlite3.connect(invalid) as connection:
         connection.execute("CREATE TABLE unexpected_round2_table (id INTEGER)")
     connection.close()
+    # Complete fixture WAL cleanup before measuring the read-only audit itself.
+    transactions_module._close_process_wal_lifetime_owner()
     before_valid = (valid.stat().st_size, valid.stat().st_mtime_ns)
     before_invalid = (invalid.stat().st_size, invalid.stat().st_mtime_ns)
     statements: list[str] = []

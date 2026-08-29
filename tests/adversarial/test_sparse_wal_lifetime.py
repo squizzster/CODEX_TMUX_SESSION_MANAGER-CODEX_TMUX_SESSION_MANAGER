@@ -14,7 +14,11 @@ from pathlib import Path
 import pytest
 
 import rodex_sql.transactions as transactions_module
-from rodex_sql import open_rodex_bootstrap_transaction, open_rodex_transaction
+from rodex_sql import (
+    open_rodex_bootstrap_transaction,
+    open_rodex_read_transaction,
+    open_rodex_transaction,
+)
 
 
 def _close_process_wal_owner() -> None:
@@ -77,6 +81,55 @@ def test_sparse_writes_reuse_one_live_wal_inode_until_clean_close(tmp_path: Path
 
     assert not wal.exists()
     assert not shm.exists()
+
+
+def test_transactions_reuse_one_process_local_validated_database_descriptor(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "registry.sqlite3"
+    _marker_database(database)
+    owner = transactions_module._PROCESS_WAL_LIFETIME_OWNER
+    assert owner is not None
+    descriptor = owner.database_descriptor
+    identity = os.fstat(descriptor).st_dev, os.fstat(descriptor).st_ino
+
+    for value in range(10):
+        with open_rodex_transaction(database) as connection:
+            connection.execute("INSERT INTO marker VALUES (?)", (str(value),))
+        with open_rodex_read_transaction(database) as connection:
+            assert connection.execute("SELECT COUNT(*) FROM marker").fetchone() == (
+                value + 1,
+            )
+        current = transactions_module._PROCESS_WAL_LIFETIME_OWNER
+        assert current is owner
+        assert current.database_descriptor == descriptor
+        assert (os.fstat(descriptor).st_dev, os.fstat(descriptor).st_ino) == identity
+
+
+def test_other_process_close_cannot_remove_sidecars_while_owner_is_active(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "registry.sqlite3"
+    _marker_database(database)
+    wal = _sidecar(database, "-wal")
+    shm = _sidecar(database, "-shm")
+    wal_identity = wal.stat().st_dev, wal.stat().st_ino
+    shm_identity = shm.stat().st_dev, shm.stat().st_ino
+    probe = """
+import sqlite3
+import sys
+
+connection = sqlite3.connect(sys.argv[1])
+try:
+    assert connection.execute('SELECT COUNT(*) FROM marker').fetchone() == (0,)
+finally:
+    connection.close()
+"""
+
+    subprocess.run([sys.executable, "-c", probe, os.fspath(database)], check=True)
+
+    assert (wal.stat().st_dev, wal.stat().st_ino) == wal_identity
+    assert (shm.stat().st_dev, shm.stat().st_ino) == shm_identity
 
 
 def test_sparse_write_syscalls_do_not_recreate_sidecars_per_commit(
@@ -147,6 +200,7 @@ import sys
 from pathlib import Path
 
 from rodex_sql import open_rodex_transaction
+from rodex_sql.transactions import _close_process_wal_lifetime_owner
 
 database = Path(sys.argv[1])
 value = sys.argv[2]
@@ -156,6 +210,7 @@ with open_rodex_transaction(database) as connection:
     connection.execute("INSERT INTO marker VALUES (?)", (value,))
 print("committed", flush=True)
 sys.stdin.readline()
+_close_process_wal_lifetime_owner()
 """
     clients = [
         subprocess.Popen(
@@ -182,6 +237,8 @@ sys.stdin.readline()
         assert shm.exists()
         with closing(sqlite3.connect(database)) as connection:
             assert connection.execute("SELECT COUNT(*) FROM marker").fetchone() == (20,)
+        assert wal.exists()
+        assert shm.exists()
 
         for client in clients:
             assert client.stdin is not None
@@ -190,6 +247,10 @@ sys.stdin.readline()
         for client in clients:
             assert client.wait(timeout=5) == 0
 
+        with closing(sqlite3.connect(database)) as connection:
+            assert connection.execute("PRAGMA integrity_check").fetchall() == [("ok",)]
+            assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+            assert connection.execute("SELECT COUNT(*) FROM marker").fetchone() == (20,)
         assert not wal.exists()
         assert not shm.exists()
     finally:
@@ -199,7 +260,7 @@ sys.stdin.readline()
             client.wait(timeout=5)
 
 
-def test_process_wal_owner_is_discarded_and_recreated_after_fork(
+def test_process_wal_owner_is_closed_before_fork_and_recreated_per_process(
     tmp_path: Path,
 ) -> None:
     database = tmp_path / "registry.sqlite3"
@@ -244,7 +305,61 @@ def test_process_wal_owner_is_discarded_and_recreated_after_fork(
         "child_owner_pid": child_pid,
         "child_pid": child_pid,
     }
+    assert transactions_module._PROCESS_WAL_LIFETIME_OWNER is None
+    with open_rodex_transaction(database) as connection:
+        connection.execute("INSERT INTO marker VALUES ('parent')")
+    replacement_parent_owner = transactions_module._PROCESS_WAL_LIFETIME_OWNER
+    assert replacement_parent_owner is not None
+    assert replacement_parent_owner is not parent_owner
+    assert replacement_parent_owner.process_id == os.getpid()
+
+
+def test_ordinary_subprocess_launch_does_not_close_parent_wal_owner(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "registry.sqlite3"
+    _marker_database(database)
+    parent_owner = transactions_module._PROCESS_WAL_LIFETIME_OWNER
+    assert parent_owner is not None
+    descriptor = parent_owner.database_descriptor
+
+    subprocess.run([sys.executable, "-c", "pass"], check=True)
+
     assert transactions_module._PROCESS_WAL_LIFETIME_OWNER is parent_owner
+    assert os.fstat(descriptor).st_ino == parent_owner.database_state.st_ino
+
+
+def test_wal_owner_closes_sqlite_before_validated_descriptor(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    events: list[tuple[str, int | None]] = []
+
+    class Connection:
+        def close(self) -> None:
+            events.append(("sqlite", None))
+
+    owner = transactions_module._ProcessWalLifetimeOwner(
+        process_id=os.getpid(),
+        database_path=tmp_path / "registry.sqlite3",
+        storage_identity=transactions_module._WalStorageIdentity(
+            parent=(1, 2),
+            transition_lock=(3, 4),
+            database=(5, 6),
+        ),
+        database_descriptor=123,
+        database_state=os.stat_result((0,) * 10),
+        connection=Connection(),  # type: ignore[arg-type]
+    )
+    monkeypatch.setattr(
+        transactions_module.os,
+        "close",
+        lambda descriptor: events.append(("descriptor", descriptor)),
+    )
+
+    owner.close()
+
+    assert events == [("sqlite", None), ("descriptor", 123)]
 
 
 def test_wal_owner_resource_and_growth_budgets_are_explicit(tmp_path: Path) -> None:

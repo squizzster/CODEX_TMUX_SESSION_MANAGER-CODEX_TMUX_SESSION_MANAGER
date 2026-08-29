@@ -44,15 +44,21 @@ class _WalStorageIdentity:
 
 @dataclass(slots=True)
 class _ProcessWalLifetimeOwner:
-    """Keep one validated WAL generation live between sparse transactions."""
+    """Keep validated storage and one idle WAL connection process-local."""
 
     process_id: int
     database_path: Path
     storage_identity: _WalStorageIdentity
-    connection: sqlite3.Connection
+    database_descriptor: int
+    database_state: os.stat_result
+    connection: sqlite3.Connection | None = None
 
     def close(self) -> None:
-        self.connection.close()
+        """Close SQLite before releasing its separately validated descriptor."""
+        if self.connection is not None:
+            self.connection.close()
+            self.connection = None
+        os.close(self.database_descriptor)
 
 
 _PROCESS_WAL_LIFETIME_LOCK = Lock()
@@ -91,7 +97,6 @@ def open_rodex_read_transaction(
     with (
         _open_transaction_storage(
             database_path,
-            writable=False,
             allow_initial_creation=False,
         ) as opened,
         _open_transaction_connection(
@@ -177,7 +182,6 @@ def _open_rodex_write_transaction(
     with (
         _open_transaction_storage(
             database_path,
-            writable=True,
             allow_initial_creation=allow_initial_creation,
         ) as opened,
         _open_transaction_connection(
@@ -193,7 +197,6 @@ def _open_rodex_write_transaction(
 def _open_transaction_storage(
     database_path: str | Path,
     *,
-    writable: bool,
     allow_initial_creation: bool,
 ) -> Iterator[ValidatedDatabaseFile]:
     path = normalise_rodex_database_path(database_path)
@@ -203,11 +206,11 @@ def _open_transaction_storage(
         create=create,
     ) as boundary:
         _acquire_database_lock(boundary, exclusive=False)
-        with boundary.open_database(
-            writable=writable,
+        opened = _retain_process_database_storage(
+            boundary,
             create=create,
-        ) as opened:
-            yield opened
+        )
+        yield opened
 
 
 def _connect_validated_database(
@@ -288,29 +291,77 @@ def _configure_wal_write_connection(connection: sqlite3.Connection) -> None:
 
 def _retain_process_wal_lifetime(opened: ValidatedDatabaseFile) -> None:
     """Retain one idle connection so sparse commits reuse their WAL sidecars."""
-    global _PROCESS_WAL_LIFETIME_OWNER
-
     process_id = os.getpid()
     storage_identity = _wal_storage_identity(opened)
     with _PROCESS_WAL_LIFETIME_LOCK:
         current = _PROCESS_WAL_LIFETIME_OWNER
+        if current is None or (
+            current.process_id != process_id
+            or current.database_path != opened.path
+            or current.storage_identity != storage_identity
+            or current.database_descriptor != opened.descriptor
+        ):
+            raise RodexSQLError(
+                "process-local SQLite storage owner changed before WAL retention"
+            )
+        if current.connection is not None:
+            return
+        current.connection = _open_process_wal_lifetime_connection(opened)
+
+
+def _retain_process_database_storage(
+    boundary: PrivateDatabaseBoundary,
+    *,
+    create: bool,
+) -> ValidatedDatabaseFile:
+    """Borrow one process-local main-file descriptor across all connections."""
+    global _PROCESS_WAL_LIFETIME_OWNER
+
+    process_id = os.getpid()
+    path = boundary.path
+    with _PROCESS_WAL_LIFETIME_LOCK:
+        current = _PROCESS_WAL_LIFETIME_OWNER
+        if current is not None and current.process_id != process_id:
+            raise RodexSQLError(
+                "inherited SQLite storage owner reached an unsupported process boundary"
+            )
         if (
             current is not None
-            and current.process_id == process_id
-            and current.database_path == opened.path
-            and current.storage_identity == storage_identity
+            and current.database_path == path
+            and current.storage_identity.parent
+            == (boundary.parent_state.st_dev, boundary.parent_state.st_ino)
+            and current.storage_identity.transition_lock
+            == (
+                boundary.transition_lock_state.st_dev,
+                boundary.transition_lock_state.st_ino,
+            )
         ):
-            return
+            opened = ValidatedDatabaseFile(
+                boundary=boundary,
+                descriptor=current.database_descriptor,
+                state=current.database_state,
+            )
+            return opened
+
         if current is not None:
             current.close()
             _PROCESS_WAL_LIFETIME_OWNER = None
-        connection = _open_process_wal_lifetime_connection(opened)
-        _PROCESS_WAL_LIFETIME_OWNER = _ProcessWalLifetimeOwner(
-            process_id=process_id,
-            database_path=opened.path,
-            storage_identity=storage_identity,
-            connection=connection,
-        )
+
+        # The retained descriptor is always writable because a later write must
+        # reuse it without opening and releasing another descriptor on this file.
+        opened = boundary.open_database(writable=True, create=create)
+        try:
+            _PROCESS_WAL_LIFETIME_OWNER = _ProcessWalLifetimeOwner(
+                process_id=process_id,
+                database_path=path,
+                storage_identity=_wal_storage_identity(opened),
+                database_descriptor=opened.descriptor,
+                database_state=opened.state,
+            )
+        except BaseException:
+            opened.close()
+            raise
+        return opened
 
 
 def _open_process_wal_lifetime_connection(
@@ -360,30 +411,28 @@ def _close_process_wal_lifetime_owner() -> None:
 
 
 def _prepare_process_wal_lifetime_fork() -> None:
+    """Close parent-owned SQLite state before a child can inherit it."""
+    global _PROCESS_WAL_LIFETIME_OWNER
+
     _PROCESS_WAL_LIFETIME_LOCK.acquire()
+    owner = _PROCESS_WAL_LIFETIME_OWNER
+    _PROCESS_WAL_LIFETIME_OWNER = None
+    if owner is not None:
+        owner.close()
 
 
 def _finish_process_wal_lifetime_fork_in_parent() -> None:
     _PROCESS_WAL_LIFETIME_LOCK.release()
 
 
-def _discard_process_wal_lifetime_after_fork() -> None:
-    """Never reuse a SQLite connection inherited from a parent process."""
-    global _PROCESS_WAL_LIFETIME_OWNER
-
-    try:
-        owner = _PROCESS_WAL_LIFETIME_OWNER
-        _PROCESS_WAL_LIFETIME_OWNER = None
-        if owner is not None:
-            with suppress(sqlite3.Error):
-                owner.close()
-    finally:
-        _PROCESS_WAL_LIFETIME_LOCK.release()
+def _finish_process_wal_lifetime_fork_in_child() -> None:
+    """Release synchronization; the parent closed SQLite before the fork."""
+    _PROCESS_WAL_LIFETIME_LOCK.release()
 
 
 os.register_at_fork(
     before=_prepare_process_wal_lifetime_fork,
     after_in_parent=_finish_process_wal_lifetime_fork_in_parent,
-    after_in_child=_discard_process_wal_lifetime_after_fork,
+    after_in_child=_finish_process_wal_lifetime_fork_in_child,
 )
 atexit.register(_close_process_wal_lifetime_owner)

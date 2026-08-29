@@ -80,7 +80,8 @@ with Codex while preserving arguments, terminal streams, signals, and exit statu
 
 - Linux is required; Rodex's fail-closed SQLite path uses `/proc/self/fd`,
   `O_NOFOLLOW`, and `flock`. Other POSIX systems and Windows are not supported.
-- Python 3.12 or newer.
+- Python 3.12.13, whose managed build loads SQLite 3.53.1. Older SQLite
+  builds are unsupported.
 - [`uv`](https://docs.astral.sh/uv/).
 - `tmux` available on `PATH` for managed launches, underscore commands, and stored
   Rodex sessions.

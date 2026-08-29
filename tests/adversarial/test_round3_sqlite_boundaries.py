@@ -52,7 +52,7 @@ def _descriptor_count() -> int:
     [open_rodex_read_transaction, open_rodex_transaction],
     ids=["read", "write"],
 )
-def test_round3_one_validated_file_open_and_one_sqlite_connection(
+def test_round3_reuses_validated_file_and_opens_one_sqlite_connection(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     opener: TransactionOpener,
@@ -81,7 +81,7 @@ def test_round3_one_validated_file_open_and_one_sqlite_connection(
     with opener(database) as connection:
         assert connection.execute("SELECT value FROM marker").fetchone() == ("validated",)
 
-    assert file_opens == 1
+    assert file_opens == 0
     assert connections == 1
 
 
@@ -347,6 +347,7 @@ def test_round3_emfile_at_each_private_open_boundary_leaks_no_descriptors(
 ) -> None:
     database = tmp_path / "registry.sqlite3"
     _marker_database(database)
+    transactions_module._close_process_wal_lifetime_owner()
     real_open = private_path_module.os.open
     calls = 0
     baseline = _descriptor_count()

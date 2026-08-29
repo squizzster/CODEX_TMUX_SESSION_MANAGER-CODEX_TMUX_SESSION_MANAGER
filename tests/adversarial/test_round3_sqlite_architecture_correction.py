@@ -194,7 +194,7 @@ print(json.dumps({
     retained_targets = [
         target for target in result["fd_targets"] if os.fspath(tmp_path) in target
     ]
-    assert 1 <= len(retained_targets) <= 5
+    assert 1 <= len(retained_targets) <= 6
     allowed_suffixes = (
         "registry.sqlite3",
         "registry.sqlite3-wal",

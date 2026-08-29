@@ -361,19 +361,6 @@ def test_real_tmux_first_shared_ctrl_c_keeps_both_clients_attached(
             tmux_binary,
             python_executable=sys.executable,
         ).initialise_session_ui(LiveTmuxSession(socket_path, session_name))
-        interactive_client_pid, terminal_master = pty.fork()
-        interactive_environment = os.environ.copy()
-        interactive_environment["TERM"] = "xterm-256color"
-        interactive_arguments = [
-            tmux_binary,
-            "-S",
-            str(socket_path),
-            "attach-session",
-            "-t",
-            f"={session_name}",
-        ]
-        if interactive_client_pid == 0:
-            os.execve(tmux_binary, interactive_arguments, interactive_environment)
         control_client = subprocess.Popen(
             [
                 tmux_binary,
@@ -389,6 +376,20 @@ def test_real_tmux_first_shared_ctrl_c_keeps_both_clients_attached(
             stderr=subprocess.PIPE,
             text=True,
         )
+        wait_for_attached_count(1)
+        interactive_client_pid, terminal_master = pty.fork()
+        interactive_environment = os.environ.copy()
+        interactive_environment["TERM"] = "xterm-256color"
+        interactive_arguments = [
+            tmux_binary,
+            "-S",
+            str(socket_path),
+            "attach-session",
+            "-t",
+            f"={session_name}",
+        ]
+        if interactive_client_pid == 0:
+            os.execve(tmux_binary, interactive_arguments, interactive_environment)
         wait_for_attached_count(2)
         os.write(terminal_master, b"\x03")
         deadline = time.monotonic() + 2

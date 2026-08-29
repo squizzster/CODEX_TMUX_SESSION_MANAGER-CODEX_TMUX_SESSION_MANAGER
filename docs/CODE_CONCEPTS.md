@@ -96,8 +96,8 @@ boundary; domain policy has one canonical owner underneath it.
 
 ## Platform and security boundary
 
-- Linux is the platform boundary. SQLite path security depends on inotify,
-  `/proc/self/fd`, `O_NOFOLLOW`, and `flock`.
+- Linux is the platform boundary. SQLite path security depends on `/proc/self/fd`,
+  `O_NOFOLLOW`, synchronous stat/fstat identity checks, and `flock`.
 - Database access goes through the Rodex transaction boundary, which validates the
   securely opened database identity and enforces owner, mode, schema-generation, and
   transition-lock invariants.

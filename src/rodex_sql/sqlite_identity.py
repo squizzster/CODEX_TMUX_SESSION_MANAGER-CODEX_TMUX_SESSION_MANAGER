@@ -5,31 +5,51 @@ from __future__ import annotations
 import os
 import sqlite3
 import stat as stat_module
+from dataclasses import dataclass
 from pathlib import Path
+from threading import Lock
 from typing import NoReturn
 
-from .database_location_guard import DatabaseLocationGuard
 from .private_database_path import ValidatedDatabaseFile
+
+
+@dataclass(frozen=True, slots=True)
+class _DatabaseIdentity:
+    parent: tuple[int, int]
+    transition_lock: tuple[int, int]
+    database: tuple[int, int]
+
+
+_IDENTITY_LOCK = Lock()
+_KNOWN_IDENTITIES: dict[Path, _DatabaseIdentity] = {}
 
 
 def validated_database_uri(opened: ValidatedDatabaseFile, *, read_only: bool) -> str:
     """Direct stdlib SQLite through the retained database descriptor."""
     descriptor_path = Path("/proc/self/fd") / str(opened.descriptor)
     if not descriptor_path.exists():
-        _reject(opened, None, "Linux /proc/self/fd is unavailable")
+        _reject(opened, "Linux /proc/self/fd is unavailable")
     mode = "ro" if read_only else "rw"
     return f"{descriptor_path.as_uri()}?mode={mode}"
 
 
 def require_database_identity(
     opened: ValidatedDatabaseFile,
-    guard: DatabaseLocationGuard,
     *,
     stage: str,
 ) -> None:
     """Revalidate parent, lock, database path, descriptors, owner, type, and mode."""
-    guard.require_available(stage)
     boundary = opened.boundary
+    admitted_identity = _DatabaseIdentity(
+        parent=_identity(boundary.parent_state),
+        transition_lock=_identity(boundary.transition_lock_state),
+        database=_identity(opened.state),
+    )
+    with _IDENTITY_LOCK:
+        expected_identity = _KNOWN_IDENTITIES.setdefault(
+            opened.path,
+            admitted_identity,
+        )
     try:
         parent_descriptor_state = os.fstat(boundary.parent_descriptor)
         lock_descriptor_state = os.fstat(boundary.transition_lock_descriptor)
@@ -48,11 +68,11 @@ def require_database_identity(
         lock_absolute_state = boundary.transition_lock_path.lstat()
         database_absolute_state = opened.path.lstat()
     except OSError as error:
-        _reject(opened, guard, f"{stage} identity check failed: {error}")
+        _reject(opened, f"{stage} identity check failed: {error}")
 
-    expected_parent = guard.parent_identity
-    expected_lock = guard.transition_lock_identity
-    expected_database = guard.database_identity
+    expected_parent = expected_identity.parent
+    expected_lock = expected_identity.transition_lock
+    expected_database = expected_identity.database
     identities = {
         "parent descriptor": _identity(parent_descriptor_state),
         "parent path": _identity(parent_path_state),
@@ -76,7 +96,7 @@ def require_database_identity(
         )
     ]
     if mismatches:
-        _reject(opened, guard, f"{stage} identity mismatch: {', '.join(mismatches)}")
+        _reject(opened, f"{stage} identity mismatch: {', '.join(mismatches)}")
     if (
         not _private_directory(parent_descriptor_state)
         or not _private_regular_file(lock_descriptor_state)
@@ -84,29 +104,26 @@ def require_database_identity(
         or stat_module.S_ISLNK(lock_absolute_state.st_mode)
         or stat_module.S_ISLNK(database_absolute_state.st_mode)
     ):
-        _reject(opened, guard, f"{stage} owner/type/mode validation failed")
-    guard.require_available(stage)
+        _reject(opened, f"{stage} owner/type/mode validation failed")
 
 
 def require_sqlite_main_path(
     connection: sqlite3.Connection,
     opened: ValidatedDatabaseFile,
-    guard: DatabaseLocationGuard,
 ) -> None:
     """Verify this connection reports the exact canonical requested main pathname."""
-    require_database_identity(opened, guard, stage="post_connect")
+    require_database_identity(opened, stage="post_connect")
     try:
         rows = connection.execute("PRAGMA database_list").fetchall()
     except sqlite3.Error as error:
-        _reject(opened, guard, f"post_connect main-path query failed: {error}")
+        _reject(opened, f"post_connect main-path query failed: {error}")
     main_paths = [Path(str(row[2])) for row in rows if row[1] == "main"]
     if main_paths != [opened.path]:
         _reject(
             opened,
-            guard,
             f"post_connect SQLite main path mismatch: {main_paths!r}",
         )
-    require_database_identity(opened, guard, stage="post_connect")
+    require_database_identity(opened, stage="post_connect")
 
 
 def _identity(state: os.stat_result) -> tuple[int, int]:
@@ -129,14 +146,16 @@ def _private_regular_file(state: os.stat_result) -> bool:
     )
 
 
+def _database_identity_was_admitted(database_path: Path) -> bool:
+    """Report whether this process has already accepted one exact storage identity."""
+    with _IDENTITY_LOCK:
+        return database_path in _KNOWN_IDENTITIES
+
+
 def _reject(
     opened: ValidatedDatabaseFile,
-    guard: DatabaseLocationGuard | None,
     reason: str,
 ) -> NoReturn:
-    if guard is not None:
-        guard.latch(reason)
-        guard.require_available("terminal")
     from .errors import RodexDatabaseMovedError
 
     raise RodexDatabaseMovedError(opened.path, reason)

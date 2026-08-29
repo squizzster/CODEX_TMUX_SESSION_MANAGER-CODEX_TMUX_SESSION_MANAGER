@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import errno
-import importlib
 import os
 import sqlite3
 import subprocess
@@ -23,7 +22,6 @@ from rodex_sql import (
     open_rodex_transaction,
 )
 
-guard_module = importlib.import_module("rodex_sql.database_location_guard")
 TransactionOpener = Callable[[Path], AbstractContextManager[sqlite3.Connection]]
 
 
@@ -358,21 +356,6 @@ def test_round3_emfile_at_each_private_open_boundary_leaks_no_descriptors(
     monkeypatch.setattr(private_path_module.os, "open", fail_selected_open)
     with pytest.raises(RodexSQLError), open_rodex_read_transaction(database):
         pass
-    assert _descriptor_count() == baseline
-
-
-def test_round3_guard_manager_pipe_failure_closes_its_inotify_descriptor(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    baseline = _descriptor_count()
-
-    def fail_pipe(_flags: int) -> tuple[int, int]:
-        raise OSError(errno.EMFILE, os.strerror(errno.EMFILE))
-
-    monkeypatch.setattr(guard_module.os, "pipe2", fail_pipe)
-    with pytest.raises(OSError, match="Too many open files"):
-        guard_module._InotifyGuardManager()
     assert _descriptor_count() == baseline
 
 

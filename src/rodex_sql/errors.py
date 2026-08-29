@@ -14,7 +14,7 @@ class RodexDatabaseNotInitializedError(RodexSQLError):
 
 
 class RodexDatabaseMovedError(RodexSQLError):
-    """The process-lifetime database location changed and cannot be followed."""
+    """A transaction identity fence detected changed database storage."""
 
     code = "database_moved"
 

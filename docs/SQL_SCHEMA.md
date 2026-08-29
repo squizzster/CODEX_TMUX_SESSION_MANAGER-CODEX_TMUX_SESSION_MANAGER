@@ -21,12 +21,15 @@ suggestion followed by user agreement.
   `open_rodex_transaction` and `open_rodex_read_transaction` are existing-only: a missing
   database or transition lock fails without creating filesystem state. An existing private
   database and lock are admitted from their exact opened descriptors by the first
-  transaction that uses them.
+  transaction that uses them. That transaction records only the parent, lock, and database
+  `(device, inode)` identities in process memory. Even the bootstrap entry will not recreate
+  storage that this process previously admitted and later finds missing.
 - SQLite opens `/proc/self/fd/<validated-database-fd>` in URI `mode=rw` or `mode=ro`, then
   must report the canonical requested main path through `PRAGMA database_list`. Rodex
   revalidates parent, transition-lock, and database descriptor/path identities plus owner,
   type, mode, and symlink state before connect, after connect, before `BEGIN`, and before
-  `COMMIT`. A failure becomes the terminal `database_moved` error.
+  `COMMIT`, and revalidates identity on connection/SQLite errors. A mismatch fails the
+  current operation with `database_moved` and restart guidance.
 - Every ordinary transaction holds a shared `flock` on the retained transition-lock
   descriptor for its complete storage lifetime. The maintenance entry holds the exclusive
   form and is for offline diagnostics. Lock acquisition has a ten-second monotonic deadline
@@ -38,24 +41,12 @@ suggestion followed by user agreement.
   deferred `BEGIN`, so a writer does not hold the cooperative lock exclusively or
   head-of-line block WAL readers. Success commits once; any exception rolls back; every
   connection and retained descriptor is closed on exit.
-- `rodex_sql.database_location_guard` admits only the exact descriptor accepted by the
-  transaction boundary. One process-wide manager owns one blocking inotify worker, one
-  inotify descriptor, and one wake pipe; each admitted location adds parent-name and
-  database-inode watches, not another thread or descriptor set. The worker blocks in
-  `select`, performs no polling and no disk writes, and queued events are also drained
-  synchronously at transaction identity fences.
-- A database/name move, delete, replacement or attribute change; a parent move, delete, or
-  unmount; an ignored watch, inotify overflow, or watcher failure permanently latches that
-  location for the life of the process. Parent ownership and mode are revalidated at the
-  next canonical transaction boundary. The latch interrupts registered SQLite connections
-  and notifies subscribers. It cannot be reset or replaced while execution continues; its
-  worker and three manager descriptors are reclaimed only at process exit.
-- `subscribe_rodex_database_terminal` is the sole runtime subscription operation. It
-  enters the canonical existing-only read boundary in the calling process, admits the
-  exact opened descriptor, and installs the subscriber before leaving that transaction.
-  A session host completes this operation before spawning its App Server, proxy, or TUI. A
-  latch shuts down the live runtime, and both long-lived and one-shot commands report
-  `database_moved: ...; please restart Rodex` rather than following replacement storage.
+- Identity memory is a lock-protected map of `(device, inode)` tuples only. Rodex retains no
+  database descriptor beyond a transaction and has no database watcher, worker, pipe,
+  callback, subscription, polling loop, or recurring SQL. Storage changes are detected only
+  at an actual transaction fence: a missing or different later identity fails, while a
+  move-away-and-back completed entirely between transactions is outside this synchronous
+  observation model.
 - The explicit integrity audit uses the same existing-only, shared-lock, read-only
   transaction. Its normal WAL-aware snapshot includes committed WAL content, executes no
   DDL, and compares every non-internal table, index, trigger, and view with the canonical

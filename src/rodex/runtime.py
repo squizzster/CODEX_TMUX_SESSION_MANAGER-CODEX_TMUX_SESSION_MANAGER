@@ -30,10 +30,6 @@ from rodex_registry.identity import (
     parse_rodex_registry_id,
     parse_rodex_runtime_id,
 )
-from rodex_sql import (
-    RodexDatabaseMovedError,
-    subscribe_rodex_database_terminal,
-)
 
 from .agent_observer import AgentObserverCoordinator, observer_control_socket_path
 from .analytics import (
@@ -46,10 +42,7 @@ from .app_server_contract import (
     RODEX_SESSION_CATALOG_APP_SERVER_CLIENT,
 )
 from .control import LiveRodexControl
-from .primary_connection_lifecycle import (
-    PrimaryConnectionLifecycleCoordinator,
-    RuntimeShutdownCoordinator,
-)
+from .primary_connection_lifecycle import PrimaryConnectionLifecycleCoordinator
 from .process_contracts import AnalyticsWorkerConfig, SessionHostConfig
 from .protocol_proxy import (
     CodexContextStatusObserver,
@@ -1286,25 +1279,12 @@ def run_session_host(
     runtime_path_keepalive: _RuntimePathKeepalive | None = None
     analytics_supervisor: AnalyticsSubprocessSupervisor | None = None
     agent_observer_controller: AgentObserverCoordinator | None = None
-    runtime_shutdown = RuntimeShutdownCoordinator()
-    unsubscribe_database_guard: Callable[[], None] | None = None
     registration_deadline = (
         None
         if analytics_config is None
         else time.monotonic() + RODEX_REGISTRATION_TIMEOUT_SECONDS
     )
     shutting_down = False
-
-    def interrupt_tui_for_terminal_shutdown() -> None:
-        active_tui = tui
-        if active_tui is not None and active_tui.poll() is None:
-            with suppress(OSError):
-                active_tui.terminate()
-
-    runtime_shutdown.subscribe_interrupt(interrupt_tui_for_terminal_shutdown)
-
-    def request_database_terminal_shutdown(path: Path, reason: str) -> None:
-        runtime_shutdown.request_shutdown(str(RodexDatabaseMovedError(path, reason)))
 
     def stop_on_signal(signum: int, _frame: object) -> None:
         if not shutting_down:
@@ -1318,18 +1298,7 @@ def run_session_host(
         for signum in (signal.SIGHUP, signal.SIGTERM)
     }
     try:
-        if analytics_config is not None:
-            unsubscribe_database_guard = subscribe_rodex_database_terminal(
-                analytics_config.rodex_database_path,
-                request_database_terminal_shutdown,
-            )
-            terminal_reason = runtime_shutdown.terminal_reason
-            if terminal_reason is not None:
-                raise RodexRuntimeError(terminal_reason)
         with _open_private_runtime_log(app_server_log_path) as log:
-            terminal_reason = runtime_shutdown.terminal_reason
-            if terminal_reason is not None:
-                raise RodexRuntimeError(terminal_reason)
             app_server = subprocess.Popen(
                 CODEX_APP_SERVER.command(codex_binary, app_server_socket_path),
                 stdin=subprocess.DEVNULL,
@@ -1444,9 +1413,6 @@ def run_session_host(
             )
             inherited_sigint_handler: object | None = None
             while True:
-                terminal_reason = runtime_shutdown.terminal_reason
-                if terminal_reason is not None:
-                    raise RodexRuntimeError(terminal_reason)
                 attempt_log_offset = os.fstat(log.fileno()).st_size
                 if inherited_sigint_handler is not None:
                     signal.signal(signal.SIGINT, inherited_sigint_handler)
@@ -1460,14 +1426,7 @@ def run_session_host(
                     if inherited_sigint_handler is None:
                         inherited_sigint_handler = replaced_handler
                         previous_handlers[signal.SIGINT] = replaced_handler
-                terminal_reason = runtime_shutdown.terminal_reason
-                if terminal_reason is not None:
-                    _stop_child_process(tui)
-                    raise RodexRuntimeError(terminal_reason)
                 while True:
-                    terminal_reason = runtime_shutdown.terminal_reason
-                    if terminal_reason is not None:
-                        raise RodexRuntimeError(terminal_reason)
                     if analytics_config is not None and analytics_supervisor is None:
                         activated_analytics = _registered_analytics_worker_config(
                             analytics_config,
@@ -1541,9 +1500,6 @@ def run_session_host(
                         )
                     except subprocess.TimeoutExpired:
                         continue
-                    terminal_reason = runtime_shutdown.terminal_reason
-                    if terminal_reason is not None:
-                        raise RodexRuntimeError(terminal_reason)
                     break
                 if (
                     returncode == 0
@@ -1573,8 +1529,6 @@ def run_session_host(
             return returncode
     finally:
         shutting_down = True
-        if unsubscribe_database_guard is not None:
-            unsubscribe_database_guard()
         try:
             try:
                 try:

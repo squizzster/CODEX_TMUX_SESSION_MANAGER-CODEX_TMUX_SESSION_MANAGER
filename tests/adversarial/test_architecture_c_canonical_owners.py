@@ -17,7 +17,6 @@ from rodex.observer_contract import OBSERVER_SNAPSHOT_EVENT_LIMIT
 from rodex.observer_state import ObserverStateReducer
 from rodex.primary_connection_lifecycle import (
     PrimaryConnectionLifecycleCoordinator,
-    RuntimeShutdownCoordinator,
 )
 from rodex.runtime import LiveTmuxSession
 from rodex.status_animation_admission import status_animation_hook_command
@@ -188,25 +187,6 @@ def test_architecture_c_disconnect_attempts_every_reset_and_advances_epoch() -> 
     assert calls == ["context", "event-tap", "observer"]
     assert coordinator.epoch == 1
     assert [failure.participant_name for failure in failures] == ["context"]
-
-
-def test_architecture_c_runtime_shutdown_is_terminal_and_isolates_interrupts() -> None:
-    calls: list[str] = []
-    coordinator = RuntimeShutdownCoordinator()
-
-    def fails() -> None:
-        calls.append("fails")
-        raise RuntimeError("interrupt failed")
-
-    coordinator.subscribe_interrupt(fails)
-    coordinator.subscribe_interrupt(lambda: calls.append("tui"))
-
-    assert coordinator.request_shutdown("database_moved: please restart Rodex")
-    assert coordinator.terminal_event.is_set()
-    assert coordinator.terminal_reason == "database_moved: please restart Rodex"
-    assert calls == ["fails", "tui"]
-    assert not coordinator.request_shutdown("later reason")
-    assert calls == ["fails", "tui"]
 
 
 def test_architecture_c_tmux_executor_has_one_run_entry_and_explicit_modes(

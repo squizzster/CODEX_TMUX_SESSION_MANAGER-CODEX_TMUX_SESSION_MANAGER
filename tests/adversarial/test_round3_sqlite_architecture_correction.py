@@ -1,38 +1,31 @@
 from __future__ import annotations
 
-import importlib
+import json
 import os
+import shutil
 import sqlite3
 import subprocess
 import sys
 from contextlib import closing
 from datetime import UTC, datetime
 from pathlib import Path
-from threading import enumerate as enumerate_threads
-from typing import Any
 
 import pytest
 
 import rodex.analytics as analytics_module
 import rodex.machine_commands as machine_commands_module
 import rodex.session_commands as session_commands_module
+import rodex_sql.sqlite_identity as sqlite_identity_module
 import rodex_sql.transactions as transactions_module
-from rodex.cli import main
 from rodex_sql import (
     RodexDatabaseMovedError,
+    RodexDatabaseNotFoundError,
+    RodexSQLError,
     open_rodex_bootstrap_transaction,
     open_rodex_read_transaction,
     open_rodex_transaction,
 )
 from rodex_sql.private_database_path import open_private_database_boundary
-
-guard_module = importlib.import_module("rodex_sql.database_location_guard")
-
-
-def _database_guard(path: Path) -> Any:
-    guard = guard_module._known_database_location_guard(path)
-    assert guard is not None
-    return guard
 
 
 def _marker_database(path: Path) -> None:
@@ -50,7 +43,7 @@ def _rows(path: Path) -> list[tuple[str]]:
     "stage",
     ["pre_connect", "post_connect", "pre_begin", "pre_commit"],
 )
-def test_round3_move_spanning_every_transaction_boundary_is_terminal_and_rolls_back(
+def test_round3_move_spanning_every_transaction_boundary_is_rejected_and_rolls_back(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     stage: str,
@@ -58,24 +51,23 @@ def test_round3_move_spanning_every_transaction_boundary_is_terminal_and_rolls_b
     database = tmp_path / "registry.sqlite3"
     moved = tmp_path / "moved.sqlite3"
     _marker_database(database)
-    guard = _database_guard(database)
     real_identity = transactions_module.require_database_identity
     real_main_path = transactions_module.require_sqlite_main_path
     moved_once = False
 
-    def maybe_move_identity(opened: object, guard: object, *, stage: str) -> None:
+    def maybe_move_identity(opened: object, *, stage: str) -> None:
         nonlocal moved_once
         if not moved_once and stage == target_stage:
             moved_once = True
             database.replace(moved)
-        real_identity(opened, guard, stage=stage)
+        real_identity(opened, stage=stage)
 
-    def maybe_move_main(connection: object, opened: object, guard: object) -> None:
+    def maybe_move_main(connection: object, opened: object) -> None:
         nonlocal moved_once
         if not moved_once and stage == "post_connect":
             moved_once = True
             database.replace(moved)
-        real_main_path(connection, opened, guard)
+        real_main_path(connection, opened)
 
     target_stage = stage
     monkeypatch.setattr(
@@ -100,228 +92,151 @@ def test_round3_move_spanning_every_transaction_boundary_is_terminal_and_rolls_b
 
     assert moved_once
     assert _rows(moved) == [("stable",)]
-    assert guard.terminal_event.is_set()
 
 
-def test_round3_rapid_move_away_and_back_still_latches_terminal_failure(
+def test_round3_valid_replacement_is_rejected_on_the_next_transaction(
     tmp_path: Path,
 ) -> None:
     database = tmp_path / "registry.sqlite3"
-    away = tmp_path / "away.sqlite3"
+    original = tmp_path / "original.sqlite3"
+    replacement = tmp_path / "replacement.sqlite3"
     _marker_database(database)
-    guard = _database_guard(database)
+    shutil.copyfile(database, replacement)
+    replacement.chmod(0o600)
+    database.replace(original)
+    replacement.replace(database)
 
     with (
-        pytest.raises(RodexDatabaseMovedError, match="please restart Rodex"),
-        open_rodex_read_transaction(database) as connection,
-    ):
-        assert connection.execute("SELECT value FROM marker").fetchone() == ("stable",)
-        database.replace(away)
-        away.replace(database)
-
-    assert guard.terminal_event.is_set()
-    assert guard.terminal_reason is not None
-    with pytest.raises(RodexDatabaseMovedError), open_rodex_read_transaction(database):
-        pass
-
-
-def test_round3_parent_move_away_and_back_latches_the_database(tmp_path: Path) -> None:
-    private_parent = tmp_path / "private"
-    private_parent.mkdir(mode=0o700)
-    database = private_parent / "registry.sqlite3"
-    moved_parent = tmp_path / "moved-private"
-    _marker_database(database)
-
-    with (
-        pytest.raises(RodexDatabaseMovedError, match="please restart Rodex"),
-        open_rodex_read_transaction(database),
-    ):
-        private_parent.replace(moved_parent)
-        moved_parent.replace(private_parent)
-
-
-def test_round3_inotify_queue_overflow_is_permanently_terminal(tmp_path: Path) -> None:
-    database = tmp_path / "registry.sqlite3"
-    _marker_database(database)
-    guard = _database_guard(database)
-
-    guard._manager.inject_overflow_for_testing()
-
-    assert guard.terminal_event.is_set()
-    assert guard.terminal_reason == "database location guard queue overflowed"
-    with (
-        pytest.raises(RodexDatabaseMovedError, match="queue overflowed"),
+        pytest.raises(RodexDatabaseMovedError, match="identity mismatch"),
         open_rodex_read_transaction(database),
     ):
         pass
 
+    assert _rows(original) == [("stable",)]
 
-def test_round3_location_guard_subscription_is_once_and_immediate_after_latch(
+
+def test_round3_bootstrap_does_not_recreate_previously_admitted_missing_storage(
     tmp_path: Path,
 ) -> None:
     database = tmp_path / "registry.sqlite3"
-    away = tmp_path / "away.sqlite3"
+    moved = tmp_path / "moved.sqlite3"
     _marker_database(database)
-    guard = _database_guard(database)
-    notices: list[tuple[Path, str]] = []
-    unsubscribe = guard.subscribe_terminal(
-        lambda path, reason: notices.append((path, reason))
-    )
-
-    database.replace(away)
-    with pytest.raises(RodexDatabaseMovedError):
-        guard.require_available("test")
-    assert len(notices) == 1
-
-    late: list[tuple[Path, str]] = []
-    guard.subscribe_terminal(lambda path, reason: late.append((path, reason)))
-    assert late == [(database, guard.terminal_reason)]
-    unsubscribe()
-
-
-def test_round3_failed_late_subscription_is_not_retained(tmp_path: Path) -> None:
-    database = tmp_path / "registry.sqlite3"
-    away = tmp_path / "away.sqlite3"
-    _marker_database(database)
-    guard = _database_guard(database)
-    database.replace(away)
-    with pytest.raises(RodexDatabaseMovedError):
-        guard.require_available("test")
-
-    def reject_terminal(_path: Path, _reason: str) -> None:
-        raise RuntimeError("subscriber cannot start")
-
-    with pytest.raises(RuntimeError, match="subscriber cannot start"):
-        guard.subscribe_terminal(reject_terminal)
-
-    assert guard._subscribers == {}
-
-
-def test_round3_guard_establishment_performs_no_writes_or_polling(tmp_path: Path) -> None:
-    database = tmp_path / "registry.sqlite3"
-    _marker_database(database)
-    before = {
-        path.name: (path.stat().st_size, path.stat().st_mtime_ns)
-        for path in tmp_path.iterdir()
-    }
-
-    guard = _database_guard(database)
-
-    after = {
-        path.name: (path.stat().st_size, path.stat().st_mtime_ns)
-        for path in tmp_path.iterdir()
-    }
-    assert not guard.terminal_event.is_set()
-    assert after == before
-    source = Path(guard_module.__file__).read_text(encoding="utf-8")
-    assert "time.sleep" not in source
-    assert "select.select" in source
-
-
-def test_round3_sibling_guard_does_not_inherit_pre_registration_parent_events(
-    tmp_path: Path,
-) -> None:
-    first = tmp_path / "first.sqlite3"
-    second = tmp_path / "second.sqlite3"
-    _marker_database(first)
-    with open_rodex_read_transaction(first):
-        pass
-
-    _marker_database(second)
-    with open_rodex_read_transaction(second) as connection:
-        assert connection.execute("SELECT value FROM marker").fetchone() == ("stable",)
-
-    assert not _database_guard(first).terminal_event.is_set()
-    assert not _database_guard(second).terminal_event.is_set()
-
-
-def test_round3_external_process_swap_back_latches_terminal_failure(
-    tmp_path: Path,
-) -> None:
-    database = tmp_path / "registry.sqlite3"
-    away = tmp_path / "away.sqlite3"
-    _marker_database(database)
-    guard = _database_guard(database)
-
-    subprocess.run(
-        [
-            sys.executable,
-            "-c",
-            "import os,sys; os.rename(sys.argv[1],sys.argv[2]); "
-            "os.rename(sys.argv[2],sys.argv[1])",
-            os.fspath(database),
-            os.fspath(away),
-        ],
-        check=True,
-    )
-
-    with pytest.raises(RodexDatabaseMovedError, match="please restart Rodex"):
-        guard.require_available("external_swap")
-
-
-def test_round3_known_location_is_never_recreated_after_move(tmp_path: Path) -> None:
-    database = tmp_path / "registry.sqlite3"
-    away = tmp_path / "away.sqlite3"
-    _marker_database(database)
-    _database_guard(database)
-    database.replace(away)
+    database.replace(moved)
 
     with (
-        pytest.raises(RodexDatabaseMovedError, match="please restart Rodex"),
+        pytest.raises(RodexDatabaseNotFoundError, match="database does not exist"),
         open_rodex_bootstrap_transaction(database),
-    ):
-        pass
-    with (
-        pytest.raises(RodexDatabaseMovedError, match="please restart Rodex"),
-        open_rodex_transaction(database),
     ):
         pass
 
     assert not database.exists()
-    assert _rows(away) == [("stable",)]
+    assert _rows(moved) == [("stable",)]
 
 
-def test_round3_guard_worker_and_descriptors_are_reclaimed(tmp_path: Path) -> None:
+def test_round3_transactions_leave_no_watcher_resources(tmp_path: Path) -> None:
     database = tmp_path / "registry.sqlite3"
-    before_fds = len(os.listdir("/proc/self/fd"))
-    before_workers = sum(
-        thread.name == "rodex-database-location-guard" for thread in enumerate_threads()
-    )
+    probe = """
+import json
+import os
+import sys
+from pathlib import Path
+from threading import enumerate as enumerate_threads
 
-    manager = guard_module._InotifyGuardManager()
+from rodex_sql import (
+    open_rodex_bootstrap_transaction,
+    open_rodex_read_transaction,
+    open_rodex_transaction,
+)
+
+database = Path(sys.argv[1])
+threads_before = sorted((thread.name, thread.daemon) for thread in enumerate_threads())
+with open_rodex_bootstrap_transaction(database) as connection:
+    connection.execute("CREATE TABLE marker (value TEXT NOT NULL)")
+with open_rodex_transaction(database) as connection:
+    connection.execute("INSERT INTO marker VALUES ('stable')")
+with open_rodex_read_transaction(database) as connection:
+    assert connection.execute("SELECT value FROM marker").fetchone() == ("stable",)
+
+targets = []
+for descriptor in os.listdir("/proc/self/fd"):
     try:
-        with (
-            open_private_database_boundary(
-                database,
-                create=True,
-            ) as boundary,
-            boundary.open_database(
-                writable=True,
-                create=True,
-            ) as opened,
-        ):
-            manager.get_or_create(opened)
+        targets.append(os.readlink(f"/proc/self/fd/{descriptor}"))
+    except OSError:
+        pass
+print(json.dumps({
+    "threads_before": threads_before,
+    "threads_after": sorted(
+        (thread.name, thread.daemon) for thread in enumerate_threads()
+    ),
+    "fd_targets": targets,
+}))
+"""
+    completed = subprocess.run(
+        [sys.executable, "-c", probe, os.fspath(database)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    result = json.loads(completed.stdout)
 
-        assert len(os.listdir("/proc/self/fd")) == before_fds + 3
-        assert (
-            sum(
-                thread.name == "rodex-database-location-guard"
-                for thread in enumerate_threads()
-            )
-            == before_workers + 1
-        )
-    finally:
-        manager.close()
-    assert len(os.listdir("/proc/self/fd")) == before_fds
-    assert (
-        sum(
-            thread.name == "rodex-database-location-guard" for thread in enumerate_threads()
-        )
-        == before_workers
+    assert result["threads_after"] == result["threads_before"]
+    assert not any("inotify" in target for target in result["fd_targets"])
+    assert not any(os.fspath(tmp_path) in target for target in result["fd_targets"])
+
+
+def test_round3_missing_proc_descriptor_path_fails_with_storage_identity_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database = tmp_path / "registry.sqlite3"
+    with (
+        open_private_database_boundary(database, create=True) as boundary,
+        boundary.open_database(writable=True, create=True) as opened,
+    ):
+        monkeypatch.setattr(sqlite_identity_module.Path, "exists", lambda _path: False)
+        with pytest.raises(RodexDatabaseMovedError, match="/proc/self/fd is unavailable"):
+            sqlite_identity_module.validated_database_uri(opened, read_only=False)
+
+
+def test_round3_connect_error_revalidates_changed_storage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database = tmp_path / "registry.sqlite3"
+    moved = tmp_path / "moved.sqlite3"
+    _marker_database(database)
+
+    def fail_connect(*_args: object, **_kwargs: object) -> None:
+        database.replace(moved)
+        raise RodexSQLError("synthetic connect failure")
+
+    monkeypatch.setattr(
+        transactions_module,
+        "_connect_validated_database",
+        fail_connect,
     )
 
+    with (
+        pytest.raises(RodexDatabaseMovedError, match="connect_error identity check failed"),
+        open_rodex_read_transaction(database),
+    ):
+        pass
 
-def test_round3_terminal_storage_error_is_not_downgraded_by_best_effort_paths(
+
+def test_round3_sqlite_error_revalidates_changed_storage(tmp_path: Path) -> None:
+    database = tmp_path / "registry.sqlite3"
+    moved = tmp_path / "moved.sqlite3"
+    _marker_database(database)
+
+    with (
+        pytest.raises(RodexDatabaseMovedError, match="sqlite_error identity check failed"),
+        open_rodex_transaction(database),
+    ):
+        database.replace(moved)
+        raise sqlite3.OperationalError("synthetic SQLite failure")
+
+
+def test_round3_storage_identity_error_is_not_downgraded_by_best_effort_paths(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -356,27 +271,3 @@ def test_round3_terminal_storage_error_is_not_downgraded_by_best_effort_paths(
     with pytest.raises(RodexDatabaseMovedError) as analytics_error:
         worker._project_health("degraded", "test", object())
     assert analytics_error.value is moved
-
-
-def test_round3_cli_reports_terminal_storage_failure_with_restart_guidance(
-    tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    database = tmp_path / "registry.sqlite3"
-    away = tmp_path / "away.sqlite3"
-    _marker_database(database)
-    _database_guard(database)
-    database.replace(away)
-    away.replace(database)
-    monkeypatch.setenv("RODEX_DATABASE_PATH", os.fspath(database))
-    monkeypatch.setattr(sys, "argv", ["rodex", "_stats-status", "unused"])
-
-    with pytest.raises(SystemExit) as exit_error:
-        main()
-
-    captured = capsys.readouterr()
-    assert exit_error.value.code == 1
-    assert captured.out == ""
-    assert "database_moved" in captured.err
-    assert "please restart Rodex" in captured.err

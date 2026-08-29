@@ -213,7 +213,6 @@ def test_sql_package_exposes_one_entry_for_each_storage_responsibility() -> None
         "require_active_rodex_transaction",
         "select_lookup_id",
         "select_or_insert_lookup_id",
-        "subscribe_rodex_database_terminal",
     }.issubset(rodex_sql.__all__)
     assert not {
         "DatabaseLocationGuard",
@@ -223,13 +222,13 @@ def test_sql_package_exposes_one_entry_for_each_storage_responsibility() -> None
         "open_rodex_audit_transaction",
         "close_database_location_guards_for_testing",
         "database_terminal_signal",
+        "subscribe_rodex_database_terminal",
     }.intersection(rodex_sql.__all__)
     assert "default_rodex_database_path" not in rodex_registry.__all__
 
 
-def test_sqlite_connection_and_descriptor_admission_have_one_owner() -> None:
+def test_sqlite_connection_has_one_owner_and_no_background_admission() -> None:
     connect_owners: set[str] = set()
-    admission_importers: set[str] = set()
     for path in SOURCE_ROOT.rglob("*.py"):
         tree = ast.parse(path.read_text(encoding="utf-8"))
         relative = path.relative_to(SOURCE_ROOT).as_posix()
@@ -242,16 +241,9 @@ def test_sqlite_connection_and_descriptor_admission_have_one_owner() -> None:
             for node in ast.walk(tree)
         ):
             connect_owners.add(relative)
-        if any(
-            isinstance(node, ast.ImportFrom)
-            and node.module == "database_location_guard"
-            and any(alias.name == "_admit_opened_database" for alias in node.names)
-            for node in ast.walk(tree)
-        ):
-            admission_importers.add(relative)
 
     assert connect_owners == {"rodex_sql/transactions.py"}
-    assert admission_importers == {"rodex_sql/transactions.py"}
+    assert not (SQL_ROOT / "database_location_guard.py").exists()
 
 
 def test_only_explicit_first_use_flows_can_bootstrap_storage() -> None:
@@ -264,30 +256,7 @@ def test_only_explicit_first_use_flows_can_bootstrap_storage() -> None:
     }
 
 
-def test_terminal_guard_has_no_runtime_reset_or_alternate_subscription_path() -> None:
-    guard_tree = ast.parse(
-        (SQL_ROOT / "database_location_guard.py").read_text(encoding="utf-8")
-    )
-    for function in (
-        node
-        for node in ast.walk(guard_tree)
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-    ):
-        assert not any(
-            isinstance(node, (ast.Assign, ast.AnnAssign))
-            and (
-                any(
-                    isinstance(target, ast.Name) and target.id == "_MANAGER"
-                    for target in (
-                        node.targets if isinstance(node, ast.Assign) else [node.target]
-                    )
-                )
-            )
-            and isinstance(node.value, ast.Constant)
-            and node.value.value is None
-            for node in ast.walk(function)
-        )
-
+def test_sql_storage_has_no_watcher_or_runtime_subscription_path() -> None:
     all_source = "\n".join(
         path.read_text(encoding="utf-8") for path in SOURCE_ROOT.rglob("*.py")
     )
@@ -295,11 +264,8 @@ def test_terminal_guard_has_no_runtime_reset_or_alternate_subscription_path() ->
     assert "require_existing_rodex_database_path" not in all_source
     assert "prepare_rodex_database_path" not in all_source
     assert "open_rodex_audit_transaction" not in all_source
+    assert "DatabaseLocationGuard" not in all_source
+    assert "database_location_guard" not in all_source
+    assert "subscribe_rodex_database_terminal" not in all_source
+    assert "inotify" not in all_source
     assert _top_level_callers("database_terminal_signal") == set()
-    assert _top_level_callers("subscribe_rodex_database_terminal") == {
-        ("rodex/runtime.py", "run_session_host")
-    }
-    assert (
-        "rodex_sql/transactions.py",
-        "subscribe_rodex_database_terminal",
-    ) in _top_level_callers("open_rodex_read_transaction")

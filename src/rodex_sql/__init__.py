@@ -20,7 +20,6 @@ from .transactions import (
     open_rodex_read_transaction,
     open_rodex_transaction,
     require_active_rodex_transaction,
-    subscribe_rodex_database_terminal,
 )
 
 __all__ = [
@@ -41,5 +40,4 @@ __all__ = [
     "require_active_rodex_transaction",
     "select_lookup_id",
     "select_or_insert_lookup_id",
-    "subscribe_rodex_database_terminal",
 ]

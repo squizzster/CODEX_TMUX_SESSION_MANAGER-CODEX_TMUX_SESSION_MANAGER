@@ -117,13 +117,8 @@ SQLite. Projection bounds text before JSON encoding and control frames are cappe
 On primary connection loss, `PrimaryConnectionLifecycleCoordinator` independently calls
 every reset participant, records failures, and completes the lifecycle transition even
 when one reset fails. The reducer alone advances the observer transport epoch. This is
-separate from terminal host shutdown. Before spawning children, runtime calls
-`subscribe_rodex_database_terminal`, whose existing-only read boundary admits the exact
-database and subscribes to its terminal latch in the host process as one operation. A
-moved, replaced, or invalidated database latches a restart-required reason.
-`RuntimeShutdownCoordinator`
-wakes every registered boundary, terminates the TUI, and the host closes analytics,
-runtime keepalive, proxy, observer, event tap, app-server, and private sockets.
+independent of SQLite. Database identity is checked synchronously only by canonical SQL
+transactions; the runtime host has no database watcher or subscription.
 
 ## Persistence and integrity
 
@@ -139,4 +134,5 @@ affect the TUI.
 - Ordinary reads and mutations are existing-only. Explicit first use alone may create storage.
 - Private database/runtime paths validate owner, type, mode, descriptor, and symlink boundaries.
 - External tmux work uses exact targets and compensated or conditional transitions.
-- Runtime path refresh and the database terminal latch fail closed when continued addressing is unsafe.
+- Runtime path refresh fails closed when continued runtime addressing is unsafe; database
+  storage validation occurs synchronously at SQL transaction boundaries.

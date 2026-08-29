@@ -390,22 +390,19 @@ current-user file at mode `0600`; runtime roots are mode `0700`, and live socket
 logs are mode `0600`. Symlink, owner, and file-type checks fail closed. SQLite uses WAL
 mode with a busy timeout so analytics writes do not block consistent readers during
 ordinary concurrent use. SQLite connects through the same retained no-follow descriptor
-Rodex validated. A single process-lifetime Linux inotify guard watches the private parent
-name and database inode; move, replacement, parent movement, unmount, or queue overflow
-permanently latches `database_moved`, interrupts active connections, and requires a Rodex
-restart. Transactions also recheck
-the retained parent, transition-lock, database, and SQLite main-path identities before
-connect, `BEGIN`, and `COMMIT`. Every ordinary transaction and integrity audit holds a
-shared advisory transition lock and reads committed WAL normally. The explicit
-maintenance lock is exclusive and is for offline diagnostics only; live database moves
-or replacements are unsupported. All Rodex processes accessing a database must use this
-transaction boundary; direct same-user SQLite access is outside the cooperative-lock
-contract. Only explicit first-use flows may create the database and transition lock;
-ordinary readers and mutations are existing-only, and runtime supervision can subscribe
-only after a transaction admits the exact opened database descriptor.
-An activated session host subscribes to that same permanent guard signal. A latch
-nonblockingly ends its foreground TUI, unwinds the proxy and sidecars, and reports
-`database_moved` restart guidance; runtime supervision never follows a replacement path.
+Rodex validated. Transactions recheck the retained parent, transition-lock, database, and
+SQLite main-path identities before connect, `BEGIN`, and `COMMIT`, and retain only a
+process-local `(device, inode)` baseline between transactions. A missing or replaced later
+identity fails that SQL operation with restart guidance. Rodex has no database watcher,
+subscription, or polling loop; a move-away-and-back completed entirely between transactions
+is not observable. Every ordinary transaction and integrity audit holds a shared advisory
+transition lock and reads committed WAL normally. The explicit maintenance lock is
+exclusive and is for offline diagnostics only; live database moves or replacements are
+unsupported. All Rodex processes accessing a database must use this transaction boundary;
+direct same-user SQLite access is outside the cooperative-lock contract. Only explicit
+first-use flows may create the database and transition lock; ordinary readers and mutations
+are existing-only, and bootstrap does not recreate storage previously admitted by the same
+process and later found missing.
 
 Each live session host refreshes every required runtime pathname hourly. This protects
 weeks-long detached sessions from age-based temporary-file cleanup without making dead

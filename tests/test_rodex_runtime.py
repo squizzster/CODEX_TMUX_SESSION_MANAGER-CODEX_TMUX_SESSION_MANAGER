@@ -11,7 +11,6 @@ import subprocess
 import sys
 import time
 import uuid
-from collections.abc import Callable
 from pathlib import Path
 from threading import Event, Lock
 from typing import BinaryIO, cast
@@ -19,7 +18,6 @@ from typing import BinaryIO, cast
 import pytest
 
 import rodex.runtime as runtime_module
-import rodex_sql.transactions as transactions_module
 from rodex.control import LiveRodexControl
 from rodex.process_contracts import AnalyticsWorkerConfig, SessionHostConfig
 from rodex.runtime import (
@@ -47,11 +45,6 @@ from rodex_registry import (
     RodexRuntimeId,
     RodexSessionId,
     initialise_rodex_database,
-)
-from rodex_sql import (
-    RodexDatabaseMovedError,
-    RodexSQLError,
-    subscribe_rodex_database_terminal,
 )
 
 RUNTIME_ID = RodexRuntimeId.parse("0c01ee2ead7240e1")
@@ -942,284 +935,7 @@ def test_primary_disconnect_resets_every_connection_scoped_observer() -> None:
     assert resets == ["context", "event-tap", "agent-observer"]
 
 
-@pytest.mark.parametrize(
-    ("latch_stage", "expected_lifecycle"),
-    [
-        ("subscribe", ("database-subscribe", "guard-unsubscribe")),
-        (
-            "tui-popen",
-            (
-                "database-subscribe",
-                "app-start",
-                "tui-start",
-                "tui-terminate",
-                "guard-unsubscribe",
-                "app-terminate",
-            ),
-        ),
-    ],
-)
-def test_session_host_closes_terminal_database_startup_windows(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    latch_stage: str,
-    expected_lifecycle: tuple[str, ...],
-) -> None:
-    database_path = tmp_path / "rodex.sqlite3"
-    lifecycle: list[str] = []
-    terminal_callback: Callable[[Path, str], None] | None = None
-    activated = AnalyticsWorkerConfig(
-        rodex_database_path=database_path,
-        codex_sessions_root=tmp_path / "sessions",
-        rodex_session_id=RodexSessionId(1),
-        rodex_registry_id=RodexRegistryId.parse("0000000000000001"),
-        runtime_id=RUNTIME_ID,
-        protocol_event_socket_path=tmp_path / "events.sock",
-        rodex_sessions_id=1,
-        codex_session_id=uuid.UUID("01a00654-f2bc-7a30-834a-a5f886a65f82"),
-    )
-
-    class FakeProcess:
-        def __init__(self, kind: str) -> None:
-            self.kind = kind
-            self.returncode: int | None = None
-
-        def poll(self) -> int | None:
-            return self.returncode
-
-        def terminate(self) -> None:
-            lifecycle.append(f"{self.kind}-terminate")
-            self.returncode = -15
-
-        def wait(self, timeout: float | None = None) -> int:
-            assert timeout is not None or self.kind == "app"
-            self.returncode = 0
-            return 0
-
-        def kill(self) -> None:
-            lifecycle.append(f"{self.kind}-kill")
-            self.returncode = -9
-
-    class FakeStatus:
-        def __init__(self, *_args: object) -> None:
-            return None
-
-        def update(self, _value: object) -> None:
-            return None
-
-    class FakeContextStatus(FakeStatus):
-        def __init__(self, *_args: object, **_kwargs: object) -> None:
-            return None
-
-        def observe_protocol_event(self, _event: object) -> None:
-            return None
-
-        def reset_after_disconnect(self) -> None:
-            return None
-
-        def close(self) -> None:
-            return None
-
-    class FakeEventTap:
-        def __init__(self, _path: Path) -> None:
-            return None
-
-        def start(self) -> None:
-            return None
-
-        def publish_protocol_event(self, _message: object, _event: object) -> None:
-            return None
-
-        def reset_after_disconnect(self) -> None:
-            return None
-
-        def close(self) -> None:
-            return None
-
-    class FakeProxy:
-        def __init__(self, *_args: object) -> None:
-            return None
-
-        def start(self) -> None:
-            return None
-
-        def close(self) -> None:
-            return None
-
-    class FakeKeepalive:
-        failure: RodexRuntimeError | None = None
-
-        def __init__(self, _paths: tuple[Path, ...]) -> None:
-            return None
-
-        def start(self) -> None:
-            return None
-
-        def close(self) -> None:
-            return None
-
-    def subscribe_database(
-        path: Path,
-        callback: Callable[[Path, str], None],
-    ) -> Callable[[], None]:
-        nonlocal terminal_callback
-        assert path == database_path
-        lifecycle.append("database-subscribe")
-        terminal_callback = callback
-        if latch_stage == "subscribe":
-            callback(database_path, "inode replaced")
-
-        def unsubscribe() -> None:
-            lifecycle.append("guard-unsubscribe")
-
-        return unsubscribe
-
-    def start_process(command: list[str], **_options: object) -> FakeProcess:
-        kind = "app" if "app-server" in command else "tui"
-        lifecycle.append(f"{kind}-start")
-        process = FakeProcess(kind)
-        if kind == "tui" and latch_stage == "tui-popen":
-            assert terminal_callback is not None
-            terminal_callback(database_path, "inode replaced")
-        return process
-
-    def fail_if_analytics_starts(_config: AnalyticsWorkerConfig) -> object:
-        lifecycle.append("analytics-start")
-        raise AssertionError("analytics started after terminal database movement")
-
-    monkeypatch.delenv("TMUX_PANE", raising=False)
-    monkeypatch.setattr(runtime_module.subprocess, "Popen", start_process)
-    monkeypatch.setattr(
-        runtime_module,
-        "_wait_for_app_server_socket",
-        lambda *_args: (tmp_path / "app.sock").touch(),
-    )
-    monkeypatch.setattr(runtime_module, "TmuxToolCallStatus", FakeStatus)
-    monkeypatch.setattr(runtime_module, "TmuxContextStatus", FakeStatus)
-    monkeypatch.setattr(runtime_module, "CodexContextStatusObserver", FakeContextStatus)
-    monkeypatch.setattr(runtime_module, "CodexProtocolEventTap", FakeEventTap)
-    monkeypatch.setattr(runtime_module, "CodexProtocolProxy", FakeProxy)
-    monkeypatch.setattr(runtime_module, "_RuntimePathKeepalive", FakeKeepalive)
-    monkeypatch.setattr(
-        runtime_module,
-        "_registered_analytics_worker_config",
-        lambda *_args: activated,
-    )
-    monkeypatch.setattr(
-        runtime_module,
-        "subscribe_rodex_database_terminal",
-        subscribe_database,
-    )
-    monkeypatch.setattr(
-        runtime_module.signal,
-        "signal",
-        lambda _signum, _handler: runtime_module.signal.SIG_DFL,
-    )
-
-    with pytest.raises(
-        RodexRuntimeError,
-        match=r"database_moved: .*inode replaced; please restart Rodex",
-    ):
-        run_session_host(
-            SessionHostConfig(
-                codex_binary="/usr/bin/codex",
-                app_server_socket_path=tmp_path / "app.sock",
-                app_server_log_path=tmp_path / "app.log",
-                protocol_proxy_socket_path=tmp_path / "proxy.sock",
-                protocol_event_socket_path=tmp_path / "events.sock",
-                tmux_binary="/usr/bin/tmux",
-                tmux_server_socket_path=tmp_path / "tmux.sock",
-                analytics=activated,
-            ),
-            analytics_supervisor_factory=fail_if_analytics_starts,
-        )
-
-    assert tuple(lifecycle) == expected_lifecycle
-
-
-@pytest.mark.parametrize("storage_kind", ["missing", "symlink"])
-def test_session_host_invalid_database_spawns_no_children(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    storage_kind: str,
-) -> None:
-    database = tmp_path / "database.sqlite3"
-    if storage_kind == "symlink":
-        target = tmp_path / "untrusted.sqlite3"
-        target.touch(mode=0o600)
-        database.symlink_to(target)
-    child_starts: list[list[str]] = []
-
-    def reject_child_start(command: list[str], **_options: object) -> object:
-        child_starts.append(command)
-        raise AssertionError("child process started before database admission")
-
-    monkeypatch.setattr(runtime_module.subprocess, "Popen", reject_child_start)
-
-    with pytest.raises(RodexSQLError):
-        run_session_host(
-            SessionHostConfig(
-                codex_binary="/usr/bin/codex",
-                app_server_socket_path=tmp_path / "app.sock",
-                app_server_log_path=tmp_path / "app.log",
-                protocol_proxy_socket_path=tmp_path / "proxy.sock",
-                protocol_event_socket_path=tmp_path / "events.sock",
-                tmux_binary="/usr/bin/tmux",
-                tmux_server_socket_path=tmp_path / "tmux.sock",
-                analytics=AnalyticsWorkerConfig(
-                    rodex_database_path=database,
-                    codex_sessions_root=tmp_path / "sessions",
-                    rodex_session_id=RodexSessionId(1),
-                    rodex_registry_id=RodexRegistryId.parse("0000000000000001"),
-                    runtime_id=RUNTIME_ID,
-                    protocol_event_socket_path=tmp_path / "events.sock",
-                ),
-            )
-        )
-
-    assert child_starts == []
-
-
-def test_database_move_between_local_admission_and_subscription_is_terminal(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    database = tmp_path / "rodex.sqlite3"
-    subprocess.run(
-        [
-            sys.executable,
-            "-c",
-            "import sys; from rodex_registry import initialise_rodex_database; "
-            "initialise_rodex_database(sys.argv[1])",
-            os.fspath(database),
-        ],
-        check=True,
-    )
-    moved = tmp_path / "moved.sqlite3"
-    real_known_guard = transactions_module._known_database_location_guard
-    callbacks: list[tuple[Path, str]] = []
-
-    def swap_before_subscription(path: Path) -> object:
-        path.replace(moved)
-        moved.replace(path)
-        return real_known_guard(path)
-
-    monkeypatch.setattr(
-        transactions_module,
-        "_known_database_location_guard",
-        swap_before_subscription,
-    )
-
-    with pytest.raises(RodexDatabaseMovedError, match="please restart Rodex"):
-        subscribe_rodex_database_terminal(
-            database,
-            lambda path, reason: callbacks.append((path, reason)),
-        )
-
-    assert callbacks == []
-
-
-def test_fresh_session_host_process_admits_database_and_survives_initialization(
+def test_fresh_session_host_process_survives_initialization(
     tmp_path: Path,
 ) -> None:
     database = initialise_rodex_database(tmp_path / "rodex.sqlite3")
@@ -1332,7 +1048,7 @@ raise SystemExit(
         except subprocess.TimeoutExpired:
             process.kill()
             _stdout, stderr = process.communicate(timeout=3)
-    assert "has not been admitted" not in stderr
+    assert stderr == ""
 
 
 @pytest.mark.evolutionary_regression
@@ -2671,8 +2387,6 @@ def test_session_host_retries_exact_resume_during_active_writer_handoff(
     tui_launches = 0
     retry_waits: list[float] = []
     primary_release_waits: list[float] = []
-    database_subscriptions: list[Path] = []
-    database_unsubscriptions = 0
 
     class FakeProcess:
         def __init__(self, kind: str, returncode: int | None) -> None:
@@ -2752,19 +2466,6 @@ def test_session_host_retries_exact_resume_during_active_writer_handoff(
         def close(self) -> None:
             return None
 
-    def subscribe_database(
-        path: Path,
-        _callback: Callable[[Path, str], None],
-    ) -> Callable[[], None]:
-        database_subscriptions.append(path)
-
-        def unsubscribe() -> None:
-            nonlocal database_unsubscriptions
-            database_unsubscriptions += 1
-
-        return unsubscribe
-
-    monkeypatch.delenv("TMUX_PANE", raising=False)
     monkeypatch.setattr(runtime_module.subprocess, "Popen", start_process)
     monkeypatch.setattr(
         runtime_module,
@@ -2776,16 +2477,6 @@ def test_session_host_retries_exact_resume_during_active_writer_handoff(
     monkeypatch.setattr(runtime_module, "CodexProtocolEventTap", FakeEventTap)
     monkeypatch.setattr(runtime_module, "CodexProtocolProxy", FakeProxy)
     monkeypatch.setattr(runtime_module, "_RuntimePathKeepalive", FakeKeepalive)
-    monkeypatch.setattr(
-        runtime_module,
-        "subscribe_rodex_database_terminal",
-        subscribe_database,
-    )
-    monkeypatch.setattr(
-        runtime_module,
-        "_registered_analytics_worker_config",
-        lambda *_args: None,
-    )
     monkeypatch.setattr(
         runtime_module,
         "_read_runtime_log_since",
@@ -2807,14 +2498,6 @@ def test_session_host_retries_exact_resume_during_active_writer_handoff(
                 tmux_binary="/usr/bin/tmux",
                 tmux_server_socket_path=tmp_path / "tmux.sock",
                 codex_arguments=("resume", str(requested_codex_session_id)),
-                analytics=AnalyticsWorkerConfig(
-                    rodex_database_path=tmp_path / "rodex.sqlite3",
-                    codex_sessions_root=tmp_path / "sessions",
-                    rodex_session_id=RodexSessionId(1),
-                    rodex_registry_id=RodexRegistryId.parse("0000000000000001"),
-                    runtime_id=RUNTIME_ID,
-                    protocol_event_socket_path=tmp_path / "events.sock",
-                ),
             )
         )
         == 0
@@ -2825,8 +2508,6 @@ def test_session_host_retries_exact_resume_during_active_writer_handoff(
         runtime_module.CODEX_PRIMARY_CONNECTION_RELEASE_TIMEOUT_SECONDS
     ]
     assert retry_waits == [runtime_module.CODEX_ACTIVE_WRITER_RETRY_INTERVAL_SECONDS]
-    assert database_subscriptions == [tmp_path / "rodex.sqlite3"]
-    assert database_unsubscriptions == 1
 
 
 def test_active_writer_handoff_retry_requires_exact_thread_and_open_window() -> None:

@@ -5,15 +5,11 @@ from __future__ import annotations
 import fcntl
 import sqlite3
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Iterator
 from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import Final
 
-from .database_location_guard import (
-    _admit_opened_database,
-    _known_database_location_guard,
-)
 from .errors import RodexSQLError
 from .private_database_path import (
     PrivateDatabaseBoundary,
@@ -22,6 +18,7 @@ from .private_database_path import (
     open_private_database_boundary,
 )
 from .sqlite_identity import (
+    _database_identity_was_admitted,
     require_database_identity,
     require_sqlite_main_path,
     validated_database_uri,
@@ -80,40 +77,9 @@ def open_rodex_maintenance_lock(
 ) -> Iterator[Path]:
     """Exclude connections for diagnostics; no live move/migration is supported."""
     path = normalise_rodex_database_path(database_path)
-    known_guard = _known_database_location_guard(path)
-    if known_guard is not None:
-        known_guard.require_available("pre_maintenance")
-    try:
-        with open_private_database_boundary(path, create=False) as boundary:
-            _acquire_database_lock(boundary, exclusive=True)
-            yield boundary.path
-    except RodexSQLError:
-        if known_guard is not None:
-            known_guard.require_available("maintenance_error")
-        raise
-
-
-def subscribe_rodex_database_terminal(
-    database_path: str | Path,
-    callback: Callable[[Path, str], None],
-) -> Callable[[], None]:
-    """Admit existing storage locally and subscribe to its permanent latch."""
-    path = normalise_rodex_database_path(database_path)
-    unsubscribe: Callable[[], None] | None = None
-    try:
-        with open_rodex_read_transaction(path):
-            guard = _known_database_location_guard(path)
-            if guard is None:
-                raise RodexSQLError(
-                    f"database transaction did not admit its location guard: {path}"
-                )
-            guard.require_available("terminal_subscription")
-            unsubscribe = guard.subscribe_terminal(callback)
-        return unsubscribe
-    except BaseException:
-        if unsubscribe is not None:
-            unsubscribe()
-        raise
+    with open_private_database_boundary(path, create=False) as boundary:
+        _acquire_database_lock(boundary, exclusive=True)
+        yield boundary.path
 
 
 def require_active_rodex_transaction(connection: sqlite3.Connection) -> None:
@@ -129,14 +95,14 @@ def _open_transaction_connection(
     read_only: bool,
     begin_statement: str,
 ) -> Iterator[sqlite3.Connection]:
-    guard = _admit_opened_database(opened)
-    require_database_identity(opened, guard, stage="pre_connect")
-    connection = _connect_validated_database(opened, read_only=read_only)
-    registered = False
+    require_database_identity(opened, stage="pre_connect")
     try:
-        guard.register_connection(connection)
-        registered = True
-        require_sqlite_main_path(connection, opened, guard)
+        connection = _connect_validated_database(opened, read_only=read_only)
+    except RodexSQLError:
+        require_database_identity(opened, stage="connect_error")
+        raise
+    try:
+        require_sqlite_main_path(connection, opened)
         connection.execute("PRAGMA busy_timeout = 10000")
         connection.execute("PRAGMA foreign_keys = ON")
         if read_only:
@@ -144,15 +110,15 @@ def _open_transaction_connection(
         else:
             _ensure_wal_journal_mode(connection)
             connection.execute("PRAGMA synchronous = NORMAL")
-        require_database_identity(opened, guard, stage="pre_begin")
+        require_database_identity(opened, stage="pre_begin")
         connection.execute(begin_statement)
         try:
             yield connection
-            require_database_identity(opened, guard, stage="pre_commit")
+            require_database_identity(opened, stage="pre_commit")
         except sqlite3.Error:
-            guard.require_available("sqlite_error")
             with suppress(sqlite3.Error):
                 connection.rollback()
+            require_database_identity(opened, stage="sqlite_error")
             raise
         except BaseException:
             with suppress(sqlite3.Error):
@@ -161,13 +127,11 @@ def _open_transaction_connection(
         else:
             connection.commit()
     except sqlite3.Error:
-        guard.require_available("sqlite_error")
         with suppress(sqlite3.Error):
             connection.rollback()
+        require_database_identity(opened, stage="sqlite_error")
         raise
     finally:
-        if registered:
-            guard.unregister_connection(connection)
         connection.close()
 
 
@@ -200,19 +164,17 @@ def _open_transaction_storage(
     allow_initial_creation: bool,
 ) -> Iterator[ValidatedDatabaseFile]:
     path = normalise_rodex_database_path(database_path)
-    known_guard = _known_database_location_guard(path)
-    if known_guard is not None:
-        known_guard.require_available("pre_open")
-    create = allow_initial_creation and known_guard is None
-    try:
-        with open_private_database_boundary(path, create=create) as boundary:
-            _acquire_database_lock(boundary, exclusive=False)
-            with boundary.open_database(writable=writable, create=create) as opened:
-                yield opened
-    except RodexSQLError:
-        if known_guard is not None:
-            known_guard.require_available("open_error")
-        raise
+    create = allow_initial_creation and not _database_identity_was_admitted(path)
+    with open_private_database_boundary(
+        path,
+        create=create,
+    ) as boundary:
+        _acquire_database_lock(boundary, exclusive=False)
+        with boundary.open_database(
+            writable=writable,
+            create=create,
+        ) as opened:
+            yield opened
 
 
 def _connect_validated_database(

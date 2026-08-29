@@ -368,8 +368,8 @@ diagnostics. Current command names are reserved from Rodex aliases.
 ## Local data
 
 The durable per-user registry defaults to
-`$XDG_STATE_HOME/rodex/rodex-v16.sqlite3`, or
-`~/.local/state/rodex/rodex-v16.sqlite3` when `XDG_STATE_HOME` is unset. Set
+`$XDG_STATE_HOME/rodex/rodex-v17.sqlite3`, or
+`~/.local/state/rodex/rodex-v17.sqlite3` when `XDG_STATE_HOME` is unset. Set
 `RODEX_DATABASE_PATH` to select another database.
 
 Rodex session IDs are random 64-bit values rendered only as 16 lowercase hex
@@ -384,7 +384,7 @@ enforces its domain uniqueness. Codex session IDs remain Codex-owned 128-bit val
 Each is stored once in the canonical `codex_threads` table across two `BIGINT` columns;
 memberships, current-root selection, activities, and lineage use integer foreign keys.
 
-The registry uses schema generation 16. An internal generation marker admits an
+The registry uses schema generation 17. An internal generation marker admits an
 already-current database cheaply inside each operation's transaction. Explicit
 first-use bootstrap creates a missing private registry atomically; nonempty unmarked,
 incomplete, and wrong-generation databases fail closed. The explicit integrity audit is

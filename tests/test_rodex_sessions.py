@@ -26,6 +26,7 @@ from rodex_registry import (
     split_codex_session_id_into_signed_bigints,
 )
 from rodex_sql import (
+    RODEX_DATABASE_SCHEMA_GENERATION,
     RodexSQLError,
     default_rodex_database_path,
     open_rodex_bootstrap_transaction,
@@ -45,7 +46,8 @@ def seed_current_schema_generation(connection: sqlite3.Connection) -> None:
         "CHECK (id = 1))"
     )
     connection.execute(
-        "INSERT INTO rodex_schema_generations (schema_generation) VALUES (16)"
+        "INSERT INTO rodex_schema_generations (schema_generation) VALUES (?)",
+        (RODEX_DATABASE_SCHEMA_GENERATION,),
     )
 
 
@@ -632,7 +634,7 @@ def test_default_database_path_uses_xdg_state_home(
     state_home = tmp_path / "state"
     monkeypatch.setenv("XDG_STATE_HOME", str(state_home))
 
-    assert default_rodex_database_path() == state_home / "rodex" / "rodex-v16.sqlite3"
+    assert default_rodex_database_path() == state_home / "rodex" / "rodex-v17.sqlite3"
 
 
 def test_default_database_path_uses_home_state_directory_without_xdg_override(
@@ -644,12 +646,12 @@ def test_default_database_path_uses_home_state_directory_without_xdg_override(
     monkeypatch.setattr(Path, "home", lambda: home)
 
     assert default_rodex_database_path() == (
-        home / ".local" / "state" / "rodex" / "rodex-v16.sqlite3"
+        home / ".local" / "state" / "rodex" / "rodex-v17.sqlite3"
     )
 
 
 @pytest.mark.evolutionary_regression
-def test_incompatible_schema_generation_leaves_v14_database_untouched(
+def test_new_schema_generation_leaves_v16_database_untouched(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Current evidence: incompatible ALPHA schemas use a new durable filename.
@@ -661,20 +663,20 @@ def test_incompatible_schema_generation_leaves_v14_database_untouched(
     registry_directory = state_home / "rodex"
     registry_directory.mkdir(mode=0o700, parents=True)
     registry_directory.chmod(0o700)
-    legacy_database = registry_directory / "rodex-v14.sqlite3"
-    legacy_contents = b"legacy-v14-database-sentinel"
+    legacy_database = registry_directory / "rodex-v16.sqlite3"
+    legacy_contents = b"preserved-v16-database-sentinel"
     legacy_database.write_bytes(legacy_contents)
     legacy_database.chmod(0o600)
     monkeypatch.setenv("XDG_STATE_HOME", str(state_home))
 
     current_database = initialise_rodex_database()
 
-    assert current_database == registry_directory / "rodex-v16.sqlite3"
+    assert current_database == registry_directory / "rodex-v17.sqlite3"
     assert current_database.is_file()
     assert legacy_database.read_bytes() == legacy_contents
 
 
-def test_nonempty_unmarked_database_is_rejected_before_v16_tables_are_created(
+def test_nonempty_unmarked_database_is_rejected_before_v17_tables_are_created(
     tmp_path: Path,
 ) -> None:
     database = tmp_path / "rodex.sqlite3"

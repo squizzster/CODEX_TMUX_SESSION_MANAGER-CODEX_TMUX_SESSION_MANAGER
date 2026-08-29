@@ -30,8 +30,9 @@ listener; control endpoints are Unix sockets below a private runtime root.
 - Rodex uses stdlib `sqlite3` behind one canonical transaction owner. The database and
   sibling transition lock are current-user-owned regular files at mode `0600` below a
   real current-user-owned private directory. Linux `O_NOFOLLOW`/`O_CLOEXEC` opens retain
-  the parent, lock, and database descriptors through each transaction; SQLite connects
-  through `/proc/self/fd/<validated-database-fd>`.
+  the parent and lock descriptors through each transaction and retain one validated
+  database descriptor for the process-local WAL lifetime. SQLite connects through
+  `/proc/self/fd/<validated-database-fd>`.
 - Only an explicit first-use bootstrap transaction may create the parent, transition
   lock, or database. Ordinary readers and writers require an existing database and lock
   and never create missing filesystem state. The first secure transaction records the
@@ -47,9 +48,11 @@ listener; control endpoints are Unix sockets below a private runtime root.
   `BEGIN IMMEDIATE`, foreign keys, a ten-second busy timeout, and `synchronous=NORMAL`;
   readers use a read-only/query-only deferred transaction and see a normal committed-WAL
   snapshot. One threadless, fork-safe process-local idle SQLite connection retains at most
-  one validated WAL generation between sparse writes. It owns no transaction or cooperative
-  lock, uses bounded checkpoint/growth settings, and closes on identity switch or clean exit;
-  a forked child discards the inherited connection before reuse.
+  one validated WAL generation between sparse writes. It reuses the owner's validated
+  main-file descriptor, owns no transaction or cooperative lock, and uses bounded
+  checkpoint/growth settings. Identity switch and clean exit close SQLite before releasing
+  that descriptor. Before a genuine fork, the parent closes the complete owner so the child
+  inherits no live SQLite state.
 - Database location enforcement is synchronous. Rodex has no filesystem watcher, worker,
   subscription, callback, polling loop, or recurring SQL. A missing or different identity
   is rejected at the next transaction boundary with restart guidance. A move-away-and-back

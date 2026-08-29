@@ -15,7 +15,7 @@ from .errors import (
     RodexSQLError,
 )
 
-RODEX_DATABASE_SCHEMA_GENERATION: Final = 16
+RODEX_DATABASE_SCHEMA_GENERATION: Final = 17
 RODEX_DATABASE_FILENAME: Final = f"rodex-v{RODEX_DATABASE_SCHEMA_GENERATION}.sqlite3"
 DATABASE_TRANSITION_LOCK_SUFFIX: Final = ".rodex-transition.lock"
 

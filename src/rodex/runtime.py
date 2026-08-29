@@ -834,7 +834,7 @@ class RodexRuntimeLauncher:
                 self._publish_tui_notice(runtime.protocol_proxy_socket_path, notice)
         environment = os.environ.copy()
         environment.pop("TMUX", None)
-        attach_target = self._stable_attach_target(runtime)
+        attach_target = self._stable_tmux_session_target(runtime)
         self._tmux(
             runtime,
             "-T",
@@ -846,7 +846,7 @@ class RodexRuntimeLauncher:
             environment=environment,
         )
 
-    def _stable_attach_target(self, runtime: LiveTmuxSession) -> str:
+    def _stable_tmux_session_target(self, runtime: LiveTmuxSession) -> str:
         """Resolve a managed runtime to tmux's immutable server-local session ID."""
         if runtime.runtime_id is None:
             return _exact_tmux_session_target(runtime.tmux_session_name)
@@ -858,7 +858,7 @@ class RodexRuntimeLauncher:
             check=False,
         )
         if result.returncode != 0:
-            raise RodexRuntimeError("Rodex runtime ended before tmux attachment")
+            raise RodexRuntimeError("Rodex runtime ended before stable tmux resolution")
         expected_runtime_id = str(runtime.runtime_id)
         matches: list[str] = []
         for line in result.stdout.splitlines():
@@ -872,9 +872,7 @@ class RodexRuntimeLauncher:
                 matches.append(tmux_session_id)
         if len(matches) != 1:
             detail = "not found" if not matches else "advertised by multiple tmux sessions"
-            raise RodexRuntimeError(
-                f"Rodex runtime {expected_runtime_id} was {detail} before attachment"
-            )
+            raise RodexRuntimeError(f"Rodex runtime {expected_runtime_id} was {detail}")
         return matches[0]
 
     def session_exists(self, runtime: LiveTmuxSession) -> bool:
@@ -1051,7 +1049,7 @@ class RodexRuntimeLauncher:
         """Set, toggle, inherit, or inspect mouse mode for one exact session."""
         if mode not in {"on", "off", "toggle", "inherit", "status"}:
             raise ValueError(f"unsupported tmux mouse mode: {mode}")
-        target = _exact_tmux_pane_target(runtime.tmux_session_name)
+        target = f"{self._stable_tmux_session_target(runtime)}:"
         if mode == "inherit":
             self._tmux(runtime, "set-option", "-u", "-t", target, "mouse")
         elif mode == "toggle":

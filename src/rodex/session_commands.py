@@ -83,10 +83,13 @@ def execute_session_command(
             raise RodexLaunchError(
                 "usage: rodex _mouse SESSION_NAME [on|off|toggle|inherit|status]"
             )
-        session_id, runtime, _ = resolve_live_control(arguments[1], database_path, launcher)
-        mouse_state = launcher.set_mouse_mode(runtime, mode)
-        _record_access_best_effort(session_id, database_path)
-        print(f"Rodex {arguments[1]} mouse: {mouse_state}", flush=True)
+        target, mouse_state = ExactTurnMutationCoordinator(
+            database_path,
+            launcher,
+            control_client,
+        ).mouse_mode(arguments[1], mode)
+        _record_access_best_effort(target.session_id, database_path)
+        print(f"Rodex {target.display_name} mouse: {mouse_state}", flush=True)
         return
     if command == WAIT_COMMAND:
         if len(arguments) != 2:

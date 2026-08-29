@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from rodex_registry import (
@@ -143,6 +143,28 @@ class ExactTurnMutationCoordinator:
                 revalidate=self._revalidator(target),
             )
             return target, state
+
+    def mouse_mode(
+        self,
+        selector: str,
+        mode: str,
+    ) -> tuple[ExactTurnTarget, str]:
+        """Inspect or mutate mouse state on one locked, immutable runtime target."""
+        with self._locked_selector(selector) as selection:
+            target = self._resolve_target(selection)
+            runtime_id = target.control.runtime_id
+            if runtime_id is None:
+                raise ExactRuntimeIdentityRequiredError(
+                    "live runtime predates exact runtime identity; restart it with this "
+                    "Rodex version"
+                )
+            target = replace(
+                target,
+                runtime=replace(target.runtime, runtime_id=runtime_id),
+            )
+            mouse_state = self._launcher.set_mouse_mode(target.runtime, mode)
+            self._revalidator(target)()
+            return target, mouse_state
 
     def alias_transition(
         self,

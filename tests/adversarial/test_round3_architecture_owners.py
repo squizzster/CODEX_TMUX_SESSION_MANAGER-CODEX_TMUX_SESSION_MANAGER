@@ -35,6 +35,8 @@ def test_round3_mutation_lock_has_one_command_domain_owner() -> None:
     assert "session_transition_lock" not in machine_source
     assert "session_transition_lock" not in session_source
     assert "session_transition_lock" not in control_source
+    assert ".set_mouse_mode(" not in session_source
+    assert ".mouse_mode(" in session_source
     assert ".start_turn(" not in machine_source
     assert ".steer_turn(" not in machine_source
     assert ".interrupt_turn(" not in machine_source

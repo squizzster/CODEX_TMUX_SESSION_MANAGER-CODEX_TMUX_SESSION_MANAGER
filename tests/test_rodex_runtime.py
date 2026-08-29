@@ -587,6 +587,41 @@ def test_attach_uses_stable_runtime_identity_when_alias_wins_before_tmux_attach(
     assert runner.calls[-1][-2:] == ["-t", "$9"]
 
 
+def test_mouse_uses_stable_runtime_identity_after_name_reuse(tmp_path: Path) -> None:
+    class ReusedNameRunner(RuntimeRunner):
+        def __call__(
+            self, command: list[str], **options: object
+        ) -> subprocess.CompletedProcess[str]:
+            self.calls.append(command)
+            self.options.append(options)
+            if "list-sessions" in command:
+                return subprocess.CompletedProcess(
+                    command,
+                    0,
+                    stdout=f"$7\t{RUNTIME_ID}\n$8\treplacement-runtime\n",
+                    stderr="",
+                )
+            if "set-option" in command:
+                assert command[-4:] == ["-t", "$7:", "mouse", "on"]
+                return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+            if "show-options" in command:
+                assert command[-2:] == ["$7:", "mouse"]
+                return subprocess.CompletedProcess(command, 0, stdout="on\n", stderr="")
+            raise AssertionError(f"unexpected tmux command: {command}")
+
+    runner = ReusedNameRunner(tmp_path)
+    launcher = RodexRuntimeLauncher("codex", "tmux", runner=runner)
+    stale_name = LiveTmuxSession(
+        tmp_path / "tmux.sock",
+        "reused-name",
+        runtime_id=RUNTIME_ID,
+    )
+
+    assert launcher.set_mouse_mode(stale_name, "on") == "on"
+    assert len(runner.calls) == 3
+    assert all("=reused-name:" not in command for command in runner.calls)
+
+
 def test_attach_notice_failure_never_blocks_tmux_attachment(tmp_path: Path) -> None:
     runner = RuntimeRunner(tmp_path)
 
@@ -1482,6 +1517,62 @@ def test_real_tmux_session_preserves_scrollback_with_mouse_disabled(
         assert "300" in captured
     finally:
         launcher.stop(runtime, check=False)
+
+
+def test_real_tmux_mouse_identity_survives_rename_and_old_name_reuse(
+    tmp_path: Path,
+) -> None:
+    tmux_binary = shutil.which("tmux")
+    if tmux_binary is None:
+        pytest.skip("tmux is not installed")
+    socket_path = tmp_path / "tmux.sock"
+    original = LiveRodexRuntime(
+        socket_path,
+        "alpha",
+        tmp_path / "app.sock",
+        tmp_path / "app.log",
+        tmp_path / "proxy.sock",
+        tmp_path / "events.sock",
+        runtime_id=RUNTIME_ID,
+    )
+    launcher = RodexRuntimeLauncher("codex", tmux_binary)
+
+    def tmux(*arguments: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [tmux_binary, "-S", str(socket_path), *arguments],
+            check=True,
+            text=True,
+            capture_output=True,
+        )
+
+    def mouse_for(name: str) -> str:
+        return tmux("show-options", "-A", "-v", "-t", f"={name}:", "mouse").stdout.strip()
+
+    tmux("new-session", "-d", "-s", "alpha", "sleep 30")
+    try:
+        tmux("new-session", "-d", "-s", "beta", "sleep 30")
+        launcher.publish_runtime_control(
+            original,
+            uuid.UUID("01a00654-f2bc-7a30-834a-a5f886a65f82"),
+        )
+        tmux("rename-session", "-t", "=alpha", "gamma")
+        tmux("rename-session", "-t", "=beta", "alpha")
+
+        stale_name = LiveTmuxSession(
+            socket_path,
+            "alpha",
+            runtime_id=RUNTIME_ID,
+        )
+        assert launcher.set_mouse_mode(stale_name, "on") == "on"
+        assert mouse_for("gamma") == "on"
+        assert mouse_for("alpha") == "off"
+    finally:
+        subprocess.run(
+            [tmux_binary, "-S", str(socket_path), "kill-server"],
+            check=False,
+            text=True,
+            capture_output=True,
+        )
 
 
 def test_real_tmux_survives_rename_and_status_configuration(tmp_path: Path) -> None:

@@ -37,7 +37,7 @@ prompt. An unregistered canonical Codex identity requires a transient App Server
 |---|---|
 | `rodex.application_pipeline` / command contracts | Classify and dispatch one typed invocation. |
 | `rodex.managed_session_lifecycle` / `cool_name` | Select, name, create, attach, resume, recover, and resolve collisions. |
-| `rodex.exact_turn_mutation` | Re-resolve mutation selectors under the per-session transition lock; validate incarnation and choose start, steer, interrupt, or alias policy. |
+| `rodex.exact_turn_mutation` | Re-resolve mutation selectors under the per-session transition lock; validate incarnation and choose start, steer, interrupt, mouse, or alias policy. |
 | `rodex.session_read_pipeline` / `session_tail` | Verify live reads and follow terminal history without idle full-history scans. |
 | `rodex.runtime` / `process_contracts` / `session_host` | Discover, launch, attach, supervise, and clean up app-server, TUI, proxy, analytics, and runtime paths. |
 | `rodex.tmux_executor` | Sole production process boundary for every tmux command. |

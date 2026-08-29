@@ -32,8 +32,8 @@ boundary; domain policy has one canonical owner underneath it.
 
 ## Exact-turn mutation
 
-- `ExactTurnMutationCoordinator` is the sole owner of start, steer, interrupt, and alias
-  mutation policy.
+- `ExactTurnMutationCoordinator` is the sole owner of start, steer, interrupt, mouse, and
+  alias mutation policy.
 - The coordinator resolves a selector, acquires that session's transition lock, resolves
   the selector again, and keeps the lock through live discovery and mutation. A selector
   that changed while waiting fails closed.
@@ -45,8 +45,8 @@ boundary; domain policy has one canonical owner underneath it.
   package-private and require the coordinator's revalidation fence; there is no
   unfenced prompt-sending API.
 - The machine-command handler invokes only the coordinator's start, steer, and interrupt
-  operations. The human session-command handler invokes only its `alias_transition`;
-  neither handler calls mutation transport directly.
+  operations. The human session-command handler invokes only its mouse and
+  `alias_transition` operations; neither handler calls mutation transport directly.
 - Start accepts only an idle thread. Steer and interrupt require the caller's exact
   active turn ID and carry it as the App Server's expected-turn guard. A stale selector
   or runtime produces no mutation frame; a mismatched turn is rejected by the App Server.
@@ -54,6 +54,8 @@ boundary; domain policy has one canonical owner underneath it.
   consistent read, performs tmux work without holding a SQLite writer transaction, and
   finalizes with compare-and-swap checks. A failed durable finalize compensates a
   completed tmux rename.
+- Mouse inspection and mutation retain the same session transition lock through tmux
+  readback and address the verified runtime through tmux's immutable `$session_id`.
 - A successful live alias change sends one `RODEX_AUTO_INFO` through the same fenced
   start-or-steer policy. Notification failure does not undo an already committed name.
 

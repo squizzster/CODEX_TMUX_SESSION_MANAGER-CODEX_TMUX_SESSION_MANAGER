@@ -48,9 +48,9 @@ Both sides retain the same Rodex, runtime, Codex, and workspace context.
 - Sends work to, waits for, or reads a running session from another shell.
 - Streams settled, readable terminal output without replaying terminal clear-screen or
   transient composer redraws.
-- Starts, steers, and interrupts through one exact-turn coordinator that blocks stale
-  selectors and runtime incarnations before transport and sends the caller's exact turn
-  ID as the App Server mutation guard.
+- Starts, steers, interrupts, and changes mouse state through one exact-turn coordinator
+  that blocks stale selectors and runtime incarnations before mutation. App Server
+  mutations also send the caller's exact turn ID as their guard.
 - Applies each alias through one serialized durable/tmux transition and uses the same
   exact-turn policy for its live name notification.
 - Waits for and reads bounded results from one exact Codex turn without copying result
@@ -299,6 +299,11 @@ expected-turn guard. A moved selector or replaced runtime fails before a mutatio
 an incompatible App Server or mismatched turn fails closed. Each mutation RPC chain has
 one absolute deadline covering connection, initialization, frame delivery, and response
 handling.
+
+`_mouse` enters the same coordinator and retains that transition lock through both its
+tmux mutation and readback. It resolves the verified runtime marker to tmux's immutable
+server-local `$session_id`, so a concurrent rename or reuse of the old display name cannot
+redirect the operation or its telemetry to another session.
 
 Resuming from a different caller working directory intentionally relocates the runtime;
 session identity follows the human rather than permanently pinning the original path.

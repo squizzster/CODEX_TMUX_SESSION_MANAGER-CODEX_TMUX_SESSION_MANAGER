@@ -73,7 +73,7 @@ def test_round2_hot_mutation_atomically_bootstraps_an_empty_private_database(
     with sqlite3.connect(database) as connection:
         assert connection.execute(
             "SELECT schema_generation FROM rodex_schema_generations WHERE id = 1"
-        ).fetchone() == (14,)
+        ).fetchone() == (16,)
         assert connection.execute(
             "SELECT uid, gid, user_name FROM rodex_sessions_users"
         ).fetchall() == [(1234, 1234, "round2")]

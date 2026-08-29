@@ -109,6 +109,7 @@ class StubLauncher:
         self.confirmed: list[LiveTmuxSession] = []
         self.session_names: tuple[str, ...] = ()
         self.mouse_state = "off"
+        self.mouse_targets: list[LiveTmuxSession] = []
         self.current_tmux_session = LiveTmuxSession(
             tmp_path / "tmux.sock", "automatic-beluga"
         )
@@ -242,7 +243,8 @@ class StubLauncher:
             attached_client_count=self.attached_client_count,
         )
 
-    def set_mouse_mode(self, _runtime: LiveTmuxSession, mode: str) -> str:
+    def set_mouse_mode(self, runtime: LiveTmuxSession, mode: str) -> str:
+        self.mouse_targets.append(runtime)
         if mode == "toggle":
             self.mouse_state = "off" if self.mouse_state == "on" else "on"
         elif mode in {"on", "off"}:
@@ -1661,7 +1663,13 @@ def test_machine_result_maps_failed_turn_outcome_to_exit_six(
 
 @pytest.mark.parametrize(
     ("mode", "expected"),
-    [("on", "on"), ("off", "off"), ("toggle", "on"), ("inherit", "off")],
+    [
+        ("on", "on"),
+        ("off", "off"),
+        ("toggle", "on"),
+        ("inherit", "off"),
+        ("status", "off"),
+    ],
 )
 def test_mouse_command_targets_only_the_verified_named_runtime(
     tmp_path: Path,
@@ -1675,7 +1683,7 @@ def test_mouse_command_targets_only_the_verified_named_runtime(
         "cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga"
     )
     monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
-    create_controlled_session(database, tmp_path)
+    create_exact_controlled_session(database, tmp_path)
     launcher = StubLauncher(tmp_path)
 
     assert (
@@ -1689,6 +1697,8 @@ def test_mouse_command_targets_only_the_verified_named_runtime(
 
     assert capsys.readouterr().out == f"Rodex automatic-beluga mouse: {expected}\n"
     assert launcher.attached == []
+    assert len(launcher.mouse_targets) == 1
+    assert launcher.mouse_targets[0].runtime_id == RUNTIME_ID
 
 
 @pytest.mark.evolutionary_regression

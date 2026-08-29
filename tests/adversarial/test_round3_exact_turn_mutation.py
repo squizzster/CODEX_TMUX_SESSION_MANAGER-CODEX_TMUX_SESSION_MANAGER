@@ -131,6 +131,205 @@ def test_start_fails_before_transport_when_runtime_changes_while_waiting(
     assert control.frames == 0
 
 
+def test_mouse_fails_before_tmux_when_selector_changes_while_waiting(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mapping = {"worker": 1}
+    mouse_calls: list[tuple[object, str]] = []
+
+    @contextmanager
+    def remapping_lock(_database: Path, _session_id: int):
+        mapping["worker"] = 2
+        yield
+
+    class Launcher:
+        def set_mouse_mode(self, runtime: object, mode: str) -> str:
+            mouse_calls.append((runtime, mode))
+            return "on"
+
+    monkeypatch.setattr(
+        mutation_module,
+        "lookup_owned_rodex_sessions_id_from_a_cool_name",
+        lambda selector, _database: mapping.get(selector),
+    )
+    monkeypatch.setattr(mutation_module, "session_transition_lock", remapping_lock)
+    monkeypatch.setattr(
+        mutation_module,
+        "resolve_live_control",
+        lambda *_args: (_ for _ in ()).throw(
+            AssertionError("stale selector must fail before live control discovery")
+        ),
+    )
+
+    with pytest.raises(RodexLaunchError, match="changed while waiting"):
+        ExactTurnMutationCoordinator(
+            tmp_path / "registry.sqlite3",
+            Launcher(),  # type: ignore[arg-type]
+            object(),  # type: ignore[arg-type]
+        ).mouse_mode("worker", "on")
+
+    assert mouse_calls == []
+
+
+def test_mouse_fails_before_tmux_when_durable_runtime_changed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = LiveTmuxSession(tmp_path / "tmux.sock", "worker")
+    live_control = SimpleNamespace(runtime_id="old-runtime")
+    mouse_calls: list[tuple[object, str]] = []
+
+    @contextmanager
+    def lock(_database: Path, _session_id: int):
+        yield
+
+    class Launcher:
+        def set_mouse_mode(self, observed: object, mode: str) -> str:
+            mouse_calls.append((observed, mode))
+            return "on"
+
+    monkeypatch.setattr(
+        mutation_module,
+        "lookup_owned_rodex_sessions_id_from_a_cool_name",
+        lambda *_args: 1,
+    )
+    monkeypatch.setattr(mutation_module, "session_transition_lock", lock)
+    monkeypatch.setattr(
+        mutation_module,
+        "resolve_live_control",
+        lambda *_args: (1, runtime, live_control),
+    )
+    monkeypatch.setattr(
+        mutation_module,
+        "lookup_rodex_runtime_instance",
+        lambda *_args: SimpleNamespace(runtime_id="replacement-runtime"),
+    )
+    monkeypatch.setattr(
+        mutation_module,
+        "lookup_rodex_session_names",
+        lambda *_args: SimpleNamespace(display_name="worker"),
+    )
+
+    with pytest.raises(RodexLaunchError, match="runtime ID"):
+        ExactTurnMutationCoordinator(
+            tmp_path / "registry.sqlite3",
+            Launcher(),  # type: ignore[arg-type]
+            object(),  # type: ignore[arg-type]
+        ).mouse_mode("worker", "on")
+
+    assert mouse_calls == []
+
+
+def test_mouse_holds_transition_lock_through_mutation_and_readback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database = tmp_path / "registry.sqlite3"
+    runtime = LiveTmuxSession(tmp_path / "tmux.sock", "worker")
+    live_control = SimpleNamespace(runtime_id="runtime")
+    revalidations: list[tuple[object, object, object]] = []
+
+    class Launcher:
+        def set_mouse_mode(self, observed: LiveTmuxSession, mode: str) -> str:
+            lock_path = (
+                database.parent / f".{database.name}.session-{RodexSessionId(1)}.lock"
+            )
+            descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+            try:
+                with pytest.raises(BlockingIOError):
+                    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            finally:
+                os.close(descriptor)
+            assert observed.runtime_id == live_control.runtime_id
+            assert mode == "toggle"
+            return "on"
+
+    monkeypatch.setattr(
+        mutation_module,
+        "lookup_owned_rodex_sessions_id_from_a_cool_name",
+        lambda *_args: 1,
+    )
+    monkeypatch.setattr(
+        mutation_module,
+        "resolve_live_control",
+        lambda *_args: (1, runtime, live_control),
+    )
+    monkeypatch.setattr(
+        mutation_module,
+        "lookup_rodex_runtime_instance",
+        lambda *_args: SimpleNamespace(runtime_id="runtime"),
+    )
+    monkeypatch.setattr(
+        mutation_module,
+        "lookup_rodex_session_names",
+        lambda *_args: SimpleNamespace(display_name="worker"),
+    )
+    monkeypatch.setattr(
+        mutation_module,
+        "revalidate_live_control",
+        lambda *args: revalidations.append(args),
+    )
+
+    launcher = Launcher()
+    target, state = ExactTurnMutationCoordinator(
+        database,
+        launcher,  # type: ignore[arg-type]
+        object(),  # type: ignore[arg-type]
+    ).mouse_mode("worker", "toggle")
+
+    assert state == "on"
+    assert target.runtime.runtime_id == live_control.runtime_id
+    assert revalidations == [(launcher, target.runtime, live_control)]
+
+
+def test_mouse_revalidates_selector_after_tmux_readback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mapping = {"worker": 1}
+    runtime = LiveTmuxSession(tmp_path / "tmux.sock", "worker")
+    live_control = SimpleNamespace(runtime_id="runtime")
+
+    @contextmanager
+    def lock(_database: Path, _session_id: int):
+        yield
+
+    class Launcher:
+        def set_mouse_mode(self, _runtime: LiveTmuxSession, _mode: str) -> str:
+            mapping["worker"] = 2
+            return "on"
+
+    monkeypatch.setattr(
+        mutation_module,
+        "lookup_owned_rodex_sessions_id_from_a_cool_name",
+        lambda selector, _database: mapping.get(selector),
+    )
+    monkeypatch.setattr(mutation_module, "session_transition_lock", lock)
+    monkeypatch.setattr(
+        mutation_module,
+        "resolve_live_control",
+        lambda *_args: (1, runtime, live_control),
+    )
+    monkeypatch.setattr(
+        mutation_module,
+        "lookup_rodex_runtime_instance",
+        lambda *_args: SimpleNamespace(runtime_id="runtime"),
+    )
+    monkeypatch.setattr(
+        mutation_module,
+        "lookup_rodex_session_names",
+        lambda *_args: SimpleNamespace(display_name="worker"),
+    )
+
+    with pytest.raises(RodexLaunchError, match="selector changed"):
+        ExactTurnMutationCoordinator(
+            tmp_path / "registry.sqlite3",
+            Launcher(),  # type: ignore[arg-type]
+            object(),  # type: ignore[arg-type]
+        ).mouse_mode("worker", "on")
+
+
 def test_start_revalidates_selector_after_transport_wait_before_first_frame(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -35,10 +35,14 @@ from .runtime import (
 @contextmanager
 def session_transition_lock(
     database_path: Path,
-    session_id: int,
+    session_identity: RodexSessionId,
 ) -> Iterator[None]:
-    """Serialize one named session's liveness decision and runtime replacement."""
-    lock_path = database_path.parent / f".{database_path.name}.session-{session_id}.lock"
+    """Serialize one durable session's publication, liveness, and replacement."""
+    if not isinstance(session_identity, RodexSessionId):
+        raise TypeError("session transition identity must be a RodexSessionId")
+    lock_path = (
+        database_path.parent / f".{database_path.name}.session-{session_identity}.lock"
+    )
     flags = os.O_RDWR | os.O_CREAT
     flags |= getattr(os, "O_NOFOLLOW", 0)
     descriptor = os.open(lock_path, flags, 0o600)

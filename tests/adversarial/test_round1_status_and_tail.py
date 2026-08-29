@@ -2,12 +2,16 @@ from __future__ import annotations
 
 import io
 import subprocess
+import time
 from pathlib import Path
 from threading import Event, Thread, get_ident
 
 import pytest
 
+from rodex import protocol_proxy as protocol_proxy_module
 from rodex.protocol_proxy import (
+    ROLLOUT_CONTEXT_MAX_IDLE_POLL_INTERVAL_SECONDS,
+    ROLLOUT_CONTEXT_POLL_INTERVAL_SECONDS,
     CodexContextStatusObserver,
     CodexProtocolProxy,
     ToolCallCounter,
@@ -193,6 +197,288 @@ def test_round1_primary_disconnect_replaces_thread_and_rollout_follower(
     assert new_follower is not old_follower
     assert not new_follower.is_alive()
     assert "Context: 70%" in observed[-1]
+
+
+def test_round1_twenty_idle_rollout_followers_have_bounded_metadata_only_work(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class VirtualMinuteComplete(Exception):
+        pass
+
+    sessions_root = tmp_path / "sessions"
+    sessions_root.mkdir()
+    observer = CodexContextStatusObserver(
+        lambda _status: None,
+        codex_sessions_root=sessions_root,
+    )
+    real_fstat = protocol_proxy_module.os.fstat
+    real_stat = protocol_proxy_module.os.stat
+    real_boundary_hash = protocol_proxy_module._rollout_boundary_sha256
+    fstat_calls = 0
+    stat_calls = 0
+    boundary_hash_calls = 0
+    intervals_by_follower: list[tuple[float, ...]] = []
+
+    def counted_fstat(descriptor: int) -> object:
+        nonlocal fstat_calls
+        fstat_calls += 1
+        return real_fstat(descriptor)
+
+    def counted_stat(path: object, **options: object) -> object:
+        nonlocal stat_calls
+        stat_calls += 1
+        return real_stat(path, **options)  # type: ignore[arg-type]
+
+    def counted_boundary_hash(descriptor: int, cursor_offset: int) -> str:
+        nonlocal boundary_hash_calls
+        boundary_hash_calls += 1
+        return real_boundary_hash(descriptor, cursor_offset)
+
+    monkeypatch.setattr(protocol_proxy_module.os, "fstat", counted_fstat)
+    monkeypatch.setattr(protocol_proxy_module.os, "stat", counted_stat)
+    monkeypatch.setattr(
+        protocol_proxy_module,
+        "_rollout_boundary_sha256",
+        counted_boundary_hash,
+    )
+
+    for follower_index in range(20):
+        rollout_path = sessions_root / f"rollout-idle-{follower_index}.jsonl"
+        rollout_path.write_bytes(b"")
+        elapsed = 0.0
+        intervals: list[float] = []
+
+        def advance_virtual_time(
+            _stop: Event,
+            wake_generation: int,
+            interval: float,
+            _intervals: list[float] = intervals,
+        ) -> tuple[bool, int]:
+            nonlocal elapsed
+            _intervals.append(interval)
+            elapsed += interval
+            if elapsed >= 60:
+                raise VirtualMinuteComplete
+            return False, wake_generation
+
+        monkeypatch.setattr(
+            observer,
+            "_wait_for_rollout_activity",
+            advance_virtual_time,
+        )
+        with pytest.raises(VirtualMinuteComplete):
+            observer._follow_rollout_context(
+                f"thread-{follower_index}", rollout_path, Event()
+            )
+        intervals_by_follower.append(tuple(intervals))
+
+    observer.close()
+
+    assert boundary_hash_calls == 20
+    assert fstat_calls <= 760
+    assert stat_calls <= 700
+    assert all(
+        intervals[:4]
+        == (
+            ROLLOUT_CONTEXT_POLL_INTERVAL_SECONDS,
+            ROLLOUT_CONTEXT_POLL_INTERVAL_SECONDS * 2,
+            ROLLOUT_CONTEXT_POLL_INTERVAL_SECONDS * 4,
+            ROLLOUT_CONTEXT_MAX_IDLE_POLL_INTERVAL_SECONDS,
+        )
+        for intervals in intervals_by_follower
+    )
+    assert all(
+        max(intervals) == ROLLOUT_CONTEXT_MAX_IDLE_POLL_INTERVAL_SECONDS
+        for intervals in intervals_by_follower
+    )
+
+
+@pytest.mark.parametrize("invalid_kind", ["missing", "outside_root"])
+def test_round1_invalid_rollout_path_retries_with_bounded_idle_backoff(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    invalid_kind: str,
+) -> None:
+    class RetryBudgetComplete(Exception):
+        pass
+
+    sessions_root = tmp_path / "sessions"
+    sessions_root.mkdir()
+    rollout_path = (
+        sessions_root / "missing.jsonl"
+        if invalid_kind == "missing"
+        else tmp_path / "outside.jsonl"
+    )
+    if invalid_kind == "outside_root":
+        rollout_path.write_bytes(b"")
+    observer = CodexContextStatusObserver(
+        lambda _status: None,
+        codex_sessions_root=sessions_root,
+    )
+    intervals: list[float] = []
+
+    def exhaust_retry_budget(
+        _stop: Event,
+        wake_generation: int,
+        interval: float,
+    ) -> tuple[bool, int]:
+        intervals.append(interval)
+        if len(intervals) == 6:
+            raise RetryBudgetComplete
+        return False, wake_generation
+
+    monkeypatch.setattr(
+        observer,
+        "_wait_for_rollout_activity",
+        exhaust_retry_budget,
+    )
+    with pytest.raises(RetryBudgetComplete):
+        observer._follow_rollout_context("thread-1", rollout_path, Event())
+    observer.close()
+
+    assert intervals == [
+        ROLLOUT_CONTEXT_POLL_INTERVAL_SECONDS,
+        ROLLOUT_CONTEXT_POLL_INTERVAL_SECONDS * 2,
+        ROLLOUT_CONTEXT_POLL_INTERVAL_SECONDS * 4,
+        ROLLOUT_CONTEXT_MAX_IDLE_POLL_INTERVAL_SECONDS,
+        ROLLOUT_CONTEXT_MAX_IDLE_POLL_INTERVAL_SECONDS,
+        ROLLOUT_CONTEXT_MAX_IDLE_POLL_INTERVAL_SECONDS,
+    ]
+
+
+def test_round1_protocol_event_wakes_an_idle_rollout_follower(
+    tmp_path: Path,
+) -> None:
+    sessions_root = tmp_path / "sessions"
+    rollout_path = sessions_root / "rollout-thread-1.jsonl"
+    rollout_path.parent.mkdir()
+    rollout_path.write_text(
+        protocol_proxy_module.json.dumps(
+            {
+                "type": "event_msg",
+                "payload": {
+                    "type": "token_count",
+                    "info": {
+                        "last_token_usage": {"total_tokens": 25_840},
+                        "model_context_window": 258_400,
+                    },
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    restored = Event()
+    advanced = Event()
+
+    def record_status(status: str) -> None:
+        restored.set() if "Context: 10%" in status else None
+        advanced.set() if "Context: 70%" in status else None
+
+    observer = CodexContextStatusObserver(
+        record_status,
+        codex_sessions_root=sessions_root,
+        rollout_poll_interval_seconds=0.01,
+        rollout_max_idle_poll_interval_seconds=0.5,
+    )
+    observer.observe_protocol_event(
+        {
+            "method": "thread/started",
+            "params": {"thread": {"id": "thread-1", "path": str(rollout_path)}},
+        }
+    )
+    try:
+        assert restored.wait(1)
+        time.sleep(0.4)
+        with rollout_path.open("a", encoding="utf-8") as rollout:
+            rollout.write(
+                protocol_proxy_module.json.dumps(
+                    {
+                        "type": "event_msg",
+                        "payload": {
+                            "type": "token_count",
+                            "info": {
+                                "last_token_usage": {"total_tokens": 180_880},
+                                "model_context_window": 258_400,
+                            },
+                        },
+                    }
+                )
+                + "\n"
+            )
+        started = time.monotonic()
+        observer.observe_protocol_event(
+            {
+                "method": "item/started",
+                "params": {
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                    "item": {"type": "agentMessage", "id": "message-1"},
+                },
+            }
+        )
+        assert advanced.wait(0.3)
+        assert time.monotonic() - started < 0.3
+    finally:
+        observer.close()
+
+
+def test_round1_rollout_replacement_is_detected_within_the_idle_poll_ceiling(
+    tmp_path: Path,
+) -> None:
+    sessions_root = tmp_path / "sessions"
+    rollout_path = sessions_root / "rollout-thread-1.jsonl"
+    replacement_path = sessions_root / "replacement.jsonl"
+    rollout_path.parent.mkdir()
+
+    def token_record(total_tokens: int) -> str:
+        return (
+            protocol_proxy_module.json.dumps(
+                {
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "token_count",
+                        "info": {
+                            "last_token_usage": {"total_tokens": total_tokens},
+                            "model_context_window": 258_400,
+                        },
+                    },
+                }
+            )
+            + "\n"
+        )
+
+    rollout_path.write_text(token_record(25_840), encoding="utf-8")
+    restored = Event()
+    replaced = Event()
+
+    def record_status(status: str) -> None:
+        restored.set() if "Context: 10%" in status else None
+        replaced.set() if "Context: 90%" in status else None
+
+    observer = CodexContextStatusObserver(
+        record_status,
+        codex_sessions_root=sessions_root,
+        rollout_poll_interval_seconds=0.005,
+        rollout_max_idle_poll_interval_seconds=0.05,
+    )
+    observer.observe_protocol_event(
+        {
+            "method": "thread/started",
+            "params": {"thread": {"id": "thread-1", "path": str(rollout_path)}},
+        }
+    )
+    try:
+        assert restored.wait(1)
+        time.sleep(0.1)
+        replacement_path.write_text(token_record(232_560), encoding="utf-8")
+        started = time.monotonic()
+        replacement_path.replace(rollout_path)
+        assert replaced.wait(0.3)
+        assert time.monotonic() - started < 0.3
+    finally:
+        observer.close()
 
 
 def test_round1_primary_reset_finishes_before_replacement_admission(

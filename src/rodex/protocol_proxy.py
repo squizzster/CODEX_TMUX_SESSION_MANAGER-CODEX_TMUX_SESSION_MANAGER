@@ -14,7 +14,7 @@ from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
-from threading import Event, Lock, Thread
+from threading import Condition, Event, Lock, Thread
 from typing import Any, Final
 
 from websockets.exceptions import ConnectionClosed
@@ -51,6 +51,7 @@ ProtocolEventCallback = Callable[[str | bytes, dict[str, Any] | None], None]
 ContextStatusCallback = Callable[[str], None]
 DisconnectCallback = Callable[[], None]
 ROLLOUT_CONTEXT_POLL_INTERVAL_SECONDS: Final = 0.25
+ROLLOUT_CONTEXT_MAX_IDLE_POLL_INTERVAL_SECONDS: Final = 2.0
 CONTEXT_COMPACTION_WATCHDOG_SECONDS: Final = 5.0
 _ROLLOUT_CONTEXT_TAIL_BYTES: Final = 8 * 1024 * 1024
 _ROLLOUT_CONTEXT_LINE_BYTES: Final = 256 * 1024
@@ -391,6 +392,9 @@ class CodexContextStatusObserver:
         compaction_watchdog_seconds: float = CONTEXT_COMPACTION_WATCHDOG_SECONDS,
         codex_sessions_root: Path | None = None,
         rollout_poll_interval_seconds: float = ROLLOUT_CONTEXT_POLL_INTERVAL_SECONDS,
+        rollout_max_idle_poll_interval_seconds: float = (
+            ROLLOUT_CONTEXT_MAX_IDLE_POLL_INTERVAL_SECONDS
+        ),
     ) -> None:
         if animation_interval_seconds <= 0 or not math.isfinite(animation_interval_seconds):
             raise ValueError("animation interval must be finite and positive")
@@ -402,6 +406,14 @@ class CodexContextStatusObserver:
             rollout_poll_interval_seconds
         ):
             raise ValueError("rollout poll interval must be finite and positive")
+        if (
+            rollout_max_idle_poll_interval_seconds < rollout_poll_interval_seconds
+            or not math.isfinite(rollout_max_idle_poll_interval_seconds)
+        ):
+            raise ValueError(
+                "rollout maximum idle poll interval must be finite and no shorter "
+                "than the rollout poll interval"
+            )
         self._on_status_changed = on_status_changed
         self._animation_interval_seconds = animation_interval_seconds
         self._compaction_watchdog_seconds = compaction_watchdog_seconds
@@ -412,6 +424,9 @@ class CodexContextStatusObserver:
             else Path(codex_sessions_root).resolve(strict=False)
         )
         self._rollout_poll_interval_seconds = rollout_poll_interval_seconds
+        self._rollout_max_idle_poll_interval_seconds = (
+            rollout_max_idle_poll_interval_seconds
+        )
         self._primary_thread_id: str | None = None
         self._latest_context_status = context_status_segment(None)
         self._active_compaction_item_ids: set[str] = set()
@@ -420,6 +435,8 @@ class CodexContextStatusObserver:
         self._animation_threads: list[Thread] = []
         self._rollout_stop: Event | None = None
         self._rollout_thread: Thread | None = None
+        self._rollout_wake_condition = Condition()
+        self._rollout_wake_generation = 0
         self._closed = False
         self._lock = Lock()
 
@@ -435,6 +452,13 @@ class CodexContextStatusObserver:
         params = payload.get("params")
         if not isinstance(params, dict):
             return
+        event_thread_id = (
+            _started_thread_id(params)
+            if method == CODEX_APP_SERVER.thread_started_method
+            else _event_thread_id(params)
+        )
+        if event_thread_id is not None:
+            self._wake_rollout_follower(event_thread_id)
         if method == CODEX_APP_SERVER.thread_started_method:
             thread_id = _started_thread_id(params)
             if thread_id is not None:
@@ -557,6 +581,8 @@ class CodexContextStatusObserver:
             self._rollout_thread = None
             if rollout_stop is not None:
                 rollout_stop.set()
+        if rollout_stop is not None:
+            self._signal_rollout_follower()
         for animation_thread in animation_threads:
             animation_thread.join(timeout=1)
         if rollout_thread is not None:
@@ -588,6 +614,8 @@ class CodexContextStatusObserver:
             self._latest_context_status = disconnected_status
             if should_publish:
                 self._publish_status_locked(disconnected_status)
+        if rollout_stop is not None:
+            self._signal_rollout_follower()
         for animation_thread in animation_threads:
             animation_thread.join(timeout=1)
         if rollout_thread is not None:
@@ -601,6 +629,42 @@ class CodexContextStatusObserver:
         if self._primary_thread_id is None:
             self._primary_thread_id = thread_id
         return self._primary_thread_id == thread_id
+
+    def _wake_rollout_follower(self, thread_id: str) -> None:
+        with self._lock:
+            should_wake = (
+                not self._closed
+                and self._primary_thread_id == thread_id
+                and self._rollout_thread is not None
+            )
+        if should_wake:
+            self._signal_rollout_follower()
+
+    def _signal_rollout_follower(self) -> None:
+        with self._rollout_wake_condition:
+            self._rollout_wake_generation += 1
+            self._rollout_wake_condition.notify_all()
+
+    def _rollout_wake_snapshot(self) -> int:
+        with self._rollout_wake_condition:
+            return self._rollout_wake_generation
+
+    def _wait_for_rollout_activity(
+        self,
+        stop: Event,
+        wake_generation: int,
+        timeout_seconds: float,
+    ) -> tuple[bool, int]:
+        """Wait for shutdown, a primary protocol event, or the bounded poll."""
+        with self._rollout_wake_condition:
+            if not stop.is_set() and self._rollout_wake_generation == wake_generation:
+                self._rollout_wake_condition.wait_for(
+                    lambda: (
+                        stop.is_set() or self._rollout_wake_generation != wake_generation
+                    ),
+                    timeout=timeout_seconds,
+                )
+            return stop.is_set(), self._rollout_wake_generation
 
     def _new_animation_thread_locked(self) -> Thread:
         self._animation_generation += 1
@@ -657,12 +721,16 @@ class CodexContextStatusObserver:
         stop: Event,
     ) -> None:
         """Follow bounded JSONL additions without retaining arbitrary rollout bodies."""
+        wake_generation = self._rollout_wake_snapshot()
+        retry_interval_seconds = self._rollout_poll_interval_seconds
         while not stop.is_set():
             try:
                 with _open_rollout_for_following(
                     rollout_path,
                     allowed_root=self._codex_sessions_root,
                 ) as rollout:
+                    retry_interval_seconds = self._rollout_poll_interval_seconds
+                    idle_interval_seconds = self._rollout_poll_interval_seconds
                     initial_percent, initial_offset = (
                         _latest_rollout_context_from_open_file(rollout)
                     )
@@ -688,7 +756,13 @@ class CodexContextStatusObserver:
                                 if advanced_checkpoint is None:
                                     break
                                 checkpoint = advanced_checkpoint
-                            if stop.wait(self._rollout_poll_interval_seconds):
+                                idle_interval_seconds = self._rollout_poll_interval_seconds
+                            stopped, wake_generation = self._wait_for_rollout_activity(
+                                stop,
+                                wake_generation,
+                                idle_interval_seconds,
+                            )
+                            if stopped:
                                 continue
                             if _rollout_path_requires_reopen(
                                 rollout_path,
@@ -696,7 +770,12 @@ class CodexContextStatusObserver:
                                 checkpoint,
                             ):
                                 break
+                            idle_interval_seconds = min(
+                                idle_interval_seconds * 2,
+                                self._rollout_max_idle_poll_interval_seconds,
+                            )
                             continue
+                        idle_interval_seconds = self._rollout_poll_interval_seconds
                         if discarding_long_line:
                             if line.endswith(b"\n"):
                                 discarding_long_line = False
@@ -732,7 +811,12 @@ class CodexContextStatusObserver:
                         if advanced_checkpoint is None:
                             break
                         checkpoint = advanced_checkpoint
-                        if stop.wait(self._rollout_poll_interval_seconds):
+                        stopped, wake_generation = self._wait_for_rollout_activity(
+                            stop,
+                            wake_generation,
+                            self._rollout_poll_interval_seconds,
+                        )
+                        if stopped:
                             continue
                         if _rollout_path_requires_reopen(
                             rollout_path,
@@ -743,7 +827,16 @@ class CodexContextStatusObserver:
             except (AnalyticsSourceReadError, OSError):
                 pass
             if not stop.is_set():
-                stop.wait(self._rollout_poll_interval_seconds)
+                stopped, wake_generation = self._wait_for_rollout_activity(
+                    stop,
+                    wake_generation,
+                    retry_interval_seconds,
+                )
+                if not stopped:
+                    retry_interval_seconds = min(
+                        retry_interval_seconds * 2,
+                        self._rollout_max_idle_poll_interval_seconds,
+                    )
 
 
 class CodexProtocolProxy:
@@ -1319,11 +1412,6 @@ def _rollout_path_requires_reopen(
         or descriptor_state.st_size < checkpoint.source_size_bytes
     ):
         return True
-    if (
-        _rollout_boundary_sha256(rollout.fileno(), checkpoint.cursor_offset)
-        != checkpoint.boundary_sha256
-    ):
-        return True
     metadata_changed = (
         descriptor_state.st_size,
         descriptor_state.st_mtime_ns,
@@ -1335,6 +1423,11 @@ def _rollout_path_requires_reopen(
     )
     if not metadata_changed:
         return False
+    if (
+        _rollout_boundary_sha256(rollout.fileno(), checkpoint.cursor_offset)
+        != checkpoint.boundary_sha256
+    ):
+        return True
     return descriptor_state.st_size == checkpoint.source_size_bytes
 
 

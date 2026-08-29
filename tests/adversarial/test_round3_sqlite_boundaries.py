@@ -122,6 +122,9 @@ def test_round3_successful_reads_do_not_leak_database_descriptors(
 ) -> None:
     database = tmp_path / "registry.sqlite3"
     _marker_database(database)
+    with open_rodex_read_transaction(database) as connection:
+        assert connection.execute("SELECT value FROM marker").fetchone() == ("validated",)
+    retained_wal_owner_targets = _open_targets_below(tmp_path)
 
     for _ in range(20):
         with open_rodex_read_transaction(database) as connection:
@@ -129,6 +132,8 @@ def test_round3_successful_reads_do_not_leak_database_descriptors(
                 "validated",
             )
 
+    assert _open_targets_below(tmp_path) == retained_wal_owner_targets
+    transactions_module._close_process_wal_lifetime_owner()
     assert _open_targets_below(tmp_path) == []
 
 

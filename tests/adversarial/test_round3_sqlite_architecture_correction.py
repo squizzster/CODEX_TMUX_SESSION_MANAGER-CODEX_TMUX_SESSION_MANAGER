@@ -32,6 +32,7 @@ def _marker_database(path: Path) -> None:
     with open_rodex_bootstrap_transaction(path) as connection:
         connection.execute("CREATE TABLE marker (value TEXT NOT NULL)")
         connection.execute("INSERT INTO marker VALUES ('stable')")
+    transactions_module._close_process_wal_lifetime_owner()
 
 
 def _rows(path: Path) -> list[tuple[str]]:
@@ -147,6 +148,7 @@ from rodex_sql import (
     open_rodex_read_transaction,
     open_rodex_transaction,
 )
+import rodex_sql.transactions as transactions
 
 database = Path(sys.argv[1])
 threads_before = sorted((thread.name, thread.daemon) for thread in enumerate_threads())
@@ -163,12 +165,20 @@ for descriptor in os.listdir("/proc/self/fd"):
         targets.append(os.readlink(f"/proc/self/fd/{descriptor}"))
     except OSError:
         pass
+transactions._close_process_wal_lifetime_owner()
+closed_targets = []
+for descriptor in os.listdir("/proc/self/fd"):
+    try:
+        closed_targets.append(os.readlink(f"/proc/self/fd/{descriptor}"))
+    except OSError:
+        pass
 print(json.dumps({
     "threads_before": threads_before,
     "threads_after": sorted(
         (thread.name, thread.daemon) for thread in enumerate_threads()
     ),
     "fd_targets": targets,
+    "closed_fd_targets": closed_targets,
 }))
 """
     completed = subprocess.run(
@@ -181,7 +191,17 @@ print(json.dumps({
 
     assert result["threads_after"] == result["threads_before"]
     assert not any("inotify" in target for target in result["fd_targets"])
-    assert not any(os.fspath(tmp_path) in target for target in result["fd_targets"])
+    retained_targets = [
+        target for target in result["fd_targets"] if os.fspath(tmp_path) in target
+    ]
+    assert 1 <= len(retained_targets) <= 5
+    allowed_suffixes = (
+        "registry.sqlite3",
+        "registry.sqlite3-wal",
+        "registry.sqlite3-shm",
+    )
+    assert all(target.endswith(allowed_suffixes) for target in retained_targets)
+    assert not any(os.fspath(tmp_path) in target for target in result["closed_fd_targets"])
 
 
 def test_round3_missing_proc_descriptor_path_fails_with_storage_identity_error(

@@ -7,6 +7,7 @@ import os
 import sqlite3
 import sys
 import uuid
+from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
 from threading import Barrier, Event, Lock, Thread, current_thread
@@ -2125,7 +2126,11 @@ def test_named_creation_holds_transition_lock_during_alias_transition(
     def require_transition_lock(*args: object, **kwargs: object):  # type: ignore[no-untyped-def]
         session_id = lookup_rodex_sessions_id_from_a_cool_name("automatic-beluga", database)
         assert session_id is not None
-        lock_path = database.parent / f".{database.name}.session-{session_id}.lock"
+        transition_identity = lookup_rodex_session_id_from_a_rodex_sessions_id(
+            session_id, database
+        )
+        assert transition_identity is not None
+        lock_path = database.parent / f".{database.name}.session-{transition_identity}.lock"
         descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
         try:
             with pytest.raises(BlockingIOError):
@@ -2148,6 +2153,173 @@ def test_named_creation_holds_transition_lock_during_alias_transition(
         )
         == 0
     )
+
+
+def test_new_session_publication_waits_for_identity_ui_and_registration(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database = tmp_path / "rodex.sqlite3"
+    initialise_rodex_database(database)
+    monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
+    monkeypatch.setattr(
+        "rodex_registry.lifecycle.current_rodex_sessions_user_identity", lambda: DNA
+    )
+    monkeypatch.setattr(
+        "cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga"
+    )
+
+    row_published = Event()
+    allow_creator_to_finalize = Event()
+    opener_waiting_for_transition = Event()
+    opener_finished = Event()
+    real_create = managed_lifecycle_module.create_a_rodex_session
+    real_transition_lock = managed_lifecycle_module.session_transition_lock
+
+    def publish_then_pause(*args: object, **kwargs: object):  # type: ignore[no-untyped-def]
+        session = real_create(*args, **kwargs)
+        row_published.set()
+        assert allow_creator_to_finalize.wait(5)
+        return session
+
+    @contextmanager
+    def observed_transition_lock(
+        lock_database: Path,
+        session_identity: RodexSessionId,
+    ):
+        if current_thread().name == "selector-opener":
+            opener_waiting_for_transition.set()
+        with real_transition_lock(lock_database, session_identity):
+            yield
+
+    monkeypatch.setattr(
+        managed_lifecycle_module, "create_a_rodex_session", publish_then_pause
+    )
+    monkeypatch.setattr(
+        managed_lifecycle_module, "session_transition_lock", observed_transition_lock
+    )
+
+    class PublicationLauncher(StubLauncher):
+        def __init__(self) -> None:
+            super().__init__(tmp_path)
+            self.live_name = self.runtime.tmux_session_name
+            self.ui_and_guards_ready = False
+            self.ui_installations = 0
+
+        def start(
+            self,
+            workspace: Path,
+            arguments: list[str],
+            *,
+            runtime_id: RodexRuntimeId,
+            rodex_session_id: RodexSessionId | None = None,
+            rodex_registry_id: RodexRegistryId | None = None,
+            rodex_database_path: Path | None = None,
+        ) -> tuple[LiveRodexRuntime, uuid.UUID]:
+            runtime, codex_session_id = super().start(
+                workspace,
+                arguments,
+                runtime_id=runtime_id,
+                rodex_session_id=rodex_session_id,
+                rodex_registry_id=rodex_registry_id,
+                rodex_database_path=rodex_database_path,
+            )
+            self.control = replace(
+                self.control,
+                rodex_session_id=rodex_session_id,
+                rodex_registry_id=rodex_registry_id,
+                registration_state="pending",
+                runtime_id=runtime_id,
+            )
+            return runtime, codex_session_id
+
+        def session_exists(self, runtime: LiveTmuxSession) -> bool:
+            self.existing_checks.append(runtime)
+            return runtime.tmux_session_name == self.live_name
+
+        def rename(
+            self, runtime: LiveTmuxSession, tmux_session_name: str
+        ) -> LiveTmuxSession:
+            assert runtime.tmux_session_name == self.live_name
+            renamed = super().rename(runtime, tmux_session_name)
+            self.live_name = renamed.tmux_session_name
+            self.runtime = replace(self.runtime, tmux_session_name=self.live_name)
+            return renamed
+
+        def discover_runtime_control(self, runtime: LiveTmuxSession) -> LiveRodexControl:
+            assert runtime.tmux_session_name == self.live_name
+            self.control_discoveries.append(runtime)
+            return self.control
+
+        def initialise_session_ui(self, runtime: LiveTmuxSession) -> None:
+            assert runtime.tmux_session_name == self.live_name
+            assert not self.ui_and_guards_ready
+            self.ui_and_guards_ready = True
+            self.ui_installations += 1
+            self.configured.append(runtime)
+
+        def reconcile_session_ui(self, runtime: LiveTmuxSession) -> None:
+            assert self.ui_and_guards_ready
+            self.reconciled.append(runtime)
+
+        def confirm_runtime_registration(
+            self, runtime: LiveTmuxSession, _rodex_sessions_id: int
+        ) -> None:
+            assert self.ui_and_guards_ready
+            assert runtime.tmux_session_name == self.live_name
+            self.confirmed.append(runtime)
+            self.control = replace(self.control, registration_state="registered")
+
+    launcher = PublicationLauncher()
+    outcomes: list[tuple[str, int]] = []
+    errors: list[BaseException] = []
+    outcome_lock = Lock()
+
+    def invoke(label: str, arguments: list[str]) -> None:
+        try:
+            result = run(arguments, database_path=database, launcher=launcher)
+        except BaseException as error:
+            with outcome_lock:
+                errors.append(error)
+        else:
+            with outcome_lock:
+                outcomes.append((label, result))
+        finally:
+            if label == "opener":
+                opener_finished.set()
+
+    creator = Thread(target=invoke, args=("creator", ["_create"]), name="creator")
+    opener = Thread(
+        target=invoke,
+        args=("opener", ["automatic-beluga"]),
+        name="selector-opener",
+    )
+    creator.start()
+    assert row_published.wait(5), errors
+    opener.start()
+    assert opener_waiting_for_transition.wait(5), errors
+    opener_was_serialized = not opener_finished.wait(0.25)
+    allow_creator_to_finalize.set()
+    creator.join(5)
+    opener.join(5)
+
+    assert opener_was_serialized
+    assert not creator.is_alive()
+    assert not opener.is_alive()
+    assert errors == []
+    assert sorted(outcomes) == [("creator", 0), ("opener", 0)]
+    assert launcher.started == [(Path.cwd(), [])]
+    assert launcher.live_name == "automatic-beluga"
+    assert launcher.ui_and_guards_ready
+    assert launcher.ui_installations == 1
+    assert len(launcher.confirmed) == 1
+    assert len(launcher.attached) == 2
+    session_id = lookup_rodex_sessions_id_from_a_cool_name("automatic-beluga", database)
+    assert session_id == 1
+    tmux_link = lookup_rodex_tmux_session(session_id, database)
+    assert tmux_link is not None
+    assert tmux_link.tmux_session_name == launcher.live_name
+    assert launcher.control.registration_state == "registered"
 
 
 def test_unknown_alias_selector_is_not_re_resolved_after_its_failed_lookup(
@@ -2671,7 +2843,9 @@ def test_live_cool_name_argument_renames_configures_and_reattaches_without_start
     assert launcher.refreshed_hooks == [
         LiveTmuxSession(tmp_path / "tmux.sock", "automatic-beluga")
     ]
-    assert launcher.attached == launcher.refreshed_hooks
+    assert launcher.attached == [
+        replace(launcher.refreshed_hooks[0], runtime_id=RUNTIME_ID)
+    ]
     tmux_link = lookup_rodex_tmux_session(1, database)
     assert tmux_link is not None
     assert tmux_link.tmux_session_name == "automatic-beluga"
@@ -2711,7 +2885,11 @@ def test_live_codex_uuid_argument_opens_its_registered_rodex_display_identity(
     assert launcher.started == []
     assert launcher.persistence_checks == []
     assert launcher.attached == [
-        LiveTmuxSession(tmp_path / "tmux.sock", "remarkable-aardvark")
+        LiveTmuxSession(
+            tmp_path / "tmux.sock",
+            "remarkable-aardvark",
+            runtime_id=RUNTIME_ID,
+        )
     ]
     assert "Reattaching Rodex remarkable-aardvark" in capsys.readouterr().out
 
@@ -3006,7 +3184,7 @@ def test_concurrent_ended_session_opens_start_only_one_runtime(
     assert start_calls == 1
     assert first_launcher.attached
     assert second_launcher.attached
-    lock_path = tmp_path / ".rodex.sqlite3.session-1.lock"
+    lock_path = tmp_path / f".rodex.sqlite3.session-{session.rodex_session_id}.lock"
     assert lock_path.stat().st_mode & 0o777 == 0o600
 
 
@@ -3019,7 +3197,7 @@ def test_named_session_transition_lock_rejects_a_symlink(
         "cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga"
     )
     monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
-    create_a_rodex_session(
+    session = create_a_rodex_session(
         database,
         codex_session_id=CODEX_SESSION_ID,
         user_identity=DNA,
@@ -3028,7 +3206,9 @@ def test_named_session_transition_lock_rejects_a_symlink(
     )
     lock_target = tmp_path / "lock-target"
     lock_target.touch()
-    (tmp_path / ".rodex.sqlite3.session-1.lock").symlink_to(lock_target)
+    (tmp_path / f".rodex.sqlite3.session-{session.rodex_session_id}.lock").symlink_to(
+        lock_target
+    )
     launcher = StubLauncher(tmp_path)
 
     with pytest.raises(OSError):
@@ -3995,7 +4175,8 @@ def test_registration_confirmation_failure_stops_the_pending_runtime(
             launcher=launcher,  # type: ignore[arg-type]
         )
 
-    assert launcher.stopped == [(launcher.runtime, False)]
+    assert launcher.configured == [launcher.stopped[0][0]]
+    assert launcher.stopped == [(launcher.configured[0], False)]
     assert launcher.attached == []
 
 

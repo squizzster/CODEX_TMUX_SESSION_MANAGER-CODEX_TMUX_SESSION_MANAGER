@@ -25,6 +25,7 @@ from .errors import (
     RodexSessionError,
     RodexSessionIdCollisionError,
     RodexSessionStatisticsConflictError,
+    RodexSessionStatisticsPublicationRaceError,
     RodexSessionTurnStatisticsAmbiguousError,
 )
 from .execution import (
@@ -174,6 +175,7 @@ __all__ = [
     "RodexSessionRuntime",
     "RodexSessionStatistics",
     "RodexSessionStatisticsConflictError",
+    "RodexSessionStatisticsPublicationRaceError",
     "RodexSessionStatisticsView",
     "RodexSessionTurnStatistics",
     "RodexSessionTurnStatisticsAmbiguousError",

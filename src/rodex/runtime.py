@@ -13,7 +13,7 @@ import sys
 import time
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import ExitStack, suppress
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from threading import Event, Thread
 from typing import Any, BinaryIO, Final
@@ -204,6 +204,7 @@ class LiveTmuxSession:
 
     tmux_server_socket_path: Path
     tmux_session_name: str
+    runtime_id: RodexRuntimeId | None = field(default=None, kw_only=True)
 
 
 @dataclass(frozen=True, slots=True)
@@ -272,7 +273,6 @@ class LiveRodexRuntime(LiveTmuxSession):
     app_server_log_path: Path
     protocol_proxy_socket_path: Path
     protocol_event_socket_path: Path
-    runtime_id: RodexRuntimeId | None = None
 
 
 def _exact_tmux_session_target(session_name: str) -> str:
@@ -834,16 +834,48 @@ class RodexRuntimeLauncher:
                 self._publish_tui_notice(runtime.protocol_proxy_socket_path, notice)
         environment = os.environ.copy()
         environment.pop("TMUX", None)
+        attach_target = self._stable_attach_target(runtime)
         self._tmux(
             runtime,
             "-T",
             RODEX_TMUX_REQUIRED_CLIENT_FEATURES,
             "attach-session",
             "-t",
-            _exact_tmux_session_target(runtime.tmux_session_name),
+            attach_target,
             interactive=True,
             environment=environment,
         )
+
+    def _stable_attach_target(self, runtime: LiveTmuxSession) -> str:
+        """Resolve a managed runtime to tmux's immutable server-local session ID."""
+        if runtime.runtime_id is None:
+            return _exact_tmux_session_target(runtime.tmux_session_name)
+        result = self._tmux(
+            runtime,
+            "list-sessions",
+            "-F",
+            f"#{{session_id}}\t#{{{_RUNTIME_ID_OPTION}}}",
+            check=False,
+        )
+        if result.returncode != 0:
+            raise RodexRuntimeError("Rodex runtime ended before tmux attachment")
+        expected_runtime_id = str(runtime.runtime_id)
+        matches: list[str] = []
+        for line in result.stdout.splitlines():
+            tmux_session_id, separator, runtime_id = line.partition("\t")
+            if (
+                separator
+                and runtime_id == expected_runtime_id
+                and tmux_session_id.startswith("$")
+                and tmux_session_id[1:].isdigit()
+            ):
+                matches.append(tmux_session_id)
+        if len(matches) != 1:
+            detail = "not found" if not matches else "advertised by multiple tmux sessions"
+            raise RodexRuntimeError(
+                f"Rodex runtime {expected_runtime_id} was {detail} before attachment"
+            )
+        return matches[0]
 
     def session_exists(self, runtime: LiveTmuxSession) -> bool:
         """Return whether the exact recorded tmux session is still running."""

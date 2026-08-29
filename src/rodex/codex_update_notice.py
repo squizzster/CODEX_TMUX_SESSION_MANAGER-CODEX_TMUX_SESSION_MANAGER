@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import fcntl
 import os
 import re
 import shutil
+import stat as stat_module
 import subprocess
 import tempfile
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
@@ -111,20 +114,68 @@ class CodexUpdateNotice:
         if cached is not None and self._cache_is_fresh():
             return cached
 
-        npm_binary = self._resolve_executable("npm")
-        if npm_binary is None:
-            return cached
-        result = self._run_version_command(
-            [npm_binary, "view", _NPM_PACKAGE, "version"],
-            timeout=CODEX_NPM_LOOKUP_TIMEOUT_SECONDS,
-        )
-        if result is None or result.returncode != 0:
-            return cached
-        observed = StableCodexVersion.parse_exact(result.stdout)
-        if observed is None:
-            return cached
-        self._write_cached_version(observed)
-        return observed
+        with self._claim_refresh() as refresh_claimed:
+            if not refresh_claimed:
+                return self._read_cached_version() or cached
+            cached_after_claim = self._read_cached_version()
+            if cached_after_claim is not None and self._cache_is_fresh():
+                return cached_after_claim
+
+            npm_binary = self._resolve_executable("npm")
+            if npm_binary is None:
+                return cached_after_claim or cached
+            result = self._run_version_command(
+                [npm_binary, "view", _NPM_PACKAGE, "version"],
+                timeout=CODEX_NPM_LOOKUP_TIMEOUT_SECONDS,
+            )
+            if result is None or result.returncode != 0:
+                return cached_after_claim or cached
+            observed = StableCodexVersion.parse_exact(result.stdout)
+            if observed is None:
+                return cached_after_claim or cached
+            self._write_cached_version(observed)
+            return observed
+
+    @contextmanager
+    def _claim_refresh(self) -> Iterator[bool]:
+        """Claim one nonblocking cross-process refresh for this exact cache."""
+        descriptor: int | None = None
+        try:
+            self._cache_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            lock_path = self._cache_path.with_name(f".{self._cache_path.name}.lock")
+            flags = os.O_RDWR | os.O_CREAT
+            flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+            descriptor = os.open(lock_path, flags, 0o600)
+            state = os.fstat(descriptor)
+            if (
+                not stat_module.S_ISREG(state.st_mode)
+                or state.st_uid != os.getuid()
+                or not self._claim_file_lock(descriptor)
+            ):
+                os.close(descriptor)
+                descriptor = None
+        except OSError:
+            if descriptor is not None:
+                os.close(descriptor)
+            descriptor = None
+        if descriptor is None:
+            yield False
+            return
+        try:
+            yield True
+        finally:
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+            finally:
+                os.close(descriptor)
+
+    @staticmethod
+    def _claim_file_lock(descriptor: int) -> bool:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return False
+        return True
 
     def _run_version_command(
         self, command: list[str], *, timeout: float

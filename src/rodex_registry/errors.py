@@ -14,7 +14,11 @@ class RodexRuntimeIdCollisionError(RodexSessionError):
 
 
 class RodexSessionStatisticsConflictError(RodexSessionError):
-    """A statistics publication lost its identity or publication-sequence fence."""
+    """A statistics publication conflicts with its durable registry state."""
+
+
+class RodexSessionStatisticsPublicationRaceError(RodexSessionStatisticsConflictError):
+    """A publication lost a sequence fence and may succeed after checkpoint reload."""
 
 
 class RodexAnalyticsPublicationRetryableError(RodexSessionError):

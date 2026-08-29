@@ -10,6 +10,7 @@ from dataclasses import replace
 from pathlib import Path
 from threading import Event
 from types import SimpleNamespace
+from typing import NoReturn
 
 import pytest
 from test_statistics_projection import _snapshot as analyzer_snapshot
@@ -1493,6 +1494,7 @@ def test_stale_publication_head_reloads_sql_cursor_before_accepting_later_append
     assert leading.poll_once() == "up_to_date"
     assert stale.poll_once() == "clean_replay"
     assert stale._verified_sources == {}
+    assert stale._parked_failure is None
     later_append = b'{"type":"later-append","payload":{}}\n'
     with rollout.open("ab") as output:
         output.write(later_append)
@@ -1506,6 +1508,62 @@ def test_stale_publication_head_reloads_sql_cursor_before_accepting_later_append
         (accepted_baseline + leader_append,),
         (later_append,),
     ]
+
+
+def test_deterministic_publication_conflict_parks_large_prefix_across_dirty_generations(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+    rollout = _rollout(config.codex_sessions_root, CODEX_SESSION_ID)
+    large_record = (
+        json.dumps(
+            {
+                "type": "event_msg",
+                "payload": {"type": "future_event", "padding": "x" * (2 * 1024 * 1024)},
+            },
+            separators=(",", ":"),
+        ).encode()
+        + b"\n"
+    )
+    with rollout.open("ab") as output:
+        output.write(large_record)
+    _create(config)
+    adapter = FakeAnalyticsAdapter()
+    worker = AnalyticsRolloutWorker(config, adapter_factory=lambda: adapter)
+    from rodex import analytics_source_reader as source_reader_module
+
+    captured_bytes = 0
+    real_pread_exact = source_reader_module._pread_exact
+
+    def measured_pread_exact(descriptor: int, offset: int, size: int) -> bytes:
+        nonlocal captured_bytes
+        captured_bytes += size
+        return real_pread_exact(descriptor, offset, size)
+
+    def reject_semantic_publication(
+        _registry: RodexAnalyticsRegistry,
+        _publication: RodexAnalyticsPublication,
+    ) -> NoReturn:
+        raise RodexSessionStatisticsConflictError(
+            "sub-agent activity call belongs to a different parent turn"
+        )
+
+    monkeypatch.setattr(source_reader_module, "_pread_exact", measured_pread_exact)
+    monkeypatch.setattr(RodexAnalyticsRegistry, "publish", reject_semantic_publication)
+    dirty = AnalyticsDirtyBatch(frozenset({CODEX_SESSION_ID}))
+
+    assert worker.poll_once() == "clean_replay"
+    for _ in range(8):
+        assert worker.poll_once(dirty) == "clean_replay"
+
+    assert len(adapter.analyses) == 1
+    assert captured_bytes <= rollout.stat().st_size + 4096
+    assert worker._parked_failure is not None
+    snapshot = read_rodex_session_statistics(1, config.rodex_database_path)
+    assert snapshot.worker is not None
+    assert snapshot.worker.worker_state == "degraded"
+    assert snapshot.worker.diagnostic_code == "analytics_publication_conflict"
 
 
 def test_worker_analyzes_only_through_final_complete_newline(tmp_path: Path) -> None:

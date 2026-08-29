@@ -30,7 +30,10 @@ from .agent_trace_contract import (
     TraceToolCall,
     require_contract_prepared_agent_trace_publication,
 )
-from .errors import RodexSessionStatisticsConflictError
+from .errors import (
+    RodexSessionStatisticsConflictError,
+    RodexSessionStatisticsPublicationRaceError,
+)
 from .execution import resolve_codex_thread_identity_in_transaction
 from .identity import (
     CodexThreadId,
@@ -90,7 +93,7 @@ def publish_agent_trace_in_transaction(
     prior_unrecognized_count = 0 if current is None else int(current[2])
     prior_coverage = None if current is None else str(current[3])
     if current_sequence != prepared.based_on_trace_publication_sequence:
-        raise RodexSessionStatisticsConflictError(
+        raise RodexSessionStatisticsPublicationRaceError(
             "agent trace publication sequence changed during calculation"
         )
     sequence = 1 if current_sequence is None else current_sequence + 1

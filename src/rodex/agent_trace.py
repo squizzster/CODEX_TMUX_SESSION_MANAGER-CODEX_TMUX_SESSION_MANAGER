@@ -134,15 +134,16 @@ def normalize_rollout_trace(
             if ordinal is None or ordinal < 0:
                 ordinal = physical_ordinal
             payload = _mapping(record.get("payload"))
-            record_turn_id = _text(payload.get("turn_id"))
+            record_type = _text(record.get("type"))
+            record_turn_id = _canonical_record_turn_id(record_type, payload)
             if record_turn_id is not None:
-                active_turn_id = str(parse_codex_turn_id(record_turn_id))
+                active_turn_id = record_turn_id
             normalized = _normalize_record(
                 parsed_thread_id,
                 active_turn_id,
                 ordinal,
                 _text(record.get("timestamp")),
-                _text(record.get("type")),
+                record_type,
                 payload,
                 tool_names,
             )
@@ -163,6 +164,28 @@ def normalize_rollout_trace(
         coverage_state=coverage,
         events=tuple(events),
     )
+
+
+def _canonical_record_turn_id(
+    record_type: str | None,
+    payload: Mapping[str, Any],
+) -> str | None:
+    """Resolve one record's turn through the authoritative Codex metadata path."""
+    direct_turn_id = _text(_first_present(payload, "turn_id", "turnId"))
+    response_metadata = _mapping(
+        _first_present(
+            payload,
+            "internal_chat_message_metadata_passthrough",
+            "internalChatMessageMetadataPassthrough",
+        )
+    )
+    response_turn_id = _text(_first_present(response_metadata, "turn_id", "turnId"))
+    candidate = (
+        response_turn_id or direct_turn_id
+        if record_type == "response_item"
+        else direct_turn_id or response_turn_id
+    )
+    return None if candidate is None else str(parse_codex_turn_id(candidate))
 
 
 def _normalize_record(

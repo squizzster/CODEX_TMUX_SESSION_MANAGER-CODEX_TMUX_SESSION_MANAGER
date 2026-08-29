@@ -14,7 +14,7 @@ from rodex_registry import (
     lookup_rodex_session_names,
     record_a_rodex_session_access,
 )
-from rodex_sql import RodexSQLError
+from rodex_sql import RodexDatabaseMovedError, RodexSQLError
 
 from .app_server_contract import RodexAppServerCompatibilityError
 from .command_contract import (
@@ -40,18 +40,18 @@ from .control import (
     RodexWaitTimeoutError,
 )
 from .errors import RodexLaunchError
+from .exact_turn_mutation import (
+    ExactRuntimeIdentityRequiredError,
+    ExactTurnMutationCoordinator,
+    require_durable_runtime_instance,
+)
 from .live_runtime import (
     resolve_live_control,
     revalidate_live_control,
-    session_transition_lock,
 )
 from .runtime import RodexRuntimeError, RodexRuntimeLauncher
 
 MACHINE_ENVELOPE_SCHEMA_VERSION = 2
-
-
-class _RuntimeUpgradeRequiredError(RodexLaunchError):
-    """A legacy live runtime lacks Phase I's exact incarnation identity."""
 
 
 def execute_machine_command(
@@ -77,6 +77,85 @@ def execute_machine_command(
         session_name = invocation.session_name
         turn_id = invocation.turn_id
         dispatch_id = invocation.dispatch_id
+        if command in {START_COMMAND, STEER_COMMAND, INTERRUPT_COMMAND}:
+            coordinator = ExactTurnMutationCoordinator(
+                database_path,
+                launcher,
+                control_client,
+            )
+            if command == START_COMMAND:
+                target, dispatch = coordinator.start(
+                    session_name,
+                    _read_machine_prompt(),
+                    dispatch_id=dispatch_id,
+                )
+                success_state = None
+                success_turn_id = dispatch.turn_id
+                success_thread_id = dispatch.thread_id
+                success_codex_session_id = dispatch.session_id
+                success_data: dict[str, object] = {
+                    "accepted": True,
+                    "dispatch": _accepted_dispatch_payload(dispatch.dispatch_id),
+                    "recommended_next": _turn_recommendation(
+                        target.display_name,
+                        dispatch.turn_id,
+                        "inProgress",
+                    ),
+                }
+            elif command == STEER_COMMAND:
+                assert isinstance(turn_id, str)
+                target, dispatch = coordinator.steer(
+                    session_name,
+                    turn_id,
+                    _read_machine_prompt(),
+                    dispatch_id=dispatch_id,
+                )
+                success_state = None
+                success_turn_id = dispatch.turn_id
+                success_thread_id = dispatch.thread_id
+                success_codex_session_id = dispatch.session_id
+                success_data = {
+                    "accepted": True,
+                    "dispatch": _accepted_dispatch_payload(dispatch.dispatch_id),
+                    "recommended_next": _turn_recommendation(
+                        target.display_name,
+                        dispatch.turn_id,
+                        "inProgress",
+                    ),
+                }
+            else:
+                assert isinstance(turn_id, str)
+                target, state = coordinator.interrupt(session_name, turn_id)
+                success_state = state
+                success_turn_id = turn_id
+                success_thread_id = None
+                success_codex_session_id = None
+                success_data = {"interrupt_requested": True}
+            session_id = target.session_id
+            control = target.control
+            display_name = target.display_name
+            try:
+                record_a_rodex_session_access(session_id, database_path)
+            except RodexDatabaseMovedError:
+                raise
+            except (OSError, RodexSQLError, RodexSessionError, sqlite3.Error) as error:
+                success_data["warnings"] = [
+                    {
+                        "code": "access_record_failed",
+                        "message": str(error),
+                    }
+                ]
+            _print_machine_success(
+                operation,
+                display_name,
+                control,
+                state=success_state,
+                turn_id=success_turn_id,
+                thread_id=success_thread_id,
+                codex_session_id=success_codex_session_id,
+                data=success_data,
+            )
+            return 0
         session_id, runtime, control = resolve_live_control(
             session_name, database_path, launcher
         )
@@ -124,54 +203,8 @@ def execute_machine_command(
             )
             return 0
 
-        _require_exact_runtime_instance(session_id, database_path, control)
-        if command == START_COMMAND:
-            prompt = _read_machine_prompt()
-            with session_transition_lock(database_path, session_id):
-                dispatch = control_client.start_turn(
-                    control,
-                    prompt,
-                    dispatch_id=dispatch_id,
-                    revalidate=revalidate,
-                )
-            success_state = None
-            success_turn_id = dispatch.turn_id
-            success_thread_id = dispatch.thread_id
-            success_codex_session_id = dispatch.session_id
-            success_data: dict[str, object] = {
-                "accepted": True,
-                "dispatch": _accepted_dispatch_payload(dispatch.dispatch_id),
-                "recommended_next": _turn_recommendation(
-                    display_name,
-                    dispatch.turn_id,
-                    "inProgress",
-                ),
-            }
-        elif command == STEER_COMMAND:
-            assert isinstance(turn_id, str)
-            prompt = _read_machine_prompt()
-            with session_transition_lock(database_path, session_id):
-                dispatch = control_client.steer_turn(
-                    control,
-                    turn_id,
-                    prompt,
-                    dispatch_id=dispatch_id,
-                    revalidate=revalidate,
-                )
-            success_state = None
-            success_turn_id = dispatch.turn_id
-            success_thread_id = dispatch.thread_id
-            success_codex_session_id = dispatch.session_id
-            success_data = {
-                "accepted": True,
-                "dispatch": _accepted_dispatch_payload(dispatch.dispatch_id),
-                "recommended_next": _turn_recommendation(
-                    display_name,
-                    dispatch.turn_id,
-                    "inProgress",
-                ),
-            }
-        elif command == DISPATCH_STATUS_COMMAND:
+        require_durable_runtime_instance(session_id, database_path, control)
+        if command == DISPATCH_STATUS_COMMAND:
             assert isinstance(dispatch_id, str)
             state, dispatch_status = control_client.dispatch_status(
                 control,
@@ -193,19 +226,6 @@ def execute_machine_command(
                     dispatch_status,
                 ),
             }
-        elif command == INTERRUPT_COMMAND:
-            assert isinstance(turn_id, str)
-            with session_transition_lock(database_path, session_id):
-                state = control_client.interrupt_turn(
-                    control,
-                    turn_id,
-                    revalidate=revalidate,
-                )
-            success_state = state
-            success_turn_id = turn_id
-            success_thread_id = None
-            success_codex_session_id = None
-            success_data = {"interrupt_requested": True}
         elif command == RESULT_COMMAND:
             assert isinstance(turn_id, str)
             state, result = control_client.result(control, turn_id, revalidate=revalidate)
@@ -261,6 +281,8 @@ def execute_machine_command(
             raise AssertionError(f"unhandled machine command: {command}")
         try:
             record_a_rodex_session_access(session_id, database_path)
+        except RodexDatabaseMovedError:
+            raise
         except (OSError, RodexSQLError, RodexSessionError, sqlite3.Error) as error:
             success_data["warnings"] = [
                 {
@@ -323,21 +345,6 @@ def _read_machine_prompt() -> str:
     if not prompt.strip():
         raise MachineUsageError("stdin prompt must be non-empty")
     return prompt
-
-
-def _require_exact_runtime_instance(
-    session_id: int,
-    database_path: Path,
-    control: LiveRodexControl,
-) -> None:
-    persisted = lookup_rodex_runtime_instance(session_id, database_path)
-    if persisted is None or control.runtime_id is None:
-        raise _RuntimeUpgradeRequiredError(
-            "live runtime predates exact runtime identity; restart it with this "
-            "Rodex version"
-        )
-    if persisted.runtime_id != control.runtime_id:
-        raise RodexLaunchError("live runtime ID does not match its durable Rodex identity")
 
 
 def _thread_state_payload(state: CodexThreadState) -> dict[str, object]:
@@ -624,9 +631,11 @@ def print_machine_error(
 
 
 def _machine_error_classification(error: BaseException) -> tuple[str, bool, int]:
+    if isinstance(error, RodexDatabaseMovedError):
+        return "database_moved", False, 1
     if isinstance(error, MachineUsageError):
         return "invalid_argument", False, 2
-    if isinstance(error, _RuntimeUpgradeRequiredError):
+    if isinstance(error, ExactRuntimeIdentityRequiredError):
         return "runtime_upgrade_required", False, 3
     if isinstance(error, RodexAppServerCompatibilityError):
         return "incompatible_app_server", False, 3

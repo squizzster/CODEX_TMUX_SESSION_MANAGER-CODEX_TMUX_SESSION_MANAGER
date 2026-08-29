@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from rodex.errors import RodexLaunchError
-from rodex.runtime import LiveTmuxSession, TmuxScrollbackSnapshot
+from rodex.runtime import LiveTmuxSession, TmuxScrollbackSnapshot, TmuxScrollbackState
 from rodex.session_tail import (
     TAIL_POLL_INTERVAL_SECONDS,
     PlainTailCursor,
@@ -14,6 +14,19 @@ from rodex.session_tail import (
     follow_session_tail,
     parse_session_tail_request,
 )
+
+
+def _state(
+    snapshot: TmuxScrollbackSnapshot,
+    *,
+    runtime_identity: str = "runtime-1",
+) -> TmuxScrollbackState:
+    return TmuxScrollbackState(
+        history_line_count=snapshot.history_line_count,
+        history_tail_lines=snapshot.history_lines,
+        visible_lines=snapshot.visible_lines,
+        runtime_identity=runtime_identity,
+    )
 
 
 @pytest.mark.parametrize(
@@ -61,35 +74,32 @@ def test_tail_parser_rejects_ambiguous_or_incomplete_grammar(
 
 def test_tail_prints_initial_text_then_only_newly_committed_scrollback() -> None:
     runtime = LiveTmuxSession(Path("/tmp/rodex-test.sock"), "worker")
-    snapshots = iter(
-        (
-            TmuxScrollbackSnapshot(("old history", "visible one", "visible two"), 1),
-            TmuxScrollbackSnapshot(
-                ("old history", "visible one", "visible two", "new one"), 2
+    snapshots = (
+        TmuxScrollbackSnapshot(("old history", "visible one", "visible two"), 1),
+        TmuxScrollbackSnapshot(("old history", "visible one", "visible two", "new one"), 2),
+        TmuxScrollbackSnapshot(
+            (
+                "old history",
+                "visible one",
+                "visible two",
+                "new one",
+                "new two",
             ),
-            TmuxScrollbackSnapshot(
-                (
-                    "old history",
-                    "visible one",
-                    "visible two",
-                    "new one",
-                    "new two",
-                ),
-                3,
+            3,
+        ),
+        TmuxScrollbackSnapshot(
+            (
+                "old history",
+                "visible one",
+                "visible two",
+                "new one",
+                "new two",
+                "prompt",
             ),
-            TmuxScrollbackSnapshot(
-                (
-                    "old history",
-                    "visible one",
-                    "visible two",
-                    "new one",
-                    "new two",
-                    "prompt",
-                ),
-                4,
-            ),
-        )
+            4,
+        ),
     )
+    states = iter(map(_state, snapshots))
     output = io.StringIO()
     trace: list[str] = []
     polls = 0
@@ -97,7 +107,12 @@ def test_tail_prints_initial_text_then_only_newly_committed_scrollback() -> None
     def capture(observed_runtime: LiveTmuxSession) -> TmuxScrollbackSnapshot:
         assert observed_runtime == runtime
         trace.append("capture")
-        return next(snapshots)
+        return snapshots[0]
+
+    def capture_state(observed_runtime: LiveTmuxSession) -> TmuxScrollbackState:
+        assert observed_runtime == runtime
+        trace.append("state")
+        return next(states)
 
     def sleep(interval: float) -> None:
         nonlocal polls
@@ -111,13 +126,14 @@ def test_tail_prints_initial_text_then_only_newly_committed_scrollback() -> None
             SessionTailRequest("worker", 2),
             runtime,
             capture,
+            capture_state,
             lambda: trace.append("revalidate"),
             output=output,
             sleep=sleep,
         )
 
     assert output.getvalue() == "visible one\nvisible two\nnew one\n"
-    assert trace == ["capture", "revalidate"] * 4
+    assert trace == ["state", "capture", "revalidate", "state", "state", "state"]
 
 
 def test_plain_cursor_suppresses_rows_already_visible_initially() -> None:
@@ -200,6 +216,50 @@ def test_plain_cursor_follows_committed_rows_after_history_reaches_its_limit() -
             ("visible one", "visible two", "new one", "new two", "new three"), 3
         )
     ) == ("new one",)
+
+
+def test_bounded_tail_state_follows_append_and_history_rollover() -> None:
+    cursor = PlainTailCursor(
+        TmuxScrollbackSnapshot(("h1", "h2", "h3", "visible one", "visible two"), 3)
+    )
+
+    assert (
+        cursor.try_advance_state(
+            TmuxScrollbackState(
+                history_line_count=3,
+                history_tail_lines=("h3", "visible one", "visible two"),
+                visible_lines=("new one", "new two"),
+                runtime_identity="runtime-1",
+            )
+        )
+        == ()
+    )
+    assert cursor.try_advance_state(
+        TmuxScrollbackState(
+            history_line_count=3,
+            history_tail_lines=("visible one", "visible two", "new one"),
+            visible_lines=("new two", "new three"),
+            runtime_identity="runtime-1",
+        )
+    ) == ("new one",)
+
+
+def test_bounded_tail_state_requests_full_fallback_for_history_replacement() -> None:
+    cursor = PlainTailCursor(TmuxScrollbackSnapshot(("h1", "h2", "visible"), 2))
+    replacement_state = TmuxScrollbackState(
+        history_line_count=2,
+        history_tail_lines=("replacement one", "replacement two"),
+        visible_lines=("prompt",),
+        runtime_identity="runtime-1",
+    )
+
+    assert cursor.try_advance_state(replacement_state) is None
+    assert (
+        cursor.advance(
+            TmuxScrollbackSnapshot(("replacement one", "replacement two", "prompt"), 2)
+        )
+        == ()
+    )
 
 
 def test_plain_cursor_emits_a_settled_visible_insertion_without_waiting_for_scroll() -> (
@@ -342,6 +402,9 @@ def test_tail_plus_line_selection_starts_at_the_one_based_retained_line() -> Non
             SessionTailRequest("worker", 3, from_start=True),
             runtime,
             lambda _runtime: TmuxScrollbackSnapshot(("one", "two", "three", "four"), 2),
+            lambda _runtime: _state(
+                TmuxScrollbackSnapshot(("one", "two", "three", "four"), 2)
+            ),
             lambda: None,
             output=output,
             sleep=stop,
@@ -362,6 +425,7 @@ def test_tail_never_emits_a_snapshot_that_fails_runtime_revalidation() -> None:
             SessionTailRequest("worker"),
             runtime,
             lambda _runtime: TmuxScrollbackSnapshot(("untrusted",), 0),
+            lambda _runtime: _state(TmuxScrollbackSnapshot(("untrusted",), 0)),
             reject,
             output=output,
             sleep=lambda _interval: None,
@@ -378,6 +442,7 @@ def test_tail_requires_a_positive_poll_interval() -> None:
             SessionTailRequest("worker"),
             runtime,
             lambda _runtime: TmuxScrollbackSnapshot((), 0),
+            lambda _runtime: _state(TmuxScrollbackSnapshot((), 0)),
             lambda: None,
             poll_interval_seconds=0,
         )

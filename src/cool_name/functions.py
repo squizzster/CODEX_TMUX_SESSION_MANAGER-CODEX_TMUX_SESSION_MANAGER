@@ -18,7 +18,9 @@ from rodex_sql import (
     INDEX_RE_TRY_ATTEMPTS,
     index_re_try_attempt_numbers,
     normalise_rodex_database_path,
-    open_rodex_transaction,
+    open_rodex_bootstrap_transaction,
+    open_rodex_read_transaction,
+    require_active_rodex_transaction,
     select_lookup_id,
 )
 
@@ -75,7 +77,7 @@ def initialise_cool_names_database(
 ) -> Path:
     """Create and verify the cool-name schema in one transaction."""
     path = normalise_rodex_database_path(database_path)
-    with open_rodex_transaction(path) as connection:
+    with open_rodex_bootstrap_transaction(path) as connection:
         create_and_verify_cool_names_schema(connection)
     return path
 
@@ -87,7 +89,8 @@ def get_unique_new_cool_name(
 ) -> str:
     """Allocate a two-word name, escalating after ten unsuccessful candidates."""
     path = normalise_rodex_database_path(database_path)
-    with open_rodex_transaction(path) as connection:
+    with open_rodex_bootstrap_transaction(path) as connection:
+        create_and_verify_cool_names_schema(connection)
         return allocate_unique_cool_name(
             connection, name_generator=name_generator
         ).cool_name
@@ -99,7 +102,7 @@ def allocate_unique_cool_name(
     name_generator: NameGenerator | None = None,
 ) -> CoolName:
     """Allocate and return a lookup row inside the caller's transaction."""
-    create_and_verify_cool_names_schema(connection)
+    require_active_rodex_transaction(connection)
     generate_name = coolname.generate_slug if name_generator is None else name_generator
     for word_count in (2, 3):
         for _attempt_number in index_re_try_attempt_numbers():
@@ -138,8 +141,7 @@ def get_unique_id_from_cool_name(
     normalised_name = _normalise_cool_name(cool_name)
     md5_int_1, md5_int_2 = _cool_name_md5_signed_ints(normalised_name)
     path = normalise_rodex_database_path(database_path)
-    with open_rodex_transaction(path) as connection:
-        create_and_verify_cool_names_schema(connection)
+    with open_rodex_read_transaction(path) as connection:
         return _lookup_cool_name_id_from_md5_ints(connection, md5_int_1, md5_int_2)
 
 
@@ -148,9 +150,7 @@ def reserve_specific_cool_name(
     cool_name: str,
 ) -> CoolName:
     """Select an exact available name first, inserting only when absent."""
-    if not connection.in_transaction:
-        raise CoolNameError("cool-name allocation requires an active transaction")
-    create_and_verify_cool_names_schema(connection)
+    require_active_rodex_transaction(connection)
     normalised_name = normalise_rodex_display_name(cool_name)
     md5_int_1, md5_int_2 = _cool_name_md5_signed_ints(normalised_name)
     existing_id = _lookup_cool_name_id_from_md5_ints(connection, md5_int_1, md5_int_2)
@@ -177,8 +177,7 @@ def lookup_cool_name(
     cool_name: str,
 ) -> CoolName | None:
     """Resolve one name through its integer MD5 identity in an active transaction."""
-    if not connection.in_transaction:
-        raise CoolNameError("cool-name lookup requires an active transaction")
+    require_active_rodex_transaction(connection)
     normalised_name = _normalise_cool_name(cool_name)
     md5_int_1, md5_int_2 = _cool_name_md5_signed_ints(normalised_name)
     cool_names_id = _lookup_cool_name_id_from_md5_ints(connection, md5_int_1, md5_int_2)
@@ -210,8 +209,7 @@ def normalise_rodex_display_name(cool_name: str) -> str:
 
 def create_and_verify_cool_names_schema(connection: sqlite3.Connection) -> None:
     """Create and validate the table within the caller's active transaction."""
-    if not connection.in_transaction:
-        raise CoolNameError("cool-name schema changes require an active transaction")
+    require_active_rodex_transaction(connection)
     connection.execute(_CREATE_TABLE)
     _verify_table(connection)
     connection.execute(_CREATE_UNIQUE_INDEX)

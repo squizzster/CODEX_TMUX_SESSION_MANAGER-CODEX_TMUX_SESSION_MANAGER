@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import fcntl
 import io
 import json
 import os
@@ -13,6 +14,8 @@ from typing import Any
 
 import pytest
 
+import rodex.exact_turn_mutation as exact_turn_mutation_module
+import rodex.managed_session_lifecycle as managed_lifecycle_module
 import rodex.session_commands as session_commands_module
 from codex_cli_contract import CODEX_CLI_0_150_1_COMMAND_TOKENS
 from rodex.app_server_contract import RodexAppServerCompatibilityError
@@ -35,6 +38,7 @@ from rodex.runtime import (
     RodexCodexSessionNotFoundError,
     RodexRuntimeError,
     TmuxScrollbackSnapshot,
+    TmuxScrollbackState,
 )
 from rodex.session_tail import SessionTailRequest
 from rodex_registry import (
@@ -168,6 +172,15 @@ class StubLauncher:
             self.capture_scrollback(runtime), max(len(self.scrollback) - 2, 0)
         )
 
+    def capture_scrollback_state(self, runtime: LiveTmuxSession) -> TmuxScrollbackState:
+        snapshot = self.capture_scrollback_snapshot(runtime)
+        return TmuxScrollbackState(
+            history_line_count=snapshot.history_line_count,
+            history_tail_lines=snapshot.history_lines,
+            visible_lines=snapshot.visible_lines,
+            runtime_identity="stub-runtime",
+        )
+
     def stop(self, runtime: LiveTmuxSession, *, check: bool = True) -> None:
         self.stopped.append((runtime, check))
 
@@ -238,7 +251,6 @@ class StubLauncher:
 
 class StubControlClient:
     def __init__(self) -> None:
-        self.sent: list[tuple[LiveRodexControl, str]] = []
         self.waited: list[LiveRodexControl] = []
         self.event_streams: list[LiveRodexControl] = []
         self.started: list[tuple[LiveRodexControl, str]] = []
@@ -247,7 +259,6 @@ class StubControlClient:
         self.steered_dispatch_ids: list[str | None] = []
         self.interrupted: list[tuple[LiveRodexControl, str]] = []
         self.exact_waited: list[tuple[LiveRodexControl, str, float | None]] = []
-        self.send_error: RodexControlError | None = None
         self.start_error: RodexControlError | None = None
         self.wait_error: RodexControlError | None = None
         self.compatibility_error: RodexAppServerCompatibilityError | None = None
@@ -297,24 +308,11 @@ class StubControlClient:
             raise self.compatibility_error
         return "0.147.0"
 
-    def send_prompt(
-        self,
-        control: LiveRodexControl,
-        prompt: str,
-        *,
-        revalidate: Any,
-    ) -> PromptDispatch:
-        revalidate()
-        if self.send_error is not None:
-            raise self.send_error
-        self.sent.append((control, prompt))
-        return PromptDispatch("started", "turn-1", "rodex:dispatch:legacy")
-
     def wait_until_idle(self, control: LiveRodexControl, *, revalidate: Any) -> None:
         revalidate()
         self.waited.append(control)
 
-    def start_turn(
+    def _start_turn(
         self,
         control: LiveRodexControl,
         prompt: str,
@@ -335,7 +333,7 @@ class StubControlClient:
             str(CODEX_SESSION_ID),
         )
 
-    def steer_turn(
+    def _steer_turn(
         self,
         control: LiveRodexControl,
         turn_id: str,
@@ -365,7 +363,7 @@ class StubControlClient:
         revalidate()
         return self.state, replace(self.dispatch_status_result, dispatch_id=dispatch_id)
 
-    def interrupt_turn(
+    def _interrupt_turn(
         self, control: LiveRodexControl, turn_id: str, *, revalidate: Any
     ) -> CodexThreadState:
         revalidate()
@@ -654,7 +652,7 @@ def test_cli_does_not_resolve_away_an_explicit_database_symlink(
     linked = tmp_path / "linked.sqlite3"
     linked.symlink_to(target)
 
-    with pytest.raises(RodexSQLError, match="securely open database"):
+    with pytest.raises(RodexSQLError, match="not a regular file"):
         run(["_stats-status", "unused"], database_path=linked)
 
 
@@ -996,38 +994,25 @@ def test_running_reports_an_unregistered_live_tmux_session(
     assert f"orphan-name on {socket_path}" in output
 
 
-@pytest.mark.parametrize("command", ["_send"])
-def test_send_command_targets_the_verified_named_runtime(
+def test_help_exposes_exact_start_and_steer_without_legacy_send(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
-    command: str,
 ) -> None:
-    database = tmp_path / "rodex.sqlite3"
-    monkeypatch.setattr(
-        "cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga"
-    )
     monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
-    create_controlled_session(database, tmp_path)
-    launcher = StubLauncher(tmp_path)
-    control = StubControlClient()
 
     assert (
         run(
-            [command, "automatic-beluga", "run", "tests"],
-            database_path=database,
-            launcher=launcher,  # type: ignore[arg-type]
-            control_client=control,  # type: ignore[arg-type]
+            ["_help"],
+            database_path=tmp_path / "rodex.sqlite3",
         )
         == 0
     )
 
-    assert control.sent == [(launcher.control, "run tests")]
-    assert launcher.control_discoveries == [
-        LiveTmuxSession(tmp_path / "tmux.sock", "automatic-beluga"),
-        LiveTmuxSession(tmp_path / "tmux.sock", "automatic-beluga"),
-    ]
-    assert "started Codex turn turn-1" in capsys.readouterr().out
+    help_text = capsys.readouterr().out
+    assert "_start SESSION" in help_text
+    assert "_steer SESSION" in help_text
+    assert "_send" not in help_text
 
 
 @pytest.mark.parametrize("command", ["_wait"])
@@ -1846,9 +1831,10 @@ def test_tail_follows_verified_session_text_without_protocol_events(
         request: SessionTailRequest,
         runtime: LiveTmuxSession,
         capture: object,
+        capture_state: object,
         revalidate: object,
     ) -> None:
-        observed.extend((request, runtime, capture, revalidate))
+        observed.extend((request, runtime, capture, capture_state, revalidate))
 
     monkeypatch.setattr(session_commands_module, "follow_session_tail", follow)
 
@@ -1867,7 +1853,8 @@ def test_tail_follows_verified_session_text_without_protocol_events(
         LiveTmuxSession(tmp_path / "tmux.sock", "automatic-beluga"),
     ]
     assert observed[2] == launcher.capture_scrollback_snapshot
-    assert callable(observed[3])
+    assert observed[3] == launcher.capture_scrollback_state
+    assert callable(observed[4])
     assert control.event_streams == []
 
 
@@ -2121,6 +2108,74 @@ def test_explicit_create_assigns_the_requested_display_name(
     tmux_link = lookup_rodex_tmux_session(1, database)
     assert tmux_link is not None
     assert tmux_link.tmux_session_name == "project_1234"
+
+
+def test_named_creation_holds_transition_lock_during_alias_transition(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database = tmp_path / "rodex.sqlite3"
+    launcher = StubLauncher(tmp_path)
+    monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
+    monkeypatch.setattr(
+        "cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga"
+    )
+    real_assignment = managed_lifecycle_module.open_a_user_defined_cool_name_assignment
+
+    def require_transition_lock(*args: object, **kwargs: object):  # type: ignore[no-untyped-def]
+        session_id = lookup_rodex_sessions_id_from_a_cool_name("automatic-beluga", database)
+        assert session_id is not None
+        lock_path = database.parent / f".{database.name}.session-{session_id}.lock"
+        descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            with pytest.raises(BlockingIOError):
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        finally:
+            os.close(descriptor)
+        return real_assignment(*args, **kwargs)
+
+    monkeypatch.setattr(
+        managed_lifecycle_module,
+        "open_a_user_defined_cool_name_assignment",
+        require_transition_lock,
+    )
+
+    assert (
+        run(
+            ["_create", "project_1234"],
+            database_path=database,
+            launcher=launcher,  # type: ignore[arg-type]
+        )
+        == 0
+    )
+
+
+def test_unknown_alias_selector_is_not_re_resolved_after_its_failed_lookup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lookup_calls = 0
+
+    def unknown_then_present(*_args: object, **_kwargs: object) -> int | None:
+        nonlocal lookup_calls
+        lookup_calls += 1
+        return None if lookup_calls == 1 else 42
+
+    monkeypatch.setattr(
+        exact_turn_mutation_module,
+        "lookup_owned_rodex_sessions_id_from_a_cool_name",
+        unknown_then_present,
+    )
+
+    with pytest.raises(RodexLaunchError, match="unknown Rodex session"):
+        run(
+            ["_alias", "not-yet-present", "new-name"],
+            database_path=tmp_path / "rodex.sqlite3",
+            launcher=StubLauncher(tmp_path),  # type: ignore[arg-type]
+            control_client=StubControlClient(),  # type: ignore[arg-type]
+        )
+
+    assert lookup_calls == 1
 
 
 def test_concurrent_requested_name_creation_leaves_only_the_successful_session(
@@ -3186,6 +3241,7 @@ def test_alias_command_accepts_force_without_starting_codex(
         user_identity=DNA,
         tmux_server_socket_path=tmp_path / "tmux.sock",
         tmux_session_name="black-sawfly",
+        runtime_id=RUNTIME_ID,
     )
     launcher = StubLauncher(tmp_path)
     control = StubControlClient()
@@ -3215,7 +3271,7 @@ def test_alias_command_accepts_force_without_starting_codex(
     tmux_link = lookup_rodex_tmux_session(1, database)
     assert tmux_link is not None
     assert tmux_link.tmux_session_name == "replacement"
-    assert [prompt for _live_control, prompt in control.sent] == [
+    assert [prompt for _live_control, prompt in control.started] == [
         (
             f"RODEX_AUTO_INFO: Rodex session {session.rodex_session_id} "
             "is now named 'first'."
@@ -3258,7 +3314,8 @@ def test_alias_does_not_send_auto_info_when_the_session_is_not_running(
         == 0
     )
 
-    assert control.sent == []
+    assert control.started == []
+    assert control.steered == []
 
 
 def test_alias_does_not_send_auto_info_when_the_display_name_is_unchanged(
@@ -3297,7 +3354,8 @@ def test_alias_does_not_send_auto_info_when_the_display_name_is_unchanged(
         == 0
     )
 
-    assert control.sent == []
+    assert control.started == []
+    assert control.steered == []
 
 
 def test_alias_reports_auto_info_failure_without_rolling_back_the_new_name(
@@ -3315,10 +3373,11 @@ def test_alias_reports_auto_info_failure_without_rolling_back_the_new_name(
         user_identity=DNA,
         tmux_server_socket_path=tmp_path / "tmux.sock",
         tmux_session_name="black-sawfly",
+        runtime_id=RUNTIME_ID,
     )
     launcher = StubLauncher(tmp_path)
     control = StubControlClient()
-    control.send_error = RodexControlError("delivery unavailable")
+    control.start_error = RodexControlError("delivery unavailable")
 
     with pytest.raises(
         RodexLaunchError,
@@ -3584,6 +3643,7 @@ def test_alias_rename_failure_preserves_the_previous_name_everywhere(
         user_identity=DNA,
         tmux_server_socket_path=tmp_path / "tmux.sock",
         tmux_session_name="safe-name",
+        runtime_id=RUNTIME_ID,
     )
     launcher = StubLauncher(tmp_path)
     control = StubControlClient()
@@ -3635,6 +3695,7 @@ def test_alias_database_failure_renames_tmux_back_and_leaves_no_alias(
         user_identity=DNA,
         tmux_server_socket_path=tmp_path / "tmux.sock",
         tmux_session_name="safe-name",
+        runtime_id=RUNTIME_ID,
     )
     launcher = StubLauncher(tmp_path)
     monkeypatch.setattr(
@@ -3678,6 +3739,7 @@ def test_concurrent_alias_commands_serialize_across_tmux_and_database(
         user_identity=DNA,
         tmux_server_socket_path=tmp_path / "tmux.sock",
         tmux_session_name="safe-name",
+        runtime_id=RUNTIME_ID,
     )
     registry_id = lookup_rodex_registry_id(database)
     state_lock = Lock()
@@ -3720,6 +3782,7 @@ def test_concurrent_alias_commands_serialize_across_tmux_and_database(
                 session.rodex_session_id,
                 registry_id,
                 "registered",
+                RUNTIME_ID,
             )
 
     first_errors: list[BaseException] = []
@@ -3765,7 +3828,7 @@ def test_concurrent_alias_commands_serialize_across_tmux_and_database(
         return open_a_user_defined_cool_name_assignment(*args, **kwargs)
 
     monkeypatch.setattr(
-        "rodex.session_commands.open_a_user_defined_cool_name_assignment",
+        "rodex.exact_turn_mutation.open_a_user_defined_cool_name_assignment",
         observe_assignment_attempt,
     )
     first_thread.start()
@@ -3793,7 +3856,7 @@ def test_concurrent_alias_commands_serialize_across_tmux_and_database(
     assert tmux_link is not None
     assert tmux_link.tmux_session_name == "first"
     assert live_name == ["first"]
-    assert [prompt for _live_control, prompt in control.sent] == [
+    assert [prompt for _live_control, prompt in control.started] == [
         (f"RODEX_AUTO_INFO: Rodex session {session.rodex_session_id} is now named 'first'.")
     ]
 

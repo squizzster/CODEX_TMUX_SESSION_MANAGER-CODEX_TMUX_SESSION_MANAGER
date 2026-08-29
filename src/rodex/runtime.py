@@ -30,8 +30,9 @@ from rodex_registry.identity import (
     parse_rodex_registry_id,
     parse_rodex_runtime_id,
 )
+from rodex_sql import RodexDatabaseMovedError, database_terminal_signal
 
-from .agent_observer import AgentObserverPaneController, observer_control_socket_path
+from .agent_observer import AgentObserverCoordinator, observer_control_socket_path
 from .analytics import (
     AnalyticsSubprocessSupervisor,
     default_codex_sessions_root,
@@ -42,6 +43,10 @@ from .app_server_contract import (
     RODEX_SESSION_CATALOG_APP_SERVER_CLIENT,
 )
 from .control import LiveRodexControl
+from .primary_connection_lifecycle import (
+    PrimaryConnectionLifecycleCoordinator,
+    RuntimeShutdownCoordinator,
+)
 from .process_contracts import AnalyticsWorkerConfig, SessionHostConfig
 from .protocol_proxy import (
     CodexContextStatusObserver,
@@ -52,7 +57,9 @@ from .protocol_proxy import (
     ToolCallCounter,
     publish_tui_notice,
 )
+from .status_animation_admission import status_animation_hook_command
 from .status_bar import context_status_segment
+from .tmux_executor import SyncTmuxExecutor, TmuxCommandResult
 from .tmux_status import (
     TmuxStatusPipeline,
 )
@@ -65,6 +72,9 @@ CODEX_PRIMARY_CONNECTION_RELEASE_TIMEOUT_SECONDS: Final = 2.5
 RUNTIME_PATH_KEEPALIVE_INTERVAL_SECONDS: Final = 60.0 * 60.0
 RODEX_REGISTRATION_TIMEOUT_SECONDS: Final = 60.0
 RODEX_TMUX_HISTORY_LIMIT_LINES: Final = 50_000
+RODEX_TMUX_SCROLLBACK_STATE_LINES: Final = 256
+RODEX_TMUX_COMMAND_TIMEOUT_SECONDS: Final = 5.0
+RODEX_TMUX_RENAME_TIMEOUT_SECONDS: Final = 5.0
 _REGISTRATION_POLL_INTERVAL_SECONDS: Final = 1.0
 _POLL_INTERVAL_SECONDS: Final = 0.05
 _PROXY_SOCKET_OPTION: Final = "@rodex_protocol_proxy_socket_path"
@@ -221,6 +231,33 @@ class TmuxScrollbackSnapshot:
 
 
 @dataclass(frozen=True, slots=True)
+class TmuxScrollbackState:
+    """Bounded pane content plus the identity needed for cheap tail continuity."""
+
+    history_line_count: int
+    history_tail_lines: tuple[str, ...]
+    visible_lines: tuple[str, ...]
+    runtime_identity: str
+
+    def __post_init__(self) -> None:
+        if self.history_line_count < len(self.history_tail_lines):
+            raise ValueError("history tail cannot exceed tmux's retained history")
+        if not self.runtime_identity:
+            raise ValueError("scrollback state requires a runtime identity")
+
+
+def _split_tmux_capture(output: str) -> tuple[str, str]:
+    metadata, separator, captured = output.partition("\n")
+    if not separator:
+        raise RodexRuntimeError("tmux omitted scrollback capture metadata")
+    return metadata, captured
+
+
+def _captured_tmux_lines(captured: str) -> tuple[str, ...]:
+    return tuple(captured.rstrip("\n").splitlines())
+
+
+@dataclass(frozen=True, slots=True)
 class CurrentTmuxPaneContext:
     """The live tmux session and attachment snapshot inherited by this process."""
 
@@ -281,33 +318,6 @@ def _tmux_pane_id_from_environment(tmux_pane_value: str | None) -> str:
     return tmux_pane_value
 
 
-def _status_animation_hook_command(
-    python_executable: str,
-    tmux_binary: str,
-    runtime: LiveTmuxSession,
-    event: str,
-) -> str:
-    if event not in {"attached", "detached"}:
-        raise ValueError(f"unsupported status animation event: {event}")
-    animation_command = shlex.join(
-        (
-            python_executable,
-            "-m",
-            "rodex.status_animation",
-            "--tmux-binary",
-            tmux_binary,
-            "--tmux-server-socket",
-            str(runtime.tmux_server_socket_path),
-            "--tmux-session-name",
-            runtime.tmux_session_name,
-            "--event",
-            event,
-        )
-    )
-    quiet_background_command = f"{animation_command} >/dev/null 2>&1"
-    return f"run-shell -b {shlex.quote(quiet_background_command)}"
-
-
 def _tmux_input_proxy_binding_command(
     python_executable: str,
     tmux_binary: str,
@@ -356,8 +366,6 @@ def _shared_ctrl_c_binding_command(
             "#{pane_id}",
             "--client-name",
             "#{client_name}",
-            "--attached-count",
-            "#{session_attached}",
         )
     )
     return f"run-shell -b {shlex.quote(guard_command)}"
@@ -720,6 +728,7 @@ class RodexRuntimeLauncher:
             "-t",
             _exact_tmux_session_target(runtime.tmux_session_name),
             session_name,
+            timeout_seconds=RODEX_TMUX_RENAME_TIMEOUT_SECONDS,
         )
         return replace(runtime, tmux_session_name=session_name)
 
@@ -745,7 +754,7 @@ class RodexRuntimeLauncher:
                 "-t",
                 target,
                 f"client-{event}",
-                _status_animation_hook_command(
+                status_animation_hook_command(
                     self._python_executable,
                     self._tmux_binary,
                     runtime,
@@ -881,23 +890,86 @@ class RodexRuntimeLauncher:
     def capture_scrollback_snapshot(
         self, runtime: LiveTmuxSession
     ) -> TmuxScrollbackSnapshot:
-        """Capture plain pane text with tmux's committed-history boundary."""
-        history_size_text = self._tmux(
+        """Capture all pane text and its history boundary with one tmux client."""
+        target = _exact_tmux_pane_target(runtime.tmux_session_name)
+        result = self._tmux(
             runtime,
             "display-message",
             "-p",
             "-t",
-            _exact_tmux_pane_target(runtime.tmux_session_name),
+            target,
             "-F",
             "#{history_size}",
-        ).stdout.strip()
+            ";",
+            "capture-pane",
+            "-p",
+            "-S",
+            "-",
+            "-t",
+            target,
+        )
+        history_size_text, captured = _split_tmux_capture(result.stdout)
         if not history_size_text.isdigit():
             raise RodexRuntimeError("tmux returned an invalid history size")
-        lines = self.capture_scrollback(runtime)
+        lines = _captured_tmux_lines(captured)
         history_line_count = int(history_size_text)
         if len(lines) < history_line_count:
             lines = (*lines, *("" for _ in range(history_line_count - len(lines))))
         return TmuxScrollbackSnapshot(lines, history_line_count)
+
+    def capture_scrollback_state(self, runtime: LiveTmuxSession) -> TmuxScrollbackState:
+        """Capture bounded tail state and exact runtime metadata with one tmux client."""
+        target = _exact_tmux_pane_target(runtime.tmux_session_name)
+        identity_format = "\t".join(
+            (
+                "#{history_size}",
+                "#{session_id}",
+                "#{window_id}",
+                "#{pane_id}",
+                "#{pane_pid}",
+                f"#{{{_PROXY_SOCKET_OPTION}}}",
+                f"#{{{_EVENT_SOCKET_OPTION}}}",
+                f"#{{{_CODEX_SESSION_ID_OPTION}}}",
+                f"#{{{_RODEX_SESSION_ID_OPTION}}}",
+                f"#{{{_REGISTRY_ID_OPTION}}}",
+                f"#{{{_REGISTRATION_STATE_OPTION}}}",
+                f"#{{{_RUNTIME_ID_OPTION}}}",
+            )
+        )
+        result = self._tmux(
+            runtime,
+            "display-message",
+            "-p",
+            "-t",
+            target,
+            "-F",
+            identity_format,
+            ";",
+            "capture-pane",
+            "-p",
+            "-S",
+            f"-{RODEX_TMUX_SCROLLBACK_STATE_LINES}",
+            "-t",
+            target,
+        )
+        metadata, captured = _split_tmux_capture(result.stdout)
+        history_size_text, separator, runtime_identity = metadata.partition("\t")
+        if not separator or not history_size_text.isdigit() or not runtime_identity:
+            raise RodexRuntimeError("tmux returned invalid scrollback state metadata")
+        history_line_count = int(history_size_text)
+        history_tail_count = min(
+            history_line_count,
+            RODEX_TMUX_SCROLLBACK_STATE_LINES,
+        )
+        lines = _captured_tmux_lines(captured)
+        if len(lines) < history_tail_count:
+            lines = (*lines, *("" for _ in range(history_tail_count - len(lines))))
+        return TmuxScrollbackState(
+            history_line_count=history_line_count,
+            history_tail_lines=lines[:history_tail_count],
+            visible_lines=lines[history_tail_count:],
+            runtime_identity=runtime_identity,
+        )
 
     def discover_current_tmux_pane_context(
         self,
@@ -1062,25 +1134,34 @@ class RodexRuntimeLauncher:
         check: bool = True,
         interactive: bool = False,
         environment: dict[str, str] | None = None,
-    ) -> subprocess.CompletedProcess[str]:
-        command = [
+        timeout_seconds: float | None = None,
+    ) -> TmuxCommandResult:
+        deadline = (
+            RODEX_TMUX_COMMAND_TIMEOUT_SECONDS
+            if timeout_seconds is None
+            else timeout_seconds
+        )
+        executor = SyncTmuxExecutor(
             self._tmux_binary,
-            "-S",
-            str(runtime.tmux_server_socket_path),
-            *arguments,
-        ]
-        options: dict[str, object] = {
-            "check": check,
-            "text": True,
-            "env": environment,
-        }
-        if not interactive:
-            options["capture_output"] = True
-        try:
-            return self._run(command, **options)
-        except subprocess.CalledProcessError as error:
-            detail = (error.stderr or error.stdout or "tmux command failed").strip()
-            raise RodexRuntimeError(detail) from error
+            runtime.tmux_server_socket_path,
+            runner=self._run,
+            timeout_seconds=deadline,
+        )
+        result = executor.run(
+            arguments,
+            mode="interactive" if interactive else "captured",
+            environment=environment if interactive else None,
+        )
+        if result.timed_out:
+            raise RodexRuntimeError(
+                f"tmux command timed out after {deadline:g}s: {arguments[0]}"
+            )
+        if result.unavailable:
+            raise RodexRuntimeError(result.stderr or "tmux command is unavailable")
+        if check and result.returncode != 0:
+            detail = (result.stderr or result.stdout or "tmux command failed").strip()
+            raise RodexRuntimeError(detail)
+        return result
 
     def _read_tmux_option(
         self,
@@ -1201,13 +1282,27 @@ def run_session_host(
     context_status_observer: CodexContextStatusObserver | None = None
     runtime_path_keepalive: _RuntimePathKeepalive | None = None
     analytics_supervisor: AnalyticsSubprocessSupervisor | None = None
-    agent_observer_controller: AgentObserverPaneController | None = None
+    agent_observer_controller: AgentObserverCoordinator | None = None
+    runtime_shutdown = RuntimeShutdownCoordinator()
+    database_guard = None
+    unsubscribe_database_guard: Callable[[], None] | None = None
     registration_deadline = (
         None
         if analytics_config is None
         else time.monotonic() + RODEX_REGISTRATION_TIMEOUT_SECONDS
     )
     shutting_down = False
+
+    def interrupt_tui_for_terminal_shutdown() -> None:
+        active_tui = tui
+        if active_tui is not None and active_tui.poll() is None:
+            with suppress(OSError):
+                active_tui.terminate()
+
+    runtime_shutdown.subscribe_interrupt(interrupt_tui_for_terminal_shutdown)
+
+    def request_database_terminal_shutdown(path: Path, reason: str) -> None:
+        runtime_shutdown.request_shutdown(str(RodexDatabaseMovedError(path, reason)))
 
     def stop_on_signal(signum: int, _frame: object) -> None:
         if not shutting_down:
@@ -1222,6 +1317,9 @@ def run_session_host(
     }
     try:
         with _open_private_runtime_log(app_server_log_path) as log:
+            terminal_reason = runtime_shutdown.terminal_reason
+            if terminal_reason is not None:
+                raise RodexRuntimeError(terminal_reason)
             app_server = subprocess.Popen(
                 CODEX_APP_SERVER.command(codex_binary, app_server_socket_path),
                 stdin=subprocess.DEVNULL,
@@ -1232,7 +1330,7 @@ def run_session_host(
             app_server_socket_path.chmod(0o600)
             tmux_pane_target = os.environ.get("TMUX_PANE", "")
             if analytics_config is not None and tmux_pane_target:
-                agent_observer_controller = AgentObserverPaneController(
+                agent_observer_controller = AgentObserverCoordinator(
                     tmux_binary,
                     tmux_server_socket_path,
                     tmux_pane_target,
@@ -1273,11 +1371,19 @@ def run_session_host(
                         agent_observer_controller.observe_protocol_event(event)
                 live_event_tap.publish_protocol_event(message, event)
 
+            lifecycle_participants = [live_context_observer, live_event_tap]
+            if agent_observer_controller is not None:
+                lifecycle_participants.append(agent_observer_controller)
+            primary_connection_lifecycle = PrimaryConnectionLifecycleCoordinator(
+                lifecycle_participants
+            )
+
             protocol_proxy = CodexProtocolProxy(
                 protocol_proxy_socket_path,
                 app_server_socket_path,
                 ToolCallCounter(tool_call_status.update),
                 publish_primary_server_message,
+                primary_connection_lifecycle,
             )
             protocol_proxy.start()
 
@@ -1328,6 +1434,9 @@ def run_session_host(
             )
             inherited_sigint_handler: object | None = None
             while True:
+                terminal_reason = runtime_shutdown.terminal_reason
+                if terminal_reason is not None:
+                    raise RodexRuntimeError(terminal_reason)
                 attempt_log_offset = os.fstat(log.fileno()).st_size
                 if inherited_sigint_handler is not None:
                     signal.signal(signal.SIGINT, inherited_sigint_handler)
@@ -1351,6 +1460,18 @@ def run_session_host(
                         )
                         if activated_analytics is not None:
                             registration_deadline = None
+                            if database_guard is None:
+                                database_guard = database_terminal_signal(
+                                    activated_analytics.rodex_database_path
+                                )
+                                unsubscribe_database_guard = (
+                                    database_guard.subscribe_terminal(
+                                        request_database_terminal_shutdown
+                                    )
+                                )
+                                terminal_reason = runtime_shutdown.terminal_reason
+                                if terminal_reason is not None:
+                                    raise RodexRuntimeError(terminal_reason)
                             candidate_supervisor: AnalyticsSubprocessSupervisor | None = (
                                 None
                             )
@@ -1415,6 +1536,9 @@ def run_session_host(
                         )
                     except subprocess.TimeoutExpired:
                         continue
+                    terminal_reason = runtime_shutdown.terminal_reason
+                    if terminal_reason is not None:
+                        raise RodexRuntimeError(terminal_reason)
                     break
                 if (
                     returncode == 0
@@ -1444,6 +1568,8 @@ def run_session_host(
             return returncode
     finally:
         shutting_down = True
+        if unsubscribe_database_guard is not None:
+            unsubscribe_database_guard()
         try:
             try:
                 try:
@@ -1452,12 +1578,8 @@ def run_session_host(
                 except Exception:
                     pass
                 finally:
-                    try:
-                        if agent_observer_controller is not None:
-                            agent_observer_controller.close()
-                    finally:
-                        if runtime_path_keepalive is not None:
-                            runtime_path_keepalive.close()
+                    if runtime_path_keepalive is not None:
+                        runtime_path_keepalive.close()
             finally:
                 try:
                     if tui is not None:
@@ -1468,23 +1590,27 @@ def run_session_host(
                             protocol_proxy.close()
                     finally:
                         try:
-                            if context_status_observer is not None:
-                                context_status_observer.close()
+                            if agent_observer_controller is not None:
+                                agent_observer_controller.close()
                         finally:
                             try:
-                                if protocol_event_tap is not None:
-                                    protocol_event_tap.close()
+                                if context_status_observer is not None:
+                                    context_status_observer.close()
                             finally:
-                                if app_server is not None:
-                                    _stop_child_process(app_server)
-                                app_server_socket_path.unlink(missing_ok=True)
-                                protocol_proxy_socket_path.unlink(missing_ok=True)
-                                protocol_event_socket_path.unlink(missing_ok=True)
-                                if (
-                                    app_server_log_path.exists()
-                                    and app_server_log_path.stat().st_size == 0
-                                ):
-                                    app_server_log_path.unlink()
+                                try:
+                                    if protocol_event_tap is not None:
+                                        protocol_event_tap.close()
+                                finally:
+                                    if app_server is not None:
+                                        _stop_child_process(app_server)
+                                    app_server_socket_path.unlink(missing_ok=True)
+                                    protocol_proxy_socket_path.unlink(missing_ok=True)
+                                    protocol_event_socket_path.unlink(missing_ok=True)
+                                    if (
+                                        app_server_log_path.exists()
+                                        and app_server_log_path.stat().st_size == 0
+                                    ):
+                                        app_server_log_path.unlink()
         finally:
             for signum, handler in previous_handlers.items():
                 signal.signal(signum, handler)
@@ -1503,20 +1629,18 @@ def _runtime_registration_is_confirmed(
 ) -> bool:
     if not tmux_pane_target:
         return False
-    result = subprocess.run(
-        [
-            tmux_binary,
-            "-S",
-            str(tmux_server_socket_path),
+    result = SyncTmuxExecutor(
+        tmux_binary,
+        tmux_server_socket_path,
+        runner=subprocess.run,
+    ).run(
+        (
             "show-options",
             "-v",
             "-t",
             tmux_pane_target,
             _REGISTRATION_STATE_OPTION,
-        ],
-        check=False,
-        text=True,
-        capture_output=True,
+        )
     )
     return result.returncode == 0 and result.stdout.strip() == RODEX_REGISTRATION_REGISTERED
 
@@ -1530,19 +1654,11 @@ def _registered_analytics_worker_config(
     """Read and validate one post-commit analytics activation manifest."""
     if not tmux_pane_target:
         return None
-    result = subprocess.run(
-        [
-            tmux_binary,
-            "-S",
-            str(tmux_server_socket_path),
-            "show-options",
-            "-t",
-            tmux_pane_target,
-        ],
-        check=False,
-        text=True,
-        capture_output=True,
-    )
+    result = SyncTmuxExecutor(
+        tmux_binary,
+        tmux_server_socket_path,
+        runner=subprocess.run,
+    ).run(("show-options", "-t", tmux_pane_target))
     if result.returncode != 0:
         return None
     options: dict[str, str] = {}

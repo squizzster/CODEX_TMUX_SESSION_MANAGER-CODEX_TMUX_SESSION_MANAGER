@@ -26,9 +26,11 @@ from rodex.tmux_status import (
 
 
 class RecordingTmux:
-    def __init__(self) -> None:
+    def __init__(self, *, attached_count: int = 2) -> None:
         self.commands: list[list[str]] = []
         self.confirmation = ""
+        self.attached_count = attached_count
+        self.sent_ctrl_c_count = 0
         self.status_options: dict[str, str] = {}
         self.status_left = RODEX_STATUS_LEFT_FORMAT
 
@@ -39,22 +41,31 @@ class RecordingTmux:
         arguments = command[3:]
         output = ""
         returncode = 0
-        if arguments[:2] == ["show-options", "-v"]:
+        if arguments[:1] == ["display-message"]:
+            output = f"{self.attached_count}\n"
+        elif arguments[:2] == ["show-options", "-v"]:
             if arguments[-1] == "@rodex_shared_ctrl_c_confirmation":
                 output = self.confirmation
             else:
                 output = self.status_options.get(arguments[-1], "")
             returncode = 0 if output else 1
         elif arguments[:2] == ["if-shell", "-t"]:
-            if self._condition_is_true(arguments[-2]):
-                for action in arguments[-1].split(" ; "):
-                    self._apply(shlex.split(action))
+            format_index = arguments.index("-F")
+            condition = arguments[format_index + 1]
+            branch_index = format_index + (2 if self._condition_is_true(condition) else 3)
+            if branch_index < len(arguments):
+                for action in arguments[branch_index].split(" ; "):
+                    if action:
+                        self._apply(shlex.split(action))
         elif arguments[:2] == ["set-option", "-u"]:
-            if arguments[-1] == "@rodex_shared_ctrl_c_confirmation":
-                self.confirmation = ""
+            self._apply(arguments)
+        elif arguments[:2] == ["set-option", "-o"]:
+            if arguments[-2] in self.status_options:
+                returncode = 1
+            else:
+                self.status_options[arguments[-2]] = arguments[-1]
         elif arguments[:1] == ["set-option"]:
-            if arguments[-2] == "@rodex_shared_ctrl_c_confirmation":
-                self.confirmation = arguments[-1]
+            self._apply(arguments)
         return subprocess.CompletedProcess(
             command,
             returncode,
@@ -63,6 +74,8 @@ class RecordingTmux:
         )
 
     def _condition_is_true(self, condition: str) -> bool:
+        if condition == "#{==:#{session_attached},1}":
+            return self.attached_count == 1
         if condition.startswith("#{<=:"):
             current = int(self.status_options.get(STATUS_CLAIM_PRIORITY_OPTION, "0"))
             requested = int(condition.rsplit(",", maxsplit=1)[1].removesuffix("}"))
@@ -70,11 +83,21 @@ class RecordingTmux:
         if STATUS_CLAIM_TOKEN_OPTION in condition:
             expected = condition.rsplit(",", maxsplit=1)[1].removesuffix("}")
             return self.status_options.get(STATUS_CLAIM_TOKEN_OPTION) == expected
+        if "@rodex_shared_ctrl_c_confirmation_claim" in condition:
+            claim = self.status_options.get("@rodex_shared_ctrl_c_confirmation_claim")
+            return bool(claim) and self.confirmation == claim
         raise AssertionError(f"unexpected condition: {condition}")
 
     def _apply(self, arguments: list[str]) -> None:
-        if arguments[:2] == ["set-option", "-u"]:
-            self.status_options.pop(arguments[-1], None)
+        if arguments[:1] == ["send-keys"]:
+            self.sent_ctrl_c_count += 1
+        elif arguments[:2] == ["set-option", "-u"]:
+            if arguments[-1] == "@rodex_shared_ctrl_c_confirmation":
+                self.confirmation = ""
+            else:
+                self.status_options.pop(arguments[-1], None)
+        elif arguments[-2] == "@rodex_shared_ctrl_c_confirmation":
+            self.confirmation = arguments[-1]
         elif arguments[-2] == "status-left":
             self.status_left = arguments[-1]
         else:
@@ -82,7 +105,7 @@ class RecordingTmux:
 
 
 def test_private_ctrl_c_is_forwarded_without_confirmation(tmp_path: Path) -> None:
-    runner = RecordingTmux()
+    runner = RecordingTmux(attached_count=1)
 
     assert (
         handle_shared_ctrl_c(
@@ -90,14 +113,91 @@ def test_private_ctrl_c_is_forwarded_without_confirmation(tmp_path: Path) -> Non
             tmp_path / "tmux.sock",
             "%4",
             "client-one",
-            1,
             runner=runner,
         )
         == 0
     )
 
-    assert runner.commands[-1][-4:] == ["send-keys", "-t", "%4", "C-c"]
-    assert not any("display-message" in command for command in runner.commands)
+    assert runner.sent_ctrl_c_count == 1
+    assert any(
+        command[3:4] == ["if-shell"]
+        and "#{session_attached}" in " ".join(command)
+        and "send-keys" in " ".join(command)
+        for command in runner.commands
+    )
+    assert any("#{session_attached}" in command for command in runner.commands)
+
+
+def test_private_ctrl_c_is_withheld_if_a_client_attaches_before_send(
+    tmp_path: Path,
+) -> None:
+    runner = RecordingTmux(attached_count=1)
+
+    def attach_after_attachment_query(
+        command: list[str], **options: object
+    ) -> subprocess.CompletedProcess[str]:
+        result = runner(command, **options)
+        if command[3:4] == ["display-message"]:
+            runner.attached_count = 2
+        return result
+
+    assert (
+        handle_shared_ctrl_c(
+            "tmux",
+            tmp_path / "tmux.sock",
+            "%4",
+            "client-one",
+            runner=attach_after_attachment_query,
+        )
+        == 0
+    )
+
+    assert runner.sent_ctrl_c_count == 0
+
+
+def test_prearmed_private_ctrl_c_race_clears_hidden_confirmation(
+    tmp_path: Path,
+) -> None:
+    runner = RecordingTmux(attached_count=2)
+    assert (
+        handle_shared_ctrl_c(
+            "tmux",
+            tmp_path / "tmux.sock",
+            "%4",
+            "client-one",
+            monotonic_nanoseconds=lambda: 10_000_000_000,
+            confirmation_token=lambda: "warning-token",
+            expiry_scheduler=lambda _callback: None,
+            runner=runner,
+        )
+        == 0
+    )
+    assert runner.confirmation
+    runner.attached_count = 1
+
+    def attach_after_attachment_query(
+        command: list[str], **options: object
+    ) -> subprocess.CompletedProcess[str]:
+        result = runner(command, **options)
+        if command[3:4] == ["display-message"]:
+            runner.attached_count = 2
+        return result
+
+    assert (
+        handle_shared_ctrl_c(
+            "tmux",
+            tmp_path / "tmux.sock",
+            "%4",
+            "client-one",
+            monotonic_nanoseconds=lambda: 11_000_000_000,
+            runner=attach_after_attachment_query,
+        )
+        == 0
+    )
+
+    assert runner.sent_ctrl_c_count == 0
+    assert runner.confirmation == ""
+    assert runner.status_left == RODEX_STATUS_LEFT_FORMAT
 
 
 def test_first_shared_ctrl_c_publishes_a_temporary_status_warning(tmp_path: Path) -> None:
@@ -110,7 +210,6 @@ def test_first_shared_ctrl_c_publishes_a_temporary_status_warning(tmp_path: Path
             tmp_path / "tmux.sock",
             "%4",
             "client-one",
-            2,
             monotonic_nanoseconds=lambda: 10_000_000_000,
             confirmation_token=lambda: "warning-token",
             expiry_scheduler=expiry_callbacks.append,
@@ -158,7 +257,6 @@ def test_same_client_second_shared_ctrl_c_is_forwarded_within_window(
                 tmp_path / "tmux.sock",
                 "%4",
                 "client-one",
-                2,
                 monotonic_nanoseconds=lambda: next(moments),
                 confirmation_token=lambda: "warning-token",
                 expiry_scheduler=expiry_callbacks.append,
@@ -168,7 +266,10 @@ def test_same_client_second_shared_ctrl_c_is_forwarded_within_window(
         )
 
     assert runner.confirmation == ""
-    assert runner.commands[-1][-4:] == ["send-keys", "-t", "%4", "C-c"]
+    assert any(
+        command[3:4] == ["if-shell"] and "send-keys" in " ".join(command)
+        for command in runner.commands
+    )
 
 
 @pytest.mark.parametrize(
@@ -189,7 +290,6 @@ def test_other_client_or_expired_confirmation_rearms_without_forwarding(
             tmp_path / "tmux.sock",
             "%4",
             "client-one",
-            2,
             monotonic_nanoseconds=lambda: 10_000_000_000,
             confirmation_token=lambda: next(tokens),
             expiry_scheduler=expiry_callbacks.append,
@@ -203,7 +303,6 @@ def test_other_client_or_expired_confirmation_rearms_without_forwarding(
             tmp_path / "tmux.sock",
             "%4",
             second_client,
-            2,
             monotonic_nanoseconds=lambda: second_moment,
             confirmation_token=lambda: next(tokens),
             expiry_scheduler=expiry_callbacks.append,

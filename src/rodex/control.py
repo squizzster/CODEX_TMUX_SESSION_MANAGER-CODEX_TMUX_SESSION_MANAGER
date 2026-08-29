@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import json
+import socket as socket_module
 import time
 import uuid
 from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
+from threading import Event, Thread
 from typing import Any, Literal
 
 from websockets.exceptions import ConnectionClosed, InvalidHandshake
@@ -29,6 +31,7 @@ Revalidate = Callable[[], None]
 EventWriter = Callable[[str], None]
 _FINAL_AGENT_MESSAGE_BYTE_LIMIT = 64 * 1024
 _MUTATION_RESPONSE_TIMEOUT_SECONDS = 5.0
+_CONTROL_RPC_CHAIN_TIMEOUT_SECONDS = 5.0
 
 
 class RodexControlError(RuntimeError):
@@ -60,6 +63,14 @@ class RodexWaitTimeoutError(RodexControlError):
 
 class _RodexRequestDeadlineError(RodexControlError):
     """An internal App Server request exhausted its caller's total deadline."""
+
+
+class _RodexSendDeadlineError(_RodexRequestDeadlineError):
+    """A bounded frame send expired, with explicit transmission uncertainty."""
+
+    def __init__(self, message: str, *, frame_may_have_been_sent: bool) -> None:
+        super().__init__(message)
+        self.frame_may_have_been_sent = frame_may_have_been_sent
 
 
 @dataclass(frozen=True, slots=True)
@@ -160,18 +171,38 @@ class CodexControlClient:
 
     def inspect(self, control: LiveRodexControl) -> CodexThreadState:
         """Return the verified thread's current runtime state."""
-        with self._open_protocol(control.protocol_proxy_socket_path) as websocket:
-            thread = self._verify_and_read_thread(websocket, control.codex_session_id)
+        deadline = self._control_rpc_deadline()
+        with self._open_protocol(
+            control.protocol_proxy_socket_path,
+            open_timeout=self._control_rpc_remaining(deadline, cap=2),
+        ) as websocket:
+            thread = self._verify_and_read_thread(
+                websocket,
+                control.codex_session_id,
+                deadline=deadline,
+            )
         return _thread_state(thread)
 
     def inspect_live(self, control: LiveRodexControl) -> CodexThreadState:
         """Return thread state with the event tap's exact active-turn identity."""
+        deadline = self._control_rpc_deadline()
         try:
-            with self._open_events(control.protocol_event_socket_path) as events:
-                ready = _expect_event_stream_ready(events)
-                with self._open_protocol(control.protocol_proxy_socket_path) as websocket:
+            with self._open_events(
+                control.protocol_event_socket_path,
+                open_timeout=self._control_rpc_remaining(deadline, cap=2),
+            ) as events:
+                ready = _expect_event_stream_ready(
+                    events,
+                    timeout_seconds=self._control_rpc_remaining(deadline, cap=2),
+                )
+                with self._open_protocol(
+                    control.protocol_proxy_socket_path,
+                    open_timeout=self._control_rpc_remaining(deadline, cap=2),
+                ) as websocket:
                     thread = self._verify_and_read_thread(
-                        websocket, control.codex_session_id
+                        websocket,
+                        control.codex_session_id,
+                        deadline=deadline,
                     )
                 return _thread_state(
                     thread,
@@ -182,114 +213,51 @@ class CodexControlClient:
 
     def exact_control_version(self, control: LiveRodexControl) -> str:
         """Return the characterized live App Server version or fail closed."""
+        deadline = self._control_rpc_deadline()
         try:
-            with self._open_protocol(control.protocol_proxy_socket_path) as websocket:
-                return self._initialize_protocol(websocket, require_compatible=True)
+            with self._open_protocol(
+                control.protocol_proxy_socket_path,
+                open_timeout=self._control_rpc_remaining(deadline, cap=2),
+            ) as websocket:
+                return self._initialize_protocol(
+                    websocket,
+                    require_compatible=True,
+                    deadline=deadline,
+                )
         except (ConnectionClosed, InvalidHandshake, OSError) as error:
             raise RodexControlError(f"Codex control connection ended: {error}") from error
 
-    def send_prompt(
-        self,
-        control: LiveRodexControl,
-        prompt: str,
-        *,
-        revalidate: Revalidate = lambda: None,
-    ) -> PromptDispatch:
-        """Start an idle turn or steer the exact active turn with user text."""
-        if not isinstance(prompt, str) or not prompt.strip():
-            raise ValueError("prompt must be non-empty")
-        dispatch_id = self._new_dispatch_id()
-        try:
-            with self._open_events(control.protocol_event_socket_path) as events:
-                ready = _expect_event_stream_ready(events)
-                active_turn_id = _ready_active_turn_id(ready, control.codex_session_id)
-                with self._open_protocol(control.protocol_proxy_socket_path) as websocket:
-                    thread = self._verify_and_read_thread(
-                        websocket, control.codex_session_id
-                    )
-                    state = _thread_state(thread, active_turn_id=active_turn_id)
-                    if state.can_accept_direct_input is False:
-                        raise RodexControlError("Codex thread does not accept direct input")
-                    revalidate()
-                    user_input = [{"type": "text", "text": prompt}]
-                    if state.status == "active":
-                        if state.active_turn_id is None:
-                            raise RodexControlError(
-                                "active Codex thread has no observable active turn"
-                            )
-                        result = _request(
-                            websocket,
-                            self._request_id_factory(),
-                            CODEX_APP_SERVER.turn_steer_method,
-                            {
-                                "threadId": str(control.codex_session_id),
-                                "expectedTurnId": state.active_turn_id,
-                                "input": user_input,
-                                "clientUserMessageId": dispatch_id,
-                            },
-                            indeterminate_context=_MutationDispatchContext(
-                                dispatch_id,
-                                state.thread_id,
-                                state.active_turn_id,
-                            ),
-                            monotonic=self._monotonic,
-                        )
-                        return PromptDispatch(
-                            "steered",
-                            _turn_id(result),
-                            dispatch_id,
-                            state.thread_id,
-                            state.session_id,
-                        )
-                    if state.status != "idle":
-                        raise RodexControlError(
-                            f"Codex thread cannot accept a turn while {state.status}"
-                        )
-                    result = _request(
-                        websocket,
-                        self._request_id_factory(),
-                        CODEX_APP_SERVER.turn_start_method,
-                        {
-                            "threadId": str(control.codex_session_id),
-                            "input": user_input,
-                            "clientUserMessageId": dispatch_id,
-                        },
-                        indeterminate_context=_MutationDispatchContext(
-                            dispatch_id,
-                            state.thread_id,
-                        ),
-                        monotonic=self._monotonic,
-                    )
-                    return PromptDispatch(
-                        "started",
-                        _turn_id(result),
-                        dispatch_id,
-                        state.thread_id,
-                        state.session_id,
-                    )
-        except (ConnectionClosed, InvalidHandshake, OSError) as error:
-            raise RodexControlError(f"Codex control connection ended: {error}") from error
-
-    def start_turn(
+    def _start_turn(
         self,
         control: LiveRodexControl,
         prompt: str,
         *,
         dispatch_id: str | None = None,
-        revalidate: Revalidate = lambda: None,
+        revalidate: Revalidate,
     ) -> PromptDispatch:
         """Start only when the verified thread is observed idle."""
         if not isinstance(prompt, str) or not prompt.strip():
             raise ValueError("prompt must be non-empty")
         resolved_dispatch_id = self._resolve_dispatch_id(dispatch_id)
+        deadline = self._control_rpc_deadline()
         try:
-            with self._open_events(control.protocol_event_socket_path) as events:
-                _expect_event_stream_ready(events)
-                with self._open_protocol(control.protocol_proxy_socket_path) as websocket:
+            with self._open_events(
+                control.protocol_event_socket_path,
+                open_timeout=self._control_rpc_remaining(deadline, cap=2),
+            ) as events:
+                _expect_event_stream_ready(
+                    events,
+                    timeout_seconds=self._control_rpc_remaining(deadline, cap=2),
+                )
+                with self._open_protocol(
+                    control.protocol_proxy_socket_path,
+                    open_timeout=self._control_rpc_remaining(deadline, cap=2),
+                ) as websocket:
                     thread = self._verify_and_read_thread(
                         websocket,
                         control.codex_session_id,
                         require_compatible=True,
+                        deadline=deadline,
                     )
                     state = _thread_state(thread)
                     if state.status != "idle":
@@ -312,6 +280,7 @@ class CodexControlClient:
                             resolved_dispatch_id,
                             state.thread_id,
                         ),
+                        deadline=deadline,
                         monotonic=self._monotonic,
                     )
                     return PromptDispatch(
@@ -326,28 +295,39 @@ class CodexControlClient:
         except (ConnectionClosed, InvalidHandshake, OSError) as error:
             raise RodexControlError(f"Codex control connection ended: {error}") from error
 
-    def steer_turn(
+    def _steer_turn(
         self,
         control: LiveRodexControl,
         turn_id: str,
         prompt: str,
         *,
         dispatch_id: str | None = None,
-        revalidate: Revalidate = lambda: None,
+        revalidate: Revalidate,
     ) -> PromptDispatch:
         """Steer only the caller-specified exact active turn."""
         _require_turn_id(turn_id)
         if not isinstance(prompt, str) or not prompt.strip():
             raise ValueError("prompt must be non-empty")
         resolved_dispatch_id = self._resolve_dispatch_id(dispatch_id)
+        deadline = self._control_rpc_deadline()
         try:
-            with self._open_events(control.protocol_event_socket_path) as events:
-                _expect_event_stream_ready(events)
-                with self._open_protocol(control.protocol_proxy_socket_path) as websocket:
+            with self._open_events(
+                control.protocol_event_socket_path,
+                open_timeout=self._control_rpc_remaining(deadline, cap=2),
+            ) as events:
+                _expect_event_stream_ready(
+                    events,
+                    timeout_seconds=self._control_rpc_remaining(deadline, cap=2),
+                )
+                with self._open_protocol(
+                    control.protocol_proxy_socket_path,
+                    open_timeout=self._control_rpc_remaining(deadline, cap=2),
+                ) as websocket:
                     thread = self._verify_and_read_thread(
                         websocket,
                         control.codex_session_id,
                         require_compatible=True,
+                        deadline=deadline,
                     )
                     state = _thread_state(thread, active_turn_id=turn_id)
                     if state.status != "active":
@@ -373,6 +353,7 @@ class CodexControlClient:
                             state.thread_id,
                             turn_id,
                         ),
+                        deadline=deadline,
                         monotonic=self._monotonic,
                     )
                     return PromptDispatch(
@@ -387,23 +368,34 @@ class CodexControlClient:
         except (ConnectionClosed, InvalidHandshake, OSError) as error:
             raise RodexControlError(f"Codex control connection ended: {error}") from error
 
-    def interrupt_turn(
+    def _interrupt_turn(
         self,
         control: LiveRodexControl,
         turn_id: str,
         *,
-        revalidate: Revalidate = lambda: None,
+        revalidate: Revalidate,
     ) -> CodexThreadState:
         """Request interruption only for the exact observed active turn."""
         _require_turn_id(turn_id)
+        deadline = self._control_rpc_deadline()
         try:
-            with self._open_events(control.protocol_event_socket_path) as events:
-                _expect_event_stream_ready(events)
-                with self._open_protocol(control.protocol_proxy_socket_path) as websocket:
+            with self._open_events(
+                control.protocol_event_socket_path,
+                open_timeout=self._control_rpc_remaining(deadline, cap=2),
+            ) as events:
+                _expect_event_stream_ready(
+                    events,
+                    timeout_seconds=self._control_rpc_remaining(deadline, cap=2),
+                )
+                with self._open_protocol(
+                    control.protocol_proxy_socket_path,
+                    open_timeout=self._control_rpc_remaining(deadline, cap=2),
+                ) as websocket:
                     thread = self._verify_and_read_thread(
                         websocket,
                         control.codex_session_id,
                         require_compatible=True,
+                        deadline=deadline,
                     )
                     state = _thread_state(thread, active_turn_id=turn_id)
                     if state.status != "active":
@@ -422,6 +414,7 @@ class CodexControlClient:
                             state.thread_id,
                             turn_id,
                         ),
+                        deadline=deadline,
                         monotonic=self._monotonic,
                     )
                     return state
@@ -439,13 +432,18 @@ class CodexControlClient:
     ) -> tuple[CodexThreadState, CodexTurnResult]:
         """Read one exact turn directly from App Server without persisting content."""
         _require_turn_id(turn_id)
+        deadline = self._control_rpc_deadline()
         try:
-            with self._open_protocol(control.protocol_proxy_socket_path) as websocket:
+            with self._open_protocol(
+                control.protocol_proxy_socket_path,
+                open_timeout=self._control_rpc_remaining(deadline, cap=2),
+            ) as websocket:
                 thread = self._verify_and_read_thread(
                     websocket,
                     control.codex_session_id,
                     include_turns=True,
                     require_compatible=True,
+                    deadline=deadline,
                 )
             revalidate()
             turn = _turn_from_thread(thread, turn_id)
@@ -462,13 +460,18 @@ class CodexControlClient:
     ) -> tuple[CodexThreadState, CodexDispatchStatus]:
         """Observe where one caller-owned dispatch ID appears on the exact thread."""
         _require_dispatch_id(dispatch_id)
+        deadline = self._control_rpc_deadline()
         try:
-            with self._open_protocol(control.protocol_proxy_socket_path) as websocket:
+            with self._open_protocol(
+                control.protocol_proxy_socket_path,
+                open_timeout=self._control_rpc_remaining(deadline, cap=2),
+            ) as websocket:
                 thread = self._verify_and_read_thread(
                     websocket,
                     control.codex_session_id,
                     include_turns=True,
                     require_compatible=True,
+                    deadline=deadline,
                 )
             revalidate()
             return _thread_state(thread), _dispatch_status(thread, dispatch_id)
@@ -482,6 +485,15 @@ class CodexControlClient:
         resolved = self._dispatch_id_factory() if dispatch_id is None else dispatch_id
         _require_dispatch_id(resolved)
         return resolved
+
+    def _control_rpc_deadline(self) -> float:
+        return self._monotonic() + _CONTROL_RPC_CHAIN_TIMEOUT_SECONDS
+
+    def _control_rpc_remaining(self, deadline: float, *, cap: float | None = None) -> float:
+        remaining = deadline - self._monotonic()
+        if remaining <= 0:
+            raise _RodexRequestDeadlineError("Codex control RPC deadline expired")
+        return remaining if cap is None else min(remaining, cap)
 
     def wait_for_turn(
         self,
@@ -742,7 +754,16 @@ class CodexControlClient:
             if require_compatible
             else CODEX_APP_SERVER.version(initialize_result)
         )
-        websocket.send(json.dumps(CODEX_APP_SERVER.initialized_notification()))
+        notification_deadline = (
+            self._control_rpc_deadline() if deadline is None else deadline
+        )
+        _send_protocol_frame(
+            websocket,
+            json.dumps(CODEX_APP_SERVER.initialized_notification()),
+            deadline=notification_deadline,
+            monotonic=self._monotonic,
+            operation="initialized notification",
+        )
         return version
 
 
@@ -808,15 +829,33 @@ def _request(
     monotonic: Callable[[], float] = time.monotonic,
 ) -> dict[str, Any]:
     response_deadline = deadline
-    if response_deadline is None and indeterminate_context is not None:
-        response_deadline = monotonic() + _MUTATION_RESPONSE_TIMEOUT_SECONDS
+    if response_deadline is None:
+        response_deadline = monotonic() + (
+            _MUTATION_RESPONSE_TIMEOUT_SECONDS
+            if indeterminate_context is not None
+            else _CONTROL_RPC_CHAIN_TIMEOUT_SECONDS
+        )
     try:
-        websocket.send(
+        _send_protocol_frame(
+            websocket,
             json.dumps(
                 CODEX_APP_SERVER.request(request_id, method, params),
                 separators=(",", ":"),
-            )
+            ),
+            deadline=response_deadline,
+            monotonic=monotonic,
+            operation=method,
         )
+    except _RodexSendDeadlineError as error:
+        if indeterminate_context is not None and error.frame_may_have_been_sent:
+            raise RodexDispatchIndeterminateError(
+                f"{method} was sent but its acceptance is unknown",
+                method=method,
+                dispatch_id=indeterminate_context.dispatch_id,
+                thread_id=indeterminate_context.thread_id,
+                turn_id=indeterminate_context.turn_id,
+            ) from error
+        raise _RodexRequestDeadlineError(f"deadline expired before {method}") from error
     except (ConnectionClosed, OSError, TimeoutError) as error:
         if indeterminate_context is not None:
             raise RodexDispatchIndeterminateError(
@@ -875,6 +914,71 @@ def _request(
         if not isinstance(result, dict):
             raise RodexControlError(f"{method} returned an invalid result")
         return result
+
+
+def _send_protocol_frame(
+    websocket: Any,
+    message: str,
+    *,
+    deadline: float,
+    monotonic: Callable[[], float],
+    operation: str,
+) -> None:
+    """Send one frame before an absolute deadline, tearing down a blocked transport."""
+    remaining = deadline - monotonic()
+    if remaining <= 0:
+        raise _RodexSendDeadlineError(
+            f"deadline expired before {operation}",
+            frame_may_have_been_sent=False,
+        )
+    completed = Event()
+    errors: list[BaseException] = []
+
+    def send() -> None:
+        try:
+            websocket.send(message)
+        except BaseException as error:
+            errors.append(error)
+        finally:
+            completed.set()
+
+    sender = Thread(
+        target=send,
+        name="rodex-control-frame-send",
+        daemon=True,
+    )
+    sender.start()
+    if not completed.wait(remaining):
+        _teardown_websocket_transport(websocket)
+        raise _RodexSendDeadlineError(
+            f"deadline expired while sending {operation}",
+            frame_may_have_been_sent=True,
+        )
+    if errors:
+        raise errors[0]
+
+
+def _teardown_websocket_transport(websocket: Any) -> None:
+    """Interrupt one blocked local WebSocket send without waiting on its handshake."""
+    transport = getattr(websocket, "socket", None)
+    if transport is not None:
+        with suppress(Exception):
+            transport.shutdown(socket_module.SHUT_RDWR)
+        with suppress(Exception):
+            transport.close()
+        return
+    close = getattr(websocket, "close", None)
+    if callable(close):
+        Thread(
+            target=lambda: _close_websocket_best_effort(close),
+            name="rodex-control-transport-close",
+            daemon=True,
+        ).start()
+
+
+def _close_websocket_best_effort(close: Callable[[], object]) -> None:
+    with suppress(Exception):
+        close()
 
 
 def _turn_id(result: dict[str, Any]) -> str:

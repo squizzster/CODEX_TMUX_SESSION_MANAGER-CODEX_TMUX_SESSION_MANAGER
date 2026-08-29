@@ -150,10 +150,10 @@ class CodexUpdateNotice:
 
     def _cache_is_fresh(self) -> bool:
         try:
-            age_seconds = self._now() - self._cache_path.stat().st_mtime
-        except OSError:
+            age_seconds = float(self._now()) - self._cache_path.stat().st_mtime
+        except (OSError, TypeError, ValueError, OverflowError):
             return False
-        return age_seconds <= CODEX_UPDATE_CACHE_TTL_SECONDS
+        return 0.0 <= age_seconds <= CODEX_UPDATE_CACHE_TTL_SECONDS
 
     def _write_cached_version(self, version: StableCodexVersion) -> None:
         temporary_path: Path | None = None

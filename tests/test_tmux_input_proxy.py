@@ -51,7 +51,12 @@ class RecordingRunner:
         self, command: list[str], **options: object
     ) -> subprocess.CompletedProcess[str]:
         self.commands.append(command)
-        assert options == {"check": False, "text": True, "capture_output": True}
+        assert options == {
+            "check": False,
+            "text": True,
+            "capture_output": True,
+            "timeout": 1.0,
+        }
         if "display-message" in command and any(
             "#{cursor_y}" in argument for argument in command
         ):

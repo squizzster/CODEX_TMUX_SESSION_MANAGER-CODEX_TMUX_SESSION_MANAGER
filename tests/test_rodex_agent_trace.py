@@ -12,6 +12,8 @@ from rodex.agent_trace import StatefulAgentTraceNormalizer, normalize_rollout_tr
 from rodex.agent_trace_commands import _safe_event_body, execute_agent_trace_command
 from rodex.errors import RodexLaunchError
 from rodex_registry import (
+    RodexRuntimeId,
+    RodexSessionStatisticsConflictError,
     create_a_rodex_session,
     read_rodex_agent_trace,
     read_rodex_agent_trace_cursor,
@@ -20,15 +22,15 @@ from rodex_registry import (
     split_codex_thread_id_into_signed_bigints,
     split_codex_turn_id_into_signed_bigints,
 )
-from rodex_registry.agent_trace import (
+from rodex_registry.agent_trace_contract import (
     RodexAgentTraceEvent,
     RodexAgentTracePublication,
-    RodexSessionStatisticsConflictError,
     TraceMessage,
     TraceSubagentActivity,
     TraceToolCall,
-    publish_agent_trace_in_transaction,
+    prepare_agent_trace_publication,
 )
+from rodex_registry.agent_trace_writer import publish_agent_trace_in_transaction
 from rodex_sql import open_rodex_transaction
 
 THREAD_ID = uuid.UUID("01a00654-f2bc-7a30-834a-a5f886a65f82")
@@ -44,11 +46,12 @@ def _content(*records: dict[str, object]) -> bytes:
 
 
 def _publish_trace(database: Path, publication: RodexAgentTracePublication) -> object:
+    prepared = prepare_agent_trace_publication(publication)
     with open_rodex_transaction(database) as connection:
         return publish_agent_trace_in_transaction(
             connection,
             1,
-            publication,
+            prepared,
             model_name_ids={},
             reasoning_effort_name_ids={},
         )
@@ -875,18 +878,21 @@ def test_trace_append_advances_persisted_counts_without_recounting_the_ledger(
         ),
     )
     statements: list[str] = []
+    prepared = prepare_agent_trace_publication(
+        RodexAgentTracePublication(
+            1,
+            "test-v1",
+            "2026-08-26T12:00:01Z",
+            "complete",
+            (RodexAgentTraceEvent(THREAD_ID, None, 2, 0, "message", None, detail),),
+        )
+    )
     with open_rodex_transaction(database) as connection:
         connection.set_trace_callback(statements.append)
         receipt = publish_agent_trace_in_transaction(
             connection,
             1,
-            RodexAgentTracePublication(
-                1,
-                "test-v1",
-                "2026-08-26T12:00:01Z",
-                "complete",
-                (RodexAgentTraceEvent(THREAD_ID, None, 2, 0, "message", None, detail),),
-            ),
+            prepared,
             model_name_ids={},
             reasoning_effort_name_ids={},
         )
@@ -1807,6 +1813,7 @@ def test_include_bodies_resolves_an_authenticated_historical_root(
         "replacement",
         database,
         codex_session_id=REPLACEMENT_THREAD_ID,
+        runtime_id=RodexRuntimeId.generate(),
     )
 
     execute_agent_trace_command(

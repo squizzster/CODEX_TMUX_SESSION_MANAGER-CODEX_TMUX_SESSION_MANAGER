@@ -15,6 +15,7 @@ from rodex_registry import (
     list_rodex_session_runtimes_for_a_user,
     lookup_rodex_session_names,
     lookup_rodex_sessions_id_from_a_cool_name,
+    open_a_user_defined_cool_name_assignment,
 )
 
 DNA = RodexSessionsUserIdentity(1009, 1010, "dna")
@@ -176,6 +177,74 @@ def test_alias_ownership_and_cross_session_uniqueness_are_enforced_transactional
 
     assert lookup_rodex_session_names(first_id, database).user_defined_cool_name is None  # type: ignore[union-attr]
     assert _cool_names(database) == [(1, "black-sawfly"), (2, "silver-otter")]
+
+
+def test_alias_finalize_rejects_state_changed_since_its_read_only_plan(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database = tmp_path / "rodex.sqlite3"
+    session_id = _create_session(
+        database,
+        monkeypatch,
+        cool_name="black-sawfly",
+        codex_int=1,
+    )
+
+    with (
+        pytest.raises(RodexSessionError, match="changed during"),
+        open_a_user_defined_cool_name_assignment(
+            "black-sawfly",
+            "planned-name",
+            database,
+            user_identity=DNA,
+        ),
+    ):
+        assign_a_user_defined_cool_name(
+            "black-sawfly",
+            "concurrent-name",
+            database,
+            user_identity=DNA,
+        )
+
+    names = lookup_rodex_session_names(session_id, database)
+    assert names is not None
+    assert names.display_name == "concurrent-name"
+    assert lookup_rodex_sessions_id_from_a_cool_name("planned-name", database) is None
+
+
+def test_alias_external_phase_has_no_writer_and_finalize_uses_one_write_transaction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database = tmp_path / "rodex.sqlite3"
+    _create_session(database, monkeypatch, cool_name="black-sawfly", codex_int=1)
+    statements: list[str] = []
+    real_connect = sqlite3.connect
+
+    def traced_connect(*args: object, **kwargs: object):  # type: ignore[no-untyped-def]
+        connection = real_connect(*args, **kwargs)
+        connection.set_trace_callback(statements.append)
+        return connection
+
+    monkeypatch.setattr("rodex_sql.transactions.sqlite3.connect", traced_connect)
+
+    with open_a_user_defined_cool_name_assignment(
+        "black-sawfly",
+        "planned-name",
+        database,
+        user_identity=DNA,
+    ):
+        assert "BEGIN IMMEDIATE" not in statements
+        contender = real_connect(database, timeout=0, isolation_level=None)
+        try:
+            contender.execute("BEGIN IMMEDIATE")
+            contender.rollback()
+        finally:
+            contender.close()
+
+    assert statements.count("BEGIN IMMEDIATE") == 1
+    assert statements.count("COMMIT") == 2
 
 
 def test_runtime_listing_is_filtered_by_the_complete_posix_user_lookup(

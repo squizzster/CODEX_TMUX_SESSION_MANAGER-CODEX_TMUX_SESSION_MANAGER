@@ -8,11 +8,10 @@ import json
 import os
 import queue
 import re
-import shlex
 import socket
-import struct
 import subprocess
 import sys
+import time
 import uuid
 from collections import deque
 from collections.abc import Callable, Mapping
@@ -34,22 +33,28 @@ from rodex_registry import (
     read_rodex_agent_trace_cursor,
 )
 
+from .app_server_contract import CODEX_APP_SERVER
+from .observer_contract import (
+    OBSERVER_CONTROL_SOCKET_PREFIX,
+    OBSERVER_FRAME_LENGTH,
+    OBSERVER_MAX_FRAME_BYTES,
+    OBSERVER_RECEIVE_DEADLINE_SECONDS,
+    OBSERVER_RECOVERED_TARGET_LIMIT,
+    OBSERVER_SCHEMA,
+)
+from .observer_pane import ObserverPaneController
+from .observer_projection import (
+    optional_uuid_text,
+    project_agent_message_event,
+    project_collaboration_invocation_event,
+    project_subagent_activity_event,
+    project_user_message_event,
+)
+from .observer_state import ObserverStateReducer
 from .protocol_proxy import AGENT_OBSERVER_EVENT_STREAM_PATH
 
-OBSERVER_SCHEMA: Final = "rodex-agent-observer-v2"
-OBSERVER_CONTROL_SOCKET_PREFIX: Final = "agent-observer-"
-OBSERVER_PRIMARY_PANE_OPTION: Final = "@rodex_agent_observer_pane_id"
-OBSERVER_OWNER_PANE_OPTION: Final = "@rodex_agent_observer_for"
 OBSERVER_TRACE_PAGE_SIZE: Final = 500
-_PANE_ID_PATTERN: Final = re.compile(r"%[0-9]+")
 _RODEX_SESSION_ID_PATTERN: Final = re.compile(r"[0-9a-f]{16}")
-_SUBAGENT_ACTIVITY_METHODS: Final = frozenset({"item/started", "item/completed"})
-_COLLABORATION_INVOCATION_METHODS: Final = frozenset({"item/started", "item/completed"})
-_COLLABORATION_TOOL_NAMES: Final = {
-    "spawnAgent": "collaboration.spawn_agent",
-    "followupTask": "collaboration.followup_task",
-    "sendMessage": "collaboration.send_message",
-}
 _TURN_REQUEST_KINDS: Final = {
     "collaboration.spawn_agent": "initial",
     "collaboration.followup_task": "follow_up",
@@ -61,7 +66,13 @@ _SCOPE_UNAVAILABLE_DETAIL: Final = (
 Runner = Callable[..., subprocess.CompletedProcess[str]]
 CursorReader = Callable[[int, Path], uuid.UUID | None]
 EventSender = Callable[[Path, dict[str, object]], None]
-_OBSERVER_FRAME_LENGTH = struct.Struct("!Q")
+_OBSERVER_FRAME_LENGTH = OBSERVER_FRAME_LENGTH
+OBSERVER_SEND_MAX_ATTEMPTS: Final = 8
+OBSERVER_SEND_RETRY_BUDGET_SECONDS: Final = 1.0
+OBSERVER_SEND_RETRY_INITIAL_SECONDS: Final = 0.01
+OBSERVER_SEND_RETRY_MAX_SECONDS: Final = 0.25
+OBSERVER_SEND_PARKED_RETRY_SECONDS: Final = 1.0
+OBSERVER_SOCKET_OPERATION_TIMEOUT_SECONDS: Final = 0.25
 
 
 def observer_control_socket_path(protocol_event_socket_path: Path) -> Path:
@@ -86,8 +97,10 @@ def _observer_event_frame(event: dict[str, object]) -> bytes:
 
 def _send_observer_event_frame(path: Path, event: dict[str, object]) -> None:
     frame = _observer_event_frame(event)
+    if len(frame) - _OBSERVER_FRAME_LENGTH.size > OBSERVER_MAX_FRAME_BYTES:
+        raise ValueError("observer control payload exceeds the frame limit")
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sender:
-        sender.settimeout(1)
+        sender.settimeout(OBSERVER_SOCKET_OPERATION_TIMEOUT_SECONDS)
         sender.connect(str(path))
         sender.sendall(frame)
 
@@ -95,6 +108,8 @@ def _send_observer_event_frame(path: Path, event: dict[str, object]) -> None:
 def _try_send_observer_event_frame(path: Path, event: dict[str, object]) -> None:
     """Send one small wake without waiting on the analytics publication path."""
     frame = _observer_event_frame(event)
+    if len(frame) - _OBSERVER_FRAME_LENGTH.size > OBSERVER_MAX_FRAME_BYTES:
+        raise ValueError("observer control payload exceeds the frame limit")
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sender:
         sender.setblocking(False)
         result = sender.connect_ex(str(path))
@@ -105,19 +120,38 @@ def _try_send_observer_event_frame(path: Path, event: dict[str, object]) -> None
 
 
 class _ObserverEventDispatcher:
-    """Deliver ordered live events across the observer's socket-startup boundary."""
+    """Transport the newest complete snapshot without reducing semantic state."""
 
-    def __init__(self) -> None:
-        self._events: queue.Queue[tuple[Path, dict[str, object]] | None] = queue.Queue()
+    def __init__(
+        self,
+        *,
+        monotonic: Callable[[], float] = time.monotonic,
+        parked_retry_seconds: float = OBSERVER_SEND_PARKED_RETRY_SECONDS,
+    ) -> None:
+        if parked_retry_seconds <= 0:
+            raise ValueError("observer parked retry interval must be positive")
+        self._events: queue.Queue[tuple[int, Path, dict[str, object]] | None] = queue.Queue(
+            maxsize=1
+        )
         self._stop = Event()
-        self._start_lock = Lock()
+        self._updated = Event()
+        self._monotonic = monotonic
+        self._parked_retry_seconds = parked_retry_seconds
+        self._lock = Lock()
         self._thread: Thread | None = None
+        self._closed = False
+        self._generation = 0
 
-    def send(self, path: Path, event: dict[str, object]) -> None:
-        if self._stop.is_set():
-            return
-        self._events.put((path, event))
-        with self._start_lock:
+    def send(self, path: Path, snapshot: dict[str, object]) -> None:
+        if snapshot.get("kind") != "observer_state_snapshot":
+            raise ValueError("observer dispatcher accepts complete snapshots only")
+        with self._lock:
+            if self._closed:
+                return
+            self._generation += 1
+            generation = self._generation
+            self._replace_pending_locked((generation, path, snapshot))
+            self._updated.set()
             if self._thread is None:
                 self._thread = Thread(
                     target=self._run,
@@ -127,218 +161,84 @@ class _ObserverEventDispatcher:
                 self._thread.start()
 
     def close(self) -> None:
-        self._stop.set()
-        self._events.put(None)
-        thread = self._thread
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            self._generation += 1
+            self._stop.set()
+            self._replace_pending_locked(None)
+            self._updated.set()
+            thread = self._thread
         if thread is not None:
-            thread.join(timeout=1)
+            thread.join(timeout=OBSERVER_SOCKET_OPERATION_TIMEOUT_SECONDS + 1)
 
     def _run(self) -> None:
-        while not self._stop.is_set():
+        while True:
             item = self._events.get()
             if item is None:
                 return
-            path, event = item
-            retry_delay = 0.01
-            while not self._stop.is_set():
+            generation, path, event = item
+            retry_delay = OBSERVER_SEND_RETRY_INITIAL_SECONDS
+            deadline = self._monotonic() + OBSERVER_SEND_RETRY_BUDGET_SECONDS
+            delivered = False
+            for attempt in range(OBSERVER_SEND_MAX_ATTEMPTS):
+                if self._superseded(generation) or self._monotonic() >= deadline:
+                    break
                 try:
                     _send_observer_event_frame(path, event)
-                except OSError:
-                    if self._stop.wait(retry_delay):
-                        return
-                    retry_delay = min(retry_delay * 2, 0.5)
-                else:
+                except ValueError:
                     break
+                except OSError:
+                    if attempt + 1 >= OBSERVER_SEND_MAX_ATTEMPTS:
+                        break
+                    remaining = deadline - self._monotonic()
+                    if remaining <= 0:
+                        break
+                    if self._wait_for_update(generation, min(retry_delay, remaining)):
+                        return
+                    retry_delay = min(
+                        retry_delay * 2,
+                        OBSERVER_SEND_RETRY_MAX_SECONDS,
+                    )
+                else:
+                    delivered = True
+                    break
+            while not delivered and not self._superseded(generation):
+                if self._wait_for_update(generation, self._parked_retry_seconds):
+                    return
+                if self._superseded(generation):
+                    break
+                try:
+                    _send_observer_event_frame(path, event)
+                except ValueError:
+                    break
+                except OSError:
+                    continue
+                else:
+                    delivered = True
 
+    def _wait_for_update(self, generation: int, delay: float) -> bool:
+        with self._lock:
+            if self._closed:
+                return True
+            if generation != self._generation:
+                return False
+            self._updated.clear()
+        self._updated.wait(delay)
+        return self._stop.is_set()
 
-def project_subagent_activity_event(
-    event: Mapping[str, object] | None,
-) -> dict[str, object] | None:
-    """Project one observed App Server sub-agent activity without content fields."""
-    if event is None or event.get("method") not in _SUBAGENT_ACTIVITY_METHODS:
-        return None
-    method = event["method"]
-    params = event.get("params")
-    if not isinstance(params, Mapping):
-        return None
-    item = params.get("item")
-    if not isinstance(item, Mapping):
-        return None
-    if item.get("type") != "subAgentActivity":
-        return None
-    item_id = item.get("id")
-    if not isinstance(item_id, str) or not item_id:
-        return None
-    thread_id = _optional_uuid_text(params.get("threadId"))
-    if thread_id is None:
-        return None
-    turn_id = params.get("turnId")
-    if turn_id is not None and (not isinstance(turn_id, str) or not turn_id):
-        return None
-    agent_thread_id = _optional_uuid_text(item.get("agentThreadId"))
-    if agent_thread_id is None:
-        return None
-    agent_path = item.get("agentPath")
-    if not isinstance(agent_path, str) or not agent_path:
-        return None
-    activity_kind = item.get("kind")
-    if not isinstance(activity_kind, str) or not activity_kind:
-        return None
-    return {
-        "schema": OBSERVER_SCHEMA,
-        "kind": "app_server_subagent_activity",
-        "method": method,
-        "thread_id": thread_id,
-        "turn_id": turn_id,
-        "item": {
-            "type": "subAgentActivity",
-            "id": item_id,
-            "activity_kind": activity_kind,
-            "agent_thread_id": agent_thread_id,
-            "agent_path": agent_path,
-        },
-    }
+    def _superseded(self, generation: int) -> bool:
+        with self._lock:
+            return self._closed or generation != self._generation
 
-
-def project_collaboration_invocation_event(
-    event: Mapping[str, object] | None,
-) -> dict[str, object] | None:
-    """Project one exact current-Codex collaboration invocation for live display."""
-    if event is None or event.get("method") not in _COLLABORATION_INVOCATION_METHODS:
-        return None
-    params = event.get("params")
-    if not isinstance(params, Mapping):
-        return None
-    item = params.get("item")
-    if not isinstance(item, Mapping) or item.get("type") != "collabAgentToolCall":
-        return None
-    item_id = item.get("id")
-    raw_tool_name = item.get("tool")
-    status = item.get("status")
-    prompt = item.get("prompt")
-    if (
-        not isinstance(item_id, str)
-        or not item_id
-        or not isinstance(raw_tool_name, str)
-        or not raw_tool_name
-        or not isinstance(status, str)
-        or not status
-        or (prompt is not None and not isinstance(prompt, str))
-    ):
-        return None
-    thread_id = _optional_uuid_text(params.get("threadId"))
-    sender_thread_id = _optional_uuid_text(item.get("senderThreadId"))
-    raw_receiver_ids = item.get("receiverThreadIds")
-    if (
-        thread_id is None
-        or sender_thread_id is None
-        or not isinstance(raw_receiver_ids, list)
-    ):
-        return None
-    receiver_thread_ids = [_optional_uuid_text(value) for value in raw_receiver_ids]
-    if any(value is None for value in receiver_thread_ids):
-        return None
-    turn_id = params.get("turnId")
-    if turn_id is not None and (not isinstance(turn_id, str) or not turn_id):
-        return None
-    return {
-        "schema": OBSERVER_SCHEMA,
-        "kind": "app_server_collaboration_invocation",
-        "method": event["method"],
-        "thread_id": thread_id,
-        "turn_id": turn_id,
-        "item": {
-            "type": "collabAgentToolCall",
-            "id": item_id,
-            "raw_tool_name": raw_tool_name,
-            "tool_name": _COLLABORATION_TOOL_NAMES.get(raw_tool_name),
-            "status": status,
-            "sender_thread_id": sender_thread_id,
-            "receiver_thread_ids": receiver_thread_ids,
-            "prompt": prompt,
-        },
-    }
-
-
-def project_agent_message_event(
-    event: Mapping[str, object] | None,
-) -> dict[str, object] | None:
-    """Project completed agent-authored text without prompts or reasoning content."""
-    if event is None or event.get("method") != "item/completed":
-        return None
-    params = event.get("params")
-    if not isinstance(params, Mapping):
-        return None
-    item = params.get("item")
-    if not isinstance(item, Mapping) or item.get("type") != "agentMessage":
-        return None
-    item_id = item.get("id")
-    text = item.get("text")
-    if not isinstance(item_id, str) or not item_id or not isinstance(text, str) or not text:
-        return None
-    thread_id = _optional_uuid_text(params.get("threadId"))
-    if thread_id is None:
-        return None
-    turn_id = params.get("turnId")
-    if turn_id is not None and (not isinstance(turn_id, str) or not turn_id):
-        return None
-    phase = item.get("phase")
-    if phase is not None and not isinstance(phase, str):
-        return None
-    return {
-        "schema": OBSERVER_SCHEMA,
-        "kind": "app_server_agent_message",
-        "thread_id": thread_id,
-        "turn_id": turn_id,
-        "item": {
-            "type": "agentMessage",
-            "id": item_id,
-            "phase": phase,
-            "text": text,
-        },
-    }
-
-
-def project_user_message_event(
-    event: Mapping[str, object] | None,
-) -> dict[str, object] | None:
-    """Project exact completed parent-user text for same-turn request correlation."""
-    if event is None or event.get("method") != "item/completed":
-        return None
-    params = event.get("params")
-    if not isinstance(params, Mapping):
-        return None
-    item = params.get("item")
-    if not isinstance(item, Mapping) or item.get("type") != "userMessage":
-        return None
-    item_id = item.get("id")
-    content = item.get("content")
-    if not isinstance(item_id, str) or not item_id or not isinstance(content, list):
-        return None
-    text_blocks = [
-        block.get("text")
-        for block in content
-        if isinstance(block, Mapping)
-        and block.get("type") == "text"
-        and isinstance(block.get("text"), str)
-    ]
-    if not text_blocks or not any(text_blocks):
-        return None
-    thread_id = _optional_uuid_text(params.get("threadId"))
-    turn_id = params.get("turnId")
-    if thread_id is None or not isinstance(turn_id, str) or not turn_id:
-        return None
-    return {
-        "schema": OBSERVER_SCHEMA,
-        "kind": "app_server_user_message",
-        "thread_id": thread_id,
-        "turn_id": turn_id,
-        "item": {
-            "type": "userMessage",
-            "id": item_id,
-            "text_blocks": text_blocks,
-        },
-    }
+    def _replace_pending_locked(
+        self,
+        item: tuple[int, Path, dict[str, object]] | None,
+    ) -> None:
+        with suppress(queue.Empty):
+            self._events.get_nowait()
+        self._events.put_nowait(item)
 
 
 def notify_agent_observer_trace_publication(
@@ -368,8 +268,8 @@ def notify_agent_observer_trace_publication(
         )
 
 
-class AgentObserverPaneController:
-    """React to exact sub-agent activity at the live tmux boundary."""
+class AgentObserverCoordinator:
+    """Coordinate stateless projections, canonical state, and tmux presentation."""
 
     def __init__(
         self,
@@ -383,11 +283,14 @@ class AgentObserverPaneController:
         event_sender: EventSender | None = None,
         python_executable: str = sys.executable,
     ) -> None:
-        self._tmux_binary = tmux_binary
-        self._tmux_server_socket_path = tmux_server_socket_path
-        self._primary_pane_target = primary_pane_target
         self._protocol_event_socket_path = protocol_event_socket_path
-        self._runner = runner
+        self._pane = ObserverPaneController(
+            tmux_binary,
+            tmux_server_socket_path,
+            primary_pane_target,
+            runner=runner,
+            python_executable=python_executable,
+        )
         self._cursor_reader = cursor_reader
         self._event_dispatcher = (
             _ObserverEventDispatcher() if event_sender is None else None
@@ -397,18 +300,13 @@ class AgentObserverPaneController:
             if self._event_dispatcher is not None
             else event_sender
         )
-        self._python_executable = python_executable
+        self._observer_state = ObserverStateReducer.producer()
         self._database_path: Path | None = None
         self._rodex_sessions_id: int | None = None
         self._rodex_session_id: str | None = None
         self._root_thread_id: uuid.UUID | None = None
-        self._observer_pane_target: str | None = None
-        self._known_activity_item_ids: set[str] = set()
-        self._tracked_target_thread_ids: set[str] = set()
-        self._latest_parent_user_message: dict[str, object] | None = None
-        self._collaboration_invocations: dict[str, dict[str, object]] = {}
-        self._subagent_activities: dict[str, dict[str, object]] = {}
-        self._sent_root_request_context_ids: set[str] = set()
+        self._lifecycle_lock = Lock()
+        self._closed = False
 
     def activate(
         self,
@@ -419,14 +317,30 @@ class AgentObserverPaneController:
         root_thread_id: uuid.UUID,
     ) -> None:
         """Bind the controller to the exact identity committed at registration."""
+        with self._lifecycle_lock:
+            self._activate_locked(
+                database_path=database_path,
+                rodex_sessions_id=rodex_sessions_id,
+                rodex_session_id=rodex_session_id,
+                root_thread_id=root_thread_id,
+            )
+
+    def _activate_locked(
+        self,
+        *,
+        database_path: Path,
+        rodex_sessions_id: int,
+        rodex_session_id: str,
+        root_thread_id: uuid.UUID,
+    ) -> None:
+        if self._closed:
+            raise RuntimeError("agent observer pane controller is closed")
         if self._database_path is not None:
             raise RuntimeError("agent observer pane controller is already activated")
         if rodex_sessions_id < 1:
             raise ValueError("rodex_sessions_id must be positive")
         if _RODEX_SESSION_ID_PATTERN.fullmatch(rodex_session_id) is None:
             raise ValueError("rodex_session_id must be 16 lowercase hexadecimal characters")
-        if _PANE_ID_PATTERN.fullmatch(self._primary_pane_target) is None:
-            raise ValueError("primary pane target must be an exact tmux pane ID")
         self._database_path = Path(os.path.abspath(database_path))
         self._rodex_sessions_id = rodex_sessions_id
         self._rodex_session_id = rodex_session_id
@@ -434,6 +348,18 @@ class AgentObserverPaneController:
 
     def observe_protocol_event(self, event: Mapping[str, object] | None) -> None:
         """Create, reuse, or update the observer from one typed App Server item."""
+        with self._lifecycle_lock:
+            if self._closed:
+                return
+            self._observe_protocol_event_locked(event)
+
+    def _observe_protocol_event_locked(
+        self,
+        event: Mapping[str, object] | None,
+    ) -> None:
+        if self._closed:
+            return
+        self._prune_protocol_terminal_state(event)
         collaboration_invocation = project_collaboration_invocation_event(event)
         if collaboration_invocation is not None:
             self._observe_collaboration_invocation(collaboration_invocation)
@@ -442,8 +368,8 @@ class AgentObserverPaneController:
         if agent_message is not None:
             target_thread_id = agent_message["thread_id"]
             if (
-                target_thread_id in self._tracked_target_thread_ids
-                and self._locate_observer_pane() is not None
+                self._observer_state.tracks_target(str(target_thread_id))
+                and self._pane.locate() is not None
             ):
                 self._send_observer_event(agent_message)
             return
@@ -453,7 +379,7 @@ class AgentObserverPaneController:
             if root_thread_id is not None and parent_user_message["thread_id"] == str(
                 root_thread_id
             ):
-                self._latest_parent_user_message = parent_user_message
+                self._observer_state.remember_parent_user_message(parent_user_message)
             return
         projected = project_subagent_activity_event(event)
         if projected is None or self._database_path is None:
@@ -465,22 +391,26 @@ class AgentObserverPaneController:
         assert isinstance(item, dict)
         item_id = str(item["id"])
         target_thread_id = str(item["agent_thread_id"])
-        self._subagent_activities[item_id] = projected
-        collaboration_invocation = self._collaboration_invocations.get(item_id)
+        collaboration_invocation = self._observer_state.collaboration_invocation(item_id)
         if collaboration_invocation is not None:
             projected["collaboration_invocation"] = collaboration_invocation["item"]
         is_new_spawn = (
             projected["method"] == "item/started" and item["activity_kind"] == "started"
         )
-        is_known = item_id in self._known_activity_item_ids
-        target_is_tracked = target_thread_id in self._tracked_target_thread_ids
+        is_known = self._observer_state.is_known_activity(item_id)
+        target_is_tracked = self._observer_state.tracks_target(target_thread_id)
         if not is_new_spawn and not is_known and not target_is_tracked:
             return
         if is_new_spawn:
             assert self._rodex_sessions_id is not None
             cursor = self._cursor_reader(self._rodex_sessions_id, self._database_path)
             projected["after_event_id"] = None if cursor is None else str(cursor)
-            self._known_activity_item_ids.add(item_id)
+        self._observer_state.remember_activity(
+            item_id,
+            target_thread_id,
+            projected,
+            new_spawn=is_new_spawn,
+        )
         tool_name = _projected_invocation_tool_name(collaboration_invocation)
         has_root_request_context = tool_name in _TURN_REQUEST_KINDS or tool_name == (
             "collaboration.send_message"
@@ -492,20 +422,34 @@ class AgentObserverPaneController:
         )
         if request_event is not None:
             projected["root_request_context_follows"] = True
-        self._tracked_target_thread_ids.add(target_thread_id)
-        pane_target = self._locate_observer_pane()
+        pane_target = self._pane.locate()
         if pane_target is None:
             if not is_new_spawn:
+                self._prune_completed_activity(projected)
                 return
-            self._observer_pane_target = self._create_observer_pane(projected)
-            if self._observer_pane_target is not None and request_event is not None:
-                self._sent_root_request_context_ids.add(item_id)
-                self._send_observer_event(request_event)
+            assert self._rodex_sessions_id is not None
+            assert self._rodex_session_id is not None
+            assert self._root_thread_id is not None
+            pane_target = self._pane.create(
+                database_path=self._database_path,
+                rodex_sessions_id=self._rodex_sessions_id,
+                rodex_session_id=self._rodex_session_id,
+                root_thread_id=self._root_thread_id,
+                protocol_event_socket_path=self._protocol_event_socket_path,
+                initial_event=projected,
+            )
+            if pane_target is not None:
+                self._observer_state.observe(projected)
+                if request_event is not None:
+                    self._observer_state.mark_root_request_context_sent(item_id)
+                    self._send_observer_event(request_event)
+            self._prune_completed_activity(projected)
             return
         self._send_observer_event(projected)
         if request_event is not None:
-            self._sent_root_request_context_ids.add(item_id)
+            self._observer_state.mark_root_request_context_sent(item_id)
             self._send_observer_event(request_event)
+        self._prune_completed_activity(projected)
 
     def _observe_collaboration_invocation(
         self,
@@ -519,45 +463,95 @@ class AgentObserverPaneController:
         if item.get("sender_thread_id") != str(self._root_thread_id):
             return
         item_id = str(item["id"])
-        self._collaboration_invocations[item_id] = invocation
-        activity = self._subagent_activities.get(item_id)
+        self._observer_state.remember_collaboration_invocation(item_id, invocation)
+        activity = self._observer_state.activity(item_id)
         if activity is not None:
             activity["collaboration_invocation"] = item
         receiver_ids = item.get("receiver_thread_ids")
         targets_tracked = isinstance(receiver_ids, list) and any(
-            target in self._tracked_target_thread_ids for target in receiver_ids
+            isinstance(target, str) and self._observer_state.tracks_target(target)
+            for target in receiver_ids
         )
         if activity is None and not targets_tracked:
+            if invocation.get("method") == "item/completed":
+                self._observer_state.forget_collaboration_invocation(item_id)
             return
-        pane_target = self._locate_observer_pane()
+        pane_target = self._pane.locate()
         if pane_target is None:
             return
         request_event = None
-        if activity is not None and item_id not in self._sent_root_request_context_ids:
+        if activity is not None and not self._observer_state.root_request_context_was_sent(
+            item_id
+        ):
             request_event = self._root_request_context_event(activity)
             if request_event is not None:
                 invocation["root_request_context_follows"] = True
         self._send_observer_event(invocation)
         if request_event is not None:
-            self._sent_root_request_context_ids.add(item_id)
+            self._observer_state.mark_root_request_context_sent(item_id)
             self._send_observer_event(request_event)
+
+    def _prune_completed_activity(self, event: Mapping[str, object]) -> None:
+        if event.get("method") != "item/completed":
+            return
+        item = event.get("item")
+        if not isinstance(item, Mapping):
+            return
+        item_id = str(item.get("id", ""))
+        target_thread_id = str(item.get("agent_thread_id", ""))
+        self._observer_state.complete_activity(item_id, target_thread_id)
+
+    def _prune_protocol_terminal_state(
+        self,
+        event: Mapping[str, object] | None,
+    ) -> None:
+        if event is None:
+            return
+        method = event.get("method")
+        params = event.get("params")
+        if not isinstance(params, Mapping):
+            return
+        thread_id = params.get("threadId")
+        if not isinstance(thread_id, str):
+            return
+        if method == CODEX_APP_SERVER.turn_completed_method and thread_id == str(
+            self._root_thread_id
+        ):
+            self._observer_state.remember_parent_user_message(None)
+        inactive = method == CODEX_APP_SERVER.turn_completed_method
+        if method == CODEX_APP_SERVER.thread_status_changed_method:
+            status = params.get("status")
+            inactive = isinstance(status, Mapping) and status.get("type") != "active"
+        if inactive and self._observer_state.tracks_target(thread_id):
+            self._prune_target_thread(thread_id)
+
+    def _prune_target_thread(self, target_thread_id: str) -> None:
+        self._send_observer_snapshot(
+            self._observer_state.prune_protocol_target(target_thread_id)
+        )
+
+    def reset_after_disconnect(self) -> None:
+        """Prune all primary-connection correlation state after its producer exits."""
+        with self._lifecycle_lock:
+            if self._closed:
+                return
+            self._send_observer_snapshot(self._observer_state.reset_epoch())
 
     def close(self) -> None:
         """Release only in-process state; tmux owns the persistent presentation pane."""
-        if self._event_dispatcher is not None:
-            self._event_dispatcher.close()
-        self._known_activity_item_ids.clear()
-        self._tracked_target_thread_ids.clear()
-        self._latest_parent_user_message = None
-        self._collaboration_invocations.clear()
-        self._subagent_activities.clear()
-        self._sent_root_request_context_ids.clear()
+        with self._lifecycle_lock:
+            if self._closed:
+                return
+            self._closed = True
+            if self._event_dispatcher is not None:
+                self._event_dispatcher.close()
+            self._observer_state.discard_producer_state()
 
     def _root_request_context_event(
         self,
         activity_event: Mapping[str, object],
     ) -> dict[str, object] | None:
-        parent_user_message = self._latest_parent_user_message
+        parent_user_message = self._observer_state.latest_parent_user_message
         if parent_user_message is None or parent_user_message.get(
             "turn_id"
         ) != activity_event.get("turn_id"):
@@ -577,136 +571,17 @@ class AgentObserverPaneController:
         }
 
     def _send_observer_event(self, event: dict[str, object]) -> None:
+        self._send_observer_snapshot(self._observer_state.observe(event))
+
+    def _send_observer_snapshot(self, snapshot: dict[str, object]) -> None:
         try:
             assert self._event_sender is not None
             self._event_sender(
                 observer_control_socket_path(self._protocol_event_socket_path),
-                event,
+                snapshot,
             )
         except OSError:
             return
-
-    def _locate_observer_pane(self) -> str | None:
-        candidate = self._observer_pane_target
-        if candidate is None:
-            shown = self._tmux(
-                "show-options",
-                "-p",
-                "-v",
-                "-t",
-                self._primary_pane_target,
-                OBSERVER_PRIMARY_PANE_OPTION,
-            )
-            if shown.returncode != 0:
-                return None
-            candidate = shown.stdout.strip()
-        if _PANE_ID_PATTERN.fullmatch(candidate) is None:
-            return None
-        identity = self._tmux(
-            "display-message",
-            "-p",
-            "-t",
-            candidate,
-            "-F",
-            f"#{{pane_id}}|#{{{OBSERVER_OWNER_PANE_OPTION}}}|#{{pane_dead}}",
-        )
-        if identity.returncode != 0:
-            self._observer_pane_target = None
-            return None
-        if identity.stdout.strip() != f"{candidate}|{self._primary_pane_target}|0":
-            self._observer_pane_target = None
-            return None
-        self._observer_pane_target = candidate
-        return candidate
-
-    def _create_observer_pane(self, initial_event: dict[str, object]) -> str | None:
-        assert self._database_path is not None
-        assert self._rodex_sessions_id is not None
-        assert self._rodex_session_id is not None
-        assert self._root_thread_id is not None
-        cwd = self._tmux(
-            "display-message",
-            "-p",
-            "-t",
-            self._primary_pane_target,
-            "-F",
-            "#{pane_current_path}",
-        )
-        if cwd.returncode != 0 or not cwd.stdout.rstrip("\n"):
-            return None
-        command = [
-            self._python_executable,
-            "-m",
-            "rodex.agent_observer",
-            "--rodex-database",
-            str(self._database_path),
-            "--rodex-sessions-id",
-            str(self._rodex_sessions_id),
-            "--rodex-session-id",
-            self._rodex_session_id,
-            "--root-thread-id",
-            str(self._root_thread_id),
-            "--protocol-event-socket",
-            str(self._protocol_event_socket_path),
-            "--initial-event",
-            json.dumps(
-                initial_event,
-                ensure_ascii=False,
-                separators=(",", ":"),
-                sort_keys=True,
-            ),
-        ]
-        split = self._tmux(
-            "split-window",
-            "-v",
-            "-b",
-            "-d",
-            "-p",
-            "33",
-            "-t",
-            self._primary_pane_target,
-            "-c",
-            cwd.stdout.rstrip("\n"),
-            "-P",
-            "-F",
-            "#{pane_id}",
-            f"exec {shlex.join(command)}",
-        )
-        pane_target = split.stdout.strip()
-        if split.returncode != 0 or _PANE_ID_PATTERN.fullmatch(pane_target) is None:
-            return None
-        self._tmux(
-            "set-option",
-            "-p",
-            "-t",
-            self._primary_pane_target,
-            OBSERVER_PRIMARY_PANE_OPTION,
-            pane_target,
-        )
-        self._tmux(
-            "set-option",
-            "-p",
-            "-t",
-            pane_target,
-            OBSERVER_OWNER_PANE_OPTION,
-            self._primary_pane_target,
-        )
-        self._tmux("select-pane", "-d", "-t", pane_target)
-        self._tmux("select-pane", "-t", self._primary_pane_target)
-        return pane_target
-
-    def _tmux(self, *arguments: str) -> subprocess.CompletedProcess[str]:
-        return self._runner(
-            [
-                self._tmux_binary,
-                "-S",
-                str(self._tmux_server_socket_path),
-                *arguments,
-            ],
-            check=False,
-            text=True,
-            capture_output=True,
-        )
 
 
 @dataclass(slots=True)
@@ -733,6 +608,8 @@ class _AgentTurnPresentation:
 
 AgentTurnKey = tuple[str, str]
 AgentActivity = tuple[str, str, str]
+ObserverEventIdentity = tuple[str, str, str]
+AgentActivityKey = tuple[str, str]
 
 
 class AgentObserverView:
@@ -751,21 +628,24 @@ class AgentObserverView:
         self._terminal_drain_complete = False
         self._last_trace_publication_sequence = 0
         self._target_paths: dict[str, str] = {}
-        self._seen_activity_item_ids: set[str] = set()
-        self._activity_items: dict[str, AgentActivity] = {}
-        self._pending_live_invocations: dict[str, dict[str, object]] = {}
-        self._invocation_tool_names: dict[str, str] = {}
-        self._rendered_invocation_ids: set[str] = set()
-        self._rendered_prompt_ids: set[str] = set()
-        self._reported_unavailable_prompt_ids: set[str] = set()
-        self._seen_agent_message_ids: set[str] = set()
+        self._seen_activity_item_ids: set[ObserverEventIdentity] = set()
+        self._activity_items: dict[AgentActivityKey, AgentActivity] = {}
+        self._pending_live_invocations: dict[AgentActivityKey, dict[str, object]] = {}
+        self._invocation_tool_names: dict[ObserverEventIdentity, str] = {}
+        self._rendered_invocation_ids: set[ObserverEventIdentity] = set()
+        self._rendered_prompt_ids: set[ObserverEventIdentity] = set()
+        self._reported_unavailable_prompt_ids: set[ObserverEventIdentity] = set()
+        self._seen_agent_message_ids: set[ObserverEventIdentity] = set()
         self._seen_parent_request_keys: set[tuple[str, str, str]] = set()
-        self._root_request_text_by_activity: dict[str, tuple[str, ...]] = {}
+        self._root_request_text_by_activity: dict[AgentActivityKey, tuple[str, ...]] = {}
         self._pending_requests: dict[str, deque[_PendingAgentRequest]] = {}
         self._turn_presentations: dict[AgentTurnKey, _AgentTurnPresentation] = {}
         self._activity_turn_keys: dict[tuple[str, str], AgentTurnKey] = {}
         self._turns_needing_evidence: set[AgentTurnKey] = set()
         self._pending_terminal_events: dict[AgentTurnKey, tuple[str, object]] = {}
+        self._terminal_cleanup_targets: set[str] = set()
+        self._observer_state = ObserverStateReducer.consumer()
+        self._observer_transport_epoch: int | None = None
         self._initial_lines = self.accept_app_server_event(initial_event)
 
     @property
@@ -788,6 +668,43 @@ class AgentObserverView:
     @property
     def initial_lines(self) -> tuple[str, ...]:
         return tuple(self._initial_lines)
+
+    def accept_observer_state_snapshot(
+        self,
+        snapshot: Mapping[str, object],
+    ) -> tuple[dict[str, object], ...]:
+        """Return only semantic changes from one complete transport snapshot."""
+        delta = self._observer_state.consume_snapshot(snapshot)
+        if delta.state_replaced:
+            if self._observer_transport_epoch is not None:
+                self._reset_connection_epoch_presentation()
+            self._observer_transport_epoch = delta.epoch
+        for target_thread_id in delta.removed_target_thread_ids:
+            self._prune_terminal_target(target_thread_id)
+        return (*delta.tombstone_events, *delta.upserted_events)
+
+    def _reset_connection_epoch_presentation(self) -> None:
+        """Discard only presentation facts derived from the old primary connection."""
+        self._target_states.clear()
+        self._active_request_ids.clear()
+        self._terminal_drain_complete = False
+        self._target_paths.clear()
+        self._seen_activity_item_ids.clear()
+        self._activity_items.clear()
+        self._pending_live_invocations.clear()
+        self._invocation_tool_names.clear()
+        self._rendered_invocation_ids.clear()
+        self._rendered_prompt_ids.clear()
+        self._reported_unavailable_prompt_ids.clear()
+        self._seen_agent_message_ids.clear()
+        self._seen_parent_request_keys.clear()
+        self._root_request_text_by_activity.clear()
+        self._pending_requests.clear()
+        self._turn_presentations.clear()
+        self._activity_turn_keys.clear()
+        self._turns_needing_evidence.clear()
+        self._pending_terminal_events.clear()
+        self._terminal_cleanup_targets.clear()
 
     def accept_app_server_event(self, event: Mapping[str, object]) -> list[str]:
         """Accept one sanitized activity without inferring its collaboration tool."""
@@ -815,15 +732,26 @@ class AgentObserverView:
             or not isinstance(agent_path, str)
         ):
             return []
-        if item_id in self._seen_activity_item_ids:
+        activity_identity = (
+            target_thread_id,
+            item_id,
+            "app_server_subagent_activity",
+        )
+        if activity_identity in self._seen_activity_item_ids:
             return []
-        self._seen_activity_item_ids.add(item_id)
+        self._seen_activity_item_ids.add(activity_identity)
+        self._terminal_cleanup_targets.discard(target_thread_id)
         self._target_states[target_thread_id] = activity_kind
         self._target_paths[target_thread_id] = agent_path
-        self._activity_items[item_id] = (target_thread_id, agent_path, activity_kind)
+        activity_key = (target_thread_id, item_id)
+        self._activity_items[activity_key] = (
+            target_thread_id,
+            agent_path,
+            activity_kind,
+        )
         invocation = event.get("collaboration_invocation")
         if not isinstance(invocation, Mapping):
-            invocation = self._pending_live_invocations.pop(item_id, None)
+            invocation = self._pending_live_invocations.pop(activity_key, None)
         if isinstance(invocation, Mapping):
             return self._accept_collaboration_invocation(
                 item_id=item_id,
@@ -863,21 +791,38 @@ class AgentObserverView:
             or item.get("sender_thread_id") != self._root_thread_id
         ):
             return []
-        activity = self._activity_items.get(item_id)
-        if activity is None:
-            self._pending_live_invocations[item_id] = item
+        receiver_ids = item.get("receiver_thread_ids")
+        if not isinstance(receiver_ids, list):
             return []
-        target_thread_id, agent_path, activity_kind = activity
-        return self._accept_collaboration_invocation(
-            item_id=item_id,
-            target_thread_id=target_thread_id,
-            agent_path=agent_path,
-            activity_kind=activity_kind,
-            invocation=item,
-            root_request_context_follows=(
-                event.get("root_request_context_follows") is True
-            ),
-        )
+        activity_keys = [
+            (target_thread_id, item_id)
+            for target_thread_id in receiver_ids
+            if isinstance(target_thread_id, str)
+        ]
+        matching_activities = [
+            activity
+            for activity_key in activity_keys
+            if (activity := self._activity_items.get(activity_key)) is not None
+        ]
+        if not matching_activities:
+            for activity_key in activity_keys:
+                self._pending_live_invocations[activity_key] = item
+            return []
+        lines: list[str] = []
+        for target_thread_id, agent_path, activity_kind in matching_activities:
+            lines.extend(
+                self._accept_collaboration_invocation(
+                    item_id=item_id,
+                    target_thread_id=target_thread_id,
+                    agent_path=agent_path,
+                    activity_kind=activity_kind,
+                    invocation=item,
+                    root_request_context_follows=(
+                        event.get("root_request_context_follows") is True
+                    ),
+                )
+            )
+        return lines
 
     def _accept_collaboration_invocation(
         self,
@@ -903,7 +848,15 @@ class AgentObserverView:
                 f"• {_agent_display_name(agent_path)} · agent interaction observed",
                 "  Invocation tool is unavailable or unsupported",
             ]
-        prior_tool_name = self._invocation_tool_names.setdefault(item_id, tool_name)
+        invocation_identity = (
+            target_thread_id,
+            item_id,
+            "app_server_collaboration_invocation",
+        )
+        prior_tool_name = self._invocation_tool_names.setdefault(
+            invocation_identity,
+            tool_name,
+        )
         if prior_tool_name != tool_name:
             return [
                 "",
@@ -918,8 +871,8 @@ class AgentObserverView:
                 request_kind,
             )
         lines: list[str] = []
-        if item_id not in self._rendered_invocation_ids:
-            self._rendered_invocation_ids.add(item_id)
+        if invocation_identity not in self._rendered_invocation_ids:
+            self._rendered_invocation_ids.add(invocation_identity)
             lines.extend(
                 _invocation_lines(
                     agent_path,
@@ -931,15 +884,19 @@ class AgentObserverView:
                 lines.extend(
                     ["", "ROOT TURN REQUEST UNAVAILABLE", f"  {_SCOPE_UNAVAILABLE_DETAIL}"]
                 )
-        if isinstance(prompt, str) and prompt and item_id not in self._rendered_prompt_ids:
-            self._rendered_prompt_ids.add(item_id)
+        if (
+            isinstance(prompt, str)
+            and prompt
+            and invocation_identity not in self._rendered_prompt_ids
+        ):
+            self._rendered_prompt_ids.add(invocation_identity)
             lines.extend(_exact_collaboration_prompt_lines(tool_name, prompt))
         elif (
             capture_state == "encrypted"
-            and item_id not in self._reported_unavailable_prompt_ids
-            and item_id not in self._rendered_prompt_ids
+            and invocation_identity not in self._reported_unavailable_prompt_ids
+            and invocation_identity not in self._rendered_prompt_ids
         ):
-            self._reported_unavailable_prompt_ids.add(item_id)
+            self._reported_unavailable_prompt_ids.add(invocation_identity)
             lines.extend(_unavailable_collaboration_prompt_lines(tool_name))
         return lines
 
@@ -949,6 +906,7 @@ class AgentObserverView:
         activity_item_id: str,
         request_kind: str,
     ) -> None:
+        self._terminal_cleanup_targets.discard(target_thread_id)
         request_id = (target_thread_id, activity_item_id)
         if request_id in self._active_request_ids or request_id in self._activity_turn_keys:
             return
@@ -958,7 +916,7 @@ class AgentObserverView:
                 activity_item_id=activity_item_id,
                 request_kind=request_kind,
                 text_blocks=self._root_request_text_by_activity.get(
-                    activity_item_id,
+                    (target_thread_id, activity_item_id),
                     (),
                 ),
             )
@@ -995,7 +953,7 @@ class AgentObserverView:
         if (
             target_thread_id not in self._target_states
             or not isinstance(activity_item_id, str)
-            or activity_item_id not in self._activity_items
+            or (str(target_thread_id), activity_item_id) not in self._activity_items
         ):
             return []
         item = event.get("item")
@@ -1016,7 +974,9 @@ class AgentObserverView:
         if not rendered:
             return []
         self._seen_parent_request_keys.add(request_key)
-        self._root_request_text_by_activity[activity_item_id] = tuple(text_blocks)
+        self._root_request_text_by_activity[(str(target_thread_id), activity_item_id)] = (
+            tuple(text_blocks)
+        )
         if pending_request is not None:
             pending_request.text_blocks = tuple(text_blocks)
         elif matching_turn is not None:
@@ -1053,9 +1013,10 @@ class AgentObserverView:
             or (phase is not None and not isinstance(phase, str))
         ):
             return []
-        if item_id in self._seen_agent_message_ids:
+        message_identity = (str(thread_id), item_id, "app_server_agent_message")
+        if message_identity in self._seen_agent_message_ids:
             return []
-        self._seen_agent_message_ids.add(item_id)
+        self._seen_agent_message_ids.add(message_identity)
         plain_text = _plain_terminal_text(text).strip()
         if not plain_text:
             return []
@@ -1074,7 +1035,12 @@ class AgentObserverView:
         )
         return ["", label, *[f"  {line}" for line in plain_text.splitlines()]]
 
-    def accept_trace_snapshot(self, snapshot: RodexAgentTraceSnapshot) -> list[str]:
+    def accept_trace_snapshot(
+        self,
+        snapshot: RodexAgentTraceSnapshot,
+        *,
+        recover_unknown_targets: bool = False,
+    ) -> list[str]:
         """Advance through one durable page and render only exact tracked identities."""
         lines: list[str] = []
         for event in snapshot.events:
@@ -1090,7 +1056,23 @@ class AgentObserverView:
                 and event_kind == "subagent_activity"
                 and isinstance(detail, Mapping)
             ):
-                target = detail.get("target_codex_thread_id")
+                target = optional_uuid_text(detail.get("target_codex_thread_id"))
+                if (
+                    recover_unknown_targets
+                    and target is not None
+                    and target not in self._target_states
+                    and len(self._target_states) < OBSERVER_RECOVERED_TARGET_LIMIT
+                ):
+                    recovered_activity_kind = detail.get("activity_kind")
+                    self._target_states[target] = (
+                        recovered_activity_kind
+                        if isinstance(recovered_activity_kind, str)
+                        else None
+                    )
+                    recovered_path = detail.get("agent_path")
+                    self._target_paths[target] = (
+                        recovered_path if isinstance(recovered_path, str) else target
+                    )
                 relevant = target in self._target_states
                 if relevant and isinstance(target, str):
                     path = detail.get("agent_path")
@@ -1108,7 +1090,7 @@ class AgentObserverView:
                             str,
                         ):
                             self._activity_items.setdefault(
-                                source_call_id,
+                                (target, source_call_id),
                                 (target, path, activity_kind),
                             )
                             lines.extend(
@@ -1119,7 +1101,7 @@ class AgentObserverView:
                                     activity_kind=activity_kind,
                                     invocation=invocation,
                                     root_request_context_follows=(
-                                        source_call_id
+                                        (target, source_call_id)
                                         in self._root_request_text_by_activity
                                     ),
                                 )
@@ -1185,7 +1167,59 @@ class AgentObserverView:
         for turn_key, (event_kind, event_time_utc) in pending:
             lines.extend(self._terminal_lines(turn_key, event_kind, event_time_utc))
             self._turns_needing_evidence.discard(turn_key)
+            self._prune_terminal_turn(turn_key)
         return lines
+
+    def _prune_terminal_turn(self, turn_key: AgentTurnKey) -> None:
+        """Release correlation and presentation state after its final render."""
+        thread_id, _turn_id = turn_key
+        turn = self._turn_presentations.pop(turn_key, None)
+        if turn is not None and turn.activity_item_id is not None:
+            activity_key = (thread_id, turn.activity_item_id)
+            self._activity_turn_keys.pop(activity_key, None)
+            self._active_request_ids.discard(activity_key)
+            self._activity_items.pop(activity_key, None)
+            self._pending_live_invocations.pop(activity_key, None)
+            self._root_request_text_by_activity.pop(activity_key, None)
+        if any(key[0] == thread_id for key in self._turn_presentations):
+            return
+        if self._pending_requests.get(thread_id):
+            return
+        self._terminal_cleanup_targets.add(thread_id)
+
+    def _prune_terminal_target(self, thread_id: str) -> None:
+        """Release a target only after the durable reader reports caught up."""
+        self._pending_requests.pop(thread_id, None)
+        self._target_states.pop(thread_id, None)
+        self._target_paths.pop(thread_id, None)
+        self._active_request_ids = {
+            key for key in self._active_request_ids if key[0] != thread_id
+        }
+        for collection in (
+            self._seen_activity_item_ids,
+            self._rendered_invocation_ids,
+            self._rendered_prompt_ids,
+            self._reported_unavailable_prompt_ids,
+            self._seen_agent_message_ids,
+        ):
+            for identity in tuple(collection):
+                if identity[0] == thread_id:
+                    collection.discard(identity)
+        for identity in tuple(self._invocation_tool_names):
+            if identity[0] == thread_id:
+                self._invocation_tool_names.pop(identity, None)
+        for collection in (
+            self._activity_items,
+            self._pending_live_invocations,
+            self._root_request_text_by_activity,
+            self._activity_turn_keys,
+        ):
+            for identity in tuple(collection):
+                if identity[0] == thread_id:
+                    collection.pop(identity, None)
+        self._seen_parent_request_keys = {
+            key for key in self._seen_parent_request_keys if key[0] != thread_id
+        }
 
     def _accept_target_trace_event(
         self,
@@ -1420,6 +1454,9 @@ class AgentObserverView:
             return
         self._last_trace_publication_sequence = trace_publication_sequence
         if caught_up and not self._active_request_ids and not self._pending_terminal_events:
+            for thread_id in tuple(self._terminal_cleanup_targets):
+                self._prune_terminal_target(thread_id)
+            self._terminal_cleanup_targets.clear()
             self._terminal_drain_complete = True
 
     def header_lines(self) -> tuple[str, ...]:
@@ -1604,6 +1641,8 @@ def _observer_control_receiver(
     control_socket: socket.socket,
     events: queue.Queue[dict[str, object]],
     stop: Event,
+    *,
+    monotonic: Callable[[], float] = time.monotonic,
 ) -> None:
     while not stop.is_set():
         try:
@@ -1611,12 +1650,24 @@ def _observer_control_receiver(
         except OSError:
             return
         with connection:
-            connection.settimeout(1)
+            deadline = monotonic() + OBSERVER_RECEIVE_DEADLINE_SECONDS
             try:
-                header = _receive_exactly(connection, _OBSERVER_FRAME_LENGTH.size)
+                header = _receive_exactly(
+                    connection,
+                    _OBSERVER_FRAME_LENGTH.size,
+                    deadline=deadline,
+                    monotonic=monotonic,
+                )
                 payload_size = _OBSERVER_FRAME_LENGTH.unpack(header)[0]
-                payload = _receive_exactly(connection, payload_size)
-            except (EOFError, OSError):
+                if payload_size > OBSERVER_MAX_FRAME_BYTES:
+                    continue
+                payload = _receive_exactly(
+                    connection,
+                    payload_size,
+                    deadline=deadline,
+                    monotonic=monotonic,
+                )
+            except (EOFError, OSError, TimeoutError):
                 continue
         try:
             event = json.loads(payload)
@@ -1626,9 +1677,23 @@ def _observer_control_receiver(
             events.put(event)
 
 
-def _receive_exactly(connection: socket.socket, size: int) -> bytes:
+def _receive_exactly(
+    connection: socket.socket,
+    size: int,
+    *,
+    deadline: float,
+    monotonic: Callable[[], float] = time.monotonic,
+) -> bytes:
+    if size < 0:
+        raise ValueError("observer receive size cannot be negative")
     payload = bytearray()
     while len(payload) < size:
+        remaining = deadline - monotonic()
+        if remaining <= 0:
+            raise TimeoutError("observer control frame receive deadline expired")
+        settimeout = getattr(connection, "settimeout", None)
+        if callable(settimeout):
+            settimeout(remaining)
         chunk = connection.recv(min(size - len(payload), 64 * 1024))
         if not chunk:
             raise EOFError("observer control frame ended early")
@@ -1662,6 +1727,7 @@ def _read_and_render_available_trace(
     database_path: Path,
     *,
     flush_terminal_events: bool,
+    recover_unknown_targets: bool = False,
 ) -> None:
     if not view.monitoring or not view.target_thread_ids:
         return
@@ -1672,7 +1738,12 @@ def _read_and_render_available_trace(
             after_event_id=view.after_event_id,
             limit=OBSERVER_TRACE_PAGE_SIZE,
         )
-        _print_lines(view.accept_trace_snapshot(snapshot))
+        _print_lines(
+            view.accept_trace_snapshot(
+                snapshot,
+                recover_unknown_targets=recover_unknown_targets,
+            )
+        )
         if len(snapshot.events) < OBSERVER_TRACE_PAGE_SIZE:
             break
     evidence = read_rodex_agent_observer_turn_evidence(
@@ -1690,16 +1761,6 @@ def _print_lines(lines: tuple[str, ...] | list[str]) -> None:
         return
     sys.stdout.write("\n".join(lines) + "\n")
     sys.stdout.flush()
-
-
-def _optional_uuid_text(value: object) -> str | None:
-    if not isinstance(value, str):
-        return None
-    with suppress(ValueError):
-        parsed = uuid.UUID(value)
-        if str(parsed) == value:
-            return value
-    return None
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -1751,6 +1812,7 @@ def main(arguments: list[str] | None = None) -> int:
     )
     control_thread.start()
     liveness_thread.start()
+    last_transport_overflow_count = 0
     try:
         _print_lines([*view.header_lines(), "", *view.initial_lines])
         _read_and_render_available_trace(
@@ -1768,8 +1830,47 @@ def main(arguments: list[str] | None = None) -> int:
                     break
             if any(event.get("kind") == "runtime_closed" for event in batch):
                 return 0
+            snapshots = [
+                event for event in batch if event.get("kind") == "observer_state_snapshot"
+            ]
+            latest_snapshot = max(
+                snapshots,
+                key=lambda event: (
+                    event.get("epoch")
+                    if isinstance(event.get("epoch"), int)
+                    and not isinstance(event.get("epoch"), bool)
+                    else -1,
+                    event.get("revision")
+                    if isinstance(event.get("revision"), int)
+                    and not isinstance(event.get("revision"), bool)
+                    else -1,
+                ),
+                default=None,
+            )
+            semantic_events = [
+                event for event in batch if event.get("kind") != "observer_state_snapshot"
+            ]
+            transport_overflowed = False
+            if latest_snapshot is not None:
+                semantic_events = [
+                    *view.accept_observer_state_snapshot(latest_snapshot),
+                    *semantic_events,
+                ]
+                overflow = latest_snapshot.get("overflow")
+                dropped_event_count = (
+                    overflow.get("dropped_event_count")
+                    if isinstance(overflow, Mapping)
+                    else None
+                )
+                if (
+                    isinstance(dropped_event_count, int)
+                    and not isinstance(dropped_event_count, bool)
+                    and dropped_event_count > last_transport_overflow_count
+                ):
+                    last_transport_overflow_count = dropped_event_count
+                    transport_overflowed = True
             trace_publications: list[tuple[int, bool]] = []
-            for event in batch:
+            for event in semantic_events:
                 kind = event.get("kind")
                 if kind == "app_server_subagent_activity":
                     _print_lines(view.accept_app_server_event(event))
@@ -1790,6 +1891,14 @@ def main(arguments: list[str] | None = None) -> int:
                     ):
                         trace_publications.append((sequence, caught_up))
             if not trace_publications:
+                if transport_overflowed:
+                    _read_and_render_available_trace(
+                        view,
+                        namespace.rodex_sessions_id,
+                        namespace.rodex_database,
+                        flush_terminal_events=False,
+                        recover_unknown_targets=True,
+                    )
                 continue
             trace_publication_sequence, caught_up = max(trace_publications)
             _read_and_render_available_trace(

@@ -4,11 +4,12 @@ Rodex makes a durable tmux-hosted Codex session feel like Codex itself. Start no
 with `./rodex`, work in the ordinary Codex TUI, detach when needed, and return later by
 a memorable name such as `automatic-beluga`. Rodex-specific commands live in an
 underscore namespace. Current Codex interactive options and an optional initial prompt
-run inside managed Rodex; Codex subcommands and uncertain future options pass through.
+run inside managed Rodex; Codex subcommands and syntax outside Rodex's managed
+interactive grammar pass through unchanged.
 
-> **Development status: ALPHA.** Rodex is a Linux/POSIX pre-release under active
-> validation. Interfaces may still change, but identity, lifecycle, installation,
-> security, and primary workflows have automated boundary coverage.
+> **Development status: ALPHA.** Rodex is an in-house Linux pre-release. The application
+> described here is complete for its current scope, but interfaces may still change
+> before a stable release.
 
 ## Why Rodex
 
@@ -16,11 +17,11 @@ Rodex's first job is to accommodate the person at the terminal: replacing `codex
 `rodex` should preserve the familiar interface, arguments, input, output, signals, and
 exit status. Durability is added around that experience rather than in place of it.
 
-That user-first foundation also creates the direction of travel: one managed session
-becomes a local bridge between an interactive Codex worker and authorized automation.
-The human can attach through tmux, handle approvals, and intervene directly; another
-shell or agent can discover the same verified runtime, observe readable terminal output
-or structured protocol events, and control one exact turn without typing into the TUI.
+One managed session is also a local bridge between an interactive Codex worker and
+authorized automation. The human can attach through tmux, handle approvals, and
+intervene directly; another shell or agent can discover the same verified runtime,
+observe readable terminal output or structured protocol events, and control one exact
+turn without typing into the TUI.
 Both sides retain the same Rodex, runtime, Codex, and workspace context.
 
 ## What Rodex does
@@ -44,14 +45,20 @@ Both sides retain the same Rodex, runtime, Codex, and workspace context.
   private/shared state in the tmux bar.
 - Preserves 50,000 lines of conversation scrollback with keyboard copy-mode access.
 - Animates shared arrival and final departure for five seconds without blocking the TUI.
-- Keeps the in-TUI `/rodex` command implementation available but disabled for now.
 - Sends work to, waits for, or reads a running session from another shell.
 - Streams settled, readable terminal output without replaying terminal clear-screen or
   transient composer redraws.
-- Starts, steers, waits for, interrupts, and reads results by exact Codex turn ID.
+- Starts, steers, and interrupts through one exact-turn coordinator that blocks stale
+  selectors and runtime incarnations before transport and sends the caller's exact turn
+  ID as the App Server mutation guard.
+- Applies each alias through one serialized durable/tmux transition and uses the same
+  exact-turn policy for its live name notification.
+- Waits for and reads bounded results from one exact Codex turn without copying result
+  bodies into SQLite.
 - Maintains queryable session and exact-turn statistics from authenticated rollouts.
 - Tracks root/sub-agent lineage and typed rollout-derived messages, commands, tools,
-  contexts, token usage, rate limits, and agent activity in a durable agent trace.
+  contexts, token usage, rate limits, and agent activity in a contract-validated durable
+  agent trace.
 - Opens and reuses a noninteractive top-third agent observer on an exact live
   `subAgentActivity(kind=started)` event, correlates the current Codex collaboration
   tool by exact call ID, then shows invocation semantics, collaboration prompt when
@@ -71,7 +78,8 @@ with Codex while preserving arguments, terminal streams, signals, and exit statu
 
 ## Requirements
 
-- Linux or a compatible POSIX system; Windows is not supported.
+- Linux is required; Rodex's fail-closed SQLite path uses `/proc/self/fd`,
+  `O_NOFOLLOW`, and `flock`. Other POSIX systems and Windows are not supported.
 - Python 3.12 or newer.
 - [`uv`](https://docs.astral.sh/uv/).
 - `tmux` available on `PATH` for managed launches, underscore commands, and stored
@@ -107,8 +115,9 @@ Managed launches disable Codex's own interactive startup update check because it
 appear before runtime registration and block Rodex attachment. Immediately before each
 attach, Rodex compares the installed Codex version with a cached npm release lookup. The
 npm lookup has a three-second bound and each successful result is cached for 24 hours;
-all lookup and delivery failures are non-fatal. When a newer stable release exists, the
-proxy gives the primary TUI a native warning:
+future-dated cache metadata is treated as stale rather than extending that window. All
+lookup and delivery failures are non-fatal. When a newer stable release exists, the proxy
+gives the primary TUI a native warning:
 
 ```text
 Rodex: Codex update available: 0.149.1 -> 0.150.1 (run 'codex update' outside Rodex)
@@ -185,11 +194,13 @@ durable terminal events and an exact up-to-date worker publication. App lifecycl
 updates never cause SQL reads. There is no timer-based SQL polling, and burst
 notifications are coalesced before a read.
 
-An already-running session host has its old code in memory. End and resume that Rodex
-session once after installing this version; detach and reattach alone does not reload it.
-
 To expose this checkout as a per-user `rodex` command, follow the
 [installation guide](INSTALL.md).
+
+Installing new Rodex code does not replace modules already loaded by a running session
+host. Apply updates in a maintenance window: exit each existing Rodex runtime and resume
+it after installation. Detach and reattach alone does not reload Python code. Never move
+the live database or its protected parent as an update mechanism.
 
 ### Modern tmux keyboard and mouse setup
 
@@ -224,11 +235,10 @@ preference. See the current [tmux manual](https://man.openbsd.org/tmux.1) and
 | `./rodex _detach` | Create without attaching and print expanded identity JSON. |
 | `./rodex automatic-beluga` | Attach if live; otherwise resume or recover its Codex session. |
 | `./rodex 01a015f4-f27c-7592-8060-d12313e8d0ce` | Open its linked Rodex session, or verify and adopt the persisted standalone Codex thread. |
-| `./rodex _running` | List this POSIX user's running Rodex sessions. |
+| `./rodex _running` | List this Linux user's running Rodex sessions. |
 | `./rodex _context` | Emit this pane's verified Rodex, Codex, tmux, and sharing context as JSON. |
 | `./rodex _alias automatic-beluga edgar-work` | Assign a preferred display name. |
 | `./rodex _alias --force automatic-beluga new-name` | Replace an existing display name. |
-| `./rodex _send edgar-work "Run the tests"` | Start or steer work in a running session. |
 | `./rodex _wait edgar-work` | Wait until the running session is idle. |
 | `./rodex _cat edgar-work` | Print all retained terminal output for use directly or in a Unix pipeline. |
 | `./rodex _cat edgar-work \| tail -n 10` | Print the last ten retained terminal lines. |
@@ -237,8 +247,8 @@ preference. See the current [tmux manual](https://man.openbsd.org/tmux.1) and
 | `./rodex _events edgar-work` | Stream filtered live protocol events as JSON lines. |
 | `./rodex _agents edgar-work --json` | Show the durable root/sub-agent lineage and rollout checkpoint state. |
 | `./rodex _trace edgar-work --json` | Read a transactionally consistent durable agent-trace snapshot. |
-| `./rodex _trace edgar-work --follow` | Follow newly committed typed trace events as JSON lines. |
-| `./rodex _trace edgar-work --include-bodies` | Re-authenticate rollout prefixes and explicitly resolve command/message/tool bodies. |
+| `./rodex _trace edgar-work --follow` | Follow newly committed typed trace metadata as JSON lines; body expansion is rejected in follow mode. |
+| `./rodex _trace edgar-work --include-bodies` | Re-authenticate rollout prefixes and explicitly resolve command/message/tool bodies in one snapshot. |
 | `./rodex _inspect edgar-work --json` | Read live thread state and its exact active turn ID. |
 | `printf '%s' "$PROMPT" \| ./rodex _start edgar-work --dispatch DISPATCH_ID --stdin --json` | Start an idle thread with caller-owned correlation. |
 | `printf '%s' "$PROMPT" \| ./rodex _steer edgar-work --turn TURN_ID --dispatch DISPATCH_ID --stdin --json` | Steer one exact active turn with caller-owned correlation. |
@@ -256,20 +266,35 @@ preference. See the current [tmux manual](https://man.openbsd.org/tmux.1) and
 
 Rodex flags include `_alias --force` and
 `_stats NAME --turn ID --thread CODEX_THREAD_ID --json`.
+
+### Exact control and alias behavior
+
 `_context` is the machine-facing self-identification route for Codex and local tooling.
 It resolves the inherited tmux pane, verifies its live Rodex, registry, and Codex markers
 against the current user's database row, and fails closed outside a matching managed
 session. Its JSON includes registry/database provenance, permanent and user-defined
 names, the complete tmux socket/session/window/pane address, and sharing state. The
 display name is read on every invocation, so an agent need not cache it.
-New runtimes also expose a random 64-bit `runtime_id` and its durable-match state. The
+Each runtime also exposes a random 64-bit `runtime_id` and its durable-match state. The
 exact control commands emit a schema-v2 success/error envelope containing separate Rodex
 session, runtime, Codex thread, Codex session-tree, and turn identities. They require
-stdin prompts and a runtime created by this Rodex version. `_inspect` reports the live
-App Server thread working directory so callers can verify workspace scope before mutation.
+stdin prompts and an exact durably registered runtime incarnation. `_inspect` reports the
+live App Server thread working directory so callers can verify workspace scope before
+mutation.
 The checked App Server version is a minimum compatibility floor, not an exact pin:
 newer stable Codex versions remain available to exact control, while older or
 unrecognized versions fail with a compatibility diagnostic.
+
+`_start`, `_steer`, and `_interrupt` enter one exact-turn mutation coordinator. The
+coordinator resolves the requested name, acquires that session's transition lock,
+resolves the name again after any wait, and verifies the durable runtime and live control
+identity immediately before transport can send. `_start` requires an idle thread;
+`_steer` and `_interrupt` require the exact active turn ID and send it as the App Server's
+expected-turn guard. A moved selector or replaced runtime fails before a mutation frame;
+an incompatible App Server or mismatched turn fails closed. Each mutation RPC chain has
+one absolute deadline covering connection, initialization, frame delivery, and response
+handling.
+
 Resuming from a different caller working directory intentionally relocates the runtime;
 session identity follows the human rather than permanently pinning the original path.
 Exact start/steer responses expose `data.dispatch.id` and a structured
@@ -279,35 +304,42 @@ they retain the ID even if command output is lost; Rodex generates one when omit
 recommends the next exact wait/result/status command without executing it.
 `_result` caps final-answer text at 64 KiB, reports its original UTF-8 byte count and
 truncation state, and includes at most 100 completed file-change paths.
-Exit status `2` means invalid
-input or unknown session, `3` means runtime/identity/compatibility failure, `4` is a
-non-interrupting wait timeout, `5` an interrupted turn, `6` a failed turn, and `7` a
-control or indeterminate-dispatch failure. `dispatch_indeterminate` is deliberately not
-retryable: execute `data.recommended_next.command`, then let the controller decide. For
-start/steer this queries `_dispatch-status`; an indeterminate interrupt instead
-recommends `_result` for its already-known turn. `not_observed` is not proof of
-rejection. Legacy `_send` and idle-based `_wait` remain available.
+Exit status `2` means invalid input or unknown session, `3` means
+runtime/identity/compatibility failure, `4` is a non-interrupting wait timeout, `5` an
+interrupted turn, `6` a failed turn, and `7` a control or indeterminate-dispatch failure.
+`dispatch_indeterminate` is deliberately not retryable: execute
+`data.recommended_next.command`, then let the controller decide. For start/steer this
+queries `_dispatch-status`; an indeterminate interrupt instead recommends `_result` for
+its already-known turn. `not_observed` is not proof of rejection. The human-facing
+idle-based `_wait` remains available; machine turn mutations use the exact `_start`,
+`_steer`, and `_interrupt` pipeline exclusively.
 The repository-local [Rodex control skill](.agents/skills/rodex-session-control/SKILL.md)
 keeps agent use on this exact identity-and-turn workflow.
-When `_alias` changes the effective name of a live session, Rodex sends one verified
-prompt to that session's Codex thread:
+
+`_alias` is one serialized coordinator operation for durable assignment, the live tmux
+name, and notification. Rodex plans the assignment from a consistent read, performs tmux
+work without holding a SQLite writer transaction, and finalizes only if the durable state
+still matches the plan. A failed durable finalize restores a tmux name it changed. After
+a successful live change, Rodex starts an idle turn or steers the exact active turn with
+one verified prompt:
 `RODEX_AUTO_INFO: Rodex session <16-hex-id> is now named '<name>'.` All attached tmux
 clients share that thread, so Rodex does not broadcast per client. Offline sessions
 and unchanged names produce no prompt. If delivery fails, Rodex reports the failure
 without rolling back the already committed name change.
-Arguments after `_create` or
-`_detach` are forwarded to the managed Codex TUI; use `--` when an explicit boundary
-improves clarity. `_cat` is a finite snapshot, so standard tools such as `head`, `tail`,
-and `grep` compose with it normally. `_tail` prints a familiar initial line selection
-and then remains open. It publishes rows as soon as they enter tmux history and publishes
-stable visible-pane changes after three 0.4-second observations. The live `Working`
-status region and composer are excluded so timer frames and partially typed prompts do
-not become duplicate transcript lines. `_events` is the distinct machine-readable
-stream: it remains open and emits selected future protocol events as JSON lines until
-interrupted. Names use 1–80
-ASCII letters, digits, underscores, or hyphens and begin with a letter or digit. The
-existing reserved-name vocabulary remains case-insensitive and includes Codex
-top-level commands and aliases.
+
+### Routing and observation
+
+Arguments after `_create` or `_detach` are forwarded to the managed Codex TUI; use `--`
+when an explicit boundary improves clarity. `_cat` is a finite snapshot, so standard
+tools such as `head`, `tail`, and `grep` compose with it normally. `_tail` prints a
+familiar initial line selection and then remains open. It publishes rows as soon as they
+enter tmux history and publishes stable visible-pane changes after three 0.4-second
+observations. The live `Working` status region and composer are excluded so timer frames
+and partially typed prompts do not become duplicate transcript lines. `_events` is the
+distinct machine-readable stream: it remains open and emits selected subsequent protocol
+events as JSON lines until interrupted. Names use 1–80 ASCII letters, digits,
+underscores, or hyphens and begin with a letter or digit. The reserved-name vocabulary is
+case-insensitive and includes Codex top-level commands and aliases.
 
 No arguments is the default managed-create route and is equivalent to `_create`. The
 characterized Codex 0.150.1 interactive grammar—current options plus zero or one prompt—
@@ -320,15 +352,8 @@ selector or subcommand interpretation.
 
 Current Codex subcommands and aliases pass through directly, as do help/version,
 external remote connections, malformed current syntax, multiple positional arguments,
-and every unknown option-shaped invocation. This preserves Codex's own diagnostics and
-future option handling. A future bare zero-argument subcommand is inherently
-indistinguishable from a one-word prompt until the single CLI contract is updated.
-Current command names are reserved from new Rodex aliases; an older colliding alias can
-still be migrated with `_alias OLD SAFE_NAME`.
-
-The in-TUI `/rodex` command and its completion ribbon are temporarily disabled through
-`RODEX_TMUX_SLASH_ENABLED` in `rodex.runtime`. The implementation remains in the
-codebase for later re-enablement; input currently passes directly to the Codex TUI.
+and every unknown option-shaped invocation. This preserves Codex's own parsing and
+diagnostics. Current command names are reserved from Rodex aliases.
 
 ## Local data
 
@@ -349,20 +374,38 @@ enforces its domain uniqueness. Codex session IDs remain Codex-owned 128-bit val
 Each is stored once in the canonical `codex_threads` table across two `BIGINT` columns;
 memberships, current-root selection, activities, and lineage use integer foreign keys.
 
-Version 14 is an incompatible ALPHA schema with no earlier-generation reader or
-migration path. Rodex leaves `rodex-v13.sqlite3` and earlier generations untouched. An
-internal generation marker rejects nonempty unmarked databases and wrong generations
-before any v14 domain table is created.
+The registry uses schema generation 14. An internal generation marker admits an
+already-current database cheaply inside each operation's transaction. Explicit
+first-use bootstrap creates a missing private registry atomically; nonempty unmarked,
+incomplete, and wrong-generation databases fail closed. The explicit integrity audit is
+a read-only canonical allowlist check and is not part of ordinary mutation hot paths.
 
 Short-lived Unix sockets and app-server logs use `$XDG_RUNTIME_DIR/rodex`, normally
 `/run/user/<uid>/rodex`. When `XDG_RUNTIME_DIR` is unset or that socket path would be
 too long, Rodex uses the private fallback `/tmp/rodex-<uid>`. Set `RODEX_RUNTIME_DIR`
 to override it.
 
-The registry is held in a private directory and repaired to mode `0600`; runtime roots
-are mode `0700`, and live sockets and logs are mode `0600`. Symlink, owner, and file-type
-checks fail closed. SQLite uses WAL mode with a busy timeout so analytics writes do not
-block consistent readers during ordinary concurrent use.
+The registry is held in a private current-user directory and must remain a regular
+current-user file at mode `0600`; runtime roots are mode `0700`, and live sockets and
+logs are mode `0600`. Symlink, owner, and file-type checks fail closed. SQLite uses WAL
+mode with a busy timeout so analytics writes do not block consistent readers during
+ordinary concurrent use. SQLite connects through the same retained no-follow descriptor
+Rodex validated. A single process-lifetime Linux inotify guard watches the private parent
+name and database inode; move, replacement, parent movement, unmount, or queue overflow
+permanently latches `database_moved`, interrupts active connections, and requires a Rodex
+restart. Transactions also recheck
+the retained parent, transition-lock, database, and SQLite main-path identities before
+connect, `BEGIN`, and `COMMIT`. Every ordinary transaction and integrity audit holds a
+shared advisory transition lock and reads committed WAL normally. The explicit
+maintenance lock is exclusive and is for offline diagnostics only; live database moves
+or replacements are unsupported. All Rodex processes accessing a database must use this
+transaction boundary; direct same-user SQLite access is outside the cooperative-lock
+contract. Only explicit first-use flows may create the database and transition lock;
+ordinary readers and mutations are existing-only, and runtime supervision can subscribe
+only after a transaction admits the exact opened database descriptor.
+An activated session host subscribes to that same permanent guard signal. A latch
+nonblockingly ends its foreground TUI, unwinds the proxy and sidecars, and reports
+`database_moved` restart guidance; runtime supervision never follows a replacement path.
 
 Each live session host refreshes every required runtime pathname hourly. This protects
 weeks-long detached sessions from age-based temporary-file cleanup without making dead
@@ -371,9 +414,9 @@ sockets persistent; refreshes stop when the owning session ends.
 The Rodex registry also stores accepted append-stream provenance, independent analytics
 worker checkpoints and health, the latest successful derived statistics snapshot, and
 an append-only typed agent trace. Each session host runs a low-priority, fail-open
-sidecar whose event scheduler blocks while idle, batches
-activity for a 0.5-second quiet period with a five-second ceiling, and resolves only the
-exact Codex thread identities named by bounded semantic wake events. A resident analyzer
+sidecar whose event scheduler blocks while idle, batches activity for a 0.5-second quiet
+period with a five-second ceiling, and resolves only the exact Codex thread identities
+named by bounded semantic wake events. A resident analyzer
 consumes only newline-complete appended bytes after initial registration; it neither
 recursively scans the sessions tree nor repeatedly reloads unchanged rollout prefixes.
 Bounded catch-up and one clean replay cover races and recoverable faults without an
@@ -381,7 +424,7 @@ unbounded polling or retry loop. Clean replay invalidates cached verified lineag
 metadata together with byte-reader and analyzer state before re-authenticating sources.
 
 Cold lineage recovery first uses exact 128-bit child identities named by lifecycle or
-parent activity. For historical runs whose spawn result carried only an agent path, one
+parent activity. When an authenticated spawn supplies only an agent path, one
 startup-only fallback enumerates regular JSONL files in the root UUIDv7 three-day window,
 reads only each first `session_meta` line, and accepts only the authenticated root/parent
 closure. Paths are then cached; resident append wakes never repeat this directory scan.
@@ -392,6 +435,20 @@ Codex's trusted append-only rollout contract and then returns to suffix-only rea
 does not claim hostile in-place mutation detection on every append. Unchanged semantic
 wakeups perform no projection write, and an event-before-append race receives only the
 scheduler's bounded retry window.
+
+Authenticated records are normalized into immutable typed facts before SQLite work. The
+registry trace contract then canonicalizes UTC timestamps, text, identities, and typed
+details; rejects duplicates; hashes each detail; and seals the complete prepared
+publication. The trace writer accepts only that exact contract-issued value and only
+inside an active Rodex transaction. Replaced or manually constructed prepared values and
+calls without an active transaction fail before the first trace SQL statement.
+
+Within that one writer transaction, trace membership resolution reads only the distinct
+thread IDs present in the batch, in bounded chunks, after the transaction's membership
+writes. Append, publication-head advancement, agent-request provenance, and FIFO
+target-turn reconciliation commit or roll back together. Reconciliation is an internal
+writer step rather than a separately sequenced public operation; trace snapshot,
+pagination, and follow behavior belong to the read side.
 
 Rodex persists stable thread/turn/item identity, replaceable typed statistics metrics,
 normalized distribution and named-count rows, and typed trace detail tables. Model and
@@ -414,9 +471,11 @@ ledger. Coverage is cumulative: a prior durable gap remains gapped, and any reta
 unrecognized record prevents a complete claim.
 `_trace --include-bodies` deliberately re-reads and re-hashes recorded prefixes for
 current or historical thread memberships; hidden reasoning and encrypted values remain
-redacted through the same privacy classifier used during normalization. Canonical
-rollout paths and SHA-256 digests are sensitive local metadata, so the database remains
-private to its POSIX user. Codex remains responsible for raw history. Each session's
+redacted through the same privacy classifier used during normalization. It is a
+one-shot operation and cannot be combined with `--follow`, whose bounded output remains
+metadata-only. Canonical rollout paths and SHA-256 digests are sensitive local metadata,
+so the database remains private to its operating-system user. Codex remains responsible for raw
+history. Each session's
 `statistics_publication_sequence` starts at one and advances only when a changed,
 authenticated projection is published. It is a consistency and concurrency token, not
 a turn count or retained history; only the latest successful snapshot remains in Rodex
@@ -430,8 +489,8 @@ SQL.
 - [Security model](docs/SECURITY.md)
 - [Code concepts](docs/CODE_CONCEPTS.md)
 - [SQL schema methodology](docs/SQL_SCHEMA.md)
-- [Codex App Server 0.147 live evidence](docs/APP_SERVER_0_147_LIVE_EVIDENCE.md)
-- [Phase II candidates for review](docs/PHASE_II_PLAN.md)
+- [Codex App Server live control evidence](docs/APP_SERVER_0_147_LIVE_EVIDENCE.md)
+- [Current boundary and unimplemented proposals](docs/PHASE_II_PLAN.md)
 
 ## Development
 
@@ -442,7 +501,7 @@ uv run pytest --cov --cov-report=term-missing
 uv build
 ```
 
-The alpha coverage floor is 70%. Tests lock the exhaustive application route/preparation
+The coverage floor is 70%. Tests lock the exhaustive application route/preparation
 matrix and thin CLI boundary, with real App Server Unix-socket and real-tmux coverage for
 scrollback retention and following, inherited mouse configuration, rename, identity
 markers, and status configuration.

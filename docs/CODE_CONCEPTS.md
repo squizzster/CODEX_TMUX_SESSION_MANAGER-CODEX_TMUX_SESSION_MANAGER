@@ -1,57 +1,106 @@
 # Rodex code concepts
 
-Rodex should first make durable session use feel as direct as the original Codex CLI,
-then let the same verified session bridge human interaction and authorized automation.
-Convenience belongs at the boundary; identity and state remain exact underneath it.
+Rodex makes durable session use feel like the Codex CLI while keeping every identity,
+runtime, turn, and durable state transition exact. Convenience belongs at the process
+boundary; domain policy has one canonical owner underneath it.
 
-## Identity
+## Application boundary
 
-- Rodex, Codex, tmux, users, and names are separate domains with explicit links.
-- Never present, store, or pass one domain's identity as another domain's identity.
-- A permanent generated name is the immutable storage anchor for a session.
-- A user-defined name, when present, is its preferred outward identity everywhere.
-- User-facing names resolve once to an integer session identity; later work uses that id.
-- Names should reveal domain, purpose, and direction without requiring distant context.
-
-## Behaviour
-
-- Every invocation is classified once, enters one authoritative application pipeline,
-  and executes exactly one domain mechanism regardless of CLI spelling.
-- Preparation branches state real control flow; handler-specific dependencies remain
-  explicit rather than being implied by inert pipeline metadata.
-- Common actions may use bare words; their `--` forms must behave identically.
+- One declarative CLI contract classifies every invocation into one application route.
+- Native Codex syntax passes through unchanged. Rodex underscore commands remain local.
+- CLI handlers parse arguments and render human text or versioned machine envelopes;
+  they do not reimplement identity, mutation, transport, or persistence policy.
+- A responsibility has one entry point and a single downstream path. A helper must not
+  leave an owner, partially perform its policy, and later rejoin it.
 - Command vocabulary is centralized and excluded from every name-allocation route.
-- The effective name remains consistent across tmux, status, and user communication.
-- Persisted runtime information is evidence of a link, not proof that a task is live.
-- Live-state answers verify the real runtime and remain scoped to the current POSIX user.
-- Attach and resume enforce that same owner boundary before touching a live runtime.
-- External runtime identities use exact matching rather than prefix or glob semantics.
-- Transparent protocol mediation is preferred to terminal scraping for machine signals.
-- Human-readable terminal observation comes from verified tmux plain text; structured
-  lifecycle observation comes from the App Server protocol. They are not conflated.
+
+## Identity and observation
+
+- Rodex registries, Rodex sessions, runtime incarnations, Codex threads, Codex turns,
+  tmux endpoints, operating-system users, and display names are separate identity
+  domains.
+- A permanent generated name is an immutable storage anchor. A user-defined alias, when
+  present, is the preferred outward name.
+- Persisted runtime information is evidence of a link, not proof that the runtime is
+  live. Live operations verify the tmux endpoint, control endpoint, durable runtime
+  incarnation, Codex thread, and current user as required by their contract.
+- Human-readable terminal observation comes from verified tmux plain text. Structured
+  lifecycle observation comes from the App Server protocol. Neither is used as a
+  substitute for authoritative exact-turn state.
 - A terminal follower emits committed rows promptly, settles mutable visible rows, and
-  never treats observation as authoritative turn completion.
+  never treats observation as proof that a turn completed.
 
-## Change
+## Exact-turn mutation
 
-- A mutation is one transaction: either its complete meaning commits or nothing does.
-- Lookup rows are selected by their complete natural key before an insert is attempted.
-- Ownership, uniqueness, and availability are checked inside the mutating transaction.
-- Optional replacement is refused by default and requires an explicit force signal.
-- Failure cleanup targets only resources created by the failed operation.
-- Cross-system transitions compensate external changes when durable commit fails.
-- CLI code adapts arguments and output; domain libraries own rules and state transitions.
-- Resolved identities and exact command specifications travel forward as typed context;
-  later stages do not rediscover them from display text or argv.
-- Errors name the failed contract and the next valid action; commands fail on stderr.
+- `ExactTurnMutationCoordinator` is the sole owner of start, steer, interrupt, and alias
+  mutation policy.
+- The coordinator resolves a selector, acquires that session's transition lock, resolves
+  the selector again, and keeps the lock through live discovery and mutation. A selector
+  that changed while waiting fails closed.
+- Start, steer, and interrupt resolve one durable runtime incarnation and revalidate the
+  selector, tmux endpoint, control metadata, and runtime ID immediately before transport
+  can send its first mutation frame. Transport independently verifies the expected Codex
+  thread in the same bounded chain.
+- `CodexControlClient` owns bounded App Server transport only. Its mutation methods are
+  package-private and require the coordinator's revalidation fence; there is no
+  unfenced prompt-sending API.
+- The machine-command handler invokes only the coordinator's start, steer, and interrupt
+  operations. The human session-command handler invokes only its `alias_transition`;
+  neither handler calls mutation transport directly.
+- Start accepts only an idle thread. Steer and interrupt require the caller's exact
+  active turn ID and carry it as the App Server's expected-turn guard. A stale selector
+  or runtime produces no mutation frame; a mismatched turn is rejected by the App Server.
+- Alias assignment has one public operation, `alias_transition`. It plans from a
+  consistent read, performs tmux work without holding a SQLite writer transaction, and
+  finalizes with compare-and-swap checks. A failed durable finalize compensates a
+  completed tmux rename.
+- A successful live alias change sends one `RODEX_AUTO_INFO` through the same fenced
+  start-or-steer policy. Notification failure does not undo an already committed name.
 
-## Evolution
+## Durable trace
 
-- Linux and compatible POSIX systems define the platform boundary.
-- ALPHA work keeps changes coherent while broadening boundary and installation checks.
-- Do not preserve accidental compatibility or speculative machinery without evidence.
-- Preserve native user behavior before adding automation; both routes meet at the same
-  verified session identity and domain contracts.
-- Keep public contracts small, descriptive, and close to the data they govern.
-- Tests should protect identity, transaction, ownership, and lifecycle boundaries quickly.
-- Documentation states future-facing standards; source and tests carry implementation facts.
+- Authenticated rollout records are first normalized into immutable typed trace facts.
+  The registry trace contract is the sole owner of complete validation, canonical
+  UTC/text/identity normalization, typed-detail matching, duplicate detection, and
+  detail hashing.
+- Contract preparation happens before `BEGIN` and issues a sealed
+  `PreparedAgentTracePublication`. The writer accepts only that exact contract-issued
+  object; copied, replaced, or manually constructed prepared values are rejected before
+  SQL.
+- The trace writer accepts prepared values only inside an active Rodex transaction. It
+  appends the deduplicated ledger, advances the publication head, and rolls all trace and
+  request-provenance changes back together on failure.
+- Thread membership resolution considers only distinct thread IDs present in the batch,
+  uses bounded `VALUES` chunks, and occurs after membership writes in the same
+  transaction. Unrelated historical memberships are not materialized.
+- Agent-request provenance and FIFO target-turn reconciliation are writer-internal
+  steps, not independently callable sequencing APIs.
+- The trace reader owns snapshot, pagination, and follow reads. Body expansion is an
+  explicit one-shot re-authentication path; follow mode remains bounded metadata-only.
+- Trace SQL stores identity, coordinates, hashes, sizes, capture state, and typed facts.
+  It does not duplicate plaintext message, command, tool, or output bodies.
+
+## Transactions and failure
+
+- Every registry mutation verifies the current schema generation inside its intended
+  short transaction. Ordinary operations do not rerun bootstrap or integrity attestation.
+- Lookup rows are selected by their complete natural key before insertion.
+- Ownership, uniqueness, expected durable state, and incarnation checks occur inside
+  the transaction that relies on them.
+- Cross-system transitions avoid external work while holding SQLite writer locks and
+  compensate only resources changed by the failed operation.
+- Post-success access telemetry is best-effort. A telemetry warning cannot turn an
+  already successful user or exact-turn mutation into a retryable failure.
+- Errors identify the failed contract and the next valid action; human errors use
+  stderr, and machine control uses versioned structured envelopes.
+
+## Platform and security boundary
+
+- Linux is the platform boundary. SQLite path security depends on inotify,
+  `/proc/self/fd`, `O_NOFOLLOW`, and `flock`.
+- Database access goes through the Rodex transaction boundary, which validates the
+  securely opened database identity and enforces owner, mode, schema-generation, and
+  transition-lock invariants.
+- Public contracts stay small, descriptive, and close to the data they govern. Tests
+  enforce the single-owner call graph, exact identity fences, transaction boundaries,
+  privacy, and bounded resource behavior.

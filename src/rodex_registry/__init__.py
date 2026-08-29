@@ -4,7 +4,7 @@ from .agent_observer import (
     RodexAgentObserverTurnEvidence,
     read_rodex_agent_observer_turn_evidence,
 )
-from .agent_trace import (
+from .agent_trace_contract import (
     RodexAgentTraceEvent,
     RodexAgentTracePublication,
     RodexAgentTraceSnapshot,
@@ -16,9 +16,8 @@ from .agent_trace import (
     TraceSubagentActivity,
     TraceTokenUsage,
     TraceToolCall,
-    read_rodex_agent_trace,
-    read_rodex_agent_trace_cursor,
 )
+from .agent_trace_reader import read_rodex_agent_trace, read_rodex_agent_trace_cursor
 from .analytics_registry import RodexAnalyticsPublication, RodexAnalyticsRegistry
 from .errors import (
     RodexAnalyticsPublicationRetryableError,
@@ -99,7 +98,7 @@ from .lifecycle import (
     validate_a_user_defined_cool_name_assignment,
 )
 from .schema import (
-    default_rodex_database_path,
+    audit_rodex_database_integrity,
     initialise_rodex_database,
     lookup_rodex_registry_id,
 )
@@ -197,9 +196,9 @@ __all__ = [
     "TraceToolCall",
     "TurnStatisticsProjection",
     "assign_a_user_defined_cool_name",
+    "audit_rodex_database_integrity",
     "create_a_rodex_session",
     "current_rodex_sessions_user_identity",
-    "default_rodex_database_path",
     "generate_an_unregistered_rodex_runtime_id_candidate",
     "generate_an_unregistered_rodex_session_id_candidate",
     "initialise_rodex_database",

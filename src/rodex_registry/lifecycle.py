@@ -8,7 +8,8 @@ import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 from cool_name.functions import (
     allocate_unique_cool_name,
@@ -19,6 +20,8 @@ from cool_name.functions import (
 from rodex_sql import (
     INDEX_RE_TRY_ATTEMPTS,
     index_re_try_attempt_numbers,
+    normalise_rodex_database_path,
+    open_rodex_bootstrap_transaction,
     open_rodex_read_transaction,
     open_rodex_transaction,
     select_lookup_id,
@@ -50,8 +53,8 @@ from .schema import (
     RODEX_SESSIONS_TABLE,
     RODEX_SESSIONS_USERS_TABLE,
     RODEX_TMUX_SESSIONS_TABLE,
-    existing_rodex_database_path,
     initialise_rodex_database,
+    require_current_rodex_schema,
 )
 from .validation import (
     _normalise_utc_datetime,
@@ -162,6 +165,16 @@ class RodexUserDefinedCoolNameAssignment:
     renamed_tmux_session_name: str | None = None
 
 
+_DURABLE_TIMESTAMP_MAX_FORWARD_SKEW = timedelta(days=1)
+
+
+def _database_path_for_mutation(
+    database_path: str | os.PathLike[str] | None,
+) -> Path:
+    """Resolve storage; its transaction secures and cold-bootstraps it."""
+    return normalise_rodex_database_path(database_path)
+
+
 def create_a_rodex_session(
     database_path: str | os.PathLike[str] | None = None,
     *,
@@ -174,7 +187,7 @@ def create_a_rodex_session(
     runtime_id: RodexRuntimeId | str | None = None,
 ) -> RodexSession:
     """Atomically persist a session and any live Codex/tmux linkage."""
-    path = initialise_rodex_database(database_path)
+    path = _database_path_for_mutation(database_path)
     identity = (
         current_rodex_sessions_user_identity()
         if user_identity is None
@@ -189,7 +202,8 @@ def create_a_rodex_session(
     if parsed_runtime_id is not None and tmux_link is None:
         raise ValueError("a runtime ID requires a tmux endpoint")
     created_at_utc = _utc_now_timestamp()
-    with open_rodex_transaction(path) as connection:
+    with open_rodex_bootstrap_transaction(path) as connection:
+        require_current_rodex_schema(connection)
         rodex_sessions_users_id = _lookup_or_insert_rodex_sessions_user_id(
             connection, identity
         )
@@ -347,7 +361,7 @@ def _generate_an_unregistered_rodex_id_candidate[
 ) -> GeneratedRodexId:
     """Run the one bounded indexed-selection pipeline for Rodex-owned IDs."""
     path = initialise_rodex_database(database_path)
-    with open_rodex_transaction(path) as connection:
+    with open_rodex_read_transaction(path) as connection:
         for _attempt_number in index_re_try_attempt_numbers():
             candidate = id_type.generate()
             row = connection.execute(
@@ -385,8 +399,9 @@ def lookup_or_create_rodex_sessions_user(
     identity = _validate_user_identity(
         RodexSessionsUserIdentity(uid=uid, gid=gid, user_name=user_name)
     )
-    path = initialise_rodex_database(database_path)
-    with open_rodex_transaction(path) as connection:
+    path = _database_path_for_mutation(database_path)
+    with open_rodex_bootstrap_transaction(path) as connection:
+        require_current_rodex_schema(connection)
         user_id = _lookup_or_insert_rodex_sessions_user_id(connection, identity)
     return RodexSessionsUser(
         id=user_id,
@@ -402,7 +417,7 @@ def lookup_rodex_sessions_user(
 ) -> RodexSessionsUser | None:
     """Return one normalized user by internal id, or ``None`` when absent."""
     _validate_positive_id(user_id, "user_id")
-    path = existing_rodex_database_path(database_path)
+    path = normalise_rodex_database_path(database_path)
     with open_rodex_read_transaction(path) as connection:
         row = connection.execute(
             f"SELECT id, uid, gid, user_name FROM {RODEX_SESSIONS_USERS_TABLE} "
@@ -421,7 +436,7 @@ def lookup_rodex_sessions_id_from_a_rodex_session_id(
     database_path: str | os.PathLike[str] | None = None,
 ) -> int | None:
     """Return the internal id for a Rodex session ID, or ``None``."""
-    path = existing_rodex_database_path(database_path)
+    path = normalise_rodex_database_path(database_path)
     parsed_session_id = parse_rodex_session_id(rodex_session_id)
     with open_rodex_read_transaction(path) as connection:
         row = connection.execute(
@@ -438,7 +453,7 @@ def lookup_rodex_session_id_from_a_rodex_sessions_id(
 ) -> RodexSessionId | None:
     """Return the public Rodex session ID for an internal ID, or ``None``."""
     _validate_positive_id(session_id, "session_id")
-    path = existing_rodex_database_path(database_path)
+    path = normalise_rodex_database_path(database_path)
     with open_rodex_read_transaction(path) as connection:
         row = connection.execute(
             f"SELECT rodex_session_id_signed_bigint "
@@ -456,7 +471,7 @@ def lookup_rodex_session_log(
 ) -> RodexSessionLog | None:
     """Return the one log row belonging to a session, or ``None`` when absent."""
     _validate_session_id(session_id)
-    path = existing_rodex_database_path(database_path)
+    path = normalise_rodex_database_path(database_path)
     with open_rodex_read_transaction(path) as connection:
         row = connection.execute(
             f"SELECT id, rodex_sessions_id, created_at_utc, rodex_sessions_users_id, "
@@ -476,24 +491,33 @@ def record_a_rodex_session_access(
     """Update and return the most recent access timestamp for a session."""
     _validate_session_id(session_id)
     timestamp = _normalise_utc_datetime(accessed_at_utc)
-    path = initialise_rodex_database(database_path)
+    path = _database_path_for_mutation(database_path)
     with open_rodex_transaction(path) as connection:
-        cursor = connection.execute(
-            f"UPDATE {RODEX_SESSIONS_LOG_TABLE} SET last_accessed_at_utc = ? "
+        require_current_rodex_schema(connection)
+        row = connection.execute(
+            f"SELECT id, rodex_sessions_id, created_at_utc, "
+            f"rodex_sessions_users_id, last_accessed_at_utc "
+            f"FROM {RODEX_SESSIONS_LOG_TABLE} WHERE rodex_sessions_id = ?",
+            (session_id,),
+        ).fetchone()
+        if row is None:
+            raise RodexSessionError(f"Rodex session log does not exist: {session_id}")
+        timestamp = _monotonic_durable_timestamp(
+            str(row[4]), timestamp, field_name="last_accessed_at_utc"
+        )
+        connection.execute(
+            f"UPDATE {RODEX_SESSIONS_LOG_TABLE} "
+            "SET last_accessed_at_utc = ? "
             "WHERE rodex_sessions_id = ?",
             (timestamp, session_id),
         )
-        if cursor.rowcount != 1:
-            raise RodexSessionError(f"Rodex session log does not exist: {session_id}")
-        row = connection.execute(
-            f"SELECT id, rodex_sessions_id, created_at_utc, rodex_sessions_users_id, "
-            f"last_accessed_at_utc FROM {RODEX_SESSIONS_LOG_TABLE} "
-            "WHERE rodex_sessions_id = ?",
-            (session_id,),
-        ).fetchone()
-    if row is None:
-        raise RodexSessionError(f"Rodex session log disappeared: {session_id}")
-    return _session_log_from_row(row)
+    return RodexSessionLog(
+        id=int(row[0]),
+        rodex_sessions_id=int(row[1]),
+        created_at_utc=str(row[2]),
+        rodex_sessions_users_id=int(row[3]),
+        last_accessed_at_utc=timestamp,
+    )
 
 
 def record_a_rodex_session_runtime_resume(
@@ -503,10 +527,10 @@ def record_a_rodex_session_runtime_resume(
     database_path: str | os.PathLike[str] | None = None,
     *,
     codex_session_id: CodexSessionId | str | None = None,
-    runtime_id: RodexRuntimeId | str | None = None,
+    runtime_id: RodexRuntimeId | str,
     accessed_at_utc: datetime | None = None,
 ) -> RodexTmuxSession:
-    """Atomically activate a runtime, optionally replacing an unsaved Codex session ID."""
+    """Atomically accept one complete runtime incarnation or keep the newer tuple."""
     _validate_session_id(session_id)
     tmux_link = _normalise_tmux_link(
         tmux_server_socket_path,
@@ -520,10 +544,58 @@ def record_a_rodex_session_runtime_resume(
         if codex_session_id is None
         else split_codex_session_id_into_signed_bigints(codex_session_id)
     )
-    parsed_runtime_id = None if runtime_id is None else parse_rodex_runtime_id(runtime_id)
+    parsed_runtime_id = parse_rodex_runtime_id(runtime_id)
     timestamp = _normalise_utc_datetime(accessed_at_utc)
-    path = initialise_rodex_database(database_path)
+    path = _database_path_for_mutation(database_path)
     with open_rodex_transaction(path) as connection:
+        require_current_rodex_schema(connection)
+        tmux_row = connection.execute(
+            f"SELECT id, rodex_sessions_id, tmux_server_socket_path, "
+            f"tmux_session_name FROM {RODEX_TMUX_SESSIONS_TABLE} "
+            "WHERE rodex_sessions_id = ?",
+            (session_id,),
+        ).fetchone()
+        if tmux_row is None:
+            raise RodexSessionError(f"Rodex tmux session does not exist: {session_id}")
+        log_row = connection.execute(
+            f"SELECT last_accessed_at_utc FROM {RODEX_SESSIONS_LOG_TABLE} "
+            "WHERE rodex_sessions_id = ?",
+            (session_id,),
+        ).fetchone()
+        if log_row is None:
+            raise RodexSessionError(f"Rodex session log does not exist: {session_id}")
+        next_access_timestamp = _monotonic_durable_timestamp(
+            str(log_row[0]), timestamp, field_name="last_accessed_at_utc"
+        )
+        runtime_row = connection.execute(
+            f"SELECT runtime_id_signed_bigint, started_at_utc "
+            f"FROM {RODEX_RUNTIME_INSTANCES_TABLE} WHERE rodex_sessions_id = ?",
+            (session_id,),
+        ).fetchone()
+        if runtime_row is not None:
+            current_started_at = _parse_canonical_durable_timestamp(
+                str(runtime_row[1]), field_name="started_at_utc"
+            )
+            candidate_started_at = _parse_canonical_durable_timestamp(
+                timestamp, field_name="started_at_utc"
+            )
+            poisoned_future = (
+                current_started_at
+                > candidate_started_at + _DURABLE_TIMESTAMP_MAX_FORWARD_SKEW
+            )
+            ambiguous_tie = (
+                candidate_started_at == current_started_at
+                and int(runtime_row[0]) != parsed_runtime_id.as_signed_bigint()
+            )
+            if (
+                candidate_started_at < current_started_at or ambiguous_tie
+            ) and not poisoned_future:
+                return RodexTmuxSession(
+                    id=int(tmux_row[0]),
+                    rodex_sessions_id=int(tmux_row[1]),
+                    tmux_server_socket_path=str(tmux_row[2]),
+                    tmux_session_name=str(tmux_row[3]),
+                )
         if codex_session_id_halves is not None:
             parsed_codex_session_id = parse_codex_session_id(codex_session_id)
             if (
@@ -547,20 +619,18 @@ def record_a_rodex_session_runtime_resume(
         )
         if tmux_cursor.rowcount != 1:
             raise RodexSessionError(f"Rodex tmux session does not exist: {session_id}")
-        if parsed_runtime_id is not None:
-            _record_rodex_runtime_instance(
-                connection,
-                session_id,
-                parsed_runtime_id,
-                timestamp,
-            )
-        log_cursor = connection.execute(
-            f"UPDATE {RODEX_SESSIONS_LOG_TABLE} SET last_accessed_at_utc = ? "
-            "WHERE rodex_sessions_id = ?",
-            (timestamp, session_id),
+        _record_rodex_runtime_instance(
+            connection,
+            session_id,
+            parsed_runtime_id,
+            timestamp,
         )
-        if log_cursor.rowcount != 1:
-            raise RodexSessionError(f"Rodex session log does not exist: {session_id}")
+        connection.execute(
+            f"UPDATE {RODEX_SESSIONS_LOG_TABLE} "
+            "SET last_accessed_at_utc = ? "
+            "WHERE rodex_sessions_id = ?",
+            (next_access_timestamp, session_id),
+        )
         row = connection.execute(
             f"SELECT id, rodex_sessions_id, tmux_server_socket_path, "
             f"tmux_session_name FROM {RODEX_TMUX_SESSIONS_TABLE} "
@@ -583,7 +653,7 @@ def lookup_rodex_runtime_instance(
 ) -> RodexRuntimeInstance | None:
     """Return the exact persisted current runtime incarnation, when recorded."""
     _validate_session_id(session_id)
-    path = existing_rodex_database_path(database_path)
+    path = normalise_rodex_database_path(database_path)
     with open_rodex_read_transaction(path) as connection:
         row = connection.execute(
             f"SELECT id, rodex_sessions_id, runtime_id_signed_bigint, started_at_utc "
@@ -637,7 +707,7 @@ def lookup_codex_session_id_from_a_rodex_sessions_id(
 ) -> CodexSessionId | None:
     """Return the Codex session ID stored on one Rodex session."""
     _validate_session_id(session_id)
-    path = existing_rodex_database_path(database_path)
+    path = normalise_rodex_database_path(database_path)
     with open_rodex_read_transaction(path) as connection:
         row = connection.execute(
             "SELECT identities.codex_thread_public_id_signed_bigint_1, "
@@ -661,7 +731,7 @@ def lookup_rodex_tmux_session(
 ) -> RodexTmuxSession | None:
     """Return the tmux endpoint linked to one Rodex session."""
     _validate_session_id(session_id)
-    path = existing_rodex_database_path(database_path)
+    path = normalise_rodex_database_path(database_path)
     with open_rodex_read_transaction(path) as connection:
         return _select_rodex_tmux_session(connection, session_id)
 
@@ -671,7 +741,7 @@ def lookup_rodex_sessions_id_from_a_cool_name(
     database_path: str | os.PathLike[str] | None = None,
 ) -> int | None:
     """Resolve a permanent or user-defined cool name through integer identities."""
-    path = existing_rodex_database_path(database_path)
+    path = normalise_rodex_database_path(database_path)
     with open_rodex_read_transaction(path) as connection:
         allocated_name = lookup_cool_name(connection, cool_name)
         if allocated_name is None:
@@ -695,7 +765,7 @@ def lookup_owned_rodex_sessions_id_from_a_cool_name(
 ) -> int | None:
     """Resolve a name only when its session belongs to the selected POSIX user."""
     identity = _resolve_user_identity(user_identity)
-    path = existing_rodex_database_path(database_path)
+    path = normalise_rodex_database_path(database_path)
     with open_rodex_read_transaction(path) as connection:
         allocated_name = lookup_cool_name(connection, cool_name)
         if allocated_name is None:
@@ -719,7 +789,7 @@ def lookup_rodex_session_names(
 ) -> RodexSessionNames | None:
     """Return the permanent and optional user-defined names for one session."""
     _validate_session_id(session_id)
-    path = existing_rodex_database_path(database_path)
+    path = normalise_rodex_database_path(database_path)
     with open_rodex_read_transaction(path) as connection:
         row = _select_rodex_session_names(connection, session_id)
     return None if row is None else _session_names_from_row(row)
@@ -743,8 +813,9 @@ def assign_a_user_defined_cool_name(
         if renamed_tmux_session_name is None
         else _normalise_tmux_session_name(renamed_tmux_session_name)
     )
-    path = initialise_rodex_database(database_path)
+    path = _database_path_for_mutation(database_path)
     with open_rodex_transaction(path) as connection:
+        require_current_rodex_schema(connection)
         return _apply_user_defined_cool_name_assignment(
             connection,
             session_cool_name,
@@ -768,7 +839,7 @@ def validate_a_user_defined_cool_name_assignment(
     if not isinstance(force, bool):
         raise TypeError("force must be a boolean")
     identity = _resolve_user_identity(user_identity)
-    path = existing_rodex_database_path(database_path)
+    path = normalise_rodex_database_path(database_path)
     with open_rodex_read_transaction(path) as connection:
         return _apply_user_defined_cool_name_assignment(
             connection,
@@ -790,12 +861,12 @@ def open_a_user_defined_cool_name_assignment(
     force: bool = False,
     user_identity: RodexSessionsUserIdentity | None = None,
 ) -> Iterator[RodexUserDefinedCoolNameAssignment]:
-    """Serialize validation, a caller's live rename, and the durable assignment."""
+    """Plan a rename, yield without a writer lock, then finalize it with CAS checks."""
     if not isinstance(force, bool):
         raise TypeError("force must be a boolean")
     identity = _resolve_user_identity(user_identity)
-    path = initialise_rodex_database(database_path)
-    with open_rodex_transaction(path) as connection:
+    path = normalise_rodex_database_path(database_path)
+    with open_rodex_read_transaction(path) as connection:
         planned_names = _apply_user_defined_cool_name_assignment(
             connection,
             session_cool_name,
@@ -805,18 +876,44 @@ def open_a_user_defined_cool_name_assignment(
             mutate=False,
             renamed_tmux_session_name=None,
         )
-        transition = RodexUserDefinedCoolNameAssignment(
-            names=planned_names,
-            tmux_session=_select_rodex_tmux_session(
-                connection, planned_names.rodex_sessions_id
-            ),
+        expected_names_row = _select_rodex_session_names(
+            connection, planned_names.rodex_sessions_id
         )
-        yield transition
-        persisted_tmux_name = (
+        if expected_names_row is None:
+            raise RodexSessionError(
+                f"Rodex session disappeared: {planned_names.rodex_sessions_id}"
+            )
+        expected_names = _session_names_from_row(expected_names_row)
+        expected_tmux = _select_rodex_tmux_session(
+            connection, planned_names.rodex_sessions_id
+        )
+    transition = RodexUserDefinedCoolNameAssignment(
+        names=planned_names,
+        tmux_session=expected_tmux,
+    )
+    yield transition
+    persisted_tmux_name = (
+        None
+        if transition.renamed_tmux_session_name is None
+        else _normalise_tmux_session_name(transition.renamed_tmux_session_name)
+    )
+    with open_rodex_transaction(path) as connection:
+        require_current_rodex_schema(connection)
+        current_names_row = _select_rodex_session_names(
+            connection, planned_names.rodex_sessions_id
+        )
+        current_names = (
             None
-            if transition.renamed_tmux_session_name is None
-            else _normalise_tmux_session_name(transition.renamed_tmux_session_name)
+            if current_names_row is None
+            else _session_names_from_row(current_names_row)
         )
+        current_tmux = _select_rodex_tmux_session(
+            connection, planned_names.rodex_sessions_id
+        )
+        if current_names != expected_names or current_tmux != expected_tmux:
+            raise RodexSessionError(
+                "Rodex session changed during its user-defined name transition"
+            )
         transition.names = _apply_user_defined_cool_name_assignment(
             connection,
             session_cool_name,
@@ -839,7 +936,7 @@ def list_rodex_session_runtimes_for_a_user(
         if user_identity is None
         else _validate_user_identity(user_identity)
     )
-    path = existing_rodex_database_path(database_path)
+    path = normalise_rodex_database_path(database_path)
     with open_rodex_read_transaction(path) as connection:
         user_id = select_lookup_id(
             connection,
@@ -892,8 +989,9 @@ def update_rodex_tmux_session_name(
     """Record a renamed tmux endpoint for one Rodex session."""
     _validate_session_id(session_id)
     session_name = _normalise_tmux_session_name(tmux_session_name)
-    path = initialise_rodex_database(database_path)
+    path = _database_path_for_mutation(database_path)
     with open_rodex_transaction(path) as connection:
+        require_current_rodex_schema(connection)
         cursor = connection.execute(
             f"UPDATE {RODEX_TMUX_SESSIONS_TABLE} SET tmux_session_name = ? "
             "WHERE rodex_sessions_id = ?",
@@ -925,7 +1023,7 @@ def lookup_rodex_sessions_id_from_a_codex_session_id(
     codex_session_id_part_1, codex_session_id_part_2 = (
         split_codex_session_id_into_signed_bigints(codex_session_id)
     )
-    path = existing_rodex_database_path(database_path)
+    path = normalise_rodex_database_path(database_path)
     with open_rodex_read_transaction(path) as connection:
         row = connection.execute(
             f"SELECT current.rodex_sessions_id FROM {CODEX_THREADS_TABLE} AS ids "
@@ -951,7 +1049,7 @@ def lookup_owned_rodex_sessions_id_from_a_codex_session_id(
     codex_session_id_part_1, codex_session_id_part_2 = (
         split_codex_session_id_into_signed_bigints(codex_session_id)
     )
-    path = existing_rodex_database_path(database_path)
+    path = normalise_rodex_database_path(database_path)
     with open_rodex_read_transaction(path) as connection:
         row = connection.execute(
             f"SELECT sessions.id, log.rodex_sessions_users_id "
@@ -1218,3 +1316,32 @@ def _session_log_from_row(row: tuple[object, ...]) -> RodexSessionLog:
         rodex_sessions_users_id=int(row[3]),
         last_accessed_at_utc=str(row[4]),
     )
+
+
+def _parse_canonical_durable_timestamp(value: str, *, field_name: str) -> datetime:
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except (TypeError, ValueError) as error:
+        raise RodexSessionError(
+            f"{field_name} is not a canonical UTC timestamp: {value!r}"
+        ) from error
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise RodexSessionError(f"{field_name} is not a canonical UTC timestamp: {value!r}")
+    parsed = parsed.astimezone(UTC)
+    if _normalise_utc_datetime(parsed) != value:
+        raise RodexSessionError(f"{field_name} is not a canonical UTC timestamp: {value!r}")
+    return parsed
+
+
+def _monotonic_durable_timestamp(
+    durable_value: str,
+    candidate_value: str,
+    *,
+    field_name: str,
+) -> str:
+    """Preserve plausible reordering and heal poisoned marks over one day ahead."""
+    durable = _parse_canonical_durable_timestamp(durable_value, field_name=field_name)
+    candidate = _parse_canonical_durable_timestamp(candidate_value, field_name=field_name)
+    if durable > candidate + _DURABLE_TIMESTAMP_MAX_FORWARD_SKEW:
+        return candidate_value
+    return durable_value if durable >= candidate else candidate_value

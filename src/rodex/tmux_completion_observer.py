@@ -12,6 +12,7 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Final
 
+from .tmux_executor import SyncTmuxExecutor, SyncTmuxRunner, TmuxCommandResult
 from .tmux_input_proxy import (
     extract_raw_prompt_text,
     native_popup_confirms_no_match,
@@ -36,7 +37,7 @@ _REDRAW_COALESCE_SECONDS: Final = 0.025
 _RIBBON_DURATION_SECONDS: Final = 5.0
 _NATIVE_COLLISION_PREFIXES: Final = frozenset({"/ro", "/rod", "/rode", "/rodex"})
 
-Runner = Callable[..., subprocess.CompletedProcess[str]]
+Runner = SyncTmuxRunner
 TokenFactory = Callable[[], str]
 
 
@@ -62,9 +63,12 @@ class TmuxCompletionObserver:
         runner: Runner = subprocess.run,
         token_factory: TokenFactory = lambda: secrets.token_hex(8),
     ) -> None:
-        self._tmux_prefix = [tmux_binary, "-S", str(tmux_server_socket_path)]
         self._pane_id = pane_id
-        self._run = runner
+        self._tmux_executor = SyncTmuxExecutor(
+            tmux_binary,
+            tmux_server_socket_path,
+            runner=runner,
+        )
         self._token_factory = token_factory
         self._token: str | None = None
         self._status = TmuxStatusPipeline(self._tmux, pane_id)
@@ -125,13 +129,8 @@ class TmuxCompletionObserver:
         if token:
             self._status.restore_if_token_matches(token)
 
-    def _tmux(self, *arguments: str) -> subprocess.CompletedProcess[str]:
-        return self._run(
-            [*self._tmux_prefix, *arguments],
-            check=False,
-            text=True,
-            capture_output=True,
-        )
+    def _tmux(self, *arguments: str) -> TmuxCommandResult:
+        return self._tmux_executor.run(arguments)
 
 
 class _AsyncPaneOutputWakeup:

@@ -21,13 +21,13 @@ or stored as another domain's identity.
 `rodex _context` is the single machine-readable self-identification pipeline. It uses
 the calling process's inherited `TMUX` and `TMUX_PANE` values only to address the live
 pane, then authenticates the advertised Rodex, registry, and Codex session IDs against the
-current POSIX user's persisted runtime. It reports the current display and tmux names,
+current Linux user's persisted runtime. It reports the current display and tmux names,
 permanent and optional user-defined names, registry/database provenance, Codex session ID,
 exact tmux socket/session/window/pane address, registration state, and attached-client
 snapshot as JSON. Missing, foreign, stale, or mismatched identity fails closed rather
 than being inferred or adopted. Private proxy/event sockets and runtime logs remain
-implementation details rather than agent context.
-New runtimes also report `runtime_id` and whether it matches the persisted incarnation.
+implementation details rather than agent context. The result includes `runtime_id` and
+whether it matches the persisted incarnation.
 
 Every process invocation passes through one application control plane. The Rodex command
 contract claims exact local commands first; the declarative Codex 0.150.1 CLI contract
@@ -72,6 +72,23 @@ replacement, retaining native stdin, stdout, stderr, signals, and exit status.
 `./rodex _help` prints the Rodex command namespace locally. It does not resolve Codex,
 tmux, or the session database.
 
+## Tmux execution boundary
+
+`rodex.tmux_executor` is the only production boundary that starts a tmux process. An
+executor binds one tmux binary and server socket; all callers use the same
+`run(command_arguments, mode=..., output=...)` entry. Captured mode either returns text
+or discards stdin/stdout/stderr and always has an absolute deadline: one second by
+default and five seconds for ordinary runtime-launcher commands. Nonzero exits, timeout,
+and process unavailability return one normalized result. Interactive attachment uses the
+same entry with direct terminal ownership, an explicit environment, no capture, and its
+natural lifetime. The asynchronous executor also exposes only `run`; deadline
+cancellation kills and reaps its one child.
+
+Status publication, input guards, completion captures, observer-pane control,
+registration checks, animation, rename, and attach all use that boundary. Domain
+components may assemble tmux arguments or atomic `if-shell` command sequences, but they
+never construct or execute the tmux process prefix themselves.
+
 ## Scrollback ownership
 
 Rodex configures tmux's history default before the first pane is created: each new pane
@@ -114,9 +131,11 @@ not become subscribers by reading or mutating. Each ordinary client uses a separ
 upstream App Server connection over private Unix sockets. tmux user options advertise
 the sockets and live identities. Tool counts cover one runtime.
 
-The separate tmux input proxy and completion observer for `/rodex` are retained but
-temporarily disabled by `RODEX_TMUX_SLASH_ENABLED`. Runtime status setup removes their
-Enter/Tab bindings and pane pipe, so all input currently passes directly to Codex.
+`/rodex` input interception is disabled by `RODEX_TMUX_SLASH_ENABLED`, so runtime setup
+removes its Enter/Tab bindings and pane pipe and all input passes directly to Codex. When
+enabled, `pipe-pane` writes pane output into the completion observer's stdin. Its event
+loop coalesces relevant bytes without polling; this inbound stream is not a tmux process
+boundary, and every outbound display, capture, or status command still uses the executor.
 
 ## Live agent observer pane
 
@@ -148,22 +167,33 @@ same turn requests an agent, sends its unchanged text to the pane as
 `ROOT TURN REQUEST · exact user message`. This is explicitly root-turn provenance, not
 the collaboration payload. Without the exact same-turn message, the observer presents
 `ROOT TURN REQUEST UNAVAILABLE`. Tracked-child commentary and final
-responses appear as agent-attributed `AGENT UPDATE` and `AGENT ANSWER`. Message text has
-no fixed display width or truncation and wraps only at the actual tmux pane edge;
+responses appear as agent-attributed `AGENT UPDATE` and `AGENT ANSWER`. Message text is
+bounded before transport, has no fixed display width, and wraps at the tmux pane edge;
 terminal control sequences are removed.
 
-The session host is the sole projector of collaboration invocation, sub-agent lifecycle,
-exact root-request context, and tracked-child message events into the observer. It
-already sees the primary App Server stream before pane creation, so its ordered
-dispatcher carries even a fast first agent reply across the observer socket-startup
-boundary without relying on subscriber replay.
+`observer_projection` statelessly validates and bounds collaboration invocations,
+sub-agent lifecycle, root-request context, and tracked-child messages. A producer
+`ObserverStateReducer` is the sole owner of identity keys, active events, tombstones,
+target pruning, revision, and primary-connection epoch. Its single-slot dispatcher owns
+transport only and sends the newest complete bounded snapshot. The observer process uses
+a consumer reducer with the same identity rules; it applies each revision once and
+replaces presentation-derived state on epoch or overflow boundaries. Consequently a
+retired target cannot reappear when an unrelated later snapshot arrives.
 Each runtime derives a distinct private control socket from its exact protocol-event
-socket. Events cross it as length-framed Unix stream messages, preserving exact long
-agent prose without a datagram-size ceiling; the observer also rejects a lifecycle or
-request event whose root identity does not match. Root request and collaboration prompt
+socket. Events cross it as length-framed Unix stream messages. Projection bounds free
+text before JSON encoding and caps each frame at 256 KiB; the observer rejects a
+lifecycle or request event whose root identity does not match. Root request and collaboration prompt
 text cross that private socket after pane startup, so it does not enter the observer
 process arguments and is not duplicated as a SQLite plaintext body. The direct
 event-stream subscription supplies runtime liveness only.
+
+`AgentObserverView` owns presentation correlation and rendering only.
+`ObserverPaneController` owns only validation, location, and creation of the
+input-disabled tmux pane, using bounded executor calls. On loss of the primary App Server
+connection, `PrimaryConnectionLifecycleCoordinator` independently resets context,
+event-tap, and observer participants and completes the transition even if one participant
+fails. The reducer alone advances the serialized observer epoch. This prevents one broken
+reset from preserving another participant's stale connection state.
 
 The analytics worker wakes the observer only after a durable publication commit, so
 indexed cursor reads need no polling timer. The observer reads only active or
@@ -222,13 +252,13 @@ shape from indexed SQL. Per-thread summaries group through canonical membership 
 separate lineage edge. Trace tables retain typed event metadata, source coordinates,
 byte counts, and opaque public UUIDs without copying message, command, tool, or output
 bodies. `_trace --include-bodies` explicitly re-authenticates recorded rollout prefixes
-before resolving those bodies.
+before resolving those bodies. Body expansion is snapshot-only; `--follow` remains a
+bounded metadata stream and rejects `--include-bodies`.
 
 Analytics is fail-open: source, parsing, calculation, process, or database failure
 cannot change the Codex TUI's behavior or exit status. `_stats`, `_stats-status`,
 `_agents`, and `_trace` enforce normal ownership but query SQLite without requiring live
-Codex, tmux, or analyzer processes. A runtime started before this feature must end and
-resume before it has an analytics sidecar.
+Codex, tmux, or analyzer processes.
 
 ## Named reattachment
 
@@ -264,7 +294,8 @@ resume before it has an analytics sidecar.
   it. A live effective-name change sends exactly one verified `RODEX_AUTO_INFO`
   prompt to the session's single Codex thread, regardless of how many tmux clients
   are attached. Offline and unchanged names do not send one.
-- `_send` and idle-based `_wait` remain compatibility commands.
+- Human-facing idle `_wait` remains available. Mutations use only the exact, locked
+  `_start`, `_steer`, and `_interrupt` coordinator operations.
 - `_inspect --json` reports the exact active turn. `_start` and `_steer` accept an
   optional caller-owned `--dispatch ID`, while `_dispatch-status` observes that ID in
   exact App Server thread history. Exact `_wait`, `_interrupt`, and `_result` use a
@@ -287,8 +318,12 @@ resume before it has an analytics sidecar.
   two seconds to send the interrupt to Codex, where it may end the TUI for every
   attached client. A private session retains Codex's native `Ctrl-C` behavior.
 - A second attached client triggers a five-second shared-arrival animation. Returning
-  to one client triggers its private-session counterpart. Both run in a separate
-  one-shot process and restore the ordinary status bar without delaying the TUI.
+  to one client triggers its private-session counterpart. The hook targets stable
+  `#{session_id}:`, so rename cannot stale it. tmux atomically increments a generation,
+  keeps only the newest pending transition, admits one lease owner, and schedules one
+  15-second recovery gate. Token/generation conditions prevent an old owner from
+  releasing its successor; the gate clears its marker before starting a replacement for
+  a crashed owner. The renderer owns frames only and conditionally restores the base bar.
 - Exiting the Codex TUI ends its supervisor and private app-server; its cool name can
   transparently resume the saved Codex session later.
 - A completely empty Codex TUI may not have saved history. Its cool name recovers by
@@ -297,9 +332,7 @@ resume before it has an analytics sidecar.
   partial database row. A host whose pending registration is never confirmed exits;
   one exact matching pending runtime can finish an interrupted confirmation on the
   next command, including when it was launched under a temporary tmux name.
-- Scrollback settings apply when a pane is created. A runtime started by an older
-  Rodex version must end and resume, or be replaced by a new session, to gain the
-  larger history and inline TUI rendering.
+- Scrollback settings apply when a pane is created.
 - The runtime uses `$XDG_RUNTIME_DIR/rodex` when suitable—normally
   `/run/user/<uid>/rodex`—otherwise `/tmp/rodex-<uid>`. Unix sockets stay there because
   long project paths can exceed Linux socket limits.
@@ -307,5 +340,11 @@ resume before it has an analytics sidecar.
   its private sockets and log hourly. A refresh failure ends that runtime rather than
   leaving a detached session that cannot be addressed. Normal cleanup eligibility
   resumes when the live hosts exit.
+- After a Rodex transaction admits the registered database, the host subscribes to
+  `database_terminal_signal`. Database move, replacement, invalidation, or notification
+  overflow permanently latches restart guidance. `RuntimeShutdownCoordinator` wakes
+  each registered boundary, terminates the TUI, and lets the host close analytics,
+  keepalive, proxy, observer, event tap, app-server, and sockets; it never follows a
+  replacement path or attempts in-process recovery.
 
 Exact tmux targets and compensated name transitions preserve the recorded endpoint.

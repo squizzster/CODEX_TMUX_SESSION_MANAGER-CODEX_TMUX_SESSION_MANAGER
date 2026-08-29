@@ -14,8 +14,8 @@ from rodex_registry import (
     RodexSessionError,
     RodexSessionId,
     RodexSessionIdCollisionError,
+    audit_rodex_database_integrity,
     create_a_rodex_session,
-    default_rodex_database_path,
     generate_an_unregistered_rodex_session_id_candidate,
     initialise_rodex_database,
     join_signed_bigints_into_a_codex_session_id,
@@ -25,7 +25,11 @@ from rodex_registry import (
     lookup_rodex_sessions_id_from_a_rodex_session_id,
     split_codex_session_id_into_signed_bigints,
 )
-from rodex_sql import RodexSQLError
+from rodex_sql import (
+    RodexSQLError,
+    default_rodex_database_path,
+    open_rodex_bootstrap_transaction,
+)
 
 
 def fetch_all(database: Path, query: str) -> list[tuple[object, ...]]:
@@ -107,15 +111,16 @@ def test_registry_id_has_one_bigint_column_and_named_unique_index(
     assert [row[2] for row in index_columns] == ["rodex_registry_id_signed_bigint"]
 
 
-def test_initialise_repairs_an_existing_database_to_private_permissions(
+def test_initialise_rejects_existing_public_permissions_without_repair(
     tmp_path: Path,
 ) -> None:
     database = tmp_path / "rodex.sqlite3"
     database.touch(mode=0o644)
 
-    initialise_rodex_database(database)
+    with pytest.raises(RodexSQLError, match="database is not private"):
+        initialise_rodex_database(database)
 
-    assert stat.S_IMODE(database.stat().st_mode) == 0o600
+    assert stat.S_IMODE(database.stat().st_mode) == 0o644
 
 
 def test_initialise_rejects_a_database_symlink(tmp_path: Path) -> None:
@@ -124,7 +129,7 @@ def test_initialise_rejects_a_database_symlink(tmp_path: Path) -> None:
     database = tmp_path / "rodex.sqlite3"
     database.symlink_to(target)
 
-    with pytest.raises(RodexSQLError, match="securely open database"):
+    with pytest.raises(RodexSQLError, match="not a regular file"):
         initialise_rodex_database(database)
 
 
@@ -311,19 +316,34 @@ def test_initialisation_is_idempotent(tmp_path: Path) -> None:
     assert fetch_all(database, "SELECT COUNT(*) FROM rodex_sessions") == [(0,)]
 
 
-def test_initialisation_rejects_an_incompatible_root_table(tmp_path: Path) -> None:
+def test_integrity_audit_accepts_a_complete_current_database(tmp_path: Path) -> None:
+    database = initialise_rodex_database(tmp_path / "rodex.sqlite3")
+
+    assert audit_rodex_database_integrity(database) == database
+
+
+def test_integrity_audit_does_not_create_absent_storage(tmp_path: Path) -> None:
+    database = tmp_path / "absent" / "rodex.sqlite3"
+
+    with pytest.raises(RodexSQLError, match="database does not exist"):
+        audit_rodex_database_integrity(database)
+
+    assert not database.parent.exists()
+
+
+def test_integrity_audit_rejects_an_incompatible_root_table(tmp_path: Path) -> None:
     database = tmp_path / "rodex.sqlite3"
-    with sqlite3.connect(database) as connection:
+    with open_rodex_bootstrap_transaction(database) as connection:
         seed_current_schema_generation(connection)
         connection.execute("CREATE TABLE rodex_sessions (id INTEGER PRIMARY KEY)")
 
-    with pytest.raises(RodexSessionError, match="schema mismatch"):
-        initialise_rodex_database(database)
+    with pytest.raises(RodexSessionError, match="integrity audit found missing table"):
+        audit_rodex_database_integrity(database)
 
 
-def test_initialisation_rejects_an_id_without_autoincrement(tmp_path: Path) -> None:
+def test_integrity_audit_rejects_an_id_without_autoincrement(tmp_path: Path) -> None:
     database = tmp_path / "rodex.sqlite3"
-    with sqlite3.connect(database) as connection:
+    with open_rodex_bootstrap_transaction(database) as connection:
         seed_current_schema_generation(connection)
         connection.execute(
             "CREATE TABLE rodex_sessions ("
@@ -335,15 +355,15 @@ def test_initialisation_rejects_an_id_without_autoincrement(tmp_path: Path) -> N
             "FOREIGN KEY (user_defined_cool_names_id) REFERENCES cool_names (id))"
         )
 
-    with pytest.raises(RodexSessionError, match="AUTOINCREMENT"):
-        initialise_rodex_database(database)
+    with pytest.raises(RodexSessionError, match="integrity audit found missing table"):
+        audit_rodex_database_integrity(database)
 
 
-def test_initialisation_rejects_missing_identity_type_constraints(
+def test_integrity_audit_rejects_missing_identity_type_constraints(
     tmp_path: Path,
 ) -> None:
     database = tmp_path / "rodex.sqlite3"
-    with sqlite3.connect(database) as connection:
+    with open_rodex_bootstrap_transaction(database) as connection:
         seed_current_schema_generation(connection)
         connection.execute(
             "CREATE TABLE rodex_sessions ("
@@ -355,13 +375,15 @@ def test_initialisation_rejects_missing_identity_type_constraints(
             "FOREIGN KEY (user_defined_cool_names_id) REFERENCES cool_names (id))"
         )
 
-    with pytest.raises(RodexSessionError, match="identity constraints mismatch"):
-        initialise_rodex_database(database)
+    with pytest.raises(RodexSessionError, match="integrity audit found missing table"):
+        audit_rodex_database_integrity(database)
 
 
-def test_initialisation_repairs_a_missing_unique_index(tmp_path: Path) -> None:
+def test_integrity_audit_rejects_a_missing_unique_index_without_repair(
+    tmp_path: Path,
+) -> None:
     database = tmp_path / "rodex.sqlite3"
-    with sqlite3.connect(database) as connection:
+    with open_rodex_bootstrap_transaction(database) as connection:
         seed_current_schema_generation(connection)
         connection.execute(
             "CREATE TABLE rodex_sessions ("
@@ -374,12 +396,10 @@ def test_initialisation_repairs_a_missing_unique_index(tmp_path: Path) -> None:
             "FOREIGN KEY (user_defined_cool_names_id) REFERENCES cool_names (id))"
         )
 
-    initialise_rodex_database(database)
+    with pytest.raises(RodexSessionError, match="integrity audit found missing"):
+        audit_rodex_database_integrity(database)
 
-    assert fetch_all(
-        database,
-        "PRAGMA index_info(rodex_sessions_session_id_unique)",
-    )
+    assert not fetch_all(database, "PRAGMA index_info(rodex_sessions_session_id_unique)")
 
 
 def test_codex_session_id_storage_helpers_preserve_the_codex_identity() -> None:
@@ -658,7 +678,7 @@ def test_nonempty_unmarked_database_is_rejected_before_v14_tables_are_created(
     tmp_path: Path,
 ) -> None:
     database = tmp_path / "rodex.sqlite3"
-    with sqlite3.connect(database) as connection:
+    with open_rodex_bootstrap_transaction(database) as connection:
         connection.execute("CREATE TABLE legacy_sentinel (value TEXT NOT NULL)")
         connection.execute("INSERT INTO legacy_sentinel VALUES ('untouched')")
 
@@ -682,7 +702,7 @@ def test_wrong_explicit_schema_generation_is_rejected_without_repair(
     tmp_path: Path,
 ) -> None:
     database = tmp_path / "rodex.sqlite3"
-    with sqlite3.connect(database) as connection:
+    with open_rodex_bootstrap_transaction(database) as connection:
         connection.execute(
             "CREATE TABLE rodex_schema_generations ("
             "id INTEGER PRIMARY KEY AUTOINCREMENT, "

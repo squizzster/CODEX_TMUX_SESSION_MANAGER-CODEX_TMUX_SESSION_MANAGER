@@ -1,12 +1,12 @@
 # Agent instructions
 
-Keep this a current blueprint, not a change log. Amend a standard only after an agent
-suggestion and user agreement. Consider one independent reviewer, retain ownership, and
-keep this file within 150 lines and 10,240 bytes.
+Keep this a current blueprint, not a change log. Amend a standard only after user
+agreement, retain clear ownership, and keep this file within 150 lines and 10,240 bytes.
 
 # Rodex architecture
 
-Rodex matches a durable session and 64-bit runtime ID to its Codex thread/session tree and tmux endpoint.
+Rodex binds a durable session and 64-bit runtime incarnation to one Codex thread tree
+and one authenticated tmux endpoint.
 
 ## Runtime shape
 
@@ -21,129 +21,120 @@ user → Rodex CLI → private tmux → session host → Codex TUI ↔ proxy ↔
 ## Application control plane
 
 ```text
-argv → Rodex contract → Codex 0.150.1 contract → execute one domain
+argv → Rodex contract → characterized Codex contract → execute one domain
                         ├─ direct: local reads or Codex passthrough
                         ├─ selector: owned session or canonical Codex candidate
                         └─ runtime: managed interactive, session, or machine work
 ```
 
-`rodex.cli` composes dependencies and the characterized Codex grammar. The pipeline owns
-typed routing. A sole interactive token gets one selector lookup; an unmatched token
-remains the managed prompt. Canonical unregistered identities require a transient App
-Server check. Direct reads and Codex passthrough need no runtime.
+`rodex.cli` composes dependencies; `rodex.application_pipeline` owns typed routing.
+One interactive token receives one selector lookup. Unmatched input remains a managed
+prompt. An unregistered canonical Codex identity requires a transient App Server check.
 
-## Component boundaries
+## Canonical owners
 
 | Component | Responsibility |
 |---|---|
-| `rodex.cli` | Adapt process arguments/errors and compose application dependencies. |
-| `rodex.application_pipeline` | Classify, prepare, and dispatch every invocation through one typed route. |
-| `codex_cli_contract` / `rodex.command_contract` | Own current Codex grammar/routing and local command/help grammar. |
-| `rodex.managed_session_lifecycle` / `cool_name` | Own selector resolution, naming, create, attach, resume, recovery, and collision policy. |
-| `rodex.session_commands` / `statistics_commands` / `agent_trace_commands` / `machine_commands` | Execute the four command domains behind the shared CLI contract. |
-| `rodex.session_read_pipeline` / `session_tail` | Own verified live reads and tail-compatible terminal following. |
-| `rodex.runtime` / `process_contracts` / `session_host` | Own typed app-server/tmux discovery, processes, attachment, and supervision. |
-| `rodex.status_bar` / `tmux_status` / `status_animation` | Own base status, palette, arbitration, and cancellable transitions. |
-| `rodex.agent_observer` | Own the input-disabled tmux pane and the human/developer presentation of invocation, exact requests, agent-authored prose, and durable outcomes. |
-| `rodex.analytics` / `analytics_source_*` | Authenticate bounded rollout sources and supervise fail-open suffix analysis. |
-| `rodex.agent_trace` | Normalize authenticated rollout records into typed trace facts. |
-| `rodex.control` | Verify and control one exact loaded Codex thread. |
-| `rodex.codex_update_notice` | Compare stable Codex versions through bounded commands and a fail-open 24-hour npm cache. |
-| `rodex.app_server_contract` / `protocol_proxy` | Own App Server contracts, forwarding, bounded live signals, and downstream-only native TUI notices. |
-| `rodex_registry.execution` / `agent_trace` / `statistics` | Own canonical lineage, request/turn provenance, typed trace persistence, and relational projections. |
-| `rodex_registry.agent_observer` | Read one bounded projection for only the observer's exact current agent turns. |
-| `rodex_registry.schema` | Own and exactly attest the complete v14 relational schema. |
-| `rodex_sql` | Separate fail-closed read-only transactions from explicit bootstrap/write transactions. |
+| `rodex.application_pipeline` / command contracts | Classify and dispatch one typed invocation. |
+| `rodex.managed_session_lifecycle` / `cool_name` | Select, name, create, attach, resume, recover, and resolve collisions. |
+| `rodex.exact_turn_mutation` | Re-resolve mutation selectors under the per-session transition lock; validate incarnation and choose start, steer, interrupt, or alias policy. |
+| `rodex.session_read_pipeline` / `session_tail` | Verify live reads and follow terminal history without idle full-history scans. |
+| `rodex.runtime` / `process_contracts` / `session_host` | Discover, launch, attach, supervise, and clean up app-server, TUI, proxy, analytics, and runtime paths. |
+| `rodex.tmux_executor` | Sole production process boundary for every tmux command. |
+| `rodex.tmux_status` / `status_animation` | Arbitrate status claims and render one already-admitted transition. |
+| `rodex.status_animation_admission` | Own tmux-native generation, pending event, lease, handoff, and watchdog recovery. |
+| `rodex.observer_projection` | Statelessly validate and bound App Server fields for observation. |
+| `rodex.observer_state` | Own observer identity keys, active state, tombstones, target pruning, revisions, and connection epochs. |
+| `rodex.agent_observer` | Coordinate observer owners, transport snapshots, and render the presentation view. |
+| `rodex.observer_pane` | Locate or create the input-disabled tmux pane; own no semantic observer state. |
+| `rodex.primary_connection_lifecycle` | Isolate primary-connection resets and terminal runtime-shutdown interrupts. |
+| `rodex.analytics` / source readers | Authenticate bounded rollout suffixes and supervise fail-open analysis. |
+| `rodex_registry.agent_trace_contract` / writer / reader | Normalize immutable trace facts before SQL, append them in a caller-owned transaction, and read bounded projections. |
+| `rodex_registry.execution` / `statistics` | Own canonical lineage, publication orchestration, and relational projections. |
+| `rodex_registry.schema` | Generate, install when authorized, and attest the complete relational catalog. |
+| `rodex_sql` | Own private no-follow paths, storage identity, location latch, connections, transactions, and natural-key lookups. |
 
-## Identity and data model
+## Tmux execution and status
 
-`rodex_sessions.id` is the private relational key. Rodex session, registry, and runtime
-IDs are distinct random 64-bit domains with one 16-character lowercase hex wire form.
-`codex_threads` stores each 128-bit UUID once as signed `BIGINT` halves; dependents use
-integer foreign keys. Turns, items, trace events, and tool calls have separate opaque
-128-bit public IDs. Provenance and activity never replace canonical identity. Detailed
-rules live in [SQL_SCHEMA.md](SQL_SCHEMA.md).
+Each tmux executor binds the binary and server socket; every caller uses the sole entry
+`run(command_arguments, mode=..., output=...)`. Synchronous captured commands either
+return text or discard all streams and have an absolute deadline: one second by default,
+five seconds for ordinary runtime-launcher operations. Results normalize nonzero exits,
+timeouts, and unavailable processes. Interactive attach uses the same entry with direct
+terminal ownership and its natural lifetime. The asynchronous entry applies its deadline
+to one child and kills and reaps that child on cancellation.
 
-## Authoritative lifecycle
+The disabled `/rodex` completion component illustrates a distinct inbound boundary:
+`pipe-pane` bytes arrive on the completion observer's stdin and wake a coalescing event
+loop. That reader does not spawn tmux. Its display, capture, and status operations still
+cross `tmux_executor`, as do input guards, shared `Ctrl-C`, status publication, observer
+pane operations, registration checks, animation, rename, and attach.
 
-### New session (native interactive syntax, `_create`, or `_detach`)
+`TmuxStatusPipeline` atomically arbitrates priority and token ownership. Client hooks
+address `#{session_id}:`, so a rename cannot invalidate an installed hook. tmux serializes
+each animation event into a generation and newest pending transition, admits one lease
+owner, and schedules one delayed recovery gate. The admission owner drains the newest
+generation and releases with token/generation conditions; the gate can replace a crashed
+owner without allowing an old owner to clear its successor. `status_animation` only
+renders an admitted transition and conditionally restores the base status.
 
-1. Allocate unregistered Rodex session and runtime IDs through the same bounded,
-   indexed ten-candidate pipeline.
-2. Configure tmux history, then create the detached session; mouse remains user-owned.
-3. Start and supervise one private app-server, proxy, updater-disabled inline Codex TUI,
-   and analytics.
-4. Observe its one Codex ID and advertise all identities as `pending`.
-5. Transactionally register identity, provenance, name, owner, and endpoint; confirm it.
-6. Rename tmux and configure status.
-7. Before an attach, check for a newer stable Codex release and, when present, ask the
-   proxy to emit a native warning only to the primary TUI; then attach regardless.
+## Identity and lifecycle
 
-### Existing selector
+`rodex_sessions.id` is private. Session, registry, and runtime IDs are separate 64-bit
+domains. Codex thread UUIDs, turns, items, trace events, and tool calls retain their own
+identities; provenance never substitutes for identity. See [SQL_SCHEMA.md](SQL_SCHEMA.md).
 
-1. Resolve a generated name, display name, or Codex UUID to `rodex_sessions.id` once.
-2. Enforce ownership using the effective POSIX identity.
-3. Attach only to an endpoint with matching identities; an exact pending tuple completes interrupted registration.
-4. Otherwise ask Codex to resume the stored Codex session ID and verify the observed ID.
-5. If never saved, start empty and atomically relink; otherwise replace the endpoint.
+New sessions allocate unregistered IDs, create detached tmux with the configured history,
+start the private host processes, observe one Codex root ID, and advertise a `pending`
+tuple. One transaction registers identities, provenance, owner, name, and endpoint before
+confirmation, tmux rename, status setup, optional update notice, and attach.
 
-### Persisted standalone Codex UUID
+Existing selectors resolve once to the owned relational identity. A live endpoint must
+match every advertised identity. Otherwise Rodex resumes and verifies the stored Codex
+ID before replacing the endpoint; a never-saved ID starts empty and relinks atomically.
+Managed opens hold the per-session lock through resolution and endpoint replacement but
+release it before attach. Exact pending runtimes repair interrupted confirmation. Alias
+changes compensate tmux rename if their database transition fails.
 
-Parse only canonical hyphenated UUIDs and resolve an existing owned link first. A
-short-lived, version-checked App Server must read the exact persisted, non-ephemeral
-candidate before normal creation with `resume <UUID>`; missing candidates clean up and
-continue as a managed initial prompt. Verify the loaded UUID before commit and attach.
+## Observer flow and connection lifecycle
 
-Managed opens hold one per-session lock through live resolution, resume, and endpoint replacement, releasing it before tmux attach. Concurrent shells converge on one verified runtime. An exact relocated `pending` runtime repairs interrupted launch. Only the exact Codex `active writer` shutdown conflict receives a bounded retry.
+```text
+App Server event → stateless projection → producer reducer → newest snapshot dispatcher
+                                              ↓
+tmux pane ← presentation view ← consumer reducer ← length-framed private socket
+```
 
-`_running` follows the same ownership and live-endpoint rules. `_alias` changes use the
-same naming pipeline and compensate a tmux rename if the database transition fails.
+The producer reducer is the sole semantic owner of active events, tombstones, tracked
+targets, pruning, epoch, and revision. It publishes complete bounded snapshots. The
+single-slot dispatcher transports only the newest snapshot; the consumer applies each
+revision once and replaces presentation-derived state on epoch or overflow boundaries.
+Target tombstones therefore survive unrelated updates and prevent resurrection. The
+view owns rendering state only, while `ObserverPaneController` owns tmux pane mechanics.
+Committed analytics publications wake bounded indexed reads; the observer does not poll
+SQLite. Projection bounds text before JSON encoding and control frames are capped at
+256 KiB.
 
-Named segments own base status. `TmuxStatusPipeline` arbitrates animations and transient claims so refreshes cannot clear higher-priority warnings. Per-client prefix state preserves fast keys; shared `Ctrl-C` requires same-client confirmation; `/rodex` remains disabled. One primary context coordinator combines live token snapshots from the exact rollout path named by `thread/started` with App Server usage and compaction events; durable analytics remains downstream.
+On primary connection loss, `PrimaryConnectionLifecycleCoordinator` independently calls
+every reset participant, records failures, and completes the lifecycle transition even
+when one reset fails. The reducer alone advances the observer transport epoch. This is
+separate from terminal host shutdown. After a Rodex transaction admits
+the database, runtime subscribes to `database_terminal_signal`; a moved, replaced, or
+invalidated database latches a restart-required reason. `RuntimeShutdownCoordinator`
+wakes every registered boundary, terminates the TUI, and the host closes analytics,
+runtime keepalive, proxy, observer, event tap, app-server, and private sockets.
 
-## Live observation
+## Persistence and integrity
 
-Live reads share one verified session-read pipeline. `_cat` snapshots tmux; `_tail`
-emits committed history and settled visible changes outside the status/composer region;
-`_events` streams App Server events. Observation is not turn completion; controllers
-use `_inspect`, `_wait`, and `_result`. A Rodex update notice terminates at the proxy and
-becomes TUI-owned scrollback; it is absent from App Server traffic, `_events`, durable
-thread content, and model turns.
+One blocking scheduler coalesces protocol activity and feeds authenticated, newline-
+complete rollout suffixes to a resident analyzer and trace normalizer. One fenced
+transaction publishes source checkpoints, statistics, append-only trace, request/turn
+associations, and health. Permanent source failures park by authenticated fingerprint
+until relevant source state changes; failures preserve the last good view and cannot
+affect the TUI.
 
-## Persistent analytics
-
-One blocking scheduler coalesces protocol activity and sends authenticated source
-suffixes through cursors into a resident analyzer and trace normalizer. Cold lineage
-recovery prefers event-named UUIDs; its bounded startup fallback reads only candidate
-metadata. Resident wakes never repeat discovery or reload unchanged prefixes.
-
-Identity, provenance, checkpoints, replaceable statistics, and the append-only trace have
-separate relational owners. One fenced transaction publishes progress, trace, metrics,
-request/turn associations, and worker health. Failures preserve the last good view and
-cannot affect the TUI. See [SQL_SCHEMA.md](SQL_SCHEMA.md) for persistence rules.
-
-After each publication, the observer reads one bounded projection for its current agent
-turns. Codex 0.150.1's `collabAgentToolCall` supplies the exact collaboration tool and,
-when available, its plaintext prompt; `subAgentActivity` supplies child identity and
-lifecycle under the same call ID. The durable trace retains that exact relationship while
-keeping rollout arguments encrypted. Only spawn and follow-up operations enter the FIFO
-target-turn association; `send_message` continues the current turn. The latest completed
-same-root, same-turn `userMessage` is separately labelled as root-request provenance.
-Runtime-specific length-framed control messages are root- and sender-checked and keyed by
-exact activity identity. Other-root content, protected instructions, encrypted payloads,
-reasoning, arbitrary tool arguments, and output payloads stay outside the boundary.
-
-## Live control
-
-WebSocket transport uses private Unix sockets. Legacy `_send` and idle `_wait` retain short-lived secondary connections. Machine commands operate by exact turn ID and emit schema-v2 envelopes with `runtime.runtime_id`; start/steer carry caller-owned dispatch IDs that `_dispatch-status` observes in thread history. Control requires matching runtime identity and App Server compatibility; results stay live. Timeout never interrupts, and reply loss is indeterminate rather than silently retried. Approval and user-input requests remain routed to the subscribed TUI.
-
-## Integrity boundaries
-
-- Rodex, Codex, tmux, users, and names never substitute identities for one another.
-- SQLite relationships, natural keys, and cardinality are enforced by constraints.
-- Related database changes use `BEGIN IMMEDIATE` and commit as one unit; WAL mode and
-  a busy timeout allow consistent readers to coexist with ordinary analytics writes.
-- Read paths use an existing private database in read-only/query-only mode; only explicit bootstrap or mutation may create or repair storage.
-- External tmux changes use exact targets and compensating transitions where needed.
-- A live host keeps runtime paths fresh and fails closed if that cannot be maintained.
-- Private runtime/database paths validate owner, type, mode, and symlink boundaries.
+- Rodex, Codex, tmux, user, session, and runtime identities never substitute for one another.
+- Related writes use explicit transactions; WAL and a busy timeout permit consistent readers.
+- Ordinary reads and mutations are existing-only. Explicit first use alone may create storage.
+- Private database/runtime paths validate owner, type, mode, descriptor, and symlink boundaries.
+- External tmux work uses exact targets and compensated or conditional transitions.
+- Runtime path refresh and the database terminal latch fail closed when continued addressing is unsafe.

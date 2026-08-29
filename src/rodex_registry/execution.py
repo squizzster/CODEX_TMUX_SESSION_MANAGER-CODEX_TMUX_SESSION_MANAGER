@@ -7,7 +7,7 @@ import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 
-from rodex_sql import open_rodex_read_transaction
+from rodex_sql import normalise_rodex_database_path, open_rodex_read_transaction
 
 from .errors import RodexSessionError
 from .identity import (
@@ -28,7 +28,6 @@ from .schema import (
     RODEX_SESSIONS_CODEX_TURNS_TABLE,
     RODEX_SESSIONS_CURRENT_CODEX_THREADS_TABLE,
     RODEX_SESSIONS_SUBAGENT_SPAWNS_TABLE,
-    existing_rodex_database_path,
 )
 from .validation import (
     _normalise_required_text,
@@ -99,7 +98,7 @@ def list_rodex_session_codex_threads(
 ) -> tuple[RodexSessionCodexThread, ...]:
     """Read execution lineage and rollout checkpoints without derived statistics."""
     _validate_session_id(session_id)
-    path = existing_rodex_database_path(database_path)
+    path = normalise_rodex_database_path(database_path)
     with open_rodex_read_transaction(path) as connection:
         rows = select_codex_threads_in_transaction(connection, session_id)
     return tuple(codex_thread_from_row(row) for row in rows)
@@ -111,7 +110,7 @@ def list_rodex_session_codex_rollout_sources(
 ) -> tuple[RodexSessionCodexRolloutSource, ...]:
     """Read authenticated prefixes for all current and historical memberships."""
     _validate_session_id(session_id)
-    path = existing_rodex_database_path(database_path)
+    path = normalise_rodex_database_path(database_path)
     with open_rodex_read_transaction(path) as connection:
         rows = connection.execute(
             f"SELECT identities.codex_thread_public_id_signed_bigint_1, "

@@ -12,11 +12,13 @@ from typing import Final, TextIO
 
 from .command_contract import TAIL_COMMAND
 from .errors import RodexLaunchError
-from .runtime import LiveTmuxSession, TmuxScrollbackSnapshot
+from .runtime import LiveTmuxSession, TmuxScrollbackSnapshot, TmuxScrollbackState
 
 DEFAULT_TAIL_LINE_COUNT: Final = 10
 TAIL_POLL_INTERVAL_SECONDS: Final = 0.4
+TAIL_MAX_IDLE_POLL_INTERVAL_SECONDS: Final = 3.2
 TAIL_SETTLED_POLL_COUNT: Final = 3
+TAIL_CURSOR_HISTORY_LINE_COUNT: Final = 256
 TAIL_USAGE: Final = (
     "usage: rodex _tail [-f|--follow] [-n NUM|--lines NUM|--lines=NUM|-NUM] SESSION_NAME"
 )
@@ -31,6 +33,7 @@ _STATUS_CONTINUATION_LINE = re.compile(r"^\s+\S")
 _STATUS_REGION_MAX_LINE_COUNT: Final = 6
 
 CaptureScrollback = Callable[[LiveTmuxSession], TmuxScrollbackSnapshot]
+CaptureScrollbackState = Callable[[LiveTmuxSession], TmuxScrollbackState]
 Revalidate = Callable[[], None]
 Sleeper = Callable[[float], None]
 
@@ -55,7 +58,10 @@ class PlainTailCursor:
     ) -> None:
         if settled_poll_count < 1:
             raise ValueError("settled poll count must be positive")
-        self._history_lines = initial_snapshot.history_lines
+        self._history_line_count = initial_snapshot.history_line_count
+        self._history_lines = initial_snapshot.history_lines[
+            -TAIL_CURSOR_HISTORY_LINE_COUNT:
+        ]
         self._observed_visible = deque(initial_snapshot.visible_lines)
         initial_visible = _settled_visible_lines(initial_snapshot.visible_lines)
         self._published_visible = initial_visible
@@ -64,15 +70,43 @@ class PlainTailCursor:
         self._settled_poll_count = settled_poll_count
 
     def advance(self, current_snapshot: TmuxScrollbackSnapshot) -> tuple[str, ...]:
-        if len(current_snapshot.history_lines) < len(self._history_lines):
-            self._rebaseline(current_snapshot)
-            return ()
-
-        emitted = self._new_committed_history(current_snapshot)
+        emitted = self._advance(
+            current_snapshot.history_lines,
+            current_snapshot.history_line_count,
+            current_snapshot.visible_lines,
+        )
         if emitted is None:
             self._rebaseline(current_snapshot)
             return ()
-        current_visible = current_snapshot.visible_lines
+        return emitted
+
+    def try_advance_state(
+        self,
+        current_state: TmuxScrollbackState,
+    ) -> tuple[str, ...] | None:
+        """Advance from a bounded capture, or request a rare full-capture fallback."""
+        return self._advance(
+            current_state.history_tail_lines,
+            current_state.history_line_count,
+            current_state.visible_lines,
+        )
+
+    def rebaseline(self, snapshot: TmuxScrollbackSnapshot) -> None:
+        """Forget continuity after a verified runtime identity transition."""
+        self._rebaseline(snapshot)
+
+    def _advance(
+        self,
+        current_history: tuple[str, ...],
+        current_history_line_count: int,
+        current_visible: tuple[str, ...],
+    ) -> tuple[str, ...] | None:
+        emitted = self._new_committed_history(
+            current_history,
+            current_history_line_count,
+        )
+        if emitted is None:
+            return None
         settled_visible = _settled_visible_lines(current_visible)
         if settled_visible != self._candidate_visible:
             self._candidate_visible = settled_visible
@@ -89,18 +123,25 @@ class PlainTailCursor:
         return tuple(emitted)
 
     def _new_committed_history(
-        self, current_snapshot: TmuxScrollbackSnapshot
+        self,
+        current_history: tuple[str, ...],
+        current_history_line_count: int,
     ) -> list[str] | None:
-        current_history = current_snapshot.history_lines
         previous_history = self._history_lines
-        if current_history[: len(previous_history)] == previous_history:
-            overlap = len(previous_history)
-        else:
-            overlap = _suffix_prefix_overlap(previous_history, current_history)
-            if previous_history and not overlap:
-                return None
-        newly_committed = current_history[overlap:]
-        self._history_lines = current_history
+        if current_history_line_count < self._history_line_count:
+            return None
+        previous_end = _history_sequence_end(
+            previous_history,
+            current_history,
+            previous_history_line_count=self._history_line_count,
+            current_history_line_count=current_history_line_count,
+            observed_visible=tuple(self._observed_visible),
+        )
+        if previous_history and previous_end is None:
+            return None
+        newly_committed = current_history[previous_end or 0 :]
+        self._history_line_count = current_history_line_count
+        self._history_lines = current_history[-TAIL_CURSOR_HISTORY_LINE_COUNT:]
         emitted: list[str] = []
         for line in newly_committed:
             if self._observed_visible:
@@ -111,7 +152,8 @@ class PlainTailCursor:
         return emitted
 
     def _rebaseline(self, snapshot: TmuxScrollbackSnapshot) -> None:
-        self._history_lines = snapshot.history_lines
+        self._history_line_count = snapshot.history_line_count
+        self._history_lines = snapshot.history_lines[-TAIL_CURSOR_HISTORY_LINE_COUNT:]
         self._observed_visible = deque(snapshot.visible_lines)
         settled_visible = _settled_visible_lines(snapshot.visible_lines)
         self._published_visible = settled_visible
@@ -169,27 +211,54 @@ def follow_session_tail(
     request: SessionTailRequest,
     runtime: LiveTmuxSession,
     capture_scrollback: CaptureScrollback,
+    capture_scrollback_state: CaptureScrollbackState,
     revalidate: Revalidate,
     *,
     output: TextIO | None = None,
     sleep: Sleeper = time.sleep,
     poll_interval_seconds: float = TAIL_POLL_INTERVAL_SECONDS,
+    max_idle_poll_interval_seconds: float = TAIL_MAX_IDLE_POLL_INTERVAL_SECONDS,
 ) -> None:
-    """Print recent plain text, then follow settled rendered changes."""
+    """Print recent text, then follow bounded state with adaptive idle probing."""
     if poll_interval_seconds <= 0:
         raise ValueError("tail poll interval must be positive")
+    if max_idle_poll_interval_seconds < poll_interval_seconds:
+        raise ValueError("tail maximum idle poll interval cannot be shorter than its poll")
     destination = sys.stdout if output is None else output
 
+    observed_state = capture_scrollback_state(runtime)
     initial = capture_scrollback(runtime)
     revalidate()
     _write_lines(_select_initial_lines(initial.lines, request), destination)
     cursor = PlainTailCursor(initial)
+    next_poll_interval = poll_interval_seconds
 
     while True:
-        sleep(poll_interval_seconds)
-        current = capture_scrollback(runtime)
-        revalidate()
-        _write_lines(cursor.advance(current), destination)
+        sleep(next_poll_interval)
+        current_state = capture_scrollback_state(runtime)
+        if current_state == observed_state:
+            next_poll_interval = min(
+                next_poll_interval * 2,
+                max_idle_poll_interval_seconds,
+            )
+            continue
+
+        if current_state.runtime_identity != observed_state.runtime_identity:
+            current = capture_scrollback(runtime)
+            revalidate()
+            cursor.rebaseline(current)
+            emitted: tuple[str, ...] = ()
+        else:
+            bounded_emitted = cursor.try_advance_state(current_state)
+            if bounded_emitted is None:
+                current = capture_scrollback(runtime)
+                revalidate()
+                emitted = cursor.advance(current)
+            else:
+                emitted = bounded_emitted
+        _write_lines(emitted, destination)
+        observed_state = current_state
+        next_poll_interval = poll_interval_seconds
 
 
 def _parse_line_count(value: str) -> tuple[int, bool]:
@@ -272,6 +341,114 @@ def _suffix_prefix_overlap(previous: tuple[str, ...], current: tuple[str, ...]) 
             candidate += 1
         prefix_lengths[index] = candidate
     return min(prefix_lengths[-1], len(previous), len(current))
+
+
+def _history_sequence_end(
+    previous: tuple[str, ...],
+    current: tuple[str, ...],
+    *,
+    previous_history_line_count: int,
+    current_history_line_count: int,
+    observed_visible: tuple[str, ...],
+) -> int | None:
+    """Locate the prior tail only when count or visible order disambiguates it."""
+    if not previous:
+        return 0
+    history_growth = current_history_line_count - previous_history_line_count
+    latest_possible_end = len(current) - history_growth
+    if latest_possible_end < 0:
+        return None
+    if (
+        history_growth == 0
+        and len(current) >= len(previous)
+        and current[-len(previous) :] == previous
+    ):
+        return len(current)
+
+    candidates = {
+        end
+        for end in (
+            *_subsequence_ends(previous, current),
+            *_suffix_prefix_overlaps(previous, current),
+        )
+        if end <= latest_possible_end
+    }
+    compatible_candidates = [
+        end
+        for end in candidates
+        if _committed_prefix_matches_visible(current[end:], observed_visible)
+    ]
+    if len(compatible_candidates) == 1:
+        return compatible_candidates[0]
+    if not compatible_candidates and history_growth > 0:
+        retained_previous_count = min(len(previous), latest_possible_end)
+        if (
+            latest_possible_end in candidates
+            and previous[-retained_previous_count:]
+            == current[latest_possible_end - retained_previous_count : latest_possible_end]
+        ):
+            return latest_possible_end
+    return None
+
+
+def _subsequence_ends(
+    pattern: tuple[str, ...],
+    values: tuple[str, ...],
+) -> tuple[int, ...]:
+    """Return every exact pattern end in linear time."""
+    prefix_lengths = [0] * len(pattern)
+    for index in range(1, len(pattern)):
+        candidate = prefix_lengths[index - 1]
+        while candidate and pattern[index] != pattern[candidate]:
+            candidate = prefix_lengths[candidate - 1]
+        if pattern[index] == pattern[candidate]:
+            candidate += 1
+        prefix_lengths[index] = candidate
+
+    matched = 0
+    ends: list[int] = []
+    for index, value in enumerate(values):
+        while matched and value != pattern[matched]:
+            matched = prefix_lengths[matched - 1]
+        if value == pattern[matched]:
+            matched += 1
+        if matched == len(pattern):
+            ends.append(index + 1)
+            matched = prefix_lengths[matched - 1]
+    return tuple(ends)
+
+
+def _suffix_prefix_overlaps(
+    previous: tuple[str, ...],
+    current: tuple[str, ...],
+) -> tuple[int, ...]:
+    """Return every non-empty prior-suffix/current-prefix overlap in O(n)."""
+    if not previous or not current:
+        return ()
+    sentinel = object()
+    combined: list[object] = [*current, sentinel, *previous]
+    prefix_lengths = [0] * len(combined)
+    for index in range(1, len(combined)):
+        candidate = prefix_lengths[index - 1]
+        while candidate and combined[index] != combined[candidate]:
+            candidate = prefix_lengths[candidate - 1]
+        if combined[index] == combined[candidate]:
+            candidate += 1
+        prefix_lengths[index] = candidate
+    overlap = min(prefix_lengths[-1], len(previous), len(current))
+    overlaps: list[int] = []
+    while overlap:
+        overlaps.append(overlap)
+        overlap = prefix_lengths[overlap - 1]
+    return tuple(overlaps)
+
+
+def _committed_prefix_matches_visible(
+    committed: tuple[str, ...],
+    observed_visible: tuple[str, ...],
+) -> bool:
+    compared_count = min(len(committed), len(observed_visible))
+    return committed[:compared_count] == observed_visible[:compared_count]
 
 
 def _write_lines(lines: tuple[str, ...], output: TextIO) -> None:

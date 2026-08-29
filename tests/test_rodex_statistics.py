@@ -15,6 +15,7 @@ import rodex_registry.statistics as statistics_module
 from rodex.cli import RodexLaunchError, run
 from rodex_registry import (
     COLLABORATION_MODEL_TOOL_NAMES,
+    RodexRuntimeId,
     RodexSessionCodexThreadObservation,
     RodexSessionError,
     RodexSessionStatisticsConflictError,
@@ -914,6 +915,7 @@ def test_unanalyzed_source_is_an_atomic_conflict(tmp_path: Path) -> None:
         "replacement",
         database,
         codex_session_id=REPLACEMENT_CODEX_SESSION_ID,
+        runtime_id=RodexRuntimeId.generate(),
     )
     with pytest.raises(RodexSessionStatisticsConflictError, match="outside"):
         _publish(
@@ -1019,6 +1021,7 @@ def test_stale_codex_session_id_and_publication_sequence_fences_preserve_rows(
         "replacement",
         database,
         codex_session_id=REPLACEMENT_CODEX_SESSION_ID,
+        runtime_id=RodexRuntimeId.generate(),
     )
     with pytest.raises(RodexSessionStatisticsConflictError, match="Codex session ID"):
         _publish(database, tmp_path, based_on=first.statistics_publication_sequence)
@@ -1195,6 +1198,7 @@ def test_historical_source_cannot_move_to_another_lineage(tmp_path: Path) -> Non
         "replacement",
         database,
         codex_session_id=REPLACEMENT_CODEX_SESSION_ID,
+        runtime_id=RodexRuntimeId.generate(),
     )
     with pytest.raises(RodexSessionError, match="already belongs"):
         create_a_rodex_session(database, codex_session_id=CODEX_SESSION_ID)

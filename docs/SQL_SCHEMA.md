@@ -1,7 +1,67 @@
 # SQL schema methodology
 
-Apply these standards to future schema decisions. These authoritative standards may be
-modified only by an agent suggestion followed by user agreement.
+This document describes the current v14 SQLite boundary and the standards applied to
+future schema decisions. These authoritative standards may be modified only by an agent
+suggestion followed by user agreement.
+
+## Current SQLite boundary
+
+- Rodex uses Python's stdlib `sqlite3` exclusively. `rodex_sql.transactions` is the sole
+  owner of SQLite connection creation, connection PRAGMAs, the cooperative database lock,
+  `BEGIN`, `COMMIT`, rollback, WAL activation, and connection close. Domain modules receive
+  a connection only inside one of these context-managed transactions.
+- `rodex_sql.private_database_path` normalizes the path and owns secure Linux filesystem
+  admission. The immediate parent must be a real current-user-owned directory with no
+  group/world permissions. The sibling transition lock and database must be regular
+  current-user-owned mode-`0600` files. Rodex opens the parent, lock, and database with
+  `O_NOFOLLOW` and `O_CLOEXEC`, opens children relative to the retained parent descriptor,
+  and retains all three descriptors through the transaction.
+- `open_rodex_bootstrap_transaction` is the only entry allowed to create the private
+  parent, transition lock, or database file. It is used only by explicit first-use flows.
+  `open_rodex_transaction` and `open_rodex_read_transaction` are existing-only: a missing
+  database or transition lock fails without creating filesystem state. An existing private
+  database and lock are admitted from their exact opened descriptors by the first
+  transaction that uses them.
+- SQLite opens `/proc/self/fd/<validated-database-fd>` in URI `mode=rw` or `mode=ro`, then
+  must report the canonical requested main path through `PRAGMA database_list`. Rodex
+  revalidates parent, transition-lock, and database descriptor/path identities plus owner,
+  type, mode, and symlink state before connect, after connect, before `BEGIN`, and before
+  `COMMIT`. A failure becomes the terminal `database_moved` error.
+- Every ordinary transaction holds a shared `flock` on the retained transition-lock
+  descriptor for its complete storage lifetime. The maintenance entry holds the exclusive
+  form and is for offline diagnostics. Lock acquisition has a ten-second monotonic deadline
+  with sleeping exponential backoff capped at 50 ms; it does not spin. All Rodex processes
+  that access the database must honor this boundary.
+- Writer transactions use `BEGIN IMMEDIATE`, WAL, `synchronous=NORMAL`, foreign keys, and a
+  ten-second busy timeout. Enabling WAL is a bounded cold-path operation with the same
+  sleeping deadline/backoff. Read transactions use a read-only URI, `query_only=ON`, and a
+  deferred `BEGIN`, so a writer does not hold the cooperative lock exclusively or
+  head-of-line block WAL readers. Success commits once; any exception rolls back; every
+  connection and retained descriptor is closed on exit.
+- `rodex_sql.database_location_guard` admits only the exact descriptor accepted by the
+  transaction boundary. One process-wide manager owns one blocking inotify worker, one
+  inotify descriptor, and one wake pipe; each admitted location adds parent-name and
+  database-inode watches, not another thread or descriptor set. The worker blocks in
+  `select`, performs no polling and no disk writes, and queued events are also drained
+  synchronously at transaction identity fences.
+- A database/name move, delete, replacement, parent move, watched parent/database
+  ownership or mode change, unmount, ignored watch, inotify overflow, or watcher failure
+  permanently latches that location for the life of the process. The latch interrupts
+  registered SQLite connections and notifies subscribers. It cannot be reset or replaced
+  while execution continues; its worker and three manager descriptors are reclaimed only
+  at process exit.
+- `database_terminal_signal` is subscription-only. A long-lived runtime can obtain it only
+  after a transaction has admitted that database; the function never opens or admits a
+  path. A latch shuts down the live runtime, and both long-lived and one-shot commands
+  report `database_moved: ...; please restart Rodex` rather than following replacement
+  storage.
+- The explicit integrity audit uses the same existing-only, shared-lock, read-only
+  transaction. Its normal WAL-aware snapshot includes committed WAL content, executes no
+  DDL, and compares every non-internal table, index, trigger, and view with the canonical
+  catalog. Location changes and live storage relocation are unsupported; the exclusive
+  maintenance lock does not move or repair the database.
+
+## Schema standards
 
 - Table names are always plural.
 - Every table starts with `id INTEGER PRIMARY KEY AUTOINCREMENT`.
@@ -30,14 +90,26 @@ modified only by an agent suggestion followed by user agreement.
   ownership requirement.
 - Lookup tables use their complete natural key: `SELECT id` first and `INSERT` only
   when no row exists. This avoids unnecessary AUTOINCREMENT gaps.
-- Related writes run inside one `BEGIN IMMEDIATE` transaction. Multi-table read views
-  use one deferred `BEGIN` transaction for a consistent snapshot without a write lock.
-  Any failure rolls back the complete unit of work.
 - SQLite foreign-key enforcement is enabled for every transaction.
-- Schema initialisation creates and verifies columns, types, nullability, primary-key
-  form, and index shape in the same transaction; incompatible schemas are rejected.
+- Cold schema initialisation creates and verifies the complete current generation in one
+  transaction. Once the generation marker is current, steady-state initialisation checks
+  that marker in one cheap WAL-aware read transaction. Every ordinary mutation rechecks
+  the generation inside its one writer transaction; only empty marker-less private
+  storage receives the cold schema bootstrap in that same transaction. A nonempty
+  marker-less database or a different generation fails closed before v14 domain DDL.
+- `synchronous=NORMAL` preserves SQLite consistency, but an operating-system crash or
+  power loss can lose recently committed transactions that have not reached durable
+  storage; this is not a `FULL` synchronous durability promise.
 - UTC timestamps use fixed microsecond ISO-8601 `TEXT`, such as
   `2026-08-15T12:34:56.123456Z`.
+- Access and runtime-start updates compare those canonical timestamps in the writer
+  transaction, so a delayed older writer cannot regress the durable high-water mark.
+  Durable text must already use canonical UTC microsecond form. A value up to 24 hours
+  ahead of an incoming observation is retained as plausible reordering; a larger lead is
+  treated as a poisoned high-water mark and healed to the incoming canonical timestamp.
+- Runtime resume persists one incarnation tuple: runtime ID/start, tmux endpoint, and
+  current Codex root are either all accepted or all rejected against the current runtime
+  start. A stale incarnation cannot partially replace any member of that tuple.
 - Unsigned identity up to 64 bits is stored losslessly in one signed `BIGINT` through
   an explicit two's-complement codec. Wider identity is stored losslessly in ordered
   signed `BIGINT` fields with one composite unique index.
@@ -59,8 +131,8 @@ modified only by an agent suggestion followed by user agreement.
   boundary, while the unique index and incarnation check carry the integrity contract.
   Generated cool names try ten candidates at each approved word count before escalating
   to the next word count, then fail explicitly.
-- In ALPHA, schema changes may reset a disposable database only after an explicit
-  decision. Additive, verified schema extensions preserve existing contents.
+- Rodex does not implicitly reset, rewrite, or repair incompatible schema generations.
+  Additive, verified schema extensions preserve current-generation contents.
 
 ## Current v14 execution, request, statistics, and agent-trace projection
 
@@ -72,7 +144,8 @@ modified only by an agent suggestion followed by user agreement.
   number. The incompatible ALPHA v14 generation is stored in `rodex-v14.sqlite3`.
   `rodex_schema_generations` marks the exact generation inside the database; Rodex
   rejects nonempty unmarked databases and wrong generations before creating any domain
-  table. Earlier generation files remain untouched and are not read or migrated.
+  table. Files for other generations remain outside the current v14 database path and
+  are not read.
 - `rodex_runtime_instances` contains one signed-`BIGINT` random 64-bit `runtime_id` and
   its start time for a Rodex session. Unique indexes fence both session cardinality and
   runtime ID reuse. Allocation uses the same ten-candidate indexed-selection pipeline
@@ -182,6 +255,14 @@ modified only by an agent suggestion followed by user agreement.
   recounts the historical event ledger. Coverage is cumulative at this boundary: a
   prior `gapped` head remains gapped, and a nonzero cumulative unrecognized-record count
   cannot be published as `complete`.
+- Agent-trace publication has one canonical pre-transaction contract. It normalizes
+  UTC/text/typed details, validates every identity and source coordinate, rejects
+  duplicate source keys, and computes canonical detail hashes before `BEGIN IMMEDIATE`.
+  The transactional writer accepts only the contract-issued immutable prepared form
+  and rejects callers outside an active Rodex transaction before SQL. After current
+  same-transaction membership updates, it resolves only the distinct thread IDs present
+  in the batch through bounded row-value `VALUES` chunks; unrelated memberships are
+  neither selected nor materialized.
 - `rodex_sessions_agent_trace_events` is the append-only event ledger. Its natural key
   is `(Codex thread row, rollout record ordinal, derived event ordinal)`. Each event has
   a bounded kind, non-null canonical activity-scope foreign key, timestamp, and first
@@ -213,7 +294,7 @@ modified only by an agent suggestion followed by user agreement.
   count, and capture state as `collaboration_invocation`. It projects `turn_request`
   only when the narrower request row actually exists; it never derives a follow-up from
   `activity_kind = interacted` alone. Existing v14 rows therefore expose historical
-  `send_message` operations correctly without migration or backfill.
+  `send_message` operations correctly without rewriting historical rows.
   `rodex_sessions_codex_items` is the sole storage location for every observed Codex
   item identity. A strict canonical UUID is stored losslessly as two signed `BIGINT`
   halves; a non-UUID source identity is retained in

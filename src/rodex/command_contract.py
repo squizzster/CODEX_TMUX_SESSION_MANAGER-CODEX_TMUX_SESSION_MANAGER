@@ -13,7 +13,6 @@ from codex_cli_contract import CODEX_CLI_0_150_1
 RUNNING_COMMAND: Final = "_running"
 CONTEXT_COMMAND: Final = "_context"
 ALIAS_COMMAND: Final = "_alias"
-SEND_COMMAND: Final = "_send"
 WAIT_COMMAND: Final = "_wait"
 CAT_COMMAND: Final = "_cat"
 TAIL_COMMAND: Final = "_tail"
@@ -81,11 +80,6 @@ COMMAND_SPECS: Final = (
         ALIAS_COMMAND,
         CommandRoute.SESSION,
         ("_alias [--force] SESSION NAME", "Assign a preferred session name."),
-    ),
-    CommandSpec(
-        SEND_COMMAND,
-        CommandRoute.SESSION,
-        ("_send SESSION PROMPT", "Send work to a running session."),
     ),
     CommandSpec(
         WAIT_COMMAND,
@@ -176,8 +170,8 @@ COMMAND_SPECS: Final = (
         TRACE_COMMAND,
         CommandRoute.AGENT_TRACE,
         (
-            "_trace SESSION [--follow] [--limit N] [--include-bodies] [--json]",
-            "Read or follow rollout-authenticated agent trace events.",
+            "_trace SESSION [--follow | --include-bodies] [--limit N] [--json]",
+            "Follow metadata only, or re-authenticate bodies in a one-shot snapshot.",
         ),
     ),
     CommandSpec(

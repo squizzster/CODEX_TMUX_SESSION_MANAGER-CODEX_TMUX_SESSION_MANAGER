@@ -106,9 +106,11 @@ def test_tmux_status_uses_the_stable_pane_target_across_session_renames(
     tmp_path: Path,
 ) -> None:
     calls: list[tuple[list[str], dict[str, object]]] = []
+    published = Event()
 
     def runner(command: list[str], **options: object) -> subprocess.CompletedProcess[str]:
         calls.append((command, options))
+        published.set()
         return subprocess.CompletedProcess(command, 0)
 
     status = TmuxToolCallStatus(
@@ -120,6 +122,7 @@ def test_tmux_status_uses_the_stable_pane_target_across_session_renames(
 
     status.update(3)
 
+    assert published.wait(1)
     assert calls[0][0] == [
         "/usr/bin/tmux",
         "-S",
@@ -130,14 +133,17 @@ def test_tmux_status_uses_the_stable_pane_target_across_session_renames(
         "@rodex_tool_calls",
         "3",
     ]
-    assert calls[0][1]["check"] is True
+    assert calls[0][1]["check"] is False
+    assert calls[0][1]["timeout"] == 1.0
 
 
 def test_tmux_context_status_uses_the_same_stable_pane_boundary(tmp_path: Path) -> None:
     calls: list[tuple[list[str], dict[str, object]]] = []
+    published = Event()
 
     def runner(command: list[str], **options: object) -> subprocess.CompletedProcess[str]:
         calls.append((command, options))
+        published.set()
         return subprocess.CompletedProcess(command, 0)
 
     status = TmuxContextStatus(
@@ -149,6 +155,7 @@ def test_tmux_context_status_uses_the_same_stable_pane_boundary(tmp_path: Path) 
 
     status.update("#[fg=red]| Context: 75% | ")
 
+    assert published.wait(1)
     assert calls[0][0] == [
         "/usr/bin/tmux",
         "-S",
@@ -159,7 +166,8 @@ def test_tmux_context_status_uses_the_same_stable_pane_boundary(tmp_path: Path) 
         "@rodex_context_status",
         "#[fg=red]| Context: 75% | ",
     ]
-    assert calls[0][1]["check"] is True
+    assert calls[0][1]["check"] is False
+    assert calls[0][1]["timeout"] == 1.0
 
 
 def test_context_observer_projects_last_usage_for_only_the_primary_thread() -> None:
@@ -648,7 +656,7 @@ def test_event_tap_ready_signal_reports_the_current_active_turn(tmp_path: Path) 
                 "method": "rodex/event-stream/ready",
                 "params": {
                     "activeTurns": {},
-                    "knownThreads": [{"id": "thread-1", "createdAt": 1_787_692_800}],
+                    "knownThreads": [],
                 },
             }
     finally:

@@ -297,9 +297,12 @@ def _create_managed_session(
                 resolved_database,
             )
         else:
-            with open_a_user_defined_cool_name_assignment(
-                session.cool_name, requested_name, resolved_database
-            ) as assignment:
+            with (
+                session_transition_lock(resolved_database, session.rodex_sessions_id),
+                open_a_user_defined_cool_name_assignment(
+                    session.cool_name, requested_name, resolved_database
+                ) as assignment,
+            ):
                 active_tmux = rename_tmux_identity(
                     runtime_launcher, active_tmux, assignment.names.display_name
                 )

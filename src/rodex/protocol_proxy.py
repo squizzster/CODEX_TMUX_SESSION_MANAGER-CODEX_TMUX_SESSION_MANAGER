@@ -2,11 +2,17 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
+import os
 import queue
+import stat
 import subprocess
+import time
 from collections.abc import Callable
+from contextlib import suppress
+from dataclasses import dataclass
 from pathlib import Path
 from threading import Event, Lock, Thread
 from typing import Any, Final
@@ -15,6 +21,7 @@ from websockets.exceptions import ConnectionClosed
 from websockets.sync.client import unix_connect
 from websockets.sync.server import unix_serve
 
+from .analytics_source_reader import AnalyticsSourceReadError, open_rollout_descriptor
 from .app_server_contract import CODEX_APP_SERVER
 from .status_bar import (
     CONTEXT_COMPACTION_FRAME_INTERVAL_SECONDS,
@@ -42,9 +49,12 @@ TOOL_CALL_ITEM_TYPES: Final = frozenset(
 ToolCountCallback = Callable[[int], None]
 ProtocolEventCallback = Callable[[str | bytes, dict[str, Any] | None], None]
 ContextStatusCallback = Callable[[str], None]
+DisconnectCallback = Callable[[], None]
 ROLLOUT_CONTEXT_POLL_INTERVAL_SECONDS: Final = 0.25
+CONTEXT_COMPACTION_WATCHDOG_SECONDS: Final = 5.0
 _ROLLOUT_CONTEXT_TAIL_BYTES: Final = 8 * 1024 * 1024
 _ROLLOUT_CONTEXT_LINE_BYTES: Final = 256 * 1024
+_ROLLOUT_CONTEXT_BOUNDARY_BYTES: Final = 4 * 1024
 _EVENT_STREAM_CLOSED: Final = object()
 EVENT_STREAM_READY_METHOD: Final = "rodex/event-stream/ready"
 CONTROL_CONNECTION_PATH: Final = "/rodex-control"
@@ -69,6 +79,17 @@ EVENT_STREAM_READY_MESSAGE: Final = json.dumps(
     },
     separators=(",", ":"),
 )
+
+
+@dataclass(frozen=True, slots=True)
+class _RolloutFollowCheckpoint:
+    source_device: int
+    source_inode: int
+    source_size_bytes: int
+    source_mtime_ns: int
+    source_ctime_ns: int
+    cursor_offset: int
+    boundary_sha256: str
 
 
 class RodexProtocolProxyError(RuntimeError):
@@ -120,8 +141,9 @@ class CodexProtocolEventTap:
             raise ValueError("queue_size must be positive")
         self._event_socket_path = event_socket_path
         self._queue_size = queue_size
-        self._subscribers: dict[queue.Queue[str | bytes | object], bool] = {}
+        self._subscribers: dict[queue.Queue[str | bytes | object], tuple[bool, Any]] = {}
         self._subscribers_lock = Lock()
+        self._closed = False
         self._active_turns: dict[str, str] = {}
         self._known_threads: dict[str, dict[str, object]] = {}
         self._server: Any | None = None
@@ -129,27 +151,32 @@ class CodexProtocolEventTap:
 
     def start(self) -> None:
         """Bind the runtime-only event socket and accept event subscribers."""
-        if self._server is not None:
-            raise RodexProtocolProxyError("Codex protocol event tap is already running")
-        self._event_socket_path.unlink(missing_ok=True)
-        try:
-            self._server = unix_serve(
-                self._handle_subscriber,
-                path=str(self._event_socket_path),
-                compression=None,
-                max_size=None,
+        with self._subscribers_lock:
+            if self._closed:
+                raise RodexProtocolProxyError("Codex protocol event tap is closed")
+            if self._server is not None:
+                raise RodexProtocolProxyError("Codex protocol event tap is already running")
+            self._event_socket_path.unlink(missing_ok=True)
+            try:
+                server = unix_serve(
+                    self._handle_subscriber,
+                    path=str(self._event_socket_path),
+                    compression=None,
+                    max_size=None,
+                )
+                self._event_socket_path.chmod(0o600)
+            except OSError as error:
+                raise RodexProtocolProxyError(
+                    f"could not bind Codex protocol event tap: {error}"
+                ) from error
+            server_thread = Thread(
+                target=server.serve_forever,
+                name="rodex-codex-protocol-event-tap",
+                daemon=True,
             )
-            self._event_socket_path.chmod(0o600)
-        except OSError as error:
-            raise RodexProtocolProxyError(
-                f"could not bind Codex protocol event tap: {error}"
-            ) from error
-        self._server_thread = Thread(
-            target=self._server.serve_forever,
-            name="rodex-codex-protocol-event-tap",
-            daemon=True,
-        )
-        self._server_thread.start()
+            self._server = server
+            self._server_thread = server_thread
+            server_thread.start()
 
     def publish(self, message: str | bytes) -> None:
         """Offer one event to every live subscriber without delaying the TUI."""
@@ -162,14 +189,16 @@ class CodexProtocolEventTap:
     ) -> None:
         """Publish raw transport bytes using the proxy's single decoded value."""
         with self._subscribers_lock:
+            if self._closed:
+                return
             if event is not None:
                 _update_active_turns(self._active_turns, event)
-                _update_known_threads(self._known_threads, event)
+                _update_known_threads(self._known_threads, self._active_turns, event)
             subscribers = tuple(self._subscribers.items())
         is_analytics_event = (
             event is not None and event.get("method") in ANALYTICS_WAKE_EVENT_METHODS
         )
-        for subscriber, analytics_only in subscribers:
+        for subscriber, (analytics_only, _connection) in subscribers:
             if analytics_only and not is_analytics_event:
                 continue
             try:
@@ -179,15 +208,19 @@ class CodexProtocolEventTap:
 
     def close(self) -> None:
         """Close subscribers, stop the event server, and remove its socket."""
-        server = self._server
-        server_thread = self._server_thread
-        self._server = None
-        self._server_thread = None
         with self._subscribers_lock:
-            subscribers = tuple(self._subscribers)
+            self._closed = True
+            server = self._server
+            server_thread = self._server_thread
+            self._server = None
+            self._server_thread = None
+            subscribers = tuple(self._subscribers.items())
             self._subscribers.clear()
-        for subscriber in subscribers:
+            self._active_turns.clear()
+            self._known_threads.clear()
+        for subscriber, (_analytics_only, connection) in subscribers:
             _close_subscriber_queue(subscriber)
+            _interrupt_subscriber_connection(connection)
         if server is not None:
             server.shutdown(close_connections=True)
         if server_thread is not None:
@@ -196,6 +229,12 @@ class CodexProtocolEventTap:
                 raise RodexProtocolProxyError("Codex protocol event tap did not stop")
         self._event_socket_path.unlink(missing_ok=True)
 
+    def reset_after_disconnect(self) -> None:
+        """Forget identities scoped to the released primary connection."""
+        with self._subscribers_lock:
+            self._active_turns.clear()
+            self._known_threads.clear()
+
     def _handle_subscriber(self, connection: Any) -> None:
         subscriber: queue.Queue[str | bytes | object] = queue.Queue(self._queue_size)
         semantic_only = _connection_path(connection) in {
@@ -203,17 +242,25 @@ class CodexProtocolEventTap:
             AGENT_OBSERVER_EVENT_STREAM_PATH,
         }
         with self._subscribers_lock:
-            self._subscribers[subscriber] = semantic_only
-            ready_message = json.dumps(
-                {
-                    "method": EVENT_STREAM_READY_METHOD,
-                    "params": {
-                        "activeTurns": dict(self._active_turns),
-                        "knownThreads": list(self._known_threads.values()),
+            if self._closed:
+                admitted = False
+                ready_message = ""
+            else:
+                admitted = True
+                self._subscribers[subscriber] = (semantic_only, connection)
+                ready_message = json.dumps(
+                    {
+                        "method": EVENT_STREAM_READY_METHOD,
+                        "params": {
+                            "activeTurns": dict(self._active_turns),
+                            "knownThreads": list(self._known_threads.values()),
+                        },
                     },
-                },
-                separators=(",", ":"),
-            )
+                    separators=(",", ":"),
+                )
+        if not admitted:
+            _interrupt_subscriber_connection(connection)
+            return
         try:
             connection.send(ready_message)
             while True:
@@ -226,16 +273,18 @@ class CodexProtocolEventTap:
         finally:
             with self._subscribers_lock:
                 self._subscribers.pop(subscriber, None)
-            connection.close()
+            _interrupt_subscriber_connection(connection)
 
     def _disconnect_slow_subscriber(
         self, subscriber: queue.Queue[str | bytes | object]
     ) -> None:
         with self._subscribers_lock:
-            if subscriber not in self._subscribers:
+            registration = self._subscribers.pop(subscriber, None)
+            if registration is None:
                 return
-            self._subscribers.pop(subscriber)
         _close_subscriber_queue(subscriber)
+        _semantic_only, connection = registration
+        _interrupt_subscriber_connection(connection)
 
 
 class ToolCallCounter:
@@ -259,10 +308,14 @@ class ToolCallCounter:
 
     def observe_protocol_event(self, event: dict[str, Any] | None) -> None:
         """Update the count from an already decoded protocol event."""
-        item_id = _started_tool_call_item_id(event)
-        if item_id is None:
+        lifecycle = _tool_call_item_lifecycle(event)
+        if lifecycle is None:
             return
+        method, item_id = lifecycle
         with self._lock:
+            if method == "item/completed":
+                self._item_ids.discard(item_id)
+                return
             if item_id in self._item_ids:
                 return
             self._item_ids.add(item_id)
@@ -335,17 +388,24 @@ class CodexContextStatusObserver:
         on_status_changed: ContextStatusCallback,
         *,
         animation_interval_seconds: float = CONTEXT_COMPACTION_FRAME_INTERVAL_SECONDS,
+        compaction_watchdog_seconds: float = CONTEXT_COMPACTION_WATCHDOG_SECONDS,
         codex_sessions_root: Path | None = None,
         rollout_poll_interval_seconds: float = ROLLOUT_CONTEXT_POLL_INTERVAL_SECONDS,
     ) -> None:
         if animation_interval_seconds <= 0 or not math.isfinite(animation_interval_seconds):
             raise ValueError("animation interval must be finite and positive")
+        if compaction_watchdog_seconds <= 0 or not math.isfinite(
+            compaction_watchdog_seconds
+        ):
+            raise ValueError("compaction watchdog must be finite and positive")
         if rollout_poll_interval_seconds <= 0 or not math.isfinite(
             rollout_poll_interval_seconds
         ):
             raise ValueError("rollout poll interval must be finite and positive")
         self._on_status_changed = on_status_changed
         self._animation_interval_seconds = animation_interval_seconds
+        self._compaction_watchdog_seconds = compaction_watchdog_seconds
+        self._monotonic = time.monotonic
         self._codex_sessions_root = (
             None
             if codex_sessions_root is None
@@ -410,6 +470,15 @@ class CodexContextStatusObserver:
                 if not self._active_compaction_item_ids:
                     self._publish_status_locked(rendered_status)
             return
+        if method == CODEX_APP_SERVER.turn_completed_method:
+            thread_id = _event_thread_id(params)
+            if thread_id is None:
+                return
+            with self._lock:
+                if self._closed or not self._accept_thread_locked(thread_id):
+                    return
+                self._finish_compaction_locked()
+            return
         if method not in {"item/started", "item/completed"}:
             return
         item = params.get("item")
@@ -420,7 +489,6 @@ class CodexContextStatusObserver:
         if not isinstance(item_id, str) or not item_id or thread_id is None:
             return
         if method == "item/started":
-            animation_thread: Thread | None = None
             with self._lock:
                 if self._closed or not self._accept_thread_locked(thread_id):
                     return
@@ -431,23 +499,17 @@ class CodexContextStatusObserver:
                 if should_start_animation:
                     # The pre-compaction percentage no longer describes the live context.
                     self._latest_context_status = context_status_segment(None)
-                    animation_thread = self._new_animation_thread_locked()
-            if animation_thread is not None:
-                animation_thread.start()
+                    self._new_animation_thread_locked().start()
             return
         with self._lock:
             if self._closed or not self._accept_thread_locked(thread_id):
                 return
             if item_id not in self._active_compaction_item_ids:
                 return
-            self._active_compaction_item_ids.remove(item_id)
-            if self._active_compaction_item_ids:
+            if len(self._active_compaction_item_ids) > 1:
+                self._active_compaction_item_ids.remove(item_id)
                 return
-            if self._animation_stop is not None:
-                self._animation_stop.set()
-                self._animation_stop = None
-            self._animation_generation += 1
-            self._publish_status_locked(self._latest_context_status)
+            self._finish_compaction_locked()
 
     def observe_rollout_context_percent(
         self,
@@ -455,12 +517,26 @@ class CodexContextStatusObserver:
         context_percent: float,
     ) -> None:
         """Accept one authenticated primary-rollout context snapshot."""
+        self._observe_rollout_context_percent(thread_id, context_percent)
+
+    def _observe_rollout_context_percent(
+        self,
+        thread_id: str,
+        context_percent: float,
+        *,
+        rollout_stop: Event | None = None,
+    ) -> None:
         rendered_status = context_status_segment(context_percent)
         with self._lock:
-            if self._closed or not self._accept_thread_locked(thread_id):
+            if (
+                self._closed
+                or (rollout_stop is not None and rollout_stop is not self._rollout_stop)
+                or not self._accept_thread_locked(thread_id)
+            ):
                 return
+            status_changed = self._latest_context_status != rendered_status
             self._latest_context_status = rendered_status
-            if not self._active_compaction_item_ids:
+            if status_changed and not self._active_compaction_item_ids:
                 self._publish_status_locked(rendered_status)
 
     def close(self) -> None:
@@ -486,6 +562,41 @@ class CodexContextStatusObserver:
         if rollout_thread is not None:
             rollout_thread.join(timeout=1)
 
+    def reset_after_disconnect(self) -> None:
+        """Discard state and workers owned by the disconnected primary transport."""
+        with self._lock:
+            if self._closed:
+                return
+            had_active_compaction = bool(self._active_compaction_item_ids)
+            self._active_compaction_item_ids.clear()
+            self._animation_generation += 1
+            if self._animation_stop is not None:
+                self._animation_stop.set()
+                self._animation_stop = None
+            animation_threads = tuple(self._animation_threads)
+            rollout_stop = self._rollout_stop
+            rollout_thread = self._rollout_thread
+            self._rollout_stop = None
+            self._rollout_thread = None
+            if rollout_stop is not None:
+                rollout_stop.set()
+            self._primary_thread_id = None
+            disconnected_status = context_status_segment(None)
+            should_publish = (
+                had_active_compaction or self._latest_context_status != disconnected_status
+            )
+            self._latest_context_status = disconnected_status
+            if should_publish:
+                self._publish_status_locked(disconnected_status)
+        for animation_thread in animation_threads:
+            animation_thread.join(timeout=1)
+        if rollout_thread is not None:
+            rollout_thread.join(timeout=1)
+        with self._lock:
+            self._animation_threads = [
+                thread for thread in self._animation_threads if thread.is_alive()
+            ]
+
     def _accept_thread_locked(self, thread_id: str) -> bool:
         if self._primary_thread_id is None:
             self._primary_thread_id = thread_id
@@ -510,13 +621,27 @@ class CodexContextStatusObserver:
 
     def _animate_compaction(self, generation: int, stop: Event) -> None:
         frame_index = 0
+        deadline = self._monotonic() + self._compaction_watchdog_seconds
         while not stop.is_set():
             with self._lock:
                 if self._closed or generation != self._animation_generation:
                     return
+                if self._monotonic() >= deadline:
+                    self._finish_compaction_locked()
+                    return
                 self._publish_status_locked(compacting_status_segment(frame_index))
             frame_index += 1
             stop.wait(self._animation_interval_seconds)
+
+    def _finish_compaction_locked(self) -> None:
+        if not self._active_compaction_item_ids:
+            return
+        self._active_compaction_item_ids.clear()
+        if self._animation_stop is not None:
+            self._animation_stop.set()
+            self._animation_stop = None
+        self._animation_generation += 1
+        self._publish_status_locked(self._latest_context_status)
 
     def _publish_status_locked(self, rendered_status: str) -> None:
         try:
@@ -534,17 +659,43 @@ class CodexContextStatusObserver:
         """Follow bounded JSONL additions without retaining arbitrary rollout bodies."""
         while not stop.is_set():
             try:
-                initial_percent, initial_offset = _latest_rollout_context(rollout_path)
-                if initial_percent is not None:
-                    self.observe_rollout_context_percent(thread_id, initial_percent)
-                with rollout_path.open("rb") as rollout:
+                with _open_rollout_for_following(
+                    rollout_path,
+                    allowed_root=self._codex_sessions_root,
+                ) as rollout:
+                    initial_percent, initial_offset = (
+                        _latest_rollout_context_from_open_file(rollout)
+                    )
+                    if initial_percent is not None:
+                        self._observe_rollout_context_percent(
+                            thread_id,
+                            initial_percent,
+                            rollout_stop=stop,
+                        )
                     rollout.seek(initial_offset)
+                    checkpoint = _rollout_follow_checkpoint(rollout)
                     discarding_long_line = False
                     while not stop.is_set():
                         line_start = rollout.tell()
                         line = rollout.readline(_ROLLOUT_CONTEXT_LINE_BYTES + 1)
                         if not line:
-                            stop.wait(self._rollout_poll_interval_seconds)
+                            if rollout.tell() != checkpoint.cursor_offset:
+                                advanced_checkpoint = _advance_rollout_follow_checkpoint(
+                                    rollout_path,
+                                    rollout,
+                                    checkpoint,
+                                )
+                                if advanced_checkpoint is None:
+                                    break
+                                checkpoint = advanced_checkpoint
+                            if stop.wait(self._rollout_poll_interval_seconds):
+                                continue
+                            if _rollout_path_requires_reopen(
+                                rollout_path,
+                                rollout,
+                                checkpoint,
+                            ):
+                                break
                             continue
                         if discarding_long_line:
                             if line.endswith(b"\n"):
@@ -553,9 +704,18 @@ class CodexContextStatusObserver:
                         if line.endswith(b"\n"):
                             context_percent = _rollout_context_percent(line)
                             if context_percent is not None:
-                                self.observe_rollout_context_percent(
+                                advanced_checkpoint = _advance_rollout_follow_checkpoint(
+                                    rollout_path,
+                                    rollout,
+                                    checkpoint,
+                                )
+                                if advanced_checkpoint is None:
+                                    break
+                                checkpoint = advanced_checkpoint
+                                self._observe_rollout_context_percent(
                                     thread_id,
                                     context_percent,
+                                    rollout_stop=stop,
                                 )
                             continue
                         if len(line) > _ROLLOUT_CONTEXT_LINE_BYTES:
@@ -564,8 +724,25 @@ class CodexContextStatusObserver:
                         # The writer has not committed the newline yet. Re-read this
                         # bounded partial record after the next append.
                         rollout.seek(line_start)
-                        stop.wait(self._rollout_poll_interval_seconds)
-            except OSError:
+                        advanced_checkpoint = _advance_rollout_follow_checkpoint(
+                            rollout_path,
+                            rollout,
+                            checkpoint,
+                        )
+                        if advanced_checkpoint is None:
+                            break
+                        checkpoint = advanced_checkpoint
+                        if stop.wait(self._rollout_poll_interval_seconds):
+                            continue
+                        if _rollout_path_requires_reopen(
+                            rollout_path,
+                            rollout,
+                            checkpoint,
+                        ):
+                            break
+            except (AnalyticsSourceReadError, OSError):
+                pass
+            if not stop.is_set():
                 stop.wait(self._rollout_poll_interval_seconds)
 
 
@@ -578,11 +755,14 @@ class CodexProtocolProxy:
         app_server_socket_path: Path,
         tool_call_counter: ToolCallCounter,
         on_primary_server_message: ProtocolEventCallback | None = None,
+        on_primary_disconnect: DisconnectCallback | None = None,
     ) -> None:
         self._proxy_socket_path = proxy_socket_path
         self._app_server_socket_path = app_server_socket_path
         self._tool_call_counter = tool_call_counter
         self._on_primary_server_message = on_primary_server_message
+        self._on_primary_disconnect = on_primary_disconnect
+        self._primary_lifecycle_lock = Lock()
         self._connection_lock = Lock()
         self._primary_send_lock = Lock()
         self._primary_connection_claimed = False
@@ -757,7 +937,7 @@ class CodexProtocolProxy:
                 self._primary_thread_id = thread_id
 
     def _claim_primary_connection(self, tui_connection: Any) -> bool:
-        with self._connection_lock:
+        with self._primary_lifecycle_lock, self._connection_lock:
             if self._primary_connection_claimed:
                 return False
             self._primary_connection_claimed = True
@@ -767,11 +947,18 @@ class CodexProtocolProxy:
             return True
 
     def _release_primary_connection(self, tui_connection: Any) -> None:
-        with self._primary_send_lock, self._connection_lock:
-            if self._primary_tui_connection is tui_connection:
-                self._primary_connection_claimed = False
-                self._primary_tui_connection = None
-                self._primary_thread_id = None
+        with self._primary_lifecycle_lock:
+            released = False
+            with self._primary_send_lock, self._connection_lock:
+                if self._primary_tui_connection is tui_connection:
+                    self._primary_connection_claimed = False
+                    self._primary_tui_connection = None
+                    self._primary_thread_id = None
+                    released = True
+            if released and self._on_primary_disconnect is not None:
+                with suppress(Exception):
+                    self._on_primary_disconnect()
+            if released:
                 self._primary_connection_released.set()
 
 
@@ -805,17 +992,40 @@ def _close_subscriber_queue(
         return
 
 
-def _started_tool_call_item_id(payload: dict[str, Any] | None) -> str | None:
-    if payload is None or payload.get("method") != "item/started":
+def _interrupt_subscriber_connection(connection: Any) -> None:
+    """Interrupt a blocked writer without waiting for a WebSocket close handshake."""
+    try:
+        close_socket = getattr(connection, "close_socket", None)
+        if callable(close_socket):
+            close_socket()
+        else:
+            connection.close()
+    except Exception:
+        # Reclaiming one failed subscriber must never reach the primary stream.
+        return
+
+
+def _tool_call_item_lifecycle(
+    payload: dict[str, Any] | None,
+) -> tuple[str, str] | None:
+    if payload is None or payload.get("method") not in {
+        "item/started",
+        "item/completed",
+    }:
         return None
+    method = payload["method"]
     params = payload.get("params")
     if not isinstance(params, dict):
         return None
     item = params.get("item")
-    if not isinstance(item, dict) or item.get("type") not in TOOL_CALL_ITEM_TYPES:
+    if not isinstance(item, dict):
         return None
     item_id = item.get("id")
-    return item_id if isinstance(item_id, str) and item_id else None
+    if not isinstance(item_id, str) or not item_id:
+        return None
+    if method == "item/started" and item.get("type") not in TOOL_CALL_ITEM_TYPES:
+        return None
+    return method, item_id
 
 
 def _update_active_turns(active_turns: dict[str, str], payload: dict[str, Any]) -> None:
@@ -883,6 +1093,8 @@ def _started_thread_rollout_path(
     candidate = Path(path_value)
     if not candidate.is_absolute() or not candidate.name.endswith(f"-{thread_id}.jsonl"):
         return None
+    if candidate.is_symlink():
+        return None
     resolved = candidate.resolve(strict=False)
     if not resolved.is_relative_to(codex_sessions_root):
         return None
@@ -890,12 +1102,28 @@ def _started_thread_rollout_path(
 
 
 def _update_known_threads(
-    known_threads: dict[str, dict[str, object]], payload: dict[str, Any]
+    known_threads: dict[str, dict[str, object]],
+    active_turns: dict[str, str],
+    payload: dict[str, Any],
 ) -> None:
-    if payload.get("method") != CODEX_APP_SERVER.thread_started_method:
-        return
+    method = payload.get("method")
     params = payload.get("params")
     if not isinstance(params, dict):
+        return
+    if method in {
+        CODEX_APP_SERVER.turn_completed_method,
+        CODEX_APP_SERVER.thread_status_changed_method,
+    }:
+        thread_id = _event_thread_id(params)
+        if thread_id is not None and thread_id not in active_turns:
+            known_threads.pop(thread_id, None)
+        return
+    if method == CODEX_APP_SERVER.turn_started_method:
+        thread_id = _event_thread_id(params)
+        if thread_id is not None:
+            known_threads.setdefault(thread_id, {"id": thread_id})
+        return
+    if method != CODEX_APP_SERVER.thread_started_method:
         return
     thread = params.get("thread")
     if not isinstance(thread, dict):
@@ -941,24 +1169,173 @@ def _context_percent(params: dict[str, Any]) -> float | None:
     return 100.0 * total_tokens / context_window
 
 
-def _latest_rollout_context(rollout_path: Path) -> tuple[float | None, int]:
-    """Read only a bounded tail and return its newest complete token snapshot."""
-    with rollout_path.open("rb") as rollout:
-        rollout.seek(0, 2)
-        end_offset = rollout.tell()
-        start_offset = max(0, end_offset - _ROLLOUT_CONTEXT_TAIL_BYTES)
-        rollout.seek(start_offset)
-        tail = rollout.read(end_offset - start_offset)
-    lines = tail.split(b"\n")
+def _open_rollout_for_following(
+    rollout_path: Path,
+    *,
+    allowed_root: Path | None,
+) -> Any:
+    """Open one owned regular rollout and bind its descriptor to the allowed root."""
+    if allowed_root is None:
+        raise AnalyticsSourceReadError("rollout following requires an allowed root")
+    root = allowed_root.resolve(strict=True)
+    descriptor = open_rollout_descriptor(rollout_path)
+    try:
+        descriptor_state = os.fstat(descriptor)
+        path_state = os.stat(rollout_path, follow_symlinks=False)
+        resolved_path = rollout_path.resolve(strict=True)
+        if not resolved_path.is_relative_to(root):
+            raise AnalyticsSourceReadError(
+                "rollout source escapes the configured sessions root"
+            )
+        if not stat.S_ISREG(path_state.st_mode) or (
+            descriptor_state.st_dev,
+            descriptor_state.st_ino,
+        ) != (path_state.st_dev, path_state.st_ino):
+            raise AnalyticsSourceReadError(
+                "rollout source identity changed while it was opened"
+            )
+        return os.fdopen(descriptor, "rb", closefd=True)
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _latest_rollout_context_from_open_file(rollout: Any) -> tuple[float | None, int]:
+    """Read a bounded complete-line baseline and retain a trailing partial offset."""
+    rollout.seek(0, 2)
+    end_offset = rollout.tell()
+    start_offset = max(0, end_offset - _ROLLOUT_CONTEXT_TAIL_BYTES)
+    rollout.seek(start_offset)
+    tail = rollout.read(end_offset - start_offset)
+    content_offset = start_offset
     if start_offset:
-        lines = lines[1:]
-    for line in reversed(lines):
+        first_newline = tail.find(b"\n")
+        if first_newline < 0:
+            return None, end_offset
+        content_offset += first_newline + 1
+        tail = tail[first_newline + 1 :]
+    if tail.endswith(b"\n"):
+        complete_content = tail
+        follow_offset = end_offset
+    else:
+        final_newline = tail.rfind(b"\n")
+        if final_newline < 0:
+            complete_content = b""
+            follow_offset = content_offset
+        else:
+            complete_content = tail[: final_newline + 1]
+            follow_offset = content_offset + final_newline + 1
+    for line in reversed(complete_content.splitlines()):
         if not line or len(line) > _ROLLOUT_CONTEXT_LINE_BYTES:
             continue
         context_percent = _rollout_context_percent(line)
         if context_percent is not None:
-            return context_percent, end_offset
-    return None, end_offset
+            return context_percent, follow_offset
+    return None, follow_offset
+
+
+def _rollout_follow_checkpoint(rollout: Any) -> _RolloutFollowCheckpoint:
+    state = os.fstat(rollout.fileno())
+    cursor_offset = rollout.tell()
+    return _RolloutFollowCheckpoint(
+        source_device=state.st_dev,
+        source_inode=state.st_ino,
+        source_size_bytes=state.st_size,
+        source_mtime_ns=state.st_mtime_ns,
+        source_ctime_ns=state.st_ctime_ns,
+        cursor_offset=cursor_offset,
+        boundary_sha256=_rollout_boundary_sha256(rollout.fileno(), cursor_offset),
+    )
+
+
+def _advance_rollout_follow_checkpoint(
+    rollout_path: Path,
+    rollout: Any,
+    checkpoint: _RolloutFollowCheckpoint,
+) -> _RolloutFollowCheckpoint | None:
+    """Advance only after the preceding trusted boundary still validates."""
+    if _rollout_path_requires_reopen(rollout_path, rollout, checkpoint):
+        return None
+    state = os.fstat(rollout.fileno())
+    if rollout.tell() == checkpoint.cursor_offset and (
+        state.st_size,
+        state.st_mtime_ns,
+        state.st_ctime_ns,
+    ) == (
+        checkpoint.source_size_bytes,
+        checkpoint.source_mtime_ns,
+        checkpoint.source_ctime_ns,
+    ):
+        return checkpoint
+    advanced = _rollout_follow_checkpoint(rollout)
+    if _rollout_path_requires_reopen(rollout_path, rollout, checkpoint):
+        return None
+    return advanced
+
+
+def _rollout_boundary_sha256(descriptor: int, cursor_offset: int) -> str:
+    """Fingerprint bounded head and cursor-boundary bytes without moving the cursor."""
+    head_size = min(cursor_offset, _ROLLOUT_CONTEXT_BOUNDARY_BYTES)
+    boundary_start = max(head_size, cursor_offset - _ROLLOUT_CONTEXT_BOUNDARY_BYTES)
+    head = os.pread(descriptor, head_size, 0)
+    boundary = os.pread(descriptor, cursor_offset - boundary_start, boundary_start)
+    digest = hashlib.sha256()
+    digest.update(head)
+    digest.update(boundary_start.to_bytes(8, "big"))
+    digest.update(boundary)
+    return digest.hexdigest()
+
+
+def _rollout_path_requires_reopen(
+    rollout_path: Path,
+    rollout: Any,
+    checkpoint: _RolloutFollowCheckpoint,
+) -> bool:
+    """Reject replacement, truncation, rewrite, or truncate-regrow at a boundary."""
+    try:
+        descriptor_state = os.fstat(rollout.fileno())
+        path_state = os.stat(rollout_path, follow_symlinks=False)
+    except OSError:
+        return True
+    if (
+        not stat.S_ISREG(path_state.st_mode)
+        or (
+            descriptor_state.st_dev,
+            descriptor_state.st_ino,
+        )
+        != (
+            checkpoint.source_device,
+            checkpoint.source_inode,
+        )
+        or (path_state.st_dev, path_state.st_ino)
+        != (
+            checkpoint.source_device,
+            checkpoint.source_inode,
+        )
+    ):
+        return True
+    if (
+        descriptor_state.st_size < checkpoint.cursor_offset
+        or descriptor_state.st_size < checkpoint.source_size_bytes
+    ):
+        return True
+    if (
+        _rollout_boundary_sha256(rollout.fileno(), checkpoint.cursor_offset)
+        != checkpoint.boundary_sha256
+    ):
+        return True
+    metadata_changed = (
+        descriptor_state.st_size,
+        descriptor_state.st_mtime_ns,
+        descriptor_state.st_ctime_ns,
+    ) != (
+        checkpoint.source_size_bytes,
+        checkpoint.source_mtime_ns,
+        checkpoint.source_ctime_ns,
+    )
+    if not metadata_changed:
+        return False
+    return descriptor_state.st_size == checkpoint.source_size_bytes
 
 
 def _rollout_context_percent(line: bytes) -> float | None:

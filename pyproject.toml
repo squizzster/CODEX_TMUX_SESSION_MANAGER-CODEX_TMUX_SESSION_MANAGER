@@ -9,7 +9,7 @@ authors = [
 requires-python = ">=3.12"
 classifiers = [
     "Development Status :: 3 - Alpha",
-    "Operating System :: POSIX",
+    "Operating System :: POSIX :: Linux",
 ]
 dependencies = [
     "codex-protocol-log-analyzer @ git+https://github.com/squizzster/CODEX_PROTOCOL_LOG_ANALYZER-CODEX_PROTOCOL_LOG_ANALYZER.git@13d23b296222e40c18cfc3b45d02c2adef45cce2",

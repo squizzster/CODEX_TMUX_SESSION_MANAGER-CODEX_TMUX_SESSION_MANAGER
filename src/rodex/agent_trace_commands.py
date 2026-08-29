@@ -23,10 +23,16 @@ from .command_contract import AGENTS_COMMAND, TRACE_COMMAND
 from .errors import RodexLaunchError
 
 TRACE_FOLLOW_POLL_SECONDS = 1.0
+TRACE_FOLLOW_MAX_IDLE_POLL_SECONDS = 16.0
 TRACE_DEFAULT_LIMIT = 200
 TRACE_USAGE = (
-    "usage: rodex _trace SESSION_NAME [--follow] [--after EVENT_ID] "
-    "[--limit NUM] [--include-bodies] [--json]"
+    "usage: rodex _trace SESSION_NAME [--follow | --include-bodies] "
+    "[--after EVENT_ID] [--limit NUM] [--json] "
+    "(--follow is metadata-only; --include-bodies and --json are snapshot-only)"
+)
+TRACE_FOLLOW_BODY_ERROR = (
+    "--include-bodies is snapshot-only and cannot be combined with --follow; "
+    "use --follow for metadata-only output or run a separate one-shot snapshot"
 )
 
 
@@ -41,6 +47,9 @@ def execute_agent_trace_command(arguments: list[str], database_path: Path) -> No
             else TRACE_USAGE
         )
     session_name = arguments[1]
+    trace_request = (
+        _parse_trace_arguments(arguments) if arguments[0] == TRACE_COMMAND else None
+    )
     session_id = lookup_owned_rodex_sessions_id_from_a_cool_name(
         session_name, database_path
     )
@@ -49,12 +58,12 @@ def execute_agent_trace_command(arguments: list[str], database_path: Path) -> No
     if arguments[0] == AGENTS_COMMAND:
         _show_agents(arguments, session_name, session_id, database_path)
         return
-    request = _parse_trace_arguments(arguments)
+    assert trace_request is not None
     _show_or_follow_trace(
         session_name,
         session_id,
         database_path,
-        **request,
+        **trace_request,
     )
 
 
@@ -131,6 +140,8 @@ def _parse_trace_arguments(arguments: list[str]) -> dict[str, Any]:
             index += 2
         else:
             raise RodexLaunchError(TRACE_USAGE)
+    if follow and include_bodies:
+        raise RodexLaunchError(TRACE_FOLLOW_BODY_ERROR)
     if as_json and follow:
         raise RodexLaunchError("--json snapshot envelopes cannot be combined with --follow")
     return {
@@ -153,8 +164,13 @@ def _show_or_follow_trace(
     after_event_id: str | None,
     limit: int,
 ) -> None:
+    if follow and include_bodies:
+        raise RodexLaunchError(TRACE_FOLLOW_BODY_ERROR)
     cursor = after_event_id
     first = True
+    idle_poll_seconds = TRACE_FOLLOW_POLL_SECONDS
+    unseen_publication = object()
+    previous_publication_sequence: int | object | None = unseen_publication
     while True:
         snapshot = read_rodex_agent_trace(
             session_id,
@@ -209,7 +225,19 @@ def _show_or_follow_trace(
                 flush=True,
             )
         first = False
-        time.sleep(TRACE_FOLLOW_POLL_SECONDS)
+        publication_changed = (
+            previous_publication_sequence is not unseen_publication
+            and snapshot.trace_publication_sequence != previous_publication_sequence
+        )
+        if events or publication_changed:
+            idle_poll_seconds = TRACE_FOLLOW_POLL_SECONDS
+        time.sleep(idle_poll_seconds)
+        if not events and not publication_changed:
+            idle_poll_seconds = min(
+                idle_poll_seconds * 2,
+                TRACE_FOLLOW_MAX_IDLE_POLL_SECONDS,
+            )
+        previous_publication_sequence = snapshot.trace_publication_sequence
 
 
 def _attach_authenticated_rollout_bodies(
@@ -239,26 +267,69 @@ def _attach_authenticated_rollout_bodies(
 
 
 def _authenticated_source_records(source: Any) -> dict[int, dict[str, Any]]:
+    """Fully authenticate one durable prefix before exposing its selected bodies."""
+    identity = _source_prefix_identity(source)
+    if identity is None:
+        return {}
+    thread_id, path, size, expected_digest = identity
+    descriptor = open_rollout_descriptor(path)
+    try:
+        before = os.fstat(descriptor)
+        content = _pread_exact_range(descriptor, 0, size)
+        after = os.fstat(descriptor)
+        path_state = os.stat(path, follow_symlinks=False)
+    finally:
+        os.close(descriptor)
+    identities = {
+        (before.st_dev, before.st_ino),
+        (after.st_dev, after.st_ino),
+        (path_state.st_dev, path_state.st_ino),
+    }
+    if len(identities) != 1 or before.st_size < size or after.st_size < size:
+        raise RodexLaunchError(
+            f"authenticated rollout source changed for thread {source.codex_thread_id}"
+        )
+    if hashlib.sha256(content).hexdigest() != expected_digest:
+        raise RodexLaunchError(
+            f"authenticated rollout prefix changed for thread {source.codex_thread_id}"
+        )
+    records: dict[int, dict[str, Any]] = {}
+    _index_source_records(records, content, line_offset=0, thread_id=thread_id)
+    return records
+
+
+def _source_prefix_identity(source: Any) -> tuple[str, Path, int, str] | None:
     if (
         source.rollout_file_path is None
         or source.analyzed_size_bytes is None
         or source.analyzed_prefix_sha256 is None
     ):
-        return {}
-    descriptor = open_rollout_descriptor(Path(source.rollout_file_path))
-    try:
-        content = _pread_exact_prefix(descriptor, source.analyzed_size_bytes)
-    finally:
-        os.close(descriptor)
+        return None
+    size = source.analyzed_size_bytes
+    digest = source.analyzed_prefix_sha256
     if (
-        len(content) != source.analyzed_size_bytes
-        or hashlib.sha256(content).hexdigest() != source.analyzed_prefix_sha256
+        isinstance(size, bool)
+        or not isinstance(size, int)
+        or size < 0
+        or not isinstance(digest, str)
+        or len(digest) != 64
+        or any(character not in "0123456789abcdef" for character in digest)
     ):
         raise RodexLaunchError(
-            f"authenticated rollout prefix changed for thread {source.codex_thread_id}"
+            "authenticated rollout checkpoint is invalid for thread "
+            f"{source.codex_thread_id}"
         )
-    records: dict[int, dict[str, Any]] = {}
-    for physical_ordinal, line in enumerate(content.splitlines()):
+    return str(source.codex_thread_id), Path(source.rollout_file_path), size, digest
+
+
+def _index_source_records(
+    records: dict[int, dict[str, Any]],
+    content: bytes,
+    *,
+    line_offset: int,
+    thread_id: str,
+) -> None:
+    for physical_ordinal, line in enumerate(content.splitlines(), start=line_offset):
         try:
             record = json.loads(line)
         except (json.JSONDecodeError, UnicodeError, ValueError):
@@ -270,17 +341,18 @@ def _authenticated_source_records(source: Any) -> dict[int, dict[str, Any]]:
             ordinal = physical_ordinal
         if ordinal in records and records[ordinal] != record:
             raise RodexLaunchError(
-                f"duplicate rollout ordinal for thread {source.codex_thread_id}: {ordinal}"
+                f"duplicate rollout ordinal for thread {thread_id}: {ordinal}"
             )
         records[ordinal] = record
-    return records
 
 
-def _pread_exact_prefix(descriptor: int, size: int) -> bytes:
+def _pread_exact_range(descriptor: int, start: int, end: int) -> bytes:
+    if end < start:
+        raise RodexLaunchError("authenticated rollout checkpoint shrank during body lookup")
     chunks: list[bytes] = []
-    offset = 0
-    while offset < size:
-        chunk = os.pread(descriptor, min(size - offset, 1024 * 1024), offset)
+    offset = start
+    while offset < end:
+        chunk = os.pread(descriptor, min(end - offset, 1024 * 1024), offset)
         if not chunk:
             raise RodexLaunchError("authenticated rollout ended during body lookup")
         chunks.append(chunk)

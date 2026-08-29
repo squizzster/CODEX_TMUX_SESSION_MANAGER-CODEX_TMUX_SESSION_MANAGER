@@ -1,49 +1,44 @@
-# Phase II evidence and remaining plan
+# Phase II current boundary and remaining proposals
 
-This document is a review surface, not a committed roadmap. The implemented evidence
-and current boundaries are factual; every remaining capability, priority, and ordering
-below remains subject to review and explicit user agreement before implementation.
+This document separates the application that exists now from capabilities that have not
+been started. It is a review surface, not a committed roadmap. Every proposal below
+requires explicit agreement before implementation.
 
-Phase II remains evidence-gated. The 0.147 live experiment now proves that a short-lived
-mutation client may disconnect after acceptance: lifecycle events and approval requests
-continue on the subscribed primary connection. See
-[the characterized evidence](APP_SERVER_0_147_LIVE_EVIDENCE.md). User-input requests now
-have the same live routing evidence. Dispatch recovery uses caller-owned correlation and
-read-only observation; it does not assume or implement server-side deduplication.
+## Current application
 
-The product order is deliberate. Rodex first accommodates the user by keeping ordinary
-Codex invocation and TUI behavior intact inside a durable, named tmux runtime. That
-foundation now forms a working local bridge: a person may attach and intervene while an
-authorized agent observes readable progress with `_tail`, observes protocol activity
-with `_events`, follows durable lineage and typed activity with `_agents` and `_trace`,
-and uses exact-turn control without terminal keystroke injection. Future multi-agent
-orchestration should extend this bridge rather than create a second runtime or
-conversation model.
+Rodex keeps ordinary Codex invocation and TUI behavior inside a durable, named tmux
+runtime. A person may attach and intervene while an authorized caller:
 
-## Candidate order for review
+- observes terminal progress with `_tail` and protocol activity with `_events`;
+- reads durable lineage and typed activity with `_agents` and `_trace`;
+- inspects, starts, steers, interrupts, waits for, and reads one exact turn;
+- correlates dispatch acceptance without assuming server-side deduplication; and
+- addresses sessions through verified durable and live identities.
 
-1. Preserve caller-directed relocation. A resumed runtime intentionally adopts the
-   caller's current working directory: moving a user's home/project/worktree and then
-   resuming from its new location carries that location forward. Rodex identity is
-   durable, but it is not a permanent workspace pin. `_inspect` reports the effective
-   App Server `cwd` before mutation.
-2. Keep the live-turn characterizations replayable through opt-in integration tests.
-   Fanout, approval ownership, user-input ownership, dispatch correlation, and initiator
-   disconnect are observed. A real TUI reconnect replay remains useful; the proxy's
-   primary handoff has a deterministic transport-level regression.
-3. Keep dispatch policy at the controller boundary. `_start` and `_steer` accept or
-   generate a `dispatch ID`, pass it as `clientUserMessageId`, and return it even when
-   response loss makes acceptance indeterminate. `_dispatch-status` reports zero, one,
-   or multiple matching `userMessage.clientId` observations and recommends a next
-   command. `not_observed` is not rejection; Rodex never silently retries.
-4. Add machine lifecycle and discovery: resumable `_sessions`, create-only `_spawn`,
-   resume-only `_resume`, controlled restart/rehome, and workspace freshness fields.
-5. Broaden compatibility and recovery: `_doctor`, generated-schema checks across each
-   supported Codex version, durable pending-attention metadata, and runtime-death
-   reconciliation. Keep transparent TUI use available when machine mutation fails
-   closed.
-6. Add multi-agent task/message orchestration only after one-session exact control,
-   workspace ownership, approval routing, and retry behavior have real evidence.
+The exact-turn coordinator is the only mutation-policy owner. The subscribed primary
+connection owns lifecycle and user-input delivery when a short-lived mutation client
+disconnects. The behavior is characterized in
+[the live App Server evidence](APP_SERVER_0_147_LIVE_EVIDENCE.md) and revalidated against
+installed Codex 0.150.1.
+
+A new or resumed runtime uses the caller-selected working directory at launch. Rodex
+does not follow a database, runtime root, or protected parent that moves while the
+application is running; that is a terminal condition requiring a controlled restart.
+
+## Unimplemented proposals
+
+1. Add explicit machine lifecycle/discovery commands such as resumable `_sessions`,
+   create-only `_spawn`, resume-only `_resume`, controlled restart/rehome, and workspace
+   freshness fields.
+2. Add a `_doctor` command, refresh exact generated-schema evidence for selected Codex
+   releases, and define durable pending-attention and runtime-death reconciliation.
+3. Add an opt-in real-TUI reconnect replay and a prolonged CPU, tmux-process-rate, WAL,
+   and disk-write soak. Deterministic transport, recovery, and resource-bound tests
+   already cover the corresponding code paths.
+4. Consider multi-agent task/message orchestration only after its authority, workspace
+   ownership, approval routing, and retry semantics are explicitly designed. It must
+   extend the existing exact-session pipeline rather than create a second runtime or
+   conversation model.
 
 ## Continuing boundaries
 
@@ -52,3 +47,6 @@ conversation model.
   never a second conversation history.
 - Names remain display/discovery aids. Mutation requires verified durable and live IDs.
 - No destructive lifecycle action gains implied authority from an automation command.
+- Database or protected-path movement is never treated as relocation authority.
+- A future capability must enter through the existing canonical owner for its
+  responsibility; it must not leave and later rejoin the pipeline through a side path.

@@ -8,10 +8,14 @@ import pytest
 from rodex_sql import (
     INDEX_RE_TRY_ATTEMPTS,
     RodexDatabaseNotFoundError,
+    RodexDatabaseNotInitializedError,
     RodexSQLError,
+    database_terminal_signal,
     index_re_try_attempt_numbers,
+    open_rodex_bootstrap_transaction,
     open_rodex_read_transaction,
     open_rodex_transaction,
+    require_active_rodex_transaction,
     select_lookup_id,
     select_or_insert_lookup_id,
 )
@@ -23,7 +27,7 @@ def test_index_re_try_policy_has_exactly_ten_finite_attempts() -> None:
 
 
 def create_lookup_table(database: Path) -> None:
-    with open_rodex_transaction(database) as connection:
+    with open_rodex_bootstrap_transaction(database) as connection:
         connection.execute(
             "CREATE TABLE example_lookup ("
             "id INTEGER PRIMARY KEY AUTOINCREMENT, code TEXT NOT NULL)"
@@ -72,6 +76,62 @@ def test_read_transaction_cannot_create_database_storage(tmp_path: Path) -> None
 
     assert not database.parent.exists()
     assert not database.exists()
+
+
+@pytest.mark.evolutionary_regression
+def test_write_transaction_cannot_create_database_storage(tmp_path: Path) -> None:
+    database = tmp_path / "absent" / "database.sqlite3"
+
+    with (
+        pytest.raises(RodexDatabaseNotFoundError, match="database does not exist"),
+        open_rodex_transaction(database),
+    ):
+        pass
+
+    assert not database.parent.exists()
+    assert not database.exists()
+
+
+def test_bootstrap_transaction_is_the_explicit_creation_entry(tmp_path: Path) -> None:
+    database = tmp_path / "nested" / "database.sqlite3"
+
+    with open_rodex_bootstrap_transaction(database) as connection:
+        connection.execute("CREATE TABLE marker (value TEXT NOT NULL)")
+
+    assert database.is_file()
+
+
+def test_existing_transaction_does_not_initialize_an_unadmitted_file(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "database.sqlite3"
+    database.touch(mode=0o600)
+
+    with (
+        pytest.raises(RodexDatabaseNotInitializedError, match="transition lock"),
+        open_rodex_transaction(database),
+    ):
+        pass
+
+    assert not any(
+        path.name.endswith(".rodex-transition.lock") for path in tmp_path.iterdir()
+    )
+
+
+def test_terminal_signal_subscribes_only_after_transaction_admission(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "nested" / "database.sqlite3"
+
+    with pytest.raises(RodexSQLError, match="has not been admitted"):
+        database_terminal_signal(database)
+    assert not database.parent.exists()
+
+    with open_rodex_bootstrap_transaction(database):
+        pass
+    signal = database_terminal_signal(database)
+    assert signal.path == database
+    assert not signal.terminal_event.is_set()
 
 
 @pytest.mark.evolutionary_regression
@@ -146,6 +206,15 @@ def test_lookup_operations_require_an_active_transaction() -> None:
         pytest.raises(RodexSQLError, match="active transaction"),
     ):
         select_lookup_id(connection, "example_lookup", {"code": "one"})
+
+
+def test_canonical_transaction_invariant_rejects_before_sql() -> None:
+    with sqlite3.connect(":memory:") as connection:
+        connection.set_authorizer(
+            lambda *_args: pytest.fail("transaction guard attempted SQL")
+        )
+        with pytest.raises(RodexSQLError, match="active transaction"):
+            require_active_rodex_transaction(connection)
 
 
 @pytest.mark.parametrize(

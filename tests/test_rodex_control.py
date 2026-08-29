@@ -97,68 +97,6 @@ def verified_responses(
     ]
 
 
-def test_send_starts_an_idle_turn_after_codex_session_id_verification(
-    tmp_path: Path,
-) -> None:
-    protocol = FakeWebSocket(
-        [
-            *verified_responses(status="idle"),
-            {"id": "rodex:test", "result": {"turn": {"id": "turn-new"}}},
-        ]
-    )
-    events = FakeWebSocket(responses=[json.loads(EVENT_STREAM_READY_MESSAGE)])
-    client = CodexControlClient(
-        connector=RoutingConnector(protocol, events),
-        request_id_factory=lambda: "rodex:test",
-        dispatch_id_factory=lambda: "rodex:dispatch:test",
-    )
-    revalidated: list[bool] = []
-
-    dispatched = client.send_prompt(
-        control(tmp_path), "run tests", revalidate=lambda: revalidated.append(True)
-    )
-
-    assert dispatched.action == "started"
-    assert dispatched.turn_id == "turn-new"
-    assert protocol.sent[-1] == {
-        "method": "turn/start",
-        "id": "rodex:test",
-        "params": {
-            "threadId": str(CODEX_SESSION_ID),
-            "input": [{"type": "text", "text": "run tests"}],
-            "clientUserMessageId": "rodex:dispatch:test",
-        },
-    }
-    assert revalidated == [True]
-
-
-def test_send_steers_the_exact_active_turn(tmp_path: Path) -> None:
-    protocol = FakeWebSocket(
-        [
-            *verified_responses(status="active"),
-            {"id": "rodex:test", "result": {"turnId": "turn-active"}},
-        ]
-    )
-    events = FakeWebSocket(
-        responses=[
-            {
-                "method": "rodex/event-stream/ready",
-                "params": {"activeTurns": {str(CODEX_SESSION_ID): "turn-active"}},
-            }
-        ]
-    )
-    client = CodexControlClient(
-        connector=RoutingConnector(protocol, events),
-        request_id_factory=lambda: "rodex:test",
-    )
-
-    dispatched = client.send_prompt(control(tmp_path), "also lint")
-
-    assert dispatched.action == "steered"
-    assert protocol.sent[-1]["method"] == "turn/steer"
-    assert protocol.sent[-1]["params"]["expectedTurnId"] == "turn-active"
-
-
 def test_thread_inspection_does_not_require_rollout_history(tmp_path: Path) -> None:
     protocol = FakeWebSocket(verified_responses(status="idle"))
     client = CodexControlClient(connector=RoutingConnector(protocol))
@@ -345,7 +283,7 @@ def test_exact_start_uses_a_string_request_id_and_returns_both_codex_identities(
         dispatch_id_factory=lambda: "rodex:dispatch:test",
     )
 
-    dispatch = client.start_turn(control(tmp_path), "run tests")
+    dispatch = client._start_turn(control(tmp_path), "run tests", revalidate=lambda: None)
 
     assert dispatch.turn_id == "turn-new"
     assert dispatch.thread_id == str(CODEX_SESSION_ID)
@@ -369,7 +307,7 @@ def test_exact_start_refuses_to_steer_an_observed_active_turn(tmp_path: Path) ->
     client = CodexControlClient(connector=RoutingConnector(protocol, events))
 
     with pytest.raises(RodexControlError, match="use _steer"):
-        client.start_turn(control(tmp_path), "new work")
+        client._start_turn(control(tmp_path), "new work", revalidate=lambda: None)
 
     assert all(message.get("method") != "turn/start" for message in protocol.sent)
 
@@ -398,7 +336,7 @@ def test_exact_start_uses_fresh_thread_state_when_ready_snapshot_is_stale(
         request_id_factory=lambda: "rodex:test",
     )
 
-    dispatch = client.start_turn(control(tmp_path), "new work")
+    dispatch = client._start_turn(control(tmp_path), "new work", revalidate=lambda: None)
 
     assert dispatch.turn_id == "turn-new"
     assert protocol.sent[-1]["method"] == "turn/start"
@@ -428,7 +366,12 @@ def test_exact_steer_defers_the_turn_id_precondition_to_app_server(tmp_path: Pat
     )
 
     with pytest.raises(RodexControlError, match="expected turn id mismatch"):
-        client.steer_turn(control(tmp_path), "turn-other", "more work")
+        client._steer_turn(
+            control(tmp_path),
+            "turn-other",
+            "more work",
+            revalidate=lambda: None,
+        )
 
     assert protocol.sent[-1]["params"]["expectedTurnId"] == "turn-other"
 
@@ -449,7 +392,12 @@ def test_exact_steer_succeeds_before_event_tap_observes_turn_started(
         request_id_factory=lambda: "rodex:test",
     )
 
-    dispatch = client.steer_turn(control(tmp_path), "turn-target", "more work")
+    dispatch = client._steer_turn(
+        control(tmp_path),
+        "turn-target",
+        "more work",
+        revalidate=lambda: None,
+    )
 
     assert dispatch.turn_id == "turn-target"
     assert protocol.sent[-1]["params"]["expectedTurnId"] == "turn-target"
@@ -468,7 +416,9 @@ def test_exact_interrupt_succeeds_before_event_tap_observes_turn_started(
         request_id_factory=lambda: "rodex:test",
     )
 
-    state = client.interrupt_turn(control(tmp_path), "turn-target")
+    state = client._interrupt_turn(
+        control(tmp_path), "turn-target", revalidate=lambda: None
+    )
 
     assert state.active_turn_id == "turn-target"
     assert protocol.sent[-1]["params"] == {
@@ -868,7 +818,7 @@ def test_lost_mutation_response_preserves_dispatch_status_hook(tmp_path: Path) -
     with pytest.raises(
         RodexDispatchIndeterminateError, match="acceptance is unknown"
     ) as raised:
-        client.start_turn(control(tmp_path), "run tests")
+        client._start_turn(control(tmp_path), "run tests", revalidate=lambda: None)
 
     assert raised.value.dispatch_id == "controller:dispatch:42"
     assert raised.value.thread_id == str(CODEX_SESSION_ID)
@@ -881,25 +831,43 @@ def test_mutation_response_has_a_total_deadline_despite_unrelated_frames(
     tmp_path: Path,
 ) -> None:
     """Current evidence: legal unrelated frames cannot suppress recovery forever."""
-    protocol = FakeWebSocket(
+    clock = [0.0]
+
+    class MutationDeadlineWebSocket(FakeWebSocket):
+        def __init__(self, responses: list[dict[str, Any]]) -> None:
+            super().__init__(responses)
+            self.mutation_sent = False
+
+        def send(self, message: str) -> None:
+            super().send(message)
+            if json.loads(message).get("method") == "turn/start":
+                self.mutation_sent = True
+                clock[0] = 1.0
+
+        def recv(self, timeout: float | None) -> str:
+            response = super().recv(timeout)
+            if self.mutation_sent:
+                clock[0] = 6.0
+            return response
+
+    protocol = MutationDeadlineWebSocket(
         [
             *verified_responses(status="idle"),
             {"method": "unrelated/notification", "params": {}},
         ]
     )
     events = FakeWebSocket(responses=[json.loads(EVENT_STREAM_READY_MESSAGE)])
-    clock_values = iter((0.0, 1.0, 6.0))
     client = CodexControlClient(
         connector=RoutingConnector(protocol, events),
         request_id_factory=lambda: "rodex:request",
         dispatch_id_factory=lambda: "controller:dispatch:deadline",
-        monotonic=lambda: next(clock_values),
+        monotonic=lambda: clock[0],
     )
 
     with pytest.raises(
         RodexDispatchIndeterminateError, match="acceptance is unknown"
     ) as raised:
-        client.start_turn(control(tmp_path), "run tests")
+        client._start_turn(control(tmp_path), "run tests", revalidate=lambda: None)
 
     assert raised.value.dispatch_id == "controller:dispatch:deadline"
 
@@ -920,4 +888,4 @@ def test_failed_mutation_send_is_explicitly_indeterminate(tmp_path: Path) -> Non
     )
 
     with pytest.raises(RodexDispatchIndeterminateError, match="before acceptance"):
-        client.start_turn(control(tmp_path), "run tests")
+        client._start_turn(control(tmp_path), "run tests", revalidate=lambda: None)

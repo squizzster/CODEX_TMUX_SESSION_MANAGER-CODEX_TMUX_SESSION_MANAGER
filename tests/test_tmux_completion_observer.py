@@ -40,7 +40,12 @@ class RecordingRunner:
         self, command: list[str], **options: object
     ) -> subprocess.CompletedProcess[str]:
         self.commands.append(command)
-        assert options == {"check": False, "text": True, "capture_output": True}
+        assert options == {
+            "check": False,
+            "text": True,
+            "capture_output": True,
+            "timeout": 1.0,
+        }
         if "#{cursor_y}" in command:
             return subprocess.CompletedProcess(
                 command, 0, stdout=self.cursor_text, stderr=""

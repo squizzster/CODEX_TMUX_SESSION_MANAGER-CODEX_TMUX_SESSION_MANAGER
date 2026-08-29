@@ -238,8 +238,15 @@ def test_record_access_changes_only_the_last_access_timestamp(
     assert updated.last_accessed_at_utc == "2026-08-15T11:30:00.000000Z"
 
 
-def test_access_timestamp_is_converted_to_utc(tmp_path: Path) -> None:
+def test_access_timestamp_is_converted_to_utc(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     database = tmp_path / "rodex.sqlite3"
+    monkeypatch.setattr(
+        session_module,
+        "_utc_now_timestamp",
+        lambda: "2026-08-15T10:00:00.000000Z",
+    )
     session = create_a_rodex_session(database, codex_session_id=CODEX_SESSION_ID_1)
     plus_two = timezone(timedelta(hours=2))
 

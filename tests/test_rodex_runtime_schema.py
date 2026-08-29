@@ -12,6 +12,7 @@ from rodex_registry import (
     RodexRuntimeIdCollisionError,
     RodexSessionError,
     RodexSessionsUserIdentity,
+    audit_rodex_database_integrity,
     create_a_rodex_session,
     generate_an_unregistered_rodex_runtime_id_candidate,
     initialise_rodex_database,
@@ -200,7 +201,7 @@ def test_current_root_and_subagent_roles_are_exclusive_for_insert_and_update(
         ) == {(child_membership_id,), (sibling_membership_id,)}
 
 
-def test_schema_reopen_rejects_a_same_named_but_weakened_root_guard(
+def test_integrity_audit_rejects_a_same_named_but_weakened_root_guard(
     tmp_path: Path,
 ) -> None:
     database = initialise_rodex_database(tmp_path / "rodex.sqlite3")
@@ -211,9 +212,11 @@ def test_schema_reopen_rejects_a_same_named_but_weakened_root_guard(
             "BEFORE INSERT ON rodex_sessions_current_codex_threads "
             "BEGIN SELECT 1; END"
         )
+    connection.close()
 
+    assert initialise_rodex_database(database) == database
     with pytest.raises(RodexSessionError, match="definition mismatch"):
-        initialise_rodex_database(database)
+        audit_rodex_database_integrity(database)
 
 
 def test_exact_foreign_key_verifier_preserves_composite_grouping() -> None:
@@ -276,6 +279,7 @@ def test_resume_cannot_promote_a_subagent_and_rolls_back_runtime_changes(
             "automatic-beluga",
             database,
             codex_session_id=child_thread_id,
+            runtime_id=RodexRuntimeId.generate(),
         )
 
     tmux_link = lookup_rodex_tmux_session(session.rodex_sessions_id, database)
@@ -348,9 +352,10 @@ def test_v4_runtime_uuid_schema_is_rejected_without_migration(tmp_path: Path) ->
             "started_at_utc TEXT NOT NULL, "
             "FOREIGN KEY (rodex_sessions_id) REFERENCES rodex_sessions (id))"
         )
+    connection.close()
 
-    with pytest.raises(RodexSessionError, match="schema mismatch"):
-        initialise_rodex_database(database)
+    with pytest.raises(RodexSessionError, match="definition mismatch"):
+        audit_rodex_database_integrity(database)
 
     assert [
         row[1] for row in fetch_all(database, "PRAGMA table_info(rodex_runtime_instances)")
@@ -387,14 +392,14 @@ def test_create_and_resume_persist_the_exact_current_runtime_id(
         "automatic-beluga",
         database,
         runtime_id=second_runtime,
-        accessed_at_utc=datetime(2026, 8, 15, 18, 30, tzinfo=UTC),
+        accessed_at_utc=datetime(2030, 8, 15, 18, 30, tzinfo=UTC),
     )
 
     resumed = lookup_rodex_runtime_instance(session.rodex_sessions_id, database)
     assert resumed is not None
     assert resumed.id == initial.id
     assert resumed.runtime_id == second_runtime
-    assert resumed.started_at_utc == "2026-08-15T18:30:00.000000Z"
+    assert resumed.started_at_utc == "2030-08-15T18:30:00.000000Z"
 
 
 def test_runtime_id_bigints_reject_non_integer_storage(
@@ -618,14 +623,15 @@ def test_runtime_resume_replaces_endpoint_and_access_time_in_one_transaction(
         "/tmp/rodex/new.sock",
         "automatic-beluga",
         database,
-        accessed_at_utc=datetime(2026, 8, 15, 18, 30, tzinfo=UTC),
+        runtime_id=RodexRuntimeId.generate(),
+        accessed_at_utc=datetime(2030, 8, 15, 18, 30, tzinfo=UTC),
     )
 
     assert updated.id == 1
     assert updated.tmux_server_socket_path == "/tmp/rodex/new.sock"
     log = lookup_rodex_session_log(session.rodex_sessions_id, database)
     assert log is not None
-    assert log.last_accessed_at_utc == "2026-08-15T18:30:00.000000Z"
+    assert log.last_accessed_at_utc == "2030-08-15T18:30:00.000000Z"
 
 
 def test_runtime_recovery_atomically_relinks_the_codex_session_id_and_endpoint(
@@ -645,6 +651,7 @@ def test_runtime_recovery_atomically_relinks_the_codex_session_id_and_endpoint(
         "automatic-beluga",
         database,
         codex_session_id=REPLACEMENT_CODEX_SESSION_ID,
+        runtime_id=RodexRuntimeId.generate(),
     )
 
     assert updated.tmux_server_socket_path == "/tmp/rodex/new.sock"
@@ -689,6 +696,7 @@ def test_runtime_resume_rolls_back_endpoint_when_access_log_update_fails(
             "automatic-beluga",
             database,
             codex_session_id=REPLACEMENT_CODEX_SESSION_ID,
+            runtime_id=RodexRuntimeId.generate(),
         )
 
     assert (

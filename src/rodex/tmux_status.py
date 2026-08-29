@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import shlex
 import subprocess
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import IntEnum
 from pathlib import Path
-from typing import Any, Final
+from threading import Condition, Thread
+from typing import Final
 
 from .status_bar import (
     RODEX_STATUS_COLOURS,
@@ -19,6 +21,11 @@ from .status_bar import (
     RODEX_STATUS_STYLE,
     RODEX_WINDOW_STATUS_FORMAT,
 )
+from .tmux_executor import SyncTmuxExecutor, SyncTmuxRunner
+
+TMUX_STATUS_COMMAND_TIMEOUT_SECONDS: Final = 1.0
+TMUX_STATUS_FAILURE_BACKOFF_SECONDS: Final = 1.0
+TMUX_STATUS_WORKER_IDLE_SECONDS: Final = 0.25
 
 
 class TmuxStatusOption:
@@ -31,32 +38,113 @@ class TmuxStatusOption:
         tmux_pane_target: str,
         option_name: str,
         *,
-        runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+        runner: SyncTmuxRunner = subprocess.run,
+        command_timeout_seconds: float = TMUX_STATUS_COMMAND_TIMEOUT_SECONDS,
+        failure_backoff_seconds: float = TMUX_STATUS_FAILURE_BACKOFF_SECONDS,
     ) -> None:
         if not tmux_pane_target.strip() or not option_name.startswith("@"):
             raise ValueError("tmux pane target and user option must be valid")
-        self._command_prefix = (
-            tmux_binary,
-            "-S",
-            str(tmux_server_socket_path),
+        if command_timeout_seconds <= 0 or failure_backoff_seconds <= 0:
+            raise ValueError("tmux status timeouts must be positive")
+        self._command_arguments = (
             "set-option",
             "-t",
             tmux_pane_target,
             option_name,
         )
-        self._run = runner
+        self._tmux_executor = SyncTmuxExecutor(
+            tmux_binary,
+            tmux_server_socket_path,
+            runner=runner,
+            timeout_seconds=command_timeout_seconds,
+        )
+        self._failure_backoff_seconds = failure_backoff_seconds
+        self._condition = Condition()
+        self._pending_value: str | None = None
+        self._inflight_value: str | None = None
+        self._published_value: str | None = None
+        self._retry_not_before = 0.0
+        self._worker: Thread | None = None
+        self._closed = False
 
     def publish(self, value: str) -> None:
-        """Publish one non-empty value without exposing tmux mechanics to its owner."""
+        """Queue one non-empty value without delaying the protocol receiver."""
         if not isinstance(value, str) or not value:
             raise ValueError("tmux status option value must be non-empty")
-        self._run(
-            [*self._command_prefix, value],
-            check=True,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
+        worker: Thread | None = None
+        with self._condition:
+            if self._closed:
+                raise RuntimeError("tmux status option is closed")
+            if value == self._pending_value:
+                return
+            if self._pending_value is None and value == self._inflight_value:
+                return
+            if (
+                self._pending_value is None
+                and self._inflight_value is None
+                and value == self._published_value
+            ):
+                return
+            self._pending_value = value
+            if self._worker is None:
+                worker = Thread(
+                    target=self._publish_pending_values,
+                    name="rodex-tmux-status-publisher",
+                    daemon=True,
+                )
+                self._worker = worker
+            self._condition.notify_all()
+        if worker is not None:
+            worker.start()
+
+    def close(self) -> None:
+        """Discard queued work and wake a publisher waiting in circuit backoff."""
+        with self._condition:
+            self._closed = True
+            self._pending_value = None
+            self._condition.notify_all()
+
+    def _publish_pending_values(self) -> None:
+        while True:
+            with self._condition:
+                if self._closed:
+                    self._worker = None
+                    return
+                if self._pending_value is None:
+                    self._condition.wait(TMUX_STATUS_WORKER_IDLE_SECONDS)
+                    if self._pending_value is None:
+                        self._worker = None
+                        return
+                    continue
+                retry_delay = self._retry_not_before - time.monotonic()
+                if retry_delay > 0:
+                    self._condition.wait(retry_delay)
+                    continue
+                value = self._pending_value
+                self._pending_value = None
+                self._inflight_value = value
+            published = False
+            try:
+                result = self._tmux_executor.run(
+                    (*self._command_arguments, value),
+                    output="discard",
+                )
+                published = result.returncode == 0
+            except Exception:
+                # A wedged or missing tmux must neither block the protocol stream nor
+                # create one replacement process per incoming status frame. The runner
+                # is injected at this boundary, so even an unexpected implementation
+                # failure must leave the single publisher worker usable.
+                pass
+            with self._condition:
+                self._inflight_value = None
+                if published:
+                    self._published_value = value
+                    self._retry_not_before = 0.0
+                else:
+                    self._retry_not_before = (
+                        time.monotonic() + self._failure_backoff_seconds
+                    )
 
 
 STATUS_CLAIM_PRIORITY_OPTION: Final = "@rodex_status_claim_priority"

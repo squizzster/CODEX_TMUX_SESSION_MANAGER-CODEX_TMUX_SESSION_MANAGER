@@ -13,25 +13,25 @@ LAUNCHERS = ["rodex", "usr/local/bin/rodex"]
 def test_usr_local_bin_shim_runs_rodex_from_the_project_after_copy(
     tmp_path: Path,
 ) -> None:
-    project_root = Path(__file__).parents[1]
-    source_shim = project_root / "usr" / "local" / "bin" / "rodex"
+    source_shim = Path(__file__).parents[1] / "usr" / "local" / "bin" / "rodex"
     installed_shim = tmp_path / "usr" / "local" / "bin" / "rodex"
     installed_shim.parent.mkdir(parents=True)
     shutil.copy2(source_shim, installed_shim)
 
-    fake_bin = tmp_path / "fake-bin"
-    fake_bin.mkdir()
     capture_path = tmp_path / "uv-arguments"
-    fake_uv = fake_bin / "uv"
-    fake_uv.write_text(
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "pyproject.toml").write_text("[project]\nname='probe'\n")
+    entrypoint = project / ".venv" / "bin" / "rodex"
+    entrypoint.parent.mkdir(parents=True)
+    entrypoint.write_text(
         '#!/bin/sh\nprintf "%s\\n" "$@" > "$RODEX_TEST_CAPTURE"\n',
         encoding="utf-8",
     )
-    fake_uv.chmod(0o755)
+    entrypoint.chmod(0o755)
 
     environment = os.environ.copy()
-    environment.pop("RODEX_PROJECT_DIR", None)
-    environment["PATH"] = f"{fake_bin}:{environment['PATH']}"
+    environment["RODEX_PROJECT_DIR"] = str(project)
     environment["RODEX_TEST_CAPTURE"] = str(capture_path)
 
     subprocess.run(
@@ -41,10 +41,6 @@ def test_usr_local_bin_shim_runs_rodex_from_the_project_after_copy(
     )
 
     assert capture_path.read_text(encoding="utf-8").splitlines() == [
-        "run",
-        "--project",
-        str(project_root.resolve()),
-        "rodex",
         "_running",
     ]
 
@@ -212,3 +208,29 @@ def test_usr_local_bin_shim_rejects_group_writable_project_code(
     assert result.returncode == 1
     assert "refusing group/world-writable project path" in result.stderr
     assert str(insecure_source) in result.stderr
+
+
+def test_usr_local_bin_shim_rejects_an_insecure_virtualenv_root(
+    tmp_path: Path,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    (project_root / "pyproject.toml").write_text("[project]\nname='probe'\n")
+    virtualenv = project_root / ".venv"
+    virtualenv.mkdir(mode=0o777)
+    virtualenv.chmod(0o777)
+    shim = Path(__file__).parents[1] / "usr" / "local" / "bin" / "rodex"
+    environment = os.environ.copy()
+    environment["RODEX_PROJECT_DIR"] = str(project_root)
+
+    result = subprocess.run(
+        [shim, "_running"],
+        check=False,
+        env=environment,
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 1
+    assert "refusing group/world-writable project path" in result.stderr
+    assert str(virtualenv) in result.stderr

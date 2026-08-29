@@ -9,11 +9,13 @@ import time
 import uuid
 from contextlib import suppress
 from pathlib import Path
+from threading import Event, Thread
 
 import pytest
 
+import rodex.agent_observer as observer_module
 from rodex.agent_observer import (
-    AgentObserverPaneController,
+    AgentObserverCoordinator,
     AgentObserverView,
     notify_agent_observer_trace_publication,
     observer_control_socket_path,
@@ -22,6 +24,7 @@ from rodex.agent_observer import (
     project_subagent_activity_event,
     project_user_message_event,
 )
+from rodex.observer_contract import OBSERVER_PROJECTED_TEXT_MAX_CHARS
 from rodex.protocol_proxy import CodexProtocolEventTap
 from rodex_registry import (
     RodexAgentObserverTurnEvidence,
@@ -35,7 +38,8 @@ from rodex_registry import (
     split_codex_thread_id_into_signed_bigints,
     split_codex_turn_id_into_signed_bigints,
 )
-from rodex_registry.agent_trace import publish_agent_trace_in_transaction
+from rodex_registry.agent_trace_contract import prepare_agent_trace_publication
+from rodex_registry.agent_trace_writer import publish_agent_trace_in_transaction
 from rodex_registry.statistics_fields import TURN_STATISTICS_SCALARS
 from rodex_sql import open_rodex_transaction
 
@@ -63,6 +67,18 @@ def _receive_exactly(connection: socket.socket, size: int) -> bytes:
             raise AssertionError("observer control frame ended early")
         payload.extend(chunk)
     return bytes(payload)
+
+
+def _observer_snapshot_events(
+    snapshot: dict[str, object],
+) -> list[dict[str, object]]:
+    assert snapshot["kind"] == "observer_state_snapshot"
+    state = snapshot["state"]
+    assert isinstance(state, dict)
+    events = state["events"]
+    assert isinstance(events, list)
+    assert all(isinstance(event, dict) for event in events)
+    return events  # type: ignore[return-value]
 
 
 def _turn_evidence(
@@ -306,7 +322,7 @@ def test_collaboration_invocation_waits_for_its_correlated_activity(
     def runner(command: list[str], **_options: object) -> subprocess.CompletedProcess[str]:
         raise AssertionError(f"unsupported spawn item reached tmux: {command}")
 
-    controller = AgentObserverPaneController(
+    controller = AgentObserverCoordinator(
         "/usr/bin/tmux",
         tmp_path / "tmux.sock",
         "%7",
@@ -396,7 +412,7 @@ def test_exact_spawn_creates_a_disabled_top_third_without_changing_focus(
             return subprocess.CompletedProcess(command, 0, "%9\n", "")
         return subprocess.CompletedProcess(command, 0, "", "")
 
-    controller = AgentObserverPaneController(
+    controller = AgentObserverCoordinator(
         "/usr/bin/tmux",
         tmp_path / "tmux.sock",
         "%7",
@@ -462,7 +478,7 @@ def test_existing_observer_pane_is_reused_and_receives_exact_new_spawn(
             return subprocess.CompletedProcess(command, 0, "%9|%7|0\n", "")
         raise AssertionError(f"unexpected tmux mutation: {command}")
 
-    controller = AgentObserverPaneController(
+    controller = AgentObserverCoordinator(
         "/usr/bin/tmux",
         tmp_path / "tmux.sock",
         "%7",
@@ -483,9 +499,10 @@ def test_existing_observer_pane_is_reused_and_receives_exact_new_spawn(
     assert not any(command[3] == "split-window" for command in calls)
     assert len(sent) == 1
     assert sent[0][0] == observer_control_socket_path(tmp_path / "events.sock")
-    assert sent[0][1]["after_event_id"] == str(TRACE_CURSOR)
-    assert sent[0][1]["item"]["id"] == "call-spawn-2"  # type: ignore[index]
-    assert "scope" not in sent[0][1]
+    events = _observer_snapshot_events(sent[0][1])
+    assert events[0]["after_event_id"] == str(TRACE_CURSOR)
+    assert events[0]["item"]["id"] == "call-spawn-2"  # type: ignore[index]
+    assert "scope" not in events[0]
 
 
 def test_same_turn_parent_request_is_sent_exactly_without_entering_process_args(
@@ -506,7 +523,7 @@ def test_same_turn_parent_request_is_sent_exactly_without_entering_process_args(
             return subprocess.CompletedProcess(command, 0, "%9\n", "")
         return subprocess.CompletedProcess(command, 0, "", "")
 
-    controller = AgentObserverPaneController(
+    controller = AgentObserverCoordinator(
         "/usr/bin/tmux",
         tmp_path / "tmux.sock",
         "%7",
@@ -531,8 +548,13 @@ def test_same_turn_parent_request_is_sent_exactly_without_entering_process_args(
     assert request not in split[-1]
     assert "root_request_context_follows" in split[-1]
     assert len(sent) == 1
-    path, root_request_context = sent[0]
+    path, snapshot = sent[0]
     assert path == observer_control_socket_path(tmp_path / "events-runtime-a.sock")
+    root_request_context = next(
+        event
+        for event in _observer_snapshot_events(snapshot)
+        if event["kind"] == "root_request_context"
+    )
     assert root_request_context == {
         "schema": "rodex-agent-observer-v2",
         "kind": "root_request_context",
@@ -559,7 +581,7 @@ def test_parent_request_is_not_correlated_across_turns_or_roots(tmp_path: Path) 
             return subprocess.CompletedProcess(command, 0, "%9|%7|0\n", "")
         raise AssertionError(f"unexpected tmux mutation: {command}")
 
-    controller = AgentObserverPaneController(
+    controller = AgentObserverCoordinator(
         "/usr/bin/tmux",
         tmp_path / "tmux.sock",
         "%7",
@@ -583,8 +605,9 @@ def test_parent_request_is_not_correlated_across_turns_or_roots(tmp_path: Path) 
     controller.observe_protocol_event(_spawn_event())
 
     assert len(sent) == 1
-    assert sent[0][1]["kind"] == "app_server_subagent_activity"
-    assert "root_request_context_follows" not in sent[0][1]
+    events = _observer_snapshot_events(sent[0][1])
+    assert [event["kind"] for event in events] == ["app_server_subagent_activity"]
+    assert "root_request_context_follows" not in events[0]
 
 
 def test_same_agent_followup_receives_its_new_exact_parent_request(tmp_path: Path) -> None:
@@ -598,7 +621,7 @@ def test_same_agent_followup_receives_its_new_exact_parent_request(tmp_path: Pat
             return subprocess.CompletedProcess(command, 0, "%9|%7|0\n", "")
         raise AssertionError(f"unexpected tmux mutation: {command}")
 
-    controller = AgentObserverPaneController(
+    controller = AgentObserverCoordinator(
         "/usr/bin/tmux",
         tmp_path / "tmux.sock",
         "%7",
@@ -642,13 +665,21 @@ def test_same_agent_followup_receives_its_new_exact_parent_request(tmp_path: Pat
         )
     )
 
-    assert [event["kind"] for _, event in sent] == [
+    latest_state = sent[-1][1]["state"]
+    assert isinstance(latest_state, dict)
+    terminal_events = latest_state["tombstones"]
+    assert isinstance(terminal_events, list)
+    assert [event["kind"] for event in terminal_events] == [  # type: ignore[index]
         "app_server_collaboration_invocation",
         "app_server_subagent_activity",
-        "root_request_context",
     ]
-    assert sent[1][1]["root_request_context_follows"] is True
-    assert sent[2][1]["item"] == {
+    assert terminal_events[1]["root_request_context_follows"] is True  # type: ignore[index]
+    root_request_context = next(
+        event
+        for event in _observer_snapshot_events(sent[-1][1])
+        if event["kind"] == "root_request_context"
+    )
+    assert root_request_context["item"] == {
         "type": "userMessage",
         "id": "user-message-2",
         "text_blocks": ["Now analyze the stock market, Iran, tariffs, and Truth Social."],
@@ -668,7 +699,7 @@ def test_primary_event_path_forwards_tracked_agent_prose_without_subscriber_gap(
             return subprocess.CompletedProcess(command, 0, "%9|%7|0\n", "")
         raise AssertionError(f"unexpected tmux mutation: {command}")
 
-    controller = AgentObserverPaneController(
+    controller = AgentObserverCoordinator(
         "/usr/bin/tmux",
         tmp_path / "tmux.sock",
         "%7",
@@ -690,10 +721,76 @@ def test_primary_event_path_forwards_tracked_agent_prose_without_subscriber_gap(
 
     assert len(sent) == 1
     assert sent[0][0] == observer_control_socket_path(tmp_path / "events.sock")
-    assert sent[0][1] == project_agent_message_event(_agent_message_event())
+    assert _observer_snapshot_events(sent[0][1])[-1] == project_agent_message_event(
+        _agent_message_event()
+    )
 
 
-def test_existing_observer_retries_live_event_until_control_socket_is_ready(
+def test_controller_close_waits_for_inflight_callback_and_blocks_late_mutation(
+    tmp_path: Path,
+) -> None:
+    callback_entered = Event()
+    release_callback = Event()
+    close_complete = Event()
+    calls: list[list[str]] = []
+    calls_after_close: list[list[str]] = []
+
+    def runner(command: list[str], **_options: object) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        if close_complete.is_set():
+            calls_after_close.append(command)
+        operation = command[3]
+        if operation == "show-options":
+            callback_entered.set()
+            assert release_callback.wait(2)
+            return subprocess.CompletedProcess(command, 1, "", "missing")
+        if operation == "display-message":
+            return subprocess.CompletedProcess(command, 0, f"{tmp_path}\n", "")
+        if operation == "split-window":
+            return subprocess.CompletedProcess(command, 0, "%9\n", "")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    controller = AgentObserverCoordinator(
+        "/usr/bin/tmux",
+        tmp_path / "tmux.sock",
+        "%7",
+        tmp_path / "events.sock",
+        runner=runner,
+        cursor_reader=lambda *_args: TRACE_CURSOR,
+        event_sender=lambda *_args: None,
+    )
+    controller.activate(
+        database_path=tmp_path / "rodex.sqlite3",
+        rodex_sessions_id=3,
+        rodex_session_id="1234567890abcdef",
+        root_thread_id=ROOT_THREAD_ID,
+    )
+    callback = Thread(target=controller.observe_protocol_event, args=(_spawn_event(),))
+    callback.start()
+    assert callback_entered.wait(1)
+
+    def close_controller() -> None:
+        controller.close()
+        close_complete.set()
+
+    closer = Thread(target=close_controller)
+    closer.start()
+    assert not close_complete.wait(0.05), "close overtook an in-flight observer callback"
+    release_callback.set()
+    callback.join(timeout=2)
+    closer.join(timeout=2)
+    assert not callback.is_alive()
+    assert not closer.is_alive()
+    assert close_complete.is_set()
+    assert calls_after_close == []
+
+    calls_at_close = len(calls)
+    controller.observe_protocol_event(_spawn_event(item_id="late-call"))
+    assert len(calls) == calls_at_close
+    assert controller._observer_state.tracked_target_thread_ids == frozenset()
+
+
+def test_existing_observer_reconnects_with_current_bounded_semantic_snapshot(
     tmp_path: Path,
 ) -> None:
     def runner(command: list[str], **_options: object) -> subprocess.CompletedProcess[str]:
@@ -705,7 +802,7 @@ def test_existing_observer_retries_live_event_until_control_socket_is_ready(
         raise AssertionError(f"unexpected tmux mutation: {command}")
 
     event_socket = tmp_path / "events.sock"
-    controller = AgentObserverPaneController(
+    controller = AgentObserverCoordinator(
         "/usr/bin/tmux",
         tmp_path / "tmux.sock",
         "%7",
@@ -750,10 +847,23 @@ def test_existing_observer_retries_live_event_until_control_socket_is_ready(
         receiver.close()
         controller.close()
 
-    assert payload["item"]["id"] == "call-during-startup"
-    assert payload["after_event_id"] == str(TRACE_CURSOR)
-    assert long_payload["item"]["text"] == long_text
-    assert later_payload["item"]["text"] == "Later agent reply."
+    startup_events = _observer_snapshot_events(payload)
+    long_events = _observer_snapshot_events(long_payload)
+    later_events = _observer_snapshot_events(later_payload)
+
+    assert [event["item"]["id"] for event in startup_events] == [  # type: ignore[index]
+        "call-during-startup"
+    ]
+    assert startup_events[0]["after_event_id"] == str(TRACE_CURSOR)
+    projected_long_text = long_events[-1]["item"]["text"]  # type: ignore[index]
+    assert projected_long_text == long_text[: len(projected_long_text)]
+    assert len(projected_long_text) == OBSERVER_PROJECTED_TEXT_MAX_CHARS
+    assert long_events[-1]["projection_overflow"] == {
+        "truncated_fields": ["item.text"],
+        "omitted_list_items": {},
+    }
+    assert later_events[-1]["item"]["text"] == "Later agent reply."  # type: ignore[index]
+    assert [len(startup_events), len(long_events), len(later_events)] == [1, 2, 3]
 
 
 def test_observer_view_renders_exact_parent_request_after_tracked_spawn() -> None:
@@ -1906,6 +2016,56 @@ def test_interleaved_agents_never_rewrite_another_agents_work_line() -> None:
     assert "\x1b[1A" not in "\n".join(lines)
 
 
+def test_view_dedupes_same_item_id_by_child_thread_and_event_kind() -> None:
+    initial = _projected_activity(item_id="shared-call-id")
+    second = _projected_activity(item_id="shared-call-id")
+    second_item = second["item"]
+    assert isinstance(second_item, dict)
+    second_item["agent_thread_id"] = str(OTHER_THREAD_ID)
+    second_item["agent_path"] = "/root/second-review"
+    view = AgentObserverView(root_thread_id=ROOT_THREAD_ID, initial_event=initial)
+
+    lines = view.accept_app_server_event(second)
+
+    assert "INVOKED · spawn_agent" in lines
+    assert view.target_thread_ids == frozenset({str(CHILD_THREAD_ID), str(OTHER_THREAD_ID)})
+
+
+def test_transport_overflow_recovers_65_unknown_same_root_targets_from_trace() -> None:
+    initial = _projected_activity(item_id="seed-call")
+    view = AgentObserverView(root_thread_id=ROOT_THREAD_ID, initial_event=initial)
+    target_ids = [uuid.UUID(int=10_000 + index) for index in range(65)]
+    durable_events = tuple(
+        {
+            "event_id": str(uuid.UUID(int=20_000 + index)),
+            "codex_thread_id": str(ROOT_THREAD_ID),
+            "codex_turn_id": "root-turn",
+            "event_kind": "subagent_activity",
+            "event_time_utc": "2026-08-29T00:00:00Z",
+            "detail": {
+                "target_codex_thread_id": str(target_id),
+                "agent_path": f"/root/child-{index}",
+                "activity_kind": "started",
+            },
+        }
+        for index, target_id in enumerate(target_ids)
+    )
+    snapshot = RodexAgentTraceSnapshot(
+        trace_publication_sequence=1,
+        trace_schema_version="rodex-agent-trace-v2",
+        calculated_at_utc="2026-08-29T00:00:00Z",
+        coverage_state="complete",
+        durable_event_count=len(durable_events),
+        unrecognized_record_count=0,
+        events=durable_events,
+    )
+
+    view.accept_trace_snapshot(snapshot, recover_unknown_targets=True)
+
+    assert {str(target_id) for target_id in target_ids}.issubset(view.target_thread_ids)
+    assert len(view.target_thread_ids) <= observer_module.OBSERVER_RECOVERED_TARGET_LIMIT
+
+
 def test_app_item_completion_cannot_suppress_the_final_durable_trace_read() -> None:
     initial = _projected_activity()
     completed = project_subagent_activity_event(_spawn_event(method="item/completed"))
@@ -2024,7 +2184,7 @@ def test_real_tmux_observer_renders_request_and_exits_with_its_runtime(
             (child_identity_id, "2026-08-27T00:00:00Z"),
         )
     tap = CodexProtocolEventTap(event_socket)
-    controller: AgentObserverPaneController | None = None
+    controller: AgentObserverCoordinator | None = None
     tap.start()
     try:
         subprocess.run(
@@ -2059,7 +2219,7 @@ def test_real_tmux_observer_renders_request_and_exits_with_its_runtime(
             text=True,
             capture_output=True,
         ).stdout.strip()
-        controller = AgentObserverPaneController(
+        controller = AgentObserverCoordinator(
             tmux,
             tmux_socket,
             primary,
@@ -2182,11 +2342,12 @@ def test_real_tmux_observer_renders_request_and_exits_with_its_runtime(
                 ),
             ),
         )
+        prepared = prepare_agent_trace_publication(publication)
         with open_rodex_transaction(database) as connection:
             receipt = publish_agent_trace_in_transaction(
                 connection,
                 1,
-                publication,
+                prepared,
                 model_name_ids={},
                 reasoning_effort_name_ids={},
             )

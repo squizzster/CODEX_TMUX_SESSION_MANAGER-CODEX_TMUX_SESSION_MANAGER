@@ -11,11 +11,8 @@ from pathlib import Path
 
 from codex_cli_contract import CODEX_CLI_0_150_1
 from cool_name import CoolNameError
-from rodex_registry import (
-    RodexSessionError,
-    default_rodex_database_path,
-)
-from rodex_sql import RodexSQLError
+from rodex_registry import RodexSessionError
+from rodex_sql import RodexSQLError, default_rodex_database_path
 
 from .application_pipeline import CodexDelegator, UnifiedRodexApplicationPipeline
 from .codex_update_notice import CodexUpdateNotice

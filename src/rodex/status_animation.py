@@ -2,16 +2,20 @@
 
 from __future__ import annotations
 
-import argparse
 import asyncio
 import secrets
-import subprocess
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, Literal
 
 from .status_bar import RODEX_STATUS_COLOURS
+from .tmux_executor import (
+    DEFAULT_TMUX_COMMAND_TIMEOUT_SECONDS,
+    AsyncTmuxExecutor,
+    AsyncTmuxRunner,
+    TmuxCommandResult,
+)
 from .tmux_status import (
     STATUS_ANIMATION_FRAME_INTERVAL_SECONDS,
     STATUS_CLAIM_TOKEN_OPTION,
@@ -24,6 +28,7 @@ from .tmux_status import (
 StatusEvent = Literal["attached", "detached"]
 
 FRAME_INTERVAL_SECONDS: Final = STATUS_ANIMATION_FRAME_INTERVAL_SECONDS
+ANIMATION_TMUX_COMMAND_TIMEOUT_SECONDS: Final = DEFAULT_TMUX_COMMAND_TIMEOUT_SECONDS
 _CLIENT_NAME_FORMAT: Final = "#{client_name}"
 _ATTACHED_COUNT_FORMAT: Final = "#{session_attached}"
 
@@ -34,14 +39,19 @@ class StatusFrame:
     text: str
 
 
-@dataclass(frozen=True, slots=True)
-class AsyncCommandResult:
-    returncode: int
-    stdout: str = ""
-
-
-AsyncCommandRunner = Callable[[Sequence[str]], Awaitable[AsyncCommandResult]]
+AsyncCommandResult = TmuxCommandResult
+AsyncCommandRunner = AsyncTmuxRunner
 FrameWaiter = Callable[[float], Awaitable[None]]
+
+
+@dataclass(slots=True)
+class _AnimationRequest:
+    event: StatusEvent
+    runner: AsyncCommandRunner | None
+    wait_until: FrameWaiter
+    token_factory: Callable[[], str]
+    command_timeout_seconds: float
+
 
 _ARRIVAL_TEXT: Final = (
     "·                 ✦                 ·",
@@ -132,17 +142,44 @@ async def animate_status(
     runner: AsyncCommandRunner | None = None,
     wait_until: FrameWaiter | None = None,
     token_factory: Callable[[], str] = lambda: secrets.token_hex(16),
+    command_timeout_seconds: float = ANIMATION_TMUX_COMMAND_TIMEOUT_SECONDS,
 ) -> None:
-    """Animate a qualifying attachment transition without blocking its caller."""
-    command_runner = runner or _run_command
-    frame_waiter = wait_until or _wait_until
-    tmux_prefix = (tmux_binary, "-S", str(tmux_server_socket_path))
-    pane_target = f"={tmux_session_name}:"
-    session_target = f"={tmux_session_name}"
+    """Render one transition already admitted by the tmux lease owner."""
+    if command_timeout_seconds <= 0:
+        raise ValueError("command_timeout_seconds must be positive")
+    request = _AnimationRequest(
+        event=event,
+        runner=runner,
+        wait_until=wait_until or _wait_until,
+        token_factory=token_factory,
+        command_timeout_seconds=command_timeout_seconds,
+    )
+    await _animate_status_once(
+        tmux_binary,
+        tmux_server_socket_path,
+        tmux_session_name,
+        request,
+    )
+
+
+async def _animate_status_once(
+    tmux_binary: str,
+    tmux_server_socket_path: Path,
+    tmux_session_name: str,
+    request: _AnimationRequest,
+) -> None:
+    """Render one captured transition for the current local owner."""
+    session_target, pane_target = _tmux_session_targets(tmux_session_name)
     status_commands = TmuxStatusClaimCommands(pane_target)
+    executor = AsyncTmuxExecutor(
+        tmux_binary,
+        tmux_server_socket_path,
+        runner=request.runner,
+        timeout_seconds=request.command_timeout_seconds,
+    )
 
     async def tmux(*arguments: str) -> AsyncCommandResult:
-        return await command_runner((*tmux_prefix, *arguments))
+        return await executor.run(arguments)
 
     count_result = await tmux(
         "display-message",
@@ -159,7 +196,7 @@ async def animate_status(
     if count_result.returncode != 0 or attached_count < 0:
         return
 
-    frames = status_frames(event, attached_count)
+    frames = status_frames(request.event, attached_count)
     if not frames:
         await tmux(
             "if-shell",
@@ -171,7 +208,7 @@ async def animate_status(
         )
         return
 
-    token = token_factory()
+    token = request.token_factory()
     claim_result = await tmux(
         "if-shell",
         "-t",
@@ -192,7 +229,7 @@ async def animate_status(
 
     loop = asyncio.get_running_loop()
     next_frame_at = loop.time() + FRAME_INTERVAL_SECONDS
-    await frame_waiter(next_frame_at)
+    await request.wait_until(next_frame_at)
     for frame in frames[1:]:
         if not await _animation_token_matches(tmux, pane_target, token):
             return
@@ -207,7 +244,7 @@ async def animate_status(
         if apply_result.returncode != 0:
             break
         next_frame_at += FRAME_INTERVAL_SECONDS
-        await frame_waiter(next_frame_at)
+        await request.wait_until(next_frame_at)
 
     await _restore_normal_status(
         tmux,
@@ -215,23 +252,6 @@ async def animate_status(
         session_target,
         token,
         status_commands,
-    )
-
-
-async def _run_command(command: Sequence[str]) -> AsyncCommandResult:
-    try:
-        process = await asyncio.create_subprocess_exec(
-            *command,
-            stdin=subprocess.DEVNULL,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-        )
-    except OSError:
-        return AsyncCommandResult(127)
-    stdout, _ = await process.communicate()
-    return AsyncCommandResult(
-        process.returncode or 0,
-        stdout.decode("utf-8", errors="replace"),
     )
 
 
@@ -277,6 +297,12 @@ async def _restore_normal_status(
             await tmux("refresh-client", "-S", "-t", client_name)
 
 
+def _tmux_session_targets(identity: str) -> tuple[str, str]:
+    """Return stable exact session and pane targets from a name or tmux session ID."""
+    session_target = identity if identity.startswith("$") else f"={identity}"
+    return session_target, f"{session_target}:"
+
+
 def _frame_presentation(frame: StatusFrame) -> TmuxStatusPresentation:
     return TmuxStatusPresentation(
         status_style=(
@@ -284,29 +310,3 @@ def _frame_presentation(frame: StatusFrame) -> TmuxStatusPresentation:
         ),
         status_format=f"#[align=centre]{frame.text}",
     )
-
-
-def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="python -m rodex.status_animation")
-    parser.add_argument("--tmux-binary", required=True)
-    parser.add_argument("--tmux-server-socket", required=True, type=Path)
-    parser.add_argument("--tmux-session-name", required=True)
-    parser.add_argument("--event", required=True, choices=("attached", "detached"))
-    return parser
-
-
-def main(argv: Sequence[str] | None = None) -> int:
-    args = _build_parser().parse_args(argv)
-    asyncio.run(
-        animate_status(
-            args.tmux_binary,
-            args.tmux_server_socket,
-            args.tmux_session_name,
-            args.event,
-        )
-    )
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

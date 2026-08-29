@@ -10,13 +10,17 @@ from dataclasses import dataclass, replace
 
 from rodex_sql import (
     index_re_try_attempt_numbers,
+    normalise_rodex_database_path,
     open_rodex_read_transaction,
     open_rodex_transaction,
     select_or_insert_lookup_id,
 )
 
-from .agent_trace import (
+from .agent_trace_contract import (
     RodexAgentTracePublication,
+    prepare_agent_trace_publication,
+)
+from .agent_trace_writer import (
     publish_agent_trace_in_transaction,
 )
 from .errors import (
@@ -72,7 +76,7 @@ from .schema import (
     RODEX_SESSIONS_TABLE,
     STATISTICS_COVERAGE_STATES,
     STATISTICS_WORKER_STATES,
-    existing_rodex_database_path,
+    require_current_rodex_schema,
 )
 from .statistics_fields import SESSION_STATISTICS_SCALARS, TURN_STATISTICS_SCALARS
 from .statistics_projection import (
@@ -330,9 +334,15 @@ def publish_rodex_session_statistics(
         observations,
         complete_turn_statistics=changed_turn_keys is None,
     )
+    prepared_agent_trace_publication = (
+        None
+        if agent_trace_publication is None
+        else prepare_agent_trace_publication(agent_trace_publication)
+    )
 
-    path = existing_rodex_database_path(database_path)
+    path = normalise_rodex_database_path(database_path)
     with open_rodex_transaction(path) as connection:
+        require_current_rodex_schema(connection)
         identity_row = connection.execute(
             f"SELECT registries.rodex_registry_id_signed_bigint, "
             "sessions.rodex_session_id_signed_bigint, "
@@ -805,11 +815,11 @@ def publish_rodex_session_statistics(
             )
         trace_receipt = (
             None
-            if agent_trace_publication is None
+            if prepared_agent_trace_publication is None
             else publish_agent_trace_in_transaction(
                 connection,
                 session_id,
-                agent_trace_publication,
+                prepared_agent_trace_publication,
                 model_name_ids=model_name_ids,
                 reasoning_effort_name_ids=reasoning_effort_name_ids,
             )
@@ -884,8 +894,9 @@ def record_rodex_session_analytics_worker_health(
         raise ValueError(
             "up_to_date worker health cannot include diagnostics, failures, or retry"
         )
-    path = existing_rodex_database_path(database_path)
+    path = normalise_rodex_database_path(database_path)
     with open_rodex_transaction(path) as connection:
+        require_current_rodex_schema(connection)
         identity_row = connection.execute(
             f"SELECT registries.rodex_registry_id_signed_bigint, "
             "sessions.rodex_session_id_signed_bigint, "
@@ -948,7 +959,7 @@ def read_rodex_analytics_checkpoint(
     expected_halves = split_codex_session_id_into_signed_bigints(
         expected_current_codex_session_id
     )
-    path = existing_rodex_database_path(database_path)
+    path = normalise_rodex_database_path(database_path)
     with open_rodex_read_transaction(path) as connection:
         rows = connection.execute(
             f"WITH RECURSIVE hierarchy(id, parent_id, thread_depth) AS ("
@@ -1080,7 +1091,7 @@ def read_rodex_session_statistics(
 ) -> RodexSessionStatisticsView:
     """Read last-good statistics, worker health, and sources in one transaction."""
     _validate_session_id(session_id)
-    path = existing_rodex_database_path(database_path)
+    path = normalise_rodex_database_path(database_path)
     with open_rodex_read_transaction(path) as connection:
         statistics_row = _select_statistics(connection, session_id)
         distribution_rows = _select_statistics_distributions(connection, session_id)
@@ -1125,7 +1136,7 @@ def read_rodex_session_turn_statistics(
         if codex_thread_id is None
         else split_codex_thread_id_into_signed_bigints(codex_thread_id)
     )
-    path = existing_rodex_database_path(database_path)
+    path = normalise_rodex_database_path(database_path)
     with open_rodex_read_transaction(path) as connection:
         statistics_row = _select_statistics(connection, session_id)
         distribution_rows = _select_statistics_distributions(connection, session_id)
@@ -1232,7 +1243,7 @@ def read_rodex_session_codex_thread_summaries(
         expected_statistics_publication_sequence,
         "expected_statistics_publication_sequence",
     )
-    path = existing_rodex_database_path(database_path)
+    path = normalise_rodex_database_path(database_path)
     with open_rodex_read_transaction(path) as connection:
         publication_row = connection.execute(
             f"SELECT statistics_publication_sequence "

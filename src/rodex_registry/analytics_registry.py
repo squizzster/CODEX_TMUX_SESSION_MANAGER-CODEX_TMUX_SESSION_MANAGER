@@ -8,7 +8,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Self
 
-from .agent_trace import RodexAgentTracePublication
+from rodex_sql import normalise_rodex_database_path
+
+from .agent_trace_contract import RodexAgentTracePublication
 from .errors import RodexAnalyticsPublicationRetryableError
 from .identity import (
     CodexSessionId,
@@ -18,7 +20,6 @@ from .identity import (
     RodexRuntimeId,
     RodexSessionId,
 )
-from .schema import existing_rodex_database_path
 from .statistics import (
     RodexAnalyticsCheckpoint,
     RodexAnalyticsPublishReceipt,
@@ -62,7 +63,7 @@ class RodexAnalyticsRegistry:
         expected_codex_session_id: CodexSessionId | str,
     ) -> None:
         _validate_session_id(session_id)
-        self._database_path = existing_rodex_database_path(database_path)
+        self._database_path = normalise_rodex_database_path(database_path)
         self._identity = RodexAnalyticsIdentityFence(
             rodex_sessions_id=session_id,
             rodex_session_id=rodex_session_id,

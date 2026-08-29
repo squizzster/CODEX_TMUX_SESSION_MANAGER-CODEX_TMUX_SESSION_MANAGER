@@ -4,23 +4,23 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import sys
 from collections.abc import Callable
 from pathlib import Path
 
 from rodex_registry import (
+    RodexSessionError,
     list_rodex_session_runtimes_for_a_user,
-    lookup_codex_session_id_from_a_rodex_sessions_id,
     lookup_owned_rodex_sessions_id_from_a_cool_name,
     lookup_rodex_registry_id,
     lookup_rodex_runtime_instance,
     lookup_rodex_session_id_from_a_rodex_sessions_id,
-    lookup_rodex_session_names,
     lookup_rodex_sessions_id_from_a_rodex_session_id,
     lookup_rodex_tmux_session,
-    open_a_user_defined_cool_name_assignment,
     record_a_rodex_session_access,
 )
+from rodex_sql import RodexDatabaseMovedError, RodexSQLError
 
 from .command_contract import (
     ALIAS_COMMAND,
@@ -30,16 +30,14 @@ from .command_contract import (
     FORCE_FLAG,
     MOUSE_COMMAND,
     RUNNING_COMMAND,
-    SEND_COMMAND,
     TAIL_COMMAND,
     WAIT_COMMAND,
 )
-from .control import CodexControlClient, LiveRodexControl, RodexControlError
+from .control import CodexControlClient, LiveRodexControl
 from .errors import RodexLaunchError
+from .exact_turn_mutation import ExactTurnMutationCoordinator
 from .live_runtime import (
-    rename_tmux_identity,
     resolve_live_control,
-    restore_tmux_identity,
     revalidate_live_control,
     verify_live_runtime_identity,
 )
@@ -87,27 +85,8 @@ def execute_session_command(
             )
         session_id, runtime, _ = resolve_live_control(arguments[1], database_path, launcher)
         mouse_state = launcher.set_mouse_mode(runtime, mode)
-        record_a_rodex_session_access(session_id, database_path)
+        _record_access_best_effort(session_id, database_path)
         print(f"Rodex {arguments[1]} mouse: {mouse_state}", flush=True)
-        return
-    if command == SEND_COMMAND:
-        if len(arguments) < 3:
-            raise RodexLaunchError("usage: rodex _send SESSION_NAME PROMPT")
-        session_name = arguments[1]
-        prompt = " ".join(arguments[2:])
-        session_id, runtime, control = resolve_live_control(
-            session_name, database_path, launcher
-        )
-        dispatch = control_client.send_prompt(
-            control,
-            prompt,
-            revalidate=lambda: revalidate_live_control(launcher, runtime, control),
-        )
-        record_a_rodex_session_access(session_id, database_path)
-        print(
-            f"Rodex {session_name}: {dispatch.action} Codex turn {dispatch.turn_id}",
-            flush=True,
-        )
         return
     if command == WAIT_COMMAND:
         if len(arguments) != 2:
@@ -119,7 +98,7 @@ def execute_session_command(
             control,
             revalidate=lambda: revalidate_live_control(launcher, runtime, control),
         )
-        record_a_rodex_session_access(session_id, database_path)
+        _record_access_best_effort(session_id, database_path)
         print(f"Rodex {arguments[1]}: Codex turn complete", flush=True)
         return
     if command == CAT_COMMAND:
@@ -140,6 +119,7 @@ def execute_session_command(
                 request,
                 runtime,
                 launcher.capture_scrollback_snapshot,
+                launcher.capture_scrollback_state,
                 revalidate,
             ),
         )
@@ -164,114 +144,17 @@ def execute_session_command(
             raise RodexLaunchError(
                 "usage: rodex _alias [--force] SESSION_NAME USER_DEFINED_NAME"
             )
-        alias_session_id = lookup_owned_rodex_sessions_id_from_a_cool_name(
-            operands[0], database_path
+        mutation_coordinator = ExactTurnMutationCoordinator(
+            database_path,
+            launcher,
+            control_client,
         )
-        previous_names = (
-            None
-            if alias_session_id is None
-            else lookup_rodex_session_names(alias_session_id, database_path)
+        display_name = mutation_coordinator.alias_transition(
+            operands[0],
+            operands[1],
+            force=force,
         )
-        expected_codex_session_id = (
-            None
-            if alias_session_id is None
-            else lookup_codex_session_id_from_a_rodex_sessions_id(
-                alias_session_id, database_path
-            )
-        )
-        expected_rodex_session_id = (
-            None
-            if alias_session_id is None
-            else lookup_rodex_session_id_from_a_rodex_sessions_id(
-                alias_session_id, database_path
-            )
-        )
-        expected_registry_id = (
-            None if alias_session_id is None else lookup_rodex_registry_id(database_path)
-        )
-        recorded_tmux: LiveTmuxSession | None = None
-        active_tmux: LiveTmuxSession | None = None
-        verified_control: LiveRodexControl | None = None
-        if alias_session_id is not None:
-            tmux_link = lookup_rodex_tmux_session(alias_session_id, database_path)
-            if tmux_link is not None:
-                recorded_tmux = LiveTmuxSession(
-                    tmux_server_socket_path=Path(tmux_link.tmux_server_socket_path),
-                    tmux_session_name=tmux_link.tmux_session_name,
-                )
-                if launcher.session_exists(recorded_tmux):
-                    if (
-                        expected_codex_session_id is None
-                        or expected_rodex_session_id is None
-                        or expected_registry_id is None
-                    ):
-                        raise RodexLaunchError(
-                            "Rodex session identity disappeared during alias change"
-                        )
-                    verified_control = verify_live_runtime_identity(
-                        launcher,
-                        recorded_tmux,
-                        session_id=alias_session_id,
-                        database_path=database_path,
-                        expected_rodex_session_id=expected_rodex_session_id,
-                        expected_registry_id=expected_registry_id,
-                        expected_codex_session_id=expected_codex_session_id,
-                    )
-        try:
-            with open_a_user_defined_cool_name_assignment(
-                operands[0],
-                operands[1],
-                database_path,
-                force=force,
-            ) as assignment:
-                tmux_link = assignment.tmux_session
-                if (
-                    tmux_link is not None
-                    and recorded_tmux is not None
-                    and verified_control is not None
-                ):
-                    revalidate_live_control(launcher, recorded_tmux, verified_control)
-                    active_tmux = rename_tmux_identity(
-                        launcher, recorded_tmux, assignment.names.display_name
-                    )
-                    assignment.renamed_tmux_session_name = active_tmux.tmux_session_name
-        except BaseException:
-            if (
-                recorded_tmux is not None
-                and active_tmux is not None
-                and active_tmux.tmux_session_name != recorded_tmux.tmux_session_name
-            ):
-                restore_tmux_identity(launcher, active_tmux, recorded_tmux)
-            raise
-        if active_tmux is not None:
-            launcher.refresh_name_bound_hooks(active_tmux)
-        if (
-            active_tmux is not None
-            and verified_control is not None
-            and expected_rodex_session_id is not None
-            and previous_names is not None
-            and previous_names.display_name != assignment.names.display_name
-        ):
-            auto_info = (
-                f"RODEX_AUTO_INFO: Rodex session {expected_rodex_session_id} "
-                f"is now named {assignment.names.display_name!r}."
-            )
-            try:
-                control_client.send_prompt(
-                    verified_control,
-                    auto_info,
-                    revalidate=lambda: revalidate_live_control(
-                        launcher,
-                        active_tmux,
-                        verified_control,
-                    ),
-                )
-            except (RodexControlError, RodexLaunchError, RodexRuntimeError) as error:
-                raise RodexLaunchError(
-                    f"Rodex name changed to {assignment.names.display_name!r}, but "
-                    f"RODEX_AUTO_INFO delivery failed: {error}"
-                ) from error
-        print(f"Rodex name: {assignment.names.display_name}", flush=True)
+        print(f"Rodex name: {display_name}", flush=True)
         return
     raise AssertionError(
         f"application pipeline selected unknown session command: {command}"
@@ -289,6 +172,19 @@ def _parse_alias_arguments(arguments: list[str]) -> tuple[bool, list[str]]:
         else:
             operands.append(argument)
     return force, operands
+
+
+def _record_access_best_effort(session_id: int, database_path: Path) -> None:
+    try:
+        record_a_rodex_session_access(session_id, database_path)
+    except RodexDatabaseMovedError:
+        raise
+    except (OSError, RodexSQLError, RodexSessionError, sqlite3.Error) as error:
+        print(
+            f"rodex: warning: access telemetry was not recorded: {error}",
+            file=sys.stderr,
+            flush=True,
+        )
 
 
 def _stream_protocol_events(

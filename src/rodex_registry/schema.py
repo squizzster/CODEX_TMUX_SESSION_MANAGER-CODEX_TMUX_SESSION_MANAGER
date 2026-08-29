@@ -3,21 +3,22 @@
 from __future__ import annotations
 
 import os
+import re
 import sqlite3
 from collections.abc import Sequence
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Final
 
 from cool_name.functions import create_and_verify_cool_names_schema
 from rodex_sql import (
     RODEX_DATABASE_SCHEMA_GENERATION,
+    RodexDatabaseNotFoundError,
+    RodexDatabaseNotInitializedError,
     normalise_rodex_database_path,
+    open_rodex_bootstrap_transaction,
     open_rodex_read_transaction,
-    open_rodex_transaction,
-    require_existing_rodex_database_path,
-)
-from rodex_sql import (
-    default_rodex_database_path as _default_rodex_database_path,
+    require_active_rodex_transaction,
 )
 
 from .errors import RodexSessionError
@@ -2054,24 +2055,48 @@ END
 """
 
 
-def default_rodex_database_path() -> Path:
-    """Resolve the current user's durable Rodex database path."""
-    return _default_rodex_database_path()
-
-
-def existing_rodex_database_path(
+def initialise_rodex_database(
     database_path: str | os.PathLike[str] | None = None,
 ) -> Path:
-    """Resolve an existing private registry without bootstrapping or repairing it."""
-    return require_existing_rodex_database_path(
-        normalise_rodex_database_path(database_path)
-    )
+    """Bootstrap storage or cheaply accept an already-current schema generation."""
+    return _bootstrap_or_audit_rodex_database(database_path, full_audit=False)
 
 
-def initialise_rodex_database(database_path: str | os.PathLike[str] | None = None) -> Path:
-    """Create and verify the current Rodex schema in one transaction."""
-    path = normalise_rodex_database_path(database_path)
-    with open_rodex_transaction(path) as connection:
+def audit_rodex_database_integrity(
+    database_path: str | os.PathLike[str] | None = None,
+) -> Path:
+    """Explicitly attest every table, index, trigger, and schema invariant."""
+    return _bootstrap_or_audit_rodex_database(database_path, full_audit=True)
+
+
+def _bootstrap_or_audit_rodex_database(
+    database_path: str | os.PathLike[str] | None,
+    *,
+    full_audit: bool,
+    _connection: sqlite3.Connection | None = None,
+) -> Path:
+    if _connection is None:
+        path = normalise_rodex_database_path(database_path)
+        if full_audit:
+            transaction = open_rodex_read_transaction(path)
+        else:
+            try:
+                if _database_has_current_schema_generation(path):
+                    return path
+            except (RodexDatabaseNotFoundError, RodexDatabaseNotInitializedError):
+                pass
+            transaction = open_rodex_bootstrap_transaction(path)
+    else:
+        if full_audit:
+            raise ValueError("an integrity audit owns its read-only connection")
+        path = normalise_rodex_database_path(database_path)
+        transaction = nullcontext(_connection)
+    with transaction as raw_connection:
+        connection = (
+            _CatalogAuditConnection(raw_connection) if full_audit else raw_connection
+        )
+        if not full_audit and _connection_has_current_schema_generation(connection):
+            return path
         _require_or_create_current_schema_generation(connection)
         connection.execute(_CREATE_REGISTRIES_TABLE)
         _verify_registries_table(connection)
@@ -3018,22 +3043,131 @@ def initialise_rodex_database(database_path: str | os.PathLike[str] | None = Non
             RODEX_SESSIONS_AGENT_REQUEST_TARGET_TURNS_TABLE,
             "agent request target-turn association is immutable",
         )
+        if full_audit:
+            connection.require_canonical_catalog()
     return path
+
+
+_CREATE_SCHEMA_OBJECT = re.compile(
+    r"^CREATE (?:UNIQUE )?(TABLE|INDEX|TRIGGER) "
+    r"(?:IF NOT EXISTS )?([A-Z][A-Z0-9_]*)"
+)
+
+
+class _CatalogAuditConnection:
+    """Run the canonical schema program as read-only catalog attestation."""
+
+    def __init__(self, connection: sqlite3.Connection) -> None:
+        self._connection = connection
+        self._expected_objects: set[tuple[str, str]] = {
+            ("table", RODEX_SCHEMA_GENERATIONS_TABLE)
+        }
+
+    @property
+    def in_transaction(self) -> bool:
+        return self._connection.in_transaction
+
+    @property
+    def total_changes(self) -> int:
+        return self._connection.total_changes
+
+    def execute(
+        self,
+        statement: str,
+        parameters: Sequence[object] = (),
+    ) -> sqlite3.Cursor:
+        normalised = _normalise_schema_sql(statement)
+        match = _CREATE_SCHEMA_OBJECT.match(normalised)
+        if match is None:
+            try:
+                return self._connection.execute(statement, parameters)
+            except sqlite3.OperationalError as error:
+                if "readonly" not in str(error).casefold():
+                    raise
+                raise RodexSessionError(
+                    "Rodex database integrity audit found missing durable state"
+                ) from error
+        object_type, uppercase_name = match.groups()
+        object_name = uppercase_name.casefold()
+        canonical_type = object_type.casefold()
+        self._expected_objects.add((canonical_type, object_name))
+        row = self._connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type = ? AND name = ?",
+            (canonical_type, object_name),
+        ).fetchone()
+        if row is None or row[0] is None:
+            raise RodexSessionError(
+                f"Rodex database integrity audit found missing {canonical_type}: "
+                f"{object_name}"
+            )
+        if _normalise_schema_sql(str(row[0])) != normalised:
+            raise RodexSessionError(f"{object_name} definition mismatch")
+        return self._connection.execute("SELECT 1 WHERE 0")
+
+    def require_canonical_catalog(self) -> None:
+        actual_objects = {
+            (str(row[0]), str(row[1]))
+            for row in self._connection.execute(
+                "SELECT type, name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'"
+            ).fetchall()
+        }
+        unexpected = sorted(actual_objects - self._expected_objects)
+        if unexpected:
+            raise RodexSessionError(
+                f"Rodex database integrity audit found unexpected schema objects: "
+                f"{unexpected!r}"
+            )
+
+
+def _database_has_current_schema_generation(path: Path) -> bool:
+    """Check only the version fence used by the steady-state bootstrap path."""
+    with open_rodex_read_transaction(path) as connection:
+        return _connection_has_current_schema_generation(connection)
+
+
+def _connection_has_current_schema_generation(
+    connection: sqlite3.Connection,
+) -> bool:
+    try:
+        rows = connection.execute(
+            f"SELECT id, schema_generation FROM {RODEX_SCHEMA_GENERATIONS_TABLE}"
+        ).fetchall()
+    except sqlite3.OperationalError as error:
+        if "no such table" not in str(error).casefold():
+            raise
+        return False
+    if rows != [(1, RODEX_DATABASE_SCHEMA_GENERATION)]:
+        raise RodexSessionError(
+            "Rodex database schema generation does not match this Rodex version"
+        )
+    return True
+
+
+def require_current_rodex_schema(connection: sqlite3.Connection) -> None:
+    """Fence one mutation and bootstrap only empty marker-less storage in-place."""
+    require_active_rodex_transaction(connection)
+    if _connection_has_current_schema_generation(connection):
+        return
+    _bootstrap_or_audit_rodex_database(
+        None,
+        full_audit=False,
+        _connection=connection,
+    )
 
 
 def _require_or_create_current_schema_generation(
     connection: sqlite3.Connection,
 ) -> None:
     """Reject hybrid databases before creating any generation-owned domain table."""
-    existing_tables = {
-        str(row[0])
+    existing_objects = {
+        (str(row[0]), str(row[1]))
         for row in connection.execute(
-            "SELECT name FROM sqlite_master "
-            "WHERE type = 'table' AND name != 'sqlite_sequence'"
+            "SELECT type, name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'"
         ).fetchall()
     }
-    if RODEX_SCHEMA_GENERATIONS_TABLE not in existing_tables:
-        if existing_tables:
+    generation_marker = ("table", RODEX_SCHEMA_GENERATIONS_TABLE)
+    if generation_marker not in existing_objects:
+        if existing_objects:
             raise RodexSessionError(
                 "Rodex database has no schema-generation marker and is not empty"
             )
@@ -3056,7 +3190,7 @@ def lookup_rodex_registry_id(
     database_path: str | os.PathLike[str] | None = None,
 ) -> RodexRegistryId:
     """Return the durable identity of one exact Rodex registry database."""
-    path = existing_rodex_database_path(database_path)
+    path = normalise_rodex_database_path(database_path)
     with open_rodex_read_transaction(path) as connection:
         row = connection.execute(
             f"SELECT rodex_registry_id_signed_bigint "

@@ -6,7 +6,7 @@ import os
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from rodex_sql import open_rodex_read_transaction
+from rodex_sql import normalise_rodex_database_path, open_rodex_read_transaction
 
 from .identity import (
     CodexThreadId,
@@ -26,7 +26,6 @@ from .schema import (
     RODEX_SESSIONS_CODEX_TURNS_TABLE,
     RODEX_SESSIONS_STATISTICS_TURN_METRICS_TABLE,
     RODEX_SESSIONS_SUBAGENT_SPAWNS_TABLE,
-    existing_rodex_database_path,
 )
 from .validation import _validate_session_id
 
@@ -147,7 +146,7 @@ def read_rodex_agent_observer_turn_evidence(
             ON metrics.rodex_sessions_codex_turns_id = turns.id
         ORDER BY requested.request_ordinal
     """
-    path = existing_rodex_database_path(database_path)
+    path = normalise_rodex_database_path(database_path)
     with open_rodex_read_transaction(path) as connection:
         rows = connection.execute(query, tuple(parameters)).fetchall()
     return tuple(_turn_evidence_from_row(row) for row in rows)

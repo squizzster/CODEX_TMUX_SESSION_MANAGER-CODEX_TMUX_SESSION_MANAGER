@@ -21,60 +21,75 @@ if [ "$project_owner_uid" != "$current_uid" ] && [ "$project_owner_uid" != 0 ]; 
     exit 1
 fi
 
-insecure_checkout=$(
+checkout_issue=$(
     /usr/bin/find "$RODEX_PROJECT_DIR" \
         -path "$RODEX_PROJECT_DIR/.git" -prune -o \
-        ! -path "$RODEX_PROJECT_DIR/.venv/.lock" \
-        \( -type f -o -type d \) -perm /022 -print -quit
+        -path "$RODEX_PROJECT_DIR/.venv/.lock" -prune -o \
+        -path "$RODEX_PROJECT_DIR/.pytest_cache/*" -prune -o \
+        -path "$RODEX_PROJECT_DIR/.ruff_cache/*" -prune -o \
+        \( -type l \( \
+            -path "$RODEX_PROJECT_DIR/.venv/bin/python" -o \
+            -path "$RODEX_PROJECT_DIR/.venv/bin/python3" -o \
+            -path "$RODEX_PROJECT_DIR/.venv/bin/python3.*" -o \
+            -path "$RODEX_PROJECT_DIR/.venv/lib64" \
+        \) \) -o \
+        \( \
+            -type l -printf 'symlink:%p\n' -o \
+            \( -type f -o -type d \) -perm /022 \
+                -printf 'writable:%p\n' -o \
+            ! -uid "$current_uid" ! -uid 0 -printf 'owner:%p\n' \
+        \) -quit
 )
-if [ -n "$insecure_checkout" ]; then
-    printf 'rodex: refusing group/world-writable project path: %s\n' \
-        "$insecure_checkout" >&2
-    exit 1
-fi
-
-untrusted_checkout=$(
-    /usr/bin/find "$RODEX_PROJECT_DIR" \
-        -path "$RODEX_PROJECT_DIR/.git" -prune -o \
-        ! -uid "$current_uid" ! -uid 0 -print -quit
-)
-if [ -n "$untrusted_checkout" ]; then
-    printf 'rodex: refusing project path with an untrusted owner: %s\n' \
-        "$untrusted_checkout" >&2
-    exit 1
-fi
-
-project_symlink=$(
-    /usr/bin/find "$RODEX_PROJECT_DIR" \
-        -path "$RODEX_PROJECT_DIR/.git" -prune -o \
-        -path "$RODEX_PROJECT_DIR/.venv" -prune -o \
-        -type l -print -quit
-)
-if [ -n "$project_symlink" ]; then
-    printf 'rodex: refusing project source symlink: %s\n' "$project_symlink" >&2
-    exit 1
-fi
-
-UV_BINARY=$(command -v uv || true)
-case "$UV_BINARY" in
-    /*) ;;
-    *)
-        printf 'rodex: uv was not found as an absolute executable on PATH\n' >&2
-        exit 127
+case "$checkout_issue" in
+    symlink:*)
+        printf 'rodex: refusing project source symlink: %s\n' \
+            "${checkout_issue#symlink:}" >&2
+        exit 1
+        ;;
+    writable:*)
+        printf 'rodex: refusing group/world-writable project path: %s\n' \
+            "${checkout_issue#writable:}" >&2
+        exit 1
+        ;;
+    owner:*)
+        printf 'rodex: refusing project path with an untrusted owner: %s\n' \
+            "${checkout_issue#owner:}" >&2
+        exit 1
         ;;
 esac
 
-uv_owner_uid=$(/usr/bin/stat -Lc '%u' -- "$UV_BINARY")
-if [ "$uv_owner_uid" != "$current_uid" ] && [ "$uv_owner_uid" != 0 ]; then
-    printf 'rodex: refusing uv owned by untrusted uid %s: %s\n' \
-        "$uv_owner_uid" "$UV_BINARY" >&2
-    exit 1
-fi
-insecure_uv=$(/usr/bin/find "$UV_BINARY" -maxdepth 0 -perm /022 -print -quit)
-if [ -n "$insecure_uv" ]; then
-    printf 'rodex: refusing group/world-writable uv executable: %s\n' \
-        "$UV_BINARY" >&2
+RODEX_ENTRYPOINT=$RODEX_PROJECT_DIR/.venv/bin/rodex
+if [ ! -f "$RODEX_ENTRYPOINT" ] || [ ! -x "$RODEX_ENTRYPOINT" ]; then
+    printf 'rodex: sealed project entrypoint is missing or not executable: %s\n' \
+        "$RODEX_ENTRYPOINT" >&2
     exit 1
 fi
 
-exec "$UV_BINARY" run --project "$RODEX_PROJECT_DIR" rodex "$@"
+RODEX_INTERPRETER=$(/usr/bin/sed -n '1s/^#!//p' "$RODEX_ENTRYPOINT")
+case "$RODEX_INTERPRETER" in
+    /*) ;;
+    *)
+        printf 'rodex: sealed project entrypoint has no absolute interpreter\n' >&2
+        exit 1
+        ;;
+esac
+RODEX_INTERPRETER=$(/usr/bin/readlink -f -- "$RODEX_INTERPRETER")
+interpreter_owner_uid=$(/usr/bin/stat -Lc '%u' -- "$RODEX_INTERPRETER")
+if [ "$interpreter_owner_uid" != "$current_uid" ] && \
+        [ "$interpreter_owner_uid" != 0 ]; then
+    printf 'rodex: refusing interpreter owned by untrusted uid %s: %s\n' \
+        "$interpreter_owner_uid" "$RODEX_INTERPRETER" >&2
+    exit 1
+fi
+insecure_interpreter=$(
+    /usr/bin/find "$RODEX_INTERPRETER" -maxdepth 0 \
+        \( ! -type f -o -perm /022 \) -print -quit
+)
+if [ -n "$insecure_interpreter" ]; then
+    printf 'rodex: refusing nonregular or group/world-writable interpreter: %s\n' \
+        "$RODEX_INTERPRETER" >&2
+    exit 1
+fi
+
+unset PYTHONHOME PYTHONPATH PYTHONSTARTUP
+exec "$RODEX_ENTRYPOINT" "$@"

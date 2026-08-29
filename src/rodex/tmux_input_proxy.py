@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
+from .tmux_executor import SyncTmuxExecutor, SyncTmuxRunner, TmuxCommandResult
 from .tmux_status import STATUS_PUBLISHER_COMPLETION, TmuxStatusPipeline
 
 _RODEX_COMMAND: Final = "/rodex"
@@ -17,7 +18,7 @@ _PROMPT_PREFIX: Final = "\N{SINGLE RIGHT-POINTING ANGLE QUOTATION MARK} "
 _MESSAGE_DURATION_MILLISECONDS: Final = "5000"
 _COMPLETABLE_PREFIXES: Final = frozenset({"/ro", "/rod", "/rode"})
 
-Runner = Callable[..., subprocess.CompletedProcess[str]]
+Runner = SyncTmuxRunner
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,15 +97,14 @@ def proxy_input_key(
     """Handle one Rodex-aware key or forward it to the Codex TUI unchanged."""
     if key not in {"Enter", "Tab"}:
         raise ValueError(f"unsupported Rodex input key: {key}")
-    tmux_prefix = [tmux_binary, "-S", str(tmux_server_socket_path)]
+    executor = SyncTmuxExecutor(
+        tmux_binary,
+        tmux_server_socket_path,
+        runner=runner,
+    )
 
-    def tmux(*arguments: str) -> subprocess.CompletedProcess[str]:
-        return runner(
-            [*tmux_prefix, *arguments],
-            check=False,
-            text=True,
-            capture_output=True,
-        )
+    def tmux(*arguments: str) -> TmuxCommandResult:
+        return executor.run(arguments)
 
     def forward_key() -> int:
         return tmux("send-keys", "-t", pane_id, key).returncode
@@ -201,7 +201,7 @@ def _dispatch_rodex_input_command(
     pane_id: str,
     session_name: str,
     client_name: str,
-    tmux: Callable[..., subprocess.CompletedProcess[str]],
+    tmux: Callable[..., TmuxCommandResult],
 ) -> int:
     TmuxStatusPipeline(tmux, pane_id).restore_if_publisher_matches(
         STATUS_PUBLISHER_COMPLETION

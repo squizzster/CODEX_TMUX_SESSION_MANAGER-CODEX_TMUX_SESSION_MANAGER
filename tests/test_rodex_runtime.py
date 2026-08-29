@@ -30,6 +30,7 @@ from rodex.runtime import (
     RodexRuntimeError,
     RodexRuntimeLauncher,
     TmuxScrollbackSnapshot,
+    TmuxScrollbackState,
     run_session_host,
 )
 from rodex.tmux_status import (
@@ -670,11 +671,7 @@ def test_scrollback_snapshot_marks_tmuxs_committed_history_boundary(
 
     def runner(command: list[str], **_options: object) -> subprocess.CompletedProcess[str]:
         calls.append(command)
-        stdout = (
-            "2\n"
-            if "display-message" in command
-            else "history one\nhistory two\nvisible\nprompt\n"
-        )
+        stdout = "2\nhistory one\nhistory two\nvisible\nprompt\n"
         return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
 
     launcher = RodexRuntimeLauncher("codex", "tmux", runner=runner)
@@ -683,14 +680,16 @@ def test_scrollback_snapshot_marks_tmuxs_committed_history_boundary(
     assert launcher.capture_scrollback_snapshot(runtime) == TmuxScrollbackSnapshot(
         ("history one", "history two", "visible", "prompt"), 2
     )
-    assert [command[3] for command in calls] == ["display-message", "capture-pane"]
+    assert len(calls) == 1
+    assert calls[0][3] == "display-message"
+    assert ";" in calls[0] and "capture-pane" in calls[0]
 
 
 def test_scrollback_snapshot_preserves_a_blank_committed_history_row(
     tmp_path: Path,
 ) -> None:
     def runner(command: list[str], **_options: object) -> subprocess.CompletedProcess[str]:
-        stdout = "2\n" if "display-message" in command else "history one\n\n"
+        stdout = "2\nhistory one\n\n"
         return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
 
     launcher = RodexRuntimeLauncher("codex", "tmux", runner=runner)
@@ -700,12 +699,60 @@ def test_scrollback_snapshot_preserves_a_blank_committed_history_row(
     ) == TmuxScrollbackSnapshot(("history one", ""), 2)
 
 
+def test_scrollback_state_consolidates_identity_and_bounded_pane_capture(
+    tmp_path: Path,
+) -> None:
+    calls: list[list[str]] = []
+    identity = "\t".join(
+        (
+            "$3",
+            "@5",
+            "%7",
+            "4321",
+            "proxy",
+            "events",
+            "codex",
+            "rodex",
+            "registry",
+            "registered",
+            "runtime",
+        )
+    )
+
+    def runner(command: list[str], **_options: object) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout=f"2\t{identity}\nhistory one\nhistory two\nvisible\nprompt\n",
+            stderr="",
+        )
+
+    launcher = RodexRuntimeLauncher("codex", "tmux", runner=runner)
+    runtime = LiveTmuxSession(tmp_path / "tmux.sock", "remarkable-aardvark")
+
+    assert launcher.capture_scrollback_state(runtime) == TmuxScrollbackState(
+        history_line_count=2,
+        history_tail_lines=("history one", "history two"),
+        visible_lines=("visible", "prompt"),
+        runtime_identity=identity,
+    )
+    assert len(calls) == 1
+    assert calls[0][3] == "display-message"
+    assert ";" in calls[0] and "capture-pane" in calls[0]
+
+
 @pytest.mark.parametrize("history_size", ["", "one", "-1", "1\t2"])
 def test_scrollback_snapshot_rejects_invalid_history_metadata(
     tmp_path: Path, history_size: str
 ) -> None:
     def runner(command: list[str], **_options: object) -> subprocess.CompletedProcess[str]:
-        return subprocess.CompletedProcess(command, 0, stdout=history_size, stderr="")
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout=f"{history_size}\n",
+            stderr="",
+        )
 
     launcher = RodexRuntimeLauncher("codex", "tmux", runner=runner)
 
@@ -783,6 +830,7 @@ def test_rename_and_session_ui_initialisation_use_the_real_tmux_session_name(
         "=rodex-token",
         "automatic-beluga",
     ]
+    assert runner.options[0]["timeout"] == 5.0
     status_commands = [command[3:] for command in runner.calls[1:]]
     base_reset = next(
         command
@@ -824,10 +872,16 @@ def test_rename_and_session_ui_initialisation_use_the_real_tmux_session_name(
             "=automatic-beluga:",
             f"client-{event}",
         ]
-        assert hook_command[4].startswith("run-shell -b ")
-        assert "/venv/bin/python -m rodex.status_animation" in hook_command[4]
+        assert hook_command[4].startswith("set-option @rodex_status_animation")
+        assert "#{session_id}" in hook_command[4]
+        assert "/venv/bin/python -m rodex.status_animation_admission" in hook_command[4]
         assert f"--event {event}" in hook_command[4]
-        assert hook_command[4].endswith(">/dev/null 2>&1'")
+        assert hook_command[4].count("--admitted") == 1
+        assert hook_command[4].count("--watchdog-gate") == 1
+        assert "--tmux-session-target" in hook_command[4]
+        assert "#{session_id}" in hook_command[4]
+        assert "@rodex_status_animation_generation" in hook_command[4]
+        assert "@rodex_status_animation_owner_token" in hook_command[4]
     shared_ctrl_c_index = status_commands.index(["list-keys", "-T", "root", "C-c"])
     shared_ctrl_c_binding = status_commands[shared_ctrl_c_index + 1]
     assert shared_ctrl_c_binding[:3] == ["bind-key", "-n", "C-c"]
@@ -836,10 +890,208 @@ def test_rename_and_session_ui_initialisation_use_the_real_tmux_session_name(
     for option, tmux_format in (
         ("--pane-id", "#{pane_id}"),
         ("--client-name", "#{client_name}"),
-        ("--attached-count", "#{session_attached}"),
     ):
         assert option in shared_ctrl_c_binding[3]
         assert tmux_format in shared_ctrl_c_binding[3]
+    assert "--attached-count" not in shared_ctrl_c_binding[3]
+
+
+def test_rename_reports_a_bounded_tmux_timeout(tmp_path: Path) -> None:
+    def runner(command: list[str], **options: object) -> subprocess.CompletedProcess[str]:
+        raise subprocess.TimeoutExpired(command, options["timeout"])
+
+    launcher = RodexRuntimeLauncher("codex", "tmux", runner=runner)
+
+    with pytest.raises(RodexRuntimeError, match=r"timed out after 5s: rename-session"):
+        launcher.rename(
+            LiveTmuxSession(tmp_path / "tmux.sock", "rodex-token"),
+            "automatic-beluga",
+        )
+
+
+def test_primary_disconnect_resets_every_connection_scoped_observer() -> None:
+    resets: list[str] = []
+
+    class ResetRecorder:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        def reset_after_disconnect(self) -> None:
+            resets.append(self.name)
+
+    runtime_module.PrimaryConnectionLifecycleCoordinator(
+        (
+            ResetRecorder("context"),
+            ResetRecorder("event-tap"),
+            ResetRecorder("agent-observer"),
+        )
+    ).reset_after_disconnect()
+
+    assert resets == ["context", "event-tap", "agent-observer"]
+
+
+def test_session_host_database_guard_terminal_signal_stops_the_tui(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database_path = tmp_path / "rodex.sqlite3"
+    lifecycle: list[str] = []
+    activated = AnalyticsWorkerConfig(
+        rodex_database_path=database_path,
+        codex_sessions_root=tmp_path / "sessions",
+        rodex_session_id=RodexSessionId(1),
+        rodex_registry_id=RodexRegistryId.parse("0000000000000001"),
+        runtime_id=RUNTIME_ID,
+        protocol_event_socket_path=tmp_path / "events.sock",
+        rodex_sessions_id=1,
+        codex_session_id=uuid.UUID("01a00654-f2bc-7a30-834a-a5f886a65f82"),
+    )
+
+    class FakeProcess:
+        def __init__(self, kind: str) -> None:
+            self.kind = kind
+            self.returncode: int | None = None
+
+        def poll(self) -> int | None:
+            return self.returncode
+
+        def terminate(self) -> None:
+            lifecycle.append(f"{self.kind}-terminate")
+            self.returncode = -15
+
+        def wait(self, timeout: float | None = None) -> int:
+            assert timeout is not None or self.kind == "app"
+            self.returncode = 0
+            return 0
+
+        def kill(self) -> None:
+            lifecycle.append(f"{self.kind}-kill")
+            self.returncode = -9
+
+    class FakeStatus:
+        def __init__(self, *_args: object) -> None:
+            return None
+
+        def update(self, _value: object) -> None:
+            return None
+
+    class FakeContextStatus(FakeStatus):
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            return None
+
+        def observe_protocol_event(self, _event: object) -> None:
+            return None
+
+        def reset_after_disconnect(self) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+    class FakeEventTap:
+        def __init__(self, _path: Path) -> None:
+            return None
+
+        def start(self) -> None:
+            return None
+
+        def publish_protocol_event(self, _message: object, _event: object) -> None:
+            return None
+
+        def reset_after_disconnect(self) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+    class FakeProxy:
+        def __init__(self, *_args: object) -> None:
+            return None
+
+        def start(self) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+    class FakeKeepalive:
+        failure: RodexRuntimeError | None = None
+
+        def __init__(self, _paths: tuple[Path, ...]) -> None:
+            return None
+
+        def start(self) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+    class FakeDatabaseGuard:
+        def subscribe_terminal(self, callback: object) -> object:
+            lifecycle.append("guard-subscribe")
+            assert callable(callback)
+            callback(database_path, "inode replaced")
+
+            def unsubscribe() -> None:
+                lifecycle.append("guard-unsubscribe")
+
+            return unsubscribe
+
+    def start_process(command: list[str], **_options: object) -> FakeProcess:
+        return FakeProcess("app" if "app-server" in command else "tui")
+
+    monkeypatch.delenv("TMUX_PANE", raising=False)
+    monkeypatch.setattr(runtime_module.subprocess, "Popen", start_process)
+    monkeypatch.setattr(
+        runtime_module,
+        "_wait_for_app_server_socket",
+        lambda *_args: (tmp_path / "app.sock").touch(),
+    )
+    monkeypatch.setattr(runtime_module, "TmuxToolCallStatus", FakeStatus)
+    monkeypatch.setattr(runtime_module, "TmuxContextStatus", FakeStatus)
+    monkeypatch.setattr(runtime_module, "CodexContextStatusObserver", FakeContextStatus)
+    monkeypatch.setattr(runtime_module, "CodexProtocolEventTap", FakeEventTap)
+    monkeypatch.setattr(runtime_module, "CodexProtocolProxy", FakeProxy)
+    monkeypatch.setattr(runtime_module, "_RuntimePathKeepalive", FakeKeepalive)
+    monkeypatch.setattr(
+        runtime_module,
+        "_registered_analytics_worker_config",
+        lambda *_args: activated,
+    )
+    monkeypatch.setattr(
+        runtime_module,
+        "database_terminal_signal",
+        lambda path: FakeDatabaseGuard() if path == database_path else None,
+    )
+    monkeypatch.setattr(
+        runtime_module.signal,
+        "signal",
+        lambda _signum, _handler: runtime_module.signal.SIG_DFL,
+    )
+
+    with pytest.raises(
+        RodexRuntimeError,
+        match=r"database_moved: .*inode replaced; please restart Rodex",
+    ):
+        run_session_host(
+            SessionHostConfig(
+                codex_binary="/usr/bin/codex",
+                app_server_socket_path=tmp_path / "app.sock",
+                app_server_log_path=tmp_path / "app.log",
+                protocol_proxy_socket_path=tmp_path / "proxy.sock",
+                protocol_event_socket_path=tmp_path / "events.sock",
+                tmux_binary="/usr/bin/tmux",
+                tmux_server_socket_path=tmp_path / "tmux.sock",
+                analytics=activated,
+            )
+        )
+
+    assert lifecycle == [
+        "guard-subscribe",
+        "tui-terminate",
+        "guard-unsubscribe",
+        "app-terminate",
+    ]
 
 
 @pytest.mark.evolutionary_regression
@@ -2007,6 +2259,21 @@ def test_session_host_skips_updater_and_connects_tui_through_protocol_proxy(
         def close(self) -> None:
             proxy_lifecycle.append("event-close")
 
+    class FakeAgentObserver:
+        def __init__(self, *args: object) -> None:
+            assert args == (
+                "/usr/bin/tmux",
+                tmux_socket,
+                "%4",
+                event_socket,
+            )
+
+        def observe_protocol_event(self, _event: object) -> None:
+            return None
+
+        def close(self) -> None:
+            proxy_lifecycle.append("observer-close")
+
     class FakeKeepalive:
         failure: RodexRuntimeError | None = None
 
@@ -2054,6 +2321,11 @@ def test_session_host_skips_updater_and_connects_tui_through_protocol_proxy(
     monkeypatch.setattr(runtime_module, "TmuxContextStatus", FakeContextStatus)
     monkeypatch.setattr(runtime_module, "CodexProtocolEventTap", FakeEventTap)
     monkeypatch.setattr(runtime_module, "CodexProtocolProxy", FakeProxy)
+    monkeypatch.setattr(
+        runtime_module,
+        "AgentObserverCoordinator",
+        FakeAgentObserver,
+    )
     monkeypatch.setattr(runtime_module, "_RuntimePathKeepalive", FakeKeepalive)
     monkeypatch.setattr(
         runtime_module,
@@ -2112,11 +2384,13 @@ def test_session_host_skips_updater_and_connects_tui_through_protocol_proxy(
         "signal-install",
         "keepalive-close",
         "close",
+        "observer-close",
         "event-close",
         "signal-restore",
         "signal-restore",
         "signal-restore",
     ]
+    assert proxy_lifecycle.index("close") < proxy_lifecycle.index("observer-close")
     assert protected_paths == (
         tmp_path,
         tmux_socket,

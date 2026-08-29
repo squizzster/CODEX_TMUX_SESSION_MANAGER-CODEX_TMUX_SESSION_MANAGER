@@ -401,9 +401,11 @@ process-local `(device, inode)` baseline between transactions. A threadless, for
 process-local SQLite connection also keeps at most one exact database's WAL generation
 alive between sparse writes, with bounded automatic checkpoint and journal-size policy;
 it holds no SQL transaction or cooperative transition lock, switches only by validated
-storage identity, and closes on clean process exit. A child discards the inherited owner
-before opening its own. A missing or replaced later identity fails that SQL operation with
-restart guidance. Rodex has no database watcher, subscription, or polling loop; a
+storage identity, and closes on clean process exit. Its validated main-file descriptor
+remains open for the same process-local lifetime and is released only after SQLite closes.
+Before a genuine fork, the parent closes this complete owner so the child inherits no live
+SQLite state. A missing or replaced later identity fails that SQL operation with restart
+guidance. Rodex has no database watcher, subscription, or polling loop; a
 move-away-and-back completed entirely between transactions is not observable. Every
 ordinary transaction and integrity audit holds a shared advisory transition lock and reads
 committed WAL normally. The explicit maintenance lock is exclusive and is for offline

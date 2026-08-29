@@ -1,6 +1,6 @@
 # SQL schema methodology
 
-This document describes the current v14 SQLite boundary and the standards applied to
+This document describes the current v16 SQLite boundary and the standards applied to
 future schema decisions. These authoritative standards may be modified only by an agent
 suggestion followed by user agreement.
 
@@ -14,8 +14,9 @@ suggestion followed by user agreement.
   admission. The immediate parent must be a real current-user-owned directory with no
   group/world permissions. The sibling transition lock and database must be regular
   current-user-owned mode-`0600` files. Rodex opens the parent, lock, and database with
-  `O_NOFOLLOW` and `O_CLOEXEC`, opens children relative to the retained parent descriptor,
-  and retains all three descriptors through the transaction.
+  `O_NOFOLLOW` and `O_CLOEXEC`, and opens children relative to the retained parent
+  descriptor. Parent and transition-lock descriptors remain open through each transaction;
+  one validated database descriptor remains open for the process-local WAL lifetime.
 - `open_rodex_bootstrap_transaction` is the only entry allowed to create the private
   parent, transition lock, or database file. It is used only by explicit first-use flows.
   `open_rodex_transaction` and `open_rodex_read_transaction` are existing-only: a missing
@@ -40,18 +41,23 @@ suggestion followed by user agreement.
   sleeping deadline/backoff. Read transactions use a read-only URI, `query_only=ON`, and a
   deferred `BEGIN`, so a writer does not hold the cooperative lock exclusively or
   head-of-line block WAL readers. Success commits once; any exception rolls back; each
-  transaction connection and its retained admission descriptors close on exit.
-- A threadless process-local owner retains one additional validated idle SQLite connection
-  for at most one exact `(path, parent, transition-lock, database)` storage identity. This
-  keeps sparse writes in one WAL generation instead of recreating `-wal` and `-shm` after
-  every commit. It owns no transaction or `flock`, uses the same `synchronous=NORMAL`,
-  1,000-page automatic-checkpoint, and 8 MiB journal-size policy as writers, and closes when
-  the process switches database identity or exits cleanly. Fork hooks serialize fork and
-  discard the inherited connection in the child before it may create its own owner.
+  transaction connection plus its parent and transition-lock admission descriptors close
+  on exit.
+- A threadless process-local owner retains one validated main-database descriptor and one
+  idle SQLite connection for at most one exact `(path, parent, transition-lock, database)`
+  storage identity. Transactions reuse that descriptor, avoiding a same-process descriptor
+  release while SQLite still owns locks on the file. The owner keeps sparse writes in one
+  WAL generation instead of recreating `-wal` and `-shm` after every commit. It owns no
+  transaction or `flock`, uses the same `synchronous=NORMAL`, 1,000-page
+  automatic-checkpoint, and 8 MiB journal-size policy as writers, and closes SQLite before
+  releasing the descriptor when the process switches database identity or exits cleanly.
+  Before a genuine fork, the parent closes the complete owner; the child inherits no live
+  parent SQLite connection and creates its own owner only when it needs database access.
 - Identity memory remains a lock-protected map of `(device, inode)` tuples. Apart from the
-  bounded WAL-lifetime connection, Rodex retains no admission descriptor beyond a
-  transaction and has no database watcher, worker, pipe, callback, subscription, polling
-  loop, or recurring SQL. Storage changes are detected only at an actual transaction fence:
+  bounded WAL-lifetime main-file descriptor and connection, Rodex retains no admission
+  descriptor beyond a transaction and has no database watcher, worker, pipe, callback,
+  subscription, polling loop, or recurring SQL. Storage changes are detected only at an
+  actual transaction fence:
   a missing or different later identity fails, while a move-away-and-back completed entirely
   between transactions is outside this synchronous observation model.
 - The explicit integrity audit uses the same existing-only, shared-lock, read-only
@@ -95,7 +101,7 @@ suggestion followed by user agreement.
   that marker in one cheap WAL-aware read transaction. Every ordinary mutation rechecks
   the generation inside its one writer transaction; only empty marker-less private
   storage receives the cold schema bootstrap in that same transaction. A nonempty
-  marker-less database or a different generation fails closed before v14 domain DDL.
+  marker-less database or a different generation fails closed before v16 domain DDL.
 - `synchronous=NORMAL` preserves SQLite consistency, but an operating-system crash or
   power loss can lose recently committed transactions that have not reached durable
   storage; this is not a `FULL` synchronous durability promise.

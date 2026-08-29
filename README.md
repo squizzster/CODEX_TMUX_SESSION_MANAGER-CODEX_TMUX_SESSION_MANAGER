@@ -115,9 +115,10 @@ Managed launches disable Codex's own interactive startup update check because it
 appear before runtime registration and block Rodex attachment. Immediately before each
 attach, Rodex compares the installed Codex version with a cached npm release lookup. The
 npm lookup has a three-second bound and each successful result is cached for 24 hours;
-future-dated cache metadata is treated as stale rather than extending that window. All
-lookup and delivery failures are non-fatal. When a newer stable release exists, the proxy
-gives the primary TUI a native warning:
+future-dated cache metadata is treated as stale rather than extending that window. One
+nonblocking cross-process claim owns refresh for an exact cache, while contenders use the
+latest valid cached value without waiting. All lookup and delivery failures are non-fatal.
+When a newer stable release exists, the proxy gives the primary TUI a native warning:
 
 ```text
 Rodex: Codex update available: 0.149.1 -> 0.150.1 (run 'codex update' outside Rodex)
@@ -135,6 +136,9 @@ token snapshots during a long turn; App Server usage notifications reconcile the
 value at their lifecycle boundary. While the App Server reports a live context compaction
 item, the same slot animates `COMPACTING` with a bright cyan-to-white activity pulse; it
 returns to the freshest post-compaction percentage, or `Context: --` until one arrives.
+At EOF the rollout follower checks metadata before its bounded content fingerprint,
+backs off from 0.25 to 2 seconds while idle, and wakes immediately on an existing primary
+protocol event. Replacement and truncation still re-enter the authenticated baseline.
 
 ### Live agent observer pane
 
@@ -391,18 +395,23 @@ logs are mode `0600`. Symlink, owner, and file-type checks fail closed. SQLite u
 mode with a busy timeout so analytics writes do not block consistent readers during
 ordinary concurrent use. SQLite connects through the same retained no-follow descriptor
 Rodex validated. Transactions recheck the retained parent, transition-lock, database, and
-SQLite main-path identities before connect, `BEGIN`, and `COMMIT`, and retain only a
-process-local `(device, inode)` baseline between transactions. A missing or replaced later
-identity fails that SQL operation with restart guidance. Rodex has no database watcher,
-subscription, or polling loop; a move-away-and-back completed entirely between transactions
-is not observable. Every ordinary transaction and integrity audit holds a shared advisory
-transition lock and reads committed WAL normally. The explicit maintenance lock is
-exclusive and is for offline diagnostics only; live database moves or replacements are
-unsupported. All Rodex processes accessing a database must use this transaction boundary;
-direct same-user SQLite access is outside the cooperative-lock contract. Only explicit
-first-use flows may create the database and transition lock; ordinary readers and mutations
-are existing-only, and bootstrap does not recreate storage previously admitted by the same
-process and later found missing.
+SQLite main-path identities before connect, `BEGIN`, and `COMMIT`, and retain a
+process-local `(device, inode)` baseline between transactions. A threadless, fork-safe
+process-local SQLite connection also keeps at most one exact database's WAL generation
+alive between sparse writes, with bounded automatic checkpoint and journal-size policy;
+it holds no SQL transaction or cooperative transition lock, switches only by validated
+storage identity, and closes on clean process exit. A child discards the inherited owner
+before opening its own. A missing or replaced later identity fails that SQL operation with
+restart guidance. Rodex has no database watcher, subscription, or polling loop; a
+move-away-and-back completed entirely between transactions is not observable. Every
+ordinary transaction and integrity audit holds a shared advisory transition lock and reads
+committed WAL normally. The explicit maintenance lock is exclusive and is for offline
+diagnostics only; live database moves or replacements are unsupported. All Rodex processes
+accessing a database must use this transaction boundary; direct same-user SQLite access is
+outside the cooperative-lock contract. Only explicit first-use flows may create the
+database and transition lock; ordinary readers and mutations are existing-only, and
+bootstrap does not recreate storage previously admitted by the same process and later
+found missing.
 
 Each live session host refreshes every required runtime pathname hourly. This protects
 weeks-long detached sessions from age-based temporary-file cleanup without making dead
@@ -430,8 +439,12 @@ On worker startup or clean recovery, Rodex performs one full-prefix read to auth
 the durable byte count and SHA-256 before analysis. The resident hot path relies on
 Codex's trusted append-only rollout contract and then returns to suffix-only reads; it
 does not claim hostile in-place mutation detection on every append. Unchanged semantic
-wakeups perform no projection write, and an event-before-append race receives only the
-scheduler's bounded retry window.
+wakeups perform no source-byte reads or projection write after reconciliation, and an
+event-before-append race receives only the scheduler's bounded retry window. Rollout
+normalization takes response-item turn identity from Codex's nested passthrough metadata,
+so a function call and its `SubAgentActivity` share the same canonical parent turn.
+Sequence-fence races reload their checkpoint; deterministic semantic publication conflicts
+park by authenticated source fingerprint instead of repeatedly resetting every cursor.
 
 Authenticated records are normalized into immutable typed facts before SQLite work. The
 registry trace contract then canonicalizes UTC timestamps, text, identities, and typed

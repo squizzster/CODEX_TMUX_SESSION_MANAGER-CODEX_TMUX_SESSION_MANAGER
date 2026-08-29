@@ -15,6 +15,17 @@ from rodex.control import LiveRodexControl
 from rodex.errors import RodexLaunchError
 from rodex.exact_turn_mutation import ExactTurnMutationCoordinator
 from rodex.runtime import LiveTmuxSession
+from rodex_registry import RodexSessionId
+
+
+@pytest.fixture(autouse=True)
+def stable_session_transition_identity(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep coordinator unit doubles on the production immutable lock identity."""
+    monkeypatch.setattr(
+        mutation_module,
+        "lookup_rodex_session_id_from_a_rodex_sessions_id",
+        lambda session_id, _database: RodexSessionId(session_id),
+    )
 
 
 class _NoFrameControlClient:
@@ -231,7 +242,7 @@ def test_alias_transition_holds_the_lock_and_steers_the_observed_active_turn(
     @contextmanager
     def assignment(*_args: object, **_kwargs: object):
         nonlocal lock_was_held
-        lock_path = database.parent / f".{database.name}.session-1.lock"
+        lock_path = database.parent / f".{database.name}.session-{RodexSessionId(1)}.lock"
         descriptor = os.open(
             lock_path,
             os.O_RDWR | os.O_CREAT,

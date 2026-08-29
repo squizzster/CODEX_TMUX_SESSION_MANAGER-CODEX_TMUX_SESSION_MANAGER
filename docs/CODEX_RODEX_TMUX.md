@@ -46,12 +46,14 @@ becomes a distinct candidate for the transient App Server persistence check.
    short Unix sockets, then connects the inline Codex TUI through it with
    `--no-alt-screen` and Codex's interactive startup updater disabled.
 4. Rodex asks that private app-server for its one loaded Codex session ID.
-5. One SQLite transaction creates the Rodex/runtime identities, canonical root-thread
-   membership, name, user/log, and tmux rows.
-6. tmux is renamed to the cool name and displays its Rodex identity, tool count, and
-   live private/shared attachment state in its status bar.
-7. Rodex attaches to the ordinary Codex prompt; an initial prompt and interactive
-   options have already reached that TUI unchanged and exactly once.
+5. Under the unregistered immutable Rodex session-ID transition lock, one SQLite
+   transaction creates the Rodex/runtime identities, canonical root-thread membership,
+   name, user/log, and tmux rows.
+6. While still holding that lock, Rodex finalizes the tmux name, status/input guards, and
+   runtime registration. A competing selector cannot attach to the intermediate row.
+7. Rodex resolves the verified incarnation to tmux's immutable `$session_id` and attaches
+   to the ordinary Codex prompt; an initial prompt and interactive options have already
+   reached that TUI unchanged and exactly once.
 
 Immediately before attachment, Rodex compares `codex --version` with the cached result
 of a bounded `npm view @openai/codex version` lookup. When a newer stable release exists,
@@ -59,7 +61,8 @@ it sends the primary TUI a native `warning` notification through a private Rodex
 proxy endpoint. That endpoint terminates at the proxy: it opens no upstream App Server
 connection, emits no protocol event to subscribers, persists no thread content, and
 starts no model turn. Rodex never installs an update, and lookup or delivery failure
-never prevents attachment.
+never prevents attachment. A nonblocking cross-process claim admits only one npm refresh
+for an exact stale cache; contenders use the latest valid cached value without waiting.
 
 The empty invocation is the default managed-create command. Current
 `codex [OPTIONS] [PROMPT]` syntax follows the same managed path with its original argv.
@@ -125,6 +128,8 @@ native warning on the subscribed primary TUI and therefore a TUI-owned scrollbac
 that survives redraw. For the status bar, the exact primary `thread/started` rollout path
 also supplies appended token snapshots between the App Server's turn-boundary usage
 notifications; the shared coordinator preserves compaction-animation priority. The
+follower checks cheap metadata before its bounded boundary hash, backs idle waits off
+from 0.25 to 2 seconds, and wakes early on existing exact-thread protocol events. The
 subscribed primary connection, normally the managed TUI,
 receives lifecycle, approval, and user-input requests; short-lived control clients do
 not become subscribers by reading or mutating. Each ordinary client uses a separate
@@ -229,6 +234,10 @@ lifetime. Direct-parent topology is staged before a new child. Catch-up, stale
 compare-and-set recovery, and clean replay have finite windows; exhausting one parks the
 work for a later event instead of polling or looping. Rodex owns scheduling,
 authenticated rollout provenance, bounded recovery, health, and persistence.
+Response-item turn scope comes from Codex's nested passthrough metadata, keeping a
+collaboration function call and its `SubAgentActivity` on one canonical parent turn.
+Publication-sequence races reload SQL/cursors; deterministic semantic conflicts publish
+degraded health and park by authenticated source fingerprint.
 
 Canonical thread, turn, item, and tool-call identities outlive replaceable statistics.
 Session membership, current-root selection, rollout source, and sub-agent lineage are
@@ -276,6 +285,8 @@ Codex, tmux, or analyzer processes.
   without attach or rename.
 - If an exact registered runtime was renamed outside Rodex, one unambiguous marker
   match repairs the endpoint; multiple matches are refused.
+- Once an incarnation is verified, attachment resolves its runtime marker to exactly one
+  immutable tmux `$session_id`; a concurrent alias cannot stale the attach target.
 - If it has ended, Rodex starts a fresh tmux/app-server and asks Codex to resume the
   stored Codex session ID; the observed ID must match before the endpoint is replaced.
 - Concurrent opens of one ended name serialize through a private per-session lock and

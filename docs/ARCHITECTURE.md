@@ -52,7 +52,7 @@ prompt. An unregistered canonical Codex identity requires a transient App Server
 | `rodex_registry.agent_trace_contract` / writer / reader | Normalize immutable trace facts before SQL, append them in a caller-owned transaction, and read bounded projections. |
 | `rodex_registry.execution` / `statistics` | Own canonical lineage, publication orchestration, and relational projections. |
 | `rodex_registry.schema` | Generate, install when authorized, and attest the complete relational catalog. |
-| `rodex_sql` | Own private no-follow paths, storage identity, location latch, connections, transactions, and natural-key lookups. |
+| `rodex_sql` | Own private no-follow paths, storage identity, connections, transactions, one process-local WAL lifetime, and natural-key lookups. |
 
 ## Tmux execution and status
 
@@ -61,8 +61,10 @@ Each tmux executor binds the binary and server socket; every caller uses the sol
 return text or discard all streams and have an absolute deadline: one second by default,
 five seconds for ordinary runtime-launcher operations. Results normalize nonzero exits,
 timeouts, and unavailable processes. Interactive attach uses the same entry with direct
-terminal ownership and its natural lifetime. The asynchronous entry applies its deadline
-to one child and kills and reaps that child on cancellation.
+terminal ownership and its natural lifetime. After runtime verification it resolves the
+incarnation to tmux's immutable server-local `$session_id`, so a concurrent alias cannot
+stale the final attach target. The asynchronous entry applies its deadline to one child
+and kills and reaps that child on cancellation.
 
 The disabled `/rodex` completion component illustrates a distinct inbound boundary:
 `pipe-pane` bytes arrive on the completion observer's stdin and wake a coalescing event
@@ -86,8 +88,9 @@ identities; provenance never substitutes for identity. See [SQL_SCHEMA.md](SQL_S
 
 New sessions allocate unregistered IDs, create detached tmux with the configured history,
 start the private host processes, observe one Codex root ID, and advertise a `pending`
-tuple. One transaction registers identities, provenance, owner, name, and endpoint before
-confirmation, tmux rename, status setup, optional update notice, and attach.
+tuple. The immutable Rodex session-ID transition lock spans SQL publication, tmux rename,
+status/input-guard setup, and registration confirmation. Competing selectors therefore
+cannot use a partially finalized row. The optional update notice and attach follow.
 
 Existing selectors resolve once to the owned relational identity. A live endpoint must
 match every advertised identity. Otherwise Rodex resumes and verifies the stored Codex
@@ -127,10 +130,12 @@ complete rollout suffixes to a resident analyzer and trace normalizer. One fence
 transaction publishes source checkpoints, statistics, append-only trace, request/turn
 associations, and health. Permanent source failures park by authenticated fingerprint
 until relevant source state changes; failures preserve the last good view and cannot
-affect the TUI.
+affect the TUI. Nested Codex response metadata supplies canonical turn identity, and only
+sequence-fence races reset cursors; deterministic semantic conflicts park.
 
 - Rodex, Codex, tmux, user, session, and runtime identities never substitute for one another.
-- Related writes use explicit transactions; WAL and a busy timeout permit consistent readers.
+- Related writes use explicit transactions; one fork-safe process-local idle connection
+  keeps a bounded WAL generation live between sparse writes without owning a transaction.
 - Ordinary reads and mutations are existing-only. Explicit first use alone may create storage.
 - Private database/runtime paths validate owner, type, mode, descriptor, and symlink boundaries.
 - External tmux work uses exact targets and compensated or conditional transitions.

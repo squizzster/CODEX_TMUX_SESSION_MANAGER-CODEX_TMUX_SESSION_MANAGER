@@ -6,6 +6,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
+from threading import Event
 from typing import Protocol
 
 import pytest
@@ -35,6 +36,20 @@ def _token_count_line(percent: int) -> str:
             },
         },
         separators=(",", ":"),
+    )
+
+
+def _rewrite_with_distinct_metadata(path: Path, content: str) -> None:
+    """Rewrite in place while advancing metadata on coarse-clock filesystems."""
+    before = path.stat()
+    path.write_text(content, encoding="utf-8")
+    after = path.stat()
+    os.utime(
+        path,
+        ns=(
+            after.st_atime_ns,
+            max(before.st_mtime_ns, after.st_mtime_ns) + 1_000_000_000,
+        ),
     )
 
 
@@ -91,6 +106,18 @@ class _CountingStop:
         return self.is_set()
 
 
+class _DeterministicRolloutObserver(CodexContextStatusObserver):
+    """Drive follower mutations at the production rollout-wait boundary."""
+
+    def _wait_for_rollout_activity(
+        self,
+        stop: Event,
+        wake_generation: int,
+        timeout_seconds: float,
+    ) -> tuple[bool, int]:
+        return stop.wait(timeout_seconds), wake_generation
+
+
 def test_round2_rollout_follower_recovers_when_the_path_is_replaced(
     tmp_path: Path,
 ) -> None:
@@ -99,7 +126,7 @@ def test_round2_rollout_follower_recovers_when_the_path_is_replaced(
     rollout.write_text(_token_count_line(10) + "\n", encoding="utf-8")
     replacement.write_text(_token_count_line(70) + "\n", encoding="utf-8")
     observed: list[str] = []
-    observer = CodexContextStatusObserver(
+    observer = _DeterministicRolloutObserver(
         observed.append,
         codex_sessions_root=tmp_path,
     )
@@ -123,7 +150,7 @@ def test_round2_rollout_follower_recovers_when_the_file_is_truncated(
         encoding="utf-8",
     )
     observed: list[str] = []
-    observer = CodexContextStatusObserver(
+    observer = _DeterministicRolloutObserver(
         observed.append,
         codex_sessions_root=tmp_path,
     )
@@ -151,7 +178,7 @@ def test_round2_rollout_follower_preserves_append_after_inode_replacement(
     rollout.write_text(_token_count_line(10) + "\n", encoding="utf-8")
     replacement.write_text(_token_count_line(70) + "\n", encoding="utf-8")
     observed: list[str] = []
-    observer = CodexContextStatusObserver(
+    observer = _DeterministicRolloutObserver(
         observed.append,
         codex_sessions_root=tmp_path,
     )
@@ -184,7 +211,7 @@ def test_round2_rollout_follower_completes_a_startup_partial_record(
         encoding="utf-8",
     )
     observed: list[str] = []
-    observer = CodexContextStatusObserver(
+    observer = _DeterministicRolloutObserver(
         observed.append,
         codex_sessions_root=tmp_path,
     )
@@ -210,7 +237,7 @@ def test_round2_rollout_follower_completes_a_replacement_partial_record(
     rollout.write_text(_token_count_line(10) + "\n", encoding="utf-8")
     replacement.write_text(_token_count_line(70), encoding="utf-8")
     observed: list[str] = []
-    observer = CodexContextStatusObserver(
+    observer = _DeterministicRolloutObserver(
         observed.append,
         codex_sessions_root=tmp_path,
     )
@@ -241,13 +268,13 @@ def test_round2_rollout_follower_detects_same_inode_equal_size_rewrite(
     rollout.write_text(initial, encoding="utf-8")
     initial_inode = rollout.stat().st_ino
     observed: list[str] = []
-    observer = CodexContextStatusObserver(
+    observer = _DeterministicRolloutObserver(
         observed.append,
         codex_sessions_root=tmp_path,
     )
 
     def rewrite_same_inode() -> None:
-        rollout.write_text(rewritten, encoding="utf-8")
+        _rewrite_with_distinct_metadata(rollout, rewritten)
         assert rollout.stat().st_ino == initial_inode
 
     stop = _MutatingStop(rewrite_same_inode)
@@ -274,7 +301,7 @@ def test_round2_rollout_checkpoint_advancement_rejects_a_pre_refresh_rewrite(
     ) as source:
         source.seek(0, 2)
         checkpoint = protocol_proxy_module._rollout_follow_checkpoint(source)
-        rollout.write_text(rewritten, encoding="utf-8")
+        _rewrite_with_distinct_metadata(rollout, rewritten)
 
         advanced = protocol_proxy_module._advance_rollout_follow_checkpoint(
             rollout,
@@ -298,7 +325,7 @@ def test_round2_rollout_follower_detects_truncate_regrow_past_old_offset(
     rollout.write_text(initial, encoding="utf-8")
     initial_inode = rollout.stat().st_ino
     observed: list[str] = []
-    observer = CodexContextStatusObserver(
+    observer = _DeterministicRolloutObserver(
         observed.append,
         codex_sessions_root=tmp_path,
     )
@@ -323,7 +350,7 @@ def test_round2_rollout_rewrite_then_append_rebaselines_without_interim_publish(
     rollout.write_text(_token_count_line(10) + "\n", encoding="utf-8")
     initial_inode = rollout.stat().st_ino
     observed: list[str] = []
-    observer = CodexContextStatusObserver(
+    observer = _DeterministicRolloutObserver(
         observed.append,
         codex_sessions_root=tmp_path,
     )
@@ -355,7 +382,7 @@ def test_round2_rollout_reopen_does_not_publish_a_duplicate_baseline(
     rollout.write_text(content, encoding="utf-8")
     replacement.write_text(content, encoding="utf-8")
     observed: list[str] = []
-    observer = CodexContextStatusObserver(
+    observer = _DeterministicRolloutObserver(
         observed.append,
         codex_sessions_root=tmp_path,
     )
@@ -411,7 +438,7 @@ def test_round2_rollout_symlink_rejection_has_bounded_open_wait_and_byte_budgets
     monkeypatch.setattr(protocol_proxy_module, "open_rollout_descriptor", counted_open)
     monkeypatch.setattr(protocol_proxy_module.os, "pread", counted_pread)
     observed: list[str] = []
-    observer = CodexContextStatusObserver(
+    observer = _DeterministicRolloutObserver(
         observed.append,
         codex_sessions_root=tmp_path,
     )

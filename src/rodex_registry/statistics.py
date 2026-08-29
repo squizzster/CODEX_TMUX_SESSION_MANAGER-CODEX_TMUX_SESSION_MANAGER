@@ -26,6 +26,7 @@ from .agent_trace_writer import (
 from .errors import (
     RodexSessionError,
     RodexSessionStatisticsConflictError,
+    RodexSessionStatisticsPublicationRaceError,
     RodexSessionTurnStatisticsAmbiguousError,
 )
 from .execution import (
@@ -381,7 +382,7 @@ def publish_rodex_session_statistics(
             None if identity_row[5] is None else int(identity_row[5])
         )
         if previous_publication_sequence != based_on_statistics_publication_sequence:
-            raise RodexSessionStatisticsConflictError(
+            raise RodexSessionStatisticsPublicationRaceError(
                 "statistics publication sequence changed during calculation"
             )
         new_publication_sequence = (

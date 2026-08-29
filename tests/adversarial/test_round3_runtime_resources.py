@@ -27,6 +27,7 @@ from rodex.tmux_status import (
     STATUS_CLAIM_PUBLISHER_OPTION,
     STATUS_CLAIM_TOKEN_OPTION,
 )
+from rodex_registry import RodexSessionId
 
 ROOT_THREAD_ID = uuid.UUID("01a00654-f2bc-7a30-834a-a5f886a65f82")
 CHILD_THREAD_ID = uuid.UUID("01a00654-f2bc-7a30-834a-a5f886a65f83")
@@ -39,7 +40,8 @@ def test_round3_supported_start_dispatches_under_the_runtime_transition_lock(
     """A mutation must not race the same lock used for resume/replacement."""
     database = tmp_path / "registry.sqlite3"
     session_id = 7
-    lock_path = database.parent / f".{database.name}.session-{session_id}.lock"
+    transition_identity = RodexSessionId(7)
+    lock_path = database.parent / f".{database.name}.session-{transition_identity}.lock"
     lock_was_held = False
     runtime = object()
     control = type("Control", (), {"runtime_id": "runtime-7"})()
@@ -69,6 +71,11 @@ def test_round3_supported_start_dispatches_under_the_runtime_transition_lock(
         mutation_module,
         "lookup_owned_rodex_sessions_id_from_a_cool_name",
         lambda *_args: session_id,
+    )
+    monkeypatch.setattr(
+        mutation_module,
+        "lookup_rodex_session_id_from_a_rodex_sessions_id",
+        lambda *_args: transition_identity,
     )
     monkeypatch.setattr(
         mutation_module,

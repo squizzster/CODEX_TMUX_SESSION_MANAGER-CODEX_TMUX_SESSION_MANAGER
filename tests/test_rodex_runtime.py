@@ -12,7 +12,7 @@ import sys
 import time
 import uuid
 from pathlib import Path
-from threading import Event, Lock
+from threading import Event, Lock, Thread
 from typing import BinaryIO, cast
 
 import pytest
@@ -510,6 +510,81 @@ def test_attach_uses_live_stdio_and_escapes_an_existing_tmux_client(
     environment = runner.options[-1]["env"]
     assert isinstance(environment, dict)
     assert "TMUX" not in environment
+
+
+def test_attach_uses_stable_runtime_identity_when_alias_wins_before_tmux_attach(
+    tmp_path: Path,
+) -> None:
+    attach_notice_entered = Event()
+    alias_completed = Event()
+    errors: list[BaseException] = []
+
+    class AliasDuringAttachRunner(RuntimeRunner):
+        def __init__(self) -> None:
+            super().__init__(tmp_path)
+            self.live_name = "before-alias"
+
+        def __call__(
+            self, command: list[str], **options: object
+        ) -> subprocess.CompletedProcess[str]:
+            self.calls.append(command)
+            self.options.append(options)
+            if "rename-session" in command:
+                assert command[-2:] == ["=before-alias", "after-alias"]
+                self.live_name = "after-alias"
+                return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+            if "list-sessions" in command:
+                assert alias_completed.is_set()
+                return subprocess.CompletedProcess(
+                    command,
+                    0,
+                    stdout=f"$9\t{RUNTIME_ID}\n",
+                    stderr="",
+                )
+            if "attach-session" in command:
+                assert self.live_name == "after-alias"
+                assert command[-2:] == ["-t", "$9"]
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    def wait_while_alias_completes() -> None:
+        attach_notice_entered.set()
+        assert alias_completed.wait(5)
+
+    runner = AliasDuringAttachRunner()
+    launcher = RodexRuntimeLauncher(
+        "codex",
+        "tmux",
+        runner=runner,
+        attach_notice=wait_while_alias_completes,
+    )
+    prepared = LiveTmuxSession(
+        tmp_path / "tmux.sock",
+        "before-alias",
+        runtime_id=RUNTIME_ID,
+    )
+
+    def attach_prepared_runtime() -> None:
+        try:
+            launcher.attach(prepared)
+        except BaseException as error:
+            errors.append(error)
+
+    attaching = Thread(target=attach_prepared_runtime)
+    attaching.start()
+    assert attach_notice_entered.wait(5), errors
+    renamed = launcher.rename(prepared, "after-alias")
+    assert renamed.tmux_session_name == "after-alias"
+    alias_completed.set()
+    attaching.join(5)
+
+    assert not attaching.is_alive()
+    assert errors == []
+    assert [command[3] for command in runner.calls] == [
+        "rename-session",
+        "list-sessions",
+        "-T",
+    ]
+    assert runner.calls[-1][-2:] == ["-t", "$9"]
 
 
 def test_attach_notice_failure_never_blocks_tmux_attachment(tmp_path: Path) -> None:
@@ -1421,7 +1496,7 @@ def test_real_tmux_survives_rename_and_status_configuration(tmp_path: Path) -> N
         tmp_path / "app.log",
         tmp_path / "proxy.sock",
         tmp_path / "events.sock",
-        RUNTIME_ID,
+        runtime_id=RUNTIME_ID,
     )
     launcher = RodexRuntimeLauncher("codex", tmux_binary)
     codex_session_id = uuid.UUID("01a00654-f2bc-7a30-834a-a5f886a65f82")
@@ -1804,7 +1879,7 @@ def test_runtime_control_publishes_pending_then_registered_identity(
         tmp_path / "app.log",
         tmp_path / "proxy.sock",
         tmp_path / "events.sock",
-        RUNTIME_ID,
+        runtime_id=RUNTIME_ID,
     )
     codex_session_id = uuid.uuid4()
     rodex_session_id = RodexSessionId.parse("0123456789abcdef")

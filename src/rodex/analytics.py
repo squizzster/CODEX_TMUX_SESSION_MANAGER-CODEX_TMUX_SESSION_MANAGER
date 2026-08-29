@@ -32,6 +32,7 @@ from rodex_registry import (
     RodexSessionCodexThread,
     RodexSessionCodexThreadObservation,
     RodexSessionStatisticsConflictError,
+    RodexSessionStatisticsPublicationRaceError,
     SessionStatisticsProjection,
     StatisticsNamedCount,
     TraceSubagentActivity,
@@ -701,7 +702,7 @@ class AnalyticsRolloutWorker:
             return "catching_up"
         except RodexAnalyticsPublicationRetryableError:
             return "publication_retry"
-        except RodexSessionStatisticsConflictError:
+        except RodexSessionStatisticsPublicationRaceError:
             self._checkpoint = None
             self._publication_sequence = None
             self._trace_publication_sequence = None
@@ -748,7 +749,11 @@ class AnalyticsRolloutWorker:
             )
             self._parked_failure = (
                 failure_fingerprint
-                if failure_fingerprint.sources and isinstance(error, RodexAnalyticsError)
+                if failure_fingerprint.sources
+                and isinstance(
+                    error,
+                    (RodexAnalyticsError, RodexSessionStatisticsConflictError),
+                )
                 else None
             )
             self._pending_failure_health = (
@@ -2062,6 +2067,8 @@ def _lower_process_priority() -> None:
 
 
 def _diagnostic_code(error: Exception) -> str:
+    if isinstance(error, RodexSessionStatisticsConflictError):
+        return "analytics_publication_conflict"
     if isinstance(error, (RodexAnalyticsError, AnalyticsSourceReadError)):
         return "analytics_error"
     if isinstance(error, OSError):

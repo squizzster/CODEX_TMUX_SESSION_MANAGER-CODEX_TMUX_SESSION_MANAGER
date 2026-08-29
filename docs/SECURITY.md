@@ -23,9 +23,10 @@ listener; control endpoints are Unix sockets below a private runtime root.
   subscribers, SQLite, Codex thread content, and model turns.
 - Managed Codex startup update prompts are disabled. Rodex's replacement check runs only
   read-only, bounded version commands, caches the npm result for 24 hours, fails open,
-  and never installs or invokes an update. Cache freshness requires a wall-clock age
-  from zero through 24 hours; a future-dated timestamp is stale rather than extending
-  the cache lifetime.
+  and never installs or invokes an update. A nonblocking current-user regular-file lock
+  elects one cross-process refresh owner; contenders retain the latest valid cache without
+  waiting. Cache freshness requires a wall-clock age from zero through 24 hours; a
+  future-dated timestamp is stale rather than extending the cache lifetime.
 - Rodex uses stdlib `sqlite3` behind one canonical transaction owner. The database and
   sibling transition lock are current-user-owned regular files at mode `0600` below a
   real current-user-owned private directory. Linux `O_NOFOLLOW`/`O_CLOEXEC` opens retain
@@ -45,7 +46,10 @@ listener; control endpoints are Unix sockets below a private runtime root.
   waits have ten-second monotonic deadlines with sleeping bounded backoff. Writers use WAL,
   `BEGIN IMMEDIATE`, foreign keys, a ten-second busy timeout, and `synchronous=NORMAL`;
   readers use a read-only/query-only deferred transaction and see a normal committed-WAL
-  snapshot.
+  snapshot. One threadless, fork-safe process-local idle SQLite connection retains at most
+  one validated WAL generation between sparse writes. It owns no transaction or cooperative
+  lock, uses bounded checkpoint/growth settings, and closes on identity switch or clean exit;
+  a forked child discards the inherited connection before reuse.
 - Database location enforcement is synchronous. Rodex has no filesystem watcher, worker,
   subscription, callback, polling loop, or recurring SQL. A missing or different identity
   is rejected at the next transaction boundary with restart guidance. A move-away-and-back
@@ -55,15 +59,20 @@ listener; control endpoints are Unix sockets below a private runtime root.
   relocation and implicit repair are unsupported. Direct same-uid SQLite access that
   ignores the cooperative lock is outside the supported contract.
 - Named runtime transitions use current-user-owned regular advisory-lock files at mode
-  `0600` with no-follow opens. The per-session lock is held through identity checking
-  and endpoint replacement, then released before terminal attachment.
+  `0600` with no-follow opens, keyed by immutable Rodex session ID. Creation holds that
+  lock from durable row publication through tmux identity/UI setup and registration
+  confirmation. Existing-session transitions hold it through identity checking and
+  endpoint replacement, then release it before terminal attachment. The verified runtime
+  incarnation resolves to tmux's immutable `$session_id` for that final attach.
 - Analytics reads only current-user-owned regular rollout files inside the configured
   sessions root, using no-follow and nonblocking opens before authenticating the Codex
   thread ID and stable complete-record prefix. Startup-only lineage discovery is bounded
   to the root UUIDv7 three-day window and reads only candidate metadata lines.
 - The live context follower accepts only an absolute, exact-thread rollout filename
   beneath that configured sessions root. It reads a bounded tail and bounded appended
-  lines for `token_count` records only, retaining no rollout bodies.
+  lines for `token_count` records only, retaining no rollout bodies. Idle checks inspect
+  metadata before bounded fingerprints, back off to a two-second ceiling, and wake early
+  on existing exact-thread protocol activity.
 - tmux operations use argv execution and exact `=name` or `=name:` targets. Dynamic hook
   commands are shell-quoted; cleanup and failure handling target one named runtime.
 - `_cat`, `_tail`, and `_events` resolve the same owned, registered live identity before

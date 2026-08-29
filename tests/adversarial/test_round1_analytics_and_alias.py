@@ -328,7 +328,7 @@ def test_round1_alias_participates_in_the_open_resume_transition_lock(
         finally:
             finished.set()
 
-    with session_transition_lock(database, session.rodex_sessions_id):
+    with session_transition_lock(database, session.rodex_session_id):
         alias_thread = Thread(target=assign_alias)
         alias_thread.start()
         attempted_while_locked = transition_attempted.wait(0.25)

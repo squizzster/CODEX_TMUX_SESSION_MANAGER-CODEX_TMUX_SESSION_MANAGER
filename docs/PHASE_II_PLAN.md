@@ -32,10 +32,17 @@ application is running; that is a terminal condition requiring a controlled rest
    freshness fields.
 2. Add a `_doctor` command, refresh exact generated-schema evidence for selected Codex
    releases, and define durable pending-attention and runtime-death reconciliation.
-3. Add an opt-in real-TUI reconnect replay and a prolonged CPU, tmux-process-rate, WAL,
+3. Bound duplicate cold lineage discovery across independent analytics workers. Twenty
+   cold workers can still each perform the same bounded `N`-source metadata discovery;
+   any shared solution must preserve authenticated provenance without restoring the
+   rejected on-disk snapshot/cache, filesystem surveillance, or watcher machinery.
+4. Bound very large analytics publications without splitting their atomic
+   registry/session/runtime/Codex identity fence. A single publication can currently hold
+   one SQLite writer transaction for an unbounded number of prepared trace/statistics rows.
+5. Add an opt-in real-TUI reconnect replay and a prolonged CPU, tmux-process-rate, WAL,
    and disk-write soak. Deterministic transport, recovery, and resource-bound tests
    already cover the corresponding code paths.
-4. Consider multi-agent task/message orchestration only after its authority, workspace
+6. Consider multi-agent task/message orchestration only after its authority, workspace
    ownership, approval routing, and retry semantics are explicitly designed. It must
    extend the existing exact-session pipeline rather than create a second runtime or
    conversation model.
@@ -45,6 +52,8 @@ application is running; that is a terminal condition requiring a controlled rest
 - Transport remains private Unix-domain WebSockets; no TCP listener is planned.
 - SQLite stores Rodex identity, provenance, coordination, and bounded outcome metadata,
   never a second conversation history.
+- Cold analytics discovery remains process-local and uncached on disk; there is no
+  snapshot, surveillance, inotify, or IDS mechanism.
 - Names remain display/discovery aids. Mutation requires verified durable and live IDs.
 - No destructive lifecycle action gains implied authority from an automation command.
 - Database or protected-path movement is never treated as relocation authority.

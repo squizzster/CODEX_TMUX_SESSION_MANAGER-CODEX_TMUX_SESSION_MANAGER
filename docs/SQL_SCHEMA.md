@@ -39,14 +39,21 @@ suggestion followed by user agreement.
   ten-second busy timeout. Enabling WAL is a bounded cold-path operation with the same
   sleeping deadline/backoff. Read transactions use a read-only URI, `query_only=ON`, and a
   deferred `BEGIN`, so a writer does not hold the cooperative lock exclusively or
-  head-of-line block WAL readers. Success commits once; any exception rolls back; every
-  connection and retained descriptor is closed on exit.
-- Identity memory is a lock-protected map of `(device, inode)` tuples only. Rodex retains no
-  database descriptor beyond a transaction and has no database watcher, worker, pipe,
-  callback, subscription, polling loop, or recurring SQL. Storage changes are detected only
-  at an actual transaction fence: a missing or different later identity fails, while a
-  move-away-and-back completed entirely between transactions is outside this synchronous
-  observation model.
+  head-of-line block WAL readers. Success commits once; any exception rolls back; each
+  transaction connection and its retained admission descriptors close on exit.
+- A threadless process-local owner retains one additional validated idle SQLite connection
+  for at most one exact `(path, parent, transition-lock, database)` storage identity. This
+  keeps sparse writes in one WAL generation instead of recreating `-wal` and `-shm` after
+  every commit. It owns no transaction or `flock`, uses the same `synchronous=NORMAL`,
+  1,000-page automatic-checkpoint, and 8 MiB journal-size policy as writers, and closes when
+  the process switches database identity or exits cleanly. Fork hooks serialize fork and
+  discard the inherited connection in the child before it may create its own owner.
+- Identity memory remains a lock-protected map of `(device, inode)` tuples. Apart from the
+  bounded WAL-lifetime connection, Rodex retains no admission descriptor beyond a
+  transaction and has no database watcher, worker, pipe, callback, subscription, polling
+  loop, or recurring SQL. Storage changes are detected only at an actual transaction fence:
+  a missing or different later identity fails, while a move-away-and-back completed entirely
+  between transactions is outside this synchronous observation model.
 - The explicit integrity audit uses the same existing-only, shared-lock, read-only
   transaction. Its normal WAL-aware snapshot includes committed WAL content, executes no
   DDL, and compares every non-internal table, index, trigger, and view with the canonical
@@ -322,8 +329,10 @@ suggestion followed by user agreement.
   immutable publication if SQLite asks it to retry; a retry never reruns analysis or
   source I/O inside the transaction. Cold startup warms resident analyzer and trace
   state from the accepted checkpoint prefix, then publishes only later suffix bytes. A
-  stale compare-and-set conflict discards the in-memory source cursor and reloads SQL
-  before accepting a subsequent append, preventing a stale worker from skipping bytes.
+  stale publication-sequence compare-and-set conflict discards the in-memory source cursor
+  and reloads SQL before accepting a subsequent append, preventing a stale worker from
+  skipping bytes. Other deterministic semantic conflicts publish degraded health and park
+  by authenticated source fingerprint without resetting every source cursor.
 - Child rollout staging retains its own `session_meta` and records after
   `subagent_history_start_ordinal`; inherited parent history is excluded before analysis.
   A clean child with no inherited history legitimately omits both `forked_from_id` and

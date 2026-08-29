@@ -11,6 +11,7 @@ from rodex_registry import (
     RodexSessionNames,
     lookup_owned_rodex_sessions_id_from_a_cool_name,
     lookup_rodex_runtime_instance,
+    lookup_rodex_session_id_from_a_rodex_sessions_id,
     lookup_rodex_session_names,
     lookup_rodex_tmux_session,
     open_a_user_defined_cool_name_assignment,
@@ -78,7 +79,12 @@ class ExactTurnMutationCoordinator:
         )
         if session_id is None:
             raise RodexLaunchError(f"unknown Rodex session: {selector}")
-        with session_transition_lock(self._database_path, session_id):
+        rodex_session_id = lookup_rodex_session_id_from_a_rodex_sessions_id(
+            session_id, self._database_path
+        )
+        if rodex_session_id is None:
+            raise RodexLaunchError(f"Rodex session disappeared: {selector}")
+        with session_transition_lock(self._database_path, rodex_session_id):
             locked_session_id = lookup_owned_rodex_sessions_id_from_a_cool_name(
                 selector, self._database_path
             )

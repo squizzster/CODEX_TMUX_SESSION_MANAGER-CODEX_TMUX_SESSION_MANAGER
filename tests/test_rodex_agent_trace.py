@@ -202,6 +202,101 @@ def test_stateful_trace_pairs_namespaced_function_request_and_later_output() -> 
     assert response.events[0].detail.response_utf8_bytes > 0  # type: ignore[union-attr]
 
 
+def test_response_item_turn_metadata_keeps_collaboration_activity_in_one_scope(
+    tmp_path: Path,
+) -> None:
+    """Interleaved turn events must not strand one call across two SQL scopes."""
+    call_id = "call_zEgzl1iRHbYlON2n7Q4SJa9k"
+    publication = normalize_rollout_trace(
+        (
+            (
+                THREAD_ID,
+                _content(
+                    {
+                        "ordinal": 1,
+                        "timestamp": "2026-08-29T05:55:18.421Z",
+                        "type": "event_msg",
+                        "payload": {"type": "task_started", "turn_id": TURN_A_ID},
+                    },
+                    {
+                        "ordinal": 2,
+                        "timestamp": "2026-08-29T05:55:20.062Z",
+                        "type": "response_item",
+                        "payload": {
+                            "type": "reasoning",
+                            "internal_chat_message_metadata_passthrough": {
+                                "turn_id": TURN_B_ID,
+                            },
+                        },
+                    },
+                    {
+                        "ordinal": 3,
+                        "timestamp": "2026-08-29T05:55:25.142Z",
+                        "type": "event_msg",
+                        "payload": {
+                            "type": "item_completed",
+                            "turn_id": TURN_A_ID,
+                            "item": {"type": "SubAgentActivity", "kind": "completed"},
+                        },
+                    },
+                    {
+                        "ordinal": 4,
+                        "timestamp": "2026-08-29T05:55:25.953Z",
+                        "type": "response_item",
+                        "payload": {
+                            "type": "function_call",
+                            "id": "fc-test-send-message",
+                            "namespace": "collaboration",
+                            "name": "send_message",
+                            "call_id": call_id,
+                            "arguments": '{"target":"/root/review"}',
+                            "internal_chat_message_metadata_passthrough": {
+                                "turn_id": TURN_B_ID,
+                            },
+                        },
+                    },
+                    {
+                        "ordinal": 5,
+                        "timestamp": "2026-08-29T05:55:25.956Z",
+                        "type": "event_msg",
+                        "payload": {
+                            "type": "item_completed",
+                            "turn_id": TURN_B_ID,
+                            "item": {
+                                "type": "SubAgentActivity",
+                                "id": call_id,
+                                "kind": "interacted",
+                                "agent_thread_id": str(CHILD_THREAD_ID),
+                                "agent_path": "/root/review",
+                            },
+                        },
+                    },
+                ),
+            ),
+        ),
+        based_on_trace_publication_sequence=None,
+        calculated_at_utc="2026-08-29T05:55:26Z",
+    )
+
+    call = next(
+        event
+        for event in publication.events
+        if isinstance(event.detail, TraceToolCall) and event.detail.call_id == call_id
+    )
+    activity = next(
+        event
+        for event in publication.events
+        if isinstance(event.detail, TraceSubagentActivity)
+        and event.detail.collaboration_call_id == call_id
+    )
+    assert call.codex_turn_id == TURN_B_ID
+    assert activity.codex_turn_id == TURN_B_ID
+
+    database = tmp_path / "rodex.sqlite3"
+    create_a_rodex_session(database, codex_session_id=THREAD_ID)
+    _publish_trace(database, publication)
+
+
 def test_normalizer_derives_typed_message_usage_rate_limit_and_unknown_events() -> None:
     publication = normalize_rollout_trace(
         (

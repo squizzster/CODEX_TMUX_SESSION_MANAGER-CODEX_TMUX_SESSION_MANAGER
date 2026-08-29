@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import atexit
 import fcntl
+import os
 import sqlite3
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager, suppress
+from dataclasses import dataclass
 from pathlib import Path
+from threading import Lock
 from typing import Final
 
 from .errors import RodexSQLError
@@ -25,6 +29,34 @@ from .sqlite_identity import (
 )
 
 _DATABASE_LOCK_TIMEOUT_SECONDS: Final = 10.0
+_WAL_AUTOCHECKPOINT_PAGES: Final = 1_000
+_WAL_JOURNAL_SIZE_LIMIT_BYTES: Final = 8 * 1024 * 1024
+
+
+@dataclass(frozen=True, slots=True)
+class _WalStorageIdentity:
+    """Exact storage identity retained by one process-local WAL owner."""
+
+    parent: tuple[int, int]
+    transition_lock: tuple[int, int]
+    database: tuple[int, int]
+
+
+@dataclass(slots=True)
+class _ProcessWalLifetimeOwner:
+    """Keep one validated WAL generation live between sparse transactions."""
+
+    process_id: int
+    database_path: Path
+    storage_identity: _WalStorageIdentity
+    connection: sqlite3.Connection
+
+    def close(self) -> None:
+        self.connection.close()
+
+
+_PROCESS_WAL_LIFETIME_LOCK = Lock()
+_PROCESS_WAL_LIFETIME_OWNER: _ProcessWalLifetimeOwner | None = None
 
 
 @contextmanager
@@ -109,7 +141,8 @@ def _open_transaction_connection(
             connection.execute("PRAGMA query_only = ON")
         else:
             _ensure_wal_journal_mode(connection)
-            connection.execute("PRAGMA synchronous = NORMAL")
+            _configure_wal_write_connection(connection)
+            _retain_process_wal_lifetime(opened)
         require_database_identity(opened, stage="pre_begin")
         connection.execute(begin_statement)
         try:
@@ -181,6 +214,7 @@ def _connect_validated_database(
     opened: ValidatedDatabaseFile,
     *,
     read_only: bool,
+    check_same_thread: bool = True,
 ) -> sqlite3.Connection:
     try:
         return sqlite3.connect(
@@ -188,6 +222,7 @@ def _connect_validated_database(
             timeout=10,
             isolation_level=None,
             uri=True,
+            check_same_thread=check_same_thread,
         )
     except sqlite3.Error as error:
         raise RodexSQLError(
@@ -242,3 +277,113 @@ def _ensure_wal_journal_mode(connection: sqlite3.Connection) -> None:
                 )
         time.sleep(retry_delay)
         retry_delay = min(retry_delay * 2.0, 0.05)
+
+
+def _configure_wal_write_connection(connection: sqlite3.Connection) -> None:
+    """Apply the one bounded durability and checkpoint policy to every writer."""
+    connection.execute("PRAGMA synchronous = NORMAL")
+    connection.execute(f"PRAGMA wal_autocheckpoint = {_WAL_AUTOCHECKPOINT_PAGES}")
+    connection.execute(f"PRAGMA journal_size_limit = {_WAL_JOURNAL_SIZE_LIMIT_BYTES}")
+
+
+def _retain_process_wal_lifetime(opened: ValidatedDatabaseFile) -> None:
+    """Retain one idle connection so sparse commits reuse their WAL sidecars."""
+    global _PROCESS_WAL_LIFETIME_OWNER
+
+    process_id = os.getpid()
+    storage_identity = _wal_storage_identity(opened)
+    with _PROCESS_WAL_LIFETIME_LOCK:
+        current = _PROCESS_WAL_LIFETIME_OWNER
+        if (
+            current is not None
+            and current.process_id == process_id
+            and current.database_path == opened.path
+            and current.storage_identity == storage_identity
+        ):
+            return
+        if current is not None:
+            current.close()
+            _PROCESS_WAL_LIFETIME_OWNER = None
+        connection = _open_process_wal_lifetime_connection(opened)
+        _PROCESS_WAL_LIFETIME_OWNER = _ProcessWalLifetimeOwner(
+            process_id=process_id,
+            database_path=opened.path,
+            storage_identity=storage_identity,
+            connection=connection,
+        )
+
+
+def _open_process_wal_lifetime_connection(
+    opened: ValidatedDatabaseFile,
+) -> sqlite3.Connection:
+    """Open the validated idle connection owned by this process's WAL lifetime."""
+    connection = _connect_validated_database(
+        opened,
+        read_only=False,
+        check_same_thread=False,
+    )
+    try:
+        require_sqlite_main_path(connection, opened)
+        connection.execute("PRAGMA busy_timeout = 10000")
+        connection.execute("PRAGMA foreign_keys = ON")
+        if connection.execute("PRAGMA journal_mode").fetchone() != ("wal",):
+            raise RodexSQLError("process WAL lifetime opened outside WAL journal mode")
+        _configure_wal_write_connection(connection)
+        require_database_identity(opened, stage="wal_lifetime")
+        return connection
+    except BaseException:
+        connection.close()
+        raise
+
+
+def _wal_storage_identity(opened: ValidatedDatabaseFile) -> _WalStorageIdentity:
+    boundary = opened.boundary
+    return _WalStorageIdentity(
+        parent=(boundary.parent_state.st_dev, boundary.parent_state.st_ino),
+        transition_lock=(
+            boundary.transition_lock_state.st_dev,
+            boundary.transition_lock_state.st_ino,
+        ),
+        database=(opened.state.st_dev, opened.state.st_ino),
+    )
+
+
+def _close_process_wal_lifetime_owner() -> None:
+    """Checkpoint and release this process's sole idle WAL lifetime owner."""
+    global _PROCESS_WAL_LIFETIME_OWNER
+
+    with _PROCESS_WAL_LIFETIME_LOCK:
+        owner = _PROCESS_WAL_LIFETIME_OWNER
+        _PROCESS_WAL_LIFETIME_OWNER = None
+        if owner is not None:
+            owner.close()
+
+
+def _prepare_process_wal_lifetime_fork() -> None:
+    _PROCESS_WAL_LIFETIME_LOCK.acquire()
+
+
+def _finish_process_wal_lifetime_fork_in_parent() -> None:
+    _PROCESS_WAL_LIFETIME_LOCK.release()
+
+
+def _discard_process_wal_lifetime_after_fork() -> None:
+    """Never reuse a SQLite connection inherited from a parent process."""
+    global _PROCESS_WAL_LIFETIME_OWNER
+
+    try:
+        owner = _PROCESS_WAL_LIFETIME_OWNER
+        _PROCESS_WAL_LIFETIME_OWNER = None
+        if owner is not None:
+            with suppress(sqlite3.Error):
+                owner.close()
+    finally:
+        _PROCESS_WAL_LIFETIME_LOCK.release()
+
+
+os.register_at_fork(
+    before=_prepare_process_wal_lifetime_fork,
+    after_in_parent=_finish_process_wal_lifetime_fork_in_parent,
+    after_in_child=_discard_process_wal_lifetime_after_fork,
+)
+atexit.register(_close_process_wal_lifetime_owner)

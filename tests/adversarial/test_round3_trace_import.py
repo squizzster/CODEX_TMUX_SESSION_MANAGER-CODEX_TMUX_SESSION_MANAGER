@@ -139,6 +139,9 @@ def test_round3_trace_contract_rejects_all_semantic_errors_before_sql(
 ) -> None:
     database = tmp_path / "registry.sqlite3"
     create_a_rodex_session(database, codex_session_id=THREAD_ID)
+    transactions_module._close_process_wal_lifetime_owner()
+    assert not Path(f"{database}-wal").exists()
+    assert not Path(f"{database}-shm").exists()
     invalid = RodexAgentTracePublication(
         based_on_trace_publication_sequence=None,
         trace_schema_version="round3-v1",

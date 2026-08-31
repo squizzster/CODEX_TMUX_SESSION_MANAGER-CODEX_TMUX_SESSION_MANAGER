@@ -55,6 +55,20 @@ becomes a distinct candidate for the transient App Server persistence check.
    to the ordinary Codex prompt; an initial prompt and interactive options have already
    reached that TUI unchanged and exactly once.
 
+The checkout launcher and installed shim execute the project's `.venv/bin/rodex`
+entrypoint directly. At the process boundary, `rodex.process_environment` compares an
+active `VIRTUAL_ENV` with Rodex's own interpreter prefix. An exact match is bootstrap
+state: Rodex removes it, its prompt and uv recursion marker, and every matching `.venv/bin`
+entry from `PATH`. A different caller-owned virtualenv is preserved. Direct Codex
+process replacement and transient App Server checks use this same prepared environment.
+
+Runtime creation supplies the prepared environment to the tmux client so a fresh private
+server starts clean. Every new session also overrides `PATH` and the virtualenv markers;
+values absent from the caller are unset for the first host and marked removed from the
+session before later panes can inherit them. This per-session contract prevents a shared
+tmux server started by older Rodex code from reintroducing stale bootstrap values. The
+session host passes the resulting environment explicitly to both App Server and TUI.
+
 Immediately before attachment, Rodex compares `codex --version` with the cached result
 of a bounded `npm view @openai/codex version` lookup. When a newer stable release exists,
 it sends the primary TUI a native `warning` notification through a private Rodex-only
@@ -82,10 +96,11 @@ executor binds one tmux binary and server socket; all callers use the same
 `run(command_arguments, mode=..., output=...)` entry. Captured mode either returns text
 or discards stdin/stdout/stderr and always has an absolute deadline: one second by
 default and five seconds for ordinary runtime-launcher commands. Nonzero exits, timeout,
-and process unavailability return one normalized result. Interactive attachment uses the
-same entry with direct terminal ownership, an explicit environment, no capture, and its
-natural lifetime. The asynchronous executor also exposes only `run`; deadline
-cancellation kills and reaps its one child.
+and process unavailability return one normalized result. Captured runtime creation may
+supply an explicit environment; interactive attachment uses the same entry with direct
+terminal ownership, an explicit environment, no capture, and its natural lifetime. The
+asynchronous executor also exposes only `run`; deadline cancellation kills and reaps its
+one child.
 
 Status publication, input guards, completion captures, observer-pane control,
 registration checks, animation, rename, and attach all use that boundary. Domain

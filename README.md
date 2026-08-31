@@ -96,6 +96,11 @@ uv sync
 ./rodex
 ```
 
+Rodex uses its project `.venv` only to run Rodex itself. Managed and delegated Codex
+processes do not inherit that bootstrap virtual environment, including through an older
+shared tmux server. A different virtual environment already active for the caller's own
+project is preserved.
+
 Start with an initial prompt exactly as you would with Codex:
 
 ```bash

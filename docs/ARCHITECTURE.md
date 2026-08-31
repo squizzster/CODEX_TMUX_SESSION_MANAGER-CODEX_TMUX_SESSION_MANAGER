@@ -39,6 +39,7 @@ prompt. An unregistered canonical Codex identity requires a transient App Server
 | `rodex.managed_session_lifecycle` / `cool_name` | Select, name, create, attach, resume, recover, and resolve collisions. |
 | `rodex.exact_turn_mutation` | Re-resolve mutation selectors under the per-session transition lock; validate incarnation and choose start, steer, interrupt, mouse, or alias policy. |
 | `rodex.session_read_pipeline` / `session_tail` | Verify live reads and follow terminal history without idle full-history scans. |
+| `rodex.process_environment` | Remove only Rodex's bootstrap virtualenv and retain caller-owned process state. |
 | `rodex.runtime` / `process_contracts` / `session_host` | Discover, launch, attach, supervise, and clean up app-server, TUI, proxy, analytics, and runtime paths. |
 | `rodex.tmux_executor` | Sole production process boundary for every tmux command. |
 | `rodex.tmux_status` / `status_animation` | Arbitrate status claims and render one already-admitted transition. |
@@ -65,6 +66,11 @@ terminal ownership and its natural lifetime. After runtime verification it resol
 incarnation to tmux's immutable server-local `$session_id`, so a concurrent alias cannot
 stale the final attach target. The asynchronous entry applies its deadline to one child
 and kills and reaps that child on cancellation.
+
+Runtime creation gives the captured tmux boundary Rodex-free caller state and replaces
+`PATH` plus virtualenv markers on every new session. Absent values are removed from the
+first host and session environment, so an older shared tmux server cannot reintroduce
+Rodex's `.venv`; a distinct caller-owned virtualenv passes through unchanged.
 
 The disabled `/rodex` completion component illustrates a distinct inbound boundary:
 `pipe-pane` bytes arrive on the completion observer's stdin and wake a coalescing event

@@ -280,12 +280,20 @@ def test_start_directly_hosts_codex_in_tmux_and_returns_its_session_id(
     )
     runner = RuntimeRunner(tmp_path)
     connector = RecordingConnector([codex_session_id])
+    rodex_virtual_environment = Path(sys.prefix)
     launcher = RodexRuntimeLauncher(
         "/usr/bin/codex",
         "/usr/bin/tmux",
         runner=runner,
         connector=connector,
         python_executable="/venv/bin/python",
+        environment={
+            "PATH": f"{rodex_virtual_environment / 'bin'}:/usr/bin",
+            "VIRTUAL_ENV": str(rodex_virtual_environment),
+            "VIRTUAL_ENV_PROMPT": "(rodex)",
+            "UV_RUN_RECURSION_DEPTH": "1",
+            "USER_SETTING": "preserved",
+        },
     )
 
     live, observed_codex_session_id = launcher.start(
@@ -307,13 +315,27 @@ def test_start_directly_hosts_codex_in_tmux_and_returns_its_session_id(
         str(RODEX_TMUX_HISTORY_LIMIT_LINES),
         ";",
     ]
-    assert new_session[8:12] == [
+    assert new_session[8:14] == [
         "new-session",
         "-d",
         "-s",
         "rodex-0123456789abcdef",
+        "-c",
+        str(tmp_path),
     ]
-    host_command = new_session[-1]
+    assert [
+        new_session[index + 1]
+        for index, argument in enumerate(new_session)
+        if argument == "-e"
+    ] == [
+        "PATH=/usr/bin",
+        "VIRTUAL_ENV=",
+        "VIRTUAL_ENV_PROMPT=",
+        "UV_RUN_RECURSION_DEPTH=",
+    ]
+    host_command = next(
+        argument for argument in new_session if "-m rodex.session_host" in argument
+    )
     assert "/venv/bin/python -m rodex.session_host" in host_command
     assert f"--protocol-event-socket {tmp_path / 'events-0123456789abcdef.sock'}" in (
         host_command
@@ -322,6 +344,30 @@ def test_start_directly_hosts_codex_in_tmux_and_returns_its_session_id(
     assert "--rodex-database" not in host_command
     assert "--codex-sessions-root" not in host_command
     assert "send-keys" not in host_command
+    assert runner.options[0]["env"] == {
+        "PATH": "/usr/bin",
+        "USER_SETTING": "preserved",
+    }
+    assert new_session[-18:] == [
+        ";",
+        "set-environment",
+        "-r",
+        "-t",
+        "=rodex-0123456789abcdef",
+        "VIRTUAL_ENV",
+        ";",
+        "set-environment",
+        "-r",
+        "-t",
+        "=rodex-0123456789abcdef",
+        "VIRTUAL_ENV_PROMPT",
+        ";",
+        "set-environment",
+        "-r",
+        "-t",
+        "=rodex-0123456789abcdef",
+        "UV_RUN_RECURSION_DEPTH",
+    ]
     assert [command[3:] for command in runner.calls[-4:-1]] == [
         [
             "set-option",
@@ -384,7 +430,9 @@ def test_start_passes_the_exact_leading_zero_session_id_to_the_session_host(
         rodex_database_path=tmp_path / "rodex-v3.sqlite3",
     )
 
-    host_command = runner.calls[0][-1]
+    host_command = next(
+        argument for argument in runner.calls[0] if "-m rodex.session_host" in argument
+    )
     assert "--rodex-session-id 0000000000000001" in host_command
     assert f"--rodex-database {tmp_path / 'rodex-v3.sqlite3'}" in host_command
 
@@ -485,6 +533,12 @@ def test_attach_uses_live_stdio_and_escapes_an_existing_tmux_client(
         tui_notice_publisher=lambda path, message: (
             published_notices.append((path, message)) or True
         ),
+        environment={
+            "PATH": "/project-xyz/.venv/bin:/usr/bin",
+            "TERM": "xterm-256color",
+            "TMUX": "/tmp/outer",
+            "VIRTUAL_ENV": "/project-xyz/.venv",
+        },
     )
     live = LiveRodexRuntime(
         tmp_path / "tmux.sock",
@@ -510,6 +564,8 @@ def test_attach_uses_live_stdio_and_escapes_an_existing_tmux_client(
     environment = runner.options[-1]["env"]
     assert isinstance(environment, dict)
     assert "TMUX" not in environment
+    assert environment["VIRTUAL_ENV"] == "/project-xyz/.venv"
+    assert environment["PATH"] == "/project-xyz/.venv/bin:/usr/bin"
 
 
 def test_attach_uses_stable_runtime_identity_when_alias_wins_before_tmux_attach(
@@ -1449,6 +1505,117 @@ def test_rodex_does_not_override_user_mouse_preferences(tmp_path: Path) -> None:
     assert not any("mouse" in command for command in runner.calls)
 
 
+@pytest.mark.parametrize("user_virtualenv_is_active", [False, True])
+def test_real_tmux_session_replaces_stale_rodex_environment_with_caller_state(
+    tmp_path: Path,
+    user_virtualenv_is_active: bool,
+) -> None:
+    tmux_binary = shutil.which("tmux")
+    if tmux_binary is None:
+        pytest.skip("tmux is not installed")
+    socket_path = tmp_path / "tmux.sock"
+    stale_environment = os.environ.copy()
+    stale_environment.update(
+        {
+            "PATH": f"{Path(sys.prefix) / 'bin'}:/usr/bin",
+            "VIRTUAL_ENV": str(Path(sys.prefix)),
+            "VIRTUAL_ENV_PROMPT": "(rodex)",
+            "UV_RUN_RECURSION_DEPTH": "1",
+        }
+    )
+    subprocess.run(
+        [
+            tmux_binary,
+            "-S",
+            str(socket_path),
+            "new-session",
+            "-d",
+            "-s",
+            "stale-environment-owner",
+            "sleep 30",
+        ],
+        check=True,
+        env=stale_environment,
+    )
+    caller_environment = {
+        "HOME": str(tmp_path),
+        "PATH": "/usr/bin",
+        "TERM": "xterm-256color",
+    }
+    expected_virtual_environment: str | None = None
+    if user_virtualenv_is_active:
+        expected_virtual_environment = str(tmp_path / "project-xyz" / ".venv")
+        caller_environment.update(
+            {
+                "PATH": f"{expected_virtual_environment}/bin:/usr/bin",
+                "VIRTUAL_ENV": expected_virtual_environment,
+                "VIRTUAL_ENV_PROMPT": "(project-xyz)",
+                "UV_RUN_RECURSION_DEPTH": "7",
+            }
+        )
+    probe_path = tmp_path / "managed-environment.json"
+    probe_source = (
+        "import json, os, sys, time; from pathlib import Path; "
+        "names = ('PATH', 'VIRTUAL_ENV', 'VIRTUAL_ENV_PROMPT', "
+        "'UV_RUN_RECURSION_DEPTH'); "
+        "Path(sys.argv[1]).write_text(json.dumps({name: os.environ.get(name) "
+        "for name in names})); time.sleep(10)"
+    )
+    launcher = RodexRuntimeLauncher(
+        "codex",
+        tmux_binary,
+        python_executable=sys.executable,
+        environment=caller_environment,
+    )
+    runtime = LiveTmuxSession(socket_path, "caller-environment")
+
+    try:
+        launcher._start_tmux_session(
+            runtime,
+            tmp_path,
+            shlex.join((sys.executable, "-c", probe_source, str(probe_path))),
+        )
+        deadline = time.monotonic() + 2
+        while not probe_path.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert probe_path.exists()
+        observed = json.loads(probe_path.read_text(encoding="utf-8"))
+        assert observed["PATH"] == caller_environment["PATH"]
+        assert observed["VIRTUAL_ENV"] == expected_virtual_environment
+        assert observed["VIRTUAL_ENV_PROMPT"] == (
+            "(project-xyz)" if user_virtualenv_is_active else None
+        )
+        assert observed["UV_RUN_RECURSION_DEPTH"] == (
+            "7" if user_virtualenv_is_active else None
+        )
+        session_virtual_environment = subprocess.run(
+            [
+                tmux_binary,
+                "-S",
+                str(socket_path),
+                "show-environment",
+                "-t",
+                "=caller-environment",
+                "VIRTUAL_ENV",
+            ],
+            check=True,
+            text=True,
+            capture_output=True,
+        ).stdout.strip()
+        assert session_virtual_environment == (
+            f"VIRTUAL_ENV={expected_virtual_environment}"
+            if user_virtualenv_is_active
+            else "-VIRTUAL_ENV"
+        )
+    finally:
+        subprocess.run(
+            [tmux_binary, "-S", str(socket_path), "kill-server"],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+
 def test_real_tmux_session_preserves_scrollback_with_mouse_disabled(
     tmp_path: Path,
 ) -> None:
@@ -2324,6 +2491,7 @@ def test_session_host_skips_updater_and_connects_tui_through_protocol_proxy(
     tmux_socket = tmp_path / "tmux.sock"
     tui_commands: list[list[str]] = []
     tui_options: list[dict[str, object]] = []
+    spawned_environments: list[dict[str, str]] = []
     status_updates: list[int] = []
     proxy_lifecycle: list[str] = []
     protected_paths: tuple[Path, ...] | None = None
@@ -2429,11 +2597,23 @@ def test_session_host_skips_updater_and_connects_tui_through_protocol_proxy(
             raise AssertionError("failed analytics supervisor was released")
 
     def start_process(command: list[str], **options: object) -> FakeProcess:
+        process_environment = options.get("env")
+        assert isinstance(process_environment, dict)
+        spawned_environments.append(process_environment.copy())
         if "app-server" not in command:
             tui_commands.append(command)
             tui_options.append(options)
         return FakeProcess(command)
 
+    rodex_virtual_environment = Path(sys.prefix)
+    monkeypatch.setenv(
+        "PATH",
+        f"{rodex_virtual_environment / 'bin'}:/usr/bin",
+    )
+    monkeypatch.setenv("VIRTUAL_ENV", str(rodex_virtual_environment))
+    monkeypatch.setenv("VIRTUAL_ENV_PROMPT", "(rodex)")
+    monkeypatch.setenv("UV_RUN_RECURSION_DEPTH", "1")
+    monkeypatch.setenv("USER_SETTING", "preserved")
     monkeypatch.setenv("TMUX_PANE", "%4")
     monkeypatch.setattr(runtime_module.subprocess, "Popen", start_process)
     monkeypatch.setattr(
@@ -2535,13 +2715,20 @@ def test_session_host_skips_updater_and_connects_tui_through_protocol_proxy(
         ]
     ]
     assert len(tui_options) == 1
+    assert len(spawned_environments) == 2
+    for process_environment in spawned_environments:
+        assert process_environment["PATH"] == "/usr/bin"
+        assert process_environment["USER_SETTING"] == "preserved"
+        assert "VIRTUAL_ENV" not in process_environment
+        assert "VIRTUAL_ENV_PROMPT" not in process_environment
+        assert "UV_RUN_RECURSION_DEPTH" not in process_environment
     if captures_stderr:
         captured_stderr = tui_options[0].get("stderr")
         assert captured_stderr is not None
         assert cast(BinaryIO, captured_stderr).closed
         assert not (tmp_path / "app.log").exists()
     else:
-        assert tui_options == [{}]
+        assert set(tui_options[0]) == {"env"}
 
 
 def test_session_host_retries_exact_resume_during_active_writer_handoff(

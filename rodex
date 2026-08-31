@@ -2,4 +2,12 @@
 set -eu
 
 RODEX_PROJECT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-exec uv run --project "$RODEX_PROJECT_DIR" rodex "$@"
+RODEX_ENTRYPOINT=$RODEX_PROJECT_DIR/.venv/bin/rodex
+
+if [ ! -x "$RODEX_ENTRYPOINT" ]; then
+    printf 'rodex: project environment is not ready: %s\n' "$RODEX_ENTRYPOINT" >&2
+    printf 'rodex: run uv sync in %s\n' "$RODEX_PROJECT_DIR" >&2
+    exit 1
+fi
+
+exec "$RODEX_ENTRYPOINT" "$@"

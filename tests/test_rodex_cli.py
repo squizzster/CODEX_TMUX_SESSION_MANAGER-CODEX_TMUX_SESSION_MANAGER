@@ -15,6 +15,7 @@ from typing import Any
 
 import pytest
 
+import rodex.cli as cli_module
 import rodex.exact_turn_mutation as exact_turn_mutation_module
 import rodex.managed_session_lifecycle as managed_lifecycle_module
 import rodex.session_commands as session_commands_module
@@ -1999,6 +2000,53 @@ def test_codex_passthrough_invocations_delegate_unchanged_without_tmux_or_databa
 
     assert delegator.calls == [("/usr/bin/codex", arguments)]
     assert not database.exists()
+
+
+def test_default_codex_passthrough_removes_the_rodex_bootstrap_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rodex_virtual_environment = Path(sys.prefix)
+    monkeypatch.setenv(
+        "PATH",
+        f"{rodex_virtual_environment / 'bin'}:/usr/local/bin:/usr/bin",
+    )
+    monkeypatch.setenv("VIRTUAL_ENV", str(rodex_virtual_environment))
+    monkeypatch.setenv("VIRTUAL_ENV_PROMPT", "(rodex)")
+    monkeypatch.setenv("UV_RUN_RECURSION_DEPTH", "1")
+    observed: list[tuple[str, list[str], dict[str, str]]] = []
+
+    def record_execve(
+        executable: str,
+        arguments: list[str],
+        environment: dict[str, str],
+    ) -> None:
+        observed.append((executable, arguments, environment))
+
+    monkeypatch.setattr(cli_module.os, "execve", record_execve)
+
+    with pytest.raises(AssertionError, match=r"os\.execve returned unexpectedly"):
+        cli_module._exec_codex("/usr/bin/codex", ("exec", "probe"))
+
+    assert observed == [
+        (
+            "/usr/bin/codex",
+            ["/usr/bin/codex", "exec", "probe"],
+            {
+                **{
+                    name: value
+                    for name, value in os.environ.items()
+                    if name
+                    not in {
+                        "PATH",
+                        "VIRTUAL_ENV",
+                        "VIRTUAL_ENV_PROMPT",
+                        "UV_RUN_RECURSION_DEPTH",
+                    }
+                },
+                "PATH": "/usr/local/bin:/usr/bin",
+            },
+        )
+    ]
 
 
 def test_bare_invocation_never_delegates_to_codex(
@@ -4190,13 +4238,14 @@ def test_registration_confirmation_failure_stops_the_pending_runtime(
     assert launcher.attached == []
 
 
-def test_project_root_launcher_is_executable_and_uses_the_project_environment() -> None:
+def test_project_root_launcher_is_executable_and_uses_the_sealed_entrypoint() -> None:
     project_root = Path(__file__).parents[1]
     launcher = project_root / "rodex"
 
     assert os.access(launcher, os.X_OK)
     contents = launcher.read_text(encoding="utf-8")
-    assert 'uv run --project "$RODEX_PROJECT_DIR" rodex "$@"' in contents
+    assert 'exec "$RODEX_ENTRYPOINT" "$@"' in contents
+    assert "uv run" not in contents
 
 
 def test_main_prints_actionable_multiline_resume_guidance(

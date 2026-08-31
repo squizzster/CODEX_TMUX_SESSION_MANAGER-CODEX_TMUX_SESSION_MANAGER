@@ -203,6 +203,10 @@ def test_architecture_c_tmux_executor_has_one_run_entry_and_explicit_modes(
     assert executor.run(("show-options",)).stdout == "ok\n"
     executor.run(("set-option", "@test", "value"), output="discard")
     executor.run(
+        ("new-session", "-d", "probe"),
+        environment={"PATH": "/usr/bin"},
+    )
+    executor.run(
         ("attach-session", "-t", "=exact"),
         mode="interactive",
         environment={"TERM": "xterm"},
@@ -233,6 +237,13 @@ def test_architecture_c_tmux_executor_has_one_run_entry_and_explicit_modes(
         "timeout": DEFAULT_TMUX_COMMAND_TIMEOUT_SECONDS,
     }
     assert calls[2][1] == {
+        "check": False,
+        "text": True,
+        "capture_output": True,
+        "timeout": DEFAULT_TMUX_COMMAND_TIMEOUT_SECONDS,
+        "env": {"PATH": "/usr/bin"},
+    }
+    assert calls[3][1] == {
         "check": False,
         "text": True,
         "env": {"TERM": "xterm"},

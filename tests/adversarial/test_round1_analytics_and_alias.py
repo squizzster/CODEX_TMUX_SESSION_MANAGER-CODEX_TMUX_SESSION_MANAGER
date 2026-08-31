@@ -28,7 +28,8 @@ from rodex_registry import (
     read_rodex_session_statistics,
 )
 
-CODEX_SESSION_ID = uuid.UUID("01a00654-f2bc-7a30-834a-a5f886a65f82")
+# This UUIDv7 encodes the fixture rollout's fixed 2026-08-29 UTC date.
+CODEX_SESSION_ID = uuid.UUID("01a04d64-1600-7a30-834a-a5f886a65f82")
 RODEX_SESSION_ID = RodexSessionId.parse("1234567890abcdef")
 RUNTIME_ID = RodexRuntimeId.parse("0000000000000001")
 

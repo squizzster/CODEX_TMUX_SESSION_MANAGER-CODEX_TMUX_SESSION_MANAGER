@@ -19,6 +19,11 @@ the project environment from the project root:
 uv sync
 ```
 
+The checkout-local `./rodex` launcher then executes `.venv/bin/rodex` directly, just as
+the installed shim does; it does not wrap Rodex in `uv run`. Rodex treats that `.venv`
+as an internal implementation environment and excludes it from Codex. A different
+virtual environment activated by the caller for their current project is retained.
+
 ## Install the command for one user (recommended)
 
 From the project root, copy the provided shim into your user command directory:

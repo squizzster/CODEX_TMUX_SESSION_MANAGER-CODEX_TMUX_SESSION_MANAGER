@@ -59,8 +59,6 @@ class SyncTmuxExecutor:
     ) -> TmuxCommandResult:
         """Run one normalized command with explicit terminal and output semantics."""
         if mode == "captured":
-            if environment is not None:
-                raise ValueError("captured tmux execution does not accept an environment")
             options: dict[str, object] = {"check": False, "text": True}
             if output == "capture":
                 options["capture_output"] = True
@@ -75,6 +73,8 @@ class SyncTmuxExecutor:
             else:
                 raise ValueError(f"unsupported tmux output policy: {output}")
             options["timeout"] = self._timeout_seconds
+            if environment is not None:
+                options["env"] = environment
         elif mode == "interactive":
             if output != "capture":
                 raise ValueError("interactive tmux execution owns terminal output")

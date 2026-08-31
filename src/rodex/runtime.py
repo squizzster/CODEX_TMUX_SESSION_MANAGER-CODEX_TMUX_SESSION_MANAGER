@@ -44,6 +44,10 @@ from .app_server_contract import (
 from .control import LiveRodexControl
 from .primary_connection_lifecycle import PrimaryConnectionLifecycleCoordinator
 from .process_contracts import AnalyticsWorkerConfig, SessionHostConfig
+from .process_environment import (
+    MANAGED_SESSION_ENVIRONMENT_VARIABLES,
+    user_process_environment,
+)
 from .protocol_proxy import (
     CodexContextStatusObserver,
     CodexProtocolEventTap,
@@ -405,6 +409,7 @@ class RodexRuntimeLauncher:
         startup_timeout_seconds: float = DEFAULT_STARTUP_TIMEOUT_SECONDS,
         attach_notice: Callable[[], str | None] | None = None,
         tui_notice_publisher: TuiNoticePublisher = publish_tui_notice,
+        environment: Mapping[str, str] | None = None,
     ) -> None:
         self._codex_binary = codex_binary
         self._tmux_binary = tmux_binary
@@ -417,6 +422,9 @@ class RodexRuntimeLauncher:
         self._startup_timeout_seconds = startup_timeout_seconds
         self._attach_notice = attach_notice
         self._publish_tui_notice = tui_notice_publisher
+        self._user_process_environment = user_process_environment(
+            os.environ if environment is None else environment
+        )
 
     def codex_session_is_persisted(self, codex_session_id: CodexSessionId) -> bool:
         """Ask a transient App Server whether an exact thread is resumable."""
@@ -435,6 +443,7 @@ class RodexRuntimeLauncher:
                 stdin=subprocess.DEVNULL,
                 stdout=log,
                 stderr=log,
+                env=self._user_process_environment,
             )
             cleanup.callback(_stop_child_process, process)
             _wait_for_app_server_socket(process, socket_path)
@@ -807,6 +816,37 @@ class RodexRuntimeLauncher:
         host_command: str,
     ) -> None:
         """Set scrollback defaults before tmux allocates the session's first pane."""
+        new_session_arguments = [
+            "new-session",
+            "-d",
+            "-s",
+            runtime.tmux_session_name,
+            "-c",
+            str(workspace),
+        ]
+        missing_environment_variables: list[str] = []
+        for name in MANAGED_SESSION_ENVIRONMENT_VARIABLES:
+            value = self._user_process_environment.get(name)
+            new_session_arguments.extend(("-e", f"{name}={value or ''}"))
+            if not value:
+                missing_environment_variables.append(name)
+        if missing_environment_variables:
+            unset_command = ["/usr/bin/env"]
+            for name in missing_environment_variables:
+                unset_command.extend(("-u", name))
+            host_command = f"{shlex.join(unset_command)} {host_command}"
+        new_session_arguments.append(host_command)
+        for name in missing_environment_variables:
+            new_session_arguments.extend(
+                (
+                    ";",
+                    "set-environment",
+                    "-r",
+                    "-t",
+                    _exact_tmux_session_target(runtime.tmux_session_name),
+                    name,
+                )
+            )
         self._tmux(
             runtime,
             "set-option",
@@ -814,13 +854,8 @@ class RodexRuntimeLauncher:
             "history-limit",
             str(RODEX_TMUX_HISTORY_LIMIT_LINES),
             ";",
-            "new-session",
-            "-d",
-            "-s",
-            runtime.tmux_session_name,
-            "-c",
-            str(workspace),
-            host_command,
+            *new_session_arguments,
+            environment=self._user_process_environment,
         )
 
     def attach(self, runtime: LiveTmuxSession) -> None:
@@ -832,7 +867,7 @@ class RodexRuntimeLauncher:
         if notice and isinstance(runtime, LiveRodexRuntime):
             with suppress(Exception):
                 self._publish_tui_notice(runtime.protocol_proxy_socket_path, notice)
-        environment = os.environ.copy()
+        environment = self._user_process_environment.copy()
         environment.pop("TMUX", None)
         attach_target = self._stable_tmux_session_target(runtime)
         self._tmux(
@@ -1176,7 +1211,7 @@ class RodexRuntimeLauncher:
         result = executor.run(
             arguments,
             mode="interactive" if interactive else "captured",
-            environment=environment if interactive else None,
+            environment=environment,
         )
         if result.timed_out:
             raise RodexRuntimeError(
@@ -1288,6 +1323,10 @@ def run_session_host(
     ] = AnalyticsSubprocessSupervisor,
 ) -> int:
     """Supervise the app-server, protocol proxy, and foreground Codex TUI."""
+    user_environment = user_process_environment(os.environ)
+    for name in MANAGED_SESSION_ENVIRONMENT_VARIABLES:
+        if not user_environment.get(name):
+            user_environment.pop(name, None)
     codex_binary = config.codex_binary
     app_server_socket_path = config.app_server_socket_path
     app_server_log_path = config.app_server_log_path
@@ -1334,6 +1373,7 @@ def run_session_host(
                 stdin=subprocess.DEVNULL,
                 stdout=log,
                 stderr=subprocess.STDOUT,
+                env=user_environment,
             )
             _wait_for_app_server_socket(app_server, app_server_socket_path)
             app_server_socket_path.chmod(0o600)
@@ -1430,7 +1470,7 @@ def run_session_host(
                 f"unix://{protocol_proxy_socket_path}",
                 *codex_arguments,
             ]
-            tui_options: dict[str, object] = {}
+            tui_options: dict[str, object] = {"env": user_environment}
             requested_codex_session_id = _requested_exact_codex_resume(codex_arguments)
             if requested_codex_session_id is not None:
                 # Startup happens before attach, so preserve exact-resume failures where

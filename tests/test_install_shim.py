@@ -10,6 +10,44 @@ import pytest
 LAUNCHERS = ["rodex", "usr/local/bin/rodex"]
 
 
+def test_project_root_launcher_does_not_create_a_rodex_virtualenv_context(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "rodex-project"
+    project.mkdir()
+    launcher = project / "rodex"
+    shutil.copy2(Path(__file__).parents[1] / "rodex", launcher)
+    entrypoint = project / ".venv" / "bin" / "rodex"
+    entrypoint.parent.mkdir(parents=True)
+    capture_path = tmp_path / "environment"
+    entrypoint.write_text(
+        "#!/bin/sh\n"
+        'printf \'%s\\n%s\\n%s\\n\' "${VIRTUAL_ENV-unset}" "$PATH" '
+        '"${UV_RUN_RECURSION_DEPTH-unset}" > "$RODEX_TEST_CAPTURE"\n',
+        encoding="utf-8",
+    )
+    entrypoint.chmod(0o755)
+    user_virtual_environment = tmp_path / "project-xyz" / ".venv"
+    caller_path = f"{user_virtual_environment}/bin:/usr/local/bin:/usr/bin"
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "PATH": caller_path,
+            "RODEX_TEST_CAPTURE": str(capture_path),
+            "UV_RUN_RECURSION_DEPTH": "4",
+            "VIRTUAL_ENV": str(user_virtual_environment),
+        }
+    )
+
+    subprocess.run([launcher, "_running"], check=True, env=environment)
+
+    assert capture_path.read_text(encoding="utf-8").splitlines() == [
+        str(user_virtual_environment),
+        caller_path,
+        "4",
+    ]
+
+
 def test_usr_local_bin_shim_runs_rodex_from_the_project_after_copy(
     tmp_path: Path,
 ) -> None:

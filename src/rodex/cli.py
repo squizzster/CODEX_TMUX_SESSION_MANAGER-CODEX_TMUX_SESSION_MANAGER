@@ -19,13 +19,18 @@ from .codex_update_notice import CodexUpdateNotice
 from .control import CodexControlClient, RodexControlError
 from .errors import RodexExecutableNotFoundError, RodexLaunchError
 from .managed_session_lifecycle import ManagedSessionLifecycle
+from .process_environment import user_process_environment
 from .runtime import RodexRuntimeError, RodexRuntimeLauncher
 
 
 def _exec_codex(codex_binary: str, arguments: Sequence[str]) -> int:
     """Replace Rodex with a Codex command that does not belong in managed tmux."""
-    os.execv(codex_binary, [codex_binary, *arguments])
-    raise AssertionError("os.execv returned unexpectedly")
+    os.execve(
+        codex_binary,
+        [codex_binary, *arguments],
+        user_process_environment(os.environ),
+    )
+    raise AssertionError("os.execve returned unexpectedly")
 
 
 def run(

@@ -126,7 +126,9 @@ coherent server/session/control snapshot. The launcher mints external authority 
 after a complete roster uniqueness check; async workers carry that already-minted
 capability. Every terminal action repeats its applicable tuple at the exact target;
 primary-pane actions also require its immutable `%pane_id`. Names and process context
-are addresses only.
+are addresses only. Expected identity values use tmux literal format operands, so
+`$session_id` and `%pane_id` sigils remain comparison data even when a worker verifies
+them through `display-message -F`.
 
 Under one stable per-user XDG/runtime context, Rodex uses one canonical database and one
 shared tmux server. Display-name uniqueness covers every session recorded in that

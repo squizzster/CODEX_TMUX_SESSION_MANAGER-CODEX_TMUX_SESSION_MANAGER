@@ -38,7 +38,7 @@ from rodex.tmux_status import (
 )
 from rodex_registry.identity import RodexRegistryId, RodexRuntimeId, RodexSessionId
 
-_OPTION_COMPARISON = re.compile(r"#\{==:#\{(@[^}]+)\},([^}]*)\}")
+_OPTION_COMPARISON = re.compile(r"#\{==:#\{(@[^}]+)\},(?:#\{l:([^}]*)\}|([^}]*))\}")
 
 
 def _capability(socket_path: Path) -> TmuxSessionCapability:
@@ -141,7 +141,8 @@ class _OwnerTmux:
         comparisons = _OPTION_COMPARISON.findall(condition)
         if comparisons:
             return all(
-                self.options.get(option, "") == expected for option, expected in comparisons
+                self.options.get(option, "") == (literal_expected or raw_expected)
+                for option, literal_expected, raw_expected in comparisons
             )
         raise AssertionError(f"unexpected tmux condition: {condition}")
 

@@ -32,9 +32,10 @@ def test_session_identity_accepts_owned_observer_but_primary_identity_does_not(
     tmp_path: Path,
 ) -> None:
     capability = _registered_capability(tmp_path / "tmux.sock")
-    exact_current_pane = f"#{{==:#{{pane_id}},{capability.tmux_primary_pane_id}}}"
+    exact_current_pane = f"#{{==:#{{pane_id}},#{{l:{capability.tmux_primary_pane_id}}}}}"
     stored_primary_pane = (
-        f"#{{==:#{{{RODEX_PRIMARY_PANE_ID_OPTION}}},{capability.tmux_primary_pane_id}}}"
+        f"#{{==:#{{{RODEX_PRIMARY_PANE_ID_OPTION}}},"
+        f"#{{l:{capability.tmux_primary_pane_id}}}}}"
     )
 
     session_identity = capability_identity_condition(capability)
@@ -50,7 +51,7 @@ def test_registration_and_primary_target_are_independent_capability_layers(
     tmp_path: Path,
 ) -> None:
     capability = _registered_capability(tmp_path / "tmux.sock")
-    exact_current_pane = f"#{{==:#{{pane_id}},{capability.tmux_primary_pane_id}}}"
+    exact_current_pane = f"#{{==:#{{pane_id}},#{{l:{capability.tmux_primary_pane_id}}}}}"
 
     registered_session = registered_capability_condition(capability)
     registered_primary = registered_primary_pane_condition(capability)

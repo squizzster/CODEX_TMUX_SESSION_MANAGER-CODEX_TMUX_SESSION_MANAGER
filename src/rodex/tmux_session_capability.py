@@ -164,8 +164,14 @@ def server_identity_condition(tmux_server_id: str) -> str:
     """Fence a server-global action to one shared-server incarnation."""
     parse_tmux_server_id(tmux_server_id)
     return combine_tmux_conditions(
-        f"#{{==:#{{{RODEX_SHARED_TMUX_PROTOCOL_OPTION}}},{RODEX_SHARED_TMUX_PROTOCOL}}}",
-        f"#{{==:#{{{RODEX_SHARED_TMUX_SERVER_ID_OPTION}}},{tmux_server_id}}}",
+        _literal_comparison(
+            f"#{{{RODEX_SHARED_TMUX_PROTOCOL_OPTION}}}",
+            RODEX_SHARED_TMUX_PROTOCOL,
+        ),
+        _literal_comparison(
+            f"#{{{RODEX_SHARED_TMUX_SERVER_ID_OPTION}}}",
+            tmux_server_id,
+        ),
     )
 
 
@@ -175,9 +181,15 @@ def capability_identity_condition(
     """Fence any pane in the exact session and runtime incarnation."""
     return combine_tmux_conditions(
         server_identity_condition(capability.tmux_server_id),
-        f"#{{==:#{{session_id}},{capability.tmux_session_id}}}",
-        (f"#{{==:#{{{RODEX_PRIMARY_PANE_ID_OPTION}}},{capability.tmux_primary_pane_id}}}"),
-        f"#{{==:#{{{RODEX_RUNTIME_ID_OPTION}}},{capability.runtime_id}}}",
+        _literal_comparison("#{session_id}", capability.tmux_session_id),
+        _literal_comparison(
+            f"#{{{RODEX_PRIMARY_PANE_ID_OPTION}}}",
+            capability.tmux_primary_pane_id,
+        ),
+        _literal_comparison(
+            f"#{{{RODEX_RUNTIME_ID_OPTION}}}",
+            str(capability.runtime_id),
+        ),
     )
 
 
@@ -185,14 +197,26 @@ def registered_capability_condition(capability: TmuxSessionCapability) -> str:
     """Fence any pane in an exact, SQL-confirmed Rodex runtime incarnation."""
     return combine_tmux_conditions(
         capability_identity_condition(capability),
-        (f"#{{==:#{{{RODEX_REGISTRATION_STATE_OPTION}}},{RODEX_REGISTRATION_REGISTERED}}}"),
-        f"#{{==:#{{{RODEX_SESSION_ID_OPTION}}},{capability.rodex_session_id}}}",
-        f"#{{==:#{{{RODEX_REGISTRY_ID_OPTION}}},{capability.registry_id}}}",
-        (
-            f"#{{==:#{{{RODEX_INTERNAL_SESSION_ID_OPTION}}},"
-            f"{capability.internal_session_id}}}"
+        _literal_comparison(
+            f"#{{{RODEX_REGISTRATION_STATE_OPTION}}}",
+            RODEX_REGISTRATION_REGISTERED,
         ),
-        f"#{{==:#{{{RODEX_CODEX_SESSION_ID_OPTION}}},{capability.codex_session_id}}}",
+        _literal_comparison(
+            f"#{{{RODEX_SESSION_ID_OPTION}}}",
+            str(capability.rodex_session_id),
+        ),
+        _literal_comparison(
+            f"#{{{RODEX_REGISTRY_ID_OPTION}}}",
+            str(capability.registry_id),
+        ),
+        _literal_comparison(
+            f"#{{{RODEX_INTERNAL_SESSION_ID_OPTION}}}",
+            str(capability.internal_session_id),
+        ),
+        _literal_comparison(
+            f"#{{{RODEX_CODEX_SESSION_ID_OPTION}}}",
+            str(capability.codex_session_id),
+        ),
     )
 
 
@@ -202,7 +226,7 @@ def primary_pane_capability_condition(
     """Fence an operation to the immutable primary pane carried by a capability."""
     return combine_tmux_conditions(
         capability_identity_condition(capability),
-        f"#{{==:#{{pane_id}},{capability.tmux_primary_pane_id}}}",
+        _literal_comparison("#{pane_id}", capability.tmux_primary_pane_id),
     )
 
 
@@ -210,7 +234,7 @@ def registered_primary_pane_condition(capability: TmuxSessionCapability) -> str:
     """Fence an operation to one registered runtime's immutable primary pane."""
     return combine_tmux_conditions(
         registered_capability_condition(capability),
-        f"#{{==:#{{pane_id}},{capability.tmux_primary_pane_id}}}",
+        _literal_comparison("#{pane_id}", capability.tmux_primary_pane_id),
     )
 
 
@@ -222,6 +246,11 @@ def combine_tmux_conditions(*conditions: str) -> str:
     for condition in conditions[1:]:
         combined = f"#{{&&:{combined},{condition}}}"
     return combined
+
+
+def _literal_comparison(actual_format: str, expected: str) -> str:
+    """Compare a tmux format value without reinterpreting the expected identity."""
+    return f"#{{==:{actual_format},#{{l:{tmux_format_literal(expected)}}}}}"
 
 
 def tmux_format_literal(value: str) -> str:

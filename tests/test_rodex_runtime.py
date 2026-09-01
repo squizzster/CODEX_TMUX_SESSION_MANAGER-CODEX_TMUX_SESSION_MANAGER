@@ -2339,6 +2339,52 @@ def test_real_tmux_survives_rename_and_status_configuration(tmp_path: Path) -> N
             time.sleep(0.01)
         pytest.fail(f"tmux option {option_name} did not contain {expected_text!r}")
 
+    # Keep one session alive while consuming two pane IDs. The managed pane is then
+    # `%3`, which tmux must compare as literal identity data inside display-message.
+    subprocess.run(
+        [
+            tmux_binary,
+            "-S",
+            str(socket_path),
+            "new-session",
+            "-d",
+            "-s",
+            "pane-id-anchor",
+            "sleep 30",
+        ],
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+    for dummy_name in ("pane-id-one", "pane-id-two"):
+        subprocess.run(
+            [
+                tmux_binary,
+                "-S",
+                str(socket_path),
+                "new-session",
+                "-d",
+                "-s",
+                dummy_name,
+                "sleep 30",
+            ],
+            check=True,
+            text=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            [
+                tmux_binary,
+                "-S",
+                str(socket_path),
+                "kill-session",
+                "-t",
+                f"={dummy_name}",
+            ],
+            check=True,
+            text=True,
+            capture_output=True,
+        )
     subprocess.run(
         [
             tmux_binary,
@@ -2409,6 +2455,7 @@ def test_real_tmux_survives_rename_and_status_configuration(tmp_path: Path) -> N
             text=True,
             capture_output=True,
         ).stdout.strip()
+        assert primary_pane_id == "%3"
         subprocess.run(
             [
                 tmux_binary,

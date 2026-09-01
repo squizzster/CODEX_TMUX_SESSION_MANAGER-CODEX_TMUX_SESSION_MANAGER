@@ -12,10 +12,26 @@ import pytest
 
 import rodex.control as control_module
 from rodex.control import CodexControlClient, LiveRodexControl, RodexControlError
+from rodex.tmux_session_capability import TmuxSessionCapability
 from rodex.tmux_shared_ctrl_c import handle_shared_ctrl_c
+from rodex_registry import RodexRegistryId, RodexRuntimeId, RodexSessionId
 
 CODEX_SESSION_ID = uuid.UUID("01a00654-f2bc-7a30-834a-a5f886a65f82")
 CONFIRMATION_OPTION = "@rodex_shared_ctrl_c_confirmation"
+
+
+def _capability(socket_path: Path) -> TmuxSessionCapability:
+    return TmuxSessionCapability(
+        socket_path,
+        "0123456789abcdef0123456789abcdef",
+        "$7",
+        "%9",
+        RodexRuntimeId.parse("0123456789abcdef"),
+        RodexSessionId.parse("1111111111111111"),
+        RodexRegistryId.parse("2222222222222222"),
+        7,
+        CODEX_SESSION_ID,
+    )
 
 
 class _BlockingTransport:
@@ -194,6 +210,10 @@ def test_round1_shared_ctrl_c_rechecks_current_attachment_count(tmp_path: Path) 
     def runner(command: list[str], **_options: object) -> subprocess.CompletedProcess[str]:
         commands.append(command)
         arguments = command[3:]
+        if "display-message" in arguments and any(
+            "@rodex_registration_state" in argument for argument in arguments
+        ):
+            return subprocess.CompletedProcess(command, 0, stdout="1\t%9\n", stderr="")
         if "display-message" in arguments or any(
             "session_attached" in argument for argument in arguments
         ):
@@ -204,8 +224,8 @@ def test_round1_shared_ctrl_c_rechecks_current_attachment_count(tmp_path: Path) 
 
     handle_shared_ctrl_c(
         "tmux",
-        tmp_path / "tmux.sock",
-        "%1",
+        _capability(tmp_path / "tmux.sock"),
+        "%9",
         "client-one",
         monotonic_nanoseconds=lambda: 10_000_000_000,
         confirmation_token=lambda: "token-one",
@@ -238,6 +258,15 @@ def test_round1_shared_ctrl_c_confirmation_is_atomic_across_callers(
         nonlocal confirmation, send_count
         arguments = command[3:]
         joined = " ".join(arguments)
+        if "display-message" in arguments and "@rodex_registration_state" in joined:
+            return subprocess.CompletedProcess(command, 0, stdout="1\t%9\n", stderr="")
+        if arguments[:1] == ["if-shell"] and "show-options" in joined:
+            if CONFIRMATION_OPTION not in joined:
+                return subprocess.CompletedProcess(command, 1, stdout="", stderr="")
+            with state_lock:
+                observed = confirmation
+            readers.wait(timeout=2)
+            return subprocess.CompletedProcess(command, 0, stdout=observed, stderr="")
         if "display-message" in arguments or "session_attached" in joined:
             return subprocess.CompletedProcess(command, 0, stdout="2\n", stderr="")
         if arguments[:2] == ["show-options", "-v"]:
@@ -267,8 +296,8 @@ def test_round1_shared_ctrl_c_confirmation_is_atomic_across_callers(
         try:
             handle_shared_ctrl_c(
                 "tmux",
-                tmp_path / "tmux.sock",
-                "%1",
+                _capability(tmp_path / "tmux.sock"),
+                "%9",
                 "client-one",
                 monotonic_nanoseconds=lambda: 11_000_000_000,
                 confirmation_token=lambda: "unused-token",

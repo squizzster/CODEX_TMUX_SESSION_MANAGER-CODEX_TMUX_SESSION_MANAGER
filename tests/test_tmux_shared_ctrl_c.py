@@ -9,12 +9,14 @@ import signal
 import subprocess
 import sys
 import time
+import uuid
 from collections.abc import Callable
 from pathlib import Path
 
 import pytest
 
 from rodex.runtime import LiveTmuxSession, RodexRuntimeLauncher
+from rodex.tmux_session_capability import TmuxSessionCapability
 from rodex.tmux_shared_ctrl_c import handle_shared_ctrl_c
 from rodex.tmux_status import (
     RODEX_STATUS_LEFT_FORMAT,
@@ -23,6 +25,21 @@ from rodex.tmux_status import (
     STATUS_CLAIM_PUBLISHER_OPTION,
     STATUS_CLAIM_TOKEN_OPTION,
 )
+from rodex_registry import RodexRegistryId, RodexRuntimeId, RodexSessionId
+
+
+def _registered_capability(socket_path: Path) -> TmuxSessionCapability:
+    return TmuxSessionCapability(
+        socket_path,
+        "0123456789abcdef0123456789abcdef",
+        "$7",
+        "%9",
+        RodexRuntimeId.parse("0c01ee2ead7240e1"),
+        RodexSessionId.parse("1111111111111111"),
+        RodexRegistryId.parse("2222222222222222"),
+        7,
+        uuid.UUID("01a00654-f2bc-7a30-834a-a5f886a65f82"),
+    )
 
 
 class RecordingTmux:
@@ -38,34 +55,7 @@ class RecordingTmux:
         self, command: list[str], **_options: object
     ) -> subprocess.CompletedProcess[str]:
         self.commands.append(command)
-        arguments = command[3:]
-        output = ""
-        returncode = 0
-        if arguments[:1] == ["display-message"]:
-            output = f"{self.attached_count}\n"
-        elif arguments[:2] == ["show-options", "-v"]:
-            if arguments[-1] == "@rodex_shared_ctrl_c_confirmation":
-                output = self.confirmation
-            else:
-                output = self.status_options.get(arguments[-1], "")
-            returncode = 0 if output else 1
-        elif arguments[:2] == ["if-shell", "-t"]:
-            format_index = arguments.index("-F")
-            condition = arguments[format_index + 1]
-            branch_index = format_index + (2 if self._condition_is_true(condition) else 3)
-            if branch_index < len(arguments):
-                for action in arguments[branch_index].split(" ; "):
-                    if action:
-                        self._apply(shlex.split(action))
-        elif arguments[:2] == ["set-option", "-u"]:
-            self._apply(arguments)
-        elif arguments[:2] == ["set-option", "-o"]:
-            if arguments[-2] in self.status_options:
-                returncode = 1
-            else:
-                self.status_options[arguments[-2]] = arguments[-1]
-        elif arguments[:1] == ["set-option"]:
-            self._apply(arguments)
+        returncode, output = self._execute(command[3:])
         return subprocess.CompletedProcess(
             command,
             returncode,
@@ -73,7 +63,62 @@ class RecordingTmux:
             stderr="",
         )
 
+    def _execute(self, arguments: list[str]) -> tuple[int, str]:
+        if arguments[:1] == ["display-message"]:
+            if "#{pane_id}" in arguments[-1]:
+                target = arguments[arguments.index("-t") + 1]
+                return 0, f"{int(target == '%9')}\t{target}\n"
+            return 0, f"{self.attached_count}\n"
+        if arguments[:2] == ["show-options", "-v"]:
+            if arguments[-1] == "@rodex_shared_ctrl_c_confirmation":
+                output = self.confirmation
+            else:
+                output = self.status_options.get(arguments[-1], "")
+            return (0 if output else 1), output
+        if arguments[:2] == ["if-shell", "-t"]:
+            format_index = arguments.index("-F")
+            condition = arguments[format_index + 1]
+            branch_index = format_index + (2 if self._condition_is_true(condition) else 3)
+            if branch_index < len(arguments):
+                result = (0, "")
+                lexer = shlex.shlex(
+                    arguments[branch_index],
+                    posix=True,
+                    punctuation_chars=";",
+                )
+                lexer.whitespace_split = True
+                lexer.commenters = ""
+                command_arguments: list[str] = []
+                for argument in [*lexer, ";"]:
+                    if argument == ";":
+                        if command_arguments:
+                            result = self._execute(command_arguments)
+                            if result[0] != 0:
+                                return result
+                            command_arguments = []
+                    else:
+                        command_arguments.append(argument)
+                return result
+            return 0, ""
+        if arguments[:2] == ["set-option", "-u"]:
+            self._apply(arguments)
+            return 0, ""
+        if arguments[:2] == ["set-option", "-o"]:
+            if arguments[-2] in self.status_options:
+                return 1, ""
+            self.status_options[arguments[-2]] = arguments[-1]
+            return 0, ""
+        if arguments[:1] == ["set-option"]:
+            self._apply(arguments)
+            return 0, ""
+        if arguments[:1] == ["send-keys"]:
+            self._apply(arguments)
+            return 0, ""
+        raise AssertionError(f"unexpected tmux command: {arguments}")
+
     def _condition_is_true(self, condition: str) -> bool:
+        if "@rodex_registration_state" in condition:
+            return True
         if condition == "#{==:#{session_attached},1}":
             return self.attached_count == 1
         if condition.startswith("#{<=:"):
@@ -110,8 +155,8 @@ def test_private_ctrl_c_is_forwarded_without_confirmation(tmp_path: Path) -> Non
     assert (
         handle_shared_ctrl_c(
             "tmux",
-            tmp_path / "tmux.sock",
-            "%4",
+            _registered_capability(tmp_path / "tmux.sock"),
+            "%9",
             "client-one",
             runner=runner,
         )
@@ -125,7 +170,28 @@ def test_private_ctrl_c_is_forwarded_without_confirmation(tmp_path: Path) -> Non
         and "send-keys" in " ".join(command)
         for command in runner.commands
     )
-    assert any("#{session_attached}" in command for command in runner.commands)
+    assert any("#{session_attached}" in " ".join(command) for command in runner.commands)
+
+
+def test_ctrl_c_from_observer_pane_fails_closed_without_primary_input(
+    tmp_path: Path,
+) -> None:
+    runner = RecordingTmux(attached_count=1)
+
+    assert (
+        handle_shared_ctrl_c(
+            "tmux",
+            _registered_capability(tmp_path / "tmux.sock"),
+            "%4",
+            "observer-client",
+            runner=runner,
+        )
+        == 1
+    )
+
+    assert runner.commands[0][runner.commands[0].index("-t") + 1] == "%4"
+    assert len(runner.commands) == 1
+    assert runner.sent_ctrl_c_count == 0
 
 
 def test_private_ctrl_c_is_withheld_if_a_client_attaches_before_send(
@@ -137,15 +203,15 @@ def test_private_ctrl_c_is_withheld_if_a_client_attaches_before_send(
         command: list[str], **options: object
     ) -> subprocess.CompletedProcess[str]:
         result = runner(command, **options)
-        if command[3:4] == ["display-message"]:
+        if "display-message" in command[-1] and "#{session_attached}" in command[-1]:
             runner.attached_count = 2
         return result
 
     assert (
         handle_shared_ctrl_c(
             "tmux",
-            tmp_path / "tmux.sock",
-            "%4",
+            _registered_capability(tmp_path / "tmux.sock"),
+            "%9",
             "client-one",
             runner=attach_after_attachment_query,
         )
@@ -162,8 +228,8 @@ def test_prearmed_private_ctrl_c_race_clears_hidden_confirmation(
     assert (
         handle_shared_ctrl_c(
             "tmux",
-            tmp_path / "tmux.sock",
-            "%4",
+            _registered_capability(tmp_path / "tmux.sock"),
+            "%9",
             "client-one",
             monotonic_nanoseconds=lambda: 10_000_000_000,
             confirmation_token=lambda: "warning-token",
@@ -179,15 +245,15 @@ def test_prearmed_private_ctrl_c_race_clears_hidden_confirmation(
         command: list[str], **options: object
     ) -> subprocess.CompletedProcess[str]:
         result = runner(command, **options)
-        if command[3:4] == ["display-message"]:
+        if "display-message" in command[-1] and "#{session_attached}" in command[-1]:
             runner.attached_count = 2
         return result
 
     assert (
         handle_shared_ctrl_c(
             "tmux",
-            tmp_path / "tmux.sock",
-            "%4",
+            _registered_capability(tmp_path / "tmux.sock"),
+            "%9",
             "client-one",
             monotonic_nanoseconds=lambda: 11_000_000_000,
             runner=attach_after_attachment_query,
@@ -207,8 +273,8 @@ def test_first_shared_ctrl_c_publishes_a_temporary_status_warning(tmp_path: Path
     assert (
         handle_shared_ctrl_c(
             "tmux",
-            tmp_path / "tmux.sock",
-            "%4",
+            _registered_capability(tmp_path / "tmux.sock"),
+            "%9",
             "client-one",
             monotonic_nanoseconds=lambda: 10_000_000_000,
             confirmation_token=lambda: "warning-token",
@@ -254,8 +320,8 @@ def test_same_client_second_shared_ctrl_c_is_forwarded_within_window(
         assert (
             handle_shared_ctrl_c(
                 "tmux",
-                tmp_path / "tmux.sock",
-                "%4",
+                _registered_capability(tmp_path / "tmux.sock"),
+                "%9",
                 "client-one",
                 monotonic_nanoseconds=lambda: next(moments),
                 confirmation_token=lambda: "warning-token",
@@ -287,8 +353,8 @@ def test_other_client_or_expired_confirmation_rearms_without_forwarding(
     assert (
         handle_shared_ctrl_c(
             "tmux",
-            tmp_path / "tmux.sock",
-            "%4",
+            _registered_capability(tmp_path / "tmux.sock"),
+            "%9",
             "client-one",
             monotonic_nanoseconds=lambda: 10_000_000_000,
             confirmation_token=lambda: next(tokens),
@@ -300,8 +366,8 @@ def test_other_client_or_expired_confirmation_rearms_without_forwarding(
     assert (
         handle_shared_ctrl_c(
             "tmux",
-            tmp_path / "tmux.sock",
-            "%4",
+            _registered_capability(tmp_path / "tmux.sock"),
+            "%9",
             second_client,
             monotonic_nanoseconds=lambda: second_moment,
             confirmation_token=lambda: next(tokens),
@@ -356,11 +422,43 @@ def test_real_tmux_first_shared_ctrl_c_keeps_both_clients_attached(
 
     tmux("new-session", "-d", "-s", session_name, "sleep 30")
     try:
+        capability = _registered_capability(socket_path)
+        tmux(
+            "set-option",
+            "-s",
+            "@rodex_shared_tmux_protocol",
+            "rodex-shared-tmux-v1",
+        )
+        tmux(
+            "set-option",
+            "-s",
+            "@rodex_shared_tmux_server_id",
+            capability.tmux_server_id,
+        )
+        primary_pane_id = tmux(
+            "display-message", "-p", "-t", f"={session_name}:", "-F", "#{pane_id}"
+        ).stdout.strip()
+        for option_name, value in (
+            ("@rodex_primary_pane_id", primary_pane_id),
+            ("@rodex_runtime_id", str(capability.runtime_id)),
+            ("@rodex_registration_state", "registered"),
+            ("@rodex_session_id", str(capability.rodex_session_id)),
+            ("@rodex_registry_id", str(capability.registry_id)),
+            ("@rodex_sessions_id", str(capability.internal_session_id)),
+            ("@rodex_codex_session_id", str(capability.codex_session_id)),
+        ):
+            tmux("set-option", "-t", f"={session_name}:", option_name, value)
         RodexRuntimeLauncher(
             "codex",
             tmux_binary,
             python_executable=sys.executable,
-        ).initialise_session_ui(LiveTmuxSession(socket_path, session_name))
+        ).initialise_session_ui(
+            LiveTmuxSession(
+                socket_path,
+                session_name,
+                runtime_id=capability.runtime_id,
+            )
+        )
         control_client = subprocess.Popen(
             [
                 tmux_binary,

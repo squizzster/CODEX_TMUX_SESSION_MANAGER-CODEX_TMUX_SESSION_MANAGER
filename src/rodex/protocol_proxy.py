@@ -30,6 +30,7 @@ from .status_bar import (
     compacting_status_segment,
     context_status_segment,
 )
+from .tmux_session_capability import TmuxRuntimeCapability
 from .tmux_status import TmuxStatusOption
 
 TOOL_CALL_ITEM_TYPES: Final = frozenset(
@@ -335,14 +336,14 @@ class TmuxToolCallStatus:
     def __init__(
         self,
         tmux_binary: str,
-        tmux_server_socket_path: Path,
+        capability: TmuxRuntimeCapability,
         tmux_pane_target: str,
         *,
         runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
     ) -> None:
         self._option = TmuxStatusOption(
             tmux_binary,
-            tmux_server_socket_path,
+            capability,
             tmux_pane_target,
             RODEX_TOOL_CALL_STATUS_OPTION,
             runner=runner,
@@ -361,14 +362,14 @@ class TmuxContextStatus:
     def __init__(
         self,
         tmux_binary: str,
-        tmux_server_socket_path: Path,
+        capability: TmuxRuntimeCapability,
         tmux_pane_target: str,
         *,
         runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
     ) -> None:
         self._option = TmuxStatusOption(
             tmux_binary,
-            tmux_server_socket_path,
+            capability,
             tmux_pane_target,
             RODEX_CONTEXT_STATUS_OPTION,
             runner=runner,

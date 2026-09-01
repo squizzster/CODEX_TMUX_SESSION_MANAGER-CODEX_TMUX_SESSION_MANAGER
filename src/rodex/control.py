@@ -25,6 +25,7 @@ from rodex_registry.identity import (
 
 from .app_server_contract import CODEX_APP_SERVER, RODEX_CONTROL_APP_SERVER_CLIENT
 from .protocol_proxy import CONTROL_CONNECTION_PATH, EVENT_STREAM_READY_METHOD
+from .tmux_session_capability import TmuxSessionCapability
 
 Connector = Callable[..., Any]
 Revalidate = Callable[[], None]
@@ -84,6 +85,7 @@ class LiveRodexControl:
     rodex_registry_id: RodexRegistryId | None = None
     registration_state: str | None = None
     runtime_id: RodexRuntimeId | None = None
+    tmux_capability: TmuxSessionCapability | None = None
 
 
 @dataclass(frozen=True, slots=True)

@@ -24,6 +24,7 @@ from rodex_registry import (
     lookup_owned_rodex_sessions_id_from_a_codex_session_id,
     lookup_owned_rodex_sessions_id_from_a_cool_name,
     lookup_rodex_registry_id,
+    lookup_rodex_runtime_instance,
     lookup_rodex_session_id_from_a_rodex_sessions_id,
     lookup_rodex_session_names,
     lookup_rodex_sessions_id_from_a_cool_name,
@@ -41,7 +42,6 @@ from .errors import RodexExecutableNotFoundError, RodexLaunchError
 from .live_runtime import (
     find_relocated_live_runtime,
     rename_tmux_identity,
-    require_live_runtime_identity,
     restore_tmux_identity,
     session_transition_lock,
     verify_live_runtime_identity,
@@ -288,9 +288,16 @@ def _create_managed_session(
                 runtime_id=live_runtime.runtime_id,
             )
             display_name = session.cool_name
+            runtime_launcher.confirm_runtime_registration(
+                active_tmux,
+                session.rodex_sessions_id,
+                expected_rodex_session_id=session.rodex_session_id,
+                expected_registry_id=registry_id,
+                expected_codex_session_id=codex_session_id,
+            )
             if requested_name is None:
                 active_tmux = rename_tmux_identity(
-                    runtime_launcher, active_tmux, display_name
+                    runtime_launcher, active_tmux, display_name, registry_id
                 )
                 update_rodex_tmux_session_name(
                     session.rodex_sessions_id,
@@ -302,14 +309,14 @@ def _create_managed_session(
                     session.cool_name, requested_name, resolved_database
                 ) as assignment:
                     active_tmux = rename_tmux_identity(
-                        runtime_launcher, active_tmux, assignment.names.display_name
+                        runtime_launcher,
+                        active_tmux,
+                        assignment.names.display_name,
+                        registry_id,
                     )
                     assignment.renamed_tmux_session_name = active_tmux.tmux_session_name
                 display_name = assignment.names.display_name
             runtime_launcher.initialise_session_ui(active_tmux)
-            runtime_launcher.confirm_runtime_registration(
-                active_tmux, session.rodex_sessions_id
-            )
     except BaseException:
         runtime_launcher.stop(active_tmux, check=False)
         raise
@@ -404,14 +411,19 @@ def _prepare_selected_session(
             expected_registry_id=registry_id,
             expected_codex_session_id=codex_session_id,
         )
+        durable_runtime = lookup_rodex_runtime_instance(session_id, database_path)
+        if durable_runtime is None or durable_runtime.runtime_id != control.runtime_id:
+            raise RodexLaunchError(
+                "live runtime lacks the durable incarnation required for attach"
+            )
+        active_tmux = _attachable_runtime_identity(recorded_tmux, control)
         active_tmux = _prepare_existing_tmux_identity(
             launcher,
-            recorded_tmux,
+            active_tmux,
             display_name,
             session_id,
             database_path,
         )
-        active_tmux = _attachable_runtime_identity(active_tmux, control)
         record_a_rodex_session_access(session_id, database_path)
         return _PreparedSelectedSession(
             session_id,
@@ -429,6 +441,9 @@ def _prepare_selected_session(
     )
     if relocated_match is not None:
         relocated, relocated_control = relocated_match
+        if relocated_control.runtime_id is None:
+            raise RodexLaunchError("relocated runtime lacks an exact incarnation")
+        relocated = replace(relocated, runtime_id=relocated_control.runtime_id)
         record_a_rodex_session_runtime_resume(
             session_id,
             relocated.tmux_server_socket_path,
@@ -437,13 +452,23 @@ def _prepare_selected_session(
             runtime_id=relocated_control.runtime_id,
         )
         if relocated_control.registration_state == RODEX_REGISTRATION_PENDING:
-            launcher.confirm_runtime_registration(relocated, session_id)
-            require_live_runtime_identity(
-                launcher.discover_runtime_control(relocated),
+            launcher.confirm_runtime_registration(
+                relocated,
+                session_id,
                 expected_rodex_session_id=rodex_session_id,
                 expected_registry_id=registry_id,
                 expected_codex_session_id=codex_session_id,
             )
+        relocated_control = verify_live_runtime_identity(
+            launcher,
+            relocated,
+            session_id=session_id,
+            database_path=database_path,
+            expected_rodex_session_id=rodex_session_id,
+            expected_registry_id=registry_id,
+            expected_codex_session_id=codex_session_id,
+        )
+        relocated = _attachable_runtime_identity(relocated, relocated_control)
         active_tmux = _prepare_existing_tmux_identity(
             launcher,
             relocated,
@@ -451,7 +476,6 @@ def _prepare_selected_session(
             session_id,
             database_path,
         )
-        active_tmux = _attachable_runtime_identity(active_tmux, relocated_control)
         return _PreparedSelectedSession(
             session_id,
             display_name,
@@ -505,7 +529,6 @@ def _prepare_selected_session(
                 "Codex resumed an unexpected session: "
                 f"expected {codex_session_id}, observed {observed_codex_session_id}"
             )
-        active_tmux = rename_tmux_identity(launcher, active_tmux, display_name)
         record_a_rodex_session_runtime_resume(
             session_id,
             active_tmux.tmux_server_socket_path,
@@ -516,7 +539,24 @@ def _prepare_selected_session(
             ),
             runtime_id=resumed_runtime.runtime_id,
         )
-        launcher.confirm_runtime_registration(active_tmux, session_id)
+        launcher.confirm_runtime_registration(
+            active_tmux,
+            session_id,
+            expected_rodex_session_id=rodex_session_id,
+            expected_registry_id=registry_id,
+            expected_codex_session_id=observed_codex_session_id,
+        )
+        active_tmux = rename_tmux_identity(
+            launcher,
+            active_tmux,
+            display_name,
+            registry_id,
+        )
+        update_rodex_tmux_session_name(
+            session_id,
+            active_tmux.tmux_session_name,
+            database_path,
+        )
         launcher.initialise_session_ui(active_tmux)
     except BaseException:
         launcher.stop(active_tmux, check=False)
@@ -659,7 +699,13 @@ def _prepare_existing_tmux_identity(
     session_id: int,
     database_path: Path,
 ) -> LiveTmuxSession:
-    active_tmux = rename_tmux_identity(launcher, recorded_tmux, display_name)
+    registry_id = lookup_rodex_registry_id(database_path)
+    active_tmux = rename_tmux_identity(
+        launcher,
+        recorded_tmux,
+        display_name,
+        registry_id,
+    )
     if active_tmux.tmux_session_name != recorded_tmux.tmux_session_name:
         try:
             update_rodex_tmux_session_name(
@@ -669,7 +715,7 @@ def _prepare_existing_tmux_identity(
             restore_tmux_identity(launcher, active_tmux, recorded_tmux)
             raise
     if active_tmux.tmux_session_name != recorded_tmux.tmux_session_name:
-        launcher.refresh_name_bound_hooks(active_tmux)
+        launcher.refresh_shared_tmux_coordination(active_tmux)
     else:
         launcher.reconcile_session_ui(active_tmux)
     return active_tmux
@@ -682,4 +728,10 @@ def _attachable_runtime_identity(
     """Carry one verified runtime incarnation through the single attach boundary."""
     if control.runtime_id is None:
         raise RodexLaunchError("live Rodex runtime did not advertise its runtime identity")
-    return replace(active_tmux, runtime_id=control.runtime_id)
+    if control.tmux_capability is None:
+        raise RodexLaunchError("live Rodex runtime lacks registered tmux authority")
+    return replace(
+        active_tmux,
+        runtime_id=control.runtime_id,
+        tmux_capability=control.tmux_capability,
+    )

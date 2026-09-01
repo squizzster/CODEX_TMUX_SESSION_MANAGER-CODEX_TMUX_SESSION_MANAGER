@@ -18,16 +18,47 @@ from rodex.observer_state import ObserverStateReducer
 from rodex.primary_connection_lifecycle import (
     PrimaryConnectionLifecycleCoordinator,
 )
-from rodex.runtime import LiveTmuxSession
-from rodex.status_animation_admission import status_animation_hook_command
+from rodex.status_animation_admission import status_animation_admission_command
 from rodex.tmux_executor import (
     DEFAULT_TMUX_COMMAND_TIMEOUT_SECONDS,
     AsyncTmuxExecutor,
     SyncTmuxExecutor,
 )
+from rodex.tmux_session_capability import (
+    RODEX_CODEX_SESSION_ID_OPTION,
+    RODEX_INTERNAL_SESSION_ID_OPTION,
+    RODEX_REGISTRATION_REGISTERED,
+    RODEX_REGISTRATION_STATE_OPTION,
+    RODEX_REGISTRY_ID_OPTION,
+    RODEX_RUNTIME_ID_OPTION,
+    RODEX_SESSION_ID_OPTION,
+    RODEX_SHARED_TMUX_PROTOCOL,
+    RODEX_SHARED_TMUX_PROTOCOL_OPTION,
+    RODEX_SHARED_TMUX_SERVER_ID_OPTION,
+    TmuxSessionCapability,
+)
+from rodex.tmux_sharing_coordinator import (
+    RODEX_SHARING_ATTACHED_COUNT_OPTION,
+    sharing_coordinator_hook_command,
+)
+from rodex_registry.identity import RodexRegistryId, RodexRuntimeId, RodexSessionId
 
 ROOT_THREAD_ID = uuid.UUID("01a00654-f2bc-7a30-834a-a5f886a65f82")
 CHILD_THREAD_ID = uuid.UUID("01a00654-f2bc-7a30-834a-a5f886a65f83")
+
+
+def _capability(socket_path: Path) -> TmuxSessionCapability:
+    return TmuxSessionCapability(
+        socket_path,
+        "0123456789abcdef0123456789abcdef",
+        "$7",
+        "%9",
+        RodexRuntimeId.parse("0123456789abcdef"),
+        RodexSessionId.parse("1111111111111111"),
+        RodexRegistryId.parse("2222222222222222"),
+        7,
+        ROOT_THREAD_ID,
+    )
 
 
 def _activity(*, item_id: str, target: uuid.UUID) -> dict[str, object]:
@@ -47,19 +78,26 @@ def _activity(*, item_id: str, target: uuid.UUID) -> dict[str, object]:
     }
 
 
-def test_architecture_c_hook_body_is_rename_stable_and_has_one_lease_owner() -> None:
-    hook = status_animation_hook_command(
+def test_architecture_c_admission_is_explicitly_capability_fenced() -> None:
+    capability = _capability(Path("/isolated/tmux.sock"))
+    admission = status_animation_admission_command(
         "/venv/bin/python",
         "/usr/bin/tmux",
-        LiveTmuxSession(Path("/isolated/tmux.sock"), "name-before-rename"),
+        capability,
         "attached",
     )
 
-    assert "=name-before-rename:" not in hook
-    assert "--tmux-session-target" in hook
-    assert "#{session_id}" in hook
-    assert hook.count("--admitted") == 1
-    assert "@rodex_status_animation_watchdog_token" in hook
+    assert "-t '#{session_id}" not in admission
+    assert "--tmux-session-id '#{session_id}" not in admission
+    assert capability.pane_target in admission
+    assert "--tmux-session-id" in admission
+    assert "--expected-runtime-id" in admission
+    assert "--expected-rodex-session-id" in admission
+    assert "--expected-registry-id" in admission
+    assert "--expected-internal-session-id" in admission
+    assert "--expected-codex-session-id" in admission
+    assert admission.count("--admitted") == 1
+    assert "@rodex_status_animation_watchdog_token" in admission
 
 
 def test_architecture_c_observer_tmux_boundary_is_absolutely_bounded() -> None:
@@ -77,7 +115,7 @@ def test_architecture_c_observer_tmux_boundary_is_absolutely_bounded() -> None:
 
     controller = AgentObserverCoordinator(
         "/usr/bin/tmux",
-        Path("/isolated/tmux.sock"),
+        _capability(Path("/isolated/tmux.sock")).runtime_capability,
         "%7",
         Path("/isolated/events.sock"),
         runner=blocked_runner,
@@ -298,8 +336,6 @@ def test_architecture_c_async_tmux_timeout_kills_and_reaps_child(
 def test_architecture_c_tmux_process_execution_has_no_production_bypass() -> None:
     rodex_source = Path(__file__).parents[2] / "src" / "rodex"
     tmux_process_modules = (
-        "tmux_input_proxy.py",
-        "tmux_completion_observer.py",
         "tmux_shared_ctrl_c.py",
         "tmux_status.py",
         "status_animation.py",
@@ -320,86 +356,131 @@ def test_architecture_c_tmux_process_execution_has_no_production_bypass() -> Non
     assert executor_source.count("create_subprocess_exec(") == 1
 
 
-def test_architecture_c_old_hook_survives_session_rename_live(tmp_path: Path) -> None:
+def test_shared_tmux_source_destruction_cannot_mutate_survivor_live(
+    tmp_path: Path,
+) -> None:
     tmux = shutil.which("tmux")
     if tmux is None:
         pytest.skip("tmux is not installed")
     socket_path = tmp_path / "tmux.sock"
-    subprocess.run(
-        [tmux, "-S", str(socket_path), "new-session", "-d", "-s", "before", "sleep 30"],
-        check=True,
-    )
+    server_id = "0123456789abcdef0123456789abcdef"
     clients: list[subprocess.Popen[bytes]] = []
+
+    def run_tmux(*arguments: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [tmux, "-S", str(socket_path), *arguments],
+            check=True,
+            text=True,
+            capture_output=True,
+        )
+
+    def set_identity(
+        session_name: str,
+        *,
+        runtime_id: str,
+        rodex_session_id: str,
+        internal_session_id: str,
+        codex_session_id: str,
+    ) -> None:
+        target = f"={session_name}:"
+        for option, value in (
+            (RODEX_RUNTIME_ID_OPTION, runtime_id),
+            (RODEX_REGISTRATION_STATE_OPTION, RODEX_REGISTRATION_REGISTERED),
+            (RODEX_SESSION_ID_OPTION, rodex_session_id),
+            (RODEX_REGISTRY_ID_OPTION, "2222222222222222"),
+            (RODEX_INTERNAL_SESSION_ID_OPTION, internal_session_id),
+            (RODEX_CODEX_SESSION_ID_OPTION, codex_session_id),
+            (RODEX_SHARING_ATTACHED_COUNT_OPTION, "1"),
+        ):
+            run_tmux("set-option", "-t", target, option, value)
+
+    run_tmux("new-session", "-d", "-s", "source", "sleep 30")
     try:
-        hook = status_animation_hook_command(
+        run_tmux("new-session", "-d", "-s", "survivor", "sleep 30")
+        run_tmux(
+            "set-option",
+            "-s",
+            RODEX_SHARED_TMUX_PROTOCOL_OPTION,
+            RODEX_SHARED_TMUX_PROTOCOL,
+        )
+        run_tmux("set-option", "-s", RODEX_SHARED_TMUX_SERVER_ID_OPTION, server_id)
+        set_identity(
+            "source",
+            runtime_id="0123456789abcdef",
+            rodex_session_id="1111111111111111",
+            internal_session_id="1",
+            codex_session_id="01a00654-f2bc-7a30-834a-a5f886a65f82",
+        )
+        set_identity(
+            "survivor",
+            runtime_id="1123456789abcdef",
+            rodex_session_id="3111111111111111",
+            internal_session_id="2",
+            codex_session_id="01a00654-f2bc-7a30-834a-a5f886a65f83",
+        )
+        hook = sharing_coordinator_hook_command(
             str(Path(__file__).parents[2] / ".venv" / "bin" / "python"),
             tmux,
-            LiveTmuxSession(socket_path, "before"),
-            "attached",
+            socket_path,
+            server_id,
         )
-        subprocess.run(
-            [
-                tmux,
-                "-S",
-                str(socket_path),
-                "set-hook",
-                "-t",
-                "before",
-                "client-attached",
-                hook,
-            ],
-            check=True,
-        )
-        subprocess.run(
-            [tmux, "-S", str(socket_path), "rename-session", "-t", "before", "after"],
-            check=True,
-        )
-        for _index in range(2):
+        for event in ("attached", "detached"):
+            run_tmux("set-hook", "-g", f"client-{event}", hook)
+
+        for session_name in ("source", "survivor"):
             clients.append(
                 subprocess.Popen(
-                    [tmux, "-S", str(socket_path), "-C", "attach-session", "-t", "after"],
+                    [
+                        tmux,
+                        "-S",
+                        str(socket_path),
+                        "-C",
+                        "attach-session",
+                        "-t",
+                        f"={session_name}",
+                    ],
                     stdin=subprocess.PIPE,
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                 )
             )
-        deadline = time.monotonic() + 5
+        deadline = time.monotonic() + 3
         while time.monotonic() < deadline:
-            generation = subprocess.run(
-                [
-                    tmux,
-                    "-S",
-                    str(socket_path),
-                    "show-options",
-                    "-v",
-                    "-t",
-                    "after:",
-                    "@rodex_status_animation_generation",
-                ],
-                check=False,
-                text=True,
-                capture_output=True,
-            ).stdout.strip()
-            rendered = subprocess.run(
-                [
-                    tmux,
-                    "-S",
-                    str(socket_path),
-                    "show-options",
-                    "-v",
-                    "-t",
-                    "after:",
-                    "status-format[0]",
-                ],
-                check=False,
-                text=True,
-                capture_output=True,
-            ).stdout.strip()
-            if generation == "2" and rendered:
+            counts = run_tmux(
+                "list-sessions",
+                "-F",
+                "#{session_name}=#{session_attached}",
+            ).stdout.splitlines()
+            if set(counts) == {"source=1", "survivor=1"}:
                 break
             time.sleep(0.02)
-        assert generation == "2"
-        assert rendered
+        assert set(counts) == {"source=1", "survivor=1"}
+
+        run_tmux("kill-session", "-t", "=source")
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            if clients[0].poll() is not None:
+                break
+            time.sleep(0.02)
+        time.sleep(0.3)
+
+        survivor_state = run_tmux(
+            "display-message",
+            "-p",
+            "-t",
+            "=survivor:",
+            "-F",
+            (
+                "#{session_attached}\t"
+                f"#{{{RODEX_SHARING_ATTACHED_COUNT_OPTION}}}\t"
+                "#{@rodex_status_animation_generation}\t"
+                "#{@rodex_status_animation_pending_event}\t"
+                "#{@rodex_status_animation_owner_token}\t"
+                "#{@rodex_status_animation_watchdog_token}"
+            ),
+        ).stdout.rstrip("\n")
+        assert survivor_state == "1\t1\t\t\t\t"
+        assert clients[1].poll() is None
     finally:
         for client in clients:
             client.terminate()

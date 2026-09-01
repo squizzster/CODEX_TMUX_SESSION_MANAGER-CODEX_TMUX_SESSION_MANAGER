@@ -89,6 +89,7 @@ def test_process_configs_own_round_trippable_wire_contracts() -> None:
         protocol_event_socket_path=Path("/tmp/event socket.sock"),
         tmux_binary="/opt/tmux bin/tmux",
         tmux_server_socket_path=Path("/tmp/tmux socket.sock"),
+        runtime_id=RUNTIME_ID,
         codex_arguments=("resume", "thread with spaces"),
         analytics=analytics,
     )

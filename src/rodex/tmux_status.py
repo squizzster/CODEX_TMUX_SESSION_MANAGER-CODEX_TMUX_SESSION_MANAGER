@@ -8,7 +8,6 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import IntEnum
-from pathlib import Path
 from threading import Condition, Thread
 from typing import Final
 
@@ -22,6 +21,10 @@ from .status_bar import (
     RODEX_WINDOW_STATUS_FORMAT,
 )
 from .tmux_executor import SyncTmuxExecutor, SyncTmuxRunner
+from .tmux_session_capability import (
+    TmuxRuntimeCapability,
+    primary_pane_capability_condition,
+)
 
 TMUX_STATUS_COMMAND_TIMEOUT_SECONDS: Final = 1.0
 TMUX_STATUS_FAILURE_BACKOFF_SECONDS: Final = 1.0
@@ -34,7 +37,7 @@ class TmuxStatusOption:
     def __init__(
         self,
         tmux_binary: str,
-        tmux_server_socket_path: Path,
+        capability: TmuxRuntimeCapability,
         tmux_pane_target: str,
         option_name: str,
         *,
@@ -47,6 +50,13 @@ class TmuxStatusOption:
         if command_timeout_seconds <= 0 or failure_backoff_seconds <= 0:
             raise ValueError("tmux status timeouts must be positive")
         self._command_arguments = (
+            "if-shell",
+            "-t",
+            tmux_pane_target,
+            "-F",
+            primary_pane_capability_condition(capability),
+        )
+        self._set_option_arguments = (
             "set-option",
             "-t",
             tmux_pane_target,
@@ -54,7 +64,7 @@ class TmuxStatusOption:
         )
         self._tmux_executor = SyncTmuxExecutor(
             tmux_binary,
-            tmux_server_socket_path,
+            capability.tmux_server_socket_path,
             runner=runner,
             timeout_seconds=command_timeout_seconds,
         )
@@ -126,7 +136,10 @@ class TmuxStatusOption:
             published = False
             try:
                 result = self._tmux_executor.run(
-                    (*self._command_arguments, value),
+                    (
+                        *self._command_arguments,
+                        shlex.join((*self._set_option_arguments, value)),
+                    ),
                     output="discard",
                 )
                 published = result.returncode == 0

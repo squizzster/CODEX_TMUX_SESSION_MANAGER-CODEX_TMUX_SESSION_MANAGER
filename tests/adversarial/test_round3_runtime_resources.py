@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import fcntl
 import os
+import re
 import shlex
 import subprocess
 import uuid
@@ -22,15 +23,30 @@ from rodex.control import PromptDispatch
 from rodex.exact_turn_mutation import ExactTurnMutationCoordinator
 from rodex.protocol_proxy import CodexProtocolEventTap, ToolCallCounter
 from rodex.status_animation import AsyncCommandResult, animate_status, status_frames
+from rodex.tmux_session_capability import TmuxSessionCapability
 from rodex.tmux_status import (
     STATUS_CLAIM_PRIORITY_OPTION,
     STATUS_CLAIM_PUBLISHER_OPTION,
     STATUS_CLAIM_TOKEN_OPTION,
 )
-from rodex_registry import RodexSessionId
+from rodex_registry import RodexRegistryId, RodexRuntimeId, RodexSessionId
 
 ROOT_THREAD_ID = uuid.UUID("01a00654-f2bc-7a30-834a-a5f886a65f82")
 CHILD_THREAD_ID = uuid.UUID("01a00654-f2bc-7a30-834a-a5f886a65f83")
+
+
+def _capability(socket_path: Path) -> TmuxSessionCapability:
+    return TmuxSessionCapability(
+        socket_path,
+        "0123456789abcdef0123456789abcdef",
+        "$7",
+        "%9",
+        RodexRuntimeId.parse("0123456789abcdef"),
+        RodexSessionId.parse("1111111111111111"),
+        RodexRegistryId.parse("2222222222222222"),
+        7,
+        ROOT_THREAD_ID,
+    )
 
 
 def test_round3_supported_start_dispatches_under_the_runtime_transition_lock(
@@ -115,7 +131,13 @@ class _AdmissionTmux:
         recorded = list(command)
         self.commands.append(recorded)
         if "display-message" in recorded:
-            return AsyncCommandResult(0, "2\n")
+            format_string = recorded[-1]
+            if "#{session_attached}" in format_string:
+                return AsyncCommandResult(0, "1\t2\n")
+            if STATUS_CLAIM_TOKEN_OPTION in format_string:
+                token = self.options.get(STATUS_CLAIM_TOKEN_OPTION, "")
+                return AsyncCommandResult(0, f"1\t{token}\n")
+            return AsyncCommandResult(0, "1\n")
         if "show-options" in recorded:
             value = self.options.get(recorded[-1], "")
             return AsyncCommandResult(0 if value else 1, f"{value}\n")
@@ -127,9 +149,11 @@ class _AdmissionTmux:
         return AsyncCommandResult(0)
 
     def _condition_is_true(self, condition: str) -> bool:
-        if condition.startswith("#{<=:"):
+        if "#{<=:" in condition:
             current = int(self.options.get(STATUS_CLAIM_PRIORITY_OPTION, "0"))
-            requested = int(condition.rsplit(",", maxsplit=1)[1].removesuffix("}"))
+            match = re.search(r"#\{<=:#\{@rodex_status_claim_priority\},(\d+)\}", condition)
+            assert match is not None
+            requested = int(match.group(1))
             return current <= requested
         expected = condition.rsplit(",", maxsplit=1)[1].removesuffix("}")
         if STATUS_CLAIM_TOKEN_OPTION in condition:
@@ -170,8 +194,7 @@ def test_round3_transition_renderer_has_one_worker_and_fixed_command_budget() ->
         task = asyncio.create_task(
             animate_status(
                 "tmux",
-                Path("/isolated/round3/tmux.sock"),
-                "round3-session",
+                _capability(Path("/isolated/round3/tmux.sock")),
                 "attached",
                 runner=tmux,
                 wait_until=hold_first_frame,
@@ -217,8 +240,7 @@ def test_round3_blocked_renderer_and_protocol_churn_stay_bounded() -> None:
         task = asyncio.create_task(
             animate_status(
                 "tmux",
-                Path("/isolated/round3/blocked.sock"),
-                "round3-blocked",
+                _capability(Path("/isolated/round3/blocked.sock")),
                 "attached",
                 runner=blocked_runner,
                 command_timeout_seconds=0.01,
@@ -310,7 +332,7 @@ def test_round3_closed_observer_is_inert_to_a_late_proxy_callback(
 
     controller = AgentObserverCoordinator(
         "/usr/bin/tmux",
-        tmp_path / "tmux.sock",
+        _capability(tmp_path / "tmux.sock").runtime_capability,
         "%7",
         tmp_path / "events.sock",
         runner=runner,
@@ -430,7 +452,7 @@ def test_round3_observer_controller_prunes_completed_activity_lifetimes(
 
     controller = AgentObserverCoordinator(
         "/usr/bin/tmux",
-        tmp_path / "tmux.sock",
+        _capability(tmp_path / "tmux.sock").runtime_capability,
         "%7",
         tmp_path / "events.sock",
         runner=runner,

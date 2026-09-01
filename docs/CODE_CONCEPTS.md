@@ -17,13 +17,21 @@ boundary; domain policy has one canonical owner underneath it.
 ## Identity and observation
 
 - Rodex registries, Rodex sessions, runtime incarnations, Codex threads, Codex turns,
-  tmux endpoints, operating-system users, and display names are separate identity
+  tmux server/session capabilities, operating-system users, and display names are separate identity
   domains.
 - A permanent generated name is an immutable storage anchor. A user-defined alias, when
   present, is the preferred outward name.
 - Persisted runtime information is evidence of a link, not proof that the runtime is
-  live. Live operations verify the tmux endpoint, control endpoint, durable runtime
-  incarnation, Codex thread, and current user as required by their contract.
+  live. Live operations verify the server incarnation, immutable `$session_id`, primary
+  `%pane_id`, control endpoint, durable runtime, Codex thread, and registered identity
+  required by their contract.
+- The shared tmux socket is transport only. The owning host uses
+  `TmuxRuntimeCapability`; the launcher mints `TmuxSessionCapability` after a
+  uniqueness-checked roster read and async actors carry it. Every terminal action
+  rechecks its tuple at the exact target; primary actions also require the immutable pane.
+  Name, socket, process context, or hook cannot substitute.
+- Global client hooks are wake-only. The sharing coordinator owns roster discovery and
+  returns each transition to the same capability-fenced session mutation contract.
 - Human-readable terminal observation comes from verified tmux plain text. Structured
   lifecycle observation comes from the App Server protocol. Neither is used as a
   substitute for authoritative exact-turn state.
@@ -38,7 +46,7 @@ boundary; domain policy has one canonical owner underneath it.
   the selector again, and keeps the lock through live discovery and mutation. A selector
   that changed while waiting fails closed.
 - Start, steer, and interrupt resolve one durable runtime incarnation and revalidate the
-  selector, tmux endpoint, control metadata, and runtime ID immediately before transport
+  selector, tmux capability, control metadata, and runtime ID immediately before transport
   can send its first mutation frame. Transport independently verifies the expected Codex
   thread in the same bounded chain.
 - `CodexControlClient` owns bounded App Server transport only. Its mutation methods are
@@ -55,7 +63,7 @@ boundary; domain policy has one canonical owner underneath it.
   finalizes with compare-and-swap checks. A failed durable finalize compensates a
   completed tmux rename.
 - Mouse inspection and mutation retain the same session transition lock through tmux
-  readback and address the verified runtime through tmux's immutable `$session_id`.
+  readback and address the verified runtime through its immutable primary `%pane_id`.
 - A successful live alias change sends one `RODEX_AUTO_INFO` through the same fenced
   start-or-steer policy. Notification failure does not undo an already committed name.
 
@@ -103,6 +111,8 @@ boundary; domain policy has one canonical owner underneath it.
 - Database access goes through the Rodex transaction boundary, which validates the
   securely opened database identity and enforces owner, mode, schema-generation, and
   transition-lock invariants.
+- Security checks run synchronously at the operation that relies on them. Rodex has no
+  inotify, filesystem surveillance, or IDS architecture.
 - Public contracts stay small, descriptive, and close to the data they govern. Tests
   enforce the single-owner call graph, exact identity fences, transaction boundaries,
   privacy, and bounded resource behavior.

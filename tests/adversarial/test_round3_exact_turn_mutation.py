@@ -15,7 +15,7 @@ from rodex.control import LiveRodexControl
 from rodex.errors import RodexLaunchError
 from rodex.exact_turn_mutation import ExactTurnMutationCoordinator
 from rodex.runtime import LiveTmuxSession
-from rodex_registry import RodexSessionId
+from rodex_registry import RodexRegistryId, RodexSessionId
 
 
 @pytest.fixture(autouse=True)
@@ -429,11 +429,13 @@ def test_alias_transition_holds_the_lock_and_steers_the_observed_active_turn(
 ) -> None:
     database = tmp_path / "registry.sqlite3"
     runtime = LiveTmuxSession(tmp_path / "tmux.sock", "worker")
+    registry_id = RodexRegistryId.parse("2222222222222222")
     live_control = LiveRodexControl(
         tmp_path / "proxy.sock",
         tmp_path / "events.sock",
         uuid.UUID("01a00654-f2bc-7a30-834a-a5f886a65f82"),
         rodex_session_id="rodex-session",
+        rodex_registry_id=registry_id,
         runtime_id="runtime",
     )
     lock_was_held = False
@@ -471,12 +473,13 @@ def test_alias_transition_holds_the_lock_and_steers_the_observed_active_turn(
             self, observed: LiveTmuxSession, tmux_session_name: str
         ) -> LiveTmuxSession:
             assert observed == runtime
+            assert tmux_session_name == f"renamed--r{registry_id}"
             return LiveTmuxSession(observed.tmux_server_socket_path, tmux_session_name)
 
         def initialise_session_ui(self, _runtime: LiveTmuxSession) -> None:
             return None
 
-        def refresh_name_bound_hooks(self, _runtime: LiveTmuxSession) -> None:
+        def refresh_shared_tmux_coordination(self, _runtime: LiveTmuxSession) -> None:
             return None
 
     class ActiveControlClient:

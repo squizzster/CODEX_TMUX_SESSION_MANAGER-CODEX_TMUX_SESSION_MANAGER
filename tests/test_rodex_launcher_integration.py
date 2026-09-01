@@ -127,7 +127,7 @@ def test_fresh_detached_launcher_keeps_the_registered_session_host_alive() -> No
     integration_root.chmod(0o700)
     database = integration_root / "database" / "rodex.sqlite3"
     runtime_root = integration_root / "runtime"
-    tmux_socket = runtime_root / "tmux.sock"
+    tmux_socket = runtime_root / "tmux-shared-v1.sock"
     codex_home = integration_root / "codex-home"
     workspace = integration_root / "workspace"
     codex_home.mkdir(mode=0o700)
@@ -169,6 +169,17 @@ def test_fresh_detached_launcher_keeps_the_registered_session_host_alive() -> No
         session_name = launch_result["rodex_session_name"]
         assert isinstance(session_name, str) and session_name
         assert database.is_file()
+        listed = _tmux(
+            tmux_binary,
+            tmux_socket,
+            "list-sessions",
+            "-F",
+            "#{session_name}",
+        )
+        tmux_session_names = listed.stdout.splitlines()
+        assert len(tmux_session_names) == 1
+        tmux_session_name = tmux_session_names[0]
+        assert tmux_session_name.startswith(f"{session_name}--r")
 
         def registered_live_pane() -> int | None:
             if not tmux_socket.exists():
@@ -179,7 +190,7 @@ def test_fresh_detached_launcher_keeps_the_registered_session_host_alive() -> No
                 "show-options",
                 "-v",
                 "-t",
-                f"={session_name}:",
+                f"={tmux_session_name}:",
                 "@rodex_registration_state",
                 check=False,
             )
@@ -189,7 +200,7 @@ def test_fresh_detached_launcher_keeps_the_registered_session_host_alive() -> No
                 "display-message",
                 "-p",
                 "-t",
-                f"={session_name}:",
+                f"={tmux_session_name}:",
                 "-F",
                 "#{pane_dead}\t#{pane_pid}",
                 check=False,
@@ -245,7 +256,7 @@ def test_fresh_detached_launcher_keeps_the_registered_session_host_alive() -> No
             tmux_socket,
             "kill-session",
             "-t",
-            f"={session_name}",
+            f"={tmux_session_name}",
         )
 
         def host_has_exited() -> bool | None:
@@ -260,7 +271,7 @@ def test_fresh_detached_launcher_keeps_the_registered_session_host_alive() -> No
                 tmux_socket,
                 "has-session",
                 "-t",
-                f"={session_name}",
+                f"={tmux_session_name}",
                 check=False,
             ).returncode
             != 0

@@ -24,7 +24,7 @@ from .control import (
     PromptDispatch,
     RodexControlError,
 )
-from .errors import RodexLaunchError
+from .errors import ExactRuntimeIdentityRequiredError, RodexLaunchError
 from .live_runtime import (
     rename_tmux_identity,
     resolve_live_control,
@@ -33,10 +33,6 @@ from .live_runtime import (
     session_transition_lock,
 )
 from .runtime import LiveTmuxSession, RodexRuntimeError, RodexRuntimeLauncher
-
-
-class ExactRuntimeIdentityRequiredError(RodexLaunchError):
-    """A live endpoint lacks the durable incarnation required for mutation."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -210,10 +206,16 @@ class ExactTurnMutationCoordinator:
                         target.runtime,
                         target.control,
                     )()
+                    registry_id = target.control.rodex_registry_id
+                    if registry_id is None:
+                        raise ExactRuntimeIdentityRequiredError(
+                            "live runtime lacks exact registry authority"
+                        )
                     active_tmux = rename_tmux_identity(
                         self._launcher,
                         recorded_tmux,
                         assignment.names.display_name,
+                        registry_id,
                     )
                     assignment.renamed_tmux_session_name = active_tmux.tmux_session_name
         except BaseException:
@@ -225,7 +227,7 @@ class ExactTurnMutationCoordinator:
                 restore_tmux_identity(self._launcher, active_tmux, recorded_tmux)
             raise
         if active_tmux is not None:
-            self._launcher.refresh_name_bound_hooks(active_tmux)
+            self._launcher.refresh_shared_tmux_coordination(active_tmux)
         if (
             active_tmux is not None
             and target is not None

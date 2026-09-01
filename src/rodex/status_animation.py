@@ -6,7 +6,6 @@ import asyncio
 import secrets
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Final, Literal
 
 from .status_bar import RODEX_STATUS_COLOURS
@@ -15,6 +14,11 @@ from .tmux_executor import (
     AsyncTmuxExecutor,
     AsyncTmuxRunner,
     TmuxCommandResult,
+)
+from .tmux_session_capability import (
+    TmuxSessionCapability,
+    combine_tmux_conditions,
+    registered_primary_pane_condition,
 )
 from .tmux_status import (
     STATUS_ANIMATION_FRAME_INTERVAL_SECONDS,
@@ -29,7 +33,6 @@ StatusEvent = Literal["attached", "detached"]
 
 FRAME_INTERVAL_SECONDS: Final = STATUS_ANIMATION_FRAME_INTERVAL_SECONDS
 ANIMATION_TMUX_COMMAND_TIMEOUT_SECONDS: Final = DEFAULT_TMUX_COMMAND_TIMEOUT_SECONDS
-_CLIENT_NAME_FORMAT: Final = "#{client_name}"
 _ATTACHED_COUNT_FORMAT: Final = "#{session_attached}"
 
 
@@ -135,8 +138,7 @@ def status_frames(event: StatusEvent, attached_count: int) -> tuple[StatusFrame,
 
 async def animate_status(
     tmux_binary: str,
-    tmux_server_socket_path: Path,
-    tmux_session_name: str,
+    capability: TmuxSessionCapability,
     event: StatusEvent,
     *,
     runner: AsyncCommandRunner | None = None,
@@ -156,24 +158,22 @@ async def animate_status(
     )
     await _animate_status_once(
         tmux_binary,
-        tmux_server_socket_path,
-        tmux_session_name,
+        capability,
         request,
     )
 
 
 async def _animate_status_once(
     tmux_binary: str,
-    tmux_server_socket_path: Path,
-    tmux_session_name: str,
+    capability: TmuxSessionCapability,
     request: _AnimationRequest,
 ) -> None:
     """Render one captured transition for the current local owner."""
-    session_target, pane_target = _tmux_session_targets(tmux_session_name)
+    pane_target = capability.pane_target
     status_commands = TmuxStatusClaimCommands(pane_target)
     executor = AsyncTmuxExecutor(
         tmux_binary,
-        tmux_server_socket_path,
+        capability.tmux_server_socket_path,
         runner=request.runner,
         timeout_seconds=request.command_timeout_seconds,
     )
@@ -187,13 +187,17 @@ async def _animate_status_once(
         "-t",
         pane_target,
         "-F",
-        _ATTACHED_COUNT_FORMAT,
+        f"{registered_primary_pane_condition(capability)}\t{_ATTACHED_COUNT_FORMAT}",
     )
     try:
-        attached_count = int(count_result.stdout.strip())
+        admitted_text, attached_count_text = count_result.stdout.strip().split(
+            "\t",
+            maxsplit=1,
+        )
+        attached_count = int(attached_count_text)
     except (TypeError, ValueError):
         return
-    if count_result.returncode != 0 or attached_count < 0:
+    if count_result.returncode != 0 or admitted_text != "1" or attached_count < 0:
         return
 
     frames = status_frames(request.event, attached_count)
@@ -203,7 +207,10 @@ async def _animate_status_once(
             "-t",
             pane_target,
             "-F",
-            status_commands.publisher_matches(STATUS_PUBLISHER_SHARING_ANIMATION),
+            combine_tmux_conditions(
+                registered_primary_pane_condition(capability),
+                status_commands.publisher_matches(STATUS_PUBLISHER_SHARING_ANIMATION),
+            ),
             status_commands.restore_base(),
         )
         return
@@ -214,7 +221,10 @@ async def _animate_status_once(
         "-t",
         pane_target,
         "-F",
-        status_commands.priority_allows(StatusPriority.SHARING_ANIMATION),
+        combine_tmux_conditions(
+            registered_primary_pane_condition(capability),
+            status_commands.priority_allows(StatusPriority.SHARING_ANIMATION),
+        ),
         status_commands.claim_and_present(
             publisher=STATUS_PUBLISHER_SHARING_ANIMATION,
             token=token,
@@ -223,7 +233,7 @@ async def _animate_status_once(
         ),
     )
     if claim_result.returncode != 0 or not await _animation_token_matches(
-        tmux, pane_target, token
+        tmux, capability, token
     ):
         return
 
@@ -231,14 +241,17 @@ async def _animate_status_once(
     next_frame_at = loop.time() + FRAME_INTERVAL_SECONDS
     await request.wait_until(next_frame_at)
     for frame in frames[1:]:
-        if not await _animation_token_matches(tmux, pane_target, token):
+        if not await _animation_token_matches(tmux, capability, token):
             return
         apply_result = await tmux(
             "if-shell",
             "-t",
             pane_target,
             "-F",
-            status_commands.token_matches(token),
+            combine_tmux_conditions(
+                registered_primary_pane_condition(capability),
+                status_commands.token_matches(token),
+            ),
             status_commands.present(_frame_presentation(frame)),
         )
         if apply_result.returncode != 0:
@@ -249,9 +262,9 @@ async def _animate_status_once(
     await _restore_normal_status(
         tmux,
         pane_target,
-        session_target,
         token,
         status_commands,
+        capability,
     )
 
 
@@ -267,40 +280,41 @@ async def _wait_until(deadline: float) -> None:
 
 async def _animation_token_matches(
     tmux: Callable[..., Awaitable[AsyncCommandResult]],
-    pane_target: str,
+    capability: TmuxSessionCapability,
     token: str,
 ) -> bool:
-    result = await tmux("show-options", "-v", "-t", pane_target, STATUS_CLAIM_TOKEN_OPTION)
-    return result.returncode == 0 and result.stdout.strip() == token
+    result = await tmux(
+        "display-message",
+        "-p",
+        "-t",
+        capability.pane_target,
+        "-F",
+        (
+            f"{registered_primary_pane_condition(capability)}\t"
+            f"#{{{STATUS_CLAIM_TOKEN_OPTION}}}"
+        ),
+    )
+    return result.returncode == 0 and result.stdout.strip() == f"1\t{token}"
 
 
 async def _restore_normal_status(
     tmux: Callable[..., Awaitable[AsyncCommandResult]],
     pane_target: str,
-    session_target: str,
     token: str,
     status_commands: TmuxStatusClaimCommands,
+    capability: TmuxSessionCapability,
 ) -> None:
     await tmux(
         "if-shell",
         "-t",
         pane_target,
         "-F",
-        status_commands.token_matches(token),
+        combine_tmux_conditions(
+            registered_primary_pane_condition(capability),
+            status_commands.token_matches(token),
+        ),
         status_commands.restore_base(),
     )
-    clients = await tmux("list-clients", "-t", session_target, "-F", _CLIENT_NAME_FORMAT)
-    if clients.returncode != 0:
-        return
-    for client_name in clients.stdout.splitlines():
-        if client_name:
-            await tmux("refresh-client", "-S", "-t", client_name)
-
-
-def _tmux_session_targets(identity: str) -> tuple[str, str]:
-    """Return stable exact session and pane targets from a name or tmux session ID."""
-    session_target = identity if identity.startswith("$") else f"={identity}"
-    return session_target, f"{session_target}:"
 
 
 def _frame_presentation(frame: StatusFrame) -> TmuxStatusPresentation:

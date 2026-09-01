@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import shlex
+import uuid
 from collections.abc import Sequence
 from itertools import pairwise
 from pathlib import Path
@@ -14,12 +16,28 @@ from rodex.status_animation import (
     animate_status,
     status_frames,
 )
+from rodex.tmux_session_capability import TmuxSessionCapability
 from rodex.tmux_status import (
     RODEX_STATUS_STYLE,
     STATUS_CLAIM_PRIORITY_OPTION,
     STATUS_CLAIM_PUBLISHER_OPTION,
     STATUS_CLAIM_TOKEN_OPTION,
 )
+from rodex_registry.identity import RodexRegistryId, RodexRuntimeId, RodexSessionId
+
+
+def _capability(socket_path: Path) -> TmuxSessionCapability:
+    return TmuxSessionCapability(
+        socket_path,
+        "0123456789abcdef0123456789abcdef",
+        "$7",
+        "%9",
+        RodexRuntimeId.parse("0123456789abcdef"),
+        RodexSessionId.parse("1111111111111111"),
+        RodexRegistryId.parse("2222222222222222"),
+        7,
+        uuid.UUID("01a00654-f2bc-7a30-834a-a5f886a65f82"),
+    )
 
 
 class FakeTmux:
@@ -43,7 +61,13 @@ class FakeTmux:
         recorded = list(command)
         self.commands.append(recorded)
         if "display-message" in recorded:
-            return AsyncCommandResult(0, f"{self.attached_count}\n")
+            format_string = recorded[-1]
+            if "#{session_attached}" in format_string:
+                return AsyncCommandResult(0, f"1\t{self.attached_count}\n")
+            if STATUS_CLAIM_TOKEN_OPTION in format_string:
+                token = self.options.get(STATUS_CLAIM_TOKEN_OPTION, "")
+                return AsyncCommandResult(0, f"1\t{token}\n")
+            return AsyncCommandResult(0, "1\n")
         if "show-options" in recorded:
             value = self.options.get(recorded[-1], "")
             return AsyncCommandResult(0 if value else 1, f"{value}\n")
@@ -55,15 +79,30 @@ class FakeTmux:
         return AsyncCommandResult(0)
 
     def _condition_is_true(self, condition: str) -> bool:
-        if condition.startswith("#{<=:"):
+        if "#{<=:" in condition:
             current = int(self.options.get(STATUS_CLAIM_PRIORITY_OPTION, "0"))
-            requested = int(condition.rsplit(",", maxsplit=1)[1].removesuffix("}"))
+            match = re.search(r"#\{<=:#\{@rodex_status_claim_priority\},(\d+)\}", condition)
+            assert match is not None
+            requested = int(match.group(1))
             return current <= requested
-        expected = condition.rsplit(",", maxsplit=1)[1].removesuffix("}")
         if STATUS_CLAIM_TOKEN_OPTION in condition:
+            match = re.search(
+                r"#\{==:#\{@rodex_status_claim_token\},([^}]*)\}",
+                condition,
+            )
+            assert match is not None
+            expected = match.group(1)
             return self.options.get(STATUS_CLAIM_TOKEN_OPTION) == expected
         if STATUS_CLAIM_PUBLISHER_OPTION in condition:
+            match = re.search(
+                r"#\{==:#\{@rodex_status_claim_publisher\},([^}]*)\}",
+                condition,
+            )
+            assert match is not None
+            expected = match.group(1)
             return self.options.get(STATUS_CLAIM_PUBLISHER_OPTION) == expected
+        if "@rodex_registration_state" in condition:
+            return True
         raise AssertionError(f"unexpected tmux condition: {condition}")
 
     def _apply(self, command: list[str]) -> None:
@@ -101,8 +140,7 @@ def test_animation_uses_scheduled_frames_and_restores_the_entire_status_format()
     asyncio.run(
         animate_status(
             "/usr/bin/tmux",
-            Path("/run/user/1009/rodex/tmux.sock"),
-            "automatic-beluga",
+            _capability(Path("/run/user/1009/rodex/tmux.sock")),
             "attached",
             runner=tmux,
             wait_until=record_deadline,
@@ -122,41 +160,39 @@ def test_animation_uses_scheduled_frames_and_restores_the_entire_status_format()
         and "status-format" in command[-1]
         and "status-format[0]" not in command[-1]
     ]
-    refresh_commands = [command for command in tmux.commands if "refresh-client" in command]
+    refresh_commands = [
+        command
+        for command in tmux.commands
+        if any("refresh-client" in argument for argument in command)
+    ]
 
     assert len(frame_commands) == 25
-    assert all(
-        command[3:6] == ["if-shell", "-t", "=automatic-beluga:"]
-        for command in frame_commands
-    )
+    assert all(command[3:6] == ["if-shell", "-t", "%9"] for command in frame_commands)
     assert len(deadlines) == 25
     assert all(
         later - earlier == pytest.approx(FRAME_INTERVAL_SECONDS)
         for earlier, later in pairwise(deadlines)
     )
     assert len(restore_commands) == 1
-    assert restore_commands[0][3:6] == ["if-shell", "-t", "=automatic-beluga:"]
+    assert restore_commands[0][3:6] == ["if-shell", "-t", "%9"]
     restore_steps = [shlex.split(step) for step in restore_commands[0][-1].split(" ; ")]
     assert [
         "set-option",
         "-u",
         "-t",
-        "=automatic-beluga:",
+        "%9",
         "status-format",
     ] in restore_steps
     assert [
         "set-option",
         "-t",
-        "=automatic-beluga:",
+        "%9",
         "status-style",
         RODEX_STATUS_STYLE,
     ] in restore_steps
     assert "status-format[0]" not in restore_commands[0][-1]
     assert tmux.options["status-style"] == RODEX_STATUS_STYLE
-    assert [command[-1] for command in refresh_commands] == [
-        "/dev/pts/10",
-        "/dev/pts/11",
-    ]
+    assert refresh_commands == []
 
 
 def test_new_animation_token_stops_an_older_animation_without_restoring_over_it() -> None:
@@ -171,8 +207,7 @@ def test_new_animation_token_stops_an_older_animation_without_restoring_over_it(
     asyncio.run(
         animate_status(
             "tmux",
-            Path("/tmp/rodex/tmux.sock"),
-            "automatic-beluga",
+            _capability(Path("/tmp/rodex/tmux.sock")),
             "attached",
             runner=tmux,
             wait_until=supersede_after_first_frame,
@@ -207,8 +242,7 @@ def test_nonqualifying_attachment_cancels_animation_and_restores_normal_status()
     asyncio.run(
         animate_status(
             "tmux",
-            Path("/tmp/rodex/tmux.sock"),
-            "automatic-beluga",
+            _capability(Path("/tmp/rodex/tmux.sock")),
             "attached",
             runner=tmux,
             wait_until=unexpected_wait,

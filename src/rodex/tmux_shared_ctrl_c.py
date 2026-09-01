@@ -14,6 +14,11 @@ from typing import Final
 
 from .status_bar import RODEX_STATUS_COLOURS
 from .tmux_executor import SyncTmuxExecutor, SyncTmuxRunner, TmuxCommandResult
+from .tmux_session_capability import (
+    TmuxSessionCapability,
+    parse_tmux_session_capability,
+    registered_primary_pane_condition,
+)
 from .tmux_status import (
     STATUS_PUBLISHER_SHARED_CTRL_C,
     StatusPriority,
@@ -44,7 +49,7 @@ def _restore_after_confirmation_window(callback: Callable[[], None]) -> None:
 
 def handle_shared_ctrl_c(
     tmux_binary: str,
-    tmux_server_socket_path: Path,
+    capability: TmuxSessionCapability,
     pane_id: str,
     client_name: str,
     *,
@@ -56,26 +61,48 @@ def handle_shared_ctrl_c(
     """Forward Ctrl-C privately, or require same-client confirmation when shared."""
     executor = SyncTmuxExecutor(
         tmux_binary,
-        tmux_server_socket_path,
+        capability.tmux_server_socket_path,
         runner=runner,
     )
 
-    def tmux(*arguments: str) -> TmuxCommandResult:
+    def raw_tmux(*arguments: str) -> TmuxCommandResult:
         return executor.run(arguments)
 
+    identity = raw_tmux(
+        "display-message",
+        "-p",
+        "-t",
+        pane_id,
+        "-F",
+        f"{registered_primary_pane_condition(capability)}\t#{{pane_id}}",
+    )
+    if identity.returncode != 0 or identity.stdout.strip() != f"1\t{pane_id}":
+        return 1
+    primary_pane_id = capability.pane_target
+
+    def tmux(*arguments: str) -> TmuxCommandResult:
+        return raw_tmux(
+            "if-shell",
+            "-t",
+            primary_pane_id,
+            "-F",
+            registered_primary_pane_condition(capability),
+            shlex.join(arguments),
+        )
+
     def clear_confirmation() -> None:
-        tmux("set-option", "-u", "-t", pane_id, _CONFIRMATION_OPTION)
+        tmux("set-option", "-u", "-t", primary_pane_id, _CONFIRMATION_OPTION)
 
     def clear_confirmation_claim() -> None:
-        tmux("set-option", "-u", "-t", pane_id, _CONFIRMATION_CLAIM_OPTION)
+        tmux("set-option", "-u", "-t", primary_pane_id, _CONFIRMATION_CLAIM_OPTION)
 
-    status = TmuxStatusPipeline(tmux, pane_id)
+    status = TmuxStatusPipeline(tmux, primary_pane_id)
 
     attached = tmux(
         "display-message",
         "-p",
         "-t",
-        pane_id,
+        primary_pane_id,
         "-F",
         "#{session_attached}",
     )
@@ -92,7 +119,7 @@ def handle_shared_ctrl_c(
         "show-options",
         "-v",
         "-t",
-        pane_id,
+        primary_pane_id,
         _CONFIRMATION_OPTION,
     )
     current_confirmation = _parse_confirmation(advertised.stdout.strip())
@@ -101,17 +128,29 @@ def handle_shared_ctrl_c(
         forwarded = tmux(
             "if-shell",
             "-t",
-            pane_id,
+            primary_pane_id,
             "-F",
             "#{==:#{session_attached},1}",
             _tmux_command_sequence(
-                ("set-option", "-u", "-t", pane_id, _CONFIRMATION_OPTION),
-                ("set-option", "-u", "-t", pane_id, _CONFIRMATION_CLAIM_OPTION),
-                ("send-keys", "-t", pane_id, "C-c"),
+                ("set-option", "-u", "-t", primary_pane_id, _CONFIRMATION_OPTION),
+                (
+                    "set-option",
+                    "-u",
+                    "-t",
+                    primary_pane_id,
+                    _CONFIRMATION_CLAIM_OPTION,
+                ),
+                ("send-keys", "-t", primary_pane_id, "C-c"),
             ),
             _tmux_command_sequence(
-                ("set-option", "-u", "-t", pane_id, _CONFIRMATION_OPTION),
-                ("set-option", "-u", "-t", pane_id, _CONFIRMATION_CLAIM_OPTION),
+                ("set-option", "-u", "-t", primary_pane_id, _CONFIRMATION_OPTION),
+                (
+                    "set-option",
+                    "-u",
+                    "-t",
+                    primary_pane_id,
+                    _CONFIRMATION_CLAIM_OPTION,
+                ),
             ),
         )
         if current_confirmation is not None:
@@ -125,7 +164,7 @@ def handle_shared_ctrl_c(
             "set-option",
             "-o",
             "-t",
-            pane_id,
+            primary_pane_id,
             _CONFIRMATION_CLAIM_OPTION,
             advertised.stdout.strip(),
         )
@@ -134,7 +173,7 @@ def handle_shared_ctrl_c(
         confirmed = tmux(
             "if-shell",
             "-t",
-            pane_id,
+            primary_pane_id,
             "-F",
             (
                 f"#{{&&:#{{?{_CONFIRMATION_CLAIM_OPTION},1,0}},"
@@ -142,12 +181,24 @@ def handle_shared_ctrl_c(
                 f"#{{{_CONFIRMATION_CLAIM_OPTION}}}}}}}"
             ),
             _tmux_command_sequence(
-                ("set-option", "-u", "-t", pane_id, _CONFIRMATION_OPTION),
-                ("set-option", "-u", "-t", pane_id, _CONFIRMATION_CLAIM_OPTION),
-                ("send-keys", "-t", pane_id, "C-c"),
+                ("set-option", "-u", "-t", primary_pane_id, _CONFIRMATION_OPTION),
+                (
+                    "set-option",
+                    "-u",
+                    "-t",
+                    primary_pane_id,
+                    _CONFIRMATION_CLAIM_OPTION,
+                ),
+                ("send-keys", "-t", primary_pane_id, "C-c"),
             ),
             _tmux_command_sequence(
-                ("set-option", "-u", "-t", pane_id, _CONFIRMATION_CLAIM_OPTION),
+                (
+                    "set-option",
+                    "-u",
+                    "-t",
+                    primary_pane_id,
+                    _CONFIRMATION_CLAIM_OPTION,
+                ),
             ),
         )
         status.restore_if_token_matches(current_confirmation[2])
@@ -170,7 +221,7 @@ def handle_shared_ctrl_c(
     armed = tmux(
         "set-option",
         "-t",
-        pane_id,
+        primary_pane_id,
         _CONFIRMATION_OPTION,
         confirmation,
     )
@@ -190,7 +241,7 @@ def handle_shared_ctrl_c(
             "show-options",
             "-v",
             "-t",
-            pane_id,
+            primary_pane_id,
             _CONFIRMATION_OPTION,
         )
         if latest.stdout.strip() != confirmation:
@@ -241,6 +292,14 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="python -m rodex.tmux_shared_ctrl_c")
     parser.add_argument("--tmux-binary", required=True)
     parser.add_argument("--tmux-server-socket", required=True, type=Path)
+    parser.add_argument("--expected-server-id", required=True)
+    parser.add_argument("--tmux-session-id", required=True)
+    parser.add_argument("--tmux-primary-pane-id", required=True)
+    parser.add_argument("--expected-runtime-id", required=True)
+    parser.add_argument("--expected-rodex-session-id", required=True)
+    parser.add_argument("--expected-registry-id", required=True)
+    parser.add_argument("--expected-internal-session-id", required=True)
+    parser.add_argument("--expected-codex-session-id", required=True)
     parser.add_argument("--pane-id", required=True)
     parser.add_argument("--client-name", required=True)
     return parser
@@ -248,9 +307,20 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
+    capability = parse_tmux_session_capability(
+        args.tmux_server_socket,
+        args.expected_server_id,
+        args.tmux_session_id,
+        args.tmux_primary_pane_id,
+        args.expected_runtime_id,
+        args.expected_rodex_session_id,
+        args.expected_registry_id,
+        args.expected_internal_session_id,
+        args.expected_codex_session_id,
+    )
     return handle_shared_ctrl_c(
         args.tmux_binary,
-        args.tmux_server_socket,
+        capability,
         args.pane_id,
         args.client_name,
     )

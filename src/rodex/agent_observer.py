@@ -52,6 +52,7 @@ from .observer_projection import (
 )
 from .observer_state import ObserverStateReducer
 from .protocol_proxy import AGENT_OBSERVER_EVENT_STREAM_PATH
+from .tmux_session_capability import TmuxRuntimeCapability
 
 OBSERVER_TRACE_PAGE_SIZE: Final = 500
 _RODEX_SESSION_ID_PATTERN: Final = re.compile(r"[0-9a-f]{16}")
@@ -274,7 +275,7 @@ class AgentObserverCoordinator:
     def __init__(
         self,
         tmux_binary: str,
-        tmux_server_socket_path: Path,
+        capability: TmuxRuntimeCapability,
         primary_pane_target: str,
         protocol_event_socket_path: Path,
         *,
@@ -286,7 +287,7 @@ class AgentObserverCoordinator:
         self._protocol_event_socket_path = protocol_event_socket_path
         self._pane = ObserverPaneController(
             tmux_binary,
-            tmux_server_socket_path,
+            capability,
             primary_pane_target,
             runner=runner,
             python_executable=python_executable,

@@ -76,11 +76,12 @@ The launcher mints registered external authority by adding the Rodex session, re
 SQL row, Codex UUID, and registered state after a uniqueness-checked roster read; async
 actors carry that full capability. Each terminal action repeats the applicable tuple at
 its exact target; primary-pane actions additionally require the immutable pane ID. Client
-hooks only wake the roster coordinator. One canonical database and one shared tmux server
-belong to each Linux user, so the unique Rodex display name is also the complete live
-tmux name. The database ID remains an internal capability fence. Checks are synchronous
-at operation boundaries—Rodex is not an IDS and uses no inotify or real-time filesystem
-or tmux monitoring.
+hooks only wake the roster coordinator. Under one stable per-user XDG/runtime context,
+Rodex uses one canonical database and one shared tmux server. The database keeps every
+successful new session's display name unique, and that display name is also the complete
+live tmux name. The database ID remains an internal capability fence. Checks are
+synchronous at operation boundaries—Rodex is not an IDS and uses no inotify or real-time
+filesystem or tmux monitoring.
 
 One declarative Codex 0.150.1 CLI contract owns this boundary. Exact underscore Rodex
 commands stay local. Native interactive options and an optional prompt create and attach
@@ -387,10 +388,15 @@ diagnostics. Current command names are reserved from Rodex aliases.
 
 ## Local data
 
-The single durable database for the current Linux user is
+The durable database resolved for the current Linux user is
 `$XDG_STATE_HOME/rodex/rodex-v17.sqlite3`, or
 `~/.local/state/rodex/rodex-v17.sqlite3` when `XDG_STATE_HOME` is unset. Rodex does not
-support an application-specific database-path override.
+support an application-specific database-path override. A successful new-session
+transaction permanently reserves its generated cool name in this database against both
+generated names and user-defined aliases, so a later session using the same database
+cannot receive that name. This database is the uniqueness boundary: selecting a different
+standard `XDG_STATE_HOME` selects a separate database and name namespace. Rodex performs
+no machine-to-machine or internet-wide name coordination.
 
 Rodex session IDs are random 64-bit values rendered only as 16 lowercase hex
 characters, including leading zeroes. Rodex registry IDs use the same 64-bit wire form
@@ -414,7 +420,9 @@ Short-lived Unix sockets and app-server logs use `$XDG_RUNTIME_DIR/rodex`, norma
 `/run/user/<uid>/rodex`. When `XDG_RUNTIME_DIR` is unset or that socket path would be
 too long, Rodex uses the private fallback `/tmp/rodex-<uid>`. Set `RODEX_RUNTIME_DIR`
 to override it. Managed tmux sessions share `tmux-shared-v1.sock` within that private
-root; each app-server, proxy, event stream, observer, and log remains runtime-specific.
+root; selecting a different runtime root therefore selects a different shared tmux
+server without changing the database selected above. Each app-server, proxy, event
+stream, observer, and log remains runtime-specific.
 
 The registry is held in a private current-user directory and must remain a regular
 current-user file at mode `0600`; runtime roots are mode `0700`, and live sockets and

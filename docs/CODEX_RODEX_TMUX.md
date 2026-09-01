@@ -128,10 +128,14 @@ capability. Every terminal action repeats its applicable tuple at the exact targ
 primary-pane actions also require its immutable `%pane_id`. Names and process context
 are addresses only.
 
-One canonical database and one shared tmux server belong to each Linux user. Display-name
-uniqueness in that database therefore covers tmux's server-global namespace, and the live
-tmux name is exactly the Rodex display name. Rename and attach keep using `$session_id`,
-so later name reuse cannot redirect an operation. The database ID remains an internal
+Under one stable per-user XDG/runtime context, Rodex uses one canonical database and one
+shared tmux server. Display-name uniqueness covers every session recorded in that
+database, and the live tmux name is exactly the Rodex display name. A successful
+new-session transaction reserves its generated name against permanent names and aliases,
+so a later session using the same database cannot receive it. A different
+`XDG_STATE_HOME` is a separate database/name boundary; a different `RODEX_RUNTIME_DIR`
+is a separate shared-server boundary. Rename and attach keep using `$session_id`, so
+later name reuse cannot redirect an operation. The database ID remains an internal
 capability field that detects stale or replaced canonical storage; it never alters the
 name.
 
@@ -404,7 +408,8 @@ Codex, tmux, or analyzer processes.
 - Scrollback settings apply when a pane is created.
 - The runtime uses `$XDG_RUNTIME_DIR/rodex` when suitable—normally
   `/run/user/<uid>/rodex`—otherwise `/tmp/rodex-<uid>`. Unix sockets stay there because
-  long project paths can exceed Linux socket limits.
+  long project paths can exceed Linux socket limits. `RODEX_RUNTIME_DIR` explicitly
+  selects another runtime root and therefore another shared tmux server.
 - While a session host is alive, it refreshes the runtime root, shared tmux socket, and
   its private sockets and log hourly. A refresh failure ends that runtime rather than
   leaving a detached session that cannot be addressed. Normal cleanup eligibility

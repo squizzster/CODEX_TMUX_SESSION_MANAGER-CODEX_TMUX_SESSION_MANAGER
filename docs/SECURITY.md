@@ -88,11 +88,13 @@ listener; control endpoints are Unix sockets below a private runtime root.
   carry it. Every terminal action repeats its applicable fields at the exact target;
   primary actions also require the immutable pane ID. Name, socket, runtime, process
   context, or hook event is insufficient.
-- One private canonical database and one shared tmux server belong to each Linux user.
-  Database-enforced display-name uniqueness therefore covers tmux's server-global name
-  namespace, and the complete live tmux name is the user-facing display name. The
-  database ID remains in the registered capability to reject stale or replaced storage;
-  it is not part of the name.
+- Under one stable per-user XDG/runtime context, Rodex uses one private canonical
+  database and one shared tmux server. Database-enforced display-name uniqueness covers
+  every session recorded in that database, and the complete live tmux name is the
+  user-facing display name. A different `XDG_STATE_HOME` is a separate database/name
+  boundary; a different `RODEX_RUNTIME_DIR` is a separate shared-server boundary. No
+  internet-wide uniqueness service exists. The database ID remains in the registered
+  capability to reject stale or replaced storage; it is not part of the name.
 - Server-global indexed client hooks are wake-only. They carry no source session or
   mutation target; the sharing coordinator re-inventories all registered sessions and
   submits a changed count only through that session's full capability. Rodex owns and

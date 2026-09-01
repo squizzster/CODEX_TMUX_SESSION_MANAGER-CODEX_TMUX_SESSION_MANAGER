@@ -125,7 +125,8 @@ def test_fresh_detached_launcher_keeps_the_registered_session_host_alive() -> No
 
     integration_root = Path(tempfile.mkdtemp(prefix="rodex-launch-", dir="/tmp"))
     integration_root.chmod(0o700)
-    database = integration_root / "database" / "rodex.sqlite3"
+    state_home = integration_root / "state"
+    database = state_home / "rodex" / "rodex-v17.sqlite3"
     runtime_root = integration_root / "runtime"
     tmux_socket = runtime_root / "tmux-shared-v1.sock"
     codex_home = integration_root / "codex-home"
@@ -141,7 +142,7 @@ def test_fresh_detached_launcher_keeps_the_registered_session_host_alive() -> No
         {
             "CODEX_HOME": os.fspath(codex_home),
             "RODEX_CODEX_BINARY": codex_binary,
-            "RODEX_DATABASE_PATH": os.fspath(database),
+            "XDG_STATE_HOME": os.fspath(state_home),
             "RODEX_RUNTIME_DIR": os.fspath(runtime_root),
             "RODEX_TMUX_BINARY": tmux_binary,
             "TERM": "xterm-256color",
@@ -179,7 +180,7 @@ def test_fresh_detached_launcher_keeps_the_registered_session_host_alive() -> No
         tmux_session_names = listed.stdout.splitlines()
         assert len(tmux_session_names) == 1
         tmux_session_name = tmux_session_names[0]
-        assert tmux_session_name.startswith(f"{session_name}--r")
+        assert tmux_session_name == session_name
 
         def registered_live_pane() -> int | None:
             if not tmux_socket.exists():

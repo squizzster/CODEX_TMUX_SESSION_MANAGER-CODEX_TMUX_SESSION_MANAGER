@@ -76,10 +76,11 @@ The launcher mints registered external authority by adding the Rodex session, re
 SQL row, Codex UUID, and registered state after a uniqueness-checked roster read; async
 actors carry that full capability. Each terminal action repeats the applicable tuple at
 its exact target; primary-pane actions additionally require the immutable pane ID. Client
-hooks only wake the roster coordinator. Live names
-include the registry ID so equal aliases in different databases cannot collide. Checks
-are synchronous at operation boundaries—Rodex is not an IDS and uses no inotify or
-real-time filesystem/tmux monitoring.
+hooks only wake the roster coordinator. One canonical database and one shared tmux server
+belong to each Linux user, so the unique Rodex display name is also the complete live
+tmux name. The database ID remains an internal capability fence. Checks are synchronous
+at operation boundaries—Rodex is not an IDS and uses no inotify or real-time filesystem
+or tmux monitoring.
 
 One declarative Codex 0.150.1 CLI contract owns this boundary. Exact underscore Rodex
 commands stay local. Native interactive options and an optional prompt create and attach
@@ -386,10 +387,10 @@ diagnostics. Current command names are reserved from Rodex aliases.
 
 ## Local data
 
-The durable per-user registry defaults to
+The single durable database for the current Linux user is
 `$XDG_STATE_HOME/rodex/rodex-v17.sqlite3`, or
-`~/.local/state/rodex/rodex-v17.sqlite3` when `XDG_STATE_HOME` is unset. Set
-`RODEX_DATABASE_PATH` to select another database.
+`~/.local/state/rodex/rodex-v17.sqlite3` when `XDG_STATE_HOME` is unset. Rodex does not
+support an application-specific database-path override.
 
 Rodex session IDs are random 64-bit values rendered only as 16 lowercase hex
 characters, including leading zeroes. Rodex registry IDs use the same 64-bit wire form

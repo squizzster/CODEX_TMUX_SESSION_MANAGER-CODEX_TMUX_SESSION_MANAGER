@@ -297,7 +297,7 @@ def _create_managed_session(
             )
             if requested_name is None:
                 active_tmux = rename_tmux_identity(
-                    runtime_launcher, active_tmux, display_name, registry_id
+                    runtime_launcher, active_tmux, display_name
                 )
                 update_rodex_tmux_session_name(
                     session.rodex_sessions_id,
@@ -312,7 +312,6 @@ def _create_managed_session(
                         runtime_launcher,
                         active_tmux,
                         assignment.names.display_name,
-                        registry_id,
                     )
                     assignment.renamed_tmux_session_name = active_tmux.tmux_session_name
                 display_name = assignment.names.display_name
@@ -550,7 +549,6 @@ def _prepare_selected_session(
             launcher,
             active_tmux,
             display_name,
-            registry_id,
         )
         update_rodex_tmux_session_name(
             session_id,
@@ -699,12 +697,10 @@ def _prepare_existing_tmux_identity(
     session_id: int,
     database_path: Path,
 ) -> LiveTmuxSession:
-    registry_id = lookup_rodex_registry_id(database_path)
     active_tmux = rename_tmux_identity(
         launcher,
         recorded_tmux,
         display_name,
-        registry_id,
     )
     if active_tmux.tmux_session_name != recorded_tmux.tmux_session_name:
         try:

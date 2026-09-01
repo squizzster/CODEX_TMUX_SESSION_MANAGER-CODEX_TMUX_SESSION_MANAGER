@@ -206,16 +206,10 @@ class ExactTurnMutationCoordinator:
                         target.runtime,
                         target.control,
                     )()
-                    registry_id = target.control.rodex_registry_id
-                    if registry_id is None:
-                        raise ExactRuntimeIdentityRequiredError(
-                            "live runtime lacks exact registry authority"
-                        )
                     active_tmux = rename_tmux_identity(
                         self._launcher,
                         recorded_tmux,
                         assignment.names.display_name,
-                        registry_id,
                     )
                     assignment.renamed_tmux_session_name = active_tmux.tmux_session_name
         except BaseException:

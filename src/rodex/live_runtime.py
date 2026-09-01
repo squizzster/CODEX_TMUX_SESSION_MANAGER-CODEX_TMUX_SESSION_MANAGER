@@ -263,13 +263,11 @@ def rename_tmux_identity(
     launcher: RodexRuntimeLauncher,
     active_tmux: LiveTmuxSession,
     display_name: str,
-    registry_id: RodexRegistryId,
 ) -> LiveTmuxSession:
-    """Rename within tmux's server-global namespace, not a registry-local alias."""
-    tmux_session_name = f"{display_name}--r{registry_id}"
-    if active_tmux.tmux_session_name == tmux_session_name:
+    """Make the canonical per-user display name the live tmux session name."""
+    if active_tmux.tmux_session_name == display_name:
         return active_tmux
-    return launcher.rename(active_tmux, tmux_session_name)
+    return launcher.rename(active_tmux, display_name)
 
 
 def restore_tmux_identity(

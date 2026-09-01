@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shlex
 import shutil
 import socket
 import subprocess
@@ -25,12 +26,15 @@ from rodex.agent_observer import (
     project_user_message_event,
 )
 from rodex.observer_contract import OBSERVER_PROJECTED_TEXT_MAX_CHARS
+from rodex.observer_pane import ObserverPaneController
 from rodex.protocol_proxy import CodexProtocolEventTap
+from rodex.tmux_session_capability import TmuxRuntimeCapability
 from rodex_registry import (
     RodexAgentObserverTurnEvidence,
     RodexAgentTraceEvent,
     RodexAgentTracePublication,
     RodexAgentTraceSnapshot,
+    RodexRuntimeId,
     TraceSubagentActivity,
     TraceToolCall,
     create_a_rodex_session,
@@ -47,6 +51,17 @@ ROOT_THREAD_ID = uuid.UUID("01a00654-f2bc-7a30-834a-a5f886a65f82")
 CHILD_THREAD_ID = uuid.UUID("01a00654-f2bc-7a30-834a-a5f886a65f83")
 OTHER_THREAD_ID = uuid.UUID("01a00654-f2bc-7a30-834a-a5f886a65f84")
 TRACE_CURSOR = uuid.UUID("10000000-0000-4000-8000-000000000001")
+RUNTIME_ID = RodexRuntimeId.parse("0123456789abcdef")
+
+
+def _runtime_capability(socket_path: Path) -> TmuxRuntimeCapability:
+    return TmuxRuntimeCapability(
+        socket_path,
+        "0123456789abcdef0123456789abcdef",
+        "$7",
+        "%7",
+        RUNTIME_ID,
+    )
 
 
 def _receive_control_event(listener: socket.socket) -> dict[str, object]:
@@ -324,7 +339,7 @@ def test_collaboration_invocation_waits_for_its_correlated_activity(
 
     controller = AgentObserverCoordinator(
         "/usr/bin/tmux",
-        tmp_path / "tmux.sock",
+        _runtime_capability(tmp_path / "tmux.sock"),
         "%7",
         tmp_path / "events.sock",
         runner=runner,
@@ -407,14 +422,14 @@ def test_exact_spawn_creates_a_disabled_top_third_without_changing_focus(
         if operation == "show-options":
             return subprocess.CompletedProcess(command, 0, "", "")
         if operation == "display-message":
-            return subprocess.CompletedProcess(command, 0, "/workspace\n", "")
-        if operation == "split-window":
+            return subprocess.CompletedProcess(command, 0, "1|%7|/workspace\n", "")
+        if operation == "if-shell" and "split-window" in command[-2]:
             return subprocess.CompletedProcess(command, 0, "%9\n", "")
         return subprocess.CompletedProcess(command, 0, "", "")
 
     controller = AgentObserverCoordinator(
         "/usr/bin/tmux",
-        tmp_path / "tmux.sock",
+        _runtime_capability(tmp_path / "tmux.sock"),
         "%7",
         tmp_path / "events.sock",
         runner=runner,
@@ -435,8 +450,10 @@ def test_exact_spawn_creates_a_disabled_top_third_without_changing_focus(
 
     controller.observe_protocol_event(_spawn_event())
 
-    split = next(command for command in calls if command[3] == "split-window")
-    assert split[4:14] == [
+    split = shlex.split(
+        next(command[-2] for command in calls if "split-window" in command[-2])
+    )
+    assert split[1:11] == [
         "-v",
         "-b",
         "-d",
@@ -454,13 +471,63 @@ def test_exact_spawn_creates_a_disabled_top_third_without_changing_focus(
     assert "subAgentActivity" in split[-1]
     assert "/root/live-review" in split[-1]
     assert "prompt" not in split[-1]
-    assert [command[3:] for command in calls[-4:]] == [
+    assert [shlex.split(command[-2]) for command in calls[-4:]] == [
         ["set-option", "-p", "-t", "%7", "@rodex_agent_observer_pane_id", "%9"],
         ["set-option", "-p", "-t", "%9", "@rodex_agent_observer_for", "%7"],
         ["select-pane", "-d", "-t", "%9"],
         ["select-pane", "-t", "%7"],
     ]
     assert sent == []
+
+
+@pytest.mark.parametrize("failed_registration_step", range(4))
+def test_observer_creation_rolls_back_every_partial_registration_failure(
+    tmp_path: Path,
+    failed_registration_step: int,
+) -> None:
+    calls: list[list[str]] = []
+    registration_step = 0
+    failure_injected = False
+
+    def runner(command: list[str], **_options: object) -> subprocess.CompletedProcess[str]:
+        nonlocal failure_injected, registration_step
+        calls.append(command)
+        operation = command[3]
+        if operation == "display-message":
+            return subprocess.CompletedProcess(command, 0, "1|%7|/workspace\n", "")
+        if operation != "if-shell":
+            raise AssertionError(f"unexpected tmux command: {command}")
+        action = shlex.split(command[-2])
+        if action[0] == "split-window":
+            return subprocess.CompletedProcess(command, 0, "%9\n", "")
+        if not failure_injected:
+            if registration_step == failed_registration_step:
+                failure_injected = True
+                return subprocess.CompletedProcess(command, 1, "", "injected failure")
+            registration_step += 1
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    controller = ObserverPaneController(
+        "/usr/bin/tmux",
+        _runtime_capability(tmp_path / "tmux.sock"),
+        "%7",
+        runner=runner,
+        python_executable="/usr/bin/python3",
+    )
+
+    created = controller.create(
+        database_path=tmp_path / "rodex.sqlite3",
+        rodex_sessions_id=3,
+        rodex_session_id="1234567890abcdef",
+        root_thread_id=ROOT_THREAD_ID,
+        protocol_event_socket_path=tmp_path / "events.sock",
+        initial_event={"kind": "test"},
+    )
+
+    assert created is None
+    assert failure_injected
+    actions = [shlex.split(command[-2]) for command in calls if command[3] == "if-shell"]
+    assert ["kill-pane", "-t", "%9"] in actions
 
 
 def test_existing_observer_pane_is_reused_and_receives_exact_new_spawn(
@@ -475,12 +542,12 @@ def test_existing_observer_pane_is_reused_and_receives_exact_new_spawn(
         if operation == "show-options":
             return subprocess.CompletedProcess(command, 0, "%9\n", "")
         if operation == "display-message":
-            return subprocess.CompletedProcess(command, 0, "%9|%7|0\n", "")
+            return subprocess.CompletedProcess(command, 0, "1|%9|%7|0\n", "")
         raise AssertionError(f"unexpected tmux mutation: {command}")
 
     controller = AgentObserverCoordinator(
         "/usr/bin/tmux",
-        tmp_path / "tmux.sock",
+        _runtime_capability(tmp_path / "tmux.sock"),
         "%7",
         tmp_path / "events.sock",
         runner=runner,
@@ -496,7 +563,7 @@ def test_existing_observer_pane_is_reused_and_receives_exact_new_spawn(
 
     controller.observe_protocol_event(_spawn_event(item_id="call-spawn-2"))
 
-    assert not any(command[3] == "split-window" for command in calls)
+    assert not any("split-window" in " ".join(command) for command in calls)
     assert len(sent) == 1
     assert sent[0][0] == observer_control_socket_path(tmp_path / "events.sock")
     events = _observer_snapshot_events(sent[0][1])
@@ -518,14 +585,14 @@ def test_same_turn_parent_request_is_sent_exactly_without_entering_process_args(
         if operation == "show-options":
             return subprocess.CompletedProcess(command, 0, "", "")
         if operation == "display-message":
-            return subprocess.CompletedProcess(command, 0, "/workspace\n", "")
-        if operation == "split-window":
+            return subprocess.CompletedProcess(command, 0, "1|%7|/workspace\n", "")
+        if operation == "if-shell" and "split-window" in command[-2]:
             return subprocess.CompletedProcess(command, 0, "%9\n", "")
         return subprocess.CompletedProcess(command, 0, "", "")
 
     controller = AgentObserverCoordinator(
         "/usr/bin/tmux",
-        tmp_path / "tmux.sock",
+        _runtime_capability(tmp_path / "tmux.sock"),
         "%7",
         tmp_path / "events-runtime-a.sock",
         runner=runner,
@@ -544,7 +611,9 @@ def test_same_turn_parent_request_is_sent_exactly_without_entering_process_args(
     controller.observe_protocol_event(_collaboration_invocation_event())
     controller.observe_protocol_event(_spawn_event())
 
-    split = next(command for command in calls if command[3] == "split-window")
+    split = shlex.split(
+        next(command[-2] for command in calls if "split-window" in command[-2])
+    )
     assert request not in split[-1]
     assert "root_request_context_follows" in split[-1]
     assert len(sent) == 1
@@ -578,12 +647,12 @@ def test_parent_request_is_not_correlated_across_turns_or_roots(tmp_path: Path) 
         if operation == "show-options":
             return subprocess.CompletedProcess(command, 0, "%9\n", "")
         if operation == "display-message":
-            return subprocess.CompletedProcess(command, 0, "%9|%7|0\n", "")
+            return subprocess.CompletedProcess(command, 0, "1|%9|%7|0\n", "")
         raise AssertionError(f"unexpected tmux mutation: {command}")
 
     controller = AgentObserverCoordinator(
         "/usr/bin/tmux",
-        tmp_path / "tmux.sock",
+        _runtime_capability(tmp_path / "tmux.sock"),
         "%7",
         tmp_path / "events.sock",
         runner=runner,
@@ -618,12 +687,12 @@ def test_same_agent_followup_receives_its_new_exact_parent_request(tmp_path: Pat
         if operation == "show-options":
             return subprocess.CompletedProcess(command, 0, "%9\n", "")
         if operation == "display-message":
-            return subprocess.CompletedProcess(command, 0, "%9|%7|0\n", "")
+            return subprocess.CompletedProcess(command, 0, "1|%9|%7|0\n", "")
         raise AssertionError(f"unexpected tmux mutation: {command}")
 
     controller = AgentObserverCoordinator(
         "/usr/bin/tmux",
-        tmp_path / "tmux.sock",
+        _runtime_capability(tmp_path / "tmux.sock"),
         "%7",
         tmp_path / "events.sock",
         runner=runner,
@@ -696,12 +765,12 @@ def test_primary_event_path_forwards_tracked_agent_prose_without_subscriber_gap(
         if operation == "show-options":
             return subprocess.CompletedProcess(command, 0, "%9\n", "")
         if operation == "display-message":
-            return subprocess.CompletedProcess(command, 0, "%9|%7|0\n", "")
+            return subprocess.CompletedProcess(command, 0, "1|%9|%7|0\n", "")
         raise AssertionError(f"unexpected tmux mutation: {command}")
 
     controller = AgentObserverCoordinator(
         "/usr/bin/tmux",
-        tmp_path / "tmux.sock",
+        _runtime_capability(tmp_path / "tmux.sock"),
         "%7",
         tmp_path / "events.sock",
         runner=runner,
@@ -745,14 +814,14 @@ def test_controller_close_waits_for_inflight_callback_and_blocks_late_mutation(
             assert release_callback.wait(2)
             return subprocess.CompletedProcess(command, 1, "", "missing")
         if operation == "display-message":
-            return subprocess.CompletedProcess(command, 0, f"{tmp_path}\n", "")
-        if operation == "split-window":
+            return subprocess.CompletedProcess(command, 0, f"1|%7|{tmp_path}\n", "")
+        if operation == "if-shell" and "split-window" in command[-2]:
             return subprocess.CompletedProcess(command, 0, "%9\n", "")
         return subprocess.CompletedProcess(command, 0, "", "")
 
     controller = AgentObserverCoordinator(
         "/usr/bin/tmux",
-        tmp_path / "tmux.sock",
+        _runtime_capability(tmp_path / "tmux.sock"),
         "%7",
         tmp_path / "events.sock",
         runner=runner,
@@ -798,13 +867,13 @@ def test_existing_observer_reconnects_with_current_bounded_semantic_snapshot(
         if operation == "show-options":
             return subprocess.CompletedProcess(command, 0, "%9\n", "")
         if operation == "display-message":
-            return subprocess.CompletedProcess(command, 0, "%9|%7|0\n", "")
+            return subprocess.CompletedProcess(command, 0, "1|%9|%7|0\n", "")
         raise AssertionError(f"unexpected tmux mutation: {command}")
 
     event_socket = tmp_path / "events.sock"
     controller = AgentObserverCoordinator(
         "/usr/bin/tmux",
-        tmp_path / "tmux.sock",
+        _runtime_capability(tmp_path / "tmux.sock"),
         "%7",
         event_socket,
         runner=runner,
@@ -2219,9 +2288,61 @@ def test_real_tmux_observer_renders_request_and_exits_with_its_runtime(
             text=True,
             capture_output=True,
         ).stdout.strip()
+        server_id = "0123456789abcdef0123456789abcdef"
+        subprocess.run(
+            [
+                tmux,
+                "-S",
+                str(tmux_socket),
+                "set-option",
+                "-s",
+                "@rodex_shared_tmux_protocol",
+                "rodex-shared-tmux-v1",
+                ";",
+                "set-option",
+                "-s",
+                "@rodex_shared_tmux_server_id",
+                server_id,
+                ";",
+                "set-option",
+                "-t",
+                primary,
+                "@rodex_runtime_id",
+                str(RUNTIME_ID),
+                ";",
+                "set-option",
+                "-t",
+                primary,
+                "@rodex_primary_pane_id",
+                primary,
+            ],
+            check=True,
+        )
+        tmux_session_id = subprocess.run(
+            [
+                tmux,
+                "-S",
+                str(tmux_socket),
+                "display-message",
+                "-p",
+                "-t",
+                primary,
+                "-F",
+                "#{session_id}",
+            ],
+            check=True,
+            text=True,
+            capture_output=True,
+        ).stdout.strip()
         controller = AgentObserverCoordinator(
             tmux,
-            tmux_socket,
+            TmuxRuntimeCapability(
+                tmux_socket,
+                server_id,
+                tmux_session_id,
+                primary,
+                RUNTIME_ID,
+            ),
             primary,
             event_socket,
             python_executable=sys.executable,

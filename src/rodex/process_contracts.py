@@ -102,6 +102,7 @@ class AnalyticsWorkerConfig:
         *,
         required: bool,
         include_event_socket: bool = True,
+        include_runtime_id: bool = True,
     ) -> None:
         parser.add_argument("--rodex-database", required=required, type=Path)
         parser.add_argument("--codex-sessions-root", required=required, type=Path)
@@ -115,11 +116,12 @@ class AnalyticsWorkerConfig:
             required=required,
             type=parse_rodex_registry_id,
         )
-        parser.add_argument(
-            "--rodex-runtime-id",
-            required=required,
-            type=parse_rodex_runtime_id,
-        )
+        if include_runtime_id:
+            parser.add_argument(
+                "--rodex-runtime-id",
+                required=required,
+                type=parse_rodex_runtime_id,
+            )
         if include_event_socket:
             parser.add_argument("--protocol-event-socket", required=required, type=Path)
         parser.add_argument("--rodex-sessions-id", type=int)
@@ -155,7 +157,12 @@ class AnalyticsWorkerConfig:
             codex_session_id=namespace.codex_session_id,
         )
 
-    def to_argv(self, *, include_event_socket: bool = True) -> list[str]:
+    def to_argv(
+        self,
+        *,
+        include_event_socket: bool = True,
+        include_runtime_id: bool = True,
+    ) -> list[str]:
         arguments = [
             "--rodex-database",
             str(self.rodex_database_path),
@@ -165,9 +172,9 @@ class AnalyticsWorkerConfig:
             str(self.rodex_session_id),
             "--rodex-registry-id",
             str(self.rodex_registry_id),
-            "--rodex-runtime-id",
-            str(self.runtime_id),
         ]
+        if include_runtime_id:
+            arguments.extend(("--rodex-runtime-id", str(self.runtime_id)))
         if include_event_socket:
             arguments.extend(
                 ("--protocol-event-socket", str(self.protocol_event_socket_path))
@@ -224,6 +231,7 @@ class SessionHostConfig:
     protocol_event_socket_path: Path
     tmux_binary: str
     tmux_server_socket_path: Path
+    runtime_id: RodexRuntimeId
     codex_arguments: tuple[str, ...] = ()
     analytics: AnalyticsWorkerConfig | None = None
 
@@ -243,6 +251,8 @@ class SessionHostConfig:
             and self.analytics.protocol_event_socket_path != self.protocol_event_socket_path
         ):
             raise ValueError("analytics must use the session host event socket")
+        if self.analytics is not None and self.analytics.runtime_id != self.runtime_id:
+            raise ValueError("analytics must use the session host runtime identity")
 
     @classmethod
     def parser(cls) -> argparse.ArgumentParser:
@@ -254,10 +264,16 @@ class SessionHostConfig:
         parser.add_argument("--protocol-event-socket", required=True, type=Path)
         parser.add_argument("--tmux-binary", required=True)
         parser.add_argument("--tmux-server-socket", required=True, type=Path)
+        parser.add_argument(
+            "--rodex-runtime-id",
+            required=True,
+            type=parse_rodex_runtime_id,
+        )
         AnalyticsWorkerConfig.add_arguments(
             parser,
             required=False,
             include_event_socket=False,
+            include_runtime_id=False,
         )
         parser.add_argument("codex_arguments", nargs=argparse.REMAINDER)
         return parser
@@ -268,13 +284,30 @@ class SessionHostConfig:
         codex_arguments = tuple(namespace.codex_arguments)
         if codex_arguments[:1] == ("--",):
             codex_arguments = codex_arguments[1:]
-        try:
-            analytics = AnalyticsWorkerConfig.from_namespace(
-                namespace,
-                optional_group=True,
+        analytics_fields = (
+            namespace.rodex_database,
+            namespace.codex_sessions_root,
+            namespace.rodex_session_id,
+            namespace.rodex_registry_id,
+        )
+        if any(value is not None for value in analytics_fields) and not all(
+            value is not None for value in analytics_fields
+        ):
+            cls.parser().error("analytics arguments must be supplied together")
+        analytics = (
+            None
+            if not any(value is not None for value in analytics_fields)
+            else AnalyticsWorkerConfig(
+                rodex_database_path=namespace.rodex_database,
+                codex_sessions_root=namespace.codex_sessions_root,
+                rodex_session_id=namespace.rodex_session_id,
+                rodex_registry_id=namespace.rodex_registry_id,
+                runtime_id=namespace.rodex_runtime_id,
+                protocol_event_socket_path=namespace.protocol_event_socket,
+                rodex_sessions_id=namespace.rodex_sessions_id,
+                codex_session_id=namespace.codex_session_id,
             )
-        except ValueError as error:
-            cls.parser().error(str(error))
+        )
         return cls(
             codex_binary=namespace.codex_binary,
             app_server_socket_path=namespace.app_server_socket,
@@ -283,6 +316,7 @@ class SessionHostConfig:
             protocol_event_socket_path=namespace.protocol_event_socket,
             tmux_binary=namespace.tmux_binary,
             tmux_server_socket_path=namespace.tmux_server_socket,
+            runtime_id=namespace.rodex_runtime_id,
             codex_arguments=codex_arguments,
             analytics=analytics,
         )
@@ -303,9 +337,16 @@ class SessionHostConfig:
             self.tmux_binary,
             "--tmux-server-socket",
             str(self.tmux_server_socket_path),
+            "--rodex-runtime-id",
+            str(self.runtime_id),
         ]
         if self.analytics is not None:
-            arguments.extend(self.analytics.to_argv(include_event_socket=False))
+            arguments.extend(
+                self.analytics.to_argv(
+                    include_event_socket=False,
+                    include_runtime_id=False,
+                )
+            )
         return [*arguments, "--", *self.codex_arguments]
 
     def command(self, python_executable: str) -> list[str]:

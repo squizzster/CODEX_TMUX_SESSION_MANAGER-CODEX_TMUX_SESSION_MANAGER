@@ -3,10 +3,10 @@ from __future__ import annotations
 import asyncio
 import re
 import shlex
+import uuid
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
-from rodex.runtime import LiveTmuxSession
 from rodex.status_animation import AsyncCommandResult, animate_status
 from rodex.status_animation_admission import (
     STATUS_ANIMATION_GENERATION_OPTION,
@@ -15,20 +15,60 @@ from rodex.status_animation_admission import (
     STATUS_ANIMATION_WATCHDOG_TOKEN_OPTION,
     animate_admitted_status,
     run_watchdog_gate,
-    status_animation_hook_command,
+    status_animation_admission_command,
+)
+from rodex.tmux_session_capability import (
+    RODEX_CODEX_SESSION_ID_OPTION,
+    RODEX_INTERNAL_SESSION_ID_OPTION,
+    RODEX_PRIMARY_PANE_ID_OPTION,
+    RODEX_REGISTRATION_REGISTERED,
+    RODEX_REGISTRATION_STATE_OPTION,
+    RODEX_REGISTRY_ID_OPTION,
+    RODEX_RUNTIME_ID_OPTION,
+    RODEX_SESSION_ID_OPTION,
+    RODEX_SHARED_TMUX_PROTOCOL,
+    RODEX_SHARED_TMUX_PROTOCOL_OPTION,
+    RODEX_SHARED_TMUX_SERVER_ID_OPTION,
+    TmuxSessionCapability,
 )
 from rodex.tmux_status import (
     STATUS_CLAIM_PRIORITY_OPTION,
     STATUS_CLAIM_PUBLISHER_OPTION,
     STATUS_CLAIM_TOKEN_OPTION,
 )
+from rodex_registry.identity import RodexRegistryId, RodexRuntimeId, RodexSessionId
 
 _OPTION_COMPARISON = re.compile(r"#\{==:#\{(@[^}]+)\},([^}]*)\}")
 
 
+def _capability(socket_path: Path) -> TmuxSessionCapability:
+    return TmuxSessionCapability(
+        socket_path,
+        "0123456789abcdef0123456789abcdef",
+        "$7",
+        "%9",
+        RodexRuntimeId.parse("0123456789abcdef"),
+        RodexSessionId.parse("1111111111111111"),
+        RodexRegistryId.parse("2222222222222222"),
+        7,
+        uuid.UUID("01a00654-f2bc-7a30-834a-a5f886a65f82"),
+    )
+
+
 class _OwnerTmux:
     def __init__(self) -> None:
-        self.options: dict[str, str] = {}
+        capability = _capability(Path("/isolated/round3/owner.sock"))
+        self.options: dict[str, str] = {
+            RODEX_SHARED_TMUX_PROTOCOL_OPTION: RODEX_SHARED_TMUX_PROTOCOL,
+            RODEX_SHARED_TMUX_SERVER_ID_OPTION: capability.tmux_server_id,
+            RODEX_PRIMARY_PANE_ID_OPTION: capability.tmux_primary_pane_id,
+            RODEX_RUNTIME_ID_OPTION: str(capability.runtime_id),
+            RODEX_REGISTRATION_STATE_OPTION: RODEX_REGISTRATION_REGISTERED,
+            RODEX_SESSION_ID_OPTION: str(capability.rodex_session_id),
+            RODEX_REGISTRY_ID_OPTION: str(capability.registry_id),
+            RODEX_INTERNAL_SESSION_ID_OPTION: str(capability.internal_session_id),
+            RODEX_CODEX_SESSION_ID_OPTION: str(capability.codex_session_id),
+        }
         self.commands: list[list[str]] = []
         self.spawned_owner_tokens: list[str] = []
         self.before_release: Callable[[], None] | None = None
@@ -53,7 +93,13 @@ class _OwnerTmux:
         recorded = list(command)
         self.commands.append(recorded)
         if "display-message" in recorded:
-            return AsyncCommandResult(0, "2\n")
+            format_string = recorded[-1]
+            if "#{session_attached}" in format_string:
+                return AsyncCommandResult(0, "1\t2\n")
+            if STATUS_CLAIM_TOKEN_OPTION in format_string:
+                token = self.options.get(STATUS_CLAIM_TOKEN_OPTION, "")
+                return AsyncCommandResult(0, f"1\t{token}\n")
+            return AsyncCommandResult(0, "1\n")
         if "show-options" in recorded:
             value = self.options.get(recorded[-1], "")
             return AsyncCommandResult(0 if value else 1, f"{value}\n")
@@ -86,9 +132,11 @@ class _OwnerTmux:
         return AsyncCommandResult(0)
 
     def _condition_is_true(self, condition: str) -> bool:
-        if condition.startswith("#{<=:"):
+        if "#{<=:" in condition:
             current = int(self.options.get(STATUS_CLAIM_PRIORITY_OPTION, "0"))
-            requested = int(condition.rsplit(",", maxsplit=1)[1].removesuffix("}"))
+            match = re.search(r"#\{<=:#\{@rodex_status_claim_priority\},(\d+)\}", condition)
+            assert match is not None
+            requested = int(match.group(1))
             return current <= requested
         comparisons = _OPTION_COMPARISON.findall(condition)
         if comparisons:
@@ -119,8 +167,7 @@ def _run_owner(
     asyncio.run(
         animate_admitted_status(
             "tmux",
-            Path("/isolated/round3/owner.sock"),
-            "round3-owner",
+            _capability(Path("/isolated/round3/owner.sock")),
             "attached",
             owner_token,
             watchdog=watchdog,
@@ -143,7 +190,7 @@ def test_round3_owner_drains_one_transition_and_clears_transient_options() -> No
     assert STATUS_ANIMATION_OWNER_TOKEN_OPTION not in tmux.options
     assert STATUS_CLAIM_TOKEN_OPTION not in tmux.options
     assert STATUS_CLAIM_PUBLISHER_OPTION not in tmux.options
-    assert len(tmux.commands) == 59
+    assert len(tmux.commands) == 60
 
 
 def test_round3_owner_aba_coalesces_to_latest_without_spawning_a_loser() -> None:
@@ -245,8 +292,7 @@ def test_round3_watchdog_gate_exposes_crashes_before_starting_recovery() -> None
     asyncio.run(
         run_watchdog_gate(
             "/usr/bin/tmux",
-            Path("/isolated/round3/tmux.sock"),
-            "round3-owner",
+            _capability(Path("/isolated/round3/tmux.sock")),
             "attached",
             owner_token,
             runner=tmux,
@@ -263,10 +309,10 @@ def test_round3_watchdog_gate_exposes_crashes_before_starting_recovery() -> None
 
 
 def test_round3_delayed_gate_uses_the_canonical_python_executor_boundary() -> None:
-    hook = status_animation_hook_command(
+    hook = status_animation_admission_command(
         "/venv/bin/python",
         "/usr/bin/tmux",
-        LiveTmuxSession(Path("/isolated/round3/tmux.sock"), "round3-owner"),
+        _capability(Path("/isolated/round3/tmux.sock")),
         "attached",
     )
 
@@ -275,11 +321,11 @@ def test_round3_delayed_gate_uses_the_canonical_python_executor_boundary() -> No
 
 
 def test_round3_hook_burst_has_one_immediate_owner_and_one_delayed_watchdog() -> None:
-    runtime = LiveTmuxSession(Path("/isolated/round3/tmux.sock"), "round3-owner")
-    hook = status_animation_hook_command(
+    capability = _capability(Path("/isolated/round3/tmux.sock"))
+    hook = status_animation_admission_command(
         "/venv/bin/python",
         "/usr/bin/tmux",
-        runtime,
+        capability,
         "attached",
     )
     tmux = _OwnerTmux()
@@ -290,8 +336,10 @@ def test_round3_hook_burst_has_one_immediate_owner_and_one_delayed_watchdog() ->
     assert tmux.spawned_owner_tokens == ["1"]
     assert hook.count("--admitted") == 1
     assert hook.count("--watchdog-gate") == 1
-    assert hook.count("--tmux-session-target") == 2
-    assert hook.count("#{session_id}") >= 2
+    assert hook.count("--tmux-session-id") == 2
+    assert "-t '#{session_id}" not in hook
+    assert "--tmux-session-id '#{session_id}" not in hook
+    assert hook.count(capability.tmux_session_id) >= 2
     assert "run-shell -b -d 15.0" in hook
     assert hook.count(STATUS_ANIMATION_PENDING_EVENT_OPTION) == 1
     assert hook.count(STATUS_ANIMATION_GENERATION_OPTION) >= 4
@@ -304,8 +352,7 @@ def test_round3_animation_uses_a_rename_stable_tmux_session_id() -> None:
     asyncio.run(
         animate_status(
             "tmux",
-            Path("/isolated/round3/rename.sock"),
-            "$7",
+            _capability(Path("/isolated/round3/rename.sock")),
             "attached",
             runner=tmux,
             wait_until=_no_wait,
@@ -316,6 +363,7 @@ def test_round3_animation_uses_a_rename_stable_tmux_session_id() -> None:
     targeted = [
         command[command.index("-t") + 1] for command in tmux.commands if "-t" in command
     ]
-    assert "$7:" in targeted
-    assert "$7" in targeted
+    assert targeted
+    assert set(targeted) == {"%9"}
+    assert any("$7" in argument for command in tmux.commands for argument in command)
     assert not any(target.startswith("=") for target in targeted)

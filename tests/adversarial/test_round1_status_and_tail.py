@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import shlex
 import subprocess
 import time
 from pathlib import Path
@@ -24,7 +25,19 @@ from rodex.session_tail import (
     SessionTailRequest,
     follow_session_tail,
 )
+from rodex.tmux_session_capability import TmuxRuntimeCapability
 from rodex.tmux_status import TmuxStatusOption
+from rodex_registry import RodexRuntimeId
+
+
+def _runtime_capability(socket_path: Path) -> TmuxRuntimeCapability:
+    return TmuxRuntimeCapability(
+        socket_path,
+        "0123456789abcdef0123456789abcdef",
+        "$7",
+        "%9",
+        RodexRuntimeId.parse("0123456789abcdef"),
+    )
 
 
 def _compaction_event(method: str) -> dict[str, object]:
@@ -535,7 +548,7 @@ def test_round1_status_publication_deduplicates_identical_values(tmp_path: Path)
     duplicate_call = Event()
 
     def runner(command: list[str], **_options: object) -> subprocess.CompletedProcess[str]:
-        calls.append(command[-1])
+        calls.append(shlex.split(command[-1])[-1])
         if len(calls) == 1:
             first_call.set()
         else:
@@ -544,7 +557,7 @@ def test_round1_status_publication_deduplicates_identical_values(tmp_path: Path)
 
     status = TmuxStatusOption(
         "tmux",
-        tmp_path / "tmux.sock",
+        _runtime_capability(tmp_path / "tmux.sock"),
         "%1",
         "@rodex_test_status",
         runner=runner,
@@ -570,7 +583,7 @@ def test_round1_blocked_tmux_status_runner_is_nonblocking_and_coalesces_latest(
     latest_published = Event()
 
     def runner(command: list[str], **_options: object) -> subprocess.CompletedProcess[str]:
-        value = command[-1]
+        value = shlex.split(command[-1])[-1]
         calls.append(value)
         runner_threads.add(get_ident())
         if len(calls) == 1:
@@ -582,7 +595,7 @@ def test_round1_blocked_tmux_status_runner_is_nonblocking_and_coalesces_latest(
 
     status = TmuxStatusOption(
         "tmux",
-        tmp_path / "tmux.sock",
+        _runtime_capability(tmp_path / "tmux.sock"),
         "%1",
         "@rodex_test_status",
         runner=runner,
@@ -619,7 +632,7 @@ def test_round1_tmux_status_aba_coalescing_preserves_latest_desired_value(
     final_value_published = Event()
 
     def runner(command: list[str], **_options: object) -> subprocess.CompletedProcess[str]:
-        value = command[-1]
+        value = shlex.split(command[-1])[-1]
         calls.append(value)
         runner_threads.add(get_ident())
         if len(calls) == 1:
@@ -631,7 +644,7 @@ def test_round1_tmux_status_aba_coalescing_preserves_latest_desired_value(
 
     status = TmuxStatusOption(
         "tmux",
-        tmp_path / "tmux.sock",
+        _runtime_capability(tmp_path / "tmux.sock"),
         "%1",
         "@rodex_test_status",
         runner=runner,
@@ -667,7 +680,7 @@ def test_round1_tmux_status_timeout_opens_a_bounded_latest_value_circuit(
     latest_published = Event()
 
     def runner(command: list[str], **options: object) -> subprocess.CompletedProcess[str]:
-        value = command[-1]
+        value = shlex.split(command[-1])[-1]
         calls.append(value)
         assert options["timeout"] == 0.01
         if len(calls) == 1:
@@ -679,7 +692,7 @@ def test_round1_tmux_status_timeout_opens_a_bounded_latest_value_circuit(
 
     status = TmuxStatusOption(
         "tmux",
-        tmp_path / "tmux.sock",
+        _runtime_capability(tmp_path / "tmux.sock"),
         "%1",
         "@rodex_test_status",
         runner=runner,

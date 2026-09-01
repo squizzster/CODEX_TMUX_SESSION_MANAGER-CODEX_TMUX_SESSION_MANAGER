@@ -26,7 +26,8 @@ Both sides retain the same Rodex, runtime, Codex, and workspace context.
 
 ## What Rodex does
 
-- Opens the ordinary interactive Codex TUI inside a private tmux runtime.
+- Opens the ordinary interactive Codex TUI as one capability-isolated session on a
+  shared, versioned per-user tmux server.
 - Accepts the current native `codex [OPTIONS] [PROMPT]` shape and forwards its arguments
   unchanged into that managed TUI.
 - Keeps Rodex and Codex session identities distinct and linked.
@@ -68,6 +69,17 @@ Both sides retain the same Rodex, runtime, Codex, and workspace context.
   before attaching to or controlling a live runtime.
 - Serializes concurrent opens of one ended name and tolerates the bounded Codex-writer
   shutdown handoff without creating duplicate runtimes.
+
+The shared Unix socket is transport, not authority. The owning host carries socket,
+server incarnation, immutable tmux `$session_id`, primary `%pane_id`, and Rodex runtime.
+The launcher mints registered external authority by adding the Rodex session, registry,
+SQL row, Codex UUID, and registered state after a uniqueness-checked roster read; async
+actors carry that full capability. Each terminal action repeats the applicable tuple at
+its exact target; primary-pane actions additionally require the immutable pane ID. Client
+hooks only wake the roster coordinator. Live names
+include the registry ID so equal aliases in different databases cannot collide. Checks
+are synchronous at operation boundaries—Rodex is not an IDS and uses no inotify or
+real-time filesystem/tmux monitoring.
 
 One declarative Codex 0.150.1 CLI contract owns this boundary. Exact underscore Rodex
 commands stay local. Native interactive options and an optional prompt create and attach
@@ -115,7 +127,9 @@ the command key, without delaying it, so fast sequences still work. Enter copy m
 mouse preference instead of overriding it. In a shared session, one `Ctrl-C` warns that
 another press may end the session for everyone and offers `Ctrl-b d` as the detach-only
 route; the same client must press it again within two seconds to pass the key to Codex.
-Custom prefixes and user-owned root `C-b` bindings are left unchanged.
+Custom prefixes and user-owned root `C-b` bindings are left unchanged. Because the
+shared `C-c` safety guard is server-global, a pre-existing non-Rodex root `C-c` binding
+causes explicit initialization failure rather than silently disabling the guard.
 
 Managed launches disable Codex's own interactive startup update check because it can
 appear before runtime registration and block Rodex attachment. Immediately before each
@@ -307,8 +321,8 @@ handling.
 
 `_mouse` enters the same coordinator and retains that transition lock through both its
 tmux mutation and readback. It resolves the verified runtime marker to tmux's immutable
-server-local `$session_id`, so a concurrent rename or reuse of the old display name cannot
-redirect the operation or its telemetry to another session.
+server-local `$session_id` and primary `%pane_id`, so rename or old-name reuse cannot
+redirect the operation or its telemetry.
 
 Resuming from a different caller working directory intentionally relocates the runtime;
 session identity follows the human rather than permanently pinning the original path.
@@ -398,7 +412,8 @@ a read-only canonical allowlist check and is not part of ordinary mutation hot p
 Short-lived Unix sockets and app-server logs use `$XDG_RUNTIME_DIR/rodex`, normally
 `/run/user/<uid>/rodex`. When `XDG_RUNTIME_DIR` is unset or that socket path would be
 too long, Rodex uses the private fallback `/tmp/rodex-<uid>`. Set `RODEX_RUNTIME_DIR`
-to override it.
+to override it. Managed tmux sessions share `tmux-shared-v1.sock` within that private
+root; each app-server, proxy, event stream, observer, and log remains runtime-specific.
 
 The registry is held in a private current-user directory and must remain a regular
 current-user file at mode `0600`; runtime roots are mode `0700`, and live sockets and

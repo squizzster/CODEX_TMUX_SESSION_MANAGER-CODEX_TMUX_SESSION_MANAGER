@@ -76,10 +76,37 @@ listener; control endpoints are Unix sockets below a private runtime root.
   lines for `token_count` records only, retaining no rollout bodies. Idle checks inspect
   metadata before bounded fingerprints, back off to a two-second ceiling, and wake early
   on existing exact-thread protocol activity.
-- tmux operations use argv execution and exact `=name` or `=name:` targets. Dynamic hook
-  commands are shell-quoted; cleanup and failure handling target one named runtime.
+- All Rodex sessions share the versioned `tmux-shared-v1.sock`; that socket is transport,
+  not authority. Server-scope protocol and random incarnation markers identify a
+  compatible server. Creation may claim only a completely unmarked server with no live
+  session. An incompatible or unmarked nonempty server is rejected without changing its
+  sessions, global options, hooks, or keys.
+- The owning host's authority is `(absolute socket, server incarnation, immutable
+  $session_id, primary %pane_id, runtime incarnation)`. External registered authority
+  adds exact Rodex session, registry, SQL-row, Codex, and `registered` identities. The
+  launcher mints it after a coherent snapshot and uniqueness-checked roster; async actors
+  carry it. Every terminal action repeats its applicable fields at the exact target;
+  primary actions also require the immutable pane ID. Name, socket, runtime, process
+  context, or hook event is insufficient.
+- tmux display names include the registry suffix `<display>--r<registry-id>`, preventing
+  equal aliases in independent SQLite registries from colliding in tmux's server-global
+  name namespace. Durable display names remain registry-local and user-facing.
+- Server-global indexed client hooks are wake-only. They carry no source session or
+  mutation target; the sharing coordinator re-inventories all registered sessions and
+  submits a changed count only through that session's full capability. Rodex owns and
+  verifies only its dedicated hook indices and options behind a server-incarnation fence,
+  and never removes local session hooks. Root `C-c` is installed exactly or initialization
+  fails closed if a non-Rodex binding owns the key. Hook shell text is quoted and tmux
+  format text is escaped.
+- These are synchronous operation-boundary checks. Rodex is not an IDS and adds no
+  filesystem/tmux surveillance, inotify watcher, or real-time monitor. An unavoidable
+  same-uid external race can install a key binding between Rodex's last absence check and
+  bind because tmux has no conditional bind-if-absent primitive; Rodex can overwrite that
+  racing change. Readback detects a later competing change, not absence at the bind
+  instant, so same-uid tmux configuration must be coordinated during initialization.
 - `_cat`, `_tail`, and `_events` resolve the same owned, registered live identity before
-  reading. `_agents`, `_trace`, and `_stats` resolve the owned durable identity and need
+  reading; terminal reads target its immutable primary pane. `_agents`, `_trace`, and
+  `_stats` resolve the owned durable identity and need
   no live runtime; explicit trace body reads re-authenticate the recorded rollout prefix.
   Terminal following emits only tmux's plain text and creates no persistent conversation
   copy.

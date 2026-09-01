@@ -11,7 +11,7 @@ and one authenticated tmux endpoint.
 ## Runtime shape
 
 ```text
-user → Rodex CLI → private tmux → session host → Codex TUI ↔ proxy ↔ app-server
+user → Rodex CLI → shared tmux → session host → Codex TUI ↔ proxy ↔ app-server
          ├──► SQLite registry          │                 ├──► status / live clients
          ├──► _cat / _tail             │                 └──► agent observer pane
          └──► bounded update check ───────────────────► TUI-only warning
@@ -41,7 +41,8 @@ prompt. An unregistered canonical Codex identity requires a transient App Server
 | `rodex.session_read_pipeline` / `session_tail` | Verify live reads and follow terminal history without idle full-history scans. |
 | `rodex.process_environment` | Remove only Rodex's bootstrap virtualenv and retain caller-owned process state. |
 | `rodex.runtime` / `process_contracts` / `session_host` | Discover, launch, attach, supervise, and clean up app-server, TUI, proxy, analytics, and runtime paths. |
-| `rodex.tmux_executor` | Sole production process boundary for every tmux command. |
+| `rodex.tmux_session_capability` | Define server/runtime and fully registered session authority plus atomic tmux fences. |
+| `rodex.tmux_sharing_coordinator` | Turn hook wakeups into exact roster transitions. |
 | `rodex.tmux_status` / `status_animation` | Arbitrate status claims and render one already-admitted transition. |
 | `rodex.status_animation_admission` | Own tmux-native generation, pending event, lease, handoff, and watchdog recovery. |
 | `rodex.observer_projection` | Statelessly validate and bound App Server fields for observation. |
@@ -55,36 +56,34 @@ prompt. An unregistered canonical Codex identity requires a transient App Server
 | `rodex_registry.schema` | Generate, install when authorized, and attest the complete relational catalog. |
 | `rodex_sql` | Own private no-follow paths, storage identity, connections, transactions, one process-local WAL lifetime, and natural-key lookups. |
 
-## Tmux execution and status
+## Shared tmux capability boundary
 
-Each tmux executor binds the binary and server socket; every caller uses the sole entry
-`run(command_arguments, mode=..., output=...)`. Synchronous captured commands either
-return text or discard all streams and have an absolute deadline: one second by default,
-five seconds for ordinary runtime-launcher operations. Results normalize nonzero exits,
-timeouts, and unavailable processes. Interactive attach uses the same entry with direct
-terminal ownership and its natural lifetime. After runtime verification it resolves the
-incarnation to tmux's immutable server-local `$session_id`, so a concurrent alias cannot
-stale the final attach target. The asynchronous entry applies its deadline to one child
-and kills and reaps that child on cancellation.
+`tmux-shared-v1.sock` is multiplexed transport, never session authority. Server-scope
+protocol and random incarnation markers identify one compatible server. Creation alone
+may claim a completely unmarked server, and only while it has no session; an unmarked
+nonempty or incompatible server is left untouched. Display names are namespaced as
+`<display>--r<registry-id>` because tmux names are server-global.
 
-Runtime creation gives the captured tmux boundary Rodex-free caller state and replaces
-`PATH` plus virtualenv markers on every new session. Absent values are removed from the
-first host and session environment, so an older shared tmux server cannot reintroduce
-Rodex's `.venv`; a distinct caller-owned virtualenv passes through unchanged.
+`TmuxRuntimeCapability` binds the owning host to socket, server, immutable `$session_id`,
+primary `%pane_id`, and runtime. `TmuxSessionCapability` adds registered Rodex, registry,
+SQL-row, and Codex identities. The launcher mints it from a uniqueness-checked roster;
+async actors carry it. Every terminal action is exact-target fenced; primary operations
+also require the immutable pane ID. Name, socket, runtime, or hook context is no authority.
 
-The disabled `/rodex` completion component illustrates a distinct inbound boundary:
-`pipe-pane` bytes arrive on the completion observer's stdin and wake a coalescing event
-loop. That reader does not spawn tmux. Its display, capture, and status operations still
-cross `tmux_executor`, as do input guards, shared `Ctrl-C`, status publication, observer
-pane operations, registration checks, animation, rename, and attach.
+Global indexed `client-attached` and `client-detached` hooks contain no session target;
+they only wake `tmux_sharing_coordinator`. The coordinator verifies server scope, reads
+one roster, and conditionally submits each changed count to its full capability. This
+avoids tmux 3.2's lost source-session context after destruction. Rodex changes only owned
+hook indices and options behind a server-incarnation fence; it never clears session
+hooks. Root `C-c` is installed exactly or setup fails closed on conflict.
+Rodex performs no general key/input interception or pane piping.
 
-`TmuxStatusPipeline` atomically arbitrates priority and token ownership. Client hooks
-address `#{session_id}:`, so a rename cannot invalidate an installed hook. tmux serializes
-each animation event into a generation and newest pending transition, admits one lease
-owner, and schedules one delayed recovery gate. The admission owner drains the newest
-generation and releases with token/generation conditions; the gate can replace a crashed
-owner without allowing an old owner to clear its successor. `status_animation` only
-renders an admitted transition and conditionally restores the base status.
+Discovery reads server, session, control, and registration fields in one tmux snapshot,
+then parses the tuple as a unit. All tmux processes cross `tmux_executor`; captured calls
+have absolute deadlines, interactive attach owns the terminal, and asynchronous timeout
+cancellation kills and reaps its child. Runtime creation replaces Rodex bootstrap
+environment fields on every new session. `TmuxStatusPipeline` arbitrates status claims;
+animation admission uses exact capability, generation, lease, token, and recovery fences.
 
 ## Identity and lifecycle
 
@@ -94,9 +93,9 @@ identities; provenance never substitutes for identity. See [SQL_SCHEMA.md](SQL_S
 
 New sessions allocate unregistered IDs, create detached tmux with the configured history,
 start the private host processes, observe one Codex root ID, and advertise a `pending`
-tuple. The immutable Rodex session-ID transition lock spans SQL publication, tmux rename,
-status/input-guard setup, and registration confirmation. Competing selectors therefore
-cannot use a partially finalized row. The optional update notice and attach follow.
+tuple. The immutable Rodex session-ID transition lock spans SQL publication, registration
+confirmation, registry-namespaced tmux rename, and UI setup. Competing selectors cannot
+use a partially finalized row. The optional update notice and attach follow.
 
 Existing selectors resolve once to the owned relational identity. A live endpoint must
 match every advertised identity. Otherwise Rodex resumes and verifies the stored Codex
@@ -144,6 +143,6 @@ sequence-fence races reset cursors; deterministic semantic conflicts park.
   keeps a bounded WAL generation live between sparse writes without owning a transaction.
 - Ordinary reads and mutations are existing-only. Explicit first use alone may create storage.
 - Private database/runtime paths validate owner, type, mode, descriptor, and symlink boundaries.
-- External tmux work uses exact targets and compensated or conditional transitions.
+- External tmux mutation requires an explicit capability and an atomic full-tuple fence.
 - Runtime path refresh fails closed when continued runtime addressing is unsafe; database
   storage validation occurs synchronously at SQL transaction boundaries.

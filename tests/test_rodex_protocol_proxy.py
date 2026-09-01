@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shlex
 import subprocess
 from pathlib import Path
 from threading import Event, Thread
@@ -26,6 +27,18 @@ from rodex.protocol_proxy import (
     publish_tui_notice,
 )
 from rodex.status_bar import RODEX_STATUS_COLOURS
+from rodex.tmux_session_capability import TmuxRuntimeCapability
+from rodex_registry import RodexRuntimeId
+
+
+def _runtime_capability(socket_path: Path) -> TmuxRuntimeCapability:
+    return TmuxRuntimeCapability(
+        socket_path,
+        "0123456789abcdef0123456789abcdef",
+        "$7",
+        "%9",
+        RodexRuntimeId.parse("0123456789abcdef"),
+    )
 
 
 def item_started(item_type: str, item_id: str = "item-1") -> str:
@@ -115,7 +128,7 @@ def test_tmux_status_uses_the_stable_pane_target_across_session_renames(
 
     status = TmuxToolCallStatus(
         "/usr/bin/tmux",
-        tmp_path / "tmux.sock",
+        _runtime_capability(tmp_path / "tmux.sock"),
         "%7",
         runner=runner,
     )
@@ -123,10 +136,18 @@ def test_tmux_status_uses_the_stable_pane_target_across_session_renames(
     status.update(3)
 
     assert published.wait(1)
-    assert calls[0][0] == [
+    assert calls[0][0][:8] == [
         "/usr/bin/tmux",
         "-S",
         str(tmp_path / "tmux.sock"),
+        "if-shell",
+        "-t",
+        "%7",
+        "-F",
+        calls[0][0][7],
+    ]
+    assert "@rodex_runtime_id" in calls[0][0][7]
+    assert shlex.split(calls[0][0][8]) == [
         "set-option",
         "-t",
         "%7",
@@ -148,7 +169,7 @@ def test_tmux_context_status_uses_the_same_stable_pane_boundary(tmp_path: Path) 
 
     status = TmuxContextStatus(
         "/usr/bin/tmux",
-        tmp_path / "tmux.sock",
+        _runtime_capability(tmp_path / "tmux.sock"),
         "%7",
         runner=runner,
     )
@@ -156,10 +177,18 @@ def test_tmux_context_status_uses_the_same_stable_pane_boundary(tmp_path: Path) 
     status.update("#[fg=red]| Context: 75% | ")
 
     assert published.wait(1)
-    assert calls[0][0] == [
+    assert calls[0][0][:8] == [
         "/usr/bin/tmux",
         "-S",
         str(tmp_path / "tmux.sock"),
+        "if-shell",
+        "-t",
+        "%7",
+        "-F",
+        calls[0][0][7],
+    ]
+    assert "@rodex_runtime_id" in calls[0][0][7]
+    assert shlex.split(calls[0][0][8]) == [
         "set-option",
         "-t",
         "%7",

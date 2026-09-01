@@ -9,7 +9,7 @@ import shlex
 import sys
 from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import Final, Literal, Protocol
+from typing import Final, Literal
 
 from .status_animation import FrameWaiter, StatusEvent, animate_status
 from .tmux_executor import (
@@ -17,6 +17,13 @@ from .tmux_executor import (
     AsyncTmuxExecutor,
     AsyncTmuxRunner,
     TmuxCommandResult,
+)
+from .tmux_session_capability import (
+    TmuxSessionCapability,
+    combine_tmux_conditions,
+    parse_tmux_session_capability,
+    registered_primary_pane_condition,
+    tmux_format_literal,
 )
 
 ANIMATION_OWNER_WATCHDOG_DELAY_SECONDS: Final = 15.0
@@ -26,27 +33,20 @@ STATUS_ANIMATION_OWNER_TOKEN_OPTION: Final = "@rodex_status_animation_owner_toke
 STATUS_ANIMATION_WATCHDOG_TOKEN_OPTION: Final = "@rodex_status_animation_watchdog_token"
 
 
-class TmuxSessionAddress(Protocol):
-    tmux_server_socket_path: Path
-    tmux_session_name: str
-
-
-def status_animation_hook_command(
+def status_animation_admission_command(
     python_executable: str,
     tmux_binary: str,
-    runtime: TmuxSessionAddress,
+    capability: TmuxSessionCapability,
     event: StatusEvent,
 ) -> str:
-    """Build one tmux-serialized admission transaction for a client transition."""
+    """Build one exact, runtime-fenced admission transaction."""
     if event not in {"attached", "detached"}:
         raise ValueError(f"unsupported status animation event: {event}")
     owner_token_format = f"#{{{STATUS_ANIMATION_GENERATION_OPTION}}}"
-    stable_session_target = "#{session_id}"
     owner_command = _animation_process_command(
         python_executable,
         tmux_binary,
-        runtime.tmux_server_socket_path,
-        stable_session_target,
+        capability,
         event,
         owner_token_format,
         mode="admitted",
@@ -54,8 +54,7 @@ def status_animation_hook_command(
     watchdog_gate = _delayed_watchdog_gate_command(
         python_executable,
         tmux_binary,
-        runtime.tmux_server_socket_path,
-        stable_session_target,
+        capability,
         event,
         owner_token_format,
     )
@@ -70,12 +69,16 @@ def status_animation_hook_command(
     start_owner_commands = _command_sequence(
         (
             "set-option",
+            "-t",
+            capability.pane_target,
             "-F",
             STATUS_ANIMATION_OWNER_TOKEN_OPTION,
             owner_token_format,
         ),
         (
             "set-option",
+            "-t",
+            capability.pane_target,
             "-F",
             STATUS_ANIMATION_WATCHDOG_TOKEN_OPTION,
             owner_token_format,
@@ -89,31 +92,49 @@ def status_animation_hook_command(
             watchdog_gate,
         ),
     )
-    return _command_sequence(
+    admission_commands = _command_sequence(
         (
             "set-option",
+            "-t",
+            capability.pane_target,
             STATUS_ANIMATION_PENDING_EVENT_OPTION,
             event,
         ),
         (
             "set-option",
+            "-t",
+            capability.pane_target,
             "-F",
             STATUS_ANIMATION_GENERATION_OPTION,
             generation_increment,
         ),
         (
             "if-shell",
+            "-t",
+            capability.pane_target,
             "-F",
-            owner_is_unleased,
+            combine_tmux_conditions(
+                registered_primary_pane_condition(capability),
+                owner_is_unleased,
+            ),
             start_owner_commands,
         ),
+    )
+    return _command_sequence(
+        (
+            "if-shell",
+            "-t",
+            capability.pane_target,
+            "-F",
+            registered_primary_pane_condition(capability),
+            admission_commands,
+        )
     )
 
 
 async def animate_admitted_status(
     tmux_binary: str,
-    tmux_server_socket_path: Path,
-    tmux_session_target: str,
+    capability: TmuxSessionCapability,
     fallback_event: StatusEvent,
     owner_token: str,
     *,
@@ -129,15 +150,17 @@ async def animate_admitted_status(
         return
     executor = AsyncTmuxExecutor(
         tmux_binary,
-        tmux_server_socket_path,
+        capability.tmux_server_socket_path,
         runner=runner,
         timeout_seconds=command_timeout_seconds,
     )
-    session_target, pane_target = _tmux_session_targets(tmux_session_target)
+    pane_target = capability.pane_target
 
     async def tmux(*arguments: str) -> TmuxCommandResult:
         return await executor.run(arguments)
 
+    if not await _registered_capability_is_current(tmux, capability):
+        return
     if (
         await _read_tmux_option(tmux, pane_target, STATUS_ANIMATION_OWNER_TOKEN_OPTION)
         != owner_token
@@ -155,8 +178,7 @@ async def animate_admitted_status(
         successor_gate = _delayed_watchdog_gate_command(
             python_executable,
             tmux_binary,
-            tmux_server_socket_path,
-            session_target,
+            capability,
             fallback_event,
             recovered_owner,
         )
@@ -188,7 +210,10 @@ async def animate_admitted_status(
             "-t",
             pane_target,
             "-F",
-            _owner_unleased_condition(owner_token),
+            combine_tmux_conditions(
+                registered_primary_pane_condition(capability),
+                _owner_unleased_condition(owner_token),
+            ),
             recovery_commands,
         )
         if (
@@ -202,7 +227,8 @@ async def animate_admitted_status(
     try:
         while True:
             if (
-                await _read_tmux_option(
+                not await _registered_capability_is_current(tmux, capability)
+                or await _read_tmux_option(
                     tmux, pane_target, STATUS_ANIMATION_OWNER_TOKEN_OPTION
                 )
                 != owner_token
@@ -210,13 +236,17 @@ async def animate_admitted_status(
                 return
             pending = await _read_pending_transition(tmux, pane_target)
             if pending is None:
-                await _release_animation_owner(tmux, pane_target, owner_token)
+                await _release_animation_owner(
+                    tmux,
+                    pane_target,
+                    owner_token,
+                    capability,
+                )
                 return
             consumed_generation, event = pending
             await animate_status(
                 tmux_binary,
-                tmux_server_socket_path,
-                session_target,
+                capability,
                 event or fallback_event,
                 runner=runner,
                 wait_until=wait_until,
@@ -228,6 +258,7 @@ async def animate_admitted_status(
                 pane_target,
                 owner_token,
                 consumed_generation,
+                capability,
             )
             current_owner = await _read_tmux_option(
                 tmux, pane_target, STATUS_ANIMATION_OWNER_TOKEN_OPTION
@@ -244,7 +275,12 @@ async def animate_admitted_status(
                 return
     finally:
         if consumed_generation is None:
-            await _release_animation_owner(tmux, pane_target, owner_token)
+            await _release_animation_owner(
+                tmux,
+                pane_target,
+                owner_token,
+                capability,
+            )
 
 
 async def _read_pending_transition(
@@ -262,6 +298,21 @@ async def _read_pending_transition(
     return generation, event
 
 
+async def _registered_capability_is_current(
+    tmux: Callable[..., Awaitable[TmuxCommandResult]],
+    capability: TmuxSessionCapability,
+) -> bool:
+    result = await tmux(
+        "display-message",
+        "-p",
+        "-t",
+        capability.pane_target,
+        "-F",
+        registered_primary_pane_condition(capability),
+    )
+    return result.returncode == 0 and result.stdout.strip() == "1"
+
+
 async def _read_tmux_option(
     tmux: Callable[..., Awaitable[TmuxCommandResult]],
     pane_target: str,
@@ -277,6 +328,7 @@ async def _release_consumed_transition(
     pane_target: str,
     owner_token: str,
     generation: str,
+    capability: TmuxSessionCapability,
 ) -> None:
     condition = (
         "#{&&:"
@@ -294,13 +346,21 @@ async def _release_consumed_transition(
             )
         )
     )
-    await tmux("if-shell", "-t", pane_target, "-F", condition, commands)
+    await tmux(
+        "if-shell",
+        "-t",
+        pane_target,
+        "-F",
+        combine_tmux_conditions(registered_primary_pane_condition(capability), condition),
+        commands,
+    )
 
 
 async def _release_animation_owner(
     tmux: Callable[..., Awaitable[TmuxCommandResult]],
     pane_target: str,
     owner_token: str,
+    capability: TmuxSessionCapability,
 ) -> None:
     commands = _command_sequence(
         *(
@@ -316,7 +376,10 @@ async def _release_animation_owner(
         "-t",
         pane_target,
         "-F",
-        _option_matches(STATUS_ANIMATION_OWNER_TOKEN_OPTION, owner_token),
+        combine_tmux_conditions(
+            registered_primary_pane_condition(capability),
+            _option_matches(STATUS_ANIMATION_OWNER_TOKEN_OPTION, owner_token),
+        ),
         commands,
     )
 
@@ -324,23 +387,36 @@ async def _release_animation_owner(
 def _animation_process_command(
     python_executable: str,
     tmux_binary: str,
-    tmux_server_socket_path: Path,
-    tmux_session_target: str,
+    capability: TmuxSessionCapability,
     event: StatusEvent,
     owner_token: str,
     *,
     mode: Literal["admitted", "watchdog", "watchdog-gate"],
 ) -> str:
     arguments = [
-        python_executable,
+        tmux_format_literal(python_executable),
         "-m",
         "rodex.status_animation_admission",
         "--tmux-binary",
-        tmux_binary,
+        tmux_format_literal(tmux_binary),
         "--tmux-server-socket",
-        str(tmux_server_socket_path),
-        "--tmux-session-target",
-        tmux_session_target,
+        tmux_format_literal(str(capability.tmux_server_socket_path)),
+        "--expected-server-id",
+        capability.tmux_server_id,
+        "--tmux-session-id",
+        capability.tmux_session_id,
+        "--tmux-primary-pane-id",
+        capability.tmux_primary_pane_id,
+        "--expected-runtime-id",
+        str(capability.runtime_id),
+        "--expected-rodex-session-id",
+        str(capability.rodex_session_id),
+        "--expected-registry-id",
+        str(capability.registry_id),
+        "--expected-internal-session-id",
+        str(capability.internal_session_id),
+        "--expected-codex-session-id",
+        str(capability.codex_session_id),
         "--event",
         event,
         "--owner-token",
@@ -353,16 +429,14 @@ def _animation_process_command(
 def _delayed_watchdog_gate_command(
     python_executable: str,
     tmux_binary: str,
-    tmux_server_socket_path: Path,
-    tmux_session_target: str,
+    capability: TmuxSessionCapability,
     event: StatusEvent,
     owner_token: str,
 ) -> str:
     return _animation_process_command(
         python_executable,
         tmux_binary,
-        tmux_server_socket_path,
-        tmux_session_target,
+        capability,
         event,
         owner_token,
         mode="watchdog-gate",
@@ -371,8 +445,7 @@ def _delayed_watchdog_gate_command(
 
 async def run_watchdog_gate(
     tmux_binary: str,
-    tmux_server_socket_path: Path,
-    tmux_session_target: str,
+    capability: TmuxSessionCapability,
     event: StatusEvent,
     owner_token: str,
     *,
@@ -383,25 +456,28 @@ async def run_watchdog_gate(
     """Clear one stale marker and launch recovery through the canonical executor."""
     executor = AsyncTmuxExecutor(
         tmux_binary,
-        tmux_server_socket_path,
+        capability.tmux_server_socket_path,
         runner=runner,
         timeout_seconds=command_timeout_seconds,
     )
-    _session_target, pane_target = _tmux_session_targets(tmux_session_target)
+    pane_target = capability.pane_target
     watchdog_command = _animation_process_command(
         python_executable,
         tmux_binary,
-        tmux_server_socket_path,
-        tmux_session_target,
+        capability,
         event,
         owner_token,
         mode="watchdog",
     )
-    condition = (
+    lease_condition = (
         "#{&&:"
         f"{_option_matches(STATUS_ANIMATION_OWNER_TOKEN_OPTION, owner_token)},"
         f"{_option_matches(STATUS_ANIMATION_WATCHDOG_TOKEN_OPTION, owner_token)}"
         "}"
+    )
+    condition = combine_tmux_conditions(
+        registered_primary_pane_condition(capability),
+        lease_condition,
     )
     action = _command_sequence(
         (
@@ -438,13 +514,6 @@ def _option_matches(option: str, expected: str) -> str:
     return f"#{{==:#{{{option}}},{expected}}}"
 
 
-def _tmux_session_targets(identity: str) -> tuple[str, str]:
-    session_target = (
-        identity if identity.startswith("$") or "#{" in identity else f"={identity}"
-    )
-    return session_target, f"{session_target}:"
-
-
 def _command_sequence(*commands: tuple[str, ...]) -> str:
     return " ; ".join(shlex.join(command) for command in commands)
 
@@ -453,7 +522,14 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="python -m rodex.status_animation_admission")
     parser.add_argument("--tmux-binary", required=True)
     parser.add_argument("--tmux-server-socket", required=True, type=Path)
-    parser.add_argument("--tmux-session-target", required=True)
+    parser.add_argument("--expected-server-id", required=True)
+    parser.add_argument("--tmux-session-id", required=True)
+    parser.add_argument("--tmux-primary-pane-id", required=True)
+    parser.add_argument("--expected-runtime-id", required=True)
+    parser.add_argument("--expected-rodex-session-id", required=True)
+    parser.add_argument("--expected-registry-id", required=True)
+    parser.add_argument("--expected-internal-session-id", required=True)
+    parser.add_argument("--expected-codex-session-id", required=True)
     parser.add_argument("--event", required=True, choices=("attached", "detached"))
     parser.add_argument("--owner-token", required=True)
     mode = parser.add_mutually_exclusive_group(required=True)
@@ -465,19 +541,28 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def main(arguments: list[str] | None = None) -> int:
     args = _build_parser().parse_args(arguments)
+    capability = parse_tmux_session_capability(
+        args.tmux_server_socket,
+        args.expected_server_id,
+        args.tmux_session_id,
+        args.tmux_primary_pane_id,
+        args.expected_runtime_id,
+        args.expected_rodex_session_id,
+        args.expected_registry_id,
+        args.expected_internal_session_id,
+        args.expected_codex_session_id,
+    )
     if args.watchdog_gate:
         operation = run_watchdog_gate(
             args.tmux_binary,
-            args.tmux_server_socket,
-            args.tmux_session_target,
+            capability,
             args.event,
             args.owner_token,
         )
     else:
         operation = animate_admitted_status(
             args.tmux_binary,
-            args.tmux_server_socket,
-            args.tmux_session_target,
+            capability,
             args.event,
             args.owner_token,
             watchdog=args.watchdog,

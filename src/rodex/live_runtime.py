@@ -7,6 +7,7 @@ import os
 import stat as stat_module
 from collections.abc import Iterator
 from contextlib import contextmanager
+from dataclasses import replace
 from pathlib import Path
 
 from rodex_registry import (
@@ -16,6 +17,7 @@ from rodex_registry import (
     lookup_codex_session_id_from_a_rodex_sessions_id,
     lookup_owned_rodex_sessions_id_from_a_cool_name,
     lookup_rodex_registry_id,
+    lookup_rodex_runtime_instance,
     lookup_rodex_session_id_from_a_rodex_sessions_id,
     lookup_rodex_tmux_session,
     record_a_rodex_session_runtime_resume,
@@ -98,6 +100,17 @@ def resolve_live_control(
         expected_registry_id=expected_registry_id,
         expected_codex_session_id=expected_codex_session_id,
     )
+    if control.runtime_id is None:
+        raise RodexLaunchError(
+            "live runtime did not advertise its exact runtime incarnation"
+        )
+    if control.tmux_capability is None:
+        raise RodexLaunchError("live runtime did not advertise registered tmux authority")
+    runtime = replace(
+        runtime,
+        runtime_id=control.runtime_id,
+        tmux_capability=control.tmux_capability,
+    )
     return session_id, runtime, control
 
 
@@ -122,21 +135,38 @@ def verify_live_runtime_identity(
             raise RodexLaunchError(
                 "pending live runtime did not advertise its exact runtime identity"
             )
+        identified_runtime = replace(runtime, runtime_id=control.runtime_id)
         record_a_rodex_session_runtime_resume(
             session_id,
-            runtime.tmux_server_socket_path,
-            runtime.tmux_session_name,
+            identified_runtime.tmux_server_socket_path,
+            identified_runtime.tmux_session_name,
             database_path,
             runtime_id=control.runtime_id,
         )
-        launcher.confirm_runtime_registration(runtime, session_id)
-        control = launcher.discover_runtime_control(runtime)
+        launcher.confirm_runtime_registration(
+            identified_runtime,
+            session_id,
+            expected_rodex_session_id=expected_rodex_session_id,
+            expected_registry_id=expected_registry_id,
+            expected_codex_session_id=expected_codex_session_id,
+        )
+        control = launcher.discover_runtime_control(identified_runtime)
     require_live_runtime_identity(
         control,
         expected_rodex_session_id=expected_rodex_session_id,
         expected_registry_id=expected_registry_id,
         expected_codex_session_id=expected_codex_session_id,
     )
+    capability = control.tmux_capability
+    if capability is None or capability.internal_session_id != session_id:
+        raise RodexLaunchError(
+            "live runtime advertised an unexpected internal session identity"
+        )
+    durable_runtime = lookup_rodex_runtime_instance(session_id, database_path)
+    if durable_runtime is not None and durable_runtime.runtime_id != control.runtime_id:
+        raise RodexLaunchError(
+            "live runtime advertised an unexpected durable runtime incarnation"
+        )
     return control
 
 
@@ -152,6 +182,10 @@ def require_live_runtime_identity(
             "live runtime is not durably registered: "
             f"expected {RODEX_REGISTRATION_REGISTERED}, "
             f"observed {control.registration_state or 'missing'}"
+        )
+    if control.runtime_id is None:
+        raise RodexLaunchError(
+            "live runtime did not advertise its exact runtime incarnation"
         )
     if control.rodex_session_id != expected_rodex_session_id:
         raise RodexLaunchError(
@@ -181,7 +215,7 @@ def find_relocated_live_runtime(
     expected_codex_session_id: CodexSessionId,
 ) -> tuple[LiveTmuxSession, LiveRodexControl] | None:
     matches: list[tuple[LiveTmuxSession, LiveRodexControl]] = []
-    unverifiable_same_codex: list[str] = []
+    conflicting_same_registry: list[str] = []
     for name in launcher.list_session_names(tmux_server_socket_path):
         candidate = LiveTmuxSession(tmux_server_socket_path, name)
         try:
@@ -197,12 +231,12 @@ def find_relocated_live_runtime(
             in {RODEX_REGISTRATION_PENDING, RODEX_REGISTRATION_REGISTERED}
         ):
             matches.append((candidate, control))
-        else:
-            unverifiable_same_codex.append(name)
-    if unverifiable_same_codex:
+        elif control.rodex_registry_id == expected_registry_id:
+            conflicting_same_registry.append(name)
+    if conflicting_same_registry:
         raise RodexLaunchError(
-            "live runtime with the expected Codex identity lacks the matching "
-            "registered Rodex identity: " + ", ".join(sorted(unverifiable_same_codex))
+            "live runtime in the expected registry has the Codex identity but not "
+            "the matching Rodex identity: " + ", ".join(sorted(conflicting_same_registry))
         )
     if len(matches) > 1:
         raise RodexLaunchError(
@@ -229,10 +263,13 @@ def rename_tmux_identity(
     launcher: RodexRuntimeLauncher,
     active_tmux: LiveTmuxSession,
     display_name: str,
+    registry_id: RodexRegistryId,
 ) -> LiveTmuxSession:
-    if active_tmux.tmux_session_name == display_name:
+    """Rename within tmux's server-global namespace, not a registry-local alias."""
+    tmux_session_name = f"{display_name}--r{registry_id}"
+    if active_tmux.tmux_session_name == tmux_session_name:
         return active_tmux
-    return launcher.rename(active_tmux, display_name)
+    return launcher.rename(active_tmux, tmux_session_name)
 
 
 def restore_tmux_identity(

@@ -39,9 +39,8 @@ from .control import (
     RodexDispatchIndeterminateError,
     RodexWaitTimeoutError,
 )
-from .errors import RodexLaunchError
+from .errors import ExactRuntimeIdentityRequiredError, RodexLaunchError
 from .exact_turn_mutation import (
-    ExactRuntimeIdentityRequiredError,
     ExactTurnMutationCoordinator,
     require_durable_runtime_instance,
 )

@@ -10,7 +10,13 @@ import uuid
 from pathlib import Path
 from typing import Final
 
-from .tmux_executor import SyncTmuxExecutor, SyncTmuxRunner
+from .tmux_executor import SyncTmuxExecutor, SyncTmuxRunner, TmuxCommandResult
+from .tmux_session_capability import (
+    TmuxRuntimeCapability,
+    capability_identity_condition,
+    combine_tmux_conditions,
+    primary_pane_capability_condition,
+)
 
 OBSERVER_PRIMARY_PANE_OPTION: Final = "@rodex_agent_observer_pane_id"
 OBSERVER_OWNER_PANE_OPTION: Final = "@rodex_agent_observer_for"
@@ -23,19 +29,20 @@ class ObserverPaneController:
     def __init__(
         self,
         tmux_binary: str,
-        tmux_server_socket_path: Path,
+        capability: TmuxRuntimeCapability,
         primary_pane_target: str,
         *,
         runner: SyncTmuxRunner,
         python_executable: str = sys.executable,
     ) -> None:
         self.validate_primary_pane_target(primary_pane_target)
+        self._capability = capability
         self._primary_pane_target = primary_pane_target
         self._python_executable = python_executable
         self._observer_pane_target: str | None = None
         self._tmux_executor = SyncTmuxExecutor(
             tmux_binary,
-            tmux_server_socket_path,
+            capability.tmux_server_socket_path,
             runner=runner,
         )
 
@@ -69,12 +76,15 @@ class ObserverPaneController:
                 "-t",
                 candidate,
                 "-F",
-                f"#{{pane_id}}|#{{{OBSERVER_OWNER_PANE_OPTION}}}|#{{pane_dead}}",
+                (
+                    f"{capability_identity_condition(self._capability)}|"
+                    f"#{{pane_id}}|#{{{OBSERVER_OWNER_PANE_OPTION}}}|#{{pane_dead}}"
+                ),
             )
         )
         if (
             identity.returncode != 0
-            or identity.stdout.strip() != f"{candidate}|{self._primary_pane_target}|0"
+            or identity.stdout.strip() != f"1|{candidate}|{self._primary_pane_target}|0"
         ):
             self._observer_pane_target = None
             return None
@@ -98,10 +108,19 @@ class ObserverPaneController:
                 "-t",
                 self._primary_pane_target,
                 "-F",
-                "#{pane_current_path}",
+                (
+                    f"{primary_pane_capability_condition(self._capability)}|"
+                    "#{pane_id}|#{pane_current_path}"
+                ),
             )
         )
-        if cwd.returncode != 0 or not cwd.stdout.rstrip("\n"):
+        cwd_fields = cwd.stdout.rstrip("\n").split("|", maxsplit=2)
+        if (
+            cwd.returncode != 0
+            or len(cwd_fields) != 3
+            or cwd_fields[:2] != ["1", self._primary_pane_target]
+            or not cwd_fields[2]
+        ):
             return None
         command = [
             self._python_executable,
@@ -125,7 +144,7 @@ class ObserverPaneController:
                 sort_keys=True,
             ),
         ]
-        split = self._tmux_executor.run(
+        split = self._mutate(
             (
                 "split-window",
                 "-v",
@@ -136,7 +155,7 @@ class ObserverPaneController:
                 "-t",
                 self._primary_pane_target,
                 "-c",
-                cwd.stdout.rstrip("\n"),
+                cwd_fields[2],
                 "-P",
                 "-F",
                 "#{pane_id}",
@@ -146,7 +165,7 @@ class ObserverPaneController:
         pane_target = split.stdout.strip()
         if split.returncode != 0 or _PANE_ID_PATTERN.fullmatch(pane_target) is None:
             return None
-        self._tmux_executor.run(
+        registration_steps = (
             (
                 "set-option",
                 "-p",
@@ -154,9 +173,7 @@ class ObserverPaneController:
                 self._primary_pane_target,
                 OBSERVER_PRIMARY_PANE_OPTION,
                 pane_target,
-            )
-        )
-        self._tmux_executor.run(
+            ),
             (
                 "set-option",
                 "-p",
@@ -164,9 +181,62 @@ class ObserverPaneController:
                 pane_target,
                 OBSERVER_OWNER_PANE_OPTION,
                 self._primary_pane_target,
-            )
+            ),
+            ("select-pane", "-d", "-t", pane_target),
+            ("select-pane", "-t", self._primary_pane_target),
         )
-        self._tmux_executor.run(("select-pane", "-d", "-t", pane_target))
-        self._tmux_executor.run(("select-pane", "-t", self._primary_pane_target))
+        for step in registration_steps:
+            if self._mutate(step).returncode != 0:
+                self._discard_failed_candidate(pane_target)
+                return None
         self._observer_pane_target = pane_target
         return pane_target
+
+    def _discard_failed_candidate(self, pane_target: str) -> None:
+        """Best-effort rollback of one exact pane that never became an observer."""
+        self._mutate(
+            (
+                "if-shell",
+                "-t",
+                self._primary_pane_target,
+                "-F",
+                f"#{{==:#{{{OBSERVER_PRIMARY_PANE_OPTION}}},{pane_target}}}",
+                shlex.join(
+                    (
+                        "set-option",
+                        "-pu",
+                        "-t",
+                        self._primary_pane_target,
+                        OBSERVER_PRIMARY_PANE_OPTION,
+                    )
+                ),
+            )
+        )
+        candidate_condition = combine_tmux_conditions(
+            capability_identity_condition(self._capability),
+            f"#{{==:#{{pane_id}},{pane_target}}}",
+        )
+        self._tmux_executor.run(
+            (
+                "if-shell",
+                "-t",
+                pane_target,
+                "-F",
+                candidate_condition,
+                shlex.join(("kill-pane", "-t", pane_target)),
+                shlex.join(("run-shell", "false")),
+            )
+        )
+
+    def _mutate(self, arguments: tuple[str, ...]) -> TmuxCommandResult:
+        return self._tmux_executor.run(
+            (
+                "if-shell",
+                "-t",
+                self._primary_pane_target,
+                "-F",
+                primary_pane_capability_condition(self._capability),
+                shlex.join(arguments),
+                shlex.join(("run-shell", "false")),
+            )
+        )

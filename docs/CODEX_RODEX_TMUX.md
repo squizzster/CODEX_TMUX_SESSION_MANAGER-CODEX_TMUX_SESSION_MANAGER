@@ -11,7 +11,9 @@ exact-turn automation. Each identity keeps its own meaning:
   characters, for one current live incarnation.
 - **Codex thread/session tree:** separate App Server `thread.id` and `thread.sessionId`;
   they are equal for the managed root thread but must not be conflated for forks.
-- **tmux session:** the exact tmux server socket path plus tmux session name.
+- **tmux runtime capability:** the exact socket, random server incarnation, immutable
+  `$session_id`, primary `%pane_id`, and runtime ID; registered authority also carries
+  Rodex session, registry, internal SQL-row, and Codex identities.
 
 Rodex session, Rodex registry, and Codex session IDs remain explicitly named and typed.
 The tmux endpoint is a
@@ -49,9 +51,10 @@ becomes a distinct candidate for the transient App Server persistence check.
 5. Under the unregistered immutable Rodex session-ID transition lock, one SQLite
    transaction creates the Rodex/runtime identities, canonical root-thread membership,
    name, user/log, and tmux rows.
-6. While still holding that lock, Rodex finalizes the tmux name, status/input guards, and
-   runtime registration. A competing selector cannot attach to the intermediate row.
-7. Rodex resolves the verified incarnation to tmux's immutable `$session_id` and attaches
+6. While still holding that lock, Rodex confirms the complete registered capability,
+   renames to `<display>--r<registry-id>`, and configures status/input safety. A competing
+   selector cannot attach to the intermediate row.
+7. Rodex carries that capability to tmux's immutable `$session_id` and attaches
    to the ordinary Codex prompt; an initial prompt and interactive options have already
    reached that TUI unchanged and exactly once.
 
@@ -62,7 +65,7 @@ state: Rodex removes it, its prompt and uv recursion marker, and every matching 
 entry from `PATH`. A different caller-owned virtualenv is preserved. Direct Codex
 process replacement and transient App Server checks use this same prepared environment.
 
-Runtime creation supplies the prepared environment to the tmux client so a fresh private
+Runtime creation supplies the prepared environment to the tmux client so a fresh shared
 server starts clean. Every new session also overrides `PATH` and the virtualenv markers;
 values absent from the caller are unset for the first host and marked removed from the
 session before later panes can inherit them. This per-session contract prevents a shared
@@ -102,10 +105,49 @@ terminal ownership, an explicit environment, no capture, and its natural lifetim
 asynchronous executor also exposes only `run`; deadline cancellation kills and reaps its
 one child.
 
-Status publication, input guards, completion captures, observer-pane control,
-registration checks, animation, rename, and attach all use that boundary. Domain
+Status publication, input guards, observer-pane control, registration checks, animation,
+rename, and attach all use that boundary. Domain
 components may assemble tmux arguments or atomic `if-shell` command sequences, but they
 never construct or execute the tmux process prefix themselves.
+
+## Shared tmux authority
+
+All managed sessions intentionally multiplex through the per-user versioned
+`tmux-shared-v1.sock`. This is analogous to many clients sharing one Unix socket: the
+socket selects a server but grants no session authority. Rodex records server-scope
+protocol and random incarnation markers. Only creation may claim a completely unmarked
+server, and only while it has no session; an unmarked nonempty or incompatible server is
+left untouched.
+
+`TmuxRuntimeCapability` binds the owning host to its socket, server incarnation, immutable
+tmux `$session_id`, primary `%pane_id`, and Rodex runtime. `TmuxSessionCapability` adds
+registered Rodex session, registry, SQL-row, and Codex identities. Discovery retrieves a
+coherent server/session/control snapshot. The launcher mints external authority only
+after a complete roster uniqueness check; async workers carry that already-minted
+capability. Every terminal action repeats its applicable tuple at the exact target;
+primary-pane actions also require its immutable `%pane_id`. Names and process context
+are addresses only.
+
+tmux names are server-global while Rodex display names are registry-local. The live tmux
+name is therefore `<display>--r<registry-id>`; two databases may use the same display
+name without colliding. Rename and attach keep using `$session_id`, so later name reuse
+cannot redirect an operation.
+
+tmux 3.2 may lose the source session from a `client-detached` hook after that session is
+destroyed. Rodex's indexed global client hooks consequently contain no authority and do
+not target any session: they wake a coordinator. The coordinator verifies the server,
+reads the complete registered roster, and submits each changed attachment count through
+that session's full capability. Rodex changes only its owned global hook slots and never
+removes session-local hooks. The shared root `C-c` guard is installed and re-read exactly;
+a pre-existing non-Rodex binding or ownership change fails initialization rather than
+silently disabling the guard. There is no general input interception or `pipe-pane`.
+
+All of these checks happen at the operation boundary. Rodex does not monitor tmux or the
+filesystem as an IDS and uses no inotify watcher or real-time surveillance loop. tmux has
+no conditional bind-if-absent primitive, so a same-uid external key change can race the
+last absence check and be overwritten by Rodex's bind. Readback detects a competing
+change that wins afterward, but cannot prove absence at the bind instant; coordinate
+same-uid tmux configuration while Rodex initializes.
 
 ## Scrollback ownership
 
@@ -117,8 +159,9 @@ without the alternate screen so rendered conversation rows reach that history.
 session override without changing any other session or the global configuration.
 
 tmux—not the terminal emulator or WebSocket proxy—owns managed-session scrollback.
-`_cat` reads that retained pane output as one finite snapshot through the verified
-live-session read pipeline. Standard tools select from it, for example
+`_cat` reads only the capability's immutable primary Codex pane as one finite snapshot
+through the verified live-session read pipeline; selecting an observer pane cannot
+redirect it. Standard tools select from the result, for example
 `rodex _cat NAME | head -n 10` or `rodex _cat NAME | tail -n 10`. `_tail NAME` uses
 the same verified tmux source but remains open: it prints the selected recent lines,
 emits rows entering committed history immediately, and emits stable visible changes
@@ -150,12 +193,6 @@ receives lifecycle, approval, and user-input requests; short-lived control clien
 not become subscribers by reading or mutating. Each ordinary client uses a separate
 upstream App Server connection over private Unix sockets. tmux user options advertise
 the sockets and live identities. Tool counts cover one runtime.
-
-`/rodex` input interception is disabled by `RODEX_TMUX_SLASH_ENABLED`, so runtime setup
-removes its Enter/Tab bindings and pane pipe and all input passes directly to Codex. When
-enabled, `pipe-pane` writes pane output into the completion observer's stdin. Its event
-loop coalesces relevant bytes without polling; this inbound stream is not a tmux process
-boundary, and every outbound display, capture, or status command still uses the executor.
 
 ## Live agent observer pane
 
@@ -298,8 +335,10 @@ Codex, tmux, or analyzer processes.
 - If its stored tmux endpoint is live, Rodex first verifies its registered Rodex session
   ID, registry ID, and Codex session ID. A missing or mismatched marker fails closed
   without attach or rename.
-- If an exact registered runtime was renamed outside Rodex, one unambiguous marker
-  match repairs the endpoint; multiple matches are refused.
+- If an exact registered runtime was renamed outside Rodex, one unambiguous full-capability
+  match in the expected registry repairs the endpoint; multiple matches are refused. A
+  foreign registry may legitimately reuse the same Codex UUID or display name and is
+  ignored rather than treated as authority or a collision.
 - Once an incarnation is verified, attachment resolves its runtime marker to exactly one
   immutable tmux `$session_id`; a concurrent alias cannot stale the attach target.
 - If it has ended, Rodex starts a fresh tmux/app-server and asks Codex to resume the
@@ -342,14 +381,16 @@ Codex, tmux, or analyzer processes.
 - In a shared session, one `Ctrl-C` is held as an accidental-exit guard and points to
   `Ctrl-b d` as the detach-only route. The same client must press `Ctrl-C` again within
   two seconds to send the interrupt to Codex, where it may end the TUI for every
-  attached client. A private session retains Codex's native `Ctrl-C` behavior.
+  attached client. A private session retains Codex's native `Ctrl-C` behavior. A foreign
+  root `C-c` binding causes explicit initialization failure because silent fallback would
+  remove this safety property.
 - A second attached client triggers a five-second shared-arrival animation. Returning
-  to one client triggers its private-session counterpart. The hook targets stable
-  `#{session_id}:`, so rename cannot stale it. tmux atomically increments a generation,
-  keeps only the newest pending transition, admits one lease owner, and schedules one
-  15-second recovery gate. Token/generation conditions prevent an old owner from
-  releasing its successor; the gate clears its marker before starting a replacement for
-  a crashed owner. The renderer owns frames only and conditionally restores the base bar.
+  to one client triggers its private-session counterpart. The global hook only wakes a
+  coordinator; it does not infer the detached session. The coordinator inventories the
+  roster and submits the transition to the immutable primary `%pane_id` under the full
+  capability. tmux atomically increments a generation, keeps only the newest pending
+  transition, admits one lease owner, and schedules one 15-second recovery gate.
+  Token/generation conditions prevent an old owner from releasing its successor.
 - Exiting the Codex TUI ends its supervisor and private app-server; its cool name can
   transparently resume the saved Codex session later.
 - A completely empty Codex TUI may not have saved history. Its cool name recovers by

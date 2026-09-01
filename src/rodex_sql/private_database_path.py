@@ -103,9 +103,6 @@ class ValidatedDatabaseFile:
 
 def default_rodex_database_path() -> Path:
     """Resolve the durable database path for the current Linux user."""
-    configured = os.environ.get("RODEX_DATABASE_PATH")
-    if configured:
-        return Path(os.path.abspath(Path(configured).expanduser()))
     configured_state_home = os.environ.get("XDG_STATE_HOME")
     state_home = (
         Path(configured_state_home).expanduser()

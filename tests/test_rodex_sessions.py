@@ -630,7 +630,6 @@ def test_lookup_session_id_rejects_invalid_internal_ids(
 def test_default_database_path_uses_xdg_state_home(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.delenv("RODEX_DATABASE_PATH", raising=False)
     state_home = tmp_path / "state"
     monkeypatch.setenv("XDG_STATE_HOME", str(state_home))
 
@@ -640,7 +639,6 @@ def test_default_database_path_uses_xdg_state_home(
 def test_default_database_path_uses_home_state_directory_without_xdg_override(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.delenv("RODEX_DATABASE_PATH", raising=False)
     monkeypatch.delenv("XDG_STATE_HOME", raising=False)
     home = tmp_path / "home"
     monkeypatch.setattr(Path, "home", lambda: home)
@@ -658,7 +656,6 @@ def test_new_schema_generation_leaves_v16_database_untouched(
 
     Supersede this guard only with an explicit migration or database-reset decision.
     """
-    monkeypatch.delenv("RODEX_DATABASE_PATH", raising=False)
     state_home = tmp_path / "state"
     registry_directory = state_home / "rodex"
     registry_directory.mkdir(mode=0o700, parents=True)
@@ -723,10 +720,12 @@ def test_wrong_explicit_schema_generation_is_rejected_without_repair(
     ) == [(10,)]
 
 
-def test_default_database_path_honours_environment_override(
+def test_default_database_path_ignores_removed_database_override(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     configured = tmp_path / "custom.sqlite3"
+    state_home = tmp_path / "state"
     monkeypatch.setenv("RODEX_DATABASE_PATH", str(configured))
+    monkeypatch.setenv("XDG_STATE_HOME", str(state_home))
 
-    assert default_rodex_database_path() == configured
+    assert default_rodex_database_path() == state_home / "rodex" / "rodex-v17.sqlite3"

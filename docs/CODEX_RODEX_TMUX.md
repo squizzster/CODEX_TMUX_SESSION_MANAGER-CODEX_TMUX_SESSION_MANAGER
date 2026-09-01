@@ -52,7 +52,7 @@ becomes a distinct candidate for the transient App Server persistence check.
    transaction creates the Rodex/runtime identities, canonical root-thread membership,
    name, user/log, and tmux rows.
 6. While still holding that lock, Rodex confirms the complete registered capability,
-   renames to `<display>--r<registry-id>`, and configures status/input safety. A competing
+   renames tmux to the unique display name, and configures status/input safety. A competing
    selector cannot attach to the intermediate row.
 7. Rodex carries that capability to tmux's immutable `$session_id` and attaches
    to the ordinary Codex prompt; an initial prompt and interactive options have already
@@ -128,10 +128,12 @@ capability. Every terminal action repeats its applicable tuple at the exact targ
 primary-pane actions also require its immutable `%pane_id`. Names and process context
 are addresses only.
 
-tmux names are server-global while Rodex display names are registry-local. The live tmux
-name is therefore `<display>--r<registry-id>`; two databases may use the same display
-name without colliding. Rename and attach keep using `$session_id`, so later name reuse
-cannot redirect an operation.
+One canonical database and one shared tmux server belong to each Linux user. Display-name
+uniqueness in that database therefore covers tmux's server-global namespace, and the live
+tmux name is exactly the Rodex display name. Rename and attach keep using `$session_id`,
+so later name reuse cannot redirect an operation. The database ID remains an internal
+capability field that detects stale or replaced canonical storage; it never alters the
+name.
 
 tmux 3.2 may lose the source session from a `client-detached` hook after that session is
 destroyed. Rodex's indexed global client hooks consequently contain no authority and do

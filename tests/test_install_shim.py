@@ -90,10 +90,11 @@ def test_launchers_route_bare_rodex_to_managed_tmux_before_database_access(
 ) -> None:
     project_root = Path(__file__).parents[1]
     launcher = project_root / launcher_relative
-    database = tmp_path / "rodex.sqlite3"
+    state_home = tmp_path / "state"
+    database = state_home / "rodex" / "rodex-v17.sqlite3"
     environment = os.environ.copy()
     environment["RODEX_PROJECT_DIR"] = str(project_root)
-    environment["RODEX_DATABASE_PATH"] = str(database)
+    environment["XDG_STATE_HOME"] = str(state_home)
     environment["RODEX_CODEX_BINARY"] = "/bin/true"
     environment["RODEX_TMUX_BINARY"] = "rodex-test-missing-tmux"
 
@@ -118,13 +119,14 @@ def test_launchers_route_an_initial_prompt_to_managed_tmux(
 ) -> None:
     project_root = Path(__file__).parents[1]
     launcher = project_root / launcher_relative
-    database = tmp_path / "rodex.sqlite3"
+    state_home = tmp_path / "state"
+    database = state_home / "rodex" / "rodex-v17.sqlite3"
     fake_codex = tmp_path / "codex-must-not-run-directly"
     fake_codex.write_text("#!/bin/sh\nexit 91\n", encoding="utf-8")
     fake_codex.chmod(0o755)
     environment = os.environ.copy()
     environment["RODEX_PROJECT_DIR"] = str(project_root)
-    environment["RODEX_DATABASE_PATH"] = str(database)
+    environment["XDG_STATE_HOME"] = str(state_home)
     environment["RODEX_CODEX_BINARY"] = str(fake_codex)
     environment["RODEX_TMUX_BINARY"] = "rodex-test-missing-tmux"
 
@@ -149,13 +151,14 @@ def test_launchers_preserve_codex_subcommand_passthrough_without_tmux(
 ) -> None:
     project_root = Path(__file__).parents[1]
     launcher = project_root / launcher_relative
-    database = tmp_path / "rodex.sqlite3"
+    state_home = tmp_path / "state"
+    database = state_home / "rodex" / "rodex-v17.sqlite3"
     fake_codex = tmp_path / "codex-probe"
     fake_codex.write_text('#!/bin/sh\nprintf "%s\\n" "$@"\n', encoding="utf-8")
     fake_codex.chmod(0o755)
     environment = os.environ.copy()
     environment["RODEX_PROJECT_DIR"] = str(project_root)
-    environment["RODEX_DATABASE_PATH"] = str(database)
+    environment["XDG_STATE_HOME"] = str(state_home)
     environment["RODEX_CODEX_BINARY"] = str(fake_codex)
     environment["RODEX_TMUX_BINARY"] = "rodex-test-missing-tmux"
 
@@ -180,10 +183,11 @@ def test_launchers_print_rodex_help_without_codex_tmux_or_database(
 ) -> None:
     project_root = Path(__file__).parents[1]
     launcher = project_root / launcher_relative
-    database = tmp_path / "rodex.sqlite3"
+    state_home = tmp_path / "state"
+    database = state_home / "rodex" / "rodex-v17.sqlite3"
     environment = os.environ.copy()
     environment["RODEX_PROJECT_DIR"] = str(project_root)
-    environment["RODEX_DATABASE_PATH"] = str(database)
+    environment["XDG_STATE_HOME"] = str(state_home)
     environment["RODEX_CODEX_BINARY"] = "rodex-test-missing-codex"
     environment["RODEX_TMUX_BINARY"] = "rodex-test-missing-tmux"
 

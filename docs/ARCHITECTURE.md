@@ -61,8 +61,9 @@ prompt. An unregistered canonical Codex identity requires a transient App Server
 `tmux-shared-v1.sock` is multiplexed transport, never session authority. Server-scope
 protocol and random incarnation markers identify one compatible server. Creation alone
 may claim a completely unmarked server, and only while it has no session; an unmarked
-nonempty or incompatible server is left untouched. Display names are namespaced as
-`<display>--r<registry-id>` because tmux names are server-global.
+nonempty or incompatible server is left untouched. Each Linux user has one canonical
+database and one shared tmux server, so database-enforced display-name uniqueness covers
+the server-global tmux namespace and each live tmux name is the complete display name.
 
 `TmuxRuntimeCapability` binds the owning host to socket, server, immutable `$session_id`,
 primary `%pane_id`, and runtime. `TmuxSessionCapability` adds registered Rodex, registry,

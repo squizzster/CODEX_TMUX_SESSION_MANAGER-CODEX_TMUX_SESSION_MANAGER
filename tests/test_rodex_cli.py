@@ -945,7 +945,7 @@ def test_named_attach_recovers_one_externally_renamed_exact_runtime(
     assert renamed_runtime.tmux_session_name == "renamed-outside-rodex"
     assert renamed_runtime.runtime_id == RUNTIME_ID
     assert renamed_runtime.tmux_capability is not None
-    assert renamed_to == (f"automatic-beluga--r{lookup_rodex_registry_id(database)}")
+    assert renamed_to == "automatic-beluga"
     assert launcher.attached
 
 
@@ -985,7 +985,7 @@ def test_named_attach_recovers_one_relocated_pending_runtime(
     assert renamed_runtime.tmux_session_name == "interrupted-resume"
     assert renamed_runtime.runtime_id == RUNTIME_ID
     assert renamed_runtime.tmux_capability is not None
-    assert renamed_to == (f"automatic-beluga--r{lookup_rodex_registry_id(database)}")
+    assert renamed_to == "automatic-beluga"
     persisted_runtime = lookup_rodex_runtime_instance(1, database)
     assert persisted_runtime is not None
     assert persisted_runtime.runtime_id == RUNTIME_ID
@@ -1039,7 +1039,7 @@ def test_relocation_ignores_the_same_codex_identity_from_a_foreign_registry(
 
     class ForeignRegistryLauncher:
         def list_session_names(self, _socket_path: Path) -> tuple[str, ...]:
-            return ("automatic-beluga--r3333333333333333",)
+            return ("foreign-runtime",)
 
         def discover_runtime_control(self, _runtime: LiveTmuxSession) -> LiveRodexControl:
             return LiveRodexControl(
@@ -1065,7 +1065,7 @@ def test_relocation_ignores_the_same_codex_identity_from_a_foreign_registry(
     )
 
 
-def test_identical_display_names_map_to_distinct_cross_registry_tmux_names(
+def test_display_name_is_the_complete_tmux_session_name(
     tmp_path: Path,
 ) -> None:
     renamed_to: list[str] = []
@@ -1082,21 +1082,13 @@ def test_identical_display_names_map_to_distinct_cross_registry_tmux_names(
         "bootstrap-name",
         runtime_id=RUNTIME_ID,
     )
-    for registry_id in (
-        RodexRegistryId.parse("2222222222222222"),
-        RodexRegistryId.parse("3333333333333333"),
-    ):
-        rename_tmux_identity(
-            RenameLauncher(),  # type: ignore[arg-type]
-            active,
-            "automatic-beluga",
-            registry_id,
-        )
+    rename_tmux_identity(
+        RenameLauncher(),  # type: ignore[arg-type]
+        active,
+        "automatic-beluga",
+    )
 
-    assert renamed_to == [
-        "automatic-beluga--r2222222222222222",
-        "automatic-beluga--r3333333333333333",
-    ]
+    assert renamed_to == ["automatic-beluga"]
 
 
 def test_running_reports_an_unregistered_live_tmux_session(
@@ -2070,7 +2062,7 @@ def test_default_and_explicit_create_link_identities_before_attach(
     )
     assert planned_database == database
     registry_id = lookup_rodex_registry_id(database)
-    tmux_session_name = f"automatic-beluga--r{registry_id}"
+    tmux_session_name = "automatic-beluga"
     assert launcher.registry_identities == [registry_id]
     assert launcher.renamed == [(launcher.runtime, tmux_session_name)]
     assert len(launcher.configured) == 1
@@ -2228,7 +2220,7 @@ def test_bare_invocation_is_observably_equivalent_to_explicit_create(
         names = lookup_rodex_session_names(1, database)
         assert tmux_link is not None
         assert names is not None
-        expected_tmux_name = f"automatic-beluga--r{lookup_rodex_registry_id(database)}"
+        expected_tmux_name = "automatic-beluga"
         assert [runtime.tmux_session_name for runtime in launcher.configured] == [
             expected_tmux_name
         ]
@@ -2295,7 +2287,7 @@ def test_explicit_create_assigns_the_requested_display_name(
     )
 
     assert launcher.started == [(Path.cwd(), [])]
-    tmux_session_name = f"project_1234--r{lookup_rodex_registry_id(database)}"
+    tmux_session_name = "project_1234"
     assert launcher.renamed == [(launcher.runtime, tmux_session_name)]
     assert launcher.attached[0].tmux_session_name == tmux_session_name
     names = lookup_rodex_session_names(1, database)
@@ -2528,9 +2520,7 @@ def test_new_session_publication_waits_for_identity_ui_and_registration(
     assert errors == []
     assert sorted(outcomes) == [("creator", 0), ("opener", 0)]
     assert launcher.started == [(Path.cwd(), [])]
-    assert launcher.live_name == (
-        f"automatic-beluga--r{lookup_rodex_registry_id(database)}"
-    )
+    assert launcher.live_name == "automatic-beluga"
     assert launcher.ui_and_guards_ready
     assert launcher.ui_installations == 1
     assert len(launcher.confirmed) == 1
@@ -2901,7 +2891,7 @@ def test_detach_ended_name_resumes_exact_codex_session_without_attaching(
     output = json.loads(capsys.readouterr().out)
     assert launcher.started == [(Path.cwd(), ["resume", str(CODEX_SESSION_ID)])]
     assert launcher.analytics_identities == [(session.rodex_session_id, database)]
-    tmux_session_name = f"automatic-beluga--r{lookup_rodex_registry_id(database)}"
+    tmux_session_name = "automatic-beluga"
     assert launcher.renamed == [(launcher.runtime, tmux_session_name)]
     assert launcher.configured[0].tmux_session_name == tmux_session_name
     assert launcher.attached == []
@@ -2955,9 +2945,7 @@ def test_detach_unsaved_name_recovers_identity_without_attaching(
         (session.rodex_session_id, database),
         (session.rodex_session_id, database),
     ]
-    assert launcher.configured[0].tmux_session_name == (
-        f"automatic-beluga--r{lookup_rodex_registry_id(database)}"
-    )
+    assert launcher.configured[0].tmux_session_name == "automatic-beluga"
     assert launcher.attached == []
     assert (
         lookup_rodex_session_id_from_a_rodex_sessions_id(
@@ -3023,9 +3011,7 @@ def test_existing_name_wins_over_a_possible_future_codex_command(
 
     assert delegator.calls == []
     assert launcher.started == []
-    assert launcher.attached[0].tmux_session_name == (
-        f"future-command--r{lookup_rodex_registry_id(database)}"
-    )
+    assert launcher.attached[0].tmux_session_name == "future-command"
     assert launcher.attached[0].tmux_capability is not None
 
 
@@ -3068,7 +3054,7 @@ def test_live_cool_name_argument_renames_configures_and_reattaches_without_start
     ]
     assert len(launcher.renamed) == 1
     assert launcher.renamed[0][0].tmux_session_name == "rodex-token"
-    tmux_session_name = f"automatic-beluga--r{lookup_rodex_registry_id(database)}"
+    tmux_session_name = "automatic-beluga"
     assert launcher.renamed[0][1] == tmux_session_name
     assert len(launcher.refreshed_hooks) == 1
     assert launcher.refreshed_hooks[0].tmux_session_name == tmux_session_name
@@ -3114,9 +3100,7 @@ def test_live_codex_uuid_argument_opens_its_registered_rodex_display_identity(
     assert launcher.started == []
     assert launcher.persistence_checks == []
     assert len(launcher.attached) == 1
-    assert launcher.attached[0].tmux_session_name == (
-        f"remarkable-aardvark--r{lookup_rodex_registry_id(database)}"
-    )
+    assert launcher.attached[0].tmux_session_name == "remarkable-aardvark"
     assert launcher.attached[0].runtime_id == RUNTIME_ID
     assert launcher.attached[0].tmux_capability is not None
     assert "Reattaching Rodex remarkable-aardvark" in capsys.readouterr().out
@@ -3156,9 +3140,7 @@ def test_ended_codex_uuid_argument_resumes_the_registered_rodex_session(
 
     assert launcher.started == [(Path.cwd(), ["resume", str(CODEX_SESSION_ID)])]
     assert launcher.persistence_checks == []
-    assert launcher.attached[0].tmux_session_name == (
-        f"automatic-beluga--r{lookup_rodex_registry_id(database)}"
-    )
+    assert launcher.attached[0].tmux_session_name == "automatic-beluga"
     assert f"Resumed Rodex automatic-beluga -> Codex {CODEX_SESSION_ID}" in (
         capsys.readouterr().out
     )
@@ -3194,9 +3176,7 @@ def test_persisted_unregistered_codex_uuid_becomes_a_managed_rodex_session(
     assert launcher.started == [(Path.cwd(), ["resume", str(REPLACEMENT_CODEX_SESSION_ID)])]
     assert len(launcher.attached) == 1
     assert launcher.attached[0].tmux_server_socket_path == tmp_path / "tmux.sock"
-    assert launcher.attached[0].tmux_session_name == (
-        f"remarkable-aardvark--r{lookup_rodex_registry_id(database)}"
-    )
+    assert launcher.attached[0].tmux_session_name == "remarkable-aardvark"
     assert (
         lookup_rodex_sessions_id_from_a_codex_session_id(
             REPLACEMENT_CODEX_SESSION_ID, database
@@ -3296,7 +3276,7 @@ def test_ended_cool_name_argument_transparently_resumes_its_codex_session(
     )
 
     assert launcher.started == [(Path.cwd(), ["resume", str(CODEX_SESSION_ID)])]
-    tmux_session_name = f"automatic-beluga--r{lookup_rodex_registry_id(database)}"
+    tmux_session_name = "automatic-beluga"
     assert launcher.renamed == [(launcher.runtime, tmux_session_name)]
     assert launcher.attached[0].tmux_session_name == tmux_session_name
     tmux_link = lookup_rodex_tmux_session(1, database)
@@ -3499,7 +3479,7 @@ def test_unsaved_codex_session_starts_fresh_and_relinks_the_rodex_identity(
         (Path.cwd(), ["resume", str(CODEX_SESSION_ID)]),
         (Path.cwd(), []),
     ]
-    tmux_session_name = f"automatic-beluga--r{lookup_rodex_registry_id(database)}"
+    tmux_session_name = "automatic-beluga"
     assert launcher.renamed == [(launcher.runtime, tmux_session_name)]
     assert launcher.configured[0].tmux_session_name == tmux_session_name
     assert launcher.attached == launcher.configured
@@ -3591,13 +3571,14 @@ def test_unsaved_session_remains_linked_to_the_stored_codex_session_id_if_recove
 
 
 @pytest.mark.parametrize("lookup_name", ["black-sawfly", "work"])
-def test_either_name_route_displays_the_user_defined_name(
+def test_either_name_route_normalizes_a_legacy_suffixed_tmux_name(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     lookup_name: str,
 ) -> None:
     database = tmp_path / "rodex.sqlite3"
+    legacy_tmux_name = "black-sawfly--r0123456789abcdef"
     monkeypatch.setattr(
         "cool_name.functions.coolname.generate_slug",
         lambda _word_count: "black-sawfly",
@@ -3607,7 +3588,7 @@ def test_either_name_route_displays_the_user_defined_name(
         codex_session_id=CODEX_SESSION_ID,
         user_identity=DNA,
         tmux_server_socket_path=tmp_path / "tmux.sock",
-        tmux_session_name="black-sawfly",
+        tmux_session_name=legacy_tmux_name,
         runtime_id=RUNTIME_ID,
     )
     assign_a_user_defined_cool_name("black-sawfly", "work", database, user_identity=DNA)
@@ -3619,9 +3600,9 @@ def test_either_name_route_displays_the_user_defined_name(
 
     assert run([lookup_name], database_path=database, launcher=launcher) == 0  # type: ignore[arg-type]
 
-    tmux_session_name = f"work--r{lookup_rodex_registry_id(database)}"
+    tmux_session_name = "work"
     assert len(launcher.renamed) == 1
-    assert launcher.renamed[0][0].tmux_session_name == "black-sawfly"
+    assert launcher.renamed[0][0].tmux_session_name == legacy_tmux_name
     assert launcher.renamed[0][0].runtime_id == RUNTIME_ID
     assert launcher.renamed[0][0].tmux_capability is not None
     assert launcher.renamed[0][1] == tmux_session_name
@@ -3687,17 +3668,14 @@ def test_alias_command_accepts_force_without_starting_codex(
     )
 
     assert launcher.started == []
-    registry_suffix = f"--r{lookup_rodex_registry_id(database)}"
     assert [name for _, name in launcher.renamed] == [
-        f"first{registry_suffix}",
-        f"replacement{registry_suffix}",
+        "first",
+        "replacement",
     ]
-    assert launcher.refreshed_hooks[-1].tmux_session_name == (
-        f"replacement{registry_suffix}"
-    )
+    assert launcher.refreshed_hooks[-1].tmux_session_name == "replacement"
     tmux_link = lookup_rodex_tmux_session(1, database)
     assert tmux_link is not None
-    assert tmux_link.tmux_session_name == f"replacement{registry_suffix}"
+    assert tmux_link.tmux_session_name == "replacement"
     assert [prompt for _live_control, prompt in control.started] == [
         (
             f"RODEX_AUTO_INFO: Rodex session {session.rodex_session_id} "
@@ -3822,7 +3800,7 @@ def test_alias_reports_auto_info_failure_without_rolling_back_the_new_name(
     assert names.display_name == "work"
     tmux_link = lookup_rodex_tmux_session(1, database)
     assert tmux_link is not None
-    assert tmux_link.tmux_session_name == (f"work--r{lookup_rodex_registry_id(database)}")
+    assert tmux_link.tmux_session_name == "work"
 
 
 def test_alias_replacement_without_force_is_reported_on_stderr(
@@ -3830,7 +3808,8 @@ def test_alias_replacement_without_force_is_reported_on_stderr(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    database = tmp_path / "rodex.sqlite3"
+    state_home = tmp_path / "state"
+    database = state_home / "rodex" / "rodex-v17.sqlite3"
     monkeypatch.setattr(
         "cool_name.functions.coolname.generate_slug",
         lambda _word_count: "black-sawfly",
@@ -3850,7 +3829,7 @@ def test_alias_replacement_without_force_is_reported_on_stderr(
         tmux_session_name="black-sawfly",
     )
     assign_a_user_defined_cool_name("black-sawfly", "first", database, user_identity=DNA)
-    monkeypatch.setenv("RODEX_DATABASE_PATH", str(database))
+    monkeypatch.setenv("XDG_STATE_HOME", str(state_home))
     monkeypatch.setattr(sys, "argv", ["rodex", "_alias", "black-sawfly", "replacement"])
 
     with pytest.raises(SystemExit) as raised:
@@ -3882,7 +3861,8 @@ def test_empty_alias_is_a_concise_stderr_error(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    database = tmp_path / "rodex.sqlite3"
+    state_home = tmp_path / "state"
+    database = state_home / "rodex" / "rodex-v17.sqlite3"
     monkeypatch.setattr(
         "cool_name.functions.coolname.generate_slug", lambda _word_count: "safe-name"
     )
@@ -3897,7 +3877,7 @@ def test_empty_alias_is_a_concise_stderr_error(
         tmux_server_socket_path=tmp_path / "tmux.sock",
         tmux_session_name="safe-name",
     )
-    monkeypatch.setenv("RODEX_DATABASE_PATH", str(database))
+    monkeypatch.setenv("XDG_STATE_HOME", str(state_home))
     monkeypatch.setattr(sys, "argv", ["rodex", "_alias", "safe-name", ""])
 
     with pytest.raises(SystemExit) as raised:
@@ -4015,7 +3995,7 @@ def test_new_launch_cleans_up_the_renamed_runtime_when_persistence_fails(
     with pytest.raises(RuntimeError, match="persist failed"):
         run(arguments, database_path=database, launcher=launcher)  # type: ignore[arg-type]
 
-    tmux_session_name = f"safe-name--r{lookup_rodex_registry_id(database)}"
+    tmux_session_name = "safe-name"
     assert launcher.renamed == [(launcher.runtime, tmux_session_name)]
     assert launcher.stopped == [
         (replace(launcher.runtime, tmux_session_name=tmux_session_name), False)
@@ -4049,7 +4029,7 @@ def test_live_reattach_restores_the_recorded_name_when_persistence_fails(
         run(["safe-name"], database_path=database, launcher=launcher)  # type: ignore[arg-type]
 
     assert [name for _, name in launcher.renamed] == [
-        f"safe-name--r{lookup_rodex_registry_id(database)}",
+        "safe-name",
         "rodex-token",
     ]
     tmux_link = lookup_rodex_tmux_session(1, database)
@@ -4107,7 +4087,7 @@ def test_alias_rename_failure_preserves_the_previous_name_everywhere(
     assert lookup_rodex_sessions_id_from_a_cool_name("replacement", database) is None
     tmux_link = lookup_rodex_tmux_session(1, database)
     assert tmux_link is not None
-    assert tmux_link.tmux_session_name == (f"first--r{lookup_rodex_registry_id(database)}")
+    assert tmux_link.tmux_session_name == "first"
 
 
 def test_alias_database_failure_renames_tmux_back_and_leaves_no_alias(
@@ -4145,7 +4125,7 @@ def test_alias_database_failure_renames_tmux_back_and_leaves_no_alias(
         )
 
     assert [name for _, name in launcher.renamed] == [
-        f"work--r{lookup_rodex_registry_id(database)}",
+        "work",
         "safe-name",
     ]
     names = lookup_rodex_session_names(1, database)
@@ -4300,8 +4280,8 @@ def test_concurrent_alias_commands_serialize_across_tmux_and_database(
     assert names.display_name == "first"
     tmux_link = lookup_rodex_tmux_session(1, database)
     assert tmux_link is not None
-    assert tmux_link.tmux_session_name == f"first--r{registry_id}"
-    assert live_name == [f"first--r{registry_id}"]
+    assert tmux_link.tmux_session_name == "first"
+    assert live_name == ["first"]
     assert [prompt for _live_control, prompt in control.started] == [
         (f"RODEX_AUTO_INFO: Rodex session {session.rodex_session_id} is now named 'first'.")
     ]

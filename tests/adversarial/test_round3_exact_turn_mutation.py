@@ -473,7 +473,7 @@ def test_alias_transition_holds_the_lock_and_steers_the_observed_active_turn(
             self, observed: LiveTmuxSession, tmux_session_name: str
         ) -> LiveTmuxSession:
             assert observed == runtime
-            assert tmux_session_name == f"renamed--r{registry_id}"
+            assert tmux_session_name == "renamed"
             return LiveTmuxSession(observed.tmux_server_socket_path, tmux_session_name)
 
         def initialise_session_ui(self, _runtime: LiveTmuxSession) -> None:

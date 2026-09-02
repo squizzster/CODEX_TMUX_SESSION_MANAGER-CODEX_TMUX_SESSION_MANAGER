@@ -59,7 +59,7 @@ def handle_shared_ctrl_c(
     expiry_scheduler: ExpiryScheduler = _restore_after_confirmation_window,
     runner: Runner = subprocess.run,
 ) -> int:
-    """Forward Ctrl-C privately, or require same-client confirmation when shared."""
+    """End a private session, or require same-client confirmation when shared."""
     executor = SyncTmuxExecutor(
         tmux_binary,
         capability.tmux_server_socket_path,
@@ -71,9 +71,7 @@ def handle_shared_ctrl_c(
 
     if pane_id != capability.pane_target:
         return 1
-    identity = raw_tmux(
-        *registered_primary_pane_read_arguments(capability, "#{pane_id}")
-    )
+    identity = raw_tmux(*registered_primary_pane_read_arguments(capability, "#{pane_id}"))
     if identity.returncode != 0 or identity.stdout.strip() != pane_id:
         return 1
     primary_pane_id = capability.pane_target
@@ -123,7 +121,7 @@ def handle_shared_ctrl_c(
     current_confirmation = _parse_confirmation(advertised.stdout.strip())
 
     if current_attached_client_count == 1:
-        forwarded = tmux(
+        terminated = tmux(
             "if-shell",
             "-t",
             primary_pane_id,
@@ -138,7 +136,7 @@ def handle_shared_ctrl_c(
                     primary_pane_id,
                     _CONFIRMATION_CLAIM_OPTION,
                 ),
-                ("send-keys", "-t", primary_pane_id, "C-c"),
+                ("kill-session", "-t", capability.session_target),
             ),
             _tmux_command_sequence(
                 ("set-option", "-u", "-t", primary_pane_id, _CONFIRMATION_OPTION),
@@ -153,7 +151,7 @@ def handle_shared_ctrl_c(
         )
         if current_confirmation is not None:
             status.restore_if_token_matches(current_confirmation[2])
-        return forwarded.returncode
+        return terminated.returncode
 
     now = monotonic_nanoseconds()
     if _is_current_confirmation(current_confirmation, client_name, now):
@@ -187,7 +185,7 @@ def handle_shared_ctrl_c(
                     primary_pane_id,
                     _CONFIRMATION_CLAIM_OPTION,
                 ),
-                ("send-keys", "-t", primary_pane_id, "C-c"),
+                ("kill-session", "-t", capability.session_target),
             ),
             _tmux_command_sequence(
                 (

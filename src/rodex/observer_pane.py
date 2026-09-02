@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shlex
 import sys
@@ -10,6 +11,10 @@ import uuid
 from pathlib import Path
 from typing import Final
 
+from .process_environment import (
+    exact_environment_exec_command,
+    validated_user_environment_entries,
+)
 from .tmux_executor import SyncTmuxExecutor, SyncTmuxRunner, TmuxCommandResult
 from .tmux_session_capability import (
     TmuxRuntimeCapability,
@@ -111,7 +116,7 @@ class ObserverPaneController:
             or not cwd_fields[1]
         ):
             return None
-        command = [
+        observer_command = [
             self._python_executable,
             "-m",
             "rodex.agent_observer",
@@ -133,6 +138,17 @@ class ObserverPaneController:
                 sort_keys=True,
             ),
         ]
+        try:
+            environment_names = tuple(
+                name for name, _value in validated_user_environment_entries(os.environ)
+            )
+            command = exact_environment_exec_command(
+                self._python_executable,
+                environment_names,
+                observer_command,
+            )
+        except ValueError:
+            return None
         split = self._mutate(
             (
                 "split-window",
@@ -148,7 +164,9 @@ class ObserverPaneController:
                 "-P",
                 "-F",
                 "#{pane_id}",
-                f"exec {shlex.join(command)}",
+                "-e",
+                f"PWD={cwd_fields[1]}",
+                *command,
             )
         )
         pane_target = split.stdout.strip()

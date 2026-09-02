@@ -235,7 +235,7 @@ def test_round1_shared_ctrl_c_rechecks_current_attachment_count(tmp_path: Path) 
     )
 
     assert any("session_attached" in " ".join(command) for command in commands)
-    assert not any("send-keys" in command for command in commands)
+    assert not any("kill-session" in command for command in commands)
 
 
 def test_round1_shared_ctrl_c_confirmation_is_atomic_across_callers(
@@ -252,13 +252,11 @@ def test_round1_shared_ctrl_c_confirmation_is_atomic_across_callers(
     confirmation = initial_confirmation
     readers = Barrier(2)
     state_lock = Lock()
-    send_count = 0
+    kill_count = 0
     errors: list[BaseException] = []
 
-    def runner(
-        command: list[str], **_options: object
-    ) -> subprocess.CompletedProcess[str]:
-        nonlocal confirmation, send_count
+    def runner(command: list[str], **_options: object) -> subprocess.CompletedProcess[str]:
+        nonlocal confirmation, kill_count
         arguments = command[3:]
         joined = " ".join(arguments)
         if (
@@ -287,15 +285,15 @@ def test_round1_shared_ctrl_c_confirmation_is_atomic_across_callers(
             with state_lock:
                 confirmation = ""
             return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
-        if arguments[:1] == ["if-shell"] and "send-keys" in joined:
+        if arguments[:1] == ["if-shell"] and "kill-session" in joined:
             with state_lock:
                 if confirmation == initial_confirmation:
                     confirmation = ""
-                    send_count += 1
+                    kill_count += 1
             return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
-        if arguments[:1] == ["send-keys"]:
+        if arguments[:1] == ["kill-session"]:
             with state_lock:
-                send_count += 1
+                kill_count += 1
             return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
         return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
 
@@ -322,4 +320,4 @@ def test_round1_shared_ctrl_c_confirmation_is_atomic_across_callers(
 
     assert all(not caller.is_alive() for caller in callers)
     assert errors == []
-    assert send_count == 1
+    assert kill_count == 1

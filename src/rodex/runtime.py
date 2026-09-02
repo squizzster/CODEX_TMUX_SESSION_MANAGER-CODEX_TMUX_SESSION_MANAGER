@@ -45,8 +45,10 @@ from .control import LiveRodexControl
 from .primary_connection_lifecycle import PrimaryConnectionLifecycleCoordinator
 from .process_contracts import AnalyticsWorkerConfig, SessionHostConfig
 from .process_environment import (
-    MANAGED_SESSION_ENVIRONMENT_VARIABLES,
+    TMUX_OWNED_CHILD_ENVIRONMENT_VARIABLES,
+    exact_environment_exec_command,
     user_process_environment,
+    validated_user_environment_entries,
 )
 from .protocol_proxy import (
     CodexContextStatusObserver,
@@ -415,6 +417,83 @@ def _tmux_command_queue(arguments: Sequence[str]) -> str:
     return " ; ".join(shlex.join(command) for command in commands)
 
 
+def _tmux_source_command_queue(arguments: Sequence[str]) -> str:
+    """Serialize a tmux source queue as ASCII with every argument byte escaped."""
+    commands: list[list[str]] = [[]]
+    for argument in arguments:
+        if argument == ";":
+            if not commands[-1]:
+                raise ValueError("tmux source queue contains an empty command")
+            commands.append([])
+        elif not isinstance(argument, str) or "\x00" in argument:
+            raise ValueError("tmux source queue contains invalid command text")
+        else:
+            commands[-1].append(argument)
+    if not commands[-1]:
+        raise ValueError("tmux source queue ends with an empty command")
+    return " ; ".join(
+        " ".join(_tmux_source_byte_string(argument) for argument in command)
+        for command in commands
+    )
+
+
+def _tmux_source_byte_string(value: str) -> str:
+    """Encode one Linux text value without tmux format or config interpolation."""
+    return '"' + "".join(f"\\{byte:03o}" for byte in os.fsencode(value)) + '"'
+
+
+def _parse_tmux_shell_environment_names(shell_commands: str) -> frozenset[str]:
+    """Parse tmux's repeated assignment/export records without evaluating values."""
+    names: set[str] = set()
+    offset = 0
+    while offset < len(shell_commands):
+        assignment = _parse_tmux_shell_environment_assignment(shell_commands, offset)
+        if assignment is not None:
+            name, offset = assignment
+            names.add(name)
+            continue
+        if shell_commands.startswith("unset ", offset):
+            record_end = shell_commands.find(";\n", offset)
+            if record_end >= 0:
+                offset = record_end + 2
+                continue
+        raise ValueError("tmux returned a malformed global environment")
+    return frozenset(names)
+
+
+def _parse_tmux_shell_environment_assignment(
+    shell_commands: str,
+    offset: int,
+) -> tuple[str, int] | None:
+    assignment_index = shell_commands.find("=", offset)
+    if assignment_index < 0:
+        return None
+    name = shell_commands[offset:assignment_index]
+    value_start = assignment_index + 1
+    if not name or "\x00" in name or shell_commands[value_start : value_start + 1] != '"':
+        return None
+    cursor = value_start + 1
+    while cursor < len(shell_commands):
+        character = shell_commands[cursor]
+        if character == "\\":
+            cursor += 2
+            continue
+        if character == '"':
+            break
+        cursor += 1
+    else:
+        return None
+    suffix = f"; export {name};"
+    if not shell_commands.startswith(suffix, cursor + 1):
+        return None
+    record_end = cursor + 1 + len(suffix)
+    if record_end == len(shell_commands):
+        return name, record_end
+    if shell_commands[record_end] != "\n":
+        return None
+    return name, record_end + 1
+
+
 class RodexRuntimeLauncher:
     """Start one private app-server/TUI pair and attach the user's terminal."""
 
@@ -595,9 +674,12 @@ class RodexRuntimeLauncher:
             codex_arguments=tuple(codex_arguments),
             analytics=analytics_config,
         )
-        host_command = shlex.join(host_config.command(self._python_executable))
-        self._start_tmux_session(runtime, resolved_workspace, host_command)
         try:
+            self._start_tmux_session(
+                runtime,
+                resolved_workspace,
+                host_config.command(self._python_executable),
+            )
             requested_codex_session_id = _requested_exact_codex_resume(codex_arguments)
             codex_session_id = self._wait_for_single_codex_session_id(
                 runtime,
@@ -617,8 +699,8 @@ class RodexRuntimeLauncher:
                 rodex_session_id,
                 rodex_registry_id,
             )
-        except BaseException:
-            self._stop_startup_runtime(runtime)
+        except BaseException as failure:
+            self._stop_startup_runtime(runtime, failure=failure)
             raise
         return runtime, codex_session_id
 
@@ -1299,34 +1381,46 @@ class RodexRuntimeLauncher:
         self,
         runtime: LiveTmuxSession,
         workspace: Path,
-        host_command: str,
+        host_command: Sequence[str],
     ) -> None:
-        """Set scrollback defaults before tmux allocates the session's first pane."""
+        """Stage one inert pane, install caller state, then start the real host."""
         if runtime.runtime_id is None:
             raise RodexRuntimeError("tmux creation requires a runtime incarnation")
+        if (
+            not host_command
+            or not isinstance(host_command[0], str)
+            or not host_command[0]
+            or any(not isinstance(argument, str) for argument in host_command)
+        ):
+            raise ValueError("tmux host command must start with non-empty executable text")
+        session_environment = self._user_process_environment.copy()
+        session_environment["PWD"] = str(workspace)
+        try:
+            environment_entries = validated_user_environment_entries(session_environment)
+        except ValueError as error:
+            raise RodexRuntimeError("caller process environment is invalid") from error
+        caller_environment_names = frozenset(name for name, _value in environment_entries)
         candidate_server_id = secrets.token_hex(16)
         new_session_arguments = [
             "new-session",
             "-d",
+            "-E",
             "-s",
             runtime.tmux_session_name,
             "-c",
             str(workspace),
+            "/usr/bin/sleep",
+            "30",
         ]
-        missing_environment_variables: list[str] = []
-        for name in MANAGED_SESSION_ENVIRONMENT_VARIABLES:
-            value = self._user_process_environment.get(name)
-            new_session_arguments.extend(("-e", f"{name}={value or ''}"))
-            if not value:
-                missing_environment_variables.append(name)
-        if missing_environment_variables:
-            unset_command = ["/usr/bin/env"]
-            for name in missing_environment_variables:
-                unset_command.extend(("-u", name))
-            host_command = f"{shlex.join(unset_command)} {host_command}"
-        new_session_arguments.append(host_command)
         new_session_arguments.extend(
             (
+                ";",
+                "set-option",
+                "-p",
+                "-t",
+                _exact_tmux_pane_target(runtime.tmux_session_name),
+                "remain-on-exit",
+                "on",
                 ";",
                 "set-option",
                 "-t",
@@ -1342,17 +1436,6 @@ class RodexRuntimeLauncher:
                 "#{pane_id}",
             )
         )
-        for name in missing_environment_variables:
-            new_session_arguments.extend(
-                (
-                    ";",
-                    "set-environment",
-                    "-r",
-                    "-t",
-                    _exact_tmux_session_target(runtime.tmux_session_name),
-                    name,
-                )
-            )
         creation_action = _tmux_command_queue(
             (
                 "set-option",
@@ -1403,8 +1486,127 @@ class RodexRuntimeLauncher:
             server_matches_current_protocol,
             creation_action,
             shlex.join(("run-shell", "false")),
-            environment=self._user_process_environment,
+            environment=session_environment,
         )
+        capability = self._resolve_bootstrap_tmux_capability(runtime)
+        global_environment_names = self._read_tmux_global_environment_names(
+            runtime,
+            capability.tmux_server_id,
+        )
+        stale_global_environment_names = tuple(
+            sorted(
+                global_environment_names
+                - caller_environment_names
+                - TMUX_OWNED_CHILD_ENVIRONMENT_VARIABLES
+            )
+        )
+        environment_action: list[str] = []
+        for name, value in environment_entries:
+            environment_action.extend(
+                (
+                    "set-environment",
+                    "-t",
+                    capability.session_target,
+                    "--",
+                    name,
+                    value,
+                    ";",
+                )
+            )
+        for name in stale_global_environment_names:
+            environment_action.extend(
+                (
+                    "set-environment",
+                    "-r",
+                    "-t",
+                    capability.session_target,
+                    "--",
+                    name,
+                    ";",
+                )
+            )
+        environment_action.extend(
+            (
+                "set-option",
+                "-t",
+                capability.pane_target,
+                "update-environment",
+                "",
+            )
+        )
+        install_action = _tmux_source_command_queue(environment_action)
+        source = _tmux_source_command_queue(
+            (
+                "if-shell",
+                "-t",
+                capability.pane_target,
+                "-F",
+                primary_pane_capability_if_shell_condition(capability),
+                install_action,
+                shlex.join(("run-shell", "false")),
+            )
+        )
+        self._tmux(
+            runtime,
+            "source-file",
+            "-",
+            environment=session_environment,
+            input_text=f"{source}\n",
+        )
+        respawn_action = _tmux_command_queue(
+            (
+                "respawn-pane",
+                "-k",
+                "-t",
+                capability.pane_target,
+                *exact_environment_exec_command(
+                    self._python_executable,
+                    tuple(caller_environment_names),
+                    host_command,
+                ),
+                ";",
+                "set-option",
+                "-p",
+                "-t",
+                capability.pane_target,
+                "remain-on-exit",
+                "off",
+            )
+        )
+        self._tmux(
+            runtime,
+            "if-shell",
+            "-t",
+            capability.pane_target,
+            "-F",
+            primary_pane_capability_if_shell_condition(capability),
+            respawn_action,
+            shlex.join(("run-shell", "false")),
+            environment=session_environment,
+        )
+
+    def _read_tmux_global_environment_names(
+        self,
+        runtime: LiveTmuxSession,
+        expected_server_id: str,
+    ) -> frozenset[str]:
+        arguments = ("show-environment", "-g", "-s")
+        result = self._server_capability_tmux(
+            runtime,
+            expected_server_id,
+            *arguments,
+            check=False,
+        )
+        if result.returncode != 0:
+            raise RodexRuntimeError(
+                "shared tmux global environment could not be read exactly"
+            )
+        try:
+            return _parse_tmux_shell_environment_names(result.stdout)
+        except ValueError as error:
+            raise RodexRuntimeError(
+                "shared tmux global environment is malformed"
+            ) from error
 
     def attach(self, runtime: LiveTmuxSession) -> None:
         """Attach the calling terminal to the live Rodex tmux session."""
@@ -1418,7 +1620,9 @@ class RodexRuntimeLauncher:
         environment = self._user_process_environment.copy()
         environment.pop("TMUX", None)
         capability = self._resolve_registered_tmux_capability(runtime)
-        attach_action = shlex.join(("attach-session", "-t", capability.session_target))
+        attach_action = shlex.join(
+            ("attach-session", "-E", "-t", capability.session_target)
+        )
         self._tmux(
             runtime,
             "-T",
@@ -1712,9 +1916,7 @@ class RodexRuntimeLauncher:
             bootstrap_capability = self._resolve_bootstrap_tmux_capability(runtime)
             tmux_session_id = bootstrap_capability.session_target
             pane_target = bootstrap_capability.pane_target
-            condition = primary_pane_capability_if_shell_condition(
-                bootstrap_capability
-            )
+            condition = primary_pane_capability_if_shell_condition(bootstrap_capability)
         self._tmux(
             runtime,
             "if-shell",
@@ -1727,10 +1929,20 @@ class RodexRuntimeLauncher:
             check=check,
         )
 
-    def _stop_startup_runtime(self, runtime: LiveTmuxSession) -> None:
+    def _stop_startup_runtime(
+        self,
+        runtime: LiveTmuxSession,
+        *,
+        failure: BaseException | None = None,
+    ) -> None:
         """Clean up only the runtime incarnation published during tmux creation."""
-        with suppress(RodexRuntimeError):
+        try:
             self.stop(runtime, check=False)
+        except BaseException as cleanup_failure:
+            if failure is not None:
+                failure.add_note(f"tmux startup cleanup also failed: {cleanup_failure}")
+            elif not isinstance(cleanup_failure, RodexRuntimeError):
+                raise
 
     def _wait_for_single_codex_session_id(
         self,
@@ -1817,6 +2029,7 @@ class RodexRuntimeLauncher:
         check: bool = True,
         interactive: bool = False,
         environment: dict[str, str] | None = None,
+        input_text: str | None = None,
         timeout_seconds: float | None = None,
     ) -> TmuxCommandResult:
         deadline = (
@@ -1834,6 +2047,7 @@ class RodexRuntimeLauncher:
             arguments,
             mode="interactive" if interactive else "captured",
             environment=environment,
+            input_text=input_text,
         )
         if result.timed_out:
             raise RodexRuntimeError(
@@ -1964,9 +2178,6 @@ def run_session_host(
 ) -> int:
     """Supervise the app-server, protocol proxy, and foreground Codex TUI."""
     user_environment = user_process_environment(os.environ)
-    for name in MANAGED_SESSION_ENVIRONMENT_VARIABLES:
-        if not user_environment.get(name):
-            user_environment.pop(name, None)
     codex_binary = config.codex_binary
     app_server_socket_path = config.app_server_socket_path
     app_server_log_path = config.app_server_log_path

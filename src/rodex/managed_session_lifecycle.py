@@ -316,8 +316,8 @@ def _create_managed_session(
                     assignment.renamed_tmux_session_name = active_tmux.tmux_session_name
                 display_name = assignment.names.display_name
             runtime_launcher.initialise_session_ui(active_tmux)
-    except BaseException:
-        runtime_launcher.stop(active_tmux, check=False)
+    except BaseException as failure:
+        _stop_failed_runtime(runtime_launcher, active_tmux, failure)
         raise
 
     if request.detach:
@@ -556,8 +556,8 @@ def _prepare_selected_session(
             database_path,
         )
         launcher.initialise_session_ui(active_tmux)
-    except BaseException:
-        launcher.stop(active_tmux, check=False)
+    except BaseException as failure:
+        _stop_failed_runtime(launcher, active_tmux, failure)
         raise
 
     action = "Recovered" if replaced_unsaved_codex_identity else "Resumed"
@@ -568,6 +568,18 @@ def _prepare_selected_session(
         f"{action} Rodex {display_name} -> Codex {observed_codex_session_id} "
         f"({active_tmux.tmux_session_name})",
     )
+
+
+def _stop_failed_runtime(
+    launcher: RodexRuntimeLauncher,
+    runtime: LiveTmuxSession,
+    failure: BaseException,
+) -> None:
+    """Attempt exact cleanup without replacing the transition's causal failure."""
+    try:
+        launcher.stop(runtime, check=False)
+    except BaseException as cleanup_failure:
+        failure.add_note(f"tmux cleanup also failed: {cleanup_failure}")
 
 
 def _start_managed_runtime(

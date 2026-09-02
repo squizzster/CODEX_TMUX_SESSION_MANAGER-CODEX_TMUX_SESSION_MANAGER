@@ -481,12 +481,27 @@ def test_exact_spawn_creates_a_disabled_top_third_without_changing_focus(
         "/workspace",
         "-P",
     ]
-    assert "exec /usr/bin/python3 -m rodex.agent_observer" in split[-1]
-    assert "--initial-event" in split[-1]
-    assert str(TRACE_CURSOR) in split[-1]
-    assert "subAgentActivity" in split[-1]
-    assert "/root/live-review" in split[-1]
-    assert "prompt" not in split[-1]
+    assert split[11:15] == ["-F", "#{pane_id}", "-e", "PWD=/workspace"]
+    assert "exec" not in split
+    scrubber_start = split.index("/usr/bin/python3", 15)
+    assert split[scrubber_start : scrubber_start + 4] == [
+        "/usr/bin/python3",
+        "-I",
+        "-m",
+        "rodex.environment_exec",
+    ]
+    observer_start = split.index("--", scrubber_start) + 1
+    assert split[observer_start : observer_start + 3] == [
+        "/usr/bin/python3",
+        "-m",
+        "rodex.agent_observer",
+    ]
+    assert "--initial-event" in split
+    joined_split = shlex.join(split)
+    assert str(TRACE_CURSOR) in joined_split
+    assert "subAgentActivity" in joined_split
+    assert "/root/live-review" in joined_split
+    assert "prompt" not in joined_split
     assert [shlex.split(command[-2]) for command in calls[-4:]] == [
         ["set-option", "-p", "-t", "%7", "@rodex_agent_observer_pane_id", "%9"],
         ["set-option", "-p", "-t", "%9", "@rodex_agent_observer_for", "%7"],
@@ -835,9 +850,7 @@ def test_controller_close_waits_for_inflight_callback_and_blocks_late_mutation(
             callback_entered.set()
             assert release_callback.wait(2)
             return subprocess.CompletedProcess(command, 1, "", "missing")
-        read_output = _observer_capability_read_output(
-            command, current_path=str(tmp_path)
-        )
+        read_output = _observer_capability_read_output(command, current_path=str(tmp_path))
         if read_output is not None:
             return subprocess.CompletedProcess(command, 0, read_output, "")
         if operation == "if-shell" and "split-window" in command[-2]:

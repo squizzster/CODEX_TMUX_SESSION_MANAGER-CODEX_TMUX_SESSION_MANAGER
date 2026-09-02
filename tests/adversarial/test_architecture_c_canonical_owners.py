@@ -245,6 +245,7 @@ def test_architecture_c_tmux_executor_has_one_run_entry_and_explicit_modes(
         ("new-session", "-d", "probe"),
         environment={"PATH": "/usr/bin"},
     )
+    executor.run(("source-file", "-"), input_text="set-option status off\n")
     executor.run(
         ("attach-session", "-t", "=exact"),
         mode="interactive",
@@ -264,12 +265,14 @@ def test_architecture_c_tmux_executor_has_one_run_entry_and_explicit_modes(
     assert calls[0][1] == {
         "check": False,
         "text": True,
+        "errors": "surrogateescape",
         "capture_output": True,
         "timeout": DEFAULT_TMUX_COMMAND_TIMEOUT_SECONDS,
     }
     assert calls[1][1] == {
         "check": False,
         "text": True,
+        "errors": "surrogateescape",
         "stdin": subprocess.DEVNULL,
         "stdout": subprocess.DEVNULL,
         "stderr": subprocess.DEVNULL,
@@ -278,6 +281,7 @@ def test_architecture_c_tmux_executor_has_one_run_entry_and_explicit_modes(
     assert calls[2][1] == {
         "check": False,
         "text": True,
+        "errors": "surrogateescape",
         "capture_output": True,
         "timeout": DEFAULT_TMUX_COMMAND_TIMEOUT_SECONDS,
         "env": {"PATH": "/usr/bin"},
@@ -285,8 +289,21 @@ def test_architecture_c_tmux_executor_has_one_run_entry_and_explicit_modes(
     assert calls[3][1] == {
         "check": False,
         "text": True,
+        "errors": "surrogateescape",
+        "capture_output": True,
+        "input": "set-option status off\n",
+        "timeout": DEFAULT_TMUX_COMMAND_TIMEOUT_SECONDS,
+    }
+    assert calls[4][1] == {
+        "check": False,
+        "text": True,
         "env": {"TERM": "xterm"},
     }
+    assert "set-option status off" not in calls[3][0]
+    with pytest.raises(ValueError, match="stdin requires captured output"):
+        executor.run(("source-file", "-"), output="discard", input_text="unsafe")
+    with pytest.raises(ValueError, match="owns terminal input"):
+        executor.run(("attach-session",), mode="interactive", input_text="unsafe")
 
 
 def test_architecture_c_async_tmux_timeout_kills_and_reaps_child(
@@ -362,9 +379,7 @@ def test_capability_predicates_are_never_rendered_as_display_payload() -> None:
 
     for source_path in rodex_source.glob("*.py"):
         tree = ast.parse(source_path.read_text(encoding="utf-8"), source_path.name)
-        for invocation in (
-            node for node in ast.walk(tree) if isinstance(node, ast.Call)
-        ):
+        for invocation in (node for node in ast.walk(tree) if isinstance(node, ast.Call)):
             if not any(
                 isinstance(node, ast.Constant) and node.value == "display-message"
                 for node in ast.walk(invocation)

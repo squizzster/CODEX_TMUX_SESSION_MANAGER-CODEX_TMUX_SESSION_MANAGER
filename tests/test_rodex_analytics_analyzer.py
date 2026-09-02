@@ -262,7 +262,7 @@ def test_stateful_analyzer_fails_closed_after_unexpected_mutation_error(
     adapter = StatefulCodexProtocolAnalyticsAdapter()
 
     def fail_consume(*args: object) -> None:
-        raise RuntimeError("pinned dependency failure")
+        raise RuntimeError("analyzer dependency failure")
 
     monkeypatch.setattr(adapter._analyzer, "_consume", fail_consume)
 

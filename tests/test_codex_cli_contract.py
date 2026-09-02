@@ -3,19 +3,19 @@ from __future__ import annotations
 import pytest
 
 from codex_cli_contract import (
-    CODEX_CLI_0_150_1,
-    CODEX_CLI_0_150_1_COMMAND_TOKENS,
+    CODEX_CLI_0_151_0,
+    CODEX_CLI_0_151_0_COMMAND_TOKENS,
     CodexCliClassificationReason,
     CodexCliRoute,
 )
 
 
 def classify(*arguments: str):  # type: ignore[no-untyped-def]
-    return CODEX_CLI_0_150_1.classify(arguments)
+    return CODEX_CLI_0_151_0.classify(arguments)
 
 
 def test_contract_attests_the_current_codex_command_and_alias_vocabulary() -> None:
-    assert CODEX_CLI_0_150_1.characterized_release == "0.150.1"
+    assert CODEX_CLI_0_151_0.characterized_release == "0.151.0"
     assert (
         frozenset(
             {
@@ -32,7 +32,6 @@ def test_contract_attests_the_current_codex_command_and_alias_vocabulary() -> No
                 "e",
                 "exec",
                 "exec-server",
-                "execpolicy",
                 "features",
                 "fork",
                 "help",
@@ -44,21 +43,18 @@ def test_contract_attests_the_current_codex_command_and_alias_vocabulary() -> No
                 "plugin",
                 "queue",
                 "remote-control",
-                "responses-api-proxy",
                 "resume",
                 "review",
                 "sandbox",
-                "sessions",
-                "stdio-to-uds",
                 "unarchive",
                 "update",
             }
         )
-        == CODEX_CLI_0_150_1_COMMAND_TOKENS
+        == CODEX_CLI_0_151_0_COMMAND_TOKENS
     )
 
 
-@pytest.mark.parametrize("command", sorted(CODEX_CLI_0_150_1_COMMAND_TOKENS))
+@pytest.mark.parametrize("command", sorted(CODEX_CLI_0_151_0_COMMAND_TOKENS))
 def test_every_current_codex_command_and_alias_is_direct(command: str) -> None:
     invocation = classify(command)
 
@@ -88,7 +84,7 @@ def test_every_current_codex_command_and_alias_is_direct(command: str) -> None:
     ],
 )
 def test_current_interactive_shapes_are_managed(arguments: tuple[str, ...]) -> None:
-    invocation = CODEX_CLI_0_150_1.classify(arguments)
+    invocation = CODEX_CLI_0_151_0.classify(arguments)
 
     assert invocation.arguments == arguments
     assert invocation.route is CodexCliRoute.MANAGED_INTERACTIVE
@@ -152,7 +148,7 @@ def test_uncertain_or_noninteractive_shapes_remain_exact_codex_passthrough(
     arguments: tuple[str, ...],
     reason: CodexCliClassificationReason,
 ) -> None:
-    invocation = CODEX_CLI_0_150_1.classify(arguments)
+    invocation = CODEX_CLI_0_151_0.classify(arguments)
 
     assert invocation.arguments == arguments
     assert invocation.route is CodexCliRoute.PASSTHROUGH

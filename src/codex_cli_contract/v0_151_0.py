@@ -1,4 +1,4 @@
-"""Codex 0.150.1 top-level commands and interactive option grammar."""
+"""Codex 0.151.0 top-level commands and interactive option grammar."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from typing import Final
 
 from .contract import CodexCliContract, CodexCliOptionSpec, CodexOptionValueArity
 
-CODEX_CLI_0_150_1_COMMAND_TOKENS: Final = frozenset(
+CODEX_CLI_0_151_0_COMMAND_TOKENS: Final = frozenset(
     {
         "a",
         "agents",
@@ -21,7 +21,6 @@ CODEX_CLI_0_150_1_COMMAND_TOKENS: Final = frozenset(
         "e",
         "exec",
         "exec-server",
-        "execpolicy",
         "features",
         "fork",
         "help",
@@ -33,18 +32,15 @@ CODEX_CLI_0_150_1_COMMAND_TOKENS: Final = frozenset(
         "plugin",
         "queue",
         "remote-control",
-        "responses-api-proxy",
         "resume",
         "review",
         "sandbox",
-        "sessions",
-        "stdio-to-uds",
         "unarchive",
         "update",
     }
 )
 
-CODEX_CLI_0_150_1_OPTION_SPECS: Final = (
+CODEX_CLI_0_151_0_OPTION_SPECS: Final = (
     CodexCliOptionSpec("config", ("-c", "--config"), CodexOptionValueArity.ONE),
     CodexCliOptionSpec("enable", ("--enable",), CodexOptionValueArity.ONE),
     CodexCliOptionSpec("disable", ("--disable",), CodexOptionValueArity.ONE),
@@ -52,13 +48,13 @@ CODEX_CLI_0_150_1_OPTION_SPECS: Final = (
         "remote",
         ("--remote",),
         CodexOptionValueArity.ONE,
-        managed_compatible=False,
+        managed_interactive=False,
     ),
     CodexCliOptionSpec(
         "remote-auth-token-env",
         ("--remote-auth-token-env",),
         CodexOptionValueArity.ONE,
-        managed_compatible=False,
+        managed_interactive=False,
     ),
     CodexCliOptionSpec("strict-config", ("--strict-config",)),
     CodexCliOptionSpec("image", ("-i", "--image"), CodexOptionValueArity.ONE_OR_MORE),
@@ -84,12 +80,12 @@ CODEX_CLI_0_150_1_OPTION_SPECS: Final = (
     ),
     CodexCliOptionSpec("search", ("--search",)),
     CodexCliOptionSpec("no-alt-screen", ("--no-alt-screen",)),
-    CodexCliOptionSpec("help", ("-h", "--help"), managed_compatible=False),
-    CodexCliOptionSpec("version", ("-V", "--version"), managed_compatible=False),
+    CodexCliOptionSpec("help", ("-h", "--help"), managed_interactive=False),
+    CodexCliOptionSpec("version", ("-V", "--version"), managed_interactive=False),
 )
 
-CODEX_CLI_0_150_1: Final = CodexCliContract(
-    characterized_release="0.150.1",
-    command_tokens=CODEX_CLI_0_150_1_COMMAND_TOKENS,
-    option_specs=CODEX_CLI_0_150_1_OPTION_SPECS,
+CODEX_CLI_0_151_0: Final = CodexCliContract(
+    characterized_release="0.151.0",
+    command_tokens=CODEX_CLI_0_151_0_COMMAND_TOKENS,
+    option_specs=CODEX_CLI_0_151_0_OPTION_SPECS,
 )

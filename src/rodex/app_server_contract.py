@@ -10,8 +10,8 @@ from typing import Any, Final
 from .version import RODEX_VERSION
 
 
-class RodexAppServerCompatibilityError(RuntimeError):
-    """The live App Server is outside Rodex's exact-control contract."""
+class RodexAppServerVersionError(RuntimeError):
+    """The live App Server version is below Rodex's minimum or unrecognized."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -26,7 +26,7 @@ class AppServerClientInfo:
 
 @dataclass(frozen=True, slots=True)
 class CodexAppServerContract:
-    minimum_supported_version: str
+    minimum_version: str
     rpc_connection_path: str = "/rpc"
     initialize_method: str = "initialize"
     initialized_method: str = "initialized"
@@ -95,38 +95,37 @@ class CodexAppServerContract:
         _client_name, separator, version = product.rpartition("/")
         return version if separator and version else "unknown"
 
-    def require_supported_version(self, initialize_result: dict[str, Any]) -> str:
+    def require_minimum_version(self, initialize_result: dict[str, Any]) -> str:
         version = self.version(initialize_result)
         if version == "unknown":
-            raise RodexAppServerCompatibilityError(
+            raise RodexAppServerVersionError(
                 "App Server initialize response has no recognized Codex user agent"
             )
         live_release = _stable_release(version)
-        minimum_release = _stable_release(self.minimum_supported_version)
+        minimum_release = _stable_release(self.minimum_version)
         if live_release is None:
-            raise RodexAppServerCompatibilityError(
+            raise RodexAppServerVersionError(
                 f"App Server reported an unrecognized Codex version: {version}"
             )
-        if minimum_release is None:
+        if minimum_release is None:  # pragma: no cover - module constant invariant.
             raise AssertionError("Rodex App Server minimum version is invalid")
         if live_release < minimum_release:
-            raise RodexAppServerCompatibilityError(
+            raise RodexAppServerVersionError(
                 "exact control requires Codex App Server "
-                f"{self.minimum_supported_version} or newer; live server is {version}"
+                f"{self.minimum_version} or newer; live server is {version}"
             )
         return version
 
 
 def _stable_release(version: str) -> tuple[int, int, int] | None:
-    """Return the comparable numeric release for an official stable Codex version."""
-
+    """Parse one official stable three-part Codex release."""
     if re.fullmatch(r"\d+\.\d+\.\d+", version) is None:
         return None
     major, minor, patch = version.split(".")
     return int(major), int(minor), int(patch)
 
 
-CODEX_APP_SERVER: Final = CodexAppServerContract(minimum_supported_version="0.147.0")
+CODEX_APP_SERVER: Final = CodexAppServerContract(minimum_version="0.151.0")
 RODEX_CONTROL_APP_SERVER_CLIENT: Final = AppServerClientInfo(
     name="rodex-control",
     title="Rodex Control",

@@ -18,8 +18,8 @@ runtime. A person may attach and intervene while an authorized caller:
 The exact-turn coordinator is the only mutation-policy owner. The subscribed primary
 connection owns lifecycle and user-input delivery when a short-lived mutation client
 disconnects. The behavior is characterized in
-[the live App Server evidence](APP_SERVER_0_147_LIVE_EVIDENCE.md) and revalidated against
-installed Codex 0.150.1.
+[the App Server 0.151.0 evidence](APP_SERVER_0_151_LIVE_EVIDENCE.md) and enforced against
+installed Codex 0.151.0.
 
 A new or resumed runtime uses the caller-selected working directory at launch. Rodex
 does not follow a database, runtime root, or protected parent that moves while the

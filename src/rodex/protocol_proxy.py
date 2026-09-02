@@ -19,7 +19,7 @@ from typing import Any, Final
 
 from websockets.exceptions import ConnectionClosed
 from websockets.sync.client import unix_connect
-from websockets.sync.server import unix_serve
+from websockets.sync.server import ServerConnection, unix_serve
 
 from .analytics_source_reader import AnalyticsSourceReadError, open_rollout_descriptor
 from .app_server_contract import CODEX_APP_SERVER
@@ -1066,10 +1066,9 @@ def _forward_messages(source: Any, destination: Any) -> None:
         destination.close()
 
 
-def _connection_path(connection: Any) -> str | None:
-    request = getattr(connection, "request", None)
-    path = getattr(request, "path", None)
-    return path if isinstance(path, str) else None
+def _connection_path(connection: ServerConnection) -> str | None:
+    request = connection.request
+    return None if request is None else request.path
 
 
 def _close_subscriber_queue(
@@ -1089,11 +1088,7 @@ def _close_subscriber_queue(
 def _interrupt_subscriber_connection(connection: Any) -> None:
     """Interrupt a blocked writer without waiting for a WebSocket close handshake."""
     try:
-        close_socket = getattr(connection, "close_socket", None)
-        if callable(close_socket):
-            close_socket()
-        else:
-            connection.close()
+        connection.close_socket()
     except Exception:
         # Reclaiming one failed subscriber must never reach the primary stream.
         return
@@ -1238,7 +1233,7 @@ def _event_thread_id(params: dict[str, Any]) -> str | None:
 
 
 def _context_percent(params: dict[str, Any]) -> float | None:
-    """Use the analyzer-compatible last-usage/context-window calculation."""
+    """Use the current analyzer's last-usage/context-window calculation."""
     token_usage = params.get("tokenUsage")
     if not isinstance(token_usage, dict):
         return None

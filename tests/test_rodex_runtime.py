@@ -19,6 +19,7 @@ from typing import BinaryIO, cast
 import pytest
 
 import rodex.runtime as runtime_module
+from rodex.app_server_contract import RodexAppServerVersionError
 from rodex.control import LiveRodexControl
 from rodex.process_contracts import AnalyticsWorkerConfig, SessionHostConfig
 from rodex.runtime import (
@@ -192,11 +193,17 @@ def _register_real_tmux_session(
 
 
 class FakeWebSocket:
-    def __init__(self, loaded: list[str]) -> None:
+    def __init__(self, loaded: list[str], *, version: str = "0.151.0") -> None:
         self.sent: list[dict[str, object]] = []
         self.responses = iter(
             [
-                {"id": 0, "result": {"platformOs": "linux"}},
+                {
+                    "id": 0,
+                    "result": {
+                        "platformOs": "linux",
+                        "userAgent": f"rodex/{version} (linux)",
+                    },
+                },
                 {"method": "remoteControl/status/changed", "params": {}},
                 {"id": 1, "result": {"data": loaded, "nextCursor": None}},
             ]
@@ -217,8 +224,8 @@ class FakeWebSocket:
 
 
 class RecordingConnector:
-    def __init__(self, loaded: list[str]) -> None:
-        self.websocket = FakeWebSocket(loaded)
+    def __init__(self, loaded: list[str], *, version: str = "0.151.0") -> None:
+        self.websocket = FakeWebSocket(loaded, version=version)
         self.calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
 
     def __call__(self, *args: object, **kwargs: object) -> FakeWebSocket:
@@ -233,7 +240,7 @@ class CatalogWebSocket:
             [
                 {
                     "id": 0,
-                    "result": {"userAgent": "rodex-session-catalog/0.147.0 (linux)"},
+                    "result": {"userAgent": "rodex-session-catalog/0.151.0 (linux)"},
                 },
                 read_response,
             ]
@@ -346,6 +353,18 @@ def test_observer_uses_distinct_codex_identity_fields_and_no_compression(
         {"method": "initialized", "params": {}},
         {"method": "thread/loaded/list", "id": 1, "params": {}},
     ]
+
+
+def test_runtime_discovery_rejects_a_noncharacterized_app_server(
+    tmp_path: Path,
+) -> None:
+    connector = RecordingConnector([], version="0.150.1")
+    launcher = RodexRuntimeLauncher("codex", "tmux", connector=connector)
+
+    with pytest.raises(RodexAppServerVersionError, match=r"live server is 0\.150\.1"):
+        launcher._list_loaded_codex_threads(tmp_path / "app.sock")
+
+    assert [message["method"] for message in connector.websocket.sent] == ["initialize"]
 
 
 @pytest.mark.parametrize("persisted", [True, False])

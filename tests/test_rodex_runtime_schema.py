@@ -339,8 +339,8 @@ def test_runtime_instance_table_identifies_one_exact_current_incarnation(
 
 
 @pytest.mark.evolutionary_regression
-def test_v4_runtime_uuid_schema_is_rejected_without_migration(tmp_path: Path) -> None:
-    database = initialise_rodex_database(tmp_path / "rodex-v4.sqlite3")
+def test_noncurrent_runtime_uuid_shape_is_rejected_without_repair(tmp_path: Path) -> None:
+    database = initialise_rodex_database(tmp_path / "rodex-noncurrent.sqlite3")
     with sqlite3.connect(database) as connection:
         connection.execute("DROP TABLE rodex_runtime_instances")
         connection.execute(

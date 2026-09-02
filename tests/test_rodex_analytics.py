@@ -9,10 +9,10 @@ from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 from threading import Event
-from types import SimpleNamespace
 from typing import NoReturn
 
 import pytest
+from codex_protocol_log_analyzer import LoadFileResult, OperationResult, StatsSnapshot
 from test_statistics_projection import _snapshot as analyzer_snapshot
 
 from rodex.analytics import (
@@ -49,6 +49,25 @@ from rodex_registry import (
     read_rodex_session_turn_statistics,
     record_a_rodex_session_runtime_resume,
 )
+
+
+def analyzer_stats_snapshot(
+    snapshot: dict[str, object] | None = None,
+) -> StatsSnapshot:
+    return StatsSnapshot(**(analyzer_snapshot() if snapshot is None else snapshot))  # type: ignore[arg-type]
+
+
+def analyzer_load_result() -> LoadFileResult:
+    return LoadFileResult(
+        protocol_id="temporary",
+        source_id="source-1",
+        added_event_count=1,
+        skipped_event_count=0,
+        new_event_type_count=0,
+        already_loaded=False,
+        revision=1,
+    )
+
 
 RODEX_SESSION_ID = RodexSessionId.parse("1234567890abcdef")
 CODEX_SESSION_ID = uuid.UUID("01a00654-f2bc-7a30-834a-a5f886a65f82")
@@ -309,7 +328,7 @@ def _collaboration_turn(
     model_tools: tuple[tuple[str, int], ...] = (),
 ) -> TurnStatisticsProjection:
     base = parse_session_statistics_snapshot(analyzer_snapshot()).turn_statistics[0]
-    legacy_collaboration_count = (StatisticsNamedCount("collaboration_tool", "wait", 2),)
+    analyzer_collaboration_count = (StatisticsNamedCount("collaboration_tool", "wait", 2),)
     return replace(
         base,
         codex_thread_id=thread_id,
@@ -328,7 +347,7 @@ def _collaboration_turn(
             StatisticsNamedCount("model_tool", tool_name, count)
             for tool_name, count in model_tools
         )
-        + legacy_collaboration_count,
+        + analyzer_collaboration_count,
     )
 
 
@@ -359,7 +378,7 @@ def _collaboration_projection(
     )
 
 
-def test_verified_collaboration_replaces_legacy_spawning_turn_counts(
+def test_verified_collaboration_replaces_analyzer_derived_spawning_turn_counts(
     tmp_path: Path,
 ) -> None:
     child_thread_id = uuid.UUID(int=CODEX_SESSION_ID.int + 100)
@@ -1947,26 +1966,28 @@ def test_analyzer_schema_drift_degrades_without_replacing_relational_snapshot(
         output.write('{"timestamp":"2026-08-16T12:00:03Z","type":"future"}\n')
 
     class DriftedLibrary:
-        def create_new_codex_protocol_id(self, _user_id: str) -> object:
-            return SimpleNamespace(status="ok", value="temporary")
+        def create_new_codex_protocol_id(self, _user_id: str) -> OperationResult[str]:
+            return OperationResult("ok", "temporary")
 
-        def load_file(self, _protocol_id: str, _path: Path) -> object:
-            return SimpleNamespace(status="ok", value=True)
+        def load_file(
+            self, _protocol_id: str, _path: Path
+        ) -> OperationResult[LoadFileResult]:
+            return OperationResult("ok", analyzer_load_result())
 
         def get_stats(
             self, _protocol_id: str, *, include_turn_statistics: bool = False
-        ) -> object:
+        ) -> OperationResult[StatsSnapshot]:
             assert include_turn_statistics
             snapshot = analyzer_snapshot()
             snapshot["recommended_insight_stats"].pop("hands_on_turn_count")
-            return SimpleNamespace(status="ok", value=snapshot)
+            return OperationResult("ok", analyzer_stats_snapshot(snapshot))
 
-        def close(self) -> None:
-            return None
+        def close(self) -> OperationResult[bool]:
+            return OperationResult("ok", True)
 
     monkeypatch.setattr(
-        "rodex.analytics_analyzer.importlib.import_module",
-        lambda _name: SimpleNamespace(CodexProtocolLibrary=DriftedLibrary),
+        "rodex.analytics_analyzer.CodexProtocolLibrary",
+        DriftedLibrary,
     )
     state = AnalyticsRolloutWorker(
         config, adapter_factory=CodexProtocolAnalyticsAdapter
@@ -2368,52 +2389,50 @@ def test_real_worker_publishes_only_the_incrementally_changed_turn(
 
 
 @pytest.mark.parametrize(
-    "load_status, load_value, expected_coverage, raises",
+    "load_status, has_load_value, expected_coverage, raises",
     [
-        ("warning", object(), "gapped", False),
-        ("error", object(), "gapped", False),
-        ("fatal", object(), None, True),
-        ("error", None, None, True),
+        ("warning", True, "gapped", False),
+        ("error", True, "gapped", False),
+        ("fatal", True, None, True),
+        ("error", False, None, True),
     ],
 )
 def test_adapter_maps_partial_values_but_rejects_fatal_or_valueless_results(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     load_status: str,
-    load_value: object | None,
+    has_load_value: bool,
     expected_coverage: str | None,
     raises: bool,
 ) -> None:
     closed: list[bool] = []
 
     class FakeLibrary:
-        def create_new_codex_protocol_id(self, _user_id: str) -> object:
-            return SimpleNamespace(status="ok", value="temporary")
+        def create_new_codex_protocol_id(self, _user_id: str) -> OperationResult[str]:
+            return OperationResult("ok", "temporary")
 
-        def load_file(self, _protocol_id: str, _path: Path) -> object:
-            return SimpleNamespace(
+        def load_file(
+            self, _protocol_id: str, _path: Path
+        ) -> OperationResult[LoadFileResult]:
+            return OperationResult(
                 status=load_status,
-                value=load_value,
+                value=analyzer_load_result() if has_load_value else None,
                 diagnostics=(),
             )
 
         def get_stats(
             self, _protocol_id: str, *, include_turn_statistics: bool = False
-        ) -> object:
+        ) -> OperationResult[StatsSnapshot]:
             assert include_turn_statistics
-            snapshot = analyzer_snapshot()
-            return SimpleNamespace(
-                status="ok",
-                value=snapshot,
-            )
+            return OperationResult("ok", analyzer_stats_snapshot())
 
-        def close(self) -> object:
+        def close(self) -> OperationResult[bool]:
             closed.append(True)
-            return True
+            return OperationResult("ok", True)
 
     monkeypatch.setattr(
-        "rodex.analytics_analyzer.importlib.import_module",
-        lambda _name: SimpleNamespace(CodexProtocolLibrary=FakeLibrary),
+        "rodex.analytics_analyzer.CodexProtocolLibrary",
+        FakeLibrary,
     )
 
     if raises:

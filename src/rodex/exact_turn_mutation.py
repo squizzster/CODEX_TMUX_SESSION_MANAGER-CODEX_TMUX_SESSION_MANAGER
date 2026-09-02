@@ -151,8 +151,7 @@ class ExactTurnMutationCoordinator:
             runtime_id = target.control.runtime_id
             if runtime_id is None:
                 raise ExactRuntimeIdentityRequiredError(
-                    "live runtime predates exact runtime identity; restart it with this "
-                    "Rodex version"
+                    "live runtime lacks the current exact runtime identity"
                 )
             target = replace(
                 target,
@@ -370,8 +369,7 @@ def require_durable_runtime_instance(
     persisted = lookup_rodex_runtime_instance(session_id, database_path)
     if persisted is None or control.runtime_id is None:
         raise ExactRuntimeIdentityRequiredError(
-            "live runtime predates exact runtime identity; restart it with this "
-            "Rodex version"
+            "live runtime lacks the current durable runtime identity"
         )
     if persisted.runtime_id != control.runtime_id:
         raise RodexLaunchError("live runtime ID does not match its durable Rodex identity")

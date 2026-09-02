@@ -8,6 +8,7 @@ from rodex.protocol_proxy import CodexProtocolEventTap
 
 class ReadyThenBlockingConnection:
     def __init__(self) -> None:
+        self.request = None
         self.ready_sent = Event()
         self.blocked_send_entered = Event()
         self.release_send = Event()
@@ -29,9 +30,13 @@ class ReadyThenBlockingConnection:
         self.closed.set()
         self.release_send.set()
 
+    def close_socket(self) -> None:
+        self.close()
+
 
 class ClosingConnection:
     def __init__(self) -> None:
+        self.request = None
         self.closed = Event()
 
     def send(self, _message: str | bytes) -> None:
@@ -39,6 +44,9 @@ class ClosingConnection:
 
     def close(self) -> None:
         self.closed.set()
+
+    def close_socket(self) -> None:
+        self.close()
 
 
 def test_round1_event_tap_rejects_registration_after_shutdown(tmp_path: Path) -> None:

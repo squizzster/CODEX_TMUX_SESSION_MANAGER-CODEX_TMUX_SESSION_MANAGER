@@ -44,7 +44,7 @@ def _run_contended_update_notice(
     def runner(command: list[str], **_options: object) -> subprocess.CompletedProcess[str]:
         if command[-1] == "--version":
             return subprocess.CompletedProcess(
-                command, 0, stdout="codex-cli 0.149.1\n", stderr=""
+                command, 0, stdout="codex-cli 0.151.0\n", stderr=""
             )
         descriptor = os.open(
             npm_counter_path,
@@ -56,7 +56,7 @@ def _run_contended_update_notice(
         finally:
             os.close(descriptor)
         time.sleep(0.3)
-        return subprocess.CompletedProcess(command, 0, stdout="0.150.1\n", stderr="")
+        return subprocess.CompletedProcess(command, 0, stdout="0.152.0\n", stderr="")
 
     before_threads = sorted(
         (thread.name, thread.daemon) for thread in threading.enumerate()
@@ -96,22 +96,22 @@ def _run_contended_update_notice(
 
 
 def test_stable_codex_versions_require_exact_three_part_releases() -> None:
-    assert StableCodexVersion.parse_exact("0.150.1\n") == StableCodexVersion(
-        (0, 150, 1), "0.150.1"
+    assert StableCodexVersion.parse_exact("0.151.0\n") == StableCodexVersion(
+        (0, 151, 0), "0.151.0"
     )
     assert StableCodexVersion.parse_codex_version_output(
-        "codex-cli 0.149.1\n"
-    ) == StableCodexVersion((0, 149, 1), "0.149.1")
-    assert StableCodexVersion.parse_exact("v0.150.1") is None
-    assert StableCodexVersion.parse_exact("0.150.1-beta.1") is None
-    assert StableCodexVersion.parse_codex_version_output("Codex 0.149.1") is None
+        "codex-cli 0.152.0\n"
+    ) == StableCodexVersion((0, 152, 0), "0.152.0")
+    assert StableCodexVersion.parse_exact("v0.151.0") is None
+    assert StableCodexVersion.parse_exact("0.151.0-beta.1") is None
+    assert StableCodexVersion.parse_codex_version_output("Codex 0.151.0") is None
 
 
 def test_fresh_npm_cache_reports_update_without_a_network_lookup(tmp_path: Path) -> None:
     cache_path = tmp_path / "latest_codex_npm_version.txt"
-    cache_path.write_text("0.150.1\n", encoding="utf-8")
+    cache_path.write_text("0.152.0\n", encoding="utf-8")
     os.utime(cache_path, (1_000, 1_000))
-    runner = VersionCommandRunner(installed="codex-cli 0.149.1\n", latest="unused")
+    runner = VersionCommandRunner(installed="codex-cli 0.151.0\n", latest="unused")
     resolver_calls: list[str] = []
 
     message = CodexUpdateNotice(
@@ -123,7 +123,7 @@ def test_fresh_npm_cache_reports_update_without_a_network_lookup(tmp_path: Path)
     ).message_if_available()
 
     assert message == (
-        "Rodex: Codex update available: 0.149.1 -> 0.150.1 "
+        "Rodex: Codex update available: 0.151.0 -> 0.152.0 "
         "(run 'codex update' outside Rodex)"
     )
     assert resolver_calls == []
@@ -144,9 +144,9 @@ def test_stale_cache_refreshes_from_npm_and_suppresses_current_release(
     tmp_path: Path,
 ) -> None:
     cache_path = tmp_path / "latest_codex_npm_version.txt"
-    cache_path.write_text("0.149.1\n", encoding="utf-8")
+    cache_path.write_text("0.152.0\n", encoding="utf-8")
     os.utime(cache_path, (1, 1))
-    runner = VersionCommandRunner(installed="codex-cli 0.150.1\n", latest="0.150.1\n")
+    runner = VersionCommandRunner(installed="codex-cli 0.152.0\n", latest="0.152.0\n")
 
     message = CodexUpdateNotice(
         "/usr/bin/codex",
@@ -157,7 +157,7 @@ def test_stale_cache_refreshes_from_npm_and_suppresses_current_release(
     ).message_if_available()
 
     assert message is None
-    assert cache_path.read_text(encoding="utf-8") == "0.150.1\n"
+    assert cache_path.read_text(encoding="utf-8") == "0.152.0\n"
     assert runner.calls[1] == (
         ["/usr/bin/npm", "view", "@openai/codex", "version"],
         {
@@ -173,7 +173,7 @@ def test_contending_stale_cache_reader_does_not_wait_for_the_refresh_owner(
     tmp_path: Path,
 ) -> None:
     cache_path = tmp_path / "latest_codex_npm_version.txt"
-    cache_path.write_text("0.150.1\n", encoding="utf-8")
+    cache_path.write_text("0.152.0\n", encoding="utf-8")
     os.utime(cache_path, (1, 1))
     npm_entered = threading.Event()
     release_npm = threading.Event()
@@ -187,13 +187,13 @@ def test_contending_stale_cache_reader_does_not_wait_for_the_refresh_owner(
         nonlocal npm_calls
         if command[-1] == "--version":
             return subprocess.CompletedProcess(
-                command, 0, stdout="codex-cli 0.149.1\n", stderr=""
+                command, 0, stdout="codex-cli 0.151.0\n", stderr=""
             )
         with calls_lock:
             npm_calls += 1
         npm_entered.set()
         assert release_npm.wait(5)
-        return subprocess.CompletedProcess(command, 0, stdout="0.151.1\n", stderr="")
+        return subprocess.CompletedProcess(command, 0, stdout="0.153.0\n", stderr="")
 
     def check(label: str) -> None:
         try:
@@ -228,14 +228,14 @@ def test_contending_stale_cache_reader_does_not_wait_for_the_refresh_owner(
     assert errors == []
     assert npm_calls == 1
     assert messages["contender"] == (
-        "Rodex: Codex update available: 0.149.1 -> 0.150.1 "
+        "Rodex: Codex update available: 0.151.0 -> 0.152.0 "
         "(run 'codex update' outside Rodex)"
     )
     assert messages["owner"] == (
-        "Rodex: Codex update available: 0.149.1 -> 0.151.1 "
+        "Rodex: Codex update available: 0.151.0 -> 0.153.0 "
         "(run 'codex update' outside Rodex)"
     )
-    assert cache_path.read_text(encoding="utf-8") == "0.151.1\n"
+    assert cache_path.read_text(encoding="utf-8") == "0.153.0\n"
 
 
 def test_twenty_processes_perform_one_atomic_cache_refresh_without_leaks(
@@ -272,7 +272,7 @@ def test_twenty_processes_perform_one_atomic_cache_refresh_without_leaks(
             process.close()
 
     assert npm_counter_path.read_text(encoding="utf-8").splitlines() == ["npm"]
-    assert cache_path.read_text(encoding="utf-8") == "0.150.1\n"
+    assert cache_path.read_text(encoding="utf-8") == "0.152.0\n"
     results = [json.loads(path.read_text(encoding="utf-8")) for path in result_paths]
     assert any(result["message"] is not None for result in results)
     assert all(result["threads_after"] == result["threads_before"] for result in results)
@@ -289,10 +289,10 @@ def test_failed_npm_refresh_uses_valid_stale_cache_and_never_breaks_attach_notic
     tmp_path: Path,
 ) -> None:
     cache_path = tmp_path / "latest_codex_npm_version.txt"
-    cache_path.write_text("0.150.1\n", encoding="utf-8")
+    cache_path.write_text("0.152.0\n", encoding="utf-8")
     os.utime(cache_path, (1, 1))
     runner = VersionCommandRunner(
-        installed="codex-cli 0.149.1\n",
+        installed="codex-cli 0.151.0\n",
         latest=subprocess.TimeoutExpired(["npm"], 3),
     )
 
@@ -305,7 +305,7 @@ def test_failed_npm_refresh_uses_valid_stale_cache_and_never_breaks_attach_notic
     ).message_if_available()
 
     assert message == (
-        "Rodex: Codex update available: 0.149.1 -> 0.150.1 "
+        "Rodex: Codex update available: 0.151.0 -> 0.152.0 "
         "(run 'codex update' outside Rodex)"
     )
 

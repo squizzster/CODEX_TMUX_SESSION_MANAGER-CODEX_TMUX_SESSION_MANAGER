@@ -41,7 +41,7 @@ class CodexCliOptionSpec:
     name: str
     tokens: tuple[str, ...]
     value_arity: CodexOptionValueArity = CodexOptionValueArity.NONE
-    managed_compatible: bool = True
+    managed_interactive: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,7 +97,7 @@ class CodexCliContract:
             matched = self._match_option(token)
             if matched is not None:
                 spec, inline_value = matched
-                if not spec.managed_compatible:
+                if not spec.managed_interactive:
                     return self._passthrough(
                         arguments,
                         CodexCliClassificationReason.DIRECT_OPTION,

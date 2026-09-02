@@ -91,7 +91,7 @@ def test_start_fails_before_transport_when_runtime_changes_while_waiting(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    old_control = SimpleNamespace(runtime_id="old-runtime")
+    replaced_control = SimpleNamespace(runtime_id="replaced-runtime")
     runtime = object()
 
     @contextmanager
@@ -107,7 +107,7 @@ def test_start_fails_before_transport_when_runtime_changes_while_waiting(
     monkeypatch.setattr(
         mutation_module,
         "resolve_live_control",
-        lambda *_args: (1, runtime, old_control),
+        lambda *_args: (1, runtime, replaced_control),
     )
     monkeypatch.setattr(
         mutation_module,
@@ -177,7 +177,7 @@ def test_mouse_fails_before_tmux_when_durable_runtime_changed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     runtime = LiveTmuxSession(tmp_path / "tmux.sock", "worker")
-    live_control = SimpleNamespace(runtime_id="old-runtime")
+    live_control = SimpleNamespace(runtime_id="replaced-runtime")
     mouse_calls: list[tuple[object, str]] = []
 
     @contextmanager

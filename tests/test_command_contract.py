@@ -128,10 +128,10 @@ def test_machine_invocation_parser_rejects_contract_violations(
 
 
 def test_wait_route_is_disambiguated_by_exact_control_arguments() -> None:
-    legacy = classify_rodex_command([WAIT_COMMAND, "session"])
-    assert legacy is not None
-    assert legacy.route is CommandRoute.SESSION
-    assert legacy.machine_spec is None
+    idle_wait = classify_rodex_command([WAIT_COMMAND, "session"])
+    assert idle_wait is not None
+    assert idle_wait.route is CommandRoute.SESSION
+    assert idle_wait.machine_spec is None
 
     exact = classify_rodex_command([WAIT_COMMAND, "session", "--turn", "turn-1", "--json"])
     assert exact is not None

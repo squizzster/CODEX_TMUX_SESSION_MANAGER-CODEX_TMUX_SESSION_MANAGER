@@ -65,7 +65,7 @@ class _BlockingSendSocket:
 
     def recv(self, timeout: float | None = None) -> str:
         return json.dumps(
-            {"id": 0, "result": {"userAgent": "rodex-control/0.147.0 (Linux)"}}
+            {"id": 0, "result": {"userAgent": "rodex-control/0.151.0 (Linux)"}}
         )
 
 
@@ -140,7 +140,6 @@ def test_round1_blocked_initialized_notification_obeys_chain_deadline() -> None:
     caller, errors = _run_in_daemon(
         lambda: client._initialize_protocol(
             socket,
-            require_compatible=True,
             deadline=deadline,
         )
     )
@@ -172,7 +171,7 @@ class ChatteringReadSocket:
         self.recv_calls += 1
         if self.recv_calls == 1:
             return json.dumps(
-                {"id": 0, "result": {"userAgent": "rodex-control/0.147.0 (Linux)"}}
+                {"id": 0, "result": {"userAgent": "rodex-control/0.151.0 (Linux)"}}
             )
         if self.recv_calls > 32:
             raise AssertionError("read RPC consumed unbounded unrelated frames")

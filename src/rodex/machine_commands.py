@@ -10,13 +10,12 @@ from pathlib import Path
 from cool_name import CoolNameError
 from rodex_registry import (
     RodexSessionError,
-    lookup_rodex_runtime_instance,
     lookup_rodex_session_names,
     record_a_rodex_session_access,
 )
 from rodex_sql import RodexDatabaseMovedError, RodexSQLError
 
-from .app_server_contract import RodexAppServerCompatibilityError
+from .app_server_contract import RodexAppServerVersionError
 from .command_contract import (
     DISPATCH_STATUS_COMMAND,
     INSPECT_COMMAND,
@@ -50,7 +49,7 @@ from .live_runtime import (
 )
 from .runtime import RodexRuntimeError, RodexRuntimeLauncher
 
-MACHINE_ENVELOPE_SCHEMA_VERSION = 2
+MACHINE_ENVELOPE_SCHEMA_VERSION = 3
 
 
 def execute_machine_command(
@@ -162,6 +161,7 @@ def execute_machine_command(
         if names is None:
             raise RodexLaunchError(f"Rodex session disappeared: {session_name}")
         display_name = names.display_name
+        require_durable_runtime_instance(session_id, database_path, control)
 
         def revalidate() -> None:
             revalidate_live_control(launcher, runtime, control)
@@ -169,18 +169,8 @@ def execute_machine_command(
         if command == INSPECT_COMMAND:
             state = control_client.inspect_live(control)
             revalidate()
-            persisted_runtime = lookup_rodex_runtime_instance(session_id, database_path)
-            runtime_matches = (
-                persisted_runtime is not None
-                and control.runtime_id == persisted_runtime.runtime_id
-            )
-            compatibility_error: str | None = None
-            compatible_version: str | None = None
-            try:
-                compatible_version = control_client.exact_control_version(control)
-                revalidate()
-            except RodexAppServerCompatibilityError as error:
-                compatibility_error = str(error)
+            app_server_version = control_client.exact_control_version(control)
+            revalidate()
             _print_machine_success(
                 operation,
                 display_name,
@@ -189,20 +179,11 @@ def execute_machine_command(
                 turn_id=state.active_turn_id,
                 data={
                     "thread": _thread_state_payload(state),
-                    "runtime_identity_persisted": runtime_matches,
-                    "exact_control_available": (
-                        runtime_matches and compatibility_error is None
-                    ),
-                    "app_server": {
-                        "compatible_version": compatible_version,
-                        "exact_control_compatible": compatibility_error is None,
-                        "compatibility_error": compatibility_error,
-                    },
+                    "app_server": {"version": app_server_version},
                 },
             )
             return 0
 
-        require_durable_runtime_instance(session_id, database_path, control)
         if command == DISPATCH_STATUS_COMMAND:
             assert isinstance(dispatch_id, str)
             state, dispatch_status = control_client.dispatch_status(
@@ -302,7 +283,7 @@ def execute_machine_command(
         return 0
     except (
         CoolNameError,
-        RodexAppServerCompatibilityError,
+        RodexAppServerVersionError,
         RodexControlError,
         RodexLaunchError,
         RodexRuntimeError,
@@ -635,9 +616,9 @@ def _machine_error_classification(error: BaseException) -> tuple[str, bool, int]
     if isinstance(error, MachineUsageError):
         return "invalid_argument", False, 2
     if isinstance(error, ExactRuntimeIdentityRequiredError):
-        return "runtime_upgrade_required", False, 3
-    if isinstance(error, RodexAppServerCompatibilityError):
-        return "incompatible_app_server", False, 3
+        return "runtime_identity_missing", False, 3
+    if isinstance(error, RodexAppServerVersionError):
+        return "app_server_version_mismatch", False, 3
     if isinstance(error, RodexDispatchIndeterminateError):
         return "dispatch_indeterminate", False, 7
     if isinstance(error, RodexWaitTimeoutError):

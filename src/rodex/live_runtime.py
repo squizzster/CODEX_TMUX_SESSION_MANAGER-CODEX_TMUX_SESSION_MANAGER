@@ -45,8 +45,7 @@ def session_transition_lock(
     lock_path = (
         database_path.parent / f".{database_path.name}.session-{session_identity}.lock"
     )
-    flags = os.O_RDWR | os.O_CREAT
-    flags |= getattr(os, "O_NOFOLLOW", 0)
+    flags = os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW
     descriptor = os.open(lock_path, flags, 0o600)
     try:
         state = os.fstat(descriptor)

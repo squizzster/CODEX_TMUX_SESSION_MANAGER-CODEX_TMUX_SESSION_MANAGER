@@ -91,7 +91,7 @@ def test_launchers_route_bare_rodex_to_managed_tmux_before_database_access(
     project_root = Path(__file__).parents[1]
     launcher = project_root / launcher_relative
     state_home = tmp_path / "state"
-    database = state_home / "rodex" / "rodex-v17.sqlite3"
+    database = state_home / "rodex" / "rodex-v18.sqlite3"
     environment = os.environ.copy()
     environment["RODEX_PROJECT_DIR"] = str(project_root)
     environment["XDG_STATE_HOME"] = str(state_home)
@@ -120,7 +120,7 @@ def test_launchers_route_an_initial_prompt_to_managed_tmux(
     project_root = Path(__file__).parents[1]
     launcher = project_root / launcher_relative
     state_home = tmp_path / "state"
-    database = state_home / "rodex" / "rodex-v17.sqlite3"
+    database = state_home / "rodex" / "rodex-v18.sqlite3"
     fake_codex = tmp_path / "codex-must-not-run-directly"
     fake_codex.write_text("#!/bin/sh\nexit 91\n", encoding="utf-8")
     fake_codex.chmod(0o755)
@@ -152,7 +152,7 @@ def test_launchers_preserve_codex_subcommand_passthrough_without_tmux(
     project_root = Path(__file__).parents[1]
     launcher = project_root / launcher_relative
     state_home = tmp_path / "state"
-    database = state_home / "rodex" / "rodex-v17.sqlite3"
+    database = state_home / "rodex" / "rodex-v18.sqlite3"
     fake_codex = tmp_path / "codex-probe"
     fake_codex.write_text('#!/bin/sh\nprintf "%s\\n" "$@"\n', encoding="utf-8")
     fake_codex.chmod(0o755)
@@ -184,7 +184,7 @@ def test_launchers_print_rodex_help_without_codex_tmux_or_database(
     project_root = Path(__file__).parents[1]
     launcher = project_root / launcher_relative
     state_home = tmp_path / "state"
-    database = state_home / "rodex" / "rodex-v17.sqlite3"
+    database = state_home / "rodex" / "rodex-v18.sqlite3"
     environment = os.environ.copy()
     environment["RODEX_PROJECT_DIR"] = str(project_root)
     environment["XDG_STATE_HOME"] = str(state_home)

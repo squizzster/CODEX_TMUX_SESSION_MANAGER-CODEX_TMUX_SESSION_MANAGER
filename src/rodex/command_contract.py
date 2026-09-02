@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Final
 
-from codex_cli_contract import CODEX_CLI_0_150_1
+from codex_cli_contract import CODEX_CLI_0_151_0
 
 RUNNING_COMMAND: Final = "_running"
 CONTEXT_COMMAND: Final = "_context"
@@ -208,7 +208,7 @@ def _help_text() -> str:
             "prompt starts a managed session.",
             "Use '--' before one token to force prompt meaning without selector or "
             "subcommand interpretation.",
-            f"Codex {CODEX_CLI_0_150_1.characterized_release} subcommands and "
+            f"Codex {CODEX_CLI_0_151_0.characterized_release} subcommands and "
             "uncertain option forms pass unchanged to Codex.",
             "",
         )

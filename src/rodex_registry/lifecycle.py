@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import pwd
 import sqlite3
+import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -378,8 +379,8 @@ def _generate_an_unregistered_rodex_id_candidate[
 
 def current_rodex_sessions_user_identity() -> RodexSessionsUserIdentity:
     """Read the current effective POSIX UID, GID, and account name."""
-    if os.name == "nt" or not hasattr(os, "getuid") or not hasattr(os, "getgid"):
-        raise RodexSessionError("Rodex requires Linux or a compatible POSIX system")
+    if sys.platform != "linux":
+        raise RodexSessionError("Rodex requires Linux")
     uid = os.getuid()
     gid = os.getgid()
     return RodexSessionsUserIdentity(

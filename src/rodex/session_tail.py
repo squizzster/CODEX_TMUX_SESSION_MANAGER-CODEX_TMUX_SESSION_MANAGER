@@ -84,7 +84,7 @@ class PlainTailCursor:
         self,
         current_state: TmuxScrollbackState,
     ) -> tuple[str, ...] | None:
-        """Advance from a bounded capture, or request a rare full-capture fallback."""
+        """Advance from a bounded capture, or request a rare full-capture recovery."""
         return self._advance(
             current_state.history_tail_lines,
             current_state.history_line_count,
@@ -162,7 +162,7 @@ class PlainTailCursor:
 
 
 def parse_session_tail_request(arguments: Sequence[str]) -> SessionTailRequest:
-    """Parse the intentionally small tail-compatible Rodex grammar."""
+    """Parse the intentionally small current Rodex tail grammar."""
     if not arguments or arguments[0] != TAIL_COMMAND:
         raise RodexLaunchError(TAIL_USAGE)
 
@@ -373,14 +373,14 @@ def _history_sequence_end(
         )
         if end <= latest_possible_end
     }
-    compatible_candidates = [
+    matching_candidates = [
         end
         for end in candidates
         if _committed_prefix_matches_visible(current[end:], observed_visible)
     ]
-    if len(compatible_candidates) == 1:
-        return compatible_candidates[0]
-    if not compatible_candidates and history_growth > 0:
+    if len(matching_candidates) == 1:
+        return matching_candidates[0]
+    if not matching_candidates and history_growth > 0:
         retained_previous_count = min(len(previous), latest_possible_end)
         if (
             latest_possible_end in candidates

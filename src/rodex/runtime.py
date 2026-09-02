@@ -493,7 +493,7 @@ class RodexRuntimeLauncher:
                 )
             )
             initialized = _receive_response(websocket, 0)
-            CODEX_APP_SERVER.require_supported_version(initialized)
+            CODEX_APP_SERVER.require_minimum_version(initialized)
             websocket.send(json.dumps(CODEX_APP_SERVER.initialized_notification()))
             websocket.send(
                 json.dumps(
@@ -795,7 +795,7 @@ class RodexRuntimeLauncher:
             runtime_id_text,
         ) = fields
         if protocol != RODEX_SHARED_TMUX_PROTOCOL:
-            raise RodexRuntimeError("live tmux session uses an incompatible protocol")
+            raise RodexRuntimeError("live tmux session protocol does not match Rodex")
         try:
             server_id = parse_tmux_server_id(server_id_text)
         except ValueError as error:
@@ -1363,7 +1363,7 @@ class RodexRuntimeLauncher:
                 *new_session_arguments,
             )
         )
-        server_is_compatible = combine_tmux_conditions(
+        server_matches_current_protocol = combine_tmux_conditions(
             (
                 f"#{{==:#{{{RODEX_SHARED_TMUX_PROTOCOL_OPTION}}},"
                 f"{RODEX_SHARED_TMUX_PROTOCOL}}}"
@@ -1400,7 +1400,7 @@ class RodexRuntimeLauncher:
             ";",
             "if-shell",
             "-F",
-            server_is_compatible,
+            server_matches_current_protocol,
             creation_action,
             shlex.join(("run-shell", "false")),
             environment=self._user_process_environment,
@@ -1792,7 +1792,8 @@ class RodexRuntimeLauncher:
                     CODEX_APP_SERVER.initialize_request(0, RODEX_RUNTIME_APP_SERVER_CLIENT)
                 )
             )
-            _receive_response(websocket, 0)
+            initialized = _receive_response(websocket, 0)
+            CODEX_APP_SERVER.require_minimum_version(initialized)
             websocket.send(json.dumps(CODEX_APP_SERVER.initialized_notification()))
             websocket.send(
                 json.dumps(
@@ -2104,7 +2105,7 @@ def run_session_host(
                 raise
             tui_command = [
                 codex_binary,
-                # Rodex checks App Server compatibility itself. An interactive
+                # Rodex enforces the minimum App Server version itself. An interactive
                 # updater here would block thread registration before attach.
                 "--config",
                 "check_for_update_on_startup=false",
@@ -2499,8 +2500,7 @@ def _require_secure_runtime_parent(parent: Path) -> None:
 
 
 def _open_private_runtime_log(path: Path) -> BinaryIO:
-    flags = os.O_RDWR | os.O_CREAT | os.O_APPEND
-    flags |= getattr(os, "O_NOFOLLOW", 0)
+    flags = os.O_RDWR | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW
     descriptor = os.open(path, flags, 0o600)
     try:
         state = os.fstat(descriptor)

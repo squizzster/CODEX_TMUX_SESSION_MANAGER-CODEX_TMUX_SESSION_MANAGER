@@ -113,9 +113,9 @@ def test_current_identity_comes_from_posix_uid_gid_and_password_database() -> No
 
 
 def test_windows_is_explicitly_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("rodex_registry.lifecycle.os.name", "nt")
+    monkeypatch.setattr("rodex_registry.lifecycle.sys.platform", "win32")
 
-    with pytest.raises(RodexSessionError, match="POSIX"):
+    with pytest.raises(RodexSessionError, match="Linux"):
         current_rodex_sessions_user_identity()
 
 

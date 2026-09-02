@@ -30,7 +30,7 @@ identity requires a transient App Server check.
 | Component | Responsibility |
 |---|---|
 | `rodex.application_pipeline` / command contracts | Classify and dispatch one typed invocation. |
-| `rodex.managed_session_lifecycle` / `cool_name` | Select, name, create, attach, resume, recover, and resolve collisions. |
+| `rodex.managed_session_lifecycle` / `human_messages` / `cool_name` | Own session lifecycle, naming, collisions, and action-first human messages. |
 | `rodex.exact_turn_mutation` | Re-resolve mutation selectors under the per-session transition lock; validate incarnation and choose start, steer, interrupt, mouse, or alias policy. |
 | `rodex.session_read_pipeline` / `session_tail` | Verify live reads and follow terminal history without idle full-history scans. |
 | `rodex.process_environment` / `environment_exec` | Prepare caller-owned state and enforce the exact managed-process environment at tmux child exec boundaries. |
@@ -89,6 +89,9 @@ environment fields on every new session. Its capability-gated staged-pane pipeli
 the whole session environment before the real host may start; shared-server globals are
 inputs to remove, not authority. `TmuxStatusPipeline` arbitrates status claims;
 animation admission uses exact capability, generation, lease, token, and recovery fences.
+
+Interactive routes print `Rodex attach [name].` before tmux and `Rodex exited [name].`
+after return. Tmux's exit line is erased first; TUI I/O stays direct without a PTY proxy.
 
 ## Identity and lifecycle
 

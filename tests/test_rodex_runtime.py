@@ -963,6 +963,104 @@ def test_attach_uses_live_stdio_and_escapes_an_existing_tmux_client(
     assert environment["PATH"] == "/project-xyz/.venv/bin:/usr/bin"
 
 
+def test_real_tmux_attach_replaces_the_native_exit_banner(
+    tmp_path: Path,
+) -> None:
+    tmux_binary = shutil.which("tmux")
+    if tmux_binary is None:
+        pytest.skip("tmux is not installed")
+    socket_path = tmp_path / "tmux.sock"
+    session_name = "replaced-exit-banner"
+    client_pid: int | None = None
+    terminal_master: int | None = None
+
+    def tmux(*arguments: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [tmux_binary, "-S", str(socket_path), *arguments],
+            check=check,
+            text=True,
+            capture_output=True,
+        )
+
+    tmux("new-session", "-d", "-s", session_name, "sleep 30")
+    try:
+        _register_real_tmux_session(tmux, socket_path, session_name)
+        client_code = (
+            "import sys;"
+            "from pathlib import Path;"
+            "from rodex.runtime import LiveTmuxSession,RodexRuntimeLauncher;"
+            "from rodex_registry import RodexRuntimeId;"
+            "launcher=RodexRuntimeLauncher('codex',sys.argv[1]);"
+            "launcher.attach(LiveTmuxSession(Path(sys.argv[2]),sys.argv[3],"
+            "runtime_id=RodexRuntimeId.parse(sys.argv[4])));"
+            "print(f'Rodex exited [{sys.argv[3]}].',flush=True)"
+        )
+        client_pid, terminal_master = pty.fork()
+        if client_pid == 0:
+            environment = os.environ.copy()
+            environment["TERM"] = "xterm-256color"
+            os.execve(
+                sys.executable,
+                [
+                    sys.executable,
+                    "-c",
+                    client_code,
+                    tmux_binary,
+                    str(socket_path),
+                    session_name,
+                    str(RUNTIME_ID),
+                ],
+                environment,
+            )
+
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            attached = tmux(
+                "display-message",
+                "-p",
+                "-t",
+                f"={session_name}:",
+                "-F",
+                "#{session_attached}",
+            )
+            if attached.stdout.strip() == "1":
+                break
+            time.sleep(0.01)
+        else:
+            pytest.fail("tmux client did not attach")
+
+        tmux("kill-session", "-t", f"={session_name}")
+        assert os.waitpid(client_pid, 0)[1] == 0
+        client_pid = None
+
+        terminal_output = bytearray()
+        os.set_blocking(terminal_master, False)
+        while True:
+            try:
+                chunk = os.read(terminal_master, 65_536)
+            except BlockingIOError:
+                time.sleep(0.01)
+                continue
+            except OSError:
+                break
+            if not chunk:
+                break
+            terminal_output.extend(chunk)
+
+        assert terminal_output.endswith(
+            b"[exited]\r\n\x1b[1A\x1b[2K\rRodex exited [replaced-exit-banner].\r\n"
+        )
+    finally:
+        tmux("kill-server", check=False)
+        if client_pid is not None:
+            waited_pid, _status = os.waitpid(client_pid, os.WNOHANG)
+            if waited_pid == 0:
+                os.kill(client_pid, signal.SIGTERM)
+                os.waitpid(client_pid, 0)
+        if terminal_master is not None:
+            os.close(terminal_master)
+
+
 def test_attach_uses_stable_runtime_identity_when_alias_wins_before_tmux_attach(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

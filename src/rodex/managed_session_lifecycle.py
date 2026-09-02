@@ -39,6 +39,7 @@ from rodex_registry import (
 from .command_contract import CREATE_COMMAND, DETACH_COMMAND
 from .control import LiveRodexControl
 from .errors import RodexExecutableNotFoundError, RodexLaunchError
+from .human_messages import rodex_session_message
 from .live_runtime import (
     find_relocated_live_runtime,
     rename_tmux_identity,
@@ -97,7 +98,6 @@ class _PreparedSelectedSession:
     session_id: int
     display_name: str
     active_tmux: LiveTmuxSession
-    attach_message: str
 
 
 class ManagedSessionLifecycle:
@@ -323,13 +323,7 @@ def _create_managed_session(
     if request.detach:
         _print_detached_runtime(display_name, session.rodex_session_id, codex_session_id)
         return 0
-    print(
-        f"Rodex {display_name} [{session.rodex_session_id}] "
-        f"-> Codex {codex_session_id} "
-        f"({active_tmux.tmux_session_name})",
-        flush=True,
-    )
-    runtime_launcher.attach(active_tmux)
+    _attach_managed_session(runtime_launcher, active_tmux, display_name)
     return 0
 
 
@@ -364,8 +358,7 @@ def _open_selected_session(
             database_path,
         )
         return
-    print(prepared.attach_message, flush=True)
-    launcher.attach(prepared.active_tmux)
+    _attach_managed_session(launcher, prepared.active_tmux, prepared.display_name)
 
 
 def _prepare_selected_session(
@@ -428,7 +421,6 @@ def _prepare_selected_session(
             session_id,
             display_name,
             active_tmux,
-            f"Reattaching Rodex {display_name} ({active_tmux.tmux_session_name})",
         )
 
     relocated_match = find_relocated_live_runtime(
@@ -479,7 +471,6 @@ def _prepare_selected_session(
             session_id,
             display_name,
             active_tmux,
-            f"Reattached relocated Rodex {display_name} ({active_tmux.tmux_session_name})",
         )
 
     if not codex_available:
@@ -560,14 +551,22 @@ def _prepare_selected_session(
         _stop_failed_runtime(launcher, active_tmux, failure)
         raise
 
-    action = "Recovered" if replaced_unsaved_codex_identity else "Resumed"
     return _PreparedSelectedSession(
         session_id,
         display_name,
         active_tmux,
-        f"{action} Rodex {display_name} -> Codex {observed_codex_session_id} "
-        f"({active_tmux.tmux_session_name})",
     )
+
+
+def _attach_managed_session(
+    launcher: RodexRuntimeLauncher,
+    runtime: LiveTmuxSession,
+    display_name: str,
+) -> None:
+    """Present one stable human lifecycle around every managed attachment."""
+    print(rodex_session_message("attach", display_name), flush=True)
+    launcher.attach(runtime)
+    print(rodex_session_message("exited", display_name), flush=True)
 
 
 def _stop_failed_runtime(

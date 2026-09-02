@@ -136,6 +136,18 @@ and user-owned root `C-b` bindings are left unchanged. Rodex owns root `C-c` and
 on its dedicated tmux server; a pre-existing conflicting binding causes explicit
 initialization failure instead of silently weakening the lifecycle contract.
 
+Every interactive create, resume, recovery, and reattach uses one concise lifecycle:
+
+```text
+Rodex attach [automatic-beluga].
+Rodex exited [automatic-beluga].
+```
+
+The ordinary Codex TUI occupies the terminal between those lines. Rodex removes tmux's
+own redundant client-exit banner when the TUI returns. Other human session messages use
+the same action-first `Rodex <action> [display-name].` grammar; structured JSON and raw
+stream commands retain their machine-oriented contracts.
+
 Managed launches disable Codex's own interactive startup update check because it can
 appear before runtime registration and block Rodex attachment. Immediately before each
 attach, Rodex compares the installed Codex version with a cached npm release lookup. The

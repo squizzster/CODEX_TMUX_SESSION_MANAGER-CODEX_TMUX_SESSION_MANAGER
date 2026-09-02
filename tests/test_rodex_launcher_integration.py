@@ -250,22 +250,16 @@ def test_fresh_detached_launcher_keeps_the_registered_session_host_alive() -> No
             timeout=20,
         )
         assert running.returncode == 0, running.stderr
-        assert "Running Rodex sessions: 1" in running.stdout
-        assert f"{session_name} -> Codex {launch_result['codex_session_id']}" in (
-            running.stdout
-        )
+        assert running.stdout == (f"Rodex running: 1.\nRodex running [{session_name}].\n")
 
         assert _process_command(session_host_pid) is not None
         terminal_master, terminal_slave = pty.openpty()
         interactive_client = subprocess.Popen(
             [
-                tmux_binary,
-                "-S",
-                os.fspath(tmux_socket),
-                "attach-session",
-                "-t",
-                f"={tmux_session_name}",
+                os.fspath(PROJECT_ROOT / "rodex"),
+                session_name,
             ],
+            cwd=workspace,
             stdin=terminal_slave,
             stdout=terminal_slave,
             stderr=terminal_slave,
@@ -297,6 +291,23 @@ def test_fresh_detached_launcher_keeps_the_registered_session_host_alive() -> No
 
         _wait_for("the exact session host to exit after Ctrl-C", host_has_exited)
         assert interactive_client.wait(timeout=5) == 0
+        terminal_output = bytearray()
+        os.set_blocking(terminal_master, False)
+        while True:
+            try:
+                chunk = os.read(terminal_master, 65_536)
+            except BlockingIOError:
+                time.sleep(0.01)
+                continue
+            except OSError:
+                break
+            if not chunk:
+                break
+            terminal_output.extend(chunk)
+        assert f"Rodex attach [{session_name}].\r\n".encode() in terminal_output
+        assert terminal_output.endswith(
+            b"\x1b[1A\x1b[2K\r" + f"Rodex exited [{session_name}].\r\n".encode()
+        )
 
         def descendants_have_exited() -> bool | None:
             return True if _isolated_codex_process_ids(codex_home) == () else None

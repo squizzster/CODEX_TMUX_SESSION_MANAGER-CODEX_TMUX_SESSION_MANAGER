@@ -1233,7 +1233,7 @@ def _event_thread_id(params: dict[str, Any]) -> str | None:
 
 
 def _context_percent(params: dict[str, Any]) -> float | None:
-    """Use the pinned analyzer's last-usage/context-window calculation."""
+    """Use the current analyzer's last-usage/context-window calculation."""
     token_usage = params.get("tokenUsage")
     if not isinstance(token_usage, dict):
         return None

@@ -1,4 +1,4 @@
-"""Stateful pinned-analyzer boundary for the Rodex analytics spine."""
+"""Stateful current-analyzer boundary for the Rodex analytics spine."""
 
 from __future__ import annotations
 
@@ -622,7 +622,7 @@ def _named_count_projections(
 
 
 class StatefulCodexProtocolAnalyticsAdapter:
-    """Retain the pinned analyzer ledgers and consume only candidate suffixes."""
+    """Retain the resident analyzer ledgers and consume only candidate suffixes."""
 
     def __init__(self) -> None:
         self._new_event_name = _new_event_name
@@ -707,7 +707,7 @@ class StatefulCodexProtocolAnalyticsAdapter:
         except Exception as error:
             self._poisoned_reason = type(error).__name__
             raise RodexAnalyticsError(
-                "pinned analyzer failed while consuming a validated append"
+                "resident analyzer failed while consuming a validated append"
             ) from error
         if not changed and self._candidate_calculation is not None:
             return self._candidate_calculation
@@ -845,7 +845,7 @@ def _decode_complete_records(content: bytes) -> tuple[list[dict[str, Any]], int]
 def _validate_source_records(
     thread_id: CodexThreadId, records: Sequence[Mapping[str, Any]]
 ) -> None:
-    """Reject identity errors before the pinned analyzer mutates resident state."""
+    """Reject identity errors before the resident analyzer mutates state."""
     for record in records:
         if record.get("type") != "session_meta":
             continue

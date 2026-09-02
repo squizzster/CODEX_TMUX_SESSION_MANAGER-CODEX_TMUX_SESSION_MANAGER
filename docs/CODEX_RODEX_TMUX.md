@@ -392,18 +392,23 @@ Codex, tmux, or analyzer processes.
 
 ## Lifecycle
 
-- `Ctrl-b d` detaches while Codex, its app-server, and tmux continue running.
+- `Ctrl-D` directly invokes tmux `detach-client` for only the current client; it never
+  reaches Codex as EOF or an undocumented disconnect command. `Ctrl-b d` remains the
+  prefix-based detach route. Both leave Codex, its app-server, and tmux running. Rodex
+  owns `exit-unattached off` for the dedicated server and `destroy-unattached off` for
+  each managed session so detaching the final client cannot destroy the runtime.
 - With the default `C-b` prefix, Rodex displays `CTRL-B MODE` while tmux awaits the
   following command key. It uses tmux's per-client prefix state without intercepting
   input; a fast `Ctrl-b d` therefore still detaches normally. A custom prefix or
   user-owned root `C-b` binding is not replaced.
 - In a shared session, one `Ctrl-C` is held as an accidental-exit guard and points to
-  `Ctrl-b d` as the detach-only route. The same client must press `Ctrl-C` again within
-  two seconds to end the exact managed tmux session for every attached client. A private
+  `Ctrl-D` or `Ctrl-b d` as the detach-only routes. The same client must press `Ctrl-C`
+  again within two seconds to end the exact managed tmux session for every attached
+  client. A private
   session ends immediately on `Ctrl-C`. Rodex owns this lifecycle transition rather than
   delegating it to the current TUI's interpretation of an input byte. A foreign
-  root `C-c` binding causes explicit initialization failure because silent fallback would
-  remove this safety property.
+  root `C-c` or `C-d` binding causes explicit initialization failure because silent
+  fallback would remove this safety property.
 - A second attached client triggers a five-second shared-arrival animation. Returning
   to one client triggers its private-session counterpart. The global hook only wakes a
   coordinator; it does not infer the detached session. The coordinator inventories the

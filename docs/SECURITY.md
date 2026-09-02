@@ -99,8 +99,11 @@ listener; control endpoints are Unix sockets below a private runtime root.
   mutation target; the sharing coordinator re-inventories all registered sessions and
   submits a changed count only through that session's full capability. Rodex owns and
   verifies only its dedicated hook indices and options behind a server-incarnation fence,
-  and never removes local session hooks. Root `C-c` is installed exactly or initialization
-  fails closed if a non-Rodex binding owns the key. Hook shell text is quoted and tmux
+  and never removes local session hooks. Root `C-c` and `C-d` are installed exactly or
+  initialization fails closed if a non-Rodex binding owns either key. `C-d` uses tmux's
+  synchronous current-client `detach-client` context without a reusable client-name
+  target. Rodex sets `exit-unattached off` and exact-session `destroy-unattached off` so
+  detach cannot implicitly destroy the runtime. Hook shell text is quoted and tmux
   format text is escaped. Capability comparisons are evaluated only as direct
   `if-shell -F` conditions, where literal operands keep `$session_id` and `%pane_id`
   sigils as comparison data. Capability-fenced reads select a payload-only

@@ -342,7 +342,7 @@ def test_first_shared_ctrl_c_publishes_a_temporary_status_warning(tmp_path: Path
     assert "CTRL-C ARMED" in runner.status_left
     assert "SHARED session" in runner.status_left
     assert "may END it for everyone" in runner.status_left
-    assert "CTRL-B d detaches only you" in runner.status_left
+    assert "CTRL-D (or CTRL-B d) detaches only you" in runner.status_left
     assert runner.status_options == {
         STATUS_CLAIM_PRIORITY_OPTION: "100",
         STATUS_CLAIM_PUBLISHER_OPTION: "shared-ctrl-c",

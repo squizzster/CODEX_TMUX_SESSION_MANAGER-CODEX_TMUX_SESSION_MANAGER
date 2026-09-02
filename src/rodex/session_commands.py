@@ -36,6 +36,7 @@ from .command_contract import (
 from .control import CodexControlClient, LiveRodexControl
 from .errors import RodexLaunchError
 from .exact_turn_mutation import ExactTurnMutationCoordinator
+from .human_messages import rodex_session_message
 from .live_runtime import (
     resolve_live_control,
     revalidate_live_control,
@@ -89,7 +90,14 @@ def execute_session_command(
             control_client,
         ).mouse_mode(arguments[1], mode)
         _record_access_best_effort(target.session_id, database_path)
-        print(f"Rodex {target.display_name} mouse: {mouse_state}", flush=True)
+        print(
+            rodex_session_message(
+                "mouse",
+                target.display_name,
+                detail=mouse_state,
+            ),
+            flush=True,
+        )
         return
     if command == WAIT_COMMAND:
         if len(arguments) != 2:
@@ -102,7 +110,7 @@ def execute_session_command(
             revalidate=lambda: revalidate_live_control(launcher, runtime, control),
         )
         _record_access_best_effort(session_id, database_path)
-        print(f"Rodex {arguments[1]}: Codex turn complete", flush=True)
+        print(rodex_session_message("turn complete", arguments[1]), flush=True)
         return
     if command == CAT_COMMAND:
         if len(arguments) != 2:
@@ -157,7 +165,7 @@ def execute_session_command(
             operands[1],
             force=force,
         )
-        print(f"Rodex name: {display_name}", flush=True)
+        print(rodex_session_message("alias", display_name), flush=True)
         return
     raise AssertionError(
         f"application pipeline selected unknown session command: {command}"
@@ -197,7 +205,11 @@ def _stream_protocol_events(
     revalidate: Callable[[], None],
 ) -> None:
     print(
-        f"Rodex {session_name}: following live Codex protocol events",
+        rodex_session_message(
+            "events",
+            session_name,
+            detail="following live Codex protocol events",
+        ),
         file=sys.stderr,
         flush=True,
     )
@@ -392,19 +404,26 @@ def _print_running_sessions(
                 unregistered.append(endpoint)
 
     if not running and not identity_failures and not unregistered:
-        print("No running Rodex sessions.", flush=True)
+        print("Rodex running: 0.", flush=True)
         return
-    print(f"Running Rodex sessions: {len(running)}", flush=True)
+    print(f"Rodex running: {len(running)}.", flush=True)
     for runtime in running:
-        print(
-            f"{runtime.display_name} -> Codex {runtime.codex_session_id}",
-            flush=True,
-        )
+        print(rodex_session_message("running", runtime.display_name), flush=True)
     if identity_failures:
-        print(f"Unverified registered runtimes: {len(identity_failures)}", flush=True)
+        print(f"Rodex unverified: {len(identity_failures)}.", flush=True)
         for name, reason in identity_failures:
-            print(f"{name}: {reason}", flush=True)
+            print(
+                rodex_session_message("unverified", name, detail=reason),
+                flush=True,
+            )
     if unregistered:
-        print(f"Unregistered live tmux sessions: {len(unregistered)}", flush=True)
+        print(f"Rodex unregistered: {len(unregistered)}.", flush=True)
         for socket_path, name in unregistered:
-            print(f"{name} on {socket_path}", flush=True)
+            print(
+                rodex_session_message(
+                    "unregistered",
+                    name,
+                    detail=f"tmux socket {socket_path}",
+                ),
+                flush=True,
+            )

@@ -392,6 +392,12 @@ Codex, tmux, or analyzer processes.
 
 ## Lifecycle
 
+- Every interactive create, resume, recovery, relocation, and reattach prints
+  `Rodex attach [display-name].` before entering the ordinary Codex TUI and
+  `Rodex exited [display-name].` after the tmux client returns successfully. Internal
+  Rodex/Codex identities and route-specific wording do not enter this human lifecycle.
+  Tmux's mandatory client-exit line is erased in place before the completion message;
+  the TUI still owns terminal input and output directly without a Rodex PTY proxy.
 - `Ctrl-D` directly invokes tmux `detach-client` for only the current client; it never
   reaches Codex as EOF or an undocumented disconnect command. `Ctrl-b d` remains the
   prefix-based detach route. Both leave Codex, its app-server, and tmux running. Rodex

@@ -1680,6 +1680,7 @@ class RodexRuntimeLauncher:
             interactive=True,
             environment=environment,
         )
+        _erase_native_tmux_exit_message()
 
     def _stable_tmux_session_target(self, runtime: LiveTmuxSession) -> str:
         """Resolve a managed runtime to tmux's immutable server-local session ID."""
@@ -2220,6 +2221,14 @@ class RodexRuntimeLauncher:
         )
         if not _shell_commands_are_equivalent(verified_command, command):
             raise RodexRuntimeError(f"{contract_name} was not installed exactly")
+
+
+def _erase_native_tmux_exit_message() -> None:
+    """Remove tmux's mandatory successful-client exit line from a real terminal."""
+    if not sys.stdout.isatty():
+        return
+    sys.stdout.write("\x1b[1A\x1b[2K\r")
+    sys.stdout.flush()
 
 
 def default_runtime_root_path() -> Path:

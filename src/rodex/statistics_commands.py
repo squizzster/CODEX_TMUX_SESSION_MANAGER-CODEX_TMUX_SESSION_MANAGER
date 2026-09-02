@@ -23,6 +23,7 @@ from rodex_registry import (
 
 from .command_contract import STATS_COMMAND, STATS_STATUS_COMMAND
 from .errors import RodexLaunchError
+from .human_messages import rodex_session_message
 
 
 def execute_statistics_command(arguments: list[str], database_path: Path) -> None:
@@ -230,13 +231,21 @@ def _print_human_statistics(payload: dict[str, object]) -> None:
     if not isinstance(statistics, dict):
         raise RodexLaunchError("stored analytics snapshot is invalid")
     turn = payload.get("turn")
-    subject = ""
+    subject: str | None = None
     if isinstance(turn, dict):
-        subject = f" turn {turn.get('turn_id')}"
+        subject = f"turn {turn.get('turn_id')}"
+    detail = (
+        f"publication sequence {payload['statistics_publication_sequence']}; "
+        f"{payload['worker_state']}"
+    )
+    if subject is not None:
+        detail = f"{subject}; {detail}"
     print(
-        f"Rodex {payload['rodex_session_name']}{subject} statistics "
-        f"(publication sequence {payload['statistics_publication_sequence']}, "
-        f"{payload['worker_state']})",
+        rodex_session_message(
+            "statistics",
+            str(payload["rodex_session_name"]),
+            detail=detail,
+        ),
         flush=True,
     )
     for category in ("must_have_basic_stats", "recommended_insight_stats"):

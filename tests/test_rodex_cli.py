@@ -1110,8 +1110,11 @@ def test_running_reports_an_unregistered_live_tmux_session(
     )  # type: ignore[arg-type]
 
     output = capsys.readouterr().out
-    assert "Unregistered live tmux sessions: 1" in output
-    assert f"orphan-name on {socket_path}" in output
+    assert output == (
+        "Rodex running: 0.\n"
+        "Rodex unregistered: 1.\n"
+        f"Rodex unregistered [orphan-name]: tmux socket {socket_path}.\n"
+    )
 
 
 def test_help_exposes_only_the_current_exact_control_commands(
@@ -1137,7 +1140,10 @@ def test_help_exposes_only_the_current_exact_control_commands(
 
 @pytest.mark.parametrize("command", ["_wait"])
 def test_wait_command_waits_for_the_verified_named_runtime(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command: str
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    command: str,
 ) -> None:
     database = tmp_path / "rodex.sqlite3"
     monkeypatch.setattr(
@@ -1159,6 +1165,7 @@ def test_wait_command_waits_for_the_verified_named_runtime(
     )
 
     assert control.waited == [launcher.control]
+    assert capsys.readouterr().out == "Rodex turn complete [automatic-beluga].\n"
 
 
 def test_machine_start_reads_stdin_and_emits_the_versioned_identity_envelope(
@@ -1858,7 +1865,7 @@ def test_mouse_command_targets_only_the_verified_named_runtime(
         == 0
     )
 
-    assert capsys.readouterr().out == f"Rodex automatic-beluga mouse: {expected}\n"
+    assert capsys.readouterr().out == (f"Rodex mouse [automatic-beluga]: {expected}.\n")
     assert launcher.attached == []
     assert len(launcher.mouse_targets) == 1
     assert launcher.mouse_targets[0].runtime_id == RUNTIME_ID
@@ -1934,7 +1941,9 @@ def test_events_continues_the_verified_protocol_stream_without_session_text(
         '{"method":"turn/started"}\n'
         '{"method":"item/started"}\n'
     )
-    assert "following live Codex protocol events" in captured.err
+    assert captured.err == (
+        "Rodex events [automatic-beluga]: following live Codex protocol events.\n"
+    )
     assert launcher.scrollback_captures == []
 
 
@@ -2122,8 +2131,33 @@ def test_default_and_explicit_create_link_identities_before_attach(
     )
     assert tmux_link.tmux_session_name == tmux_session_name
     output = capsys.readouterr().out
-    assert f"-> Codex {CODEX_SESSION_ID}" in output
-    assert "Rodex automatic-beluga" in output
+    assert output == (
+        "Rodex attach [automatic-beluga].\nRodex exited [automatic-beluga].\n"
+    )
+
+
+def test_failed_attach_does_not_claim_that_rodex_exited_cleanly(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    class FailingAttachLauncher(StubLauncher):
+        def attach(self, runtime: LiveTmuxSession) -> None:
+            super().attach(runtime)
+            raise RodexRuntimeError("attach failed")
+
+    database = tmp_path / "rodex.sqlite3"
+    launcher = FailingAttachLauncher(tmp_path)
+    monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
+    monkeypatch.setattr(
+        "cool_name.functions.coolname.generate_slug",
+        lambda _word_count: "automatic-beluga",
+    )
+
+    with pytest.raises(RodexRuntimeError, match="attach failed"):
+        run([], database_path=database, launcher=launcher)  # type: ignore[arg-type]
+
+    assert capsys.readouterr().out == "Rodex attach [automatic-beluga].\n"
 
 
 @pytest.mark.parametrize(
@@ -3110,7 +3144,9 @@ def test_live_cool_name_argument_renames_configures_and_reattaches_without_start
     tmux_link = lookup_rodex_tmux_session(1, database)
     assert tmux_link is not None
     assert tmux_link.tmux_session_name == tmux_session_name
-    assert "Reattaching Rodex automatic-beluga" in capsys.readouterr().out
+    assert capsys.readouterr().out == (
+        "Rodex attach [automatic-beluga].\nRodex exited [automatic-beluga].\n"
+    )
 
 
 @pytest.mark.evolutionary_regression
@@ -3149,7 +3185,9 @@ def test_live_codex_uuid_argument_opens_its_registered_rodex_display_identity(
     assert launcher.attached[0].tmux_session_name == "remarkable-aardvark"
     assert launcher.attached[0].runtime_id == RUNTIME_ID
     assert launcher.attached[0].tmux_capability is not None
-    assert "Reattaching Rodex remarkable-aardvark" in capsys.readouterr().out
+    assert capsys.readouterr().out == (
+        "Rodex attach [remarkable-aardvark].\nRodex exited [remarkable-aardvark].\n"
+    )
 
 
 def test_ended_codex_uuid_argument_resumes_the_registered_rodex_session(
@@ -3187,8 +3225,8 @@ def test_ended_codex_uuid_argument_resumes_the_registered_rodex_session(
     assert launcher.started == [(Path.cwd(), ["resume", str(CODEX_SESSION_ID)])]
     assert launcher.persistence_checks == []
     assert launcher.attached[0].tmux_session_name == "automatic-beluga"
-    assert f"Resumed Rodex automatic-beluga -> Codex {CODEX_SESSION_ID}" in (
-        capsys.readouterr().out
+    assert capsys.readouterr().out == (
+        "Rodex attach [automatic-beluga].\nRodex exited [automatic-beluga].\n"
     )
 
 
@@ -3229,7 +3267,9 @@ def test_persisted_unregistered_codex_uuid_becomes_a_managed_rodex_session(
         )
         == 1
     )
-    assert f"] -> Codex {REPLACEMENT_CODEX_SESSION_ID}" in capsys.readouterr().out
+    assert capsys.readouterr().out == (
+        "Rodex attach [remarkable-aardvark].\nRodex exited [remarkable-aardvark].\n"
+    )
 
 
 def test_missing_canonical_codex_uuid_becomes_a_managed_initial_prompt(
@@ -3331,8 +3371,8 @@ def test_ended_cool_name_argument_transparently_resumes_its_codex_session(
         launcher.runtime.tmux_server_socket_path
     )
     assert tmux_link.tmux_session_name == tmux_session_name
-    assert f"Resumed Rodex automatic-beluga -> Codex {CODEX_SESSION_ID}" in (
-        capsys.readouterr().out
+    assert capsys.readouterr().out == (
+        "Rodex attach [automatic-beluga].\nRodex exited [automatic-beluga].\n"
     )
 
 
@@ -3535,8 +3575,8 @@ def test_unsaved_codex_session_starts_fresh_and_relinks_the_rodex_identity(
     assert tmux_link.tmux_server_socket_path == str(
         launcher.runtime.tmux_server_socket_path
     )
-    assert f"Recovered Rodex automatic-beluga -> Codex {REPLACEMENT_CODEX_SESSION_ID}" in (
-        capsys.readouterr().out
+    assert capsys.readouterr().out == (
+        "Rodex attach [automatic-beluga].\nRodex exited [automatic-beluga].\n"
     )
 
 
@@ -3659,7 +3699,7 @@ def test_either_name_route_reconciles_tmux_with_the_current_display_name(
     tmux_link = lookup_rodex_tmux_session(1, database)
     assert tmux_link is not None
     assert tmux_link.tmux_session_name == tmux_session_name
-    assert "Reattaching Rodex work" in capsys.readouterr().out
+    assert capsys.readouterr().out == ("Rodex attach [work].\nRodex exited [work].\n")
 
 
 @pytest.mark.parametrize("command", ["_alias"])
@@ -3732,7 +3772,7 @@ def test_alias_command_accepts_force_without_starting_codex(
             "is now named 'replacement'."
         ),
     ]
-    assert "Rodex name: replacement" in capsys.readouterr().out
+    assert capsys.readouterr().out == ("Rodex alias [first].\nRodex alias [replacement].\n")
 
 
 def test_alias_does_not_send_auto_info_when_the_session_is_not_running(
@@ -4017,8 +4057,7 @@ def test_running_commands_show_only_the_current_users_live_sessions(
         LiveTmuxSession(tmp_path / "dna.sock", "black-sawfly")
     ]
     output = capsys.readouterr().out
-    assert "Running Rodex sessions: 1" in output
-    assert f"work -> Codex {CODEX_SESSION_ID}" in output
+    assert output == "Rodex running: 1.\nRodex running [work].\n"
     assert "black-sawfly" not in output
     assert "silver-otter" not in output
 

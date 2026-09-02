@@ -17,8 +17,9 @@ from .tmux_executor import (
 )
 from .tmux_session_capability import (
     TmuxSessionCapability,
-    combine_tmux_conditions,
-    registered_primary_pane_condition,
+    combine_tmux_if_shell_conditions,
+    registered_primary_pane_if_shell_condition,
+    registered_primary_pane_read_arguments,
 )
 from .tmux_status import (
     STATUS_ANIMATION_FRAME_INTERVAL_SECONDS,
@@ -182,22 +183,13 @@ async def _animate_status_once(
         return await executor.run(arguments)
 
     count_result = await tmux(
-        "display-message",
-        "-p",
-        "-t",
-        pane_target,
-        "-F",
-        f"{registered_primary_pane_condition(capability)}\t{_ATTACHED_COUNT_FORMAT}",
+        *registered_primary_pane_read_arguments(capability, _ATTACHED_COUNT_FORMAT)
     )
     try:
-        admitted_text, attached_count_text = count_result.stdout.strip().split(
-            "\t",
-            maxsplit=1,
-        )
-        attached_count = int(attached_count_text)
+        attached_count = int(count_result.stdout.strip())
     except (TypeError, ValueError):
         return
-    if count_result.returncode != 0 or admitted_text != "1" or attached_count < 0:
+    if count_result.returncode != 0 or attached_count < 0:
         return
 
     frames = status_frames(request.event, attached_count)
@@ -207,8 +199,8 @@ async def _animate_status_once(
             "-t",
             pane_target,
             "-F",
-            combine_tmux_conditions(
-                registered_primary_pane_condition(capability),
+            combine_tmux_if_shell_conditions(
+                registered_primary_pane_if_shell_condition(capability),
                 status_commands.publisher_matches(STATUS_PUBLISHER_SHARING_ANIMATION),
             ),
             status_commands.restore_base(),
@@ -221,8 +213,8 @@ async def _animate_status_once(
         "-t",
         pane_target,
         "-F",
-        combine_tmux_conditions(
-            registered_primary_pane_condition(capability),
+        combine_tmux_if_shell_conditions(
+            registered_primary_pane_if_shell_condition(capability),
             status_commands.priority_allows(StatusPriority.SHARING_ANIMATION),
         ),
         status_commands.claim_and_present(
@@ -248,8 +240,8 @@ async def _animate_status_once(
             "-t",
             pane_target,
             "-F",
-            combine_tmux_conditions(
-                registered_primary_pane_condition(capability),
+            combine_tmux_if_shell_conditions(
+                registered_primary_pane_if_shell_condition(capability),
                 status_commands.token_matches(token),
             ),
             status_commands.present(_frame_presentation(frame)),
@@ -284,17 +276,12 @@ async def _animation_token_matches(
     token: str,
 ) -> bool:
     result = await tmux(
-        "display-message",
-        "-p",
-        "-t",
-        capability.pane_target,
-        "-F",
-        (
-            f"{registered_primary_pane_condition(capability)}\t"
-            f"#{{{STATUS_CLAIM_TOKEN_OPTION}}}"
-        ),
+        *registered_primary_pane_read_arguments(
+            capability,
+            f"#{{{STATUS_CLAIM_TOKEN_OPTION}}}",
+        )
     )
-    return result.returncode == 0 and result.stdout.strip() == f"1\t{token}"
+    return result.returncode == 0 and result.stdout.strip() == token
 
 
 async def _restore_normal_status(
@@ -309,8 +296,8 @@ async def _restore_normal_status(
         "-t",
         pane_target,
         "-F",
-        combine_tmux_conditions(
-            registered_primary_pane_condition(capability),
+        combine_tmux_if_shell_conditions(
+            registered_primary_pane_if_shell_condition(capability),
             status_commands.token_matches(token),
         ),
         status_commands.restore_base(),

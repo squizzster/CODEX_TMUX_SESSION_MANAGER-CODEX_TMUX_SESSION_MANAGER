@@ -209,10 +209,12 @@ def test_round1_shared_ctrl_c_rechecks_current_attachment_count(tmp_path: Path) 
     def runner(command: list[str], **_options: object) -> subprocess.CompletedProcess[str]:
         commands.append(command)
         arguments = command[3:]
-        if "display-message" in arguments and any(
-            "@rodex_registration_state" in argument for argument in arguments
+        if (
+            arguments[:1] == ["if-shell"]
+            and "display-message" in arguments[-2]
+            and "#{pane_id}" in arguments[-2]
         ):
-            return subprocess.CompletedProcess(command, 0, stdout="1\t%9\n", stderr="")
+            return subprocess.CompletedProcess(command, 0, stdout="%9\n", stderr="")
         if "display-message" in arguments or any(
             "session_attached" in argument for argument in arguments
         ):
@@ -253,12 +255,18 @@ def test_round1_shared_ctrl_c_confirmation_is_atomic_across_callers(
     send_count = 0
     errors: list[BaseException] = []
 
-    def runner(command: list[str], **_options: object) -> subprocess.CompletedProcess[str]:
+    def runner(
+        command: list[str], **_options: object
+    ) -> subprocess.CompletedProcess[str]:
         nonlocal confirmation, send_count
         arguments = command[3:]
         joined = " ".join(arguments)
-        if "display-message" in arguments and "@rodex_registration_state" in joined:
-            return subprocess.CompletedProcess(command, 0, stdout="1\t%9\n", stderr="")
+        if (
+            arguments[:1] == ["if-shell"]
+            and "display-message" in arguments[-2]
+            and "#{pane_id}" in arguments[-2]
+        ):
+            return subprocess.CompletedProcess(command, 0, stdout="%9\n", stderr="")
         if arguments[:1] == ["if-shell"] and "show-options" in joined:
             if CONFIRMATION_OPTION not in joined:
                 return subprocess.CompletedProcess(command, 1, stdout="", stderr="")

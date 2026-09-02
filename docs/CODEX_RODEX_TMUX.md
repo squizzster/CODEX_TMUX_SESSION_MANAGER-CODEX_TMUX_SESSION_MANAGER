@@ -127,8 +127,11 @@ after a complete roster uniqueness check; async workers carry that already-minte
 capability. Every terminal action repeats its applicable tuple at the exact target;
 primary-pane actions also require its immutable `%pane_id`. Names and process context
 are addresses only. Expected identity values use tmux literal format operands, so
-`$session_id` and `%pane_id` sigils remain comparison data even when a worker verifies
-them through `display-message -F`.
+`$session_id` and `%pane_id` sigils remain comparison data in their direct
+`if-shell -F` condition context. Capability-fenced reads keep that condition in
+`if-shell`; only the selected branch evaluates `display-message` payload. Predicates
+are never rendered as display output because tmux assigns different literal semantics
+to the two format contexts.
 
 Under one stable per-user XDG/runtime context, Rodex uses one canonical database and one
 shared tmux server. Display-name uniqueness covers every session recorded in that

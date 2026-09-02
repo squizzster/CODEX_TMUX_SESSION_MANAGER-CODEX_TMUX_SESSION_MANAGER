@@ -101,8 +101,10 @@ listener; control endpoints are Unix sockets below a private runtime root.
   verifies only its dedicated hook indices and options behind a server-incarnation fence,
   and never removes local session hooks. Root `C-c` is installed exactly or initialization
   fails closed if a non-Rodex binding owns the key. Hook shell text is quoted and tmux
-  format text is escaped; expected capability identities use tmux literal format operands
-  so `$session_id` and `%pane_id` sigils remain data during comparison.
+  format text is escaped. Capability comparisons are evaluated only as direct
+  `if-shell -F` conditions, where literal operands keep `$session_id` and `%pane_id`
+  sigils as comparison data. Capability-fenced reads select a payload-only
+  `display-message` branch after that condition succeeds.
 - These are synchronous operation-boundary checks. Rodex is not an IDS and adds no
   filesystem/tmux surveillance, inotify watcher, or real-time monitor. An unavoidable
   same-uid external race can install a key binding between Rodex's last absence check and

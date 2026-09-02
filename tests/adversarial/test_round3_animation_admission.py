@@ -92,21 +92,25 @@ class _OwnerTmux:
     async def __call__(self, command: Sequence[str]) -> AsyncCommandResult:
         recorded = list(command)
         self.commands.append(recorded)
-        if "display-message" in recorded:
-            format_string = recorded[-1]
+        return self._execute(recorded[3:])
+
+    def _execute(self, arguments: list[str]) -> AsyncCommandResult:
+        if arguments[:1] == ["display-message"]:
+            format_string = arguments[-1]
             if "#{session_attached}" in format_string:
-                return AsyncCommandResult(0, "1\t2\n")
+                return AsyncCommandResult(0, "2\n")
             if STATUS_CLAIM_TOKEN_OPTION in format_string:
                 token = self.options.get(STATUS_CLAIM_TOKEN_OPTION, "")
-                return AsyncCommandResult(0, f"1\t{token}\n")
-            return AsyncCommandResult(0, "1\n")
-        if "show-options" in recorded:
-            value = self.options.get(recorded[-1], "")
+                return AsyncCommandResult(0, f"{token}\n")
+            return AsyncCommandResult(0, "%9\n")
+        if arguments[:1] == ["show-options"]:
+            value = self.options.get(arguments[-1], "")
             return AsyncCommandResult(0 if value else 1, f"{value}\n")
-        if "list-clients" in recorded:
+        if arguments[:1] == ["list-clients"]:
             return AsyncCommandResult(0, "")
-        if "if-shell" in recorded:
-            condition = recorded[-2]
+        if arguments[:1] == ["if-shell"]:
+            format_index = arguments.index("-F")
+            condition = arguments[format_index + 1]
             if self.fail_release_once and STATUS_ANIMATION_GENERATION_OPTION in condition:
                 self.fail_release_once = False
                 return AsyncCommandResult(124)
@@ -117,11 +121,19 @@ class _OwnerTmux:
                 callback = self.before_release
                 self.before_release = None
                 callback()
-            if self._condition_is_true(condition):
-                for tmux_command in recorded[-1].split(" ; "):
+            branch_index = format_index + (
+                2 if self._condition_is_true(condition) else 3
+            )
+            if branch_index < len(arguments):
+                result = AsyncCommandResult(0)
+                for tmux_command in arguments[branch_index].split(" ; "):
                     if tmux_command.lstrip().startswith("run-shell"):
                         continue
-                    self._apply(shlex.split(tmux_command))
+                    nested = shlex.split(tmux_command)
+                    if nested[:1] in (["display-message"], ["if-shell"]):
+                        result = self._execute(nested)
+                    else:
+                        self._apply(nested)
                 if (
                     STATUS_ANIMATION_GENERATION_OPTION in condition
                     and self.after_release is not None
@@ -129,6 +141,7 @@ class _OwnerTmux:
                     callback = self.after_release
                     self.after_release = None
                     callback()
+                return result
         return AsyncCommandResult(0)
 
     def _condition_is_true(self, condition: str) -> bool:
@@ -265,7 +278,11 @@ def test_round3_stale_watchdog_is_a_noop_after_owner_generation_changes() -> Non
     _run_owner(tmux, stale_token, watchdog=True)
 
     assert tmux.options[STATUS_ANIMATION_OWNER_TOKEN_OPTION] == "new-owner"
-    assert not any("if-shell" in command for command in tmux.commands)
+    assert not any(
+        "if-shell" in command
+        and not any("display-message" in argument for argument in command)
+        for command in tmux.commands
+    )
 
 
 def test_round3_release_timeout_remains_covered_by_the_native_watchdog() -> None:

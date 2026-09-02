@@ -41,7 +41,7 @@ prompt. An unregistered canonical Codex identity requires a transient App Server
 | `rodex.session_read_pipeline` / `session_tail` | Verify live reads and follow terminal history without idle full-history scans. |
 | `rodex.process_environment` | Remove only Rodex's bootstrap virtualenv and retain caller-owned process state. |
 | `rodex.runtime` / `process_contracts` / `session_host` | Discover, launch, attach, supervise, and clean up app-server, TUI, proxy, analytics, and runtime paths. |
-| `rodex.tmux_session_capability` | Define server/runtime and fully registered session authority plus atomic tmux fences. |
+| `rodex.tmux_session_capability` | Define server/runtime and fully registered session authority; own direct tmux mutation fences and capability-fenced reads. |
 | `rodex.tmux_sharing_coordinator` | Turn hook wakeups into exact roster transitions. |
 | `rodex.tmux_status` / `status_animation` | Arbitrate status claims and render one already-admitted transition. |
 | `rodex.status_animation_admission` | Own tmux-native generation, pending event, lease, handoff, and watchdog recovery. |
@@ -73,6 +73,11 @@ primary `%pane_id`, and runtime. `TmuxSessionCapability` adds registered Rodex, 
 SQL-row, and Codex identities. The launcher mints it from a uniqueness-checked roster;
 async actors carry it. Every terminal action is exact-target fenced; primary operations
 also require the immutable pane ID. Name, socket, runtime, or hook context is no authority.
+Capability predicates belong exclusively to direct `if-shell -F` evaluation. A read is
+one owned transaction: direct `if-shell -F` first proves the capability, then its selected
+branch runs `display-message` for payload only. Domain callers never embed an ownership
+predicate in display output, because tmux does not give those two format contexts the same
+literal semantics.
 
 Global indexed `client-attached` and `client-detached` hooks contain no session target;
 they only wake `tmux_sharing_coordinator`. The coordinator verifies server scope, reads

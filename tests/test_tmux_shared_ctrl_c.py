@@ -42,6 +42,49 @@ def _registered_capability(socket_path: Path) -> TmuxSessionCapability:
     )
 
 
+def _create_registered_session_at_pane_four(
+    tmux: Callable[..., subprocess.CompletedProcess[str]],
+    socket_path: Path,
+    session_name: str,
+) -> TmuxSessionCapability:
+    """Create a registered fixture at the first pane ID that exposed the bug."""
+    tmux("new-session", "-d", "-s", "pane-id-anchor", "sleep 30")
+    for pane_number in range(1, 4):
+        dummy_name = f"pane-id-{pane_number}"
+        tmux("new-session", "-d", "-s", dummy_name, "sleep 30")
+        tmux("kill-session", "-t", f"={dummy_name}")
+    tmux("new-session", "-d", "-s", session_name, "sleep 30")
+
+    capability = _registered_capability(socket_path)
+    tmux(
+        "set-option",
+        "-s",
+        "@rodex_shared_tmux_protocol",
+        "rodex-shared-tmux-v1",
+    )
+    tmux(
+        "set-option",
+        "-s",
+        "@rodex_shared_tmux_server_id",
+        capability.tmux_server_id,
+    )
+    primary_pane_id = tmux(
+        "display-message", "-p", "-t", f"={session_name}:", "-F", "#{pane_id}"
+    ).stdout.strip()
+    assert primary_pane_id == "%4"
+    for option_name, value in (
+        ("@rodex_primary_pane_id", primary_pane_id),
+        ("@rodex_runtime_id", str(capability.runtime_id)),
+        ("@rodex_registration_state", "registered"),
+        ("@rodex_session_id", str(capability.rodex_session_id)),
+        ("@rodex_registry_id", str(capability.registry_id)),
+        ("@rodex_sessions_id", str(capability.internal_session_id)),
+        ("@rodex_codex_session_id", str(capability.codex_session_id)),
+    ):
+        tmux("set-option", "-t", f"={session_name}:", option_name, value)
+    return capability
+
+
 class RecordingTmux:
     def __init__(self, *, attached_count: int = 2) -> None:
         self.commands: list[list[str]] = []
@@ -67,7 +110,7 @@ class RecordingTmux:
         if arguments[:1] == ["display-message"]:
             if "#{pane_id}" in arguments[-1]:
                 target = arguments[arguments.index("-t") + 1]
-                return 0, f"{int(target == '%9')}\t{target}\n"
+                return 0, f"{target}\n"
             return 0, f"{self.attached_count}\n"
         if arguments[:2] == ["show-options", "-v"]:
             if arguments[-1] == "@rodex_shared_ctrl_c_confirmation":
@@ -189,8 +232,7 @@ def test_ctrl_c_from_observer_pane_fails_closed_without_primary_input(
         == 1
     )
 
-    assert runner.commands[0][runner.commands[0].index("-t") + 1] == "%4"
-    assert len(runner.commands) == 1
+    assert runner.commands == []
     assert runner.sent_ctrl_c_count == 0
 
 
@@ -203,7 +245,10 @@ def test_private_ctrl_c_is_withheld_if_a_client_attaches_before_send(
         command: list[str], **options: object
     ) -> subprocess.CompletedProcess[str]:
         result = runner(command, **options)
-        if "display-message" in command[-1] and "#{session_attached}" in command[-1]:
+        if any(
+            "display-message" in argument and "#{session_attached}" in argument
+            for argument in command
+        ):
             runner.attached_count = 2
         return result
 
@@ -245,7 +290,10 @@ def test_prearmed_private_ctrl_c_race_clears_hidden_confirmation(
         command: list[str], **options: object
     ) -> subprocess.CompletedProcess[str]:
         result = runner(command, **options)
-        if "display-message" in command[-1] and "#{session_attached}" in command[-1]:
+        if any(
+            "display-message" in argument and "#{session_attached}" in argument
+            for argument in command
+        ):
             runner.attached_count = 2
         return result
 
@@ -420,34 +468,9 @@ def test_real_tmux_first_shared_ctrl_c_keeps_both_clients_attached(
             time.sleep(0.01)
         pytest.fail(f"tmux did not report {expected} attached clients")
 
-    tmux("new-session", "-d", "-s", session_name, "sleep 30")
+    _create_registered_session_at_pane_four(tmux, socket_path, session_name)
     try:
         capability = _registered_capability(socket_path)
-        tmux(
-            "set-option",
-            "-s",
-            "@rodex_shared_tmux_protocol",
-            "rodex-shared-tmux-v1",
-        )
-        tmux(
-            "set-option",
-            "-s",
-            "@rodex_shared_tmux_server_id",
-            capability.tmux_server_id,
-        )
-        primary_pane_id = tmux(
-            "display-message", "-p", "-t", f"={session_name}:", "-F", "#{pane_id}"
-        ).stdout.strip()
-        for option_name, value in (
-            ("@rodex_primary_pane_id", primary_pane_id),
-            ("@rodex_runtime_id", str(capability.runtime_id)),
-            ("@rodex_registration_state", "registered"),
-            ("@rodex_session_id", str(capability.rodex_session_id)),
-            ("@rodex_registry_id", str(capability.registry_id)),
-            ("@rodex_sessions_id", str(capability.internal_session_id)),
-            ("@rodex_codex_session_id", str(capability.codex_session_id)),
-        ):
-            tmux("set-option", "-t", f"={session_name}:", option_name, value)
         RodexRuntimeLauncher(
             "codex",
             tmux_binary,
@@ -533,6 +556,87 @@ def test_real_tmux_first_shared_ctrl_c_keeps_both_clients_attached(
             except subprocess.TimeoutExpired:
                 control_client.terminate()
                 control_client.communicate(timeout=2)
+        if interactive_client_pid is not None:
+            waited_pid, _status = os.waitpid(interactive_client_pid, os.WNOHANG)
+            if waited_pid == 0:
+                os.kill(interactive_client_pid, signal.SIGTERM)
+                os.waitpid(interactive_client_pid, 0)
+        if terminal_master is not None:
+            os.close(terminal_master)
+
+
+def test_real_tmux_private_ctrl_c_exits_high_pane_session(tmp_path: Path) -> None:
+    tmux_binary = shutil.which("tmux")
+    if tmux_binary is None:
+        pytest.skip("tmux is not installed")
+    socket_path = tmp_path / "tmux.sock"
+    session_name = "private-ctrl-c"
+    interactive_client_pid: int | None = None
+    terminal_master: int | None = None
+
+    def tmux(*arguments: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [tmux_binary, "-S", str(socket_path), *arguments],
+            check=check,
+            text=True,
+            capture_output=True,
+        )
+
+    def wait_for_attached_count(expected: int) -> None:
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            shown = tmux(
+                "display-message",
+                "-p",
+                "-t",
+                f"={session_name}:",
+                "-F",
+                "#{session_attached}",
+            )
+            if shown.stdout.strip() == str(expected):
+                return
+            time.sleep(0.01)
+        pytest.fail(f"tmux did not report {expected} attached clients")
+
+    _create_registered_session_at_pane_four(tmux, socket_path, session_name)
+    try:
+        capability = _registered_capability(socket_path)
+        RodexRuntimeLauncher(
+            "codex",
+            tmux_binary,
+            python_executable=sys.executable,
+        ).initialise_session_ui(
+            LiveTmuxSession(
+                socket_path,
+                session_name,
+                runtime_id=capability.runtime_id,
+            )
+        )
+        interactive_client_pid, terminal_master = pty.fork()
+        interactive_environment = os.environ.copy()
+        interactive_environment["TERM"] = "xterm-256color"
+        interactive_arguments = [
+            tmux_binary,
+            "-S",
+            str(socket_path),
+            "attach-session",
+            "-t",
+            f"={session_name}",
+        ]
+        if interactive_client_pid == 0:
+            os.execve(tmux_binary, interactive_arguments, interactive_environment)
+        wait_for_attached_count(1)
+
+        os.write(terminal_master, b"\x03")
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            if tmux("has-session", "-t", f"={session_name}", check=False).returncode:
+                break
+            time.sleep(0.01)
+        else:
+            pytest.fail("private Ctrl-C was not forwarded to the high-ID primary pane")
+    finally:
+        tmux("kill-server", check=False)
         if interactive_client_pid is not None:
             waited_pid, _status = os.waitpid(interactive_client_pid, os.WNOHANG)
             if waited_pid == 0:

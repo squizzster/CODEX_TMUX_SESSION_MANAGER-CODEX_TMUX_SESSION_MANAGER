@@ -13,9 +13,11 @@ from typing import Final
 from .tmux_executor import SyncTmuxExecutor, SyncTmuxRunner, TmuxCommandResult
 from .tmux_session_capability import (
     TmuxRuntimeCapability,
-    capability_identity_condition,
-    combine_tmux_conditions,
-    primary_pane_capability_condition,
+    capability_identity_if_shell_condition,
+    capability_pane_read_arguments,
+    combine_tmux_if_shell_conditions,
+    primary_pane_capability_if_shell_condition,
+    primary_pane_capability_read_arguments,
 )
 
 OBSERVER_PRIMARY_PANE_OPTION: Final = "@rodex_agent_observer_pane_id"
@@ -70,21 +72,15 @@ class ObserverPaneController:
         if _PANE_ID_PATTERN.fullmatch(candidate) is None:
             return None
         identity = self._tmux_executor.run(
-            (
-                "display-message",
-                "-p",
-                "-t",
+            capability_pane_read_arguments(
+                self._capability,
                 candidate,
-                "-F",
-                (
-                    f"{capability_identity_condition(self._capability)}|"
-                    f"#{{pane_id}}|#{{{OBSERVER_OWNER_PANE_OPTION}}}|#{{pane_dead}}"
-                ),
+                f"#{{pane_id}}|#{{{OBSERVER_OWNER_PANE_OPTION}}}|#{{pane_dead}}",
             )
         )
         if (
             identity.returncode != 0
-            or identity.stdout.strip() != f"1|{candidate}|{self._primary_pane_target}|0"
+            or identity.stdout.strip() != f"{candidate}|{self._primary_pane_target}|0"
         ):
             self._observer_pane_target = None
             return None
@@ -102,24 +98,17 @@ class ObserverPaneController:
         initial_event: dict[str, object],
     ) -> str | None:
         cwd = self._tmux_executor.run(
-            (
-                "display-message",
-                "-p",
-                "-t",
-                self._primary_pane_target,
-                "-F",
-                (
-                    f"{primary_pane_capability_condition(self._capability)}|"
-                    "#{pane_id}|#{pane_current_path}"
-                ),
+            primary_pane_capability_read_arguments(
+                self._capability,
+                "#{pane_id}|#{pane_current_path}",
             )
         )
-        cwd_fields = cwd.stdout.rstrip("\n").split("|", maxsplit=2)
+        cwd_fields = cwd.stdout.rstrip("\n").split("|", maxsplit=1)
         if (
             cwd.returncode != 0
-            or len(cwd_fields) != 3
-            or cwd_fields[:2] != ["1", self._primary_pane_target]
-            or not cwd_fields[2]
+            or len(cwd_fields) != 2
+            or cwd_fields[0] != self._primary_pane_target
+            or not cwd_fields[1]
         ):
             return None
         command = [
@@ -155,7 +144,7 @@ class ObserverPaneController:
                 "-t",
                 self._primary_pane_target,
                 "-c",
-                cwd_fields[2],
+                cwd_fields[1],
                 "-P",
                 "-F",
                 "#{pane_id}",
@@ -212,8 +201,8 @@ class ObserverPaneController:
                 ),
             )
         )
-        candidate_condition = combine_tmux_conditions(
-            capability_identity_condition(self._capability),
+        candidate_condition = combine_tmux_if_shell_conditions(
+            capability_identity_if_shell_condition(self._capability),
             f"#{{==:#{{pane_id}},{pane_target}}}",
         )
         self._tmux_executor.run(
@@ -235,7 +224,7 @@ class ObserverPaneController:
                 "-t",
                 self._primary_pane_target,
                 "-F",
-                primary_pane_capability_condition(self._capability),
+                primary_pane_capability_if_shell_condition(self._capability),
                 shlex.join(arguments),
                 shlex.join(("run-shell", "false")),
             )

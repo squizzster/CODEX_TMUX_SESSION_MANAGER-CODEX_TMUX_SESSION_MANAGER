@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import asyncio
 import shutil
 import subprocess
@@ -354,6 +355,37 @@ def test_architecture_c_tmux_process_execution_has_no_production_bypass() -> Non
     assert "subprocess.run(" not in runtime_source
     executor_source = (rodex_source / "tmux_executor.py").read_text(encoding="utf-8")
     assert executor_source.count("create_subprocess_exec(") == 1
+
+
+def test_capability_predicates_are_never_rendered_as_display_payload() -> None:
+    rodex_source = Path(__file__).parents[2] / "src" / "rodex"
+
+    for source_path in rodex_source.glob("*.py"):
+        tree = ast.parse(source_path.read_text(encoding="utf-8"), source_path.name)
+        for invocation in (
+            node for node in ast.walk(tree) if isinstance(node, ast.Call)
+        ):
+            if not any(
+                isinstance(node, ast.Constant) and node.value == "display-message"
+                for node in ast.walk(invocation)
+            ):
+                continue
+            condition_calls = [
+                node
+                for node in ast.walk(invocation)
+                if isinstance(node, ast.Call)
+                and (
+                    (
+                        isinstance(node.func, ast.Name)
+                        and node.func.id.endswith("_if_shell_condition")
+                    )
+                    or (
+                        isinstance(node.func, ast.Attribute)
+                        and node.func.attr.endswith("_if_shell_condition")
+                    )
+                )
+            ]
+            assert condition_calls == [], source_path.name
 
 
 def test_shared_tmux_source_destruction_cannot_mutate_survivor_live(

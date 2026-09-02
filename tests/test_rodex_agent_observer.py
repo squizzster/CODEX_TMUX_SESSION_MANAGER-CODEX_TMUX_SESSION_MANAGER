@@ -64,6 +64,21 @@ def _runtime_capability(socket_path: Path) -> TmuxRuntimeCapability:
     )
 
 
+def _observer_capability_read_output(
+    command: list[str],
+    *,
+    current_path: str = "/workspace",
+) -> str | None:
+    """Model the direct if-shell ownership gate before its display payload."""
+    if command[3] != "if-shell" or "display-message" not in command[-2]:
+        return None
+    if "#{pane_current_path}" in command[-2]:
+        return f"%7|{current_path}\n"
+    if "@rodex_agent_observer_for" in command[-2]:
+        return "%9|%7|0\n"
+    raise AssertionError(f"unexpected capability read: {command}")
+
+
 def _receive_control_event(listener: socket.socket) -> dict[str, object]:
     connection, _address = listener.accept()
     with connection:
@@ -421,8 +436,9 @@ def test_exact_spawn_creates_a_disabled_top_third_without_changing_focus(
         operation = command[3]
         if operation == "show-options":
             return subprocess.CompletedProcess(command, 0, "", "")
-        if operation == "display-message":
-            return subprocess.CompletedProcess(command, 0, "1|%7|/workspace\n", "")
+        read_output = _observer_capability_read_output(command)
+        if read_output is not None:
+            return subprocess.CompletedProcess(command, 0, read_output, "")
         if operation == "if-shell" and "split-window" in command[-2]:
             return subprocess.CompletedProcess(command, 0, "%9\n", "")
         return subprocess.CompletedProcess(command, 0, "", "")
@@ -493,8 +509,9 @@ def test_observer_creation_rolls_back_every_partial_registration_failure(
         nonlocal failure_injected, registration_step
         calls.append(command)
         operation = command[3]
-        if operation == "display-message":
-            return subprocess.CompletedProcess(command, 0, "1|%7|/workspace\n", "")
+        read_output = _observer_capability_read_output(command)
+        if read_output is not None:
+            return subprocess.CompletedProcess(command, 0, read_output, "")
         if operation != "if-shell":
             raise AssertionError(f"unexpected tmux command: {command}")
         action = shlex.split(command[-2])
@@ -541,8 +558,9 @@ def test_existing_observer_pane_is_reused_and_receives_exact_new_spawn(
         operation = command[3]
         if operation == "show-options":
             return subprocess.CompletedProcess(command, 0, "%9\n", "")
-        if operation == "display-message":
-            return subprocess.CompletedProcess(command, 0, "1|%9|%7|0\n", "")
+        read_output = _observer_capability_read_output(command)
+        if read_output is not None:
+            return subprocess.CompletedProcess(command, 0, read_output, "")
         raise AssertionError(f"unexpected tmux mutation: {command}")
 
     controller = AgentObserverCoordinator(
@@ -584,8 +602,9 @@ def test_same_turn_parent_request_is_sent_exactly_without_entering_process_args(
         operation = command[3]
         if operation == "show-options":
             return subprocess.CompletedProcess(command, 0, "", "")
-        if operation == "display-message":
-            return subprocess.CompletedProcess(command, 0, "1|%7|/workspace\n", "")
+        read_output = _observer_capability_read_output(command)
+        if read_output is not None:
+            return subprocess.CompletedProcess(command, 0, read_output, "")
         if operation == "if-shell" and "split-window" in command[-2]:
             return subprocess.CompletedProcess(command, 0, "%9\n", "")
         return subprocess.CompletedProcess(command, 0, "", "")
@@ -646,8 +665,9 @@ def test_parent_request_is_not_correlated_across_turns_or_roots(tmp_path: Path) 
         operation = command[3]
         if operation == "show-options":
             return subprocess.CompletedProcess(command, 0, "%9\n", "")
-        if operation == "display-message":
-            return subprocess.CompletedProcess(command, 0, "1|%9|%7|0\n", "")
+        read_output = _observer_capability_read_output(command)
+        if read_output is not None:
+            return subprocess.CompletedProcess(command, 0, read_output, "")
         raise AssertionError(f"unexpected tmux mutation: {command}")
 
     controller = AgentObserverCoordinator(
@@ -686,8 +706,9 @@ def test_same_agent_followup_receives_its_new_exact_parent_request(tmp_path: Pat
         operation = command[3]
         if operation == "show-options":
             return subprocess.CompletedProcess(command, 0, "%9\n", "")
-        if operation == "display-message":
-            return subprocess.CompletedProcess(command, 0, "1|%9|%7|0\n", "")
+        read_output = _observer_capability_read_output(command)
+        if read_output is not None:
+            return subprocess.CompletedProcess(command, 0, read_output, "")
         raise AssertionError(f"unexpected tmux mutation: {command}")
 
     controller = AgentObserverCoordinator(
@@ -764,8 +785,9 @@ def test_primary_event_path_forwards_tracked_agent_prose_without_subscriber_gap(
         operation = command[3]
         if operation == "show-options":
             return subprocess.CompletedProcess(command, 0, "%9\n", "")
-        if operation == "display-message":
-            return subprocess.CompletedProcess(command, 0, "1|%9|%7|0\n", "")
+        read_output = _observer_capability_read_output(command)
+        if read_output is not None:
+            return subprocess.CompletedProcess(command, 0, read_output, "")
         raise AssertionError(f"unexpected tmux mutation: {command}")
 
     controller = AgentObserverCoordinator(
@@ -813,8 +835,11 @@ def test_controller_close_waits_for_inflight_callback_and_blocks_late_mutation(
             callback_entered.set()
             assert release_callback.wait(2)
             return subprocess.CompletedProcess(command, 1, "", "missing")
-        if operation == "display-message":
-            return subprocess.CompletedProcess(command, 0, f"1|%7|{tmp_path}\n", "")
+        read_output = _observer_capability_read_output(
+            command, current_path=str(tmp_path)
+        )
+        if read_output is not None:
+            return subprocess.CompletedProcess(command, 0, read_output, "")
         if operation == "if-shell" and "split-window" in command[-2]:
             return subprocess.CompletedProcess(command, 0, "%9\n", "")
         return subprocess.CompletedProcess(command, 0, "", "")
@@ -866,8 +891,9 @@ def test_existing_observer_reconnects_with_current_bounded_semantic_snapshot(
         operation = command[3]
         if operation == "show-options":
             return subprocess.CompletedProcess(command, 0, "%9\n", "")
-        if operation == "display-message":
-            return subprocess.CompletedProcess(command, 0, "1|%9|%7|0\n", "")
+        read_output = _observer_capability_read_output(command)
+        if read_output is not None:
+            return subprocess.CompletedProcess(command, 0, read_output, "")
         raise AssertionError(f"unexpected tmux mutation: {command}")
 
     event_socket = tmp_path / "events.sock"
@@ -2264,6 +2290,45 @@ def test_real_tmux_observer_renders_request_and_exits_with_its_runtime(
                 "new-session",
                 "-d",
                 "-s",
+                "pane-id-anchor",
+                "sleep 30",
+            ],
+            check=True,
+        )
+        for pane_number in range(1, 4):
+            dummy_name = f"pane-id-{pane_number}"
+            subprocess.run(
+                [
+                    tmux,
+                    "-S",
+                    str(tmux_socket),
+                    "new-session",
+                    "-d",
+                    "-s",
+                    dummy_name,
+                    "sleep 30",
+                ],
+                check=True,
+            )
+            subprocess.run(
+                [
+                    tmux,
+                    "-S",
+                    str(tmux_socket),
+                    "kill-session",
+                    "-t",
+                    f"={dummy_name}",
+                ],
+                check=True,
+            )
+        subprocess.run(
+            [
+                tmux,
+                "-S",
+                str(tmux_socket),
+                "new-session",
+                "-d",
+                "-s",
                 "observer-test",
                 "-x",
                 "120",
@@ -2288,6 +2353,7 @@ def test_real_tmux_observer_renders_request_and_exits_with_its_runtime(
             text=True,
             capture_output=True,
         ).stdout.strip()
+        assert primary == "%4"
         server_id = "0123456789abcdef0123456789abcdef"
         subprocess.run(
             [

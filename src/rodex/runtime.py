@@ -77,12 +77,12 @@ from .tmux_session_capability import (
     RODEX_SHARED_TMUX_SOCKET_NAME,
     TmuxRuntimeCapability,
     TmuxSessionCapability,
-    combine_tmux_conditions,
+    combine_tmux_if_shell_conditions,
     parse_tmux_server_id,
     parse_tmux_session_capability,
-    primary_pane_capability_condition,
-    registered_primary_pane_condition,
-    server_identity_condition,
+    primary_pane_capability_if_shell_condition,
+    registered_primary_pane_if_shell_condition,
+    server_identity_if_shell_condition,
     tmux_format_literal,
 )
 from .tmux_sharing_coordinator import (
@@ -660,7 +660,7 @@ class RodexRuntimeLauncher:
             "-t",
             target,
             "-F",
-            primary_pane_capability_condition(capability),
+            primary_pane_capability_if_shell_condition(capability),
             publication_action,
             shlex.join(("run-shell", "false")),
         )
@@ -696,8 +696,8 @@ class RodexRuntimeLauncher:
             raise RodexRuntimeError(
                 "runtime registration pending identity disagrees with durable identity"
             )
-        condition = combine_tmux_conditions(
-            primary_pane_capability_condition(bootstrap_capability),
+        condition = combine_tmux_if_shell_conditions(
+            primary_pane_capability_if_shell_condition(bootstrap_capability),
             (
                 f"#{{==:#{{{RODEX_REGISTRATION_STATE_OPTION}}},"
                 f"{RODEX_REGISTRATION_PENDING}}}"
@@ -898,7 +898,7 @@ class RodexRuntimeLauncher:
             "-t",
             capability.pane_target,
             "-F",
-            registered_primary_pane_condition(capability),
+            registered_primary_pane_if_shell_condition(capability),
             action,
             shlex.join(("run-shell", "false")),
             timeout_seconds=RODEX_TMUX_RENAME_TIMEOUT_SECONDS,
@@ -1154,7 +1154,7 @@ class RodexRuntimeLauncher:
             "-t",
             capability.pane_target,
             "-F",
-            registered_primary_pane_condition(capability),
+            registered_primary_pane_if_shell_condition(capability),
             _tmux_command_queue(arguments),
             shlex.join(("run-shell", "false")),
         )
@@ -1173,7 +1173,7 @@ class RodexRuntimeLauncher:
             runtime,
             "if-shell",
             "-F",
-            server_identity_condition(tmux_server_id),
+            server_identity_if_shell_condition(tmux_server_id),
             _tmux_command_queue(arguments),
             shlex.join(("run-shell", "false")),
             check=check,
@@ -1363,14 +1363,14 @@ class RodexRuntimeLauncher:
                 *new_session_arguments,
             )
         )
-        server_matches_current_protocol = combine_tmux_conditions(
+        server_matches_current_protocol = combine_tmux_if_shell_conditions(
             (
                 f"#{{==:#{{{RODEX_SHARED_TMUX_PROTOCOL_OPTION}}},"
                 f"{RODEX_SHARED_TMUX_PROTOCOL}}}"
             ),
             (f"#{{m/r:^{'[0-9a-f]' * 32}$,#{{{RODEX_SHARED_TMUX_SERVER_ID_OPTION}}}}}"),
         )
-        server_is_unclaimed = combine_tmux_conditions(
+        server_is_unclaimed = combine_tmux_if_shell_conditions(
             f"#{{==:#{{{RODEX_SHARED_TMUX_PROTOCOL_OPTION}}},}}",
             f"#{{==:#{{{RODEX_SHARED_TMUX_SERVER_ID_OPTION}}},}}",
             "#{==:#{session_id},}",
@@ -1427,7 +1427,7 @@ class RodexRuntimeLauncher:
             "-t",
             capability.pane_target,
             "-F",
-            registered_primary_pane_condition(capability),
+            registered_primary_pane_if_shell_condition(capability),
             attach_action,
             shlex.join(("run-shell", "false")),
             interactive=True,
@@ -1707,12 +1707,14 @@ class RodexRuntimeLauncher:
             capability = self._resolve_registered_tmux_capability(runtime)
             tmux_session_id = capability.session_target
             pane_target = capability.pane_target
-            condition = registered_primary_pane_condition(capability)
+            condition = registered_primary_pane_if_shell_condition(capability)
         else:
             bootstrap_capability = self._resolve_bootstrap_tmux_capability(runtime)
             tmux_session_id = bootstrap_capability.session_target
             pane_target = bootstrap_capability.pane_target
-            condition = primary_pane_capability_condition(bootstrap_capability)
+            condition = primary_pane_capability_if_shell_condition(
+                bootstrap_capability
+            )
         self._tmux(
             runtime,
             "if-shell",

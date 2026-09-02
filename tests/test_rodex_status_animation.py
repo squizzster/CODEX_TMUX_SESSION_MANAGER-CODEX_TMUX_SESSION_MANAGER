@@ -60,22 +60,38 @@ class FakeTmux:
     async def __call__(self, command: Sequence[str]) -> AsyncCommandResult:
         recorded = list(command)
         self.commands.append(recorded)
-        if "display-message" in recorded:
-            format_string = recorded[-1]
+        return self._execute(recorded[3:])
+
+    def _execute(self, arguments: list[str]) -> AsyncCommandResult:
+        if arguments[:1] == ["display-message"]:
+            format_string = arguments[-1]
             if "#{session_attached}" in format_string:
-                return AsyncCommandResult(0, f"1\t{self.attached_count}\n")
+                return AsyncCommandResult(0, f"{self.attached_count}\n")
             if STATUS_CLAIM_TOKEN_OPTION in format_string:
                 token = self.options.get(STATUS_CLAIM_TOKEN_OPTION, "")
-                return AsyncCommandResult(0, f"1\t{token}\n")
-            return AsyncCommandResult(0, "1\n")
-        if "show-options" in recorded:
-            value = self.options.get(recorded[-1], "")
+                return AsyncCommandResult(0, f"{token}\n")
+            return AsyncCommandResult(0, "%9\n")
+        if arguments[:1] == ["show-options"]:
+            value = self.options.get(arguments[-1], "")
             return AsyncCommandResult(0 if value else 1, f"{value}\n")
-        if "list-clients" in recorded:
+        if arguments[:1] == ["list-clients"]:
             return AsyncCommandResult(0, "/dev/pts/10\n/dev/pts/11\n")
-        if "if-shell" in recorded and self._condition_is_true(recorded[-2]):
-            for tmux_command in recorded[-1].split(" ; "):
-                self._apply(shlex.split(tmux_command))
+        if arguments[:1] == ["if-shell"]:
+            format_index = arguments.index("-F")
+            condition = arguments[format_index + 1]
+            branch_index = format_index + (
+                2 if self._condition_is_true(condition) else 3
+            )
+            if branch_index >= len(arguments):
+                return AsyncCommandResult(0)
+            result = AsyncCommandResult(0)
+            for tmux_command in arguments[branch_index].split(" ; "):
+                nested = shlex.split(tmux_command)
+                if nested[:1] in (["display-message"], ["if-shell"]):
+                    result = self._execute(nested)
+                else:
+                    self._apply(nested)
+            return result
         return AsyncCommandResult(0)
 
     def _condition_is_true(self, condition: str) -> bool:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import shlex
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
@@ -160,10 +161,10 @@ def parse_tmux_server_id(value: str) -> str:
     return value
 
 
-def server_identity_condition(tmux_server_id: str) -> str:
-    """Fence a server-global action to one shared-server incarnation."""
+def server_identity_if_shell_condition(tmux_server_id: str) -> str:
+    """Fence a server-global action in one direct ``if-shell -F`` evaluation."""
     parse_tmux_server_id(tmux_server_id)
-    return combine_tmux_conditions(
+    return combine_tmux_if_shell_conditions(
         _literal_comparison(
             f"#{{{RODEX_SHARED_TMUX_PROTOCOL_OPTION}}}",
             RODEX_SHARED_TMUX_PROTOCOL,
@@ -175,12 +176,12 @@ def server_identity_condition(tmux_server_id: str) -> str:
     )
 
 
-def capability_identity_condition(
+def capability_identity_if_shell_condition(
     capability: TmuxRuntimeCapability | TmuxSessionCapability,
 ) -> str:
-    """Fence any pane in the exact session and runtime incarnation."""
-    return combine_tmux_conditions(
-        server_identity_condition(capability.tmux_server_id),
+    """Fence any pane in one exact session/runtime for direct ``if-shell -F``."""
+    return combine_tmux_if_shell_conditions(
+        server_identity_if_shell_condition(capability.tmux_server_id),
         _literal_comparison("#{session_id}", capability.tmux_session_id),
         _literal_comparison(
             f"#{{{RODEX_PRIMARY_PANE_ID_OPTION}}}",
@@ -193,10 +194,12 @@ def capability_identity_condition(
     )
 
 
-def registered_capability_condition(capability: TmuxSessionCapability) -> str:
-    """Fence any pane in an exact, SQL-confirmed Rodex runtime incarnation."""
-    return combine_tmux_conditions(
-        capability_identity_condition(capability),
+def registered_capability_if_shell_condition(
+    capability: TmuxSessionCapability,
+) -> str:
+    """Fence one registered runtime in a direct ``if-shell -F`` evaluation."""
+    return combine_tmux_if_shell_conditions(
+        capability_identity_if_shell_condition(capability),
         _literal_comparison(
             f"#{{{RODEX_REGISTRATION_STATE_OPTION}}}",
             RODEX_REGISTRATION_REGISTERED,
@@ -220,32 +223,93 @@ def registered_capability_condition(capability: TmuxSessionCapability) -> str:
     )
 
 
-def primary_pane_capability_condition(
+def primary_pane_capability_if_shell_condition(
     capability: TmuxRuntimeCapability | TmuxSessionCapability,
 ) -> str:
-    """Fence an operation to the immutable primary pane carried by a capability."""
-    return combine_tmux_conditions(
-        capability_identity_condition(capability),
+    """Fence the immutable primary pane in a direct ``if-shell -F`` evaluation."""
+    return combine_tmux_if_shell_conditions(
+        capability_identity_if_shell_condition(capability),
         _literal_comparison("#{pane_id}", capability.tmux_primary_pane_id),
     )
 
 
-def registered_primary_pane_condition(capability: TmuxSessionCapability) -> str:
-    """Fence an operation to one registered runtime's immutable primary pane."""
-    return combine_tmux_conditions(
-        registered_capability_condition(capability),
+def registered_primary_pane_if_shell_condition(
+    capability: TmuxSessionCapability,
+) -> str:
+    """Fence a registered primary pane in a direct ``if-shell -F`` evaluation."""
+    return combine_tmux_if_shell_conditions(
+        registered_capability_if_shell_condition(capability),
         _literal_comparison("#{pane_id}", capability.tmux_primary_pane_id),
     )
 
 
-def combine_tmux_conditions(*conditions: str) -> str:
-    """Combine already-validated tmux format predicates without ambient authority."""
+def combine_tmux_if_shell_conditions(*conditions: str) -> str:
+    """Combine predicates already encoded for direct ``if-shell -F`` evaluation."""
     if not conditions or any(not condition for condition in conditions):
         raise ValueError("at least one non-empty tmux condition is required")
     combined = conditions[0]
     for condition in conditions[1:]:
         combined = f"#{{&&:{combined},{condition}}}"
     return combined
+
+
+def capability_pane_read_arguments(
+    capability: TmuxRuntimeCapability | TmuxSessionCapability,
+    pane_target: str,
+    payload_format: str,
+) -> tuple[str, ...]:
+    """Read one pane only after its session/runtime capability is still current."""
+    return _capability_read_arguments(
+        pane_target,
+        capability_identity_if_shell_condition(capability),
+        payload_format,
+    )
+
+
+def primary_pane_capability_read_arguments(
+    capability: TmuxRuntimeCapability | TmuxSessionCapability,
+    payload_format: str,
+) -> tuple[str, ...]:
+    """Read the exact primary pane through the atomic runtime-capability boundary."""
+    return _capability_read_arguments(
+        capability.pane_target,
+        primary_pane_capability_if_shell_condition(capability),
+        payload_format,
+    )
+
+
+def registered_primary_pane_read_arguments(
+    capability: TmuxSessionCapability,
+    payload_format: str,
+) -> tuple[str, ...]:
+    """Read the exact registered primary pane through one authoritative pipeline."""
+    return _capability_read_arguments(
+        capability.pane_target,
+        registered_primary_pane_if_shell_condition(capability),
+        payload_format,
+    )
+
+
+def _capability_read_arguments(
+    pane_target: str,
+    condition: str,
+    payload_format: str,
+) -> tuple[str, ...]:
+    if _TMUX_PANE_ID_PATTERN.fullmatch(pane_target) is None:
+        raise ValueError("capability read requires an exact %pane_id target")
+    if not isinstance(payload_format, str) or not payload_format:
+        raise ValueError("capability read requires a non-empty tmux payload format")
+    return (
+        "if-shell",
+        "-t",
+        pane_target,
+        "-F",
+        condition,
+        shlex.join(
+            ("display-message", "-p", "-t", pane_target, "-F", payload_format)
+        ),
+        shlex.join(("run-shell", "false")),
+    )
 
 
 def _literal_comparison(actual_format: str, expected: str) -> str:

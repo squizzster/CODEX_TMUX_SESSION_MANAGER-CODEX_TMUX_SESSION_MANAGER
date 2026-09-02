@@ -44,9 +44,16 @@ def _registered_row(
 
 
 class _SharingRunner:
-    def __init__(self, roster: str, *, protocol: str = RODEX_SHARED_TMUX_PROTOCOL) -> None:
+    def __init__(
+        self,
+        roster: str,
+        *,
+        protocol: str = RODEX_SHARED_TMUX_PROTOCOL,
+        mutation_returncode: int = 0,
+    ) -> None:
         self.roster = roster
         self.protocol = protocol
+        self.mutation_returncode = mutation_returncode
         self.calls: list[list[str]] = []
 
     def __call__(
@@ -62,7 +69,12 @@ class _SharingRunner:
             output = self.roster
         else:
             output = ""
-        return subprocess.CompletedProcess(command, 0, stdout=output, stderr="")
+        return subprocess.CompletedProcess(
+            command,
+            self.mutation_returncode if operation == "if-shell" else 0,
+            stdout=output,
+            stderr="",
+        )
 
     @property
     def mutations(self) -> list[list[str]]:
@@ -138,6 +150,23 @@ def test_malformed_registered_roster_aborts_before_any_mutation(tmp_path: Path) 
 
     assert result == 1
     assert runner.mutations == []
+
+
+def test_mutation_failure_is_not_reported_as_success(tmp_path: Path) -> None:
+    runner = _SharingRunner(
+        f"{_registered_row(attached='2', previous='1')}\n",
+        mutation_returncode=7,
+    )
+
+    result = reconcile_sharing_state(
+        "tmux",
+        tmp_path / "tmux.sock",
+        SERVER_ID,
+        runner=runner,
+    )
+
+    assert result == 7
+    assert len(runner.mutations) == 1
 
 
 def test_duplicate_registered_identity_aborts_before_any_mutation(tmp_path: Path) -> None:

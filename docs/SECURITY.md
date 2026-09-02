@@ -101,8 +101,10 @@ listener; control endpoints are Unix sockets below a private runtime root.
   verifies only its dedicated hook indices and options behind a server-incarnation fence,
   and never removes local session hooks. Root `C-c` is installed exactly or initialization
   fails closed if a non-Rodex binding owns the key. Hook shell text is quoted and tmux
-  format text is escaped; expected capability identities use tmux literal format operands
-  so `$session_id` and `%pane_id` sigils remain data during comparison.
+  format text is escaped. Capability comparisons are evaluated only as direct
+  `if-shell -F` conditions, where literal operands keep `$session_id` and `%pane_id`
+  sigils as comparison data. Capability-fenced reads select a payload-only
+  `display-message` branch after that condition succeeds.
 - These are synchronous operation-boundary checks. Rodex is not an IDS and adds no
   filesystem/tmux surveillance, inotify watcher, or real-time monitor. An unavoidable
   same-uid external race can install a key binding between Rodex's last absence check and
@@ -137,6 +139,14 @@ listener; control endpoints are Unix sockets below a private runtime root.
   resolved and separately checked as a root- or current-user-owned, non-writable regular
   file. The shim never syncs or rewrites the environment. A system command must use an
   immutable root-owned installation.
+- Shared tmux global environment state is not trusted as caller state. New-session startup
+  gates a disposable pane by its runtime capability, transports byte-escaped environment
+  values only over tmux stdin, installs global-name tombstones, and starts the real host
+  only after that installation succeeds. Host and observer exec boundaries remove names
+  outside the caller/tmux contract. General environment payload does not enter process
+  arguments; pane working directories remain explicit tmux control arguments.
+  The shared server remains a same-UID boundary: protection against malicious concurrent
+  mutation of dynamic-loader state would require a separately trusted static launcher.
 
 Rodex does not auto-adopt or auto-delete an unregistered or unverifiable tmux session.
 `rodex _running` reports it for explicit diagnosis. This is deliberate: an orphan is

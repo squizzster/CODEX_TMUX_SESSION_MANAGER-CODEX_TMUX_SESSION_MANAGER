@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shlex
 import sys
@@ -10,12 +11,18 @@ import uuid
 from pathlib import Path
 from typing import Final
 
+from .process_environment import (
+    exact_environment_exec_command,
+    validated_user_environment_entries,
+)
 from .tmux_executor import SyncTmuxExecutor, SyncTmuxRunner, TmuxCommandResult
 from .tmux_session_capability import (
     TmuxRuntimeCapability,
-    capability_identity_condition,
-    combine_tmux_conditions,
-    primary_pane_capability_condition,
+    capability_identity_if_shell_condition,
+    capability_pane_read_arguments,
+    combine_tmux_if_shell_conditions,
+    primary_pane_capability_if_shell_condition,
+    primary_pane_capability_read_arguments,
 )
 
 OBSERVER_PRIMARY_PANE_OPTION: Final = "@rodex_agent_observer_pane_id"
@@ -70,21 +77,15 @@ class ObserverPaneController:
         if _PANE_ID_PATTERN.fullmatch(candidate) is None:
             return None
         identity = self._tmux_executor.run(
-            (
-                "display-message",
-                "-p",
-                "-t",
+            capability_pane_read_arguments(
+                self._capability,
                 candidate,
-                "-F",
-                (
-                    f"{capability_identity_condition(self._capability)}|"
-                    f"#{{pane_id}}|#{{{OBSERVER_OWNER_PANE_OPTION}}}|#{{pane_dead}}"
-                ),
+                f"#{{pane_id}}|#{{{OBSERVER_OWNER_PANE_OPTION}}}|#{{pane_dead}}",
             )
         )
         if (
             identity.returncode != 0
-            or identity.stdout.strip() != f"1|{candidate}|{self._primary_pane_target}|0"
+            or identity.stdout.strip() != f"{candidate}|{self._primary_pane_target}|0"
         ):
             self._observer_pane_target = None
             return None
@@ -102,27 +103,20 @@ class ObserverPaneController:
         initial_event: dict[str, object],
     ) -> str | None:
         cwd = self._tmux_executor.run(
-            (
-                "display-message",
-                "-p",
-                "-t",
-                self._primary_pane_target,
-                "-F",
-                (
-                    f"{primary_pane_capability_condition(self._capability)}|"
-                    "#{pane_id}|#{pane_current_path}"
-                ),
+            primary_pane_capability_read_arguments(
+                self._capability,
+                "#{pane_id}|#{pane_current_path}",
             )
         )
-        cwd_fields = cwd.stdout.rstrip("\n").split("|", maxsplit=2)
+        cwd_fields = cwd.stdout.rstrip("\n").split("|", maxsplit=1)
         if (
             cwd.returncode != 0
-            or len(cwd_fields) != 3
-            or cwd_fields[:2] != ["1", self._primary_pane_target]
-            or not cwd_fields[2]
+            or len(cwd_fields) != 2
+            or cwd_fields[0] != self._primary_pane_target
+            or not cwd_fields[1]
         ):
             return None
-        command = [
+        observer_command = [
             self._python_executable,
             "-m",
             "rodex.agent_observer",
@@ -144,6 +138,17 @@ class ObserverPaneController:
                 sort_keys=True,
             ),
         ]
+        try:
+            environment_names = tuple(
+                name for name, _value in validated_user_environment_entries(os.environ)
+            )
+            command = exact_environment_exec_command(
+                self._python_executable,
+                environment_names,
+                observer_command,
+            )
+        except ValueError:
+            return None
         split = self._mutate(
             (
                 "split-window",
@@ -155,11 +160,13 @@ class ObserverPaneController:
                 "-t",
                 self._primary_pane_target,
                 "-c",
-                cwd_fields[2],
+                cwd_fields[1],
                 "-P",
                 "-F",
                 "#{pane_id}",
-                f"exec {shlex.join(command)}",
+                "-e",
+                f"PWD={cwd_fields[1]}",
+                *command,
             )
         )
         pane_target = split.stdout.strip()
@@ -212,8 +219,8 @@ class ObserverPaneController:
                 ),
             )
         )
-        candidate_condition = combine_tmux_conditions(
-            capability_identity_condition(self._capability),
+        candidate_condition = combine_tmux_if_shell_conditions(
+            capability_identity_if_shell_condition(self._capability),
             f"#{{==:#{{pane_id}},{pane_target}}}",
         )
         self._tmux_executor.run(
@@ -235,7 +242,7 @@ class ObserverPaneController:
                 "-t",
                 self._primary_pane_target,
                 "-F",
-                primary_pane_capability_condition(self._capability),
+                primary_pane_capability_if_shell_condition(self._capability),
                 shlex.join(arguments),
                 shlex.join(("run-shell", "false")),
             )

@@ -65,12 +65,19 @@ state: Rodex removes it, its prompt and uv recursion marker, and every matching 
 entry from `PATH`. A different caller-owned virtualenv is preserved. Direct Codex
 process replacement and transient App Server checks use this same prepared environment.
 
-Runtime creation supplies the prepared environment to the tmux client so a fresh shared
-server starts clean. Every new session also overrides `PATH` and the virtualenv markers;
-values absent from the caller are unset for the first host and marked removed from the
-session before later panes can inherit them. This per-session contract prevents the
-shared tmux server from reintroducing stale bootstrap values. The
-session host passes the resulting environment explicitly to both App Server and TUI.
+Runtime creation treats the shared tmux server as transport, never environment authority.
+It first creates a direct-argv inert pane with `new-session -E`, publishes its immutable
+runtime/pane capability, then reads the current global environment under the server
+fence. A byte-escaped tmux program sent on stdin installs every prepared caller value in
+that exact session, marks global-only names removed, freezes automatic session updates,
+and only then permits a separately checked `respawn-pane` to start the real host. General
+environment payload does not enter tmux or host process arguments; pane working
+directories remain explicit `-c`/`-e PWD` control arguments. A small isolated exec boundary
+retains only the authorized names plus tmux-owned `SHELL`, `TERM*`, and `TMUX*` metadata;
+`PWD` is bound to the actual workspace. Observer panes use the same boundary with their
+actual pane directory and direct argv rather than `$SHELL -c`. The session host then
+passes the resulting environment explicitly to both App Server and TUI. CPython may
+perform its standard locale coercion while starting these internal Python boundaries.
 
 Immediately before attachment, Rodex compares `codex --version` with the cached result
 of a bounded `npm view @openai/codex version` lookup. When a newer stable release exists,
@@ -100,8 +107,9 @@ executor binds one tmux binary and server socket; all callers use the same
 or discards stdin/stdout/stderr and always has an absolute deadline: one second by
 default and five seconds for ordinary runtime-launcher commands. Nonzero exits, timeout,
 and process unavailability return one normalized result. Captured runtime creation may
-supply an explicit environment; interactive attachment uses the same entry with direct
-terminal ownership, an explicit environment, no capture, and its natural lifetime. The
+supply an explicit environment or a source program on stdin; these modes cannot be
+combined with discarded or interactive input. Interactive attachment uses the same entry
+with direct terminal ownership, an explicit environment, no capture, and its natural lifetime. The
 asynchronous executor also exposes only `run`; deadline cancellation kills and reaps its
 one child.
 
@@ -127,8 +135,11 @@ after a complete roster uniqueness check; async workers carry that already-minte
 capability. Every terminal action repeats its applicable tuple at the exact target;
 primary-pane actions also require its immutable `%pane_id`. Names and process context
 are addresses only. Expected identity values use tmux literal format operands, so
-`$session_id` and `%pane_id` sigils remain comparison data even when a worker verifies
-them through `display-message -F`.
+`$session_id` and `%pane_id` sigils remain comparison data in their direct
+`if-shell -F` condition context. Capability-fenced reads keep that condition in
+`if-shell`; only the selected branch evaluates `display-message` payload. Predicates
+are never rendered as display output because tmux assigns different literal semantics
+to the two format contexts.
 
 Under one stable per-user XDG/runtime context, Rodex uses one canonical database and one
 shared tmux server. Display-name uniqueness covers every session recorded in that
@@ -388,8 +399,9 @@ Codex, tmux, or analyzer processes.
   user-owned root `C-b` binding is not replaced.
 - In a shared session, one `Ctrl-C` is held as an accidental-exit guard and points to
   `Ctrl-b d` as the detach-only route. The same client must press `Ctrl-C` again within
-  two seconds to send the interrupt to Codex, where it may end the TUI for every
-  attached client. A private session retains Codex's native `Ctrl-C` behavior. A foreign
+  two seconds to end the exact managed tmux session for every attached client. A private
+  session ends immediately on `Ctrl-C`. Rodex owns this lifecycle transition rather than
+  delegating it to the current TUI's interpretation of an input byte. A foreign
   root `C-c` binding causes explicit initialization failure because silent fallback would
   remove this safety property.
 - A second attached client triggers a five-second shared-arrival animation. Returning

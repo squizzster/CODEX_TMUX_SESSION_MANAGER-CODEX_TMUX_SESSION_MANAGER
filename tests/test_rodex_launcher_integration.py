@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import pty
 import shutil
 import signal
 import subprocess
@@ -153,6 +154,9 @@ def test_fresh_detached_launcher_keeps_the_registered_session_host_alive() -> No
 
     session_name: str | None = None
     session_host_pid: int | None = None
+    interactive_client: subprocess.Popen[bytes] | None = None
+    terminal_master: int | None = None
+    terminal_slave: int | None = None
     try:
         assert not database.exists()
         assert not database.parent.exists()
@@ -252,19 +256,54 @@ def test_fresh_detached_launcher_keeps_the_registered_session_host_alive() -> No
         )
 
         assert _process_command(session_host_pid) is not None
-        _tmux(
-            tmux_binary,
-            tmux_socket,
-            "kill-session",
-            "-t",
-            f"={tmux_session_name}",
+        terminal_master, terminal_slave = pty.openpty()
+        interactive_client = subprocess.Popen(
+            [
+                tmux_binary,
+                "-S",
+                os.fspath(tmux_socket),
+                "attach-session",
+                "-t",
+                f"={tmux_session_name}",
+            ],
+            stdin=terminal_slave,
+            stdout=terminal_slave,
+            stderr=terminal_slave,
+            env=environment,
+            start_new_session=True,
         )
+        os.close(terminal_slave)
+        terminal_slave = None
+
+        def one_attached_client() -> bool | None:
+            attached = _tmux(
+                tmux_binary,
+                tmux_socket,
+                "display-message",
+                "-p",
+                "-t",
+                f"={tmux_session_name}:",
+                "-F",
+                "#{session_attached}",
+                check=False,
+            )
+            return True if attached.stdout.strip() == "1" else None
+
+        _wait_for("the isolated interactive tmux client", one_attached_client)
+        os.write(terminal_master, b"\x03")
 
         def host_has_exited() -> bool | None:
             return True if _process_command(session_host_pid) is None else None
 
-        _wait_for("the exact session host to exit during cleanup", host_has_exited)
-        _stop_isolated_codex_processes(codex_home)
+        _wait_for("the exact session host to exit after Ctrl-C", host_has_exited)
+        assert interactive_client.wait(timeout=5) == 0
+
+        def descendants_have_exited() -> bool | None:
+            return True if _isolated_codex_process_ids(codex_home) == () else None
+
+        _wait_for(
+            "the isolated Codex descendants to exit after Ctrl-C", descendants_have_exited
+        )
         assert _isolated_codex_process_ids(codex_home) == ()
         assert (
             _tmux(
@@ -305,5 +344,13 @@ def test_fresh_detached_launcher_keeps_the_registered_session_host_alive() -> No
         if remaining_host is not None and "rodex.session_host" in remaining_host:
             with suppress(ProcessLookupError):
                 os.kill(session_host_pid, signal.SIGTERM)
+        if interactive_client is not None and interactive_client.poll() is None:
+            interactive_client.terminate()
+            with suppress(subprocess.TimeoutExpired):
+                interactive_client.wait(timeout=2)
+        if terminal_slave is not None:
+            os.close(terminal_slave)
+        if terminal_master is not None:
+            os.close(terminal_master)
         _stop_isolated_codex_processes(codex_home)
         shutil.rmtree(integration_root)

@@ -17,7 +17,8 @@ from .tmux_executor import SyncTmuxExecutor, SyncTmuxRunner, TmuxCommandResult
 from .tmux_session_capability import (
     TmuxSessionCapability,
     parse_tmux_session_capability,
-    registered_primary_pane_condition,
+    registered_primary_pane_if_shell_condition,
+    registered_primary_pane_read_arguments,
 )
 from .tmux_status import (
     STATUS_PUBLISHER_SHARED_CTRL_C,
@@ -58,7 +59,7 @@ def handle_shared_ctrl_c(
     expiry_scheduler: ExpiryScheduler = _restore_after_confirmation_window,
     runner: Runner = subprocess.run,
 ) -> int:
-    """Forward Ctrl-C privately, or require same-client confirmation when shared."""
+    """End a private session, or require same-client confirmation when shared."""
     executor = SyncTmuxExecutor(
         tmux_binary,
         capability.tmux_server_socket_path,
@@ -68,15 +69,10 @@ def handle_shared_ctrl_c(
     def raw_tmux(*arguments: str) -> TmuxCommandResult:
         return executor.run(arguments)
 
-    identity = raw_tmux(
-        "display-message",
-        "-p",
-        "-t",
-        pane_id,
-        "-F",
-        f"{registered_primary_pane_condition(capability)}\t#{{pane_id}}",
-    )
-    if identity.returncode != 0 or identity.stdout.strip() != f"1\t{pane_id}":
+    if pane_id != capability.pane_target:
+        return 1
+    identity = raw_tmux(*registered_primary_pane_read_arguments(capability, "#{pane_id}"))
+    if identity.returncode != 0 or identity.stdout.strip() != pane_id:
         return 1
     primary_pane_id = capability.pane_target
 
@@ -86,7 +82,7 @@ def handle_shared_ctrl_c(
             "-t",
             primary_pane_id,
             "-F",
-            registered_primary_pane_condition(capability),
+            registered_primary_pane_if_shell_condition(capability),
             shlex.join(arguments),
         )
 
@@ -125,7 +121,7 @@ def handle_shared_ctrl_c(
     current_confirmation = _parse_confirmation(advertised.stdout.strip())
 
     if current_attached_client_count == 1:
-        forwarded = tmux(
+        terminated = tmux(
             "if-shell",
             "-t",
             primary_pane_id,
@@ -140,7 +136,7 @@ def handle_shared_ctrl_c(
                     primary_pane_id,
                     _CONFIRMATION_CLAIM_OPTION,
                 ),
-                ("send-keys", "-t", primary_pane_id, "C-c"),
+                ("kill-session", "-t", capability.session_target),
             ),
             _tmux_command_sequence(
                 ("set-option", "-u", "-t", primary_pane_id, _CONFIRMATION_OPTION),
@@ -155,7 +151,7 @@ def handle_shared_ctrl_c(
         )
         if current_confirmation is not None:
             status.restore_if_token_matches(current_confirmation[2])
-        return forwarded.returncode
+        return terminated.returncode
 
     now = monotonic_nanoseconds()
     if _is_current_confirmation(current_confirmation, client_name, now):
@@ -189,7 +185,7 @@ def handle_shared_ctrl_c(
                     primary_pane_id,
                     _CONFIRMATION_CLAIM_OPTION,
                 ),
-                ("send-keys", "-t", primary_pane_id, "C-c"),
+                ("kill-session", "-t", capability.session_target),
             ),
             _tmux_command_sequence(
                 (

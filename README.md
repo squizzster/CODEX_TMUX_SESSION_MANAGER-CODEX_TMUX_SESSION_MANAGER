@@ -112,7 +112,9 @@ uv sync
 Rodex uses its project `.venv` only to run Rodex itself. Managed and delegated Codex
 processes do not inherit that bootstrap virtual environment, including through an older
 shared tmux server. A different virtual environment already active for the caller's own
-project is preserved.
+project is preserved. New managed sessions replace shared-server environment state with
+the launching caller's prepared session state before Codex starts; tmux-owned terminal
+metadata and the internal Python host's documented locale normalization remain native.
 
 Start with an initial prompt exactly as you would with Codex:
 
@@ -127,7 +129,8 @@ the command key, without delaying it, so fast sequences still work. Enter copy m
 `Ctrl-b [`, navigate with the keyboard, and leave it with `q`. Rodex inherits your tmux
 mouse preference instead of overriding it. In a shared session, one `Ctrl-C` warns that
 another press may end the session for everyone and offers `Ctrl-b d` as the detach-only
-route; the same client must press it again within two seconds to pass the key to Codex.
+route; the same client must press it again within two seconds to end the exact managed
+session. In a private session, `Ctrl-C` ends the exact managed session immediately.
 Custom prefixes and user-owned root `C-b` bindings are left unchanged. Because the
 shared `C-c` safety guard is server-global, a pre-existing non-Rodex root `C-c` binding
 causes explicit initialization failure rather than silently disabling the guard.

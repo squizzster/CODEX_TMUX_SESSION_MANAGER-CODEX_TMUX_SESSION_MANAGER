@@ -23,7 +23,7 @@ from .status_bar import (
 from .tmux_executor import SyncTmuxExecutor, SyncTmuxRunner
 from .tmux_session_capability import (
     TmuxRuntimeCapability,
-    primary_pane_capability_condition,
+    primary_pane_capability_if_shell_condition,
 )
 
 TMUX_STATUS_COMMAND_TIMEOUT_SECONDS: Final = 1.0
@@ -54,7 +54,7 @@ class TmuxStatusOption:
             "-t",
             tmux_pane_target,
             "-F",
-            primary_pane_capability_condition(capability),
+            primary_pane_capability_if_shell_condition(capability),
         )
         self._set_option_arguments = (
             "set-option",

@@ -20,9 +20,10 @@ from .tmux_executor import (
 )
 from .tmux_session_capability import (
     TmuxSessionCapability,
-    combine_tmux_conditions,
+    combine_tmux_if_shell_conditions,
     parse_tmux_session_capability,
-    registered_primary_pane_condition,
+    registered_primary_pane_if_shell_condition,
+    registered_primary_pane_read_arguments,
     tmux_format_literal,
 )
 
@@ -113,8 +114,8 @@ def status_animation_admission_command(
             "-t",
             capability.pane_target,
             "-F",
-            combine_tmux_conditions(
-                registered_primary_pane_condition(capability),
+            combine_tmux_if_shell_conditions(
+                registered_primary_pane_if_shell_condition(capability),
                 owner_is_unleased,
             ),
             start_owner_commands,
@@ -126,7 +127,7 @@ def status_animation_admission_command(
             "-t",
             capability.pane_target,
             "-F",
-            registered_primary_pane_condition(capability),
+            registered_primary_pane_if_shell_condition(capability),
             admission_commands,
         )
     )
@@ -210,8 +211,8 @@ async def animate_admitted_status(
             "-t",
             pane_target,
             "-F",
-            combine_tmux_conditions(
-                registered_primary_pane_condition(capability),
+            combine_tmux_if_shell_conditions(
+                registered_primary_pane_if_shell_condition(capability),
                 _owner_unleased_condition(owner_token),
             ),
             recovery_commands,
@@ -303,14 +304,9 @@ async def _registered_capability_is_current(
     capability: TmuxSessionCapability,
 ) -> bool:
     result = await tmux(
-        "display-message",
-        "-p",
-        "-t",
-        capability.pane_target,
-        "-F",
-        registered_primary_pane_condition(capability),
+        *registered_primary_pane_read_arguments(capability, "#{pane_id}")
     )
-    return result.returncode == 0 and result.stdout.strip() == "1"
+    return result.returncode == 0 and result.stdout.strip() == capability.pane_target
 
 
 async def _read_tmux_option(
@@ -351,7 +347,9 @@ async def _release_consumed_transition(
         "-t",
         pane_target,
         "-F",
-        combine_tmux_conditions(registered_primary_pane_condition(capability), condition),
+        combine_tmux_if_shell_conditions(
+            registered_primary_pane_if_shell_condition(capability), condition
+        ),
         commands,
     )
 
@@ -376,8 +374,8 @@ async def _release_animation_owner(
         "-t",
         pane_target,
         "-F",
-        combine_tmux_conditions(
-            registered_primary_pane_condition(capability),
+        combine_tmux_if_shell_conditions(
+            registered_primary_pane_if_shell_condition(capability),
             _option_matches(STATUS_ANIMATION_OWNER_TOKEN_OPTION, owner_token),
         ),
         commands,
@@ -475,8 +473,8 @@ async def run_watchdog_gate(
         f"{_option_matches(STATUS_ANIMATION_WATCHDOG_TOKEN_OPTION, owner_token)}"
         "}"
     )
-    condition = combine_tmux_conditions(
-        registered_primary_pane_condition(capability),
+    condition = combine_tmux_if_shell_conditions(
+        registered_primary_pane_if_shell_condition(capability),
         lease_condition,
     )
     action = _command_sequence(

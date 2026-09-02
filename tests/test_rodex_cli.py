@@ -4443,6 +4443,36 @@ def test_database_failure_stops_the_unregistered_runtime(
     assert launcher.attached == []
 
 
+def test_cleanup_failure_does_not_replace_the_causal_transition_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    launcher = StubLauncher(tmp_path)
+    monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
+    monkeypatch.setattr(
+        "rodex.managed_session_lifecycle.create_a_rodex_session",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("database failed")),
+    )
+    monkeypatch.setattr(
+        launcher,
+        "stop",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RodexRuntimeError("cleanup capability changed")
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="database failed") as raised:
+        run(
+            ["_create"],
+            database_path=tmp_path / "db.sqlite3",
+            launcher=launcher,  # type: ignore[arg-type]
+        )
+
+    assert raised.value.__notes__ == [
+        "tmux cleanup also failed: cleanup capability changed"
+    ]
+
+
 def test_registration_confirmation_failure_stops_the_pending_runtime(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

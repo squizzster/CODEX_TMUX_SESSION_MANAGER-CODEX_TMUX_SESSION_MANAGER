@@ -32,9 +32,9 @@ from .tmux_session_capability import (
     RODEX_SHARED_TMUX_PROTOCOL_OPTION,
     RODEX_SHARED_TMUX_SERVER_ID_OPTION,
     TmuxSessionCapability,
-    combine_tmux_conditions,
+    combine_tmux_if_shell_conditions,
     parse_tmux_session_capability,
-    registered_primary_pane_condition,
+    registered_primary_pane_if_shell_condition,
     tmux_format_literal,
 )
 
@@ -138,7 +138,9 @@ def reconcile_sharing_state(
     except ValueError:
         return 1
     for state in states:
-        _reconcile_one(executor, python_executable, tmux_binary, state)
+        reconciled = _reconcile_one(executor, python_executable, tmux_binary, state)
+        if reconciled != 0:
+            return reconciled
     return 0
 
 
@@ -218,7 +220,7 @@ def _reconcile_one(
     python_executable: str,
     tmux_binary: str,
     state: _SharingState,
-) -> None:
+) -> int:
     capability = state.capability
     current_count_condition = f"#{{==:#{{session_attached}},{state.attached_count}}}"
     if state.previous_attached_count is None:
@@ -233,7 +235,7 @@ def _reconcile_one(
             )
         )
     elif state.previous_attached_count == state.attached_count:
-        return
+        return 0
     else:
         previous_count_condition = (
             f"#{{==:#{{{RODEX_SHARING_ATTACHED_COUNT_OPTION}}},"
@@ -259,20 +261,20 @@ def _reconcile_one(
                 event,
             ),
         )
-    executor.run(
+    return executor.run(
         (
             "if-shell",
             "-t",
             capability.pane_target,
             "-F",
-            combine_tmux_conditions(
-                registered_primary_pane_condition(capability),
+            combine_tmux_if_shell_conditions(
+                registered_primary_pane_if_shell_condition(capability),
                 current_count_condition,
                 previous_count_condition,
             ),
             action,
         )
-    )
+    ).returncode
 
 
 def _command_sequence(*commands: tuple[str, ...] | str) -> str:

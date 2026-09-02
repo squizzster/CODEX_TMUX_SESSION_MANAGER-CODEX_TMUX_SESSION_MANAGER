@@ -505,6 +505,10 @@ def test_round2_receive_exactly_requires_an_absolute_deadline_contract() -> None
     class DripConnection:
         def __init__(self) -> None:
             self.recv_calls = 0
+            self.timeouts: list[float] = []
+
+        def settimeout(self, timeout: float) -> None:
+            self.timeouts.append(timeout)
 
         def recv(self, _size: int) -> bytes:
             self.recv_calls += 1
@@ -522,3 +526,4 @@ def test_round2_receive_exactly_requires_an_absolute_deadline_contract() -> None
             connection, 100, deadline=2.0, monotonic=monotonic
         )
     assert connection.recv_calls <= 5
+    assert connection.timeouts

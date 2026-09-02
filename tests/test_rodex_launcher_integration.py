@@ -126,7 +126,7 @@ def test_fresh_detached_launcher_keeps_the_registered_session_host_alive() -> No
     integration_root = Path(tempfile.mkdtemp(prefix="rodex-launch-", dir="/tmp"))
     integration_root.chmod(0o700)
     state_home = integration_root / "state"
-    database = state_home / "rodex" / "rodex-v17.sqlite3"
+    database = state_home / "rodex" / "rodex-v18.sqlite3"
     runtime_root = integration_root / "runtime"
     tmux_socket = runtime_root / "tmux-shared-v1.sock"
     codex_home = integration_root / "codex-home"

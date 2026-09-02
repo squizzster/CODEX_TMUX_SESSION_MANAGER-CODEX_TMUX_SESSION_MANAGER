@@ -78,9 +78,9 @@ listener; control endpoints are Unix sockets below a private runtime root.
   on existing exact-thread protocol activity.
 - All Rodex sessions share the versioned `tmux-shared-v1.sock`; that socket is transport,
   not authority. Server-scope protocol and random incarnation markers identify a
-  compatible server. Creation may claim only a completely unmarked server with no live
-  session. An incompatible or unmarked nonempty server is rejected without changing its
-  sessions, global options, hooks, or keys.
+  current-protocol server. Creation may claim only a completely unmarked server with no
+  live session. A protocol mismatch or unmarked nonempty server is rejected without
+  changing its sessions, global options, hooks, or keys.
 - The owning host's authority is `(absolute socket, server incarnation, immutable
   $session_id, primary %pane_id, runtime incarnation)`. External registered authority
   adds exact Rodex session, registry, SQL-row, Codex, and `registered` identities. The

@@ -1061,7 +1061,7 @@ def test_observer_view_renders_only_exact_target_trace_metadata() -> None:
     terminal_event_id = uuid.UUID("10000000-0000-4000-8000-000000000009")
     snapshot = RodexAgentTraceSnapshot(
         trace_publication_sequence=8,
-        trace_schema_version="rodex-agent-trace-v1",
+        trace_schema_version="rodex-agent-trace-v2",
         calculated_at_utc="2026-08-27T00:00:02Z",
         coverage_state="complete",
         durable_event_count=8,
@@ -2152,7 +2152,7 @@ def test_app_item_completion_cannot_suppress_the_final_durable_trace_read() -> N
     view.accept_trace_snapshot(
         RodexAgentTraceSnapshot(
             trace_publication_sequence=8,
-            trace_schema_version="rodex-agent-trace-v1",
+            trace_schema_version="rodex-agent-trace-v2",
             calculated_at_utc="2026-08-27T00:00:02Z",
             coverage_state="complete",
             durable_event_count=1,

@@ -160,7 +160,7 @@ def test_duplicate_registered_identity_aborts_before_any_mutation(tmp_path: Path
 def test_server_protocol_or_incarnation_mismatch_fails_before_roster_read(
     tmp_path: Path,
 ) -> None:
-    runner = _SharingRunner(_registered_row(), protocol="legacy")
+    runner = _SharingRunner(_registered_row(), protocol="unexpected-protocol")
 
     result = reconcile_sharing_state(
         "tmux",

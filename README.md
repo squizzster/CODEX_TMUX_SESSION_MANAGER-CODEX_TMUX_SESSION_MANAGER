@@ -83,7 +83,7 @@ live tmux name. The database ID remains an internal capability fence. Checks are
 synchronous at operation boundaries—Rodex is not an IDS and uses no inotify or real-time
 filesystem or tmux monitoring.
 
-One declarative Codex 0.150.1 CLI contract owns this boundary. Exact underscore Rodex
+One declarative Codex 0.151.0 CLI contract owns this boundary. Exact underscore Rodex
 commands stay local. Native interactive options and an optional prompt create and attach
 to a managed session, while a sole bare token first gets the chance to resolve an
 existing Rodex name or persisted Codex UUID. Current Codex subcommands, help/version,
@@ -143,7 +143,7 @@ latest valid cached value without waiting. All lookup and delivery failures are 
 When a newer stable release exists, the proxy gives the primary TUI a native warning:
 
 ```text
-Rodex: Codex update available: 0.149.1 -> 0.150.1 (run 'codex update' outside Rodex)
+Rodex: Codex update available: 0.151.0 -> 0.152.0 (run 'codex update' outside Rodex)
 ```
 
 The notice enters ordinary TUI scrollback but is not sent to the App Server, persisted in
@@ -228,11 +228,9 @@ host. Apply updates in a maintenance window: exit each existing Rodex runtime an
 it after installation. Detach and reattach alone does not reload Python code. Never move
 the live database or its protected parent as an update mechanism.
 
-### Modern tmux keyboard and mouse setup
+### Tmux keyboard and mouse setup
 
-Current tmux uses one `mouse` option; the older `mode-mouse`, `mouse-resize-pane`,
-`mouse-select-pane`, and `mouse-select-window` options are obsolete. A compact vi-like
-configuration is:
+Tmux uses one `mouse` option. A compact vi-like configuration is:
 
 ```tmux
 set -g status-keys vi
@@ -302,14 +300,13 @@ session. Its JSON includes registry/database provenance, permanent and user-defi
 names, the complete tmux socket/session/window/pane address, and sharing state. The
 display name is read on every invocation, so an agent need not cache it.
 Each runtime also exposes a random 64-bit `runtime_id` and its durable-match state. The
-exact control commands emit a schema-v2 success/error envelope containing separate Rodex
+exact control commands emit a schema-v3 success/error envelope containing separate Rodex
 session, runtime, Codex thread, Codex session-tree, and turn identities. They require
 stdin prompts and an exact durably registered runtime incarnation. `_inspect` reports the
 live App Server thread working directory so callers can verify workspace scope before
 mutation.
-The checked App Server version is a minimum compatibility floor, not an exact pin:
-newer stable Codex versions remain available to exact control, while older or
-unrecognized versions fail with a compatibility diagnostic.
+Exact control requires stable Codex App Server 0.151.0 or newer. Versions below that
+minimum and unrecognized version strings fail before control or inspection proceeds.
 
 `_start`, `_steer`, and `_interrupt` enter one exact-turn mutation coordinator. The
 coordinator resolves the requested name, acquires that session's transition lock,
@@ -317,9 +314,9 @@ resolves the name again after any wait, and verifies the durable runtime and liv
 identity immediately before transport can send. `_start` requires an idle thread;
 `_steer` and `_interrupt` require the exact active turn ID and send it as the App Server's
 expected-turn guard. A moved selector or replaced runtime fails before a mutation frame;
-an incompatible App Server or mismatched turn fails closed. Each mutation RPC chain has
-one absolute deadline covering connection, initialization, frame delivery, and response
-handling.
+a mismatched App Server version or mismatched turn fails closed. Each mutation RPC chain
+has one absolute deadline covering connection, initialization, frame delivery, and
+response handling.
 
 `_mouse` enters the same coordinator and retains that transition lock through both its
 tmux mutation and readback. It resolves the verified runtime marker to tmux's immutable
@@ -336,7 +333,7 @@ recommends the next exact wait/result/status command without executing it.
 `_result` caps final-answer text at 64 KiB, reports its original UTF-8 byte count and
 truncation state, and includes at most 100 completed file-change paths.
 Exit status `2` means invalid input or unknown session, `3` means
-runtime/identity/compatibility failure, `4` is a non-interrupting wait timeout, `5` an
+runtime/identity/version-contract failure, `4` is a non-interrupting wait timeout, `5` an
 interrupted turn, `6` a failed turn, and `7` a control or indeterminate-dispatch failure.
 `dispatch_indeterminate` is deliberately not retryable: execute
 `data.recommended_next.command`, then let the controller decide. For start/steer this
@@ -373,7 +370,7 @@ underscores, or hyphens and begin with a letter or digit. The reserved-name voca
 case-insensitive and includes Codex top-level commands and aliases.
 
 No arguments is the default managed-create route and is equivalent to `_create`. The
-characterized Codex 0.150.1 interactive grammar—current options plus zero or one prompt—
+characterized Codex 0.151.0 interactive grammar—current options plus zero or one prompt—
 uses the same managed route and reaches Codex unchanged. A sole bare token first resolves
 an existing Rodex name or linked Codex UUID; otherwise it becomes the initial prompt.
 An unregistered canonical Codex UUID is checked through a short-lived App Server
@@ -389,8 +386,8 @@ diagnostics. Current command names are reserved from Rodex aliases.
 ## Local data
 
 The durable database resolved for the current Linux user is
-`$XDG_STATE_HOME/rodex/rodex-v17.sqlite3`, or
-`~/.local/state/rodex/rodex-v17.sqlite3` when `XDG_STATE_HOME` is unset. Rodex does not
+`$XDG_STATE_HOME/rodex/rodex-v18.sqlite3`, or
+`~/.local/state/rodex/rodex-v18.sqlite3` when `XDG_STATE_HOME` is unset. Rodex does not
 support an application-specific database-path override. A successful new-session
 transaction permanently reserves its generated cool name in this database against both
 generated names and user-defined aliases, so a later session using the same database
@@ -410,7 +407,7 @@ enforces its domain uniqueness. Codex session IDs remain Codex-owned 128-bit val
 Each is stored once in the canonical `codex_threads` table across two `BIGINT` columns;
 memberships, current-root selection, activities, and lineage use integer foreign keys.
 
-The registry uses schema generation 17. An internal generation marker admits an
+The registry uses schema generation 18. An internal generation marker admits an
 already-current database cheaply inside each operation's transaction. Explicit
 first-use bootstrap creates a missing private registry atomically; nonempty unmarked,
 incomplete, and wrong-generation databases fail closed. The explicit integrity audit is
@@ -536,7 +533,7 @@ SQL.
 - [Security model](docs/SECURITY.md)
 - [Code concepts](docs/CODE_CONCEPTS.md)
 - [SQL schema methodology](docs/SQL_SCHEMA.md)
-- [Codex App Server live control evidence](docs/APP_SERVER_0_147_LIVE_EVIDENCE.md)
+- [Codex App Server live control evidence](docs/APP_SERVER_0_151_LIVE_EVIDENCE.md)
 - [Current boundary and unimplemented proposals](docs/PHASE_II_PLAN.md)
 
 ## Development

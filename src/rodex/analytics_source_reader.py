@@ -206,7 +206,7 @@ def resolve_rollout_path(path: str | Path, *, allowed_root: Path | None = None) 
 
 def open_rollout_descriptor(path: Path) -> int:
     """Open one owned regular rollout without following a final symlink."""
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
     descriptor = os.open(path, flags)
     try:
         state = os.fstat(descriptor)

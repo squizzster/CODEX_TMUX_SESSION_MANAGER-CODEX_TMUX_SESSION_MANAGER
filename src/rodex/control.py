@@ -223,7 +223,6 @@ class CodexControlClient:
             ) as websocket:
                 return self._initialize_protocol(
                     websocket,
-                    require_compatible=True,
                     deadline=deadline,
                 )
         except (ConnectionClosed, InvalidHandshake, OSError) as error:
@@ -258,7 +257,6 @@ class CodexControlClient:
                     thread = self._verify_and_read_thread(
                         websocket,
                         control.codex_session_id,
-                        require_compatible=True,
                         deadline=deadline,
                     )
                     state = _thread_state(thread)
@@ -328,7 +326,6 @@ class CodexControlClient:
                     thread = self._verify_and_read_thread(
                         websocket,
                         control.codex_session_id,
-                        require_compatible=True,
                         deadline=deadline,
                     )
                     state = _thread_state(thread, active_turn_id=turn_id)
@@ -396,7 +393,6 @@ class CodexControlClient:
                     thread = self._verify_and_read_thread(
                         websocket,
                         control.codex_session_id,
-                        require_compatible=True,
                         deadline=deadline,
                     )
                     state = _thread_state(thread, active_turn_id=turn_id)
@@ -444,7 +440,6 @@ class CodexControlClient:
                     websocket,
                     control.codex_session_id,
                     include_turns=True,
-                    require_compatible=True,
                     deadline=deadline,
                 )
             revalidate()
@@ -472,7 +467,6 @@ class CodexControlClient:
                     websocket,
                     control.codex_session_id,
                     include_turns=True,
-                    require_compatible=True,
                     deadline=deadline,
                 )
             revalidate()
@@ -528,7 +522,6 @@ class CodexControlClient:
                         websocket,
                         control.codex_session_id,
                         include_turns=True,
-                        require_compatible=True,
                         deadline=deadline,
                     )
                 state = _thread_state(
@@ -576,7 +569,6 @@ class CodexControlClient:
                             websocket,
                             control.codex_session_id,
                             include_turns=True,
-                            require_compatible=True,
                             deadline=deadline,
                         )
                     terminal_result = _turn_result(
@@ -697,12 +689,10 @@ class CodexControlClient:
         expected_codex_session_id: CodexSessionId,
         *,
         include_turns: bool = False,
-        require_compatible: bool = False,
         deadline: float | None = None,
     ) -> dict[str, Any]:
         self._initialize_protocol(
             websocket,
-            require_compatible=require_compatible,
             deadline=deadline,
         )
         loaded = _request(
@@ -740,7 +730,6 @@ class CodexControlClient:
         self,
         websocket: Any,
         *,
-        require_compatible: bool,
         deadline: float | None = None,
     ) -> str:
         initialize_result = _request(
@@ -751,11 +740,7 @@ class CodexControlClient:
             deadline=deadline,
             monotonic=self._monotonic,
         )
-        version = (
-            CODEX_APP_SERVER.require_supported_version(initialize_result)
-            if require_compatible
-            else CODEX_APP_SERVER.version(initialize_result)
-        )
+        version = CODEX_APP_SERVER.require_minimum_version(initialize_result)
         notification_deadline = (
             self._control_rpc_deadline() if deadline is None else deadline
         )
@@ -962,25 +947,11 @@ def _send_protocol_frame(
 
 def _teardown_websocket_transport(websocket: Any) -> None:
     """Interrupt one blocked local WebSocket send without waiting on its handshake."""
-    transport = getattr(websocket, "socket", None)
-    if transport is not None:
-        with suppress(Exception):
-            transport.shutdown(socket_module.SHUT_RDWR)
-        with suppress(Exception):
-            transport.close()
-        return
-    close = getattr(websocket, "close", None)
-    if callable(close):
-        Thread(
-            target=lambda: _close_websocket_best_effort(close),
-            name="rodex-control-transport-close",
-            daemon=True,
-        ).start()
-
-
-def _close_websocket_best_effort(close: Callable[[], object]) -> None:
+    transport = websocket.socket
     with suppress(Exception):
-        close()
+        transport.shutdown(socket_module.SHUT_RDWR)
+    with suppress(Exception):
+        transport.close()
 
 
 def _turn_id(result: dict[str, Any]) -> str:

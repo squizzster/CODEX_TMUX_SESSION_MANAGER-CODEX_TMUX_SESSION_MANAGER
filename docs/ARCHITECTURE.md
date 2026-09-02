@@ -59,10 +59,10 @@ prompt. An unregistered canonical Codex identity requires a transient App Server
 ## Shared tmux capability boundary
 
 `tmux-shared-v1.sock` is multiplexed transport, never session authority. Server-scope
-protocol and random incarnation markers identify one compatible server. Creation alone
-may claim a completely unmarked server, and only while it has no session; an unmarked
-nonempty or incompatible server is left untouched. Under one stable per-user
-XDG/runtime context, Rodex uses one canonical database and one shared tmux server.
+protocol and random incarnation markers identify one current-protocol server. Creation
+alone may claim a completely unmarked server, and only while it has no session; an
+unmarked nonempty server or protocol mismatch is left untouched. Under one stable
+per-user XDG/runtime context, Rodex uses one canonical database and one shared tmux server.
 Database-enforced display-name uniqueness covers every session recorded in that
 database, and each live tmux name is the complete display name. A different
 `XDG_STATE_HOME` is a separate database/name boundary; a different `RODEX_RUNTIME_DIR`

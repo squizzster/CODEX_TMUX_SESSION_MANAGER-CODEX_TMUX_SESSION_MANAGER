@@ -1,6 +1,6 @@
 # Codex, Rodex, and tmux
 
-Rodex is a local session harness: user-facing Codex compatibility comes first, and the
+Rodex is a local session harness: current Codex behavior comes first, and the
 same durable runtime then bridges human tmux attachment with authorized observation and
 exact-turn automation. Each identity keeps its own meaning:
 
@@ -32,7 +32,7 @@ implementation details rather than agent context. The result includes `runtime_i
 whether it matches the persisted incarnation.
 
 Every process invocation passes through one application control plane. The Rodex command
-contract claims exact local commands first; the declarative Codex 0.150.1 CLI contract
+contract claims exact local commands first; the declarative Codex 0.151.0 CLI contract
 then classifies native interactive syntax or direct passthrough once. The selected direct,
 selector, or runtime preparation branch supplies one domain executor. `rodex.cli` only
 composes these contracts and process dependencies. A matching bare selector becomes one
@@ -68,8 +68,8 @@ process replacement and transient App Server checks use this same prepared envir
 Runtime creation supplies the prepared environment to the tmux client so a fresh shared
 server starts clean. Every new session also overrides `PATH` and the virtualenv markers;
 values absent from the caller are unset for the first host and marked removed from the
-session before later panes can inherit them. This per-session contract prevents a shared
-tmux server started by older Rodex code from reintroducing stale bootstrap values. The
+session before later panes can inherit them. This per-session contract prevents the
+shared tmux server from reintroducing stale bootstrap values. The
 session host passes the resulting environment explicitly to both App Server and TUI.
 
 Immediately before attachment, Rodex compares `codex --version` with the cached result
@@ -116,8 +116,8 @@ All managed sessions intentionally multiplex through the per-user versioned
 `tmux-shared-v1.sock`. This is analogous to many clients sharing one Unix socket: the
 socket selects a server but grants no session authority. Rodex records server-scope
 protocol and random incarnation markers. Only creation may claim a completely unmarked
-server, and only while it has no session; an unmarked nonempty or incompatible server is
-left untouched.
+server, and only while it has no session; an unmarked nonempty server or protocol mismatch
+is left untouched.
 
 `TmuxRuntimeCapability` binds the owning host to its socket, server incarnation, immutable
 tmux `$session_id`, primary `%pane_id`, and Rodex runtime. `TmuxSessionCapability` adds
@@ -283,7 +283,7 @@ outside the display contract.
 Each session host supervises one low-priority analytics subprocess keyed by its Rodex
 session. A blocking scheduler coalesces protocol activity until 0.5 seconds of quiet or
 five seconds of continuous work. Cold lineage recovery follows exact event-named thread
-UUIDs first. When historical spawn output lacks a UUID, one startup-only fallback scans
+UUIDs first. When a spawn activity lacks a UUID, one startup-only recovery scan checks
 regular JSONL files in the root UUIDv7 three-day window, reads only first metadata lines,
 and accepts the authenticated parent closure. Cached resident sources then consume only
 newline-complete suffixes; ordinary wakes never repeat discovery or reload unchanged
@@ -352,7 +352,7 @@ Codex, tmux, or analyzer processes.
 - If it has ended, Rodex starts a fresh tmux/app-server and asks Codex to resume the
   stored Codex session ID; the observed ID must match before the endpoint is replaced.
 - Concurrent opens of one ended name serialize through a private per-session lock and
-  converge on one runtime. A short old-writer shutdown handoff is retried in place;
+  converge on one runtime. A short departing-writer shutdown handoff is retried in place;
   persistent or wrong-thread writer conflicts remain hard failures.
 - If Codex explicitly reports that the ID was never saved, Rodex starts an empty
   Codex runtime and atomically relinks its new ID to the existing Rodex identity.
@@ -372,7 +372,7 @@ Codex, tmux, or analyzer processes.
 - `_inspect --json` reports the exact active turn. `_start` and `_steer` accept an
   optional caller-owned `--dispatch ID`, while `_dispatch-status` observes that ID in
   exact App Server thread history. Exact `_wait`, `_interrupt`, and `_result` use a
-  caller-supplied turn ID. Every machine command emits one schema-v2 envelope with
+  caller-supplied turn ID. Every machine command emits one schema-v3 envelope with
   `runtime.runtime_id` and requires the persisted runtime ID. Results stay App
   Server-owned rather than becoming a second SQLite conversation store.
 - A resumed runtime intentionally uses the caller's current working directory. This

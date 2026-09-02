@@ -1692,9 +1692,7 @@ def _receive_exactly(
         remaining = deadline - monotonic()
         if remaining <= 0:
             raise TimeoutError("observer control frame receive deadline expired")
-        settimeout = getattr(connection, "settimeout", None)
-        if callable(settimeout):
-            settimeout(remaining)
+        connection.settimeout(remaining)
         chunk = connection.recv(min(size - len(payload), 64 * 1024))
         if not chunk:
             raise EOFError("observer control frame ended early")

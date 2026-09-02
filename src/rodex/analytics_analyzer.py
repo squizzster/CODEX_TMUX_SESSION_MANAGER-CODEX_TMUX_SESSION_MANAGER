@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
-import importlib
 import json
 import math
 import os
@@ -14,6 +14,19 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from statistics import median
 from typing import Any, Protocol
+
+from codex_protocol_log_analyzer import (
+    CodexProtocolLibrary,
+    LoadFileResult,
+    OperationResult,
+    StatsSnapshot,
+)
+from codex_protocol_log_analyzer.library import _new_event_name
+from codex_protocol_log_analyzer.statistics import (
+    _command_identity,
+    _digest,
+    _StatisticalAnalyzer,
+)
 
 from rodex_registry import (
     CodexThreadId,
@@ -60,15 +73,17 @@ AnalyticsBoundaryFactory = Callable[[], AnalyticsBoundary]
 
 
 class _AnalyzerLibrary(Protocol):
-    def create_new_codex_protocol_id(self, user_id: str) -> object: ...
+    def create_new_codex_protocol_id(self, user_id: str) -> OperationResult[str]: ...
 
-    def load_file(self, protocol_id: str, path: Path) -> object: ...
+    def load_file(
+        self, protocol_id: str, path: Path
+    ) -> OperationResult[LoadFileResult]: ...
 
     def get_stats(
         self, protocol_id: str, *, include_turn_statistics: bool = False
-    ) -> object: ...
+    ) -> OperationResult[StatsSnapshot]: ...
 
-    def close(self) -> object: ...
+    def close(self) -> OperationResult[bool]: ...
 
 
 class CodexProtocolAnalyticsAdapter:
@@ -78,8 +93,7 @@ class CodexProtocolAnalyticsAdapter:
         self, sources: Sequence[AnalyticsAnalyzerSource], user_id: str
     ) -> AnalyticsCalculation:
         try:
-            module = importlib.import_module("codex_protocol_log_analyzer")
-            library: _AnalyzerLibrary = module.CodexProtocolLibrary()
+            library: _AnalyzerLibrary = CodexProtocolLibrary()
         except Exception as error:
             raise RodexAnalyticsError(
                 f"could not initialize Codex protocol analytics: {error}"
@@ -101,7 +115,7 @@ class CodexProtocolAnalyticsAdapter:
                     "load verified Codex rollout",
                     allow_partial=True,
                 )
-                if getattr(loaded, "status", "ok") != "ok":
+                if loaded.status != "ok":
                     coverage_state = "gapped"
             stats_result = library.get_stats(protocol_id, include_turn_statistics=True)
             stats = _mapping_value(
@@ -111,7 +125,7 @@ class CodexProtocolAnalyticsAdapter:
                     allow_partial=True,
                 )
             )
-            if getattr(stats_result, "status", "ok") != "ok":
+            if stats_result.status != "ok":
                 coverage_state = "gapped"
             return AnalyticsCalculation(
                 statistics_projection=_parse_projection(stats),
@@ -611,18 +625,10 @@ class StatefulCodexProtocolAnalyticsAdapter:
     """Retain the pinned analyzer ledgers and consume only candidate suffixes."""
 
     def __init__(self) -> None:
-        try:
-            statistics = importlib.import_module("codex_protocol_log_analyzer.statistics")
-            library = importlib.import_module("codex_protocol_log_analyzer.library")
-            analyzer_type = statistics._StatisticalAnalyzer
-            self._new_event_name = library._new_event_name
-            self._command_identity = statistics._command_identity
-            self._digest = statistics._digest
-            self._analyzer = analyzer_type()
-        except Exception as error:
-            raise RodexAnalyticsError(
-                f"pinned analyzer state contract is unavailable: {error}"
-            ) from error
+        self._new_event_name = _new_event_name
+        self._command_identity = _command_identity
+        self._digest = _digest
+        self._analyzer = _StatisticalAnalyzer()
         self._sources: dict[CodexThreadId, _SourceState] = {}
         self._user_id: str | None = None
         self._revision = 0
@@ -864,38 +870,32 @@ def _parse_projection(stats: Mapping[str, Any]) -> SessionStatisticsProjection:
         ) from error
 
 
-def _operation_value(
-    result: object, operation: str, *, allow_partial: bool = False
-) -> object:
-    value = getattr(result, "value", result)
-    status = getattr(result, "status", "ok")
+def _operation_value[OperationValue](
+    result: OperationResult[OperationValue],
+    operation: str,
+    *,
+    allow_partial: bool = False,
+) -> OperationValue:
+    if not isinstance(result, OperationResult):
+        raise RodexAnalyticsError(f"could not {operation}: invalid analyzer result")
+    value = result.value
+    status = result.status
     if status != "fatal" and value is not None and (allow_partial or status != "error"):
         return value
-    diagnostics = getattr(result, "diagnostics", ())
-    detail = "; ".join(
-        str(getattr(diagnostic, "message", diagnostic)) for diagnostic in diagnostics
-    )
+    detail = "; ".join(diagnostic.message for diagnostic in result.diagnostics)
     raise RodexAnalyticsError(f"could not {operation}" + (f": {detail}" if detail else ""))
 
 
 def _protocol_id(value: object) -> str:
     if isinstance(value, str) and value:
         return value
-    if isinstance(value, Mapping):
-        value = value.get("protocol_id")
-    else:
-        value = getattr(value, "protocol_id", None)
-    if not isinstance(value, str) or not value:
-        raise RodexAnalyticsError("analyzer returned no temporary protocol identity")
-    return value
+    raise RodexAnalyticsError("analyzer returned no temporary protocol identity")
 
 
 def _mapping_value(value: object) -> dict[str, Any]:
-    if hasattr(value, "to_dict"):
-        value = value.to_dict()
-    if not isinstance(value, Mapping):
+    if not isinstance(value, StatsSnapshot):
         raise RodexAnalyticsError("analyzer returned an invalid statistics snapshot")
-    return dict(value)
+    return value.to_dict()
 
 
 def _load_analyzer_bytes(
@@ -924,32 +924,13 @@ def _load_analyzer_bytes(
 
 def _create_memory_file(name: str) -> int:
     flags = 0x0001 | 0x0002
-    if hasattr(os, "memfd_create"):
-        return os.memfd_create(name, flags)
-    try:
-        import ctypes
-
-        libc = ctypes.CDLL(None, use_errno=True)
-        memfd_create = libc.memfd_create
-        memfd_create.argtypes = (ctypes.c_char_p, ctypes.c_uint)
-        memfd_create.restype = ctypes.c_int
-        descriptor = memfd_create(name.encode(), flags)
-    except (AttributeError, ImportError) as error:
-        raise RodexAnalyticsError("memory-backed analyzer files are unavailable") from error
-    if descriptor < 0:
-        error_number = ctypes.get_errno()
-        raise RodexAnalyticsError(
-            f"could not create memory-backed analyzer file: {os.strerror(error_number)}"
-        )
-    return int(descriptor)
+    return os.memfd_create(name, flags)
 
 
 def _seal_memory_file(descriptor: int) -> None:
     try:
-        import fcntl
-
         fcntl.fcntl(descriptor, 1033, 0x0001 | 0x0002 | 0x0004 | 0x0008)
-    except (ImportError, OSError) as error:
+    except OSError as error:
         raise RodexAnalyticsError(
             f"could not seal memory-backed analyzer file: {error}"
         ) from error

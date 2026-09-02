@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Final, Protocol
 
 from codex_cli_contract import (
-    CODEX_CLI_0_150_1,
+    CODEX_CLI_0_151_0,
     CodexCliContract,
     CodexCliInvocation,
     CodexCliRoute,
@@ -132,7 +132,7 @@ class PreparedRodexInvocation:
 
 def select_rodex_invocation(
     arguments: Sequence[str],
-    codex_cli_contract: CodexCliContract = CODEX_CLI_0_150_1,
+    codex_cli_contract: CodexCliContract = CODEX_CLI_0_151_0,
 ) -> RodexInvocation:
     """Normalize argv and select exactly one exhaustive application route."""
     normalized = tuple(arguments) if arguments else (CREATE_COMMAND,)
@@ -183,7 +183,7 @@ class UnifiedRodexApplicationPipeline:
         resolve_executable: ExecutableResolver,
         runtime_launcher_factory: RuntimeLauncherFactory,
         session_lifecycle: SessionLifecycle,
-        codex_cli_contract: CodexCliContract = CODEX_CLI_0_150_1,
+        codex_cli_contract: CodexCliContract = CODEX_CLI_0_151_0,
     ) -> None:
         self._database_path = database_path
         self._configured_codex = configured_codex

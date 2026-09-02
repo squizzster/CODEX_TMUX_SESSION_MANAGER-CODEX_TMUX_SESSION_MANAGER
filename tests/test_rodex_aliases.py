@@ -115,7 +115,7 @@ def test_duplicate_codex_session_resume_guidance_prefers_the_user_defined_name(
 
 @pytest.mark.parametrize(
     "reserved_name",
-    [*sorted(RODEX_RESERVED_WORDS), "Alias", "EXEC", "RUNNING", "SESSIONS"],
+    [*sorted(RODEX_RESERVED_WORDS), "Alias", "EXEC", "RUNNING"],
 )
 def test_reserved_aliases_are_rejected_without_consuming_an_id(
     tmp_path: Path,

@@ -29,7 +29,7 @@ dev = [
 requires-dist = [
     { name = "codex-protocol-log-analyzer", git = "https://github.com/squizzster/CODEX_PROTOCOL_LOG_ANALYZER-CODEX_PROTOCOL_LOG_ANALYZER.git?rev=13d23b296222e40c18cfc3b45d02c2adef45cce2" },
     { name = "coolname", specifier = ">=5.0.0" },
-    { name = "websockets", specifier = ">=15,<18" },
+    { name = "websockets", specifier = "==17.0.1" },
 ]
 
 [package.metadata.requires-dev]

@@ -7,6 +7,7 @@ from typing import Any
 
 import pytest
 
+from rodex.app_server_contract import RodexAppServerVersionError
 from rodex.control import (
     CodexControlClient,
     LiveRodexControl,
@@ -76,7 +77,7 @@ def verified_responses(
     *, status: str, turns: list[dict[str, Any]] | None = None
 ) -> list[dict[str, Any]]:
     return [
-        {"id": 0, "result": {"userAgent": "rodex-control/0.147.0 (Linux)"}},
+        {"id": 0, "result": {"userAgent": "rodex-control/0.151.0 (Linux)"}},
         {"id": 1, "result": {"data": [str(CODEX_SESSION_ID)]}},
         {
             "id": 2,
@@ -130,12 +131,26 @@ def test_live_inspection_includes_the_event_taps_exact_active_turn(
 
 def test_exact_control_version_uses_the_live_initialize_contract(tmp_path: Path) -> None:
     protocol = FakeWebSocket(
-        [{"id": 0, "result": {"userAgent": "rodex-control/0.147.0 (Linux)"}}]
+        [{"id": 0, "result": {"userAgent": "rodex-control/0.151.0 (Linux)"}}]
     )
     client = CodexControlClient(connector=RoutingConnector(protocol))
 
-    assert client.exact_control_version(control(tmp_path)) == "0.147.0"
+    assert client.exact_control_version(control(tmp_path)) == "0.151.0"
     assert protocol.sent[-1] == {"method": "initialized", "params": {}}
+
+
+def test_every_control_read_rejects_a_noncharacterized_app_server(
+    tmp_path: Path,
+) -> None:
+    protocol = FakeWebSocket(
+        [{"id": 0, "result": {"userAgent": "rodex-control/0.150.1 (Linux)"}}]
+    )
+    client = CodexControlClient(connector=RoutingConnector(protocol))
+
+    with pytest.raises(RodexAppServerVersionError, match=r"live server is 0\.150\.1"):
+        client.inspect(control(tmp_path))
+
+    assert [message["method"] for message in protocol.sent] == ["initialize"]
 
 
 def test_control_rejects_an_endpoint_without_the_expected_codex_session_id(
@@ -143,7 +158,7 @@ def test_control_rejects_an_endpoint_without_the_expected_codex_session_id(
 ) -> None:
     protocol = FakeWebSocket(
         [
-            {"id": 0, "result": {}},
+            {"id": 0, "result": {"userAgent": "rodex-control/0.151.0 (Linux)"}},
             {"id": 1, "result": {"data": [str(uuid.uuid4())]}},
         ]
     )
@@ -470,7 +485,7 @@ def test_exact_result_reads_live_turn_content_without_persisting_it(tmp_path: Pa
 def test_dispatch_status_attributes_client_message_id_from_exact_thread_history(
     tmp_path: Path,
 ) -> None:
-    """Current 0.147 evidence: clientUserMessageId is exposed as userMessage.clientId."""
+    """Current contract: clientUserMessageId is exposed as userMessage.clientId."""
     turn = {
         "id": "turn-target",
         "status": "inProgress",

@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from codex_cli_contract import CODEX_CLI_0_150_1_COMMAND_TOKENS
+from codex_cli_contract import CODEX_CLI_0_151_0_COMMAND_TOKENS
 from cool_name import (
     RODEX_RESERVED_WORDS,
     CoolNameGenerationError,
@@ -131,15 +131,15 @@ def test_reserved_names_are_case_insensitive_and_automatic_allocation_skips_them
         requested_word_counts.append(word_count)
         return "RUNNING" if word_count == 2 else "fresh-three-name"
 
-    assert CODEX_CLI_0_150_1_COMMAND_TOKENS <= RODEX_RESERVED_WORDS
+    assert CODEX_CLI_0_151_0_COMMAND_TOKENS <= RODEX_RESERVED_WORDS
     assert (
         frozenset({"alias", "create", "detach", "running", "send", "tail", "wait"})
-        == RODEX_RESERVED_WORDS - CODEX_CLI_0_150_1_COMMAND_TOKENS
+        == RODEX_RESERVED_WORDS - CODEX_CLI_0_151_0_COMMAND_TOKENS
     )
     assert is_reserved_rodex_name("Alias")
     assert is_reserved_rodex_name("EXEC")
     assert is_reserved_rodex_name("RUNNING")
-    assert is_reserved_rodex_name("SESSIONS")
+    assert not is_reserved_rodex_name("SESSIONS")
     assert not is_reserved_rodex_name("running-fox")
     assert get_unique_new_cool_name(database, name_generator=generate_name) == (
         "fresh-three-name"

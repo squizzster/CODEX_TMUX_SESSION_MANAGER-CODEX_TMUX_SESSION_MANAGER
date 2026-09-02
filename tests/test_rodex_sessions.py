@@ -633,7 +633,7 @@ def test_default_database_path_uses_xdg_state_home(
     state_home = tmp_path / "state"
     monkeypatch.setenv("XDG_STATE_HOME", str(state_home))
 
-    assert default_rodex_database_path() == state_home / "rodex" / "rodex-v17.sqlite3"
+    assert default_rodex_database_path() == state_home / "rodex" / "rodex-v18.sqlite3"
 
 
 def test_default_database_path_uses_home_state_directory_without_xdg_override(
@@ -644,12 +644,12 @@ def test_default_database_path_uses_home_state_directory_without_xdg_override(
     monkeypatch.setattr(Path, "home", lambda: home)
 
     assert default_rodex_database_path() == (
-        home / ".local" / "state" / "rodex" / "rodex-v17.sqlite3"
+        home / ".local" / "state" / "rodex" / "rodex-v18.sqlite3"
     )
 
 
 @pytest.mark.evolutionary_regression
-def test_new_schema_generation_leaves_v16_database_untouched(
+def test_new_schema_generation_leaves_v17_database_untouched(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Current evidence: incompatible ALPHA schemas use a new durable filename.
@@ -660,32 +660,32 @@ def test_new_schema_generation_leaves_v16_database_untouched(
     registry_directory = state_home / "rodex"
     registry_directory.mkdir(mode=0o700, parents=True)
     registry_directory.chmod(0o700)
-    legacy_database = registry_directory / "rodex-v16.sqlite3"
-    legacy_contents = b"preserved-v16-database-sentinel"
-    legacy_database.write_bytes(legacy_contents)
-    legacy_database.chmod(0o600)
+    previous_database = registry_directory / "rodex-v17.sqlite3"
+    previous_contents = b"preserved-v17-database-sentinel"
+    previous_database.write_bytes(previous_contents)
+    previous_database.chmod(0o600)
     monkeypatch.setenv("XDG_STATE_HOME", str(state_home))
 
     current_database = initialise_rodex_database()
 
-    assert current_database == registry_directory / "rodex-v17.sqlite3"
+    assert current_database == registry_directory / "rodex-v18.sqlite3"
     assert current_database.is_file()
-    assert legacy_database.read_bytes() == legacy_contents
+    assert previous_database.read_bytes() == previous_contents
 
 
-def test_nonempty_unmarked_database_is_rejected_before_v17_tables_are_created(
+def test_nonempty_unmarked_database_is_rejected_before_v18_tables_are_created(
     tmp_path: Path,
 ) -> None:
     database = tmp_path / "rodex.sqlite3"
     with open_rodex_bootstrap_transaction(database) as connection:
-        connection.execute("CREATE TABLE legacy_sentinel (value TEXT NOT NULL)")
-        connection.execute("INSERT INTO legacy_sentinel VALUES ('untouched')")
+        connection.execute("CREATE TABLE unmarked_sentinel (value TEXT NOT NULL)")
+        connection.execute("INSERT INTO unmarked_sentinel VALUES ('untouched')")
 
     with pytest.raises(RodexSessionError, match="no schema-generation marker"):
         initialise_rodex_database(database)
 
     with sqlite3.connect(database) as connection:
-        assert connection.execute("SELECT value FROM legacy_sentinel").fetchall() == [
+        assert connection.execute("SELECT value FROM unmarked_sentinel").fetchall() == [
             ("untouched",)
         ]
         assert (
@@ -728,4 +728,4 @@ def test_default_database_path_ignores_removed_database_override(
     monkeypatch.setenv("RODEX_DATABASE_PATH", str(configured))
     monkeypatch.setenv("XDG_STATE_HOME", str(state_home))
 
-    assert default_rodex_database_path() == state_home / "rodex" / "rodex-v17.sqlite3"
+    assert default_rodex_database_path() == state_home / "rodex" / "rodex-v18.sqlite3"

@@ -61,7 +61,7 @@ def test_real_app_server_accepts_string_ids_on_a_private_unix_socket() -> None:
             )
             initialized = _response_for(websocket, initialize_id)
             assert initialized["id"] == initialize_id
-            CODEX_APP_SERVER.require_supported_version(initialized["result"])
+            CODEX_APP_SERVER.require_minimum_version(initialized["result"])
             websocket.send(json.dumps(CODEX_APP_SERVER.initialized_notification()))
 
             loaded_id = "rodex:integration:loaded"
@@ -107,7 +107,7 @@ class _LiveUserInputLifecycle:
 
 @pytest.mark.evolutionary_regression
 def test_live_turn_survives_initiator_disconnect_and_streams_to_subscriber() -> None:
-    """Current 0.147 evidence: subscriber owns lifecycle and persisted correlation."""
+    """Current contract: subscriber owns lifecycle and persisted correlation."""
     live_turn_environment = "RODEX_RUN_LIVE_TURN_INTEGRATION"
     if os.environ.get(live_turn_environment) != "1":
         pytest.skip(
@@ -264,7 +264,7 @@ def test_live_turn_survives_initiator_disconnect_and_streams_to_subscriber() -> 
 
 @pytest.mark.evolutionary_regression
 def test_live_user_input_routes_to_subscriber_after_initiator_disconnect() -> None:
-    """Current 0.147 evidence: subscribed primary owns request_user_input."""
+    """Current contract: subscribed primary owns request_user_input."""
     live_user_input_environment = "RODEX_RUN_LIVE_USER_INPUT_INTEGRATION"
     if os.environ.get(live_user_input_environment) != "1":
         pytest.skip(
@@ -418,7 +418,7 @@ def _initialize(
             experimental_api=experimental_api,
         ),
     )
-    CODEX_APP_SERVER.require_supported_version(response["result"])
+    CODEX_APP_SERVER.require_minimum_version(response["result"])
     websocket.send(json.dumps(CODEX_APP_SERVER.initialized_notification()))
 
 

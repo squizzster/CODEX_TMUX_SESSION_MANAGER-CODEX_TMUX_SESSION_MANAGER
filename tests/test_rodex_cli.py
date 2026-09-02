@@ -19,8 +19,8 @@ import rodex.cli as cli_module
 import rodex.exact_turn_mutation as exact_turn_mutation_module
 import rodex.managed_session_lifecycle as managed_lifecycle_module
 import rodex.session_commands as session_commands_module
-from codex_cli_contract import CODEX_CLI_0_150_1_COMMAND_TOKENS
-from rodex.app_server_contract import RodexAppServerCompatibilityError
+from codex_cli_contract import CODEX_CLI_0_151_0_COMMAND_TOKENS
+from rodex.app_server_contract import RodexAppServerVersionError
 from rodex.cli import RodexExecutableNotFoundError, RodexLaunchError, main, run
 from rodex.control import (
     CodexDispatchMatch,
@@ -301,7 +301,7 @@ class StubControlClient:
         self.exact_waited: list[tuple[LiveRodexControl, str, float | None]] = []
         self.start_error: RodexControlError | None = None
         self.wait_error: RodexControlError | None = None
-        self.compatibility_error: RodexAppServerCompatibilityError | None = None
+        self.version_error: RodexAppServerVersionError | None = None
         self.dispatch_status_result = CodexDispatchStatus(
             dispatch_id="rodex:dispatch:test",
             observation="accepted",
@@ -344,9 +344,9 @@ class StubControlClient:
         return self.state
 
     def exact_control_version(self, _control: LiveRodexControl) -> str:
-        if self.compatibility_error is not None:
-            raise self.compatibility_error
-        return "0.147.0"
+        if self.version_error is not None:
+            raise self.version_error
+        return "0.151.0"
 
     def wait_until_idle(self, control: LiveRodexControl, *, revalidate: Any) -> None:
         revalidate()
@@ -504,7 +504,7 @@ def test_help_prints_rodex_commands_without_codex_tmux_or_database(
     assert "_running" in output.out
     assert "_context" in output.out
     assert "current interactive options" in output.out
-    assert "Codex 0.150.1 subcommands" in output.out
+    assert "Codex 0.151.0 subcommands" in output.out
     assert "canonical Codex UUID" in output.out
     assert delegator.calls == []
     assert not database.exists()
@@ -1114,7 +1114,7 @@ def test_running_reports_an_unregistered_live_tmux_session(
     assert f"orphan-name on {socket_path}" in output
 
 
-def test_help_exposes_exact_start_and_steer_without_legacy_send(
+def test_help_exposes_only_the_current_exact_control_commands(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -1194,7 +1194,7 @@ def test_machine_start_reads_stdin_and_emits_the_versioned_identity_envelope(
     assert control.started == [(launcher.control, "run focused tests\n")]
     assert control.started_dispatch_ids == ["controller:dispatch:42"]
     payload = json.loads(capsys.readouterr().out)
-    assert payload["schema_version"] == 2
+    assert payload["schema_version"] == 3
     assert payload["operation"] == "turn.start"
     assert payload["ok"] is True
     assert payload["runtime"] == {
@@ -1322,7 +1322,7 @@ def test_machine_exact_control_requires_a_persisted_runtime_id(
     assert control.started == []
     payload = json.loads(capsys.readouterr().out)
     assert payload["ok"] is False
-    assert payload["error"]["code"] == "runtime_upgrade_required"
+    assert payload["error"]["code"] == "runtime_identity_missing"
     assert payload["error"]["retryable"] is False
 
 
@@ -1641,7 +1641,7 @@ def test_machine_wait_distinguishes_a_failed_turn_outcome(
     assert payload["data"]["turn"]["error"] == {"message": "model failed"}
 
 
-def test_machine_inspect_is_available_for_a_legacy_runtime_before_restart(
+def test_machine_inspect_rejects_a_runtime_without_durable_identity(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -1667,14 +1667,13 @@ def test_machine_inspect_is_available_for_a_legacy_runtime_before_restart(
         control_client=control,  # type: ignore[arg-type]
     )
 
-    assert status == 0
+    assert status == 3
     payload = json.loads(capsys.readouterr().out)
-    assert payload["data"]["exact_control_available"] is False
-    assert payload["data"]["runtime_identity_persisted"] is False
-    assert payload["codex"]["turn_id"] == "turn-active"
+    assert payload["ok"] is False
+    assert payload["error"]["code"] == "runtime_identity_missing"
 
 
-def test_machine_inspect_reports_incompatible_exact_control_without_hiding_state(
+def test_machine_inspect_emits_only_the_current_runtime_and_app_server_contract(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -1687,8 +1686,10 @@ def test_machine_inspect_reports_incompatible_exact_control_without_hiding_state
     create_exact_controlled_session(database, tmp_path)
     launcher = StubLauncher(tmp_path)
     control = StubControlClient()
-    control.compatibility_error = RodexAppServerCompatibilityError(
-        "exact control requires 0.147.0 or newer; live server is 0.146.0"
+    control.state = replace(
+        control.state,
+        status="active",
+        active_turn_id="turn-active",
     )
 
     status = run(
@@ -1700,14 +1701,59 @@ def test_machine_inspect_reports_incompatible_exact_control_without_hiding_state
 
     assert status == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["data"]["thread"]["status"] == "idle"
-    assert payload["data"]["exact_control_available"] is False
-    assert payload["data"]["app_server"] == {
-        "compatible_version": None,
-        "exact_control_compatible": False,
-        "compatibility_error": (
-            "exact control requires 0.147.0 or newer; live server is 0.146.0"
+    assert payload["schema_version"] == 3
+    assert payload["operation"] == "thread.inspect"
+    assert payload["ok"] is True
+    assert payload["runtime"] == {
+        "runtime_id": str(RUNTIME_ID),
+        "state": "running",
+    }
+    assert payload["data"] == {
+        "thread": {
+            "cwd": "/workspace/project",
+            "status": "active",
+            "active_flags": [],
+            "active_turn_id": "turn-active",
+            "can_accept_direct_input": True,
+        },
+        "app_server": {"version": "0.151.0"},
+    }
+
+
+def test_machine_inspect_rejects_a_noncharacterized_app_server_version(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    database = tmp_path / "rodex.sqlite3"
+    monkeypatch.setattr(
+        "cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga"
+    )
+    monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
+    create_exact_controlled_session(database, tmp_path)
+    launcher = StubLauncher(tmp_path)
+    control = StubControlClient()
+    control.version_error = RodexAppServerVersionError(
+        "exact control requires Codex App Server 0.151.0 or newer; live server is 0.150.1"
+    )
+
+    status = run(
+        ["_inspect", "automatic-beluga", "--json"],
+        database_path=database,
+        launcher=launcher,  # type: ignore[arg-type]
+        control_client=control,  # type: ignore[arg-type]
+    )
+
+    assert status == 3
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is False
+    assert payload["error"] == {
+        "code": "app_server_version_mismatch",
+        "message": (
+            "exact control requires Codex App Server 0.151.0 or newer; "
+            "live server is 0.150.1"
         ),
+        "retryable": False,
     }
 
 
@@ -2087,7 +2133,7 @@ def test_default_and_explicit_create_link_identities_before_attach(
         ["-h"],
         ["--version"],
         ["-V"],
-        *[[command] for command in sorted(CODEX_CLI_0_150_1_COMMAND_TOKENS)],
+        *[[command] for command in sorted(CODEX_CLI_0_151_0_COMMAND_TOKENS)],
         ["exec", "--json", "run tests"],
         ["review", "--uncommitted"],
         ["features", "list"],
@@ -3571,14 +3617,14 @@ def test_unsaved_session_remains_linked_to_the_stored_codex_session_id_if_recove
 
 
 @pytest.mark.parametrize("lookup_name", ["black-sawfly", "work"])
-def test_either_name_route_normalizes_a_legacy_suffixed_tmux_name(
+def test_either_name_route_reconciles_tmux_with_the_current_display_name(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     lookup_name: str,
 ) -> None:
     database = tmp_path / "rodex.sqlite3"
-    legacy_tmux_name = "black-sawfly--r0123456789abcdef"
+    recorded_tmux_name = "black-sawfly"
     monkeypatch.setattr(
         "cool_name.functions.coolname.generate_slug",
         lambda _word_count: "black-sawfly",
@@ -3588,7 +3634,7 @@ def test_either_name_route_normalizes_a_legacy_suffixed_tmux_name(
         codex_session_id=CODEX_SESSION_ID,
         user_identity=DNA,
         tmux_server_socket_path=tmp_path / "tmux.sock",
-        tmux_session_name=legacy_tmux_name,
+        tmux_session_name=recorded_tmux_name,
         runtime_id=RUNTIME_ID,
     )
     assign_a_user_defined_cool_name("black-sawfly", "work", database, user_identity=DNA)
@@ -3602,7 +3648,7 @@ def test_either_name_route_normalizes_a_legacy_suffixed_tmux_name(
 
     tmux_session_name = "work"
     assert len(launcher.renamed) == 1
-    assert launcher.renamed[0][0].tmux_session_name == legacy_tmux_name
+    assert launcher.renamed[0][0].tmux_session_name == recorded_tmux_name
     assert launcher.renamed[0][0].runtime_id == RUNTIME_ID
     assert launcher.renamed[0][0].tmux_capability is not None
     assert launcher.renamed[0][1] == tmux_session_name
@@ -3809,7 +3855,7 @@ def test_alias_replacement_without_force_is_reported_on_stderr(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     state_home = tmp_path / "state"
-    database = state_home / "rodex" / "rodex-v17.sqlite3"
+    database = state_home / "rodex" / "rodex-v18.sqlite3"
     monkeypatch.setattr(
         "cool_name.functions.coolname.generate_slug",
         lambda _word_count: "black-sawfly",
@@ -3862,7 +3908,7 @@ def test_empty_alias_is_a_concise_stderr_error(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     state_home = tmp_path / "state"
-    database = state_home / "rodex" / "rodex-v17.sqlite3"
+    database = state_home / "rodex" / "rodex-v18.sqlite3"
     monkeypatch.setattr(
         "cool_name.functions.coolname.generate_slug", lambda _word_count: "safe-name"
     )

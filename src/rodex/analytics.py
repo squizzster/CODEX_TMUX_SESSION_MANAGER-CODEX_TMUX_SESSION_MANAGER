@@ -369,7 +369,7 @@ class AnalyticsRolloutWorker:
                     and checkpoint.trace.trace_schema_version != AGENT_TRACE_SCHEMA_VERSION
                 ):
                     raise RodexAnalyticsError(
-                        "agent trace schema is incompatible with this Rodex generation"
+                        "agent trace schema does not match this Rodex generation"
                     )
                 self._checkpoint = checkpoint
                 self._accepted_observations = _checkpoint_source_observations(
@@ -1926,7 +1926,7 @@ def _derive_verified_turn_collaboration(
     *,
     agents_started: int,
 ) -> TurnStatisticsProjection:
-    """Replace one analyzer turn's legacy collaboration view with canonical facts."""
+    """Replace one analyzer turn's derived collaboration view with canonical facts."""
     by_tool = _canonical_collaboration_counts(turn.named_counts)
     return replace(
         turn,

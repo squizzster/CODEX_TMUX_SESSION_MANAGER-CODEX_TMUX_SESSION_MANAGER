@@ -112,7 +112,7 @@ def open_rodex_read_transaction(
 def open_rodex_maintenance_lock(
     database_path: str | Path,
 ) -> Iterator[Path]:
-    """Exclude connections for diagnostics; no live move/migration is supported."""
+    """Exclude connections for diagnostics; live storage relocation is unsupported."""
     path = normalise_rodex_database_path(database_path)
     with open_private_database_boundary(path, create=False) as boundary:
         _acquire_database_lock(boundary, exclusive=True)

@@ -15,7 +15,7 @@ from .errors import (
     RodexSQLError,
 )
 
-RODEX_DATABASE_SCHEMA_GENERATION: Final = 17
+RODEX_DATABASE_SCHEMA_GENERATION: Final = 18
 RODEX_DATABASE_FILENAME: Final = f"rodex-v{RODEX_DATABASE_SCHEMA_GENERATION}.sqlite3"
 DATABASE_TRANSITION_LOCK_SUFFIX: Final = ".rodex-transition.lock"
 
@@ -204,8 +204,7 @@ def open_private_database_boundary(
 
 
 def _require_linux_secure_open_support() -> None:
-    required = ("O_CLOEXEC", "O_DIRECTORY", "O_NOFOLLOW")
-    if sys.platform != "linux" or any(not hasattr(os, name) for name in required):
+    if sys.platform != "linux":
         raise RodexSQLError(
             "Rodex SQLite storage requires Linux O_NOFOLLOW, O_DIRECTORY, and O_CLOEXEC"
         )

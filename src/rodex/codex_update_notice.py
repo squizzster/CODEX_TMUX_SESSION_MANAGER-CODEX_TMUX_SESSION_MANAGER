@@ -143,8 +143,7 @@ class CodexUpdateNotice:
         try:
             self._cache_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
             lock_path = self._cache_path.with_name(f".{self._cache_path.name}.lock")
-            flags = os.O_RDWR | os.O_CREAT
-            flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+            flags = os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW
             descriptor = os.open(lock_path, flags, 0o600)
             state = os.fstat(descriptor)
             if (

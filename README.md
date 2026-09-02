@@ -123,17 +123,18 @@ Start with an initial prompt exactly as you would with Codex:
 ./rodex --model gpt-5.6-sol 'Review this project'
 ```
 
-At the `›` prompt, use Codex normally. Detach without ending the session with
-`Ctrl-b d`. With the default prefix, `Ctrl-b` shows `CTRL-B MODE` while tmux waits for
+At the `›` prompt, use Codex normally. `Ctrl-D` detaches only the current Rodex client;
+`Ctrl-b d` remains the prefix-based detach route. Both leave Codex, its app-server, and
+tmux running. With the default prefix, `Ctrl-b` shows `CTRL-B MODE` while tmux waits for
 the command key, without delaying it, so fast sequences still work. Enter copy mode with
 `Ctrl-b [`, navigate with the keyboard, and leave it with `q`. Rodex inherits your tmux
 mouse preference instead of overriding it. In a shared session, one `Ctrl-C` warns that
-another press may end the session for everyone and offers `Ctrl-b d` as the detach-only
-route; the same client must press it again within two seconds to end the exact managed
-session. In a private session, `Ctrl-C` ends the exact managed session immediately.
-Custom prefixes and user-owned root `C-b` bindings are left unchanged. Because the
-shared `C-c` safety guard is server-global, a pre-existing non-Rodex root `C-c` binding
-causes explicit initialization failure rather than silently disabling the guard.
+another press may end the session for everyone and offers both detach routes; the same
+client must press it again within two seconds to end the exact managed session. In a
+private session, `Ctrl-C` ends the exact managed session immediately. Custom prefixes
+and user-owned root `C-b` bindings are left unchanged. Rodex owns root `C-c` and `C-d`
+on its dedicated tmux server; a pre-existing conflicting binding causes explicit
+initialization failure instead of silently weakening the lifecycle contract.
 
 Managed launches disable Codex's own interactive startup update check because it can
 appear before runtime registration and block Rodex attachment. Immediately before each

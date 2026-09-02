@@ -36,7 +36,7 @@ _CONFIRMATION_STATUS: Final = (
     f"#[fg={RODEX_STATUS_COLOURS.safety_foreground}]"
     "#[bold] CTRL-C ARMED: SHARED session — "
     "CTRL-C again within 2s may END it for everyone; "
-    "CTRL-B d detaches only you. #[default]"
+    "CTRL-D (or CTRL-B d) detaches only you. #[default]"
 )
 
 Runner = SyncTmuxRunner

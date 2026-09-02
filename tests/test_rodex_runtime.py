@@ -132,15 +132,16 @@ def _mock_registered_ui_capability(
                 return fields[-1]
         return ""
 
-    def read_key(_runtime: LiveTmuxSession, _key: str, **_options: object) -> str:
+    def read_key(_runtime: LiveTmuxSession, key: str, **_options: object) -> str:
+        owner_options = {
+            "C-c": "@rodex_shared_tmux_ctrl_c_command",
+            "C-d": "@rodex_shared_tmux_ctrl_d_command",
+        }
         for command in reversed(runner.calls):
             action = command[-2] if command[3:4] == ["if-shell"] else ""
-            prefix = "bind-key -n C-c "
+            prefix = f"bind-key -n {key} "
             if action.startswith(prefix):
-                return read_server(
-                    _runtime,
-                    "@rodex_shared_tmux_ctrl_c_command",
-                )
+                return read_server(_runtime, owner_options[key])
         return ""
 
     monkeypatch.setattr(launcher, "_read_tmux_global_hook_command", read_hook)
@@ -527,14 +528,24 @@ def test_start_directly_hosts_codex_in_tmux_and_returns_its_session_id(
     assert new_session[9] == "run-shell true"
     assert new_session[11:13] == ["if-shell", "-F"]
     creation = shlex.split(new_session[-2])
-    assert creation[:5] == [
+    assert creation[:15] == [
+        "set-option",
+        "-s",
+        "exit-unattached",
+        "off",
+        ";",
+        "set-option",
+        "-g",
+        "destroy-unattached",
+        "off",
+        ";",
         "set-option",
         "-g",
         "history-limit",
         str(RODEX_TMUX_HISTORY_LIMIT_LINES),
         ";",
     ]
-    assert creation[5:12] == [
+    assert creation[15:22] == [
         "new-session",
         "-d",
         "-E",
@@ -543,9 +554,16 @@ def test_start_directly_hosts_codex_in_tmux_and_returns_its_session_id(
         "-c",
         str(tmp_path),
     ]
-    assert creation[12:14] == ["/usr/bin/sleep", "30"]
+    assert creation[22:24] == ["/usr/bin/sleep", "30"]
     assert "-e" not in creation
-    assert creation[15:21] == [
+    assert creation[25:30] == [
+        "set-option",
+        "-t",
+        "=rodex-0123456789abcdef:",
+        "destroy-unattached",
+        "off",
+    ]
+    assert creation[31:37] == [
         "set-option",
         "-p",
         "-t",
@@ -1482,15 +1500,16 @@ def test_rename_and_session_ui_initialisation_use_the_real_tmux_session_name(
                 return fields[-1]
         return ""
 
-    def read_key(_runtime: LiveTmuxSession, _key: str, **_options: object) -> str:
+    def read_key(_runtime: LiveTmuxSession, key: str, **_options: object) -> str:
+        owner_options = {
+            "C-c": "@rodex_shared_tmux_ctrl_c_command",
+            "C-d": "@rodex_shared_tmux_ctrl_d_command",
+        }
         for command in reversed(runner.calls):
             action = command[-2] if command[3:4] == ["if-shell"] else ""
-            prefix = "bind-key -n C-c "
+            prefix = f"bind-key -n {key} "
             if action.startswith(prefix):
-                return read_server(
-                    _runtime,
-                    "@rodex_shared_tmux_ctrl_c_command",
-                )
+                return read_server(_runtime, owner_options[key])
         return ""
 
     monkeypatch.setattr(launcher, "_read_tmux_global_hook_command", read_hook)
@@ -1570,6 +1589,20 @@ def test_rename_and_session_ui_initialisation_use_the_real_tmux_session_name(
         assert option in shared_ctrl_c_binding[3]
         assert tmux_format in shared_ctrl_c_binding[3]
     assert "--attached-count" not in shared_ctrl_c_binding[3]
+    ctrl_d_owner_claim = next(
+        command
+        for command in status_actions
+        if command[:3] == ["set-option", "-so", "@rodex_shared_tmux_ctrl_d_command"]
+    )
+    assert ctrl_d_owner_claim == [
+        "set-option",
+        "-so",
+        "@rodex_shared_tmux_ctrl_d_command",
+        "detach-client",
+    ]
+    assert [
+        command for command in status_actions if command[:3] == ["bind-key", "-n", "C-d"]
+    ] == [["bind-key", "-n", "C-d", "detach-client"]]
 
 
 def test_rename_reports_a_bounded_tmux_timeout(
@@ -1851,6 +1884,44 @@ def test_shared_ctrl_c_guard_fails_closed_on_a_user_owned_binding(
     )
 
 
+def test_ctrl_d_detach_contract_fails_closed_on_a_user_owned_binding(
+    tmp_path: Path,
+) -> None:
+    calls: list[list[str]] = []
+
+    def runner(command: list[str], **_options: object) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        output = (
+            "bind-key -T root C-d display-message user-binding\n"
+            if "list-keys -T root C-d" in command
+            else ""
+        )
+        return subprocess.CompletedProcess(command, 0, stdout=output, stderr="")
+
+    launcher = RodexRuntimeLauncher("codex", "tmux", runner=runner)
+    with pytest.raises(
+        RodexRuntimeError,
+        match="root C-d already has a non-Rodex binding",
+    ):
+        launcher._install_ctrl_d_detach_binding(
+            LiveTmuxSession(
+                tmp_path / "tmux.sock",
+                "automatic-beluga",
+                runtime_id=RUNTIME_ID,
+            ),
+            _registered_capability(tmp_path / "tmux.sock"),
+        )
+
+    assert not any(
+        "bind-key -n C-d" in argument for command in calls for argument in command
+    )
+    assert not any(
+        command[3:4] == ["if-shell"]
+        and "set-option -so @rodex_shared_tmux_ctrl_d_command" in command[-2]
+        for command in calls
+    )
+
+
 def test_stale_server_capability_cannot_submit_a_server_global_write(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1888,8 +1959,14 @@ def test_stale_server_capability_cannot_submit_a_server_global_write(
     assert not any(command[3] in {"set-option", "bind-key"} for command in calls)
 
 
-def test_real_tmux_fast_ctrl_b_d_detaches_without_ending_session(
+@pytest.mark.parametrize(
+    ("detach_input", "detach_name"),
+    ((b"\x02d", "Ctrl-b d"), (b"\x04", "Ctrl-D")),
+)
+def test_real_tmux_detach_keys_leave_session_running(
     tmp_path: Path,
+    detach_input: bytes,
+    detach_name: str,
 ) -> None:
     tmux_binary = shutil.which("tmux")
     if tmux_binary is None:
@@ -1962,7 +2039,7 @@ def test_real_tmux_fast_ctrl_b_d_detaches_without_ending_session(
         ).stdout.strip()
         assert "RGB" in client_features.split(",")
 
-        os.write(terminal_master, b"\x02d")
+        os.write(terminal_master, detach_input)
         deadline = time.monotonic() + 2
         while time.monotonic() < deadline:
             attached = tmux(
@@ -1977,9 +2054,267 @@ def test_real_tmux_fast_ctrl_b_d_detaches_without_ending_session(
                 break
             time.sleep(0.01)
         else:
-            pytest.fail("fast Ctrl-b d did not detach the current client")
+            pytest.fail(f"{detach_name} did not detach the current client")
 
         assert tmux("has-session", "-t", f"={session_name}", check=False).returncode == 0
+    finally:
+        tmux("kill-server", check=False)
+        if client_pid is not None:
+            waited_pid, _status = os.waitpid(client_pid, os.WNOHANG)
+            if waited_pid == 0:
+                os.kill(client_pid, signal.SIGTERM)
+                os.waitpid(client_pid, 0)
+        if terminal_master is not None:
+            os.close(terminal_master)
+
+
+def test_real_tmux_ctrl_d_detaches_only_the_invoking_shared_client(
+    tmp_path: Path,
+) -> None:
+    tmux_binary = shutil.which("tmux")
+    if tmux_binary is None:
+        pytest.skip("tmux is not installed")
+    socket_path = tmp_path / "tmux.sock"
+    session_name = "shared-ctrl-d-detach"
+    clients: list[tuple[int, int]] = []
+
+    def tmux(*arguments: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [tmux_binary, "-S", str(socket_path), *arguments],
+            check=check,
+            text=True,
+            capture_output=True,
+        )
+
+    def attached_count() -> str:
+        return tmux(
+            "display-message",
+            "-p",
+            "-t",
+            f"={session_name}:",
+            "-F",
+            "#{session_attached}",
+        ).stdout.strip()
+
+    def wait_for_attached_count(expected: str) -> None:
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            if attached_count() == expected:
+                return
+            time.sleep(0.01)
+        pytest.fail(f"tmux client count did not become {expected}")
+
+    def attach_client() -> tuple[int, int]:
+        client_pid, terminal_master = pty.fork()
+        if client_pid == 0:
+            environment = os.environ.copy()
+            environment["TERM"] = "xterm-256color"
+            os.execve(
+                tmux_binary,
+                [
+                    tmux_binary,
+                    "-S",
+                    str(socket_path),
+                    "-T",
+                    RODEX_TMUX_REQUIRED_CLIENT_FEATURES,
+                    "attach-session",
+                    "-t",
+                    f"={session_name}",
+                ],
+                environment,
+            )
+        return client_pid, terminal_master
+
+    tmux("new-session", "-d", "-s", session_name, "sleep 30")
+    try:
+        launcher = RodexRuntimeLauncher(
+            "codex", tmux_binary, python_executable=sys.executable
+        )
+        launcher.initialise_session_ui(
+            _register_real_tmux_session(tmux, socket_path, session_name)
+        )
+        host_pane_pid = tmux(
+            "display-message",
+            "-p",
+            "-t",
+            f"={session_name}:",
+            "-F",
+            "#{pane_pid}",
+        ).stdout.strip()
+
+        clients.append(attach_client())
+        wait_for_attached_count("1")
+        clients.append(attach_client())
+        wait_for_attached_count("2")
+
+        os.write(clients[0][1], b"\x04")
+        wait_for_attached_count("1")
+        assert tmux("has-session", "-t", f"={session_name}", check=False).returncode == 0
+        assert (
+            tmux(
+                "display-message",
+                "-p",
+                "-t",
+                f"={session_name}:",
+                "-F",
+                "#{pane_pid}",
+            ).stdout.strip()
+            == host_pane_pid
+        )
+
+        os.write(clients[1][1], b"\x04")
+        wait_for_attached_count("0")
+        assert tmux("has-session", "-t", f"={session_name}", check=False).returncode == 0
+        assert (
+            tmux(
+                "display-message",
+                "-p",
+                "-t",
+                f"={session_name}:",
+                "-F",
+                "#{pane_pid}",
+            ).stdout.strip()
+            == host_pane_pid
+        )
+    finally:
+        tmux("kill-server", check=False)
+        for client_pid, terminal_master in clients:
+            waited_pid, _status = os.waitpid(client_pid, os.WNOHANG)
+            if waited_pid == 0:
+                os.kill(client_pid, signal.SIGTERM)
+                os.waitpid(client_pid, 0)
+            os.close(terminal_master)
+
+
+def test_real_tmux_ctrl_d_survives_hostile_unattached_user_options(
+    tmp_path: Path,
+) -> None:
+    tmux_binary = shutil.which("tmux")
+    if tmux_binary is None:
+        pytest.skip("tmux is not installed")
+    socket_path = tmp_path / "tmux.sock"
+    session_name = "hostile-unattached-options"
+    tmux_home = tmp_path / "home"
+    tmux_home.mkdir()
+    (tmux_home / ".tmux.conf").write_text(
+        "set-option -s exit-unattached on\nset-option -g destroy-unattached on\n",
+        encoding="utf-8",
+    )
+    environment = os.environ.copy()
+    environment["HOME"] = str(tmux_home)
+    runtime = LiveTmuxSession(socket_path, session_name, runtime_id=RUNTIME_ID)
+    client_pid: int | None = None
+    terminal_master: int | None = None
+
+    def tmux(*arguments: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [tmux_binary, "-S", str(socket_path), *arguments],
+            check=check,
+            text=True,
+            capture_output=True,
+        )
+
+    try:
+        launcher = RodexRuntimeLauncher(
+            "codex",
+            tmux_binary,
+            python_executable=sys.executable,
+            environment=environment,
+        )
+        launcher._start_tmux_session(runtime, tmp_path, ("/bin/sleep", "30"))
+
+        assert tmux("has-session", "-t", f"={session_name}", check=False).returncode == 0
+        assert tmux("show-options", "-s", "-v", "exit-unattached").stdout.strip() == "off"
+        assert (
+            tmux(
+                "show-options",
+                "-v",
+                "-t",
+                f"={session_name}:",
+                "destroy-unattached",
+            ).stdout.strip()
+            == "off"
+        )
+
+        launcher.initialise_session_ui(
+            _register_real_tmux_session(tmux, socket_path, session_name)
+        )
+        host_pane_pid = tmux(
+            "display-message",
+            "-p",
+            "-t",
+            f"={session_name}:",
+            "-F",
+            "#{pane_pid}",
+        ).stdout.strip()
+        client_pid, terminal_master = pty.fork()
+        if client_pid == 0:
+            child_environment = os.environ.copy()
+            child_environment["TERM"] = "xterm-256color"
+            os.execve(
+                tmux_binary,
+                [
+                    tmux_binary,
+                    "-S",
+                    str(socket_path),
+                    "-T",
+                    RODEX_TMUX_REQUIRED_CLIENT_FEATURES,
+                    "attach-session",
+                    "-t",
+                    f"={session_name}",
+                ],
+                child_environment,
+            )
+
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            if (
+                tmux(
+                    "display-message",
+                    "-p",
+                    "-t",
+                    f"={session_name}:",
+                    "-F",
+                    "#{session_attached}",
+                ).stdout.strip()
+                == "1"
+            ):
+                break
+            time.sleep(0.01)
+        else:
+            pytest.fail("tmux client did not attach")
+
+        os.write(terminal_master, b"\x04")
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            if (
+                tmux(
+                    "display-message",
+                    "-p",
+                    "-t",
+                    f"={session_name}:",
+                    "-F",
+                    "#{session_attached}",
+                ).stdout.strip()
+                == "0"
+            ):
+                break
+            time.sleep(0.01)
+        else:
+            pytest.fail("Ctrl-D did not detach the current client")
+
+        assert tmux("has-session", "-t", f"={session_name}", check=False).returncode == 0
+        assert (
+            tmux(
+                "display-message",
+                "-p",
+                "-t",
+                f"={session_name}:",
+                "-F",
+                "#{pane_pid}",
+            ).stdout.strip()
+            == host_pane_pid
+        )
     finally:
         tmux("kill-server", check=False)
         if client_pid is not None:

@@ -113,6 +113,7 @@ RODEX_SHARED_TMUX_COORDINATOR_COMMAND_OPTION: Final = (
     "@rodex_shared_tmux_coordinator_command"
 )
 RODEX_SHARED_TMUX_CTRL_C_COMMAND_OPTION: Final = "@rodex_shared_tmux_ctrl_c_command"
+RODEX_SHARED_TMUX_CTRL_D_COMMAND_OPTION: Final = "@rodex_shared_tmux_ctrl_d_command"
 RODEX_SHARED_TMUX_HOOK_INDEX: Final = 731
 Runner = Callable[..., subprocess.CompletedProcess[str]]
 Connector = Callable[..., Any]
@@ -1270,7 +1271,7 @@ class RodexRuntimeLauncher:
             capability,
             publish_base_status=True,
         )
-        self._install_input_guards(runtime, capability)
+        self._install_terminal_key_contracts(runtime, capability)
 
     def reconcile_session_ui(self, runtime: LiveTmuxSession) -> None:
         """Refresh static UI configuration without replacing a transient claim."""
@@ -1281,7 +1282,7 @@ class RodexRuntimeLauncher:
             capability,
             publish_base_status=False,
         )
-        self._install_input_guards(runtime, capability)
+        self._install_terminal_key_contracts(runtime, capability)
 
     def refresh_shared_tmux_coordination(self, runtime: LiveTmuxSession) -> None:
         """Reconcile the global coordinator for one verified registered runtime."""
@@ -1370,12 +1371,38 @@ class RodexRuntimeLauncher:
             reset_transient_claims=publish_base_status,
         )
 
-    def _install_input_guards(
+    def _install_terminal_key_contracts(
         self,
         runtime: LiveTmuxSession,
         capability: TmuxSessionCapability,
     ) -> None:
+        self._configure_detached_runtime_persistence(runtime, capability)
         self._install_shared_ctrl_c_guard(runtime, capability)
+        self._install_ctrl_d_detach_binding(runtime, capability)
+
+    def _configure_detached_runtime_persistence(
+        self,
+        runtime: LiveTmuxSession,
+        capability: TmuxSessionCapability,
+    ) -> None:
+        """Keep client detach distinct from ending a managed runtime."""
+        self._server_capability_tmux(
+            runtime,
+            capability.tmux_server_id,
+            "set-option",
+            "-s",
+            "exit-unattached",
+            "off",
+        )
+        self._capability_tmux(
+            runtime,
+            capability,
+            "set-option",
+            "-t",
+            capability.pane_target,
+            "destroy-unattached",
+            "off",
+        )
 
     def _start_tmux_session(
         self,
@@ -1416,6 +1443,12 @@ class RodexRuntimeLauncher:
             (
                 ";",
                 "set-option",
+                "-t",
+                _exact_tmux_pane_target(runtime.tmux_session_name),
+                "destroy-unattached",
+                "off",
+                ";",
+                "set-option",
                 "-p",
                 "-t",
                 _exact_tmux_pane_target(runtime.tmux_session_name),
@@ -1438,6 +1471,16 @@ class RodexRuntimeLauncher:
         )
         creation_action = _tmux_command_queue(
             (
+                "set-option",
+                "-s",
+                "exit-unattached",
+                "off",
+                ";",
+                "set-option",
+                "-g",
+                "destroy-unattached",
+                "off",
+                ";",
                 "set-option",
                 "-g",
                 "history-limit",
@@ -2071,19 +2114,53 @@ class RodexRuntimeLauncher:
             runtime,
             capability.tmux_server_id,
         )
+        self._install_owned_root_key_binding(
+            runtime,
+            capability,
+            key="C-c",
+            command=command,
+            owner_option=RODEX_SHARED_TMUX_CTRL_C_COMMAND_OPTION,
+            contract_name="shared Ctrl-C safety guard",
+        )
+
+    def _install_ctrl_d_detach_binding(
+        self,
+        runtime: LiveTmuxSession,
+        capability: TmuxSessionCapability,
+    ) -> None:
+        self._install_owned_root_key_binding(
+            runtime,
+            capability,
+            key="C-d",
+            command="detach-client",
+            owner_option=RODEX_SHARED_TMUX_CTRL_D_COMMAND_OPTION,
+            contract_name="Ctrl-D detach contract",
+        )
+
+    def _install_owned_root_key_binding(
+        self,
+        runtime: LiveTmuxSession,
+        capability: TmuxSessionCapability,
+        *,
+        key: str,
+        command: str,
+        owner_option: str,
+        contract_name: str,
+    ) -> None:
+        """Claim and verify one Rodex-owned root key on its dedicated server."""
         existing_command = self._read_tmux_root_key_command(
             runtime,
-            "C-c",
+            key,
             expected_server_id=capability.tmux_server_id,
         )
         owned_command = self._read_tmux_server_option(
             runtime,
-            RODEX_SHARED_TMUX_CTRL_C_COMMAND_OPTION,
+            owner_option,
             expected_server_id=capability.tmux_server_id,
         )
         if owned_command and not _shell_commands_are_equivalent(owned_command, command):
             raise RodexRuntimeError(
-                "shared Ctrl-C command is owned by a different Rodex installation"
+                f"{contract_name} command is owned by a different Rodex installation"
             )
         if existing_command and not _shell_commands_are_equivalent(
             existing_command,
@@ -2091,34 +2168,34 @@ class RodexRuntimeLauncher:
         ):
             if owned_command:
                 raise RodexRuntimeError(
-                    "shared Ctrl-C binding changed after Rodex claimed it"
+                    f"{contract_name} binding changed after Rodex claimed it"
                 )
             raise RodexRuntimeError(
-                "cannot install the shared Ctrl-C safety guard: root C-c already "
-                "has a non-Rodex binding"
+                f"cannot install the {contract_name}: root {key} already has a "
+                "non-Rodex binding"
             )
         self._server_capability_tmux(
             runtime,
             capability.tmux_server_id,
             "set-option",
             "-so",
-            RODEX_SHARED_TMUX_CTRL_C_COMMAND_OPTION,
+            owner_option,
             command,
             check=False,
         )
         installed_command = self._read_tmux_server_option(
             runtime,
-            RODEX_SHARED_TMUX_CTRL_C_COMMAND_OPTION,
+            owner_option,
             expected_server_id=capability.tmux_server_id,
         )
         if installed_command != command:
             raise RodexRuntimeError(
-                "shared Ctrl-C binding belongs to a different Rodex installation"
+                f"{contract_name} binding belongs to a different Rodex installation"
             )
         if not existing_command:
             claimed_binding = self._read_tmux_root_key_command(
                 runtime,
-                "C-c",
+                key,
                 expected_server_id=capability.tmux_server_id,
             )
             if claimed_binding and not _shell_commands_are_equivalent(
@@ -2126,23 +2203,23 @@ class RodexRuntimeLauncher:
                 command,
             ):
                 raise RodexRuntimeError(
-                    "shared Ctrl-C binding changed while Rodex claimed it"
+                    f"{contract_name} binding changed while Rodex claimed it"
                 )
             self._server_capability_tmux(
                 runtime,
                 capability.tmux_server_id,
                 "bind-key",
                 "-n",
-                "C-c",
+                key,
                 command,
             )
         verified_command = self._read_tmux_root_key_command(
             runtime,
-            "C-c",
+            key,
             expected_server_id=capability.tmux_server_id,
         )
         if not _shell_commands_are_equivalent(verified_command, command):
-            raise RodexRuntimeError("shared Ctrl-C binding was not installed exactly")
+            raise RodexRuntimeError(f"{contract_name} was not installed exactly")
 
 
 def default_runtime_root_path() -> Path:

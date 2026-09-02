@@ -72,11 +72,14 @@ they only wake `tmux_sharing_coordinator`. The coordinator verifies server scope
 one roster, and conditionally submits each changed count to its full capability. This
 avoids tmux 3.2's lost source-session context after destruction. Rodex changes only owned
 hook indices and options behind a server-incarnation fence; it never clears session
-hooks. Root `C-c` is installed exactly or setup fails closed on conflict. The installed
-command owns the lifecycle action: it capability-fences and kills the exact private
-session immediately, or the exact shared session after same-client confirmation. It does
-not delegate exit semantics to TUI input. Rodex performs no general key/input
-interception or pane piping.
+hooks. Root `C-c` and `C-d` are installed exactly or setup fails closed on conflict. The
+`C-c` command owns the exit action: it capability-fences and kills the exact private
+session immediately, or the exact shared session after same-client confirmation. Root
+`C-d` directly runs tmux `detach-client`, whose current-client command context is the
+complete target; it never reaches the TUI. Creation owns `exit-unattached off` before
+any session exists plus global and exact-session `destroy-unattached off`, and
+reconciliation reapplies the server/session settings. Rodex otherwise performs no
+general key/input interception or pane piping.
 
 Discovery reads server, session, control, and registration fields in one tmux snapshot,
 then parses the tuple as a unit. All tmux processes cross `tmux_executor`; captured calls

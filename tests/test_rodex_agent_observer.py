@@ -25,6 +25,12 @@ from rodex.agent_observer import (
     project_subagent_activity_event,
     project_user_message_event,
 )
+from rodex.interaction_pipeline import (
+    DeliveryStatus,
+    InteractionOperation,
+    InteractionRequest,
+    SessionInteractionPipeline,
+)
 from rodex.observer_contract import OBSERVER_PROJECTED_TEXT_MAX_CHARS
 from rodex.observer_pane import ObserverPaneController
 from rodex.protocol_proxy import CodexProtocolEventTap
@@ -518,6 +524,8 @@ def test_observer_creation_rolls_back_every_partial_registration_failure(
         nonlocal failure_injected, registration_step
         calls.append(command)
         operation = command[3]
+        if operation == "show-options":
+            return subprocess.CompletedProcess(command, 0, "", "")
         read_output = _observer_capability_read_output(command)
         if read_output is not None:
             return subprocess.CompletedProcess(command, 0, read_output, "")
@@ -2267,6 +2275,7 @@ def test_real_tmux_observer_renders_request_and_exits_with_its_runtime(
             (child_identity_id, "2026-08-27T00:00:00Z"),
         )
     tap = CodexProtocolEventTap(event_socket)
+    pipeline = SessionInteractionPipeline()
     controller: AgentObserverCoordinator | None = None
     tap.start()
     try:
@@ -2400,6 +2409,7 @@ def test_real_tmux_observer_renders_request_and_exits_with_its_runtime(
             primary,
             event_socket,
             python_executable=sys.executable,
+            interaction_pipeline=pipeline,
         )
         controller.activate(
             database_path=database,
@@ -2411,6 +2421,11 @@ def test_real_tmux_observer_renders_request_and_exits_with_its_runtime(
         controller.observe_protocol_event(_user_message_event(text=exact_request))
         controller.observe_protocol_event(_collaboration_invocation_event(prompt=exact_request))
         controller.observe_protocol_event(_spawn_event())
+
+        # No readiness sleep: this must wait for the real observer's socket before
+        # sending once, and obtain admission from the exact newly created pane.
+        startup_notice = pipeline.send_message(target="agent-observer", text="Observer startup delivery succeeded")
+        assert startup_notice.status == DeliveryStatus.DELIVERED
 
         panes = _wait_for_tmux_panes(tmux, tmux_socket, 2)
         observer = next(pane for pane in panes if pane[0] != primary)
@@ -2554,6 +2569,16 @@ def test_real_tmux_observer_renders_request_and_exits_with_its_runtime(
         )
         time.sleep(0.05)
         assert "\nls\n" not in _capture_tmux_pane(tmux, tmux_socket, observer[0])
+
+        controller.reset_after_disconnect()
+        assert pipeline.execute(InteractionRequest("agent-observer", InteractionOperation.CLOSE, "test")).accepted
+        reopened = pipeline.send_message(target="agent-observer", text="Fresh observer state", open_if_missing=True)
+        assert reopened.status == DeliveryStatus.DELIVERED
+        panes = _wait_for_tmux_panes(tmux, tmux_socket, 2)
+        new_observer = next(pane for pane in panes if pane[0] != primary)
+        assert new_observer[0] != observer[0]
+        captured = _wait_for_captured_text(tmux, tmux_socket, new_observer[0], "Fresh observer state")
+        assert exact_request not in captured  # Never replay the original --initial-event.
 
         tap.close()
         panes = _wait_for_tmux_panes(tmux, tmux_socket, 1)

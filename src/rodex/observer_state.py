@@ -8,9 +8,9 @@ from dataclasses import dataclass
 from typing import Literal
 
 from .observer_contract import (
-    OBSERVER_MAX_FRAME_BYTES,
     OBSERVER_SCHEMA,
     OBSERVER_SNAPSHOT_EVENT_LIMIT,
+    OBSERVER_SNAPSHOT_MAX_BYTES,
 )
 
 ObserverStateKey = tuple[str, str, str]
@@ -212,7 +212,7 @@ class ObserverStateReducer:
     def snapshot(self) -> dict[str, object]:
         self._require_mode("producer")
         snapshot = self._snapshot_value()
-        while _snapshot_size(snapshot) > OBSERVER_MAX_FRAME_BYTES:
+        while _snapshot_size(snapshot) > OBSERVER_SNAPSHOT_MAX_BYTES:
             if self._active:
                 self._active.pop(next(iter(self._active)))
             elif self._tombstones:

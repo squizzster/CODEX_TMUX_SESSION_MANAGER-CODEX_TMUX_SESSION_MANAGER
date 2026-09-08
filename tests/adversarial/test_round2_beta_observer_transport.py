@@ -406,7 +406,8 @@ def test_round2_closed_observer_dispatcher_reclaims_worker_and_rejects_late_send
 
     dispatcher.close()
     attempts_after_close = attempts
-    dispatcher.send(tmp_path / "observer.sock", _snapshot(2))
+    with pytest.raises(OSError, match="closed"):
+        dispatcher.send(tmp_path / "observer.sock", _snapshot(2))
 
     assert not worker.is_alive()
     assert dispatcher._thread is worker

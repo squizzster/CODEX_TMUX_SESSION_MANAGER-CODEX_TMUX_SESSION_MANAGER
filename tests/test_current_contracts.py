@@ -19,7 +19,7 @@ from rodex_sql import RODEX_DATABASE_FILENAME, RODEX_DATABASE_SCHEMA_GENERATION
 
 def test_current_release_declares_matching_package_and_process_versions() -> None:
     project = tomllib.loads((Path(__file__).parents[1] / "pyproject.toml").read_text())
-    assert project["project"]["version"] == RODEX_VERSION == "0.6.0a5"
+    assert project["project"]["version"] == RODEX_VERSION == "0.7.0a1"
     assert RODEX_DATABASE_SCHEMA_GENERATION == 19
     assert RODEX_DATABASE_FILENAME == "rodex-v19.sqlite3"
     assert RODEX_SHARED_TMUX_PROTOCOL == "rodex-shared-tmux-v2"

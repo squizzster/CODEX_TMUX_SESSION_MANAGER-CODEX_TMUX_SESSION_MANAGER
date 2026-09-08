@@ -10,21 +10,23 @@ import pytest
 from websockets.sync.client import unix_connect
 from websockets.sync.server import unix_serve
 
+from rodex.interaction_transport import (
+    SESSION_INTERACTION_CONNECTION_PATH,
+    SESSION_INTERACTION_METHOD,
+    publish_tui_notice,
+)
 from rodex.protocol_proxy import (
     AGENT_OBSERVER_EVENT_STREAM_PATH,
     ANALYTICS_EVENT_STREAM_PATH,
     CONTROL_CONNECTION_PATH,
     EVENT_STREAM_READY_MESSAGE,
     TOOL_CALL_ITEM_TYPES,
-    TUI_NOTICE_CONNECTION_PATH,
-    TUI_NOTICE_METHOD,
     CodexContextStatusObserver,
     CodexProtocolEventTap,
     CodexProtocolProxy,
     TmuxContextStatus,
     TmuxToolCallStatus,
     ToolCallCounter,
-    publish_tui_notice,
 )
 from rodex.status_bar import RODEX_STATUS_COLOURS
 from rodex.tmux_session_capability import TmuxRuntimeCapability
@@ -465,14 +467,24 @@ def test_tui_notice_client_uses_the_rodex_only_proxy_path(tmp_path: Path) -> Non
 
         def send(self, message: str) -> None:
             assert json.loads(message) == {
-                "method": TUI_NOTICE_METHOD,
+                "method": SESSION_INTERACTION_METHOD,
                 "id": 0,
-                "params": {"message": "Rodex: notice"},
+                "params": {
+                    "target": "main",
+                    "operation": "message",
+                    "text": "Rodex: notice",
+                    "start_model_turn": False,
+                    "open_if_missing": False,
+                    "size_percent": None,
+                    "dispatch_id": None,
+                    "expected_binding": None,
+                    "expected_thread_id": None,
+                },
             }
 
         def recv(self, timeout: float) -> str:
             assert timeout == 1
-            return '{"id":0,"result":{"delivered":true}}'
+            return '{"id":0,"result":{"status":"delivered"}}'
 
     def connector(*args: object, **kwargs: object) -> Connection:
         calls.append((args, kwargs))
@@ -484,7 +496,7 @@ def test_tui_notice_client_uses_the_rodex_only_proxy_path(tmp_path: Path) -> Non
         connector=connector,
     )
     assert calls[0][0] == (str(tmp_path / "proxy.sock"),)
-    assert calls[0][1]["uri"] == f"ws://localhost{TUI_NOTICE_CONNECTION_PATH}"
+    assert calls[0][1]["uri"] == f"ws://localhost{SESSION_INTERACTION_CONNECTION_PATH}"
 
 
 @pytest.mark.evolutionary_regression

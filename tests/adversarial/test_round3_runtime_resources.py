@@ -61,7 +61,7 @@ def test_round3_supported_start_dispatches_under_the_runtime_transition_lock(
     lock_path = database.parent / f".{database.name}.session-{transition_identity}.lock"
     lock_was_held = False
     runtime = object()
-    control = type("Control", (), {"runtime_id": "runtime-7"})()
+    control = type("Control", (), {"runtime_id": "runtime-7", "codex_session_id": ROOT_THREAD_ID})()
 
     class LockProbingControlClient:
         def _start_turn(self, *_args: object, **_kwargs: object) -> PromptDispatch:

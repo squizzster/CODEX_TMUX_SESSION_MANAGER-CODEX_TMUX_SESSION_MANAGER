@@ -27,6 +27,8 @@ import pytest
 from websockets.sync.client import unix_connect
 
 from rodex.app_server_contract import CODEX_APP_SERVER, AppServerClientInfo
+from rodex.interaction_pipeline import DeliveryStatus, InteractionOperation, InteractionRequest
+from rodex.interaction_transport import publish_session_interaction
 from rodex.tmux_session_capability import RODEX_SHARED_TMUX_SOCKET_NAME
 
 
@@ -276,6 +278,31 @@ def test_installed_rodex_starts_reuses_and_adopts_sessions(
                 pytest.fail(f"Codex TUI did not render for {name}: {pane.stdout}")
             runtime_id = envelope["runtime"]["runtime_id"]
             assert runtime_id
+            endpoint = tmux("display-message", "-p", "-t", f"={name}:", "#{@rodex_protocol_proxy_socket_path}")
+            assert endpoint.returncode == 0 and endpoint.stdout.strip()
+            notice = f"Rodex pipeline display check {runtime_id}"
+            delivery = publish_session_interaction(
+                Path(endpoint.stdout.strip()),
+                InteractionRequest("main", InteractionOperation.MESSAGE, "startup-test", text=notice),
+            )
+            assert delivery.status == DeliveryStatus.DELIVERED, delivery
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                displayed = tmux("capture-pane", "-p", "-t", f"={name}:")
+                if notice in displayed.stdout:
+                    break
+                client.poll()
+            else:
+                pytest.fail(f"Pipeline notice did not render in the real Codex TUI: {displayed.stdout}")
+            after_notice = subprocess.run(
+                [str(installed_shim), "_inspect", name, "--json"],
+                env=environment,
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+            assert after_notice.returncode == 0, after_notice.stdout + after_notice.stderr
+            assert json.loads(after_notice.stdout)["codex"]["turn_id"] is None
             client.detach()
         assert tmux("has-session", "-t", f"={name}").returncode == 0
         return name, runtime_id

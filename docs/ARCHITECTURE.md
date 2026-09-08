@@ -31,6 +31,7 @@ identity requires a transient App Server check.
 | `rodex.application_pipeline` / command contracts | Classify and dispatch one typed invocation. |
 | `rodex.managed_session_lifecycle` / `human_messages` / `cool_name` | Own session lifecycle, naming, collisions, and action-first human messages. |
 | `rodex.exact_turn_mutation` | Re-resolve mutation selectors under the per-session transition lock; validate incarnation and choose start, steer, interrupt, mouse, or alias policy. |
+| `rodex.interaction_pipeline` / `interaction_transport` | Resolve typed targets, preserve intent through ordered hooks, deliver and record outcomes; expose one private operation endpoint. |
 | `rodex.session_read_pipeline` / `session_tail` | Verify live reads and follow terminal history without idle full-history scans. |
 | `rodex.process_environment` / `environment_exec` | Prepare caller-owned state and enforce the exact managed-process environment at tmux child exec boundaries. |
 | `rodex.runtime` / `process_contracts` / `session_host` | Discover, launch, attach, supervise, and clean up app-server, TUI, proxy, analytics, and runtime paths. |
@@ -42,7 +43,8 @@ identity requires a transient App Server check.
 | `rodex.observer_projection` | Statelessly validate and bound App Server fields for observation. |
 | `rodex.observer_state` | Own observer identity keys, active state, tombstones, target pruning, revisions, and connection epochs. |
 | `rodex.agent_observer` | Coordinate observer owners, transport snapshots, and render the presentation view. |
-| `rodex.observer_pane` | Locate or create the input-disabled tmux pane; own no semantic observer state. |
+| `rodex.observer_pane` / `pane_control` | Adapt observer operations to the shared interaction contract; fence exact pane lifecycle effects without owning semantic state. |
+| `rodex.terminal_presentation` | Route observer bootstrap, live and SQL-recovered text through the interaction contract before stdout. |
 | `rodex.primary_connection_lifecycle` | Isolate primary-connection resets and terminal runtime-shutdown interrupts. |
 | `rodex.analytics` / source readers | Authenticate bounded rollout suffixes and supervise fail-open analysis. |
 | `rodex_registry.agent_trace_contract` / writer / reader | Normalize immutable trace facts before SQL, append them in a caller-owned transaction, and read bounded projections. |
@@ -122,9 +124,10 @@ tmux pane ← presentation view ← consumer reducer ← length-framed private s
 The producer reducer owns events, tombstones, targets, pruning, epoch, and revision. It
 publishes bounded snapshots through a newest-only dispatcher. The consumer applies each
 revision once and replaces presentation state at epoch/overflow boundaries, so tombstones
-cannot resurrect. The view only renders; `ObserverPaneController` owns pane mechanics.
+cannot resurrect. The interaction pipeline admits pane work; `TmuxPaneController` owns mechanics.
 Analytics publication wakes bounded indexed reads; projection bounds text before JSON,
 and control frames are capped at 256 KiB.
+The complete [interaction path inventory](INTERACTION_PATHS.md) distinguishes chat, status, lifecycle and storage owners.
 
 On primary connection loss, `PrimaryConnectionLifecycleCoordinator` calls every reset
 participant despite failures; only the reducer advances observer epoch. SQL transactions

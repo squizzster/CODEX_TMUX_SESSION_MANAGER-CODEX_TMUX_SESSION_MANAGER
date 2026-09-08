@@ -24,6 +24,7 @@ from rodex_registry.identity import (
 )
 
 from .app_server_contract import CODEX_APP_SERVER, RODEX_CONTROL_APP_SERVER_CLIENT
+from .interaction_pipeline import InteractionDeliveryIndeterminate
 from .protocol_proxy import CONTROL_CONNECTION_PATH, EVENT_STREAM_READY_METHOD
 from .tmux_session_capability import TmuxSessionCapability
 
@@ -39,7 +40,7 @@ class RodexControlError(RuntimeError):
     """A named live Codex control or event operation failed."""
 
 
-class RodexDispatchIndeterminateError(RodexControlError):
+class RodexDispatchIndeterminateError(RodexControlError, InteractionDeliveryIndeterminate):
     """A mutating request was sent but its acceptance could not be observed."""
 
     def __init__(

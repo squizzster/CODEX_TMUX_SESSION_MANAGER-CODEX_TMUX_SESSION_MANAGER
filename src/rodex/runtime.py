@@ -13,7 +13,7 @@ import sys
 import time
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import ExitStack, suppress
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from threading import Event, Thread
 from typing import Any, BinaryIO, Final
@@ -41,7 +41,10 @@ from .app_server_contract import (
     RODEX_RUNTIME_APP_SERVER_CLIENT,
     RODEX_SESSION_CATALOG_APP_SERVER_CLIENT,
 )
-from .control import LiveRodexControl
+from .control import CodexControlClient, LiveRodexControl
+from .interaction_pipeline import DeliveryStatus, InteractionRequest, InteractionResult, SessionInteractionPipeline
+from .interaction_transport import publish_tui_notice
+from .pane_control import TmuxPaneController
 from .primary_connection_lifecycle import PrimaryConnectionLifecycleCoordinator
 from .process_contracts import AnalyticsWorkerConfig, SessionHostConfig
 from .process_environment import (
@@ -59,7 +62,6 @@ from .protocol_proxy import (
     TmuxContextStatus,
     TmuxToolCallStatus,
     ToolCallCounter,
-    publish_tui_notice,
 )
 from .status_bar import context_status_segment
 from .tmux_executor import SyncTmuxExecutor, TmuxCommandResult
@@ -1552,6 +1554,7 @@ class RodexRuntimeLauncher:
 
     def attach(self, runtime: LiveTmuxSession) -> None:
         """Attach the calling terminal to the live Rodex tmux session."""
+        capability = self._resolve_registered_tmux_capability(runtime)
         notice: str | None = None
         if self._attach_notice is not None:
             with suppress(Exception):
@@ -1561,7 +1564,6 @@ class RodexRuntimeLauncher:
                 self._publish_tui_notice(runtime.protocol_proxy_socket_path, notice)
         environment = self._user_process_environment.copy()
         environment.pop("TMUX", None)
-        capability = self._resolve_registered_tmux_capability(runtime)
         attach_action = shlex.join(("attach-session", "-E", "-t", capability.session_target))
         self._tmux(
             runtime,
@@ -2111,6 +2113,48 @@ def default_runtime_root() -> Path:
     return _prepare_runtime_root(default_runtime_root_path())
 
 
+def _start_registered_main_model_message(
+    request: InteractionRequest,
+    context: AnalyticsWorkerConfig | None,
+    config: SessionHostConfig,
+    protocol_proxy: CodexProtocolProxy | None,
+) -> InteractionResult:
+    # Composition occurs here to keep the runtime/control dependency acyclic.
+    from rodex_registry import lookup_rodex_session_names
+
+    from .exact_turn_mutation import ExactTurnMutationCoordinator
+
+    if context is None or context.rodex_sessions_id is None or context.codex_session_id is None:
+        return InteractionResult(DeliveryStatus.REJECTED, "runtime registration is not complete")
+    if request.expected_thread_id != str(context.codex_session_id):
+        return InteractionResult(DeliveryStatus.REJECTED, "main chat is not the registered model thread")
+
+    def revalidate_main_binding() -> None:
+        if protocol_proxy is None:
+            raise RodexRuntimeError("main conversation is unavailable")
+        protocol_proxy.validate_primary_model_binding(request)
+
+    revalidate_main_binding()
+    names = lookup_rodex_session_names(context.rodex_sessions_id, context.rodex_database_path)
+    if names is None:
+        return InteractionResult(DeliveryStatus.REJECTED, "registered session no longer exists")
+    coordinator = ExactTurnMutationCoordinator(
+        context.rodex_database_path,
+        RodexRuntimeLauncher(config.codex_binary, config.tmux_binary),
+        CodexControlClient(),
+    )
+    assert request.text is not None
+    _target, dispatch = coordinator.start(
+        names.display_name,
+        request.text,
+        dispatch_id=request.dispatch_id,
+        expected_runtime_id=str(config.runtime_id),
+        expected_thread_id=str(context.codex_session_id),
+        before_dispatch=revalidate_main_binding,
+    )
+    return InteractionResult(DeliveryStatus.MODEL_TURN_STARTED, value=asdict(dispatch))
+
+
 def run_session_host(
     config: SessionHostConfig,
     *,
@@ -2141,6 +2185,8 @@ def run_session_host(
     runtime_path_keepalive: _RuntimePathKeepalive | None = None
     analytics_supervisor: AnalyticsSubprocessSupervisor | None = None
     agent_observer_controller: AgentObserverCoordinator | None = None
+    interaction_pipeline = SessionInteractionPipeline()
+    registered_interaction_context: AnalyticsWorkerConfig | None = None
     registration_deadline = time.monotonic() + RODEX_REGISTRATION_TIMEOUT_SECONDS
     shutting_down = False
 
@@ -2175,6 +2221,7 @@ def run_session_host(
                 tmux_runtime_capability,
                 tmux_pane_target,
                 protocol_event_socket_path,
+                interaction_pipeline=interaction_pipeline,
             )
             tool_call_status = TmuxToolCallStatus(
                 tmux_binary,
@@ -2212,12 +2259,30 @@ def run_session_host(
                 lifecycle_participants.append(agent_observer_controller)
             primary_connection_lifecycle = PrimaryConnectionLifecycleCoordinator(lifecycle_participants)
 
+            def start_model_message(request: InteractionRequest) -> InteractionResult:
+                return _start_registered_main_model_message(
+                    request,
+                    registered_interaction_context,
+                    config,
+                    protocol_proxy,
+                )
+
             protocol_proxy = CodexProtocolProxy(
                 protocol_proxy_socket_path,
                 app_server_socket_path,
                 ToolCallCounter(tool_call_status.update),
                 publish_primary_server_message,
                 primary_connection_lifecycle,
+                interaction_pipeline=interaction_pipeline,
+                runtime_identity=str(config.runtime_id),
+                primary_pane=TmuxPaneController(
+                    tmux_binary,
+                    tmux_runtime_capability,
+                    tmux_pane_target,
+                    runner=subprocess.run,
+                    primary=True,
+                ),
+                model_message_sender=start_model_message,
             )
             protocol_proxy.start()
 
@@ -2291,21 +2356,22 @@ def run_session_host(
                         )
                         if activated_analytics is not None:
                             pending_analytics_config = None
+                            registered_interaction_context = activated_analytics
+                            if agent_observer_controller is not None:
+                                with suppress(Exception):
+                                    assert activated_analytics.rodex_sessions_id is not None
+                                    assert activated_analytics.codex_session_id is not None
+                                    agent_observer_controller.activate(
+                                        database_path=activated_analytics.rodex_database_path,
+                                        rodex_sessions_id=activated_analytics.rodex_sessions_id,
+                                        rodex_session_id=str(activated_analytics.rodex_session_id),
+                                        root_thread_id=activated_analytics.codex_session_id,
+                                    )
                             candidate_supervisor: AnalyticsSubprocessSupervisor | None = None
                             try:
                                 candidate_supervisor = analytics_supervisor_factory(activated_analytics)
                                 candidate_supervisor.start()
                                 analytics_supervisor = candidate_supervisor
-                                if agent_observer_controller is not None:
-                                    with suppress(Exception):
-                                        assert activated_analytics.rodex_sessions_id is not None
-                                        assert activated_analytics.codex_session_id is not None
-                                        agent_observer_controller.activate(
-                                            database_path=(activated_analytics.rodex_database_path),
-                                            rodex_sessions_id=(activated_analytics.rodex_sessions_id),
-                                            rodex_session_id=str(activated_analytics.rodex_session_id),
-                                            root_thread_id=(activated_analytics.codex_session_id),
-                                        )
                             except Exception:
                                 # Persistent statistics are strictly off the interactive
                                 # path; a failed sidecar must not break the Codex TUI.

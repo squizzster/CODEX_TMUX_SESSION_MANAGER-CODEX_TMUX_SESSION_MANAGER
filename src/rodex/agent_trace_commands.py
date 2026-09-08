@@ -42,17 +42,11 @@ def execute_agent_trace_command(arguments: list[str], database_path: Path) -> No
         raise AssertionError("application pipeline selected an invalid trace command")
     if len(arguments) < 2 or arguments[1].startswith("-"):
         raise RodexLaunchError(
-            "usage: rodex _agents SESSION_NAME [--json]"
-            if arguments and arguments[0] == AGENTS_COMMAND
-            else TRACE_USAGE
+            "usage: rodex _agents SESSION_NAME [--json]" if arguments and arguments[0] == AGENTS_COMMAND else TRACE_USAGE
         )
     session_name = arguments[1]
-    trace_request = (
-        _parse_trace_arguments(arguments) if arguments[0] == TRACE_COMMAND else None
-    )
-    session_id = lookup_owned_rodex_sessions_id_from_a_cool_name(
-        session_name, database_path
-    )
+    trace_request = _parse_trace_arguments(arguments) if arguments[0] == TRACE_COMMAND else None
+    session_id = lookup_owned_rodex_sessions_id_from_a_cool_name(session_name, database_path)
     if session_id is None:
         raise RodexLaunchError(f"unknown Rodex session: {session_name}")
     if arguments[0] == AGENTS_COMMAND:
@@ -67,9 +61,7 @@ def execute_agent_trace_command(arguments: list[str], database_path: Path) -> No
     )
 
 
-def _show_agents(
-    arguments: list[str], session_name: str, session_id: int, database_path: Path
-) -> None:
+def _show_agents(arguments: list[str], session_name: str, session_id: int, database_path: Path) -> None:
     if arguments[2:] not in ([], ["--json"]):
         raise RodexLaunchError("usage: rodex _agents SESSION_NAME [--json]")
     sources = list_rodex_session_codex_threads(session_id, database_path)
@@ -81,9 +73,7 @@ def _show_agents(
             {
                 "codex_thread_id": str(source.codex_thread_id),
                 "source_kind": source.source_kind,
-                "parent_codex_thread_id": thread_ids_by_row_id.get(
-                    source.parent_rodex_sessions_codex_threads_id
-                ),
+                "parent_codex_thread_id": thread_ids_by_row_id.get(source.parent_rodex_sessions_codex_threads_id),
                 "thread_depth": source.thread_depth,
                 "agent_path": source.agent_path,
                 "agent_nickname": source.agent_nickname,
@@ -260,9 +250,7 @@ def _attach_authenticated_rollout_bodies(
             records_by_thread[thread_id] = records
         record = records.get(int(event["source_record_ordinal"]))
         event["body"] = (
-            {"capture_state": "unavailable"}
-            if record is None
-            else _safe_event_body(str(event["event_kind"]), record)
+            {"capture_state": "unavailable"} if record is None else _safe_event_body(str(event["event_kind"]), record)
         )
 
 
@@ -286,24 +274,16 @@ def _authenticated_source_records(source: Any) -> dict[int, dict[str, Any]]:
         (path_state.st_dev, path_state.st_ino),
     }
     if len(identities) != 1 or before.st_size < size or after.st_size < size:
-        raise RodexLaunchError(
-            f"authenticated rollout source changed for thread {source.codex_thread_id}"
-        )
+        raise RodexLaunchError(f"authenticated rollout source changed for thread {source.codex_thread_id}")
     if hashlib.sha256(content).hexdigest() != expected_digest:
-        raise RodexLaunchError(
-            f"authenticated rollout prefix changed for thread {source.codex_thread_id}"
-        )
+        raise RodexLaunchError(f"authenticated rollout prefix changed for thread {source.codex_thread_id}")
     records: dict[int, dict[str, Any]] = {}
     _index_source_records(records, content, line_offset=0, thread_id=thread_id)
     return records
 
 
 def _source_prefix_identity(source: Any) -> tuple[str, Path, int, str] | None:
-    if (
-        source.rollout_file_path is None
-        or source.analyzed_size_bytes is None
-        or source.analyzed_prefix_sha256 is None
-    ):
+    if source.rollout_file_path is None or source.analyzed_size_bytes is None or source.analyzed_prefix_sha256 is None:
         return None
     size = source.analyzed_size_bytes
     digest = source.analyzed_prefix_sha256
@@ -315,10 +295,7 @@ def _source_prefix_identity(source: Any) -> tuple[str, Path, int, str] | None:
         or len(digest) != 64
         or any(character not in "0123456789abcdef" for character in digest)
     ):
-        raise RodexLaunchError(
-            "authenticated rollout checkpoint is invalid for thread "
-            f"{source.codex_thread_id}"
-        )
+        raise RodexLaunchError(f"authenticated rollout checkpoint is invalid for thread {source.codex_thread_id}")
     return str(source.codex_thread_id), Path(source.rollout_file_path), size, digest
 
 
@@ -340,9 +317,7 @@ def _index_source_records(
         if not isinstance(ordinal, int) or isinstance(ordinal, bool) or ordinal < 0:
             ordinal = physical_ordinal
         if ordinal in records and records[ordinal] != record:
-            raise RodexLaunchError(
-                f"duplicate rollout ordinal for thread {thread_id}: {ordinal}"
-            )
+            raise RodexLaunchError(f"duplicate rollout ordinal for thread {thread_id}: {ordinal}")
         records[ordinal] = record
 
 
@@ -375,11 +350,7 @@ def _safe_event_body(event_kind: str, record: dict[str, Any]) -> dict[str, Any]:
         return {"capture_state": "redacted", "reason": "hidden_reasoning"}
     if event_kind == "message":
         content = next(
-            (
-                item[key]
-                for key in ("content", "message", "text")
-                if key in item and item[key] is not None
-            ),
+            (item[key] for key in ("content", "message", "text") if key in item and item[key] is not None),
             None,
         )
         selected = {

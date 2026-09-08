@@ -27,13 +27,8 @@ def test_index_re_try_policy_has_exactly_ten_finite_attempts() -> None:
 
 def create_lookup_table(database: Path) -> None:
     with open_rodex_bootstrap_transaction(database) as connection:
-        connection.execute(
-            "CREATE TABLE example_lookup ("
-            "id INTEGER PRIMARY KEY AUTOINCREMENT, code TEXT NOT NULL)"
-        )
-        connection.execute(
-            "CREATE UNIQUE INDEX example_lookup_code_unique ON example_lookup (code)"
-        )
+        connection.execute("CREATE TABLE example_lookup (id INTEGER PRIMARY KEY AUTOINCREMENT, code TEXT NOT NULL)")
+        connection.execute("CREATE UNIQUE INDEX example_lookup_code_unique ON example_lookup (code)")
 
 
 def test_transaction_commits_successful_work(tmp_path: Path) -> None:
@@ -42,9 +37,9 @@ def test_transaction_commits_successful_work(tmp_path: Path) -> None:
     create_lookup_table(database)
 
     with sqlite3.connect(database) as connection:
-        assert connection.execute(
-            "SELECT name FROM sqlite_master WHERE name = 'example_lookup'"
-        ).fetchone() == ("example_lookup",)
+        assert connection.execute("SELECT name FROM sqlite_master WHERE name = 'example_lookup'").fetchone() == (
+            "example_lookup",
+        )
 
 
 def test_transaction_rolls_back_all_work_on_failure(tmp_path: Path) -> None:
@@ -112,9 +107,7 @@ def test_existing_transaction_does_not_initialize_an_unadmitted_file(
     ):
         pass
 
-    assert not any(
-        path.name.endswith(".rodex-transition.lock") for path in tmp_path.iterdir()
-    )
+    assert not any(path.name.endswith(".rodex-transition.lock") for path in tmp_path.iterdir())
 
 
 @pytest.mark.evolutionary_regression
@@ -141,18 +134,11 @@ def test_rolled_back_lookup_insert_does_not_leave_an_autoincrement_gap(
         pytest.raises(RuntimeError),
         open_rodex_transaction(database) as connection,
     ):
-        assert (
-            select_or_insert_lookup_id(
-                connection, "example_lookup", {"code": "rolled-back"}
-            )
-            == 1
-        )
+        assert select_or_insert_lookup_id(connection, "example_lookup", {"code": "rolled-back"}) == 1
         raise RuntimeError
 
     with open_rodex_transaction(database) as connection:
-        inserted_id = select_or_insert_lookup_id(
-            connection, "example_lookup", {"code": "committed"}
-        )
+        inserted_id = select_or_insert_lookup_id(connection, "example_lookup", {"code": "committed"})
 
     assert inserted_id == 1
 
@@ -166,9 +152,7 @@ def test_lookup_selects_before_it_considers_inserting(tmp_path: Path) -> None:
     statements: list[str] = []
     with open_rodex_transaction(database) as connection:
         connection.set_trace_callback(statements.append)
-        existing_id = select_or_insert_lookup_id(
-            connection, "example_lookup", {"code": "existing"}
-        )
+        existing_id = select_or_insert_lookup_id(connection, "example_lookup", {"code": "existing"})
 
     assert existing_id == 1
     assert statements[0].startswith("SELECT id FROM example_lookup")
@@ -193,9 +177,7 @@ def test_lookup_operations_require_an_active_transaction() -> None:
 
 def test_canonical_transaction_invariant_rejects_before_sql() -> None:
     with sqlite3.connect(":memory:") as connection:
-        connection.set_authorizer(
-            lambda *_args: pytest.fail("transaction guard attempted SQL")
-        )
+        connection.set_authorizer(lambda *_args: pytest.fail("transaction guard attempted SQL"))
         with pytest.raises(RodexSQLError, match="active transaction"):
             require_active_rodex_transaction(connection)
 

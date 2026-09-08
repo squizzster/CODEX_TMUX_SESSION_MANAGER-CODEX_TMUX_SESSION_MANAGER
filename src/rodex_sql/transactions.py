@@ -228,9 +228,7 @@ def _connect_validated_database(
             check_same_thread=check_same_thread,
         )
     except sqlite3.Error as error:
-        raise RodexSQLError(
-            f"could not open validated database {opened.path}: {error}"
-        ) from error
+        raise RodexSQLError(f"could not open validated database {opened.path}: {error}") from error
 
 
 def _acquire_database_lock(
@@ -252,8 +250,7 @@ def _acquire_database_lock(
             if time.monotonic() >= deadline:
                 mode = "maintenance" if not exclusive else "active connections"
                 raise RodexSQLError(
-                    f"timed out waiting for database lock at {boundary.path}; "
-                    f"blocked by {mode}"
+                    f"timed out waiting for database lock at {boundary.path}; blocked by {mode}"
                 ) from error
         time.sleep(retry_delay)
         retry_delay = min(retry_delay * 2.0, 0.05)
@@ -275,9 +272,7 @@ def _ensure_wal_journal_mode(connection: sqlite3.Connection) -> None:
             if journal_mode == ("wal",):
                 return
             if time.monotonic() >= deadline:
-                raise RodexSQLError(
-                    f"could not enable WAL journal mode; SQLite returned {journal_mode!r}"
-                )
+                raise RodexSQLError(f"could not enable WAL journal mode; SQLite returned {journal_mode!r}")
         time.sleep(retry_delay)
         retry_delay = min(retry_delay * 2.0, 0.05)
 
@@ -301,9 +296,7 @@ def _retain_process_wal_lifetime(opened: ValidatedDatabaseFile) -> None:
             or current.storage_identity != storage_identity
             or current.database_descriptor != opened.descriptor
         ):
-            raise RodexSQLError(
-                "process-local SQLite storage owner changed before WAL retention"
-            )
+            raise RodexSQLError("process-local SQLite storage owner changed before WAL retention")
         if current.connection is not None:
             return
         current.connection = _open_process_wal_lifetime_connection(opened)
@@ -322,14 +315,11 @@ def _retain_process_database_storage(
     with _PROCESS_WAL_LIFETIME_LOCK:
         current = _PROCESS_WAL_LIFETIME_OWNER
         if current is not None and current.process_id != process_id:
-            raise RodexSQLError(
-                "inherited SQLite storage owner reached an unsupported process boundary"
-            )
+            raise RodexSQLError("inherited SQLite storage owner reached an unsupported process boundary")
         if (
             current is not None
             and current.database_path == path
-            and current.storage_identity.parent
-            == (boundary.parent_state.st_dev, boundary.parent_state.st_ino)
+            and current.storage_identity.parent == (boundary.parent_state.st_dev, boundary.parent_state.st_ino)
             and current.storage_identity.transition_lock
             == (
                 boundary.transition_lock_state.st_dev,

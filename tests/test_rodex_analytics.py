@@ -90,17 +90,13 @@ class FakeAnalyticsAdapter:
         self.accepted_batches = 0
         self.source_ids: set[uuid.UUID] = set()
 
-    def analyze_rollouts(
-        self, sources: list[AnalyticsAnalyzerSource], user_id: str
-    ) -> AnalyticsCalculation:
+    def analyze_rollouts(self, sources: list[AnalyticsAnalyzerSource], user_id: str) -> AnalyticsCalculation:
         if self.fail:
             raise OSError("analytics unavailable")
         captured = tuple(source.analyzer_content for source in sources)
         self.source_ids.update(source.codex_thread_id for source in sources)
         self.analyses.append((captured, user_id))
-        self.appended_analyses.append(
-            tuple(source.appended_analyzer_content for source in sources)
-        )
+        self.appended_analyses.append(tuple(source.appended_analyzer_content for source in sources))
         if self.on_analyze is not None:
             self.on_analyze()
         base = parse_session_statistics_snapshot(analyzer_snapshot())
@@ -189,9 +185,7 @@ def _rollout(root: Path, codex_session_id: uuid.UUID) -> Path:
             "payload": {"type": "task_complete", "turn_id": TURN_TEST_ID},
         },
     ]
-    path.write_text(
-        "".join(json.dumps(record) + "\n" for record in records), encoding="utf-8"
-    )
+    path.write_text("".join(json.dumps(record) + "\n" for record in records), encoding="utf-8")
     return path
 
 
@@ -248,9 +242,7 @@ def _subagent_rollout(
         if inherited_history
         else ({"ordinal": 1, "type": "event_msg", "payload": {"child": True}},)
     )
-    path.write_text(
-        "".join(json.dumps(record) + "\n" for record in records), encoding="utf-8"
-    )
+    path.write_text("".join(json.dumps(record) + "\n" for record in records), encoding="utf-8")
     return path
 
 
@@ -275,9 +267,7 @@ def _analyzer_source(content: bytes) -> AnalyticsAnalyzerSource:
     )
 
 
-def _create(
-    config: AnalyticsWorkerConfig, codex_session_id: uuid.UUID = CODEX_SESSION_ID
-) -> None:
+def _create(config: AnalyticsWorkerConfig, codex_session_id: uuid.UUID = CODEX_SESSION_ID) -> None:
     create_a_rodex_session(
         config.rodex_database_path,
         rodex_session_id=RODEX_SESSION_ID,
@@ -339,14 +329,9 @@ def _collaboration_turn(
         collaboration_operations_count=2,
         collaboration_agents_started_count=0,
         named_counts=tuple(
-            item
-            for item in base.named_counts
-            if item.count_kind not in {"model_tool", "collaboration_tool"}
+            item for item in base.named_counts if item.count_kind not in {"model_tool", "collaboration_tool"}
         )
-        + tuple(
-            StatisticsNamedCount("model_tool", tool_name, count)
-            for tool_name, count in model_tools
-        )
+        + tuple(StatisticsNamedCount("model_tool", tool_name, count) for tool_name, count in model_tools)
         + analyzer_collaboration_count,
     )
 
@@ -359,20 +344,13 @@ def _collaboration_projection(
     for turn in turns:
         for item in turn.named_counts:
             if item.count_kind == "model_tool":
-                model_tools[item.count_name] = (
-                    model_tools.get(item.count_name, 0) + item.occurrence_count
-                )
+                model_tools[item.count_name] = model_tools.get(item.count_name, 0) + item.occurrence_count
     return replace(
         base,
         named_counts=tuple(
-            item
-            for item in base.named_counts
-            if item.count_kind not in {"model_tool", "collaboration_tool"}
+            item for item in base.named_counts if item.count_kind not in {"model_tool", "collaboration_tool"}
         )
-        + tuple(
-            StatisticsNamedCount("model_tool", tool_name, count)
-            for tool_name, count in sorted(model_tools.items())
-        )
+        + tuple(StatisticsNamedCount("model_tool", tool_name, count) for tool_name, count in sorted(model_tools.items()))
         + (StatisticsNamedCount("collaboration_tool", "wait", 2),),
         turn_statistics=turns,
     )
@@ -473,10 +451,7 @@ def test_verified_collaboration_owns_multiple_and_nested_subagents(
     )
 
     assert verified.statistics_projection.collaboration_agents_started_count == 3
-    assert [
-        turn.collaboration_agents_started_count
-        for turn in verified.statistics_projection.turn_statistics
-    ] == [2, 1]
+    assert [turn.collaboration_agents_started_count for turn in verified.statistics_projection.turn_statistics] == [2, 1]
     assert [source.spawning_codex_turn_id for source in verified.analyzed_sources[1:]] == [
         "root-spawn",
         "root-spawn",
@@ -527,9 +502,7 @@ def test_verified_collaboration_rejects_missing_or_ambiguous_turn_ownership(
         RodexAnalyticsError,
         match="must belong to exactly one direct-parent turn",
     ):
-        _derive_verified_collaboration_projection(
-            _collaboration_projection(turns), analyzed_sources=sources
-        )
+        _derive_verified_collaboration_projection(_collaboration_projection(turns), analyzed_sources=sources)
 
 
 def test_verified_collaboration_rejects_session_and_turn_tool_disagreement(
@@ -626,9 +599,7 @@ def test_worker_runs_one_startup_reconciliation_then_uses_the_event_scheduler(
             lifecycle.append("scheduler-dirty")
 
         def run(self, reconcile: Callable[[AnalyticsDirtyBatch], object]) -> None:
-            lifecycle.append(
-                f"reconcile:{reconcile(AnalyticsDirtyBatch(frozenset(), True))}"
-            )
+            lifecycle.append(f"reconcile:{reconcile(AnalyticsDirtyBatch(frozenset(), True))}")
 
         def close(self) -> None:
             lifecycle.append("scheduler-close")
@@ -744,17 +715,13 @@ def test_worker_notifies_the_observer_only_after_durable_trace_publication(
     worker = AnalyticsRolloutWorker(
         config,
         adapter_factory=FakeAnalyticsAdapter,
-        trace_publication_notifier=lambda path, sequence, caught_up: notifications.append(
-            (path, sequence, caught_up)
-        ),
+        trace_publication_notifier=lambda path, sequence, caught_up: notifications.append((path, sequence, caught_up)),
     )
 
     assert worker.poll_once() == "up_to_date"
 
     trace = read_rodex_agent_trace(1, config.rodex_database_path)
-    assert notifications == [
-        (config.protocol_event_socket_path, trace.trace_publication_sequence, True)
-    ]
+    assert notifications == [(config.protocol_event_socket_path, trace.trace_publication_sequence, True)]
 
     assert worker.poll_once() == "up_to_date"
     assert len(notifications) == 1
@@ -863,10 +830,10 @@ def test_cold_restart_recovers_an_unresolved_activity_target_without_scanning(
     restarted = AnalyticsRolloutWorker(config, adapter_factory=FakeAnalyticsAdapter)
 
     assert restarted.poll_once() == "up_to_date"
-    assert [
-        source.codex_thread_id
-        for source in list_rodex_session_codex_threads(1, config.rodex_database_path)
-    ] == [CODEX_SESSION_ID, child_thread_id]
+    assert [source.codex_thread_id for source in list_rodex_session_codex_threads(1, config.rodex_database_path)] == [
+        CODEX_SESSION_ID,
+        child_thread_id,
+    ]
 
 
 def test_live_batch_loads_checkpoint_once_and_reads_only_its_exact_source(
@@ -922,9 +889,7 @@ def test_live_batch_loads_checkpoint_once_and_reads_only_its_exact_source(
     with child_rollout.open("ab") as output:
         output.write(addition)
 
-    assert (
-        worker.poll_once(AnalyticsDirtyBatch(frozenset({child_thread_id}))) == "up_to_date"
-    )
+    assert worker.poll_once(AnalyticsDirtyBatch(frozenset({child_thread_id}))) == "up_to_date"
 
     assert checkpoint_loads == 1
     assert read_paths == [child_rollout.resolve()]
@@ -959,9 +924,7 @@ def test_mixed_batch_publishes_resolved_source_and_retains_unresolved_identity(
     with root_rollout.open("ab") as output:
         output.write(root_addition)
 
-    state = worker.poll_once(
-        AnalyticsDirtyBatch(frozenset({CODEX_SESSION_ID, missing_child_id}))
-    )
+    state = worker.poll_once(AnalyticsDirtyBatch(frozenset({CODEX_SESSION_ID, missing_child_id})))
 
     assert state == "catching_up"
     assert adapter.appended_analyses[-1] == (root_addition,)
@@ -976,9 +939,7 @@ def test_mixed_batch_publishes_resolved_source_and_retains_unresolved_identity(
         missing_child_id,
     )
 
-    assert (
-        worker.poll_once(AnalyticsDirtyBatch(frozenset({CODEX_SESSION_ID}))) == "up_to_date"
-    )
+    assert worker.poll_once(AnalyticsDirtyBatch(frozenset({CODEX_SESSION_ID}))) == "up_to_date"
     assert missing_child_id in adapter.source_ids
 
 
@@ -1101,9 +1062,7 @@ def test_new_historical_child_resolves_against_a_non_latest_resident_parent_turn
         }
     )
 
-    assert (
-        worker.poll_once(AnalyticsDirtyBatch(frozenset({child_thread_id}))) == "up_to_date"
-    )
+    assert worker.poll_once(AnalyticsDirtyBatch(frozenset({child_thread_id}))) == "up_to_date"
     child = next(
         source
         for source in list_rodex_session_codex_threads(1, config.rodex_database_path)
@@ -1176,9 +1135,7 @@ def test_same_burst_nested_children_resolve_in_parent_first_topology(
             }
         )
 
-    state = worker.poll_once(
-        AnalyticsDirtyBatch(frozenset({child_thread_id, grandchild_thread_id}))
-    )
+    state = worker.poll_once(AnalyticsDirtyBatch(frozenset({child_thread_id, grandchild_thread_id})))
 
     assert state == "up_to_date"
     assert worker._requires_full_reconcile is False
@@ -1224,17 +1181,12 @@ def test_new_topology_is_promoted_only_after_its_source_batch_is_accepted(
 
     monkeypatch.setattr(worker._source_reader, "read", fail_new_child_read)
 
-    assert (
-        worker.poll_once(AnalyticsDirtyBatch(frozenset({child_thread_id})))
-        == "clean_replay"
-    )
+    assert worker.poll_once(AnalyticsDirtyBatch(frozenset({child_thread_id}))) == "clean_replay"
     assert child_thread_id not in worker._verified_sources
     assert child_thread_id in worker._pending_resolution_thread_ids
     monkeypatch.setattr(worker._source_reader, "read", original_read)
 
-    assert (
-        worker.poll_once(AnalyticsDirtyBatch(frozenset({child_thread_id}))) == "up_to_date"
-    )
+    assert worker.poll_once(AnalyticsDirtyBatch(frozenset({child_thread_id}))) == "up_to_date"
     assert child_thread_id in worker._verified_sources
 
 
@@ -1292,10 +1244,7 @@ def test_restarted_worker_warms_state_once_then_consumes_only_suffix(
     rollout = _rollout(config.codex_sessions_root, CODEX_SESSION_ID)
     _create(config)
     first_adapter = FakeAnalyticsAdapter()
-    assert (
-        AnalyticsRolloutWorker(config, adapter_factory=lambda: first_adapter).poll_once()
-        == "up_to_date"
-    )
+    assert AnalyticsRolloutWorker(config, adapter_factory=lambda: first_adapter).poll_once() == "up_to_date"
     accepted_baseline = rollout.read_bytes()
     restarted_adapter = FakeAnalyticsAdapter()
     restarted = AnalyticsRolloutWorker(config, adapter_factory=lambda: restarted_adapter)
@@ -1364,14 +1313,10 @@ def test_cold_restart_after_offline_append_publishes_only_trace_and_turn_delta(
     assert len(publications) == 1
     publication = publications[0]
     assert publication.changed_turn_keys == {(CODEX_SESSION_ID, TURN_SECOND_ID)}
-    assert [
-        turn.codex_turn_id for turn in publication.statistics_projection.turn_statistics
-    ] == [TURN_SECOND_ID]
+    assert [turn.codex_turn_id for turn in publication.statistics_projection.turn_statistics] == [TURN_SECOND_ID]
     assert publication.agent_trace_publication is not None
     assert len(publication.agent_trace_publication.events) == 3
-    assert {
-        event.codex_turn_id for event in publication.agent_trace_publication.events
-    } == {TURN_SECOND_ID}
+    assert {event.codex_turn_id for event in publication.agent_trace_publication.events} == {TURN_SECOND_ID}
 
 
 def test_restarted_worker_rebuilds_active_trace_turn_before_suffix(tmp_path: Path) -> None:
@@ -1407,19 +1352,14 @@ def test_restarted_worker_rejects_rewritten_durable_prefix_before_reanalysis(
     rollout = _rollout(config.codex_sessions_root, CODEX_SESSION_ID)
     _create(config)
     first_adapter = FakeAnalyticsAdapter()
-    assert (
-        AnalyticsRolloutWorker(config, adapter_factory=lambda: first_adapter).poll_once()
-        == "up_to_date"
-    )
+    assert AnalyticsRolloutWorker(config, adapter_factory=lambda: first_adapter).poll_once() == "up_to_date"
     original = rollout.read_bytes()
     rewritten = original.replace(b'"model": "gpt-test"', b'"model": "bad-test"')
     assert len(rewritten) == len(original)
     rollout.write_bytes(rewritten + b'{"type":"compacted","payload":{}}\n')
     restarted_adapter = FakeAnalyticsAdapter()
 
-    state = AnalyticsRolloutWorker(
-        config, adapter_factory=lambda: restarted_adapter
-    ).poll_once()
+    state = AnalyticsRolloutWorker(config, adapter_factory=lambda: restarted_adapter).poll_once()
 
     assert state == "clean_replay"
     assert restarted_adapter.analyses == []
@@ -1432,8 +1372,7 @@ def test_restarted_worker_rejects_rewritten_durable_prefix_before_reanalysis(
     "checkpoint_mutation",
     (
         "DELETE FROM rodex_sessions_agent_trace_publications",
-        "UPDATE rodex_sessions_agent_trace_publications "
-        "SET trace_schema_version = 'incompatible-v0'",
+        "UPDATE rodex_sessions_agent_trace_publications SET trace_schema_version = 'incompatible-v0'",
     ),
 )
 def test_restarted_worker_rejects_non_atomic_or_incompatible_publication_heads(
@@ -1443,9 +1382,7 @@ def test_restarted_worker_rejects_non_atomic_or_incompatible_publication_heads(
     config = _config(tmp_path)
     _rollout(config.codex_sessions_root, CODEX_SESSION_ID)
     _create(config)
-    assert AnalyticsRolloutWorker(
-        config, adapter_factory=FakeAnalyticsAdapter
-    ).poll_once() == ("up_to_date")
+    assert AnalyticsRolloutWorker(config, adapter_factory=FakeAnalyticsAdapter).poll_once() == ("up_to_date")
     before = read_rodex_session_statistics(1, config.rodex_database_path)
     assert before.statistics is not None
     with sqlite3.connect(config.rodex_database_path) as connection:
@@ -1461,10 +1398,7 @@ def test_restarted_worker_rejects_non_atomic_or_incompatible_publication_heads(
     assert restarted_adapter.analyses == []
     after = read_rodex_session_statistics(1, config.rodex_database_path)
     assert after.statistics is not None
-    assert (
-        after.statistics.statistics_publication_sequence
-        == before.statistics.statistics_publication_sequence
-    )
+    assert after.statistics.statistics_publication_sequence == before.statistics.statistics_publication_sequence
 
 
 def test_dirty_wake_before_append_retries_without_sql_write_churn(tmp_path: Path) -> None:
@@ -1564,9 +1498,7 @@ def test_deterministic_publication_conflict_parks_large_prefix_across_dirty_gene
         _registry: RodexAnalyticsRegistry,
         _publication: RodexAnalyticsPublication,
     ) -> NoReturn:
-        raise RodexSessionStatisticsConflictError(
-            "sub-agent activity call belongs to a different parent turn"
-        )
+        raise RodexSessionStatisticsConflictError("sub-agent activity call belongs to a different parent turn")
 
     monkeypatch.setattr(source_reader_module, "_pread_exact", measured_pread_exact)
     monkeypatch.setattr(RodexAnalyticsRegistry, "publish", reject_semantic_publication)
@@ -1956,9 +1888,7 @@ def test_analyzer_schema_drift_degrades_without_replacing_relational_snapshot(
     config = _config(tmp_path)
     rollout = _rollout(config.codex_sessions_root, CODEX_SESSION_ID)
     _create(config)
-    first_worker = AnalyticsRolloutWorker(
-        config, adapter_factory=lambda: FakeAnalyticsAdapter()
-    )
+    first_worker = AnalyticsRolloutWorker(config, adapter_factory=lambda: FakeAnalyticsAdapter())
     assert first_worker.poll_once() == "up_to_date"
     before = read_rodex_session_statistics(1, config.rodex_database_path).statistics
     assert before is not None
@@ -1969,9 +1899,7 @@ def test_analyzer_schema_drift_degrades_without_replacing_relational_snapshot(
         def create_new_codex_protocol_id(self, _user_id: str) -> OperationResult[str]:
             return OperationResult("ok", "temporary")
 
-        def load_file(
-            self, _protocol_id: str, _path: Path
-        ) -> OperationResult[LoadFileResult]:
+        def load_file(self, _protocol_id: str, _path: Path) -> OperationResult[LoadFileResult]:
             return OperationResult("ok", analyzer_load_result())
 
         def get_stats(
@@ -1989,9 +1917,7 @@ def test_analyzer_schema_drift_degrades_without_replacing_relational_snapshot(
         "rodex.analytics_analyzer.CodexProtocolLibrary",
         DriftedLibrary,
     )
-    state = AnalyticsRolloutWorker(
-        config, adapter_factory=CodexProtocolAnalyticsAdapter
-    ).poll_once()
+    state = AnalyticsRolloutWorker(config, adapter_factory=CodexProtocolAnalyticsAdapter).poll_once()
     after = read_rodex_session_statistics(1, config.rodex_database_path)
 
     assert state == "clean_replay"
@@ -2072,10 +1998,7 @@ def test_partial_usable_analysis_publishes_gapped_coverage(tmp_path: Path) -> No
     adapter = FakeAnalyticsAdapter()
     adapter.coverage_state = "gapped"
 
-    assert (
-        AnalyticsRolloutWorker(config, adapter_factory=lambda: adapter).poll_once()
-        == "up_to_date"
-    )
+    assert AnalyticsRolloutWorker(config, adapter_factory=lambda: adapter).poll_once() == "up_to_date"
 
     view = read_rodex_session_statistics(1, config.rodex_database_path)
     assert view.statistics is not None
@@ -2125,9 +2048,7 @@ def test_supervisor_start_failure_is_fail_open_and_health_only(
     monkeypatch.setattr(
         RodexAnalyticsRegistry,
         "load_checkpoint",
-        lambda _registry: (_ for _ in ()).throw(
-            AssertionError("supervisor health opened a read transaction")
-        ),
+        lambda _registry: (_ for _ in ()).throw(AssertionError("supervisor health opened a read transaction")),
     )
 
     def fail_start(*_args: object, **_kwargs: object) -> subprocess.Popen[bytes]:
@@ -2237,20 +2158,13 @@ def test_supervisor_close_kills_and_reaps_a_worker_that_ignores_terminate(
 def test_real_adapter_uses_existing_in_memory_analyzer_api(tmp_path: Path) -> None:
     rollout = _rollout(tmp_path, CODEX_SESSION_ID)
 
-    calculation = CodexProtocolAnalyticsAdapter().analyze_rollouts(
-        [_analyzer_source(rollout.read_bytes())], "test-user"
-    )
+    calculation = CodexProtocolAnalyticsAdapter().analyze_rollouts([_analyzer_source(rollout.read_bytes())], "test-user")
 
     assert calculation.coverage_state == "complete"
     assert calculation.statistics_projection.analyzer_source_count == 1
     assert len(calculation.statistics_projection.turn_statistics) == 1
-    assert (
-        calculation.statistics_projection.turn_statistics[0].codex_thread_id
-        == CODEX_SESSION_ID
-    )
-    assert (
-        calculation.statistics_projection.turn_statistics[0].codex_turn_id == TURN_TEST_ID
-    )
+    assert calculation.statistics_projection.turn_statistics[0].codex_thread_id == CODEX_SESSION_ID
+    assert calculation.statistics_projection.turn_statistics[0].codex_turn_id == TURN_TEST_ID
     assert calculation.statistics_projection.turn_statistics[0].model == "gpt-test"
     assert calculation.statistics_projection.turn_statistics[0].reasoning_effort == "xhigh"
 
@@ -2356,16 +2270,12 @@ def test_real_worker_publishes_only_the_incrementally_changed_turn(
     with rollout.open("a", encoding="utf-8") as output:
         output.writelines(json.dumps(record) + "\n" for record in second_turn)
 
-    assert (
-        worker.poll_once(AnalyticsDirtyBatch(frozenset({CODEX_SESSION_ID}))) == "up_to_date"
-    )
+    assert worker.poll_once(AnalyticsDirtyBatch(frozenset({CODEX_SESSION_ID}))) == "up_to_date"
 
     assert len(publications) == 2
     incremental = publications[1]
     assert incremental.changed_turn_keys == {(CODEX_SESSION_ID, TURN_SECOND_ID)}
-    assert [
-        turn.codex_turn_id for turn in incremental.statistics_projection.turn_statistics
-    ] == [TURN_SECOND_ID]
+    assert [turn.codex_turn_id for turn in incremental.statistics_projection.turn_statistics] == [TURN_SECOND_ID]
     assert lookup_resolutions == [
         ("model_names", "gpt-test"),
         ("reasoning_effort_names", "xhigh"),
@@ -2411,9 +2321,7 @@ def test_adapter_maps_partial_values_but_rejects_fatal_or_valueless_results(
         def create_new_codex_protocol_id(self, _user_id: str) -> OperationResult[str]:
             return OperationResult("ok", "temporary")
 
-        def load_file(
-            self, _protocol_id: str, _path: Path
-        ) -> OperationResult[LoadFileResult]:
+        def load_file(self, _protocol_id: str, _path: Path) -> OperationResult[LoadFileResult]:
             return OperationResult(
                 status=load_status,
                 value=analyzer_load_result() if has_load_value else None,
@@ -2437,13 +2345,9 @@ def test_adapter_maps_partial_values_but_rejects_fatal_or_valueless_results(
 
     if raises:
         with pytest.raises(RodexAnalyticsError):
-            CodexProtocolAnalyticsAdapter().analyze_rollouts(
-                [_analyzer_source(b"{}\n")], "test-user"
-            )
+            CodexProtocolAnalyticsAdapter().analyze_rollouts([_analyzer_source(b"{}\n")], "test-user")
     else:
-        calculation = CodexProtocolAnalyticsAdapter().analyze_rollouts(
-            [_analyzer_source(b"{}\n")], "test-user"
-        )
+        calculation = CodexProtocolAnalyticsAdapter().analyze_rollouts([_analyzer_source(b"{}\n")], "test-user")
         assert calculation.coverage_state == expected_coverage
         assert calculation.statistics_projection.analyzer_source_count == 1
     assert closed == [True]

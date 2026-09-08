@@ -20,9 +20,7 @@ def test_cli_is_the_complete_thin_process_entrypoint() -> None:
     assert classes == set()
 
 
-def test_cli_enters_exactly_one_application_pipeline(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_cli_enters_exactly_one_application_pipeline(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     constructed: list[dict[str, object]] = []
     executions: list[tuple[str, ...]] = []
 

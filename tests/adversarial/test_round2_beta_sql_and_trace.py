@@ -64,8 +64,7 @@ def test_round2_steady_state_schema_bootstrap_has_a_small_sql_budget(
     initialise_rodex_database(database)
 
     assert len(statements) <= STEADY_STATE_STATEMENT_BUDGET, (
-        "steady-state bootstrap must use a schema-generation fast path; "
-        f"observed {len(statements)} SQL statements"
+        f"steady-state bootstrap must use a schema-generation fast path; observed {len(statements)} SQL statements"
     )
     assert sum(sql == "BEGIN IMMEDIATE" for sql in statements) <= 1
     assert sum(sql == "COMMIT" for sql in statements) <= 1
@@ -83,8 +82,7 @@ def test_round2_hot_access_mutation_uses_one_small_transaction(
     record_a_rodex_session_access(session.rodex_sessions_id, database)
 
     assert len(statements) <= STEADY_STATE_STATEMENT_BUDGET, (
-        "a hot row mutation must not replay the whole schema verifier; "
-        f"observed {len(statements)} SQL statements"
+        f"a hot row mutation must not replay the whole schema verifier; observed {len(statements)} SQL statements"
     )
     assert sum(sql == "BEGIN IMMEDIATE" for sql in statements) == 1
     assert sum(sql == "COMMIT" for sql in statements) == 1
@@ -137,15 +135,11 @@ def test_round2_concurrent_bootstrap_runs_full_schema_creation_once(
     statements, _connections = _trace_sql(monkeypatch)
 
     with ThreadPoolExecutor(max_workers=8) as workers:
-        paths = list(
-            workers.map(lambda _index: initialise_rodex_database(database), range(8))
-        )
+        paths = list(workers.map(lambda _index: initialise_rodex_database(database), range(8)))
 
     assert paths == [database] * 8
     registry_creates = [
-        sql
-        for sql in statements
-        if sql.lstrip().startswith("CREATE TABLE IF NOT EXISTS rodex_registries")
+        sql for sql in statements if sql.lstrip().startswith("CREATE TABLE IF NOT EXISTS rodex_registries")
     ]
     assert len(registry_creates) == 1
 
@@ -186,9 +180,7 @@ def test_round2_trace_parser_explains_that_follow_is_metadata_only() -> None:
         RodexLaunchError,
         match=r"snapshot-only.*metadata-only",
     ):
-        trace_commands._parse_trace_arguments(
-            ["_trace", "session", "--follow", "--include-bodies"]
-        )
+        trace_commands._parse_trace_arguments(["_trace", "session", "--follow", "--include-bodies"])
 
 
 def test_round2_public_trace_rejects_body_follow_before_session_lookup(
@@ -332,6 +324,5 @@ def test_round2_idle_trace_follow_increases_its_database_poll_interval(
     capsys.readouterr()
     assert queries == len(requested_delays)
     assert requested_delays == [1.0, 2.0, 4.0, 8.0], (
-        "an idle follower must back off its DB-open/query cadence; "
-        f"requested delays were {requested_delays}"
+        f"an idle follower must back off its DB-open/query cadence; requested delays were {requested_delays}"
     )

@@ -14,9 +14,7 @@ from rodex.managed_session_lifecycle import (
 from rodex_registry import parse_codex_session_id
 
 
-def test_selector_resolution_returns_the_owned_identity_once(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_selector_resolution_returns_the_owned_identity_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     lookups: list[tuple[str, Path]] = []
 
     def lookup(selector: str, database_path: Path) -> int:
@@ -50,9 +48,7 @@ def test_canonical_unregistered_codex_identity_is_selected_without_opening_sql(
 
     selection = ManagedSessionLifecycle().resolve_selector(selector, database)
 
-    assert selection == UnregisteredCodexSessionSelection(
-        selector, parse_codex_session_id(selector)
-    )
+    assert selection == UnregisteredCodexSessionSelection(selector, parse_codex_session_id(selector))
     assert not database.exists()
 
 

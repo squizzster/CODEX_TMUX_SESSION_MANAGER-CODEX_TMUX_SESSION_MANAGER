@@ -191,9 +191,7 @@ print(json.dumps({
 
     assert result["threads_after"] == result["threads_before"]
     assert not any("inotify" in target for target in result["fd_targets"])
-    retained_targets = [
-        target for target in result["fd_targets"] if os.fspath(tmp_path) in target
-    ]
+    retained_targets = [target for target in result["fd_targets"] if os.fspath(tmp_path) in target]
     assert 1 <= len(retained_targets) <= 6
     allowed_suffixes = (
         "registry.sqlite3",

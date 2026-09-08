@@ -1,6 +1,6 @@
 [project]
 name = "codex-tmux-session-manager"
-version = "0.5.0a1"
+version = "0.6.0a3"
 description = "Durable Codex sessions bridging native tmux use and exact local automation"
 readme = "README.md"
 authors = [
@@ -32,6 +32,7 @@ dev = [
 addopts = "--strict-markers --strict-config"
 testpaths = ["tests"]
 markers = [
+    "live_startup: exercises the installed Rodex CLI with real authenticated Codex and isolated tmux/SQL",
     "evolutionary_regression: guards a production fix based on current best evidence; deliberately replace it when broader evidence supersedes the model",
 ]
 
@@ -44,8 +45,9 @@ fail_under = 70
 show_missing = true
 
 [tool.ruff]
-line-length = 92
+line-length = 122
 target-version = "py312"
+extend-exclude = [".tmp_*"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
@@ -60,5 +62,5 @@ module-name = [
 ]
 
 [build-system]
-requires = ["uv_build>=0.12.1"]
+requires = ["uv_build>=0.12.1,<0.13"]
 build-backend = "uv_build"

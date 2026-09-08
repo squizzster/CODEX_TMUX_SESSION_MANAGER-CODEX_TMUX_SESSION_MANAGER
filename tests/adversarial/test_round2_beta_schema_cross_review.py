@@ -24,6 +24,7 @@ from rodex_registry import (
     record_a_rodex_session_access,
     record_a_rodex_session_runtime_resume,
 )
+from rodex_sql import RODEX_DATABASE_SCHEMA_GENERATION
 
 
 def test_round2_hot_mutation_checks_generation_after_begin_immediate(
@@ -45,15 +46,9 @@ def test_round2_hot_mutation_checks_generation_after_begin_immediate(
     record_a_rodex_session_access(session.rodex_sessions_id, database)
 
     begin = statements.index("BEGIN IMMEDIATE")
-    generation = next(
-        index
-        for index, statement in enumerate(statements)
-        if "FROM rodex_schema_generations" in statement
-    )
+    generation = next(index for index, statement in enumerate(statements) if "FROM rodex_schema_generations" in statement)
     mutation = next(
-        index
-        for index, statement in enumerate(statements)
-        if statement.startswith("UPDATE rodex_sessions_log")
+        index for index, statement in enumerate(statements) if statement.startswith("UPDATE rodex_sessions_log")
     )
     assert begin < generation < mutation
     assert statements.count("BEGIN IMMEDIATE") == 1
@@ -71,12 +66,12 @@ def test_round2_hot_mutation_atomically_bootstraps_an_empty_private_database(
 
     assert user.id == 1
     with sqlite3.connect(database) as connection:
-        assert connection.execute(
-            "SELECT schema_generation FROM rodex_schema_generations WHERE id = 1"
-        ).fetchone() == (18,)
-        assert connection.execute(
-            "SELECT uid, gid, user_name FROM rodex_sessions_users"
-        ).fetchall() == [(1234, 1234, "round2")]
+        assert connection.execute("SELECT schema_generation FROM rodex_schema_generations WHERE id = 1").fetchone() == (
+            RODEX_DATABASE_SCHEMA_GENERATION,
+        )
+        assert connection.execute("SELECT uid, gid, user_name FROM rodex_sessions_users").fetchall() == [
+            (1234, 1234, "round2")
+        ]
 
 
 def test_round2_concurrent_empty_mutations_run_the_cold_bootstrap_once(
@@ -111,9 +106,7 @@ def test_round2_concurrent_empty_mutations_run_the_cold_bootstrap_once(
     assert len(set(user_ids)) == 4
     assert (
         sum(
-            statement.lstrip().startswith(
-                "CREATE TABLE IF NOT EXISTS rodex_schema_generations"
-            )
+            statement.lstrip().startswith("CREATE TABLE IF NOT EXISTS rodex_schema_generations")
             for statement in statements
         )
         == 1
@@ -129,9 +122,7 @@ def test_round2_hot_mutation_rejects_a_mismatched_generation_before_mutation(
     session = create_a_rodex_session(database, codex_session_id=uuid.uuid4())
     before = lookup_rodex_session_log(session.rodex_sessions_id, database)
     with sqlite3.connect(database) as connection:
-        connection.execute(
-            "UPDATE rodex_schema_generations SET schema_generation = 13 WHERE id = 1"
-        )
+        connection.execute("UPDATE rodex_schema_generations SET schema_generation = 13 WHERE id = 1")
 
     with pytest.raises(RodexSessionError, match="schema generation does not match"):
         record_a_rodex_session_access(session.rodex_sessions_id, database)
@@ -181,12 +172,7 @@ def test_round2_stale_resume_rejects_the_whole_incarnation_tuple(tmp_path: Path)
         "/tmp/rodex/current.sock",
         "current",
     )
-    assert (
-        lookup_codex_session_id_from_a_rodex_sessions_id(
-            session.rodex_sessions_id, database
-        )
-        == current_codex_id
-    )
+    assert lookup_codex_session_id_from_a_rodex_sessions_id(session.rodex_sessions_id, database) == current_codex_id
 
 
 def test_round2_concurrent_resume_keeps_one_newest_incarnation_tuple(
@@ -252,12 +238,7 @@ def test_round2_concurrent_resume_keeps_one_newest_incarnation_tuple(
         "/tmp/rodex/newer.sock",
         "newer",
     )
-    assert (
-        lookup_codex_session_id_from_a_rodex_sessions_id(
-            session.rodex_sessions_id, database
-        )
-        == newer_codex_id
-    )
+    assert lookup_codex_session_id_from_a_rodex_sessions_id(session.rodex_sessions_id, database) == newer_codex_id
 
 
 def test_round2_resume_heals_a_poisoned_future_incarnation_as_one_tuple(
@@ -307,12 +288,7 @@ def test_round2_resume_heals_a_poisoned_future_incarnation_as_one_tuple(
         "healed",
     )
     assert log.last_accessed_at_utc == "2030-01-02T00:00:00.000000Z"
-    assert (
-        lookup_codex_session_id_from_a_rodex_sessions_id(
-            session.rodex_sessions_id, database
-        )
-        == replacement_codex_id
-    )
+    assert lookup_codex_session_id_from_a_rodex_sessions_id(session.rodex_sessions_id, database) == replacement_codex_id
 
 
 def test_round2_resume_rejects_a_noncanonical_runtime_start(tmp_path: Path) -> None:
@@ -353,8 +329,7 @@ def test_round2_access_rejects_noncanonical_durable_high_water_marks(
     session = create_a_rodex_session(database, codex_session_id=uuid.uuid4())
     with sqlite3.connect(database) as connection:
         connection.execute(
-            "UPDATE rodex_sessions_log SET last_accessed_at_utc = ? "
-            "WHERE rodex_sessions_id = ?",
+            "UPDATE rodex_sessions_log SET last_accessed_at_utc = ? WHERE rodex_sessions_id = ?",
             (durable_timestamp, session.rodex_sessions_id),
         )
 
@@ -373,8 +348,7 @@ def test_round2_access_heals_a_durable_mark_beyond_the_skew_window(
     session = create_a_rodex_session(database, codex_session_id=uuid.uuid4())
     with sqlite3.connect(database) as connection:
         connection.execute(
-            "UPDATE rodex_sessions_log SET last_accessed_at_utc = ? "
-            "WHERE rodex_sessions_id = ?",
+            "UPDATE rodex_sessions_log SET last_accessed_at_utc = ? WHERE rodex_sessions_id = ?",
             ("2099-01-01T00:00:00.000000Z", session.rodex_sessions_id),
         )
 
@@ -396,14 +370,8 @@ def test_round2_integrity_audit_rejects_every_unexpected_schema_object(
     database = initialise_rodex_database(tmp_path / "rodex.sqlite3")
     statements = {
         "table": "CREATE TABLE unexpected_round2_table (id INTEGER)",
-        "index": (
-            "CREATE INDEX unexpected_round2_index "
-            "ON rodex_sessions_log (last_accessed_at_utc)"
-        ),
-        "trigger": (
-            "CREATE TRIGGER unexpected_round2_trigger AFTER UPDATE "
-            "ON rodex_sessions_log BEGIN SELECT 1; END"
-        ),
+        "index": ("CREATE INDEX unexpected_round2_index ON rodex_sessions_log (last_accessed_at_utc)"),
+        "trigger": ("CREATE TRIGGER unexpected_round2_trigger AFTER UPDATE ON rodex_sessions_log BEGIN SELECT 1; END"),
     }
     with sqlite3.connect(database) as connection:
         connection.execute(statements[object_kind])
@@ -443,9 +411,7 @@ def test_round2_integrity_audit_uses_a_read_only_wal_aware_transaction(
     assert (valid.stat().st_size, valid.stat().st_mtime_ns) == before_valid
     assert (invalid.stat().st_size, invalid.stat().st_mtime_ns) == before_invalid
     forbidden = ("INSERT ", "UPDATE ", "DELETE ", "CREATE ", "DROP ", "ALTER ")
-    assert not any(
-        statement.lstrip().upper().startswith(forbidden) for statement in statements
-    )
+    assert not any(statement.lstrip().upper().startswith(forbidden) for statement in statements)
     assert statements.count("BEGIN") == 2
 
 
@@ -456,10 +422,7 @@ def test_round2_integrity_audit_sees_an_unexpected_view_in_an_active_wal(
     writer = sqlite3.connect(database, isolation_level=None)
     try:
         writer.execute("PRAGMA wal_autocheckpoint = 0")
-        writer.execute(
-            "CREATE VIEW unexpected_round2_view AS "
-            "SELECT rodex_sessions_id FROM rodex_sessions_log"
-        )
+        writer.execute("CREATE VIEW unexpected_round2_view AS SELECT rodex_sessions_id FROM rodex_sessions_log")
         wal = Path(f"{database}-wal")
         before = (
             database.stat().st_mtime_ns,

@@ -131,18 +131,12 @@ def _identity(state: os.stat_result) -> tuple[int, int]:
 
 
 def _private_directory(state: os.stat_result) -> bool:
-    return (
-        stat_module.S_ISDIR(state.st_mode)
-        and state.st_uid == os.getuid()
-        and state.st_mode & 0o077 == 0
-    )
+    return stat_module.S_ISDIR(state.st_mode) and state.st_uid == os.getuid() and state.st_mode & 0o077 == 0
 
 
 def _private_regular_file(state: os.stat_result) -> bool:
     return (
-        stat_module.S_ISREG(state.st_mode)
-        and state.st_uid == os.getuid()
-        and stat_module.S_IMODE(state.st_mode) == 0o600
+        stat_module.S_ISREG(state.st_mode) and state.st_uid == os.getuid() and stat_module.S_IMODE(state.st_mode) == 0o600
     )
 
 

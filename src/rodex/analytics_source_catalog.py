@@ -72,9 +72,7 @@ class AnalyticsSourceCatalog:
             directory = self._sessions_root / expected_date.strftime("%Y/%m/%d")
             try:
                 with os.scandir(directory) as entries:
-                    candidates.extend(
-                        Path(entry.path) for entry in entries if entry.name.endswith(suffix)
-                    )
+                    candidates.extend(Path(entry.path) for entry in entries if entry.name.endswith(suffix))
             except OSError:
                 continue
         return tuple(sorted(set(candidates)))
@@ -105,8 +103,7 @@ class AnalyticsSourceCatalog:
                     candidates.extend(
                         Path(entry.path)
                         for entry in entries
-                        if entry.name.endswith(".jsonl")
-                        and entry.is_file(follow_symlinks=False)
+                        if entry.name.endswith(".jsonl") and entry.is_file(follow_symlinks=False)
                     )
             except OSError:
                 continue
@@ -117,9 +114,7 @@ class AnalyticsSourceCatalog:
         parsed_thread_id = parse_codex_thread_id(thread_id)
         with self._lock:
             self._resolved_paths[parsed_thread_id] = path
-            self._dates_by_thread.setdefault(parsed_thread_id, set()).update(
-                _uuid_v7_date_window(parsed_thread_id)
-            )
+            self._dates_by_thread.setdefault(parsed_thread_id, set()).update(_uuid_v7_date_window(parsed_thread_id))
 
     def _observe_thread(self, thread: Mapping[str, Any]) -> None:
         try:

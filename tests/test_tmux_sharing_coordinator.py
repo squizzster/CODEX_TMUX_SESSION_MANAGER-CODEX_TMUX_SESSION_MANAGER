@@ -137,8 +137,7 @@ def test_changed_count_is_admitted_only_through_the_exact_full_capability(
 
 def test_malformed_registered_roster_aborts_before_any_mutation(tmp_path: Path) -> None:
     runner = _SharingRunner(
-        f"{_registered_row(attached='2', previous='1')}\n"
-        f"{_registered_row(tmux_session_id='$2', runtime_id='invalid')}\n"
+        f"{_registered_row(attached='2', previous='1')}\n{_registered_row(tmux_session_id='$2', runtime_id='invalid')}\n"
     )
 
     result = reconcile_sharing_state(

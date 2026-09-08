@@ -34,14 +34,10 @@ def _characterize_schema(schema_root: Path) -> dict[str, object]:
     user_input_response = _load_schema(schema_root, "ToolRequestUserInputResponse.json")
     definitions = thread_read["definitions"]
     agent_message = next(
-        option
-        for option in definitions["ThreadItem"]["oneOf"]
-        if option["title"] == "AgentMessageThreadItem"
+        option for option in definitions["ThreadItem"]["oneOf"] if option["title"] == "AgentMessageThreadItem"
     )
     user_message = next(
-        option
-        for option in definitions["ThreadItem"]["oneOf"]
-        if option["title"] == "UserMessageThreadItem"
+        option for option in definitions["ThreadItem"]["oneOf"] if option["title"] == "UserMessageThreadItem"
     )
     return {
         "codex_cli_version": CODEX_APP_SERVER.minimum_version,
@@ -49,38 +45,26 @@ def _characterize_schema(schema_root: Path) -> dict[str, object]:
         "request_id_types": sorted(option["type"] for option in request_id["anyOf"]),
         "thread_required_fields": definitions["Thread"]["required"],
         "thread_statuses": sorted(
-            option["properties"]["type"]["enum"][0]
-            for option in definitions["ThreadStatus"]["oneOf"]
+            option["properties"]["type"]["enum"][0] for option in definitions["ThreadStatus"]["oneOf"]
         ),
         "turn_statuses": definitions["TurnStatus"]["enum"],
-        "agent_message_phases": sorted(
-            option["enum"][0] for option in definitions["MessagePhase"]["oneOf"]
-        ),
+        "agent_message_phases": sorted(option["enum"][0] for option in definitions["MessagePhase"]["oneOf"]),
         "agent_message_phase_required": "phase" in agent_message["required"],
         "agent_message_phase_nullable": any(
-            option.get("type") == "null"
-            for option in agent_message["properties"]["phase"]["anyOf"]
+            option.get("type") == "null" for option in agent_message["properties"]["phase"]["anyOf"]
         ),
         "file_change_statuses": definitions["PatchApplyStatus"]["enum"],
         "turn_start_required_params": turn_start["required"],
-        "turn_start_client_message_id_types": sorted(
-            turn_start["properties"]["clientUserMessageId"]["type"]
-        ),
+        "turn_start_client_message_id_types": sorted(turn_start["properties"]["clientUserMessageId"]["type"]),
         "turn_start_response_required_fields": turn_start_response["required"],
         "turn_steer_required_params": turn_steer["required"],
-        "turn_steer_client_message_id_types": sorted(
-            turn_steer["properties"]["clientUserMessageId"]["type"]
-        ),
-        "user_message_client_id_types": sorted(
-            user_message["properties"]["clientId"]["type"]
-        ),
+        "turn_steer_client_message_id_types": sorted(turn_steer["properties"]["clientUserMessageId"]["type"]),
+        "user_message_client_id_types": sorted(user_message["properties"]["clientId"]["type"]),
         "user_message_client_id_required": "clientId" in user_message["required"],
         "user_input_request_required_params": user_input_request["required"],
         "user_input_response_required_params": user_input_response["required"],
         "turn_interrupt_required_params": turn_interrupt["required"],
-        "server_request_methods": sorted(
-            option["properties"]["method"]["enum"][0] for option in server_request["oneOf"]
-        ),
+        "server_request_methods": sorted(option["properties"]["method"]["enum"][0] for option in server_request["oneOf"]),
     }
 
 
@@ -114,50 +98,29 @@ def test_checked_in_contract_is_generated_from_the_minimum_supported_cli(
         capture_output=True,
         text=True,
     )
-    fixture_path = (
-        Path(__file__).parent / "fixtures" / "codex_app_server_0_151_contract.json"
-    )
+    fixture_path = Path(__file__).parent / "fixtures" / "codex_app_server_0_151_contract.json"
     checked_in = json.loads(fixture_path.read_text(encoding="utf-8"))
 
     assert checked_in == _characterize_schema(schema_root)
 
 
 def test_live_initialize_metadata_accepts_the_minimum_and_newer_stable_versions() -> None:
-    assert (
-        CODEX_APP_SERVER.require_minimum_version(
-            {"userAgent": "rodex-control/0.151.0 (Linux; x86_64)"}
-        )
-        == "0.151.0"
-    )
-    assert (
-        CODEX_APP_SERVER.require_minimum_version(
-            {"userAgent": "rodex-control/0.151.1 (Linux; x86_64)"}
-        )
-        == "0.151.1"
-    )
-    assert (
-        CODEX_APP_SERVER.require_minimum_version(
-            {"userAgent": "rodex-control/1.0.0 (Linux; x86_64)"}
-        )
-        == "1.0.0"
-    )
+    assert CODEX_APP_SERVER.require_minimum_version({"userAgent": "rodex-control/0.151.0 (Linux; x86_64)"}) == "0.151.0"
+    assert CODEX_APP_SERVER.require_minimum_version({"userAgent": "rodex-control/0.151.1 (Linux; x86_64)"}) == "0.151.1"
+    assert CODEX_APP_SERVER.require_minimum_version({"userAgent": "rodex-control/1.0.0 (Linux; x86_64)"}) == "1.0.0"
 
     with pytest.raises(
         RodexAppServerVersionError,
         match=r"requires Codex App Server 0\.151\.0 or newer; live server is 0\.150\.1",
     ):
-        CODEX_APP_SERVER.require_minimum_version(
-            {"userAgent": "rodex-control/0.150.1 (Linux)"}
-        )
+        CODEX_APP_SERVER.require_minimum_version({"userAgent": "rodex-control/0.150.1 (Linux)"})
 
     for version in ("development", "0.151.0-beta.1"):
         with pytest.raises(
             RodexAppServerVersionError,
             match="unrecognized Codex version",
         ):
-            CODEX_APP_SERVER.require_minimum_version(
-                {"userAgent": f"rodex-control/{version} (Linux)"}
-            )
+            CODEX_APP_SERVER.require_minimum_version({"userAgent": f"rodex-control/{version} (Linux)"})
 
 
 def test_live_initialize_metadata_rejects_missing_version() -> None:
@@ -174,9 +137,7 @@ def test_contract_owns_process_and_handshake_messages(tmp_path: Path) -> None:
         "--listen",
         f"unix://{socket_path}",
     )
-    assert CODEX_APP_SERVER.initialize_request(
-        "request-1", RODEX_CONTROL_APP_SERVER_CLIENT
-    ) == {
+    assert CODEX_APP_SERVER.initialize_request("request-1", RODEX_CONTROL_APP_SERVER_CLIENT) == {
         "method": CODEX_APP_SERVER.initialize_method,
         "id": "request-1",
         "params": {
@@ -227,9 +188,7 @@ def test_app_server_method_vocabulary_has_one_production_owner() -> None:
         duplicates.extend(
             (path.name, node.value)
             for node in ast.walk(tree)
-            if isinstance(node, ast.Constant)
-            and isinstance(node.value, str)
-            and node.value in owned_methods
+            if isinstance(node, ast.Constant) and isinstance(node.value, str) and node.value in owned_methods
         )
 
     assert duplicates == []

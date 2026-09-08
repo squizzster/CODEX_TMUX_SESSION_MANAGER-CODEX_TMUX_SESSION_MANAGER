@@ -59,9 +59,7 @@ class AnalyticsWorkerConfig:
                 parse_codex_session_id(self.codex_session_id),
             )
         activated = (self.rodex_sessions_id, self.codex_session_id)
-        if any(value is not None for value in activated) and not all(
-            value is not None for value in activated
-        ):
+        if any(value is not None for value in activated) and not all(value is not None for value in activated):
             raise ValueError("analytics activation identity must be supplied together")
         if self.rodex_sessions_id is not None and (
             not isinstance(self.rodex_sessions_id, int)
@@ -100,30 +98,29 @@ class AnalyticsWorkerConfig:
         cls,
         parser: argparse.ArgumentParser,
         *,
-        required: bool,
         include_event_socket: bool = True,
         include_runtime_id: bool = True,
     ) -> None:
-        parser.add_argument("--rodex-database", required=required, type=Path)
-        parser.add_argument("--codex-sessions-root", required=required, type=Path)
+        parser.add_argument("--rodex-database", required=True, type=Path)
+        parser.add_argument("--codex-sessions-root", required=True, type=Path)
         parser.add_argument(
             "--rodex-session-id",
-            required=required,
+            required=True,
             type=RodexSessionId.parse,
         )
         parser.add_argument(
             "--rodex-registry-id",
-            required=required,
+            required=True,
             type=parse_rodex_registry_id,
         )
         if include_runtime_id:
             parser.add_argument(
                 "--rodex-runtime-id",
-                required=required,
+                required=True,
                 type=parse_rodex_runtime_id,
             )
         if include_event_socket:
-            parser.add_argument("--protocol-event-socket", required=required, type=Path)
+            parser.add_argument("--protocol-event-socket", required=True, type=Path)
         parser.add_argument("--rodex-sessions-id", type=int)
         parser.add_argument("--codex-session-id", type=parse_codex_session_id)
 
@@ -131,21 +128,8 @@ class AnalyticsWorkerConfig:
     def from_namespace(
         cls,
         namespace: argparse.Namespace,
-        *,
-        optional_group: bool,
-    ) -> Self | None:
-        values = (
-            namespace.rodex_database,
-            namespace.codex_sessions_root,
-            namespace.rodex_session_id,
-            namespace.rodex_registry_id,
-            namespace.rodex_runtime_id,
-            namespace.protocol_event_socket,
-        )
-        if optional_group and not any(value is not None for value in values):
-            return None
-        if not all(value is not None for value in values):
-            raise ValueError("analytics arguments must be supplied together")
+    ) -> Self:
+        """Read the required identity group from a current process parser."""
         return cls(
             rodex_database_path=namespace.rodex_database,
             codex_sessions_root=namespace.codex_sessions_root,
@@ -176,9 +160,7 @@ class AnalyticsWorkerConfig:
         if include_runtime_id:
             arguments.extend(("--rodex-runtime-id", str(self.runtime_id)))
         if include_event_socket:
-            arguments.extend(
-                ("--protocol-event-socket", str(self.protocol_event_socket_path))
-            )
+            arguments.extend(("--protocol-event-socket", str(self.protocol_event_socket_path)))
         if self.is_activated:
             assert self.rodex_sessions_id is not None
             assert self.codex_session_id is not None
@@ -195,16 +177,14 @@ class AnalyticsWorkerConfig:
     @classmethod
     def parser(cls) -> argparse.ArgumentParser:
         parser = argparse.ArgumentParser(prog="python -m rodex.analytics_worker")
-        cls.add_arguments(parser, required=True)
+        cls.add_arguments(parser)
         return parser
 
     @classmethod
     def parse(cls, arguments: list[str] | None = None) -> Self:
         config = cls.from_namespace(
             cls.parser().parse_args(arguments),
-            optional_group=False,
         )
-        assert config is not None
         if not config.is_activated:
             cls.parser().error("analytics worker requires a committed activation identity")
         return config
@@ -232,8 +212,8 @@ class SessionHostConfig:
     tmux_binary: str
     tmux_server_socket_path: Path
     runtime_id: RodexRuntimeId
+    analytics: AnalyticsWorkerConfig
     codex_arguments: tuple[str, ...] = ()
-    analytics: AnalyticsWorkerConfig | None = None
 
     def __post_init__(self) -> None:
         if not self.codex_binary or not self.tmux_binary:
@@ -246,12 +226,9 @@ class SessionHostConfig:
             "tmux_server_socket_path",
         ):
             object.__setattr__(self, field_name, _absolute_path(getattr(self, field_name)))
-        if (
-            self.analytics is not None
-            and self.analytics.protocol_event_socket_path != self.protocol_event_socket_path
-        ):
+        if self.analytics.protocol_event_socket_path != self.protocol_event_socket_path:
             raise ValueError("analytics must use the session host event socket")
-        if self.analytics is not None and self.analytics.runtime_id != self.runtime_id:
+        if self.analytics.runtime_id != self.runtime_id:
             raise ValueError("analytics must use the session host runtime identity")
 
     @classmethod
@@ -271,7 +248,6 @@ class SessionHostConfig:
         )
         AnalyticsWorkerConfig.add_arguments(
             parser,
-            required=False,
             include_event_socket=False,
             include_runtime_id=False,
         )
@@ -284,30 +260,7 @@ class SessionHostConfig:
         codex_arguments = tuple(namespace.codex_arguments)
         if codex_arguments[:1] == ("--",):
             codex_arguments = codex_arguments[1:]
-        analytics_fields = (
-            namespace.rodex_database,
-            namespace.codex_sessions_root,
-            namespace.rodex_session_id,
-            namespace.rodex_registry_id,
-        )
-        if any(value is not None for value in analytics_fields) and not all(
-            value is not None for value in analytics_fields
-        ):
-            cls.parser().error("analytics arguments must be supplied together")
-        analytics = (
-            None
-            if not any(value is not None for value in analytics_fields)
-            else AnalyticsWorkerConfig(
-                rodex_database_path=namespace.rodex_database,
-                codex_sessions_root=namespace.codex_sessions_root,
-                rodex_session_id=namespace.rodex_session_id,
-                rodex_registry_id=namespace.rodex_registry_id,
-                runtime_id=namespace.rodex_runtime_id,
-                protocol_event_socket_path=namespace.protocol_event_socket,
-                rodex_sessions_id=namespace.rodex_sessions_id,
-                codex_session_id=namespace.codex_session_id,
-            )
-        )
+        analytics = AnalyticsWorkerConfig.from_namespace(namespace)
         return cls(
             codex_binary=namespace.codex_binary,
             app_server_socket_path=namespace.app_server_socket,
@@ -340,13 +293,12 @@ class SessionHostConfig:
             "--rodex-runtime-id",
             str(self.runtime_id),
         ]
-        if self.analytics is not None:
-            arguments.extend(
-                self.analytics.to_argv(
-                    include_event_socket=False,
-                    include_runtime_id=False,
-                )
+        arguments.extend(
+            self.analytics.to_argv(
+                include_event_socket=False,
+                include_runtime_id=False,
             )
+        )
         return [*arguments, "--", *self.codex_arguments]
 
     def command(self, python_executable: str) -> list[str]:

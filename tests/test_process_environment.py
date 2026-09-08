@@ -7,11 +7,54 @@ import pytest
 
 import rodex.environment_exec as environment_exec_module
 from rodex.process_environment import (
+    canonical_native_executable,
+    canonical_python_environment_executable,
     exact_environment_exec_command,
     select_exact_process_environment,
     user_process_environment,
     validated_user_environment_entries,
 )
+
+
+def test_python_aliases_keep_their_environment_instead_of_the_shared_base_binary(tmp_path: Path) -> None:
+    base_python = tmp_path / "base-python"
+    base_python.write_text("test binary")
+    environments = []
+    for name in ("first", "second"):
+        python = tmp_path / name / "bin" / "python"
+        python.parent.mkdir(parents=True)
+        python.symlink_to(base_python)
+        python3 = python.with_name("python3")
+        python3.symlink_to("python")
+        environments.append(str(python))
+        assert canonical_python_environment_executable(str(python3)) == str(python)
+        assert canonical_python_environment_executable(str(python)) == str(python)
+    assert environments[0] != environments[1]
+
+
+def test_python_directory_aliases_resolve_without_leaving_the_environment(tmp_path: Path) -> None:
+    python = tmp_path / "environment" / "bin" / "python"
+    python.parent.mkdir(parents=True)
+    python.write_text("test binary")
+    alias = tmp_path / "environment-alias"
+    alias.symlink_to(python.parent.parent, target_is_directory=True)
+    assert canonical_python_environment_executable(str(alias / "bin" / "python")) == str(python)
+
+
+def test_explicit_python_without_an_environment_python_alias_keeps_its_selected_name(tmp_path: Path) -> None:
+    python = tmp_path / "python3"
+    python.write_text("test binary")
+    assert canonical_python_environment_executable(str(python)) == str(python)
+    assert canonical_python_environment_executable("test-python") == "test-python"
+
+
+def test_native_executable_aliases_resolve_to_the_selected_binary(tmp_path: Path) -> None:
+    binary = tmp_path / "tmux"
+    binary.write_text("test binary")
+    alias = tmp_path / "tmux-alias"
+    alias.symlink_to(binary)
+    assert canonical_native_executable(str(alias)) == str(binary)
+    assert canonical_native_executable("test-tmux") == "test-tmux"
 
 
 def test_rodex_bootstrap_virtualenv_is_removed_from_user_processes(
@@ -49,9 +92,7 @@ def test_user_project_virtualenv_is_preserved_unchanged(tmp_path: Path) -> None:
     rodex_virtual_environment = tmp_path / "rodex" / ".venv"
     user_virtual_environment = tmp_path / "project-xyz" / ".venv"
     inherited = {
-        "PATH": os.pathsep.join(
-            (str(user_virtual_environment / "bin"), "/usr/local/bin", "/usr/bin")
-        ),
+        "PATH": os.pathsep.join((str(user_virtual_environment / "bin"), "/usr/local/bin", "/usr/bin")),
         "VIRTUAL_ENV": str(user_virtual_environment),
         "VIRTUAL_ENV_PROMPT": "(project-xyz)",
         "UV_RUN_RECURSION_DEPTH": "2",

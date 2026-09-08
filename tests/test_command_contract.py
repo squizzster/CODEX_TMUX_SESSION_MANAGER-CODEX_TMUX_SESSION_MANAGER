@@ -32,9 +32,7 @@ def test_help_is_generated_from_every_declared_command() -> None:
     for spec in COMMAND_SPECS:
         assert len(spec.help_lines) % 2 == 0
         assert spec.token in HELP_TEXT
-        for usage, description in zip(
-            spec.help_lines[::2], spec.help_lines[1::2], strict=True
-        ):
+        for usage, description in zip(spec.help_lines[::2], spec.help_lines[1::2], strict=True):
             assert usage in HELP_TEXT
             assert description in HELP_TEXT
 

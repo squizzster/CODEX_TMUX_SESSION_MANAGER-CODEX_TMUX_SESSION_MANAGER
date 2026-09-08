@@ -26,9 +26,7 @@ from rodex_sql import (
 
 COOL_NAMES_TABLE: Final = "cool_names"
 COOL_NAMES_MD5_INTS_UNIQUE_INDEX: Final = "cool_names_md5_ints_unique"
-_RODEX_LOCAL_RESERVED_WORDS: Final = frozenset(
-    {"alias", "create", "detach", "running", "send", "tail", "wait"}
-)
+_RODEX_LOCAL_RESERVED_WORDS: Final = frozenset({"alias", "create", "detach", "running", "send", "tail", "wait"})
 RODEX_RESERVED_WORDS: Final = CODEX_CLI_0_151_0_COMMAND_TOKENS | _RODEX_LOCAL_RESERVED_WORDS
 _SAFE_RODEX_DISPLAY_NAME: Final = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$")
 
@@ -91,9 +89,7 @@ def get_unique_new_cool_name(
     path = normalise_rodex_database_path(database_path)
     with open_rodex_bootstrap_transaction(path) as connection:
         create_and_verify_cool_names_schema(connection)
-        return allocate_unique_cool_name(
-            connection, name_generator=name_generator
-        ).cool_name
+        return allocate_unique_cool_name(connection, name_generator=name_generator).cool_name
 
 
 def allocate_unique_cool_name(
@@ -118,9 +114,7 @@ def allocate_unique_cool_name(
             if select_lookup_id(connection, COOL_NAMES_TABLE, lookup_values) is not None:
                 continue
             cursor = connection.execute(
-                f"INSERT INTO {COOL_NAMES_TABLE} "
-                "(cool_name_md5_int_1, cool_name_md5_int_2, cool_name) "
-                "VALUES (?, ?, ?)",
+                f"INSERT INTO {COOL_NAMES_TABLE} (cool_name_md5_int_1, cool_name_md5_int_2, cool_name) VALUES (?, ?, ?)",
                 (md5_int_1, md5_int_2, cool_name),
             )
             if cursor.lastrowid is None:
@@ -163,8 +157,7 @@ def reserve_specific_cool_name(
             raise CoolNameError("derived cool-name identity is already occupied")
         return CoolName(id=existing_id, cool_name=normalised_name)
     cursor = connection.execute(
-        f"INSERT INTO {COOL_NAMES_TABLE} "
-        "(cool_name_md5_int_1, cool_name_md5_int_2, cool_name) VALUES (?, ?, ?)",
+        f"INSERT INTO {COOL_NAMES_TABLE} (cool_name_md5_int_1, cool_name_md5_int_2, cool_name) VALUES (?, ?, ?)",
         (md5_int_1, md5_int_2, normalised_name),
     )
     if cursor.lastrowid is None:
@@ -274,9 +267,7 @@ def _verify_table(connection: sqlite3.Connection) -> None:
 def _verify_indexes(connection: sqlite3.Connection) -> None:
     indexes = connection.execute(f"PRAGMA index_list({COOL_NAMES_TABLE})").fetchall()
     matching = [row for row in indexes if row[1] == COOL_NAMES_MD5_INTS_UNIQUE_INDEX]
-    columns = connection.execute(
-        f"PRAGMA index_info({COOL_NAMES_MD5_INTS_UNIQUE_INDEX})"
-    ).fetchall()
+    columns = connection.execute(f"PRAGMA index_info({COOL_NAMES_MD5_INTS_UNIQUE_INDEX})").fetchall()
     if (
         len(matching) != 1
         or matching[0][2] != 1
@@ -284,9 +275,7 @@ def _verify_indexes(connection: sqlite3.Connection) -> None:
     ):
         raise CoolNameError(f"unique index is missing: {COOL_NAMES_MD5_INTS_UNIQUE_INDEX}")
     indexed_columns = {
-        row[2]
-        for index in indexes
-        for row in connection.execute(f"PRAGMA index_info({index[1]})").fetchall()
+        row[2] for index in indexes for row in connection.execute(f"PRAGMA index_info({index[1]})").fetchall()
     }
     if "cool_name" in indexed_columns:
         raise CoolNameError("cool_name must remain an unindexed payload field")

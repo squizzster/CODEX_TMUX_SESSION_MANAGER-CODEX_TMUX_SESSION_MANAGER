@@ -89,11 +89,7 @@ class TmuxStatusOption:
                 return
             if self._pending_value is None and value == self._inflight_value:
                 return
-            if (
-                self._pending_value is None
-                and self._inflight_value is None
-                and value == self._published_value
-            ):
+            if self._pending_value is None and self._inflight_value is None and value == self._published_value:
                 return
             self._pending_value = value
             if self._worker is None:
@@ -155,9 +151,7 @@ class TmuxStatusOption:
                     self._published_value = value
                     self._retry_not_before = 0.0
                 else:
-                    self._retry_not_before = (
-                        time.monotonic() + self._failure_backoff_seconds
-                    )
+                    self._retry_not_before = time.monotonic() + self._failure_backoff_seconds
 
 
 STATUS_CLAIM_PRIORITY_OPTION: Final = "@rodex_status_claim_priority"
@@ -278,9 +272,7 @@ class TmuxStatusClaimCommands:
         )
 
     def set_base_status(self) -> str:
-        return _tmux_command_sequence(
-            *self._presentation_commands(RODEX_BASE_STATUS_PRESENTATION)
-        )
+        return _tmux_command_sequence(*self._presentation_commands(RODEX_BASE_STATUS_PRESENTATION))
 
     def _presentation_commands(
         self,

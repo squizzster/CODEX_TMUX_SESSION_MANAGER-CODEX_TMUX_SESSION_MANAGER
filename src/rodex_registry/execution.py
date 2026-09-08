@@ -145,9 +145,7 @@ def list_rodex_session_codex_rollout_sources(
     )
 
 
-def select_codex_threads_in_transaction(
-    connection: sqlite3.Connection, session_id: int
-) -> list[tuple[object, ...]]:
+def select_codex_threads_in_transaction(connection: sqlite3.Connection, session_id: int) -> list[tuple[object, ...]]:
     """Select every rooted thread and its current worker checkpoint in one query."""
     rows = connection.execute(
         f"WITH RECURSIVE hierarchy(id, parent_id, thread_depth) AS ("
@@ -194,8 +192,7 @@ def select_codex_threads_in_transaction(
         (session_id,),
     ).fetchall()
     current = connection.execute(
-        f"SELECT 1 FROM {RODEX_SESSIONS_CURRENT_CODEX_THREADS_TABLE} "
-        "WHERE rodex_sessions_id = ?",
+        f"SELECT 1 FROM {RODEX_SESSIONS_CURRENT_CODEX_THREADS_TABLE} WHERE rodex_sessions_id = ?",
         (session_id,),
     ).fetchone()
     if current is not None and not rows:
@@ -216,9 +213,7 @@ def codex_thread_from_row(row: tuple[object, ...]) -> RodexSessionCodexThread:
         agent_nickname=None if row[8] is None else str(row[8]),
         subagent_history_start_ordinal=None if row[9] is None else int(row[9]),
         spawning_codex_turn_id=(
-            None
-            if row[10] is None
-            else str(join_signed_bigints_into_a_codex_turn_id(row[10], row[11]))
+            None if row[10] is None else str(join_signed_bigints_into_a_codex_turn_id(row[10], row[11]))
         ),
         first_linked_at_utc=str(row[12]),
         rollout_file_path=None if row[13] is None else str(row[13]),
@@ -237,12 +232,9 @@ def register_codex_root_thread_in_transaction(
     first_linked_at_utc: str,
 ) -> int:
     """Register one root Codex thread inside its owning lifecycle transaction."""
-    codex_threads_id = resolve_codex_thread_identity_in_transaction(
-        connection, codex_session_id
-    )
+    codex_threads_id = resolve_codex_thread_identity_in_transaction(connection, codex_session_id)
     row = connection.execute(
-        f"SELECT id, rodex_sessions_id FROM {RODEX_SESSIONS_CODEX_THREADS_TABLE} "
-        "WHERE codex_threads_id = ?",
+        f"SELECT id, rodex_sessions_id FROM {RODEX_SESSIONS_CODEX_THREADS_TABLE} WHERE codex_threads_id = ?",
         (codex_threads_id,),
     ).fetchone()
     if row is None:
@@ -255,15 +247,11 @@ def register_codex_root_thread_in_transaction(
     if row is None:
         raise RodexSessionError("Codex thread membership insertion returned no identity")
     if int(row[1]) != session_id:
-        raise RodexSessionError(
-            "Codex history already belongs to another Rodex execution lineage: "
-            f"{codex_session_id}"
-        )
+        raise RodexSessionError(f"Codex history already belongs to another Rodex execution lineage: {codex_session_id}")
     membership_id = int(row[0])
     if (
         connection.execute(
-            f"SELECT 1 FROM {RODEX_SESSIONS_SUBAGENT_SPAWNS_TABLE} "
-            "WHERE subagent_rodex_sessions_codex_threads_id = ?",
+            f"SELECT 1 FROM {RODEX_SESSIONS_SUBAGENT_SPAWNS_TABLE} WHERE subagent_rodex_sessions_codex_threads_id = ?",
             (membership_id,),
         ).fetchone()
         is not None
@@ -309,9 +297,7 @@ def validate_codex_thread_observation(
 ) -> RodexSessionCodexThreadObservation:
     """Validate one exact worker observation at the shared lineage boundary."""
     if not isinstance(observation, RodexSessionCodexThreadObservation):
-        raise TypeError(
-            "analyzed_sources must contain RodexSessionCodexThreadObservation values"
-        )
+        raise TypeError("analyzed_sources must contain RodexSessionCodexThreadObservation values")
     codex_thread_id = parse_codex_thread_id(observation.codex_thread_id)
     source_kind = _normalise_required_text(observation.source_kind, "source_kind")
     if source_kind not in {"root", "subagent"}:
@@ -323,14 +309,10 @@ def validate_codex_thread_observation(
     ):
         raise ValueError("thread_depth must be a non-negative integer")
     parent_codex_thread_id = (
-        None
-        if observation.parent_codex_thread_id is None
-        else parse_codex_thread_id(observation.parent_codex_thread_id)
+        None if observation.parent_codex_thread_id is None else parse_codex_thread_id(observation.parent_codex_thread_id)
     )
     agent_path = (
-        None
-        if observation.agent_path is None
-        else _normalise_required_text(observation.agent_path, "agent_path")
+        None if observation.agent_path is None else _normalise_required_text(observation.agent_path, "agent_path")
     )
     agent_nickname = (
         None
@@ -338,9 +320,7 @@ def validate_codex_thread_observation(
         else _normalise_required_text(observation.agent_nickname, "agent_nickname")
     )
     cutoff = observation.subagent_history_start_ordinal
-    if cutoff is not None and (
-        not isinstance(cutoff, int) or isinstance(cutoff, bool) or cutoff < 0
-    ):
+    if cutoff is not None and (not isinstance(cutoff, int) or isinstance(cutoff, bool) or cutoff < 0):
         raise ValueError("subagent_history_start_ordinal must be non-negative")
     spawning_codex_turn_id = (
         None
@@ -389,12 +369,8 @@ def validate_codex_thread_observation(
     ):
         if not isinstance(value, int) or isinstance(value, bool) or value < 0:
             raise ValueError(f"{field_name} must be a non-negative integer")
-    digest = _normalise_required_text(
-        observation.analyzed_prefix_sha256, "analyzed_prefix_sha256"
-    ).lower()
-    if len(digest) != 64 or any(
-        character not in "0123456789abcdef" for character in digest
-    ):
+    digest = _normalise_required_text(observation.analyzed_prefix_sha256, "analyzed_prefix_sha256").lower()
+    if len(digest) != 64 or any(character not in "0123456789abcdef" for character in digest):
         raise ValueError("analyzed_prefix_sha256 must be 64 lowercase hexadecimal digits")
     return RodexSessionCodexThreadObservation(
         codex_thread_id=codex_thread_id,

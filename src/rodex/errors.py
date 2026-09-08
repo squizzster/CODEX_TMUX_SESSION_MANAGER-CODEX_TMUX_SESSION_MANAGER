@@ -8,7 +8,7 @@ class RodexLaunchError(RuntimeError):
 
 
 class ExactRuntimeIdentityRequiredError(RodexLaunchError):
-    """A live endpoint lacks durable incarnation authority for mutation."""
+    """A live endpoint lacks the durable incarnation required for managed access."""
 
 
 class RodexExecutableNotFoundError(RodexLaunchError):

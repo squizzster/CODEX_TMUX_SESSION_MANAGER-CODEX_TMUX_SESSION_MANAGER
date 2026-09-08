@@ -10,7 +10,6 @@ from pathlib import Path
 from rodex_registry import (
     RodexSessionNames,
     lookup_owned_rodex_sessions_id_from_a_cool_name,
-    lookup_rodex_runtime_instance,
     lookup_rodex_session_id_from_a_rodex_sessions_id,
     lookup_rodex_session_names,
     lookup_rodex_tmux_session,
@@ -27,6 +26,7 @@ from .control import (
 from .errors import ExactRuntimeIdentityRequiredError, RodexLaunchError
 from .live_runtime import (
     rename_tmux_identity,
+    require_durable_runtime_instance,
     resolve_live_control,
     restore_tmux_identity,
     revalidate_live_control,
@@ -70,24 +70,16 @@ class ExactTurnMutationCoordinator:
     @contextmanager
     def _locked_selector(self, selector: str) -> Iterator[_LockedSessionSelection]:
         """Lock the initially selected session, then fail if the selector moved."""
-        session_id = lookup_owned_rodex_sessions_id_from_a_cool_name(
-            selector, self._database_path
-        )
+        session_id = lookup_owned_rodex_sessions_id_from_a_cool_name(selector, self._database_path)
         if session_id is None:
             raise RodexLaunchError(f"unknown Rodex session: {selector}")
-        rodex_session_id = lookup_rodex_session_id_from_a_rodex_sessions_id(
-            session_id, self._database_path
-        )
+        rodex_session_id = lookup_rodex_session_id_from_a_rodex_sessions_id(session_id, self._database_path)
         if rodex_session_id is None:
             raise RodexLaunchError(f"Rodex session disappeared: {selector}")
         with session_transition_lock(self._database_path, rodex_session_id):
-            locked_session_id = lookup_owned_rodex_sessions_id_from_a_cool_name(
-                selector, self._database_path
-            )
+            locked_session_id = lookup_owned_rodex_sessions_id_from_a_cool_name(selector, self._database_path)
             if locked_session_id != session_id:
-                raise RodexLaunchError(
-                    "Rodex session selector changed while waiting for its transition lock"
-                )
+                raise RodexLaunchError("Rodex session selector changed while waiting for its transition lock")
             yield _LockedSessionSelection(selector, session_id)
 
     def start(
@@ -150,9 +142,7 @@ class ExactTurnMutationCoordinator:
             target = self._resolve_target(selection)
             runtime_id = target.control.runtime_id
             if runtime_id is None:
-                raise ExactRuntimeIdentityRequiredError(
-                    "live runtime lacks the current exact runtime identity"
-                )
+                raise ExactRuntimeIdentityRequiredError("live runtime lacks the current exact runtime identity")
             target = replace(
                 target,
                 runtime=replace(target.runtime, runtime_id=runtime_id),
@@ -195,11 +185,7 @@ class ExactTurnMutationCoordinator:
                     target = self._resolve_locked_live_target(selection)
                     if target is not None:
                         recorded_tmux = target.runtime
-                if (
-                    assignment.tmux_session is not None
-                    and recorded_tmux is not None
-                    and target is not None
-                ):
+                if assignment.tmux_session is not None and recorded_tmux is not None and target is not None:
                     self._runtime_revalidator(
                         target.session_id,
                         target.runtime,
@@ -221,11 +207,7 @@ class ExactTurnMutationCoordinator:
             raise
         if active_tmux is not None:
             self._launcher.refresh_shared_tmux_coordination(active_tmux)
-        if (
-            active_tmux is not None
-            and target is not None
-            and previous_display_name != assignment.names.display_name
-        ):
+        if active_tmux is not None and target is not None and previous_display_name != assignment.names.display_name:
             auto_info = (
                 f"RODEX_AUTO_INFO: Rodex session {target.control.rodex_session_id} "
                 f"is now named {assignment.names.display_name!r}."
@@ -296,9 +278,7 @@ class ExactTurnMutationCoordinator:
                 prompt,
                 revalidate=revalidate,
             )
-        raise RodexLaunchError(
-            f"Codex thread cannot accept Rodex information while {state.status}"
-        )
+        raise RodexLaunchError(f"Codex thread cannot accept Rodex information while {state.status}")
 
     def _resolve_target(self, selection: _LockedSessionSelection) -> ExactTurnTarget:
         session_id, runtime, control = resolve_live_control(
@@ -307,9 +287,7 @@ class ExactTurnMutationCoordinator:
             self._launcher,
         )
         if session_id != selection.session_id:
-            raise RodexLaunchError(
-                "Rodex session selector changed during exact control discovery"
-            )
+            raise RodexLaunchError("Rodex session selector changed during exact control discovery")
         names = lookup_rodex_session_names(session_id, self._database_path)
         if names is None:
             raise RodexLaunchError(f"Rodex session disappeared: {selection.selector}")
@@ -329,9 +307,7 @@ class ExactTurnMutationCoordinator:
                 self._database_path,
             )
             if current_session_id != target.session_id:
-                raise RodexLaunchError(
-                    "Rodex session selector changed during exact turn mutation"
-                )
+                raise RodexLaunchError("Rodex session selector changed during exact turn mutation")
             self._runtime_revalidator(
                 target.session_id,
                 target.runtime,
@@ -358,18 +334,3 @@ class ExactTurnMutationCoordinator:
         control: LiveRodexControl,
     ) -> None:
         require_durable_runtime_instance(session_id, self._database_path, control)
-
-
-def require_durable_runtime_instance(
-    session_id: int,
-    database_path: Path,
-    control: LiveRodexControl,
-) -> None:
-    """Fail unless live control belongs to the current durable incarnation."""
-    persisted = lookup_rodex_runtime_instance(session_id, database_path)
-    if persisted is None or control.runtime_id is None:
-        raise ExactRuntimeIdentityRequiredError(
-            "live runtime lacks the current durable runtime identity"
-        )
-    if persisted.runtime_id != control.runtime_id:
-        raise RodexLaunchError("live runtime ID does not match its durable Rodex identity")

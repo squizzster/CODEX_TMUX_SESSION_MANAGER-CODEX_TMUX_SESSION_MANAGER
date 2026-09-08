@@ -293,11 +293,7 @@ def optional_uuid_text(value: object) -> str | None:
 
 
 def _projected_identifier(value: object) -> str | None:
-    if (
-        not isinstance(value, str)
-        or not value
-        or len(value) > OBSERVER_PROJECTED_ID_MAX_CHARS
-    ):
+    if not isinstance(value, str) or not value or len(value) > OBSERVER_PROJECTED_ID_MAX_CHARS:
         return None
     return value
 

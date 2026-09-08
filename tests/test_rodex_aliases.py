@@ -24,9 +24,7 @@ OTHER_USER = RodexSessionsUserIdentity(2001, 2002, "other")
 
 def _cool_names(database: Path) -> list[tuple[object, ...]]:
     with sqlite3.connect(database) as connection:
-        return connection.execute(
-            "SELECT id, cool_name FROM cool_names ORDER BY id"
-        ).fetchall()
+        return connection.execute("SELECT id, cool_name FROM cool_names ORDER BY id").fetchall()
 
 
 def _create_session(
@@ -37,9 +35,7 @@ def _create_session(
     codex_int: int,
     owner: RodexSessionsUserIdentity = DNA,
 ) -> int:
-    monkeypatch.setattr(
-        "cool_name.functions.coolname.generate_slug", lambda _word_count: cool_name
-    )
+    monkeypatch.setattr("cool_name.functions.coolname.generate_slug", lambda _word_count: cool_name)
     return create_a_rodex_session(
         database,
         codex_session_id=uuid.UUID(int=codex_int),
@@ -53,22 +49,14 @@ def test_alias_is_one_owned_integer_identity_and_force_replaces_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     database = tmp_path / "rodex.sqlite3"
-    session_id = _create_session(
-        database, monkeypatch, cool_name="black-sawfly", codex_int=1
-    )
+    session_id = _create_session(database, monkeypatch, cool_name="black-sawfly", codex_int=1)
 
-    assigned = assign_a_user_defined_cool_name(
-        "black-sawfly", "user_defined_field", database, user_identity=DNA
-    )
+    assigned = assign_a_user_defined_cool_name("black-sawfly", "user_defined_field", database, user_identity=DNA)
 
     assert assigned.user_defined_cool_name == "user_defined_field"
-    assert lookup_rodex_sessions_id_from_a_cool_name("user_defined_field", database) == (
-        session_id
-    )
+    assert lookup_rodex_sessions_id_from_a_cool_name("user_defined_field", database) == (session_id)
     with pytest.raises(RodexSessionError, match="use --force"):
-        assign_a_user_defined_cool_name(
-            "black-sawfly", "replacement", database, user_identity=DNA
-        )
+        assign_a_user_defined_cool_name("black-sawfly", "replacement", database, user_identity=DNA)
     assert _cool_names(database) == [(1, "black-sawfly"), (2, "user_defined_field")]
 
     replaced = assign_a_user_defined_cool_name(
@@ -96,9 +84,7 @@ def test_duplicate_codex_session_resume_guidance_prefers_the_user_defined_name(
 ) -> None:
     database = tmp_path / "rodex.sqlite3"
     _create_session(database, monkeypatch, cool_name="black-sawfly", codex_int=1)
-    assign_a_user_defined_cool_name(
-        "black-sawfly", "preferred-name", database, user_identity=DNA
-    )
+    assign_a_user_defined_cool_name("black-sawfly", "preferred-name", database, user_identity=DNA)
 
     with pytest.raises(RodexSessionError) as raised:
         create_a_rodex_session(
@@ -108,8 +94,7 @@ def test_duplicate_codex_session_resume_guidance_prefers_the_user_defined_name(
         )
 
     assert str(raised.value) == (
-        "Codex session already belongs to Rodex preferred-name.\n"
-        "Resume with: rodex preferred-name"
+        "Codex session already belongs to Rodex preferred-name.\nResume with: rodex preferred-name"
     )
 
 
@@ -126,9 +111,7 @@ def test_reserved_aliases_are_rejected_without_consuming_an_id(
     _create_session(database, monkeypatch, cool_name="black-sawfly", codex_int=1)
 
     with pytest.raises(ReservedCoolNameError, match="reserved"):
-        assign_a_user_defined_cool_name(
-            "black-sawfly", reserved_name, database, user_identity=DNA
-        )
+        assign_a_user_defined_cool_name("black-sawfly", reserved_name, database, user_identity=DNA)
 
     assert _cool_names(database) == [(1, "black-sawfly")]
 
@@ -146,9 +129,7 @@ def test_aliases_must_be_portable_tmux_session_names_without_consuming_an_id(
     _create_session(database, monkeypatch, cool_name="black-sawfly", codex_int=1)
 
     with pytest.raises(CoolNameError, match=r"cool_name|Rodex names"):
-        assign_a_user_defined_cool_name(
-            "black-sawfly", invalid_name, database, user_identity=DNA
-        )
+        assign_a_user_defined_cool_name("black-sawfly", invalid_name, database, user_identity=DNA)
 
     assert _cool_names(database) == [(1, "black-sawfly")]
 
@@ -167,13 +148,9 @@ def test_alias_ownership_and_cross_session_uniqueness_are_enforced_transactional
     )
 
     with pytest.raises(RodexSessionError, match="not owned"):
-        assign_a_user_defined_cool_name(
-            "black-sawfly", "unauthorised", database, user_identity=OTHER_USER
-        )
+        assign_a_user_defined_cool_name("black-sawfly", "unauthorised", database, user_identity=OTHER_USER)
     with pytest.raises(RodexSessionError, match="another session"):
-        assign_a_user_defined_cool_name(
-            "black-sawfly", "silver-otter", database, user_identity=DNA
-        )
+        assign_a_user_defined_cool_name("black-sawfly", "silver-otter", database, user_identity=DNA)
 
     assert lookup_rodex_session_names(first_id, database).user_defined_cool_name is None  # type: ignore[union-attr]
     assert _cool_names(database) == [(1, "black-sawfly"), (2, "silver-otter")]
@@ -251,9 +228,7 @@ def test_runtime_listing_is_filtered_by_the_complete_posix_user_lookup(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     database = tmp_path / "rodex.sqlite3"
-    session_id = _create_session(
-        database, monkeypatch, cool_name="black-sawfly", codex_int=1
-    )
+    session_id = _create_session(database, monkeypatch, cool_name="black-sawfly", codex_int=1)
     _create_session(
         database,
         monkeypatch,

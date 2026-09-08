@@ -232,9 +232,7 @@ class PreparedAgentTracePublication:
         object.__setattr__(self, "_contract_token", _contract_token)
 
 
-_PREPARED_PUBLICATIONS: weakref.WeakValueDictionary[int, PreparedAgentTracePublication] = (
-    weakref.WeakValueDictionary()
-)
+_PREPARED_PUBLICATIONS: weakref.WeakValueDictionary[int, PreparedAgentTracePublication] = weakref.WeakValueDictionary()
 _PREPARED_PUBLICATIONS_LOCK = Lock()
 
 
@@ -265,9 +263,7 @@ def prepare_agent_trace_publication(
     based_on = publication.based_on_trace_publication_sequence
     if based_on is not None:
         _positive_integer(based_on, "publication sequence")
-    schema_version = _normalise_required_text(
-        publication.trace_schema_version, "trace_schema_version"
-    )
+    schema_version = _normalise_required_text(publication.trace_schema_version, "trace_schema_version")
     calculated_at = _normalise_utc_timestamp_text(publication.calculated_at_utc)
     coverage = _normalise_required_text(publication.coverage_state, "coverage_state")
     if coverage not in {"complete", "gapped"}:
@@ -334,20 +330,12 @@ def _validate_event(event: RodexAgentTraceEvent) -> RodexAgentTraceEvent:
         turn_id = str(parse_codex_turn_id(event.codex_turn_id))
         if turn_id != event.codex_turn_id:
             raise ValueError("codex_turn_id must use canonical lowercase UUID text")
-    source_ordinal = _nonnegative_integer(
-        event.source_record_ordinal, "source_record_ordinal"
-    )
-    derived_ordinal = _nonnegative_integer(
-        event.derived_event_ordinal, "derived_event_ordinal"
-    )
+    source_ordinal = _nonnegative_integer(event.source_record_ordinal, "source_record_ordinal")
+    derived_ordinal = _nonnegative_integer(event.derived_event_ordinal, "derived_event_ordinal")
     kind = _normalise_required_text(event.event_kind, "event_kind")
     if kind not in TRACE_EVENT_KINDS:
         raise ValueError(f"unsupported agent trace event kind: {kind}")
-    event_time = (
-        None
-        if event.event_time_utc is None
-        else _normalise_utc_timestamp_text(event.event_time_utc)
-    )
+    event_time = None if event.event_time_utc is None else _normalise_utc_timestamp_text(event.event_time_utc)
     detail = _validate_detail(kind, event.detail)
     return replace(
         event,
@@ -368,9 +356,7 @@ def _validate_detail(kind: str, detail: TraceDetail) -> TraceDetail:
             raise ValueError(f"agent trace {kind} event cannot have typed detail")
         return None
     if not isinstance(detail, expected_type):
-        raise ValueError(
-            f"agent trace {kind} event requires {expected_type.__name__} detail"
-        )
+        raise ValueError(f"agent trace {kind} event requires {expected_type.__name__} detail")
     if isinstance(detail, TraceMessage):
         return replace(
             detail,
@@ -385,13 +371,9 @@ def _validate_detail(kind: str, detail: TraceDetail) -> TraceDetail:
                 "message_role",
                 {"assistant", "user", "system", "unknown"},
             ),
-            content_block_count=_nonnegative_integer(
-                detail.content_block_count, "content_block_count"
-            ),
+            content_block_count=_nonnegative_integer(detail.content_block_count, "content_block_count"),
             body_utf8_bytes=_nonnegative_integer(detail.body_utf8_bytes, "body_utf8_bytes"),
-            body_capture_state=_one_of(
-                detail.body_capture_state, "body_capture_state", _CAPTURE_STATES
-            ),
+            body_capture_state=_one_of(detail.body_capture_state, "body_capture_state", _CAPTURE_STATES),
         )
     elif isinstance(detail, TraceToolCall):
         return replace(
@@ -400,15 +382,9 @@ def _validate_detail(kind: str, detail: TraceDetail) -> TraceDetail:
             call_id=_optional_text(detail.call_id, "call_id"),
             tool_name=_normalise_required_text(detail.tool_name, "tool_name"),
             tool_status=_optional_text(detail.tool_status, "tool_status"),
-            request_utf8_bytes=_nonnegative_integer(
-                detail.request_utf8_bytes, "request_utf8_bytes"
-            ),
-            response_utf8_bytes=_nonnegative_integer(
-                detail.response_utf8_bytes, "response_utf8_bytes"
-            ),
-            payload_capture_state=_one_of(
-                detail.payload_capture_state, "payload_capture_state", _CAPTURE_STATES
-            ),
+            request_utf8_bytes=_nonnegative_integer(detail.request_utf8_bytes, "request_utf8_bytes"),
+            response_utf8_bytes=_nonnegative_integer(detail.response_utf8_bytes, "response_utf8_bytes"),
+            payload_capture_state=_one_of(detail.payload_capture_state, "payload_capture_state", _CAPTURE_STATES),
             activity_kind=_one_of(
                 detail.activity_kind,
                 "activity_kind",
@@ -419,26 +395,18 @@ def _validate_detail(kind: str, detail: TraceDetail) -> TraceDetail:
         return replace(
             detail,
             item_id=_optional_item_id(detail.item_id),
-            command_argument_count=_nonnegative_integer(
-                detail.command_argument_count, "command_argument_count"
-            ),
+            command_argument_count=_nonnegative_integer(detail.command_argument_count, "command_argument_count"),
             working_directory=_optional_text(detail.working_directory, "working_directory"),
             command_status=_optional_text(detail.command_status, "command_status"),
             duration_ms=_optional_nonnegative_integer(detail.duration_ms, "duration_ms"),
             exit_code=_optional_integer(detail.exit_code, "exit_code"),
-            stdout_utf8_bytes=_nonnegative_integer(
-                detail.stdout_utf8_bytes, "stdout_utf8_bytes"
-            ),
-            stderr_utf8_bytes=_nonnegative_integer(
-                detail.stderr_utf8_bytes, "stderr_utf8_bytes"
-            ),
+            stdout_utf8_bytes=_nonnegative_integer(detail.stdout_utf8_bytes, "stdout_utf8_bytes"),
+            stderr_utf8_bytes=_nonnegative_integer(detail.stderr_utf8_bytes, "stderr_utf8_bytes"),
             aggregated_output_utf8_bytes=_nonnegative_integer(
                 detail.aggregated_output_utf8_bytes,
                 "aggregated_output_utf8_bytes",
             ),
-            payload_capture_state=_one_of(
-                detail.payload_capture_state, "payload_capture_state", _CAPTURE_STATES
-            ),
+            payload_capture_state=_one_of(detail.payload_capture_state, "payload_capture_state", _CAPTURE_STATES),
         )
     elif isinstance(detail, TraceContext):
         return replace(
@@ -448,12 +416,8 @@ def _validate_detail(kind: str, detail: TraceDetail) -> TraceDetail:
             working_directory=_optional_text(detail.working_directory, "working_directory"),
             sandbox_mode=_optional_text(detail.sandbox_mode, "sandbox_mode"),
             approval_policy=_optional_text(detail.approval_policy, "approval_policy"),
-            permission_profile_type=_optional_text(
-                detail.permission_profile_type, "permission_profile_type"
-            ),
-            workspace_root_count=_nonnegative_integer(
-                detail.workspace_root_count, "workspace_root_count"
-            ),
+            permission_profile_type=_optional_text(detail.permission_profile_type, "permission_profile_type"),
+            workspace_root_count=_nonnegative_integer(detail.workspace_root_count, "workspace_root_count"),
         )
     elif isinstance(detail, TraceTokenUsage):
         replacements: dict[str, int | float | None] = {}
@@ -465,9 +429,7 @@ def _validate_detail(kind: str, detail: TraceDetail) -> TraceDetail:
             "total_tokens",
         ):
             replacements[name] = _optional_nonnegative_integer(getattr(detail, name), name)
-        replacements["context_used_percent"] = _optional_percentage(
-            detail.context_used_percent, "context_used_percent"
-        )
+        replacements["context_used_percent"] = _optional_percentage(detail.context_used_percent, "context_used_percent")
         return replace(detail, **replacements)
     elif isinstance(detail, TraceRateLimits):
         if not isinstance(detail.windows, tuple):
@@ -481,9 +443,7 @@ def _validate_detail(kind: str, detail: TraceDetail) -> TraceDetail:
                     window,
                     limit_id=_normalise_required_text(window.limit_id, "limit_id"),
                     used_percent=_optional_percentage(window.used_percent, "used_percent"),
-                    window_minutes=_optional_positive_integer(
-                        window.window_minutes, "window_minutes"
-                    ),
+                    window_minutes=_optional_positive_integer(window.window_minutes, "window_minutes"),
                     resets_at_unix_seconds=_optional_nonnegative_integer(
                         window.resets_at_unix_seconds, "resets_at_unix_seconds"
                     ),
@@ -493,18 +453,14 @@ def _validate_detail(kind: str, detail: TraceDetail) -> TraceDetail:
         return replace(detail, windows=tuple(windows))
     elif isinstance(detail, TraceSubagentActivity):
         target_thread_id = (
-            None
-            if detail.target_codex_thread_id is None
-            else parse_codex_thread_id(detail.target_codex_thread_id)
+            None if detail.target_codex_thread_id is None else parse_codex_thread_id(detail.target_codex_thread_id)
         )
         return replace(
             detail,
             target_codex_thread_id=target_thread_id,
             activity_kind=_normalise_required_text(detail.activity_kind, "activity_kind"),
             agent_path=_optional_text(detail.agent_path, "agent_path"),
-            collaboration_call_id=_optional_text(
-                detail.collaboration_call_id, "collaboration_call_id"
-            ),
+            collaboration_call_id=_optional_text(detail.collaboration_call_id, "collaboration_call_id"),
         )
     raise AssertionError("trace detail type table and validation branches diverged")
 

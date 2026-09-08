@@ -68,9 +68,7 @@ COMMAND_SPECS: Final = (
             "Create, resume, or recover without attaching.",
         ),
     ),
-    CommandSpec(
-        RUNNING_COMMAND, CommandRoute.SESSION, ("_running", "List running sessions.")
-    ),
+    CommandSpec(RUNNING_COMMAND, CommandRoute.SESSION, ("_running", "List running sessions.")),
     CommandSpec(
         CONTEXT_COMMAND,
         CommandRoute.SESSION,
@@ -195,19 +193,15 @@ def _help_text() -> str:
         "  (no command)                       Create and attach to a managed session.",
     ]
     for spec in COMMAND_SPECS:
-        for usage, description in zip(
-            spec.help_lines[::2], spec.help_lines[1::2], strict=True
-        ):
+        for usage, description in zip(spec.help_lines[::2], spec.help_lines[1::2], strict=True):
             lines.append(f"  {usage:<36} {description}")
     lines.extend(
         (
             "",
             "Use a Rodex session name or canonical Codex UUID as the sole argument "
             "to attach, resume, recover, or adopt it.",
-            "A sole unmatched token, current interactive options, or an optional "
-            "prompt starts a managed session.",
-            "Use '--' before one token to force prompt meaning without selector or "
-            "subcommand interpretation.",
+            "A sole unmatched token, current interactive options, or an optional prompt starts a managed session.",
+            "Use '--' before one token to force prompt meaning without selector or subcommand interpretation.",
             f"Codex {CODEX_CLI_0_151_0.characterized_release} subcommands and "
             "uncertain option forms pass unchanged to Codex.",
             "",
@@ -247,9 +241,7 @@ class ClassifiedRodexCommand:
 MACHINE_COMMAND_SPECS: Final = {
     spec.token: spec
     for spec in (
-        MachineCommandSpec(
-            INSPECT_COMMAND, "thread.inspect", "rodex _inspect SESSION --json"
-        ),
+        MachineCommandSpec(INSPECT_COMMAND, "thread.inspect", "rodex _inspect SESSION --json"),
         MachineCommandSpec(
             START_COMMAND,
             "turn.start",
@@ -313,20 +305,13 @@ def classify_rodex_command(
     if command is None:
         return None
     machine = MACHINE_COMMAND_SPECS.get(command.token)
-    if (
-        machine is not None
-        and machine.token == WAIT_COMMAND
-        and "--turn" not in arguments
-        and "--json" not in arguments
-    ):
+    if machine is not None and machine.token == WAIT_COMMAND and "--turn" not in arguments and "--json" not in arguments:
         machine = None
     route = CommandRoute.MACHINE if machine is not None else command.route
     return ClassifiedRodexCommand(command, route, machine)
 
 
-def parse_machine_invocation(
-    arguments: list[str], spec: MachineCommandSpec
-) -> MachineInvocation:
+def parse_machine_invocation(arguments: list[str], spec: MachineCommandSpec) -> MachineInvocation:
     if not arguments or arguments[0] != spec.token:
         raise MachineUsageError("arguments do not match the classified machine command")
     if len(arguments) < 2 or not arguments[1].strip() or arguments[1].startswith("-"):
@@ -351,9 +336,7 @@ def parse_machine_invocation(
         elif option == "--dispatch" and dispatch_id is None and index + 1 < len(arguments):
             dispatch_id = arguments[index + 1]
             index += 2
-        elif (
-            option == "--timeout" and timeout_seconds is None and index + 1 < len(arguments)
-        ):
+        elif option == "--timeout" and timeout_seconds is None and index + 1 < len(arguments):
             timeout_seconds = _parse_timeout_duration(arguments[index + 1])
             index += 2
         else:
@@ -390,9 +373,7 @@ def _parse_timeout_duration(value: str) -> float:
     try:
         seconds = float(number) * multiplier
     except ValueError as error:
-        raise MachineUsageError(
-            "timeout must be a positive duration such as 30s or 5m"
-        ) from error
+        raise MachineUsageError("timeout must be a positive duration such as 30s or 5m") from error
     if not math.isfinite(seconds) or seconds <= 0:
         raise MachineUsageError("timeout must be a positive duration such as 30s or 5m")
     return seconds

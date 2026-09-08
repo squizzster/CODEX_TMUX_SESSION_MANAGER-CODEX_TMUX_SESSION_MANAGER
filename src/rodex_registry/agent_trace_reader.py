@@ -90,8 +90,7 @@ def read_rodex_agent_trace(
                 raise ValueError("after_event_id is not an event in this Rodex session")
             after_internal_id = int(after_row[0])
         rows = connection.execute(
-            _TRACE_EVENT_SELECT + " WHERE events.rodex_sessions_id = ? AND events.id > ? "
-            "ORDER BY events.id LIMIT ?",
+            _TRACE_EVENT_SELECT + " WHERE events.rodex_sessions_id = ? AND events.id > ? ORDER BY events.id LIMIT ?",
             (session_id, after_internal_id, limit),
         ).fetchall()
         event_ids = tuple(int(row[0]) for row in rows)
@@ -120,9 +119,7 @@ def read_rodex_agent_trace(
                 "plan_type": None if row[6] is None else str(row[6]),
             }
         )
-    events = tuple(
-        _trace_event_row_as_dict(row, rates.get(int(row[0]), [])) for row in rows
-    )
+    events = tuple(_trace_event_row_as_dict(row, rates.get(int(row[0]), [])) for row in rows)
     return RodexAgentTraceSnapshot(
         trace_publication_sequence=None if publication is None else int(publication[0]),
         trace_schema_version=None if publication is None else str(publication[1]),
@@ -303,9 +300,7 @@ LEFT JOIN {RODEX_SESSIONS_CODEX_TURN_STATES_TABLE} AS target_turn_states
 """
 
 
-def _trace_event_row_as_dict(
-    row: tuple[object, ...], rate_windows: list[dict[str, Any]]
-) -> dict[str, Any]:
+def _trace_event_row_as_dict(row: tuple[object, ...], rate_windows: list[dict[str, Any]]) -> dict[str, Any]:
     event = {
         "event_id": str(join_signed_bigints_into_a_codex_thread_id(row[1], row[2])),
         "codex_thread_id": str(join_signed_bigints_into_a_codex_thread_id(row[3], row[4])),
@@ -332,9 +327,7 @@ def _trace_event_row_as_dict(
         }
     elif kind == "tool_call":
         event["detail"] = {
-            "tool_call_id": str(
-                join_signed_bigints_into_a_codex_thread_id(row[24], row[25])
-            ),
+            "tool_call_id": str(join_signed_bigints_into_a_codex_thread_id(row[24], row[25])),
             "call_id": row[26],
             "item_id": _optional_codex_item_id(row[27], row[28]),
             "item_alias": row[29],

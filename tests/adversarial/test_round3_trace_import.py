@@ -85,8 +85,7 @@ def test_round3_cold_trace_import_resolves_each_thread_membership_once(
 
     membership_lookups = sum(map(_is_membership_lookup, statements))
     assert membership_lookups <= 1, (
-        f"one cold batch for one thread performed {membership_lookups} identical "
-        "membership lookups"
+        f"one cold batch for one thread performed {membership_lookups} identical membership lookups"
     )
 
 
@@ -370,9 +369,7 @@ def test_round3_trace_membership_resolution_observes_same_transaction_writes(
     database = tmp_path / "registry.sqlite3"
     create_a_rodex_session(database, codex_session_id=THREAD_ID)
     new_thread_id = uuid.UUID("01a00654-f2bc-7a30-834a-a5f886a65f84")
-    prepared = prepare_agent_trace_publication(
-        _cold_publication(1, thread_id=new_thread_id)
-    )
+    prepared = prepare_agent_trace_publication(_cold_publication(1, thread_id=new_thread_id))
 
     with open_rodex_transaction(database) as connection:
         identity_id = resolve_codex_thread_identity_in_transaction(

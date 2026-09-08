@@ -76,7 +76,7 @@ listener; control endpoints are Unix sockets below a private runtime root.
   lines for `token_count` records only, retaining no rollout bodies. Idle checks inspect
   metadata before bounded fingerprints, back off to a two-second ceiling, and wake early
   on existing exact-thread protocol activity.
-- All Rodex sessions share the versioned `tmux-shared-v1.sock`; that socket is transport,
+- All Rodex sessions share the versioned `tmux-shared-v2.sock`; that socket is transport,
   not authority. Server-scope protocol and random incarnation markers identify a
   current-protocol server. Creation may claim only a completely unmarked server with no
   live session. A protocol mismatch or unmarked nonempty server is rejected without

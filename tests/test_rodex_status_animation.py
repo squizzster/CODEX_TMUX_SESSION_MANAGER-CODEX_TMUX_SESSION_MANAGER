@@ -79,9 +79,7 @@ class FakeTmux:
         if arguments[:1] == ["if-shell"]:
             format_index = arguments.index("-F")
             condition = arguments[format_index + 1]
-            branch_index = format_index + (
-                2 if self._condition_is_true(condition) else 3
-            )
+            branch_index = format_index + (2 if self._condition_is_true(condition) else 3)
             if branch_index >= len(arguments):
                 return AsyncCommandResult(0)
             result = AsyncCommandResult(0)
@@ -164,31 +162,18 @@ def test_animation_uses_scheduled_frames_and_restores_the_entire_status_format()
         )
     )
 
-    frame_commands = [
-        command
-        for command in tmux.commands
-        if "if-shell" in command and "status-format[0]" in command[-1]
-    ]
+    frame_commands = [command for command in tmux.commands if "if-shell" in command and "status-format[0]" in command[-1]]
     restore_commands = [
         command
         for command in tmux.commands
-        if "if-shell" in command
-        and "status-format" in command[-1]
-        and "status-format[0]" not in command[-1]
+        if "if-shell" in command and "status-format" in command[-1] and "status-format[0]" not in command[-1]
     ]
-    refresh_commands = [
-        command
-        for command in tmux.commands
-        if any("refresh-client" in argument for argument in command)
-    ]
+    refresh_commands = [command for command in tmux.commands if any("refresh-client" in argument for argument in command)]
 
     assert len(frame_commands) == 25
     assert all(command[3:6] == ["if-shell", "-t", "%9"] for command in frame_commands)
     assert len(deadlines) == 25
-    assert all(
-        later - earlier == pytest.approx(FRAME_INTERVAL_SECONDS)
-        for earlier, later in pairwise(deadlines)
-    )
+    assert all(later - earlier == pytest.approx(FRAME_INTERVAL_SECONDS) for earlier, later in pairwise(deadlines))
     assert len(restore_commands) == 1
     assert restore_commands[0][3:6] == ["if-shell", "-t", "%9"]
     restore_steps = [shlex.split(step) for step in restore_commands[0][-1].split(" ; ")]
@@ -231,17 +216,11 @@ def test_new_animation_token_stops_an_older_animation_without_restoring_over_it(
         )
     )
 
-    frame_commands = [
-        command
-        for command in tmux.commands
-        if "if-shell" in command and "status-format[0]" in command[-1]
-    ]
+    frame_commands = [command for command in tmux.commands if "if-shell" in command and "status-format[0]" in command[-1]]
     restore_commands = [
         command
         for command in tmux.commands
-        if "if-shell" in command
-        and "status-format" in command[-1]
-        and "status-format[0]" not in command[-1]
+        if "if-shell" in command and "status-format" in command[-1] and "status-format[0]" not in command[-1]
     ]
     assert waits == 1
     assert len(frame_commands) == 1
@@ -267,8 +246,5 @@ def test_nonqualifying_attachment_cancels_animation_and_restores_normal_status()
     )
 
     assert not any("status-format[0]" in command[-1] for command in tmux.commands)
-    assert any(
-        "status-format" in command[-1] and "status-format[0]" not in command[-1]
-        for command in tmux.commands
-    )
+    assert any("status-format" in command[-1] and "status-format[0]" not in command[-1] for command in tmux.commands)
     assert tmux.animation_token == ""

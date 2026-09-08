@@ -37,9 +37,7 @@ class FakeTmux:
     def __call__(self, *arguments: str) -> subprocess.CompletedProcess[str]:
         command = list(arguments)
         self.commands.append(command)
-        if command[:4] == ["if-shell", "-t", "%4", "-F"] or (
-            command[:2] == ["if-shell", "-t"]
-        ):
+        if command[:4] == ["if-shell", "-t", "%4", "-F"] or (command[:2] == ["if-shell", "-t"]):
             if self._condition_is_true(command[-2]):
                 for tmux_command in command[-1].split(" ; "):
                     self._apply(shlex.split(tmux_command))

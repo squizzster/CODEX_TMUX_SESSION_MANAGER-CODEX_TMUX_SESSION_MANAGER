@@ -260,11 +260,7 @@ def _parse_confirmation(value: str) -> tuple[str, int, str] | None:
     armed_client = confirmation.get("client_name")
     armed_at = confirmation.get("armed_at_monotonic_ns")
     status_token = confirmation.get("status_token")
-    if (
-        not isinstance(armed_client, str)
-        or type(armed_at) is not int
-        or not isinstance(status_token, str)
-    ):
+    if not isinstance(armed_client, str) or type(armed_at) is not int or not isinstance(status_token, str):
         return None
     return armed_client, armed_at, status_token
 

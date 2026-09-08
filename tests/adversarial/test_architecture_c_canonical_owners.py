@@ -106,9 +106,7 @@ def test_architecture_c_observer_tmux_boundary_is_absolutely_bounded() -> None:
     release = threading.Event()
     options: list[dict[str, object]] = []
 
-    def blocked_runner(
-        command: list[str], **kwargs: object
-    ) -> subprocess.CompletedProcess[str]:
+    def blocked_runner(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         options.append(dict(kwargs))
         entered.set()
         release.wait()
@@ -195,9 +193,7 @@ def test_architecture_c_overflow_replaces_stale_presentation_state() -> None:
 
     assert len(view.target_thread_ids) == OBSERVER_SNAPSHOT_EVENT_LIMIT
     assert str(targets[0]) not in view.target_thread_ids
-    assert view.target_thread_ids == frozenset(
-        str(target) for target in targets[-OBSERVER_SNAPSHOT_EVENT_LIMIT:]
-    )
+    assert view.target_thread_ids == frozenset(str(target) for target in targets[-OBSERVER_SNAPSHOT_EVENT_LIMIT:])
 
 
 def test_architecture_c_disconnect_attempts_every_reset_and_advances_epoch() -> None:
@@ -253,14 +249,10 @@ def test_architecture_c_tmux_executor_has_one_run_entry_and_explicit_modes(
     )
 
     assert {
-        name
-        for name, value in SyncTmuxExecutor.__dict__.items()
-        if callable(value) and not name.startswith("_")
+        name for name, value in SyncTmuxExecutor.__dict__.items() if callable(value) and not name.startswith("_")
     } == {"run"}
     assert {
-        name
-        for name, value in AsyncTmuxExecutor.__dict__.items()
-        if callable(value) and not name.startswith("_")
+        name for name, value in AsyncTmuxExecutor.__dict__.items() if callable(value) and not name.startswith("_")
     } == {"run"}
     assert calls[0][1] == {
         "check": False,
@@ -381,8 +373,7 @@ def test_capability_predicates_are_never_rendered_as_display_payload() -> None:
         tree = ast.parse(source_path.read_text(encoding="utf-8"), source_path.name)
         for invocation in (node for node in ast.walk(tree) if isinstance(node, ast.Call)):
             if not any(
-                isinstance(node, ast.Constant) and node.value == "display-message"
-                for node in ast.walk(invocation)
+                isinstance(node, ast.Constant) and node.value == "display-message" for node in ast.walk(invocation)
             ):
                 continue
             condition_calls = [
@@ -390,14 +381,8 @@ def test_capability_predicates_are_never_rendered_as_display_payload() -> None:
                 for node in ast.walk(invocation)
                 if isinstance(node, ast.Call)
                 and (
-                    (
-                        isinstance(node.func, ast.Name)
-                        and node.func.id.endswith("_if_shell_condition")
-                    )
-                    or (
-                        isinstance(node.func, ast.Attribute)
-                        and node.func.attr.endswith("_if_shell_condition")
-                    )
+                    (isinstance(node.func, ast.Name) and node.func.id.endswith("_if_shell_condition"))
+                    or (isinstance(node.func, ast.Attribute) and node.func.attr.endswith("_if_shell_condition"))
                 )
             ]
             assert condition_calls == [], source_path.name

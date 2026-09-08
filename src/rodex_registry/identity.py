@@ -46,28 +46,19 @@ class _RodexId:
     def parse(cls, text: str) -> Self:
         """Parse only the exact 16-character lowercase hexadecimal wire form."""
         if not isinstance(text, str) or _CANONICAL_RODEX_ID.fullmatch(text) is None:
-            raise RodexIdError(
-                f"{cls._domain_name} ID must be exactly 16 lowercase hexadecimal characters"
-            )
+            raise RodexIdError(f"{cls._domain_name} ID must be exactly 16 lowercase hexadecimal characters")
         return cls(int(text, 16))
 
     @classmethod
     def from_signed_bigint(cls, stored_value: int) -> Self:
         """Restore all 64 ID bits from one SQLite signed BIGINT value."""
-        if (
-            type(stored_value) is not int
-            or not _SIGNED_64_MIN <= stored_value <= _SIGNED_64_MAX
-        ):
-            raise RodexIdError(
-                f"stored {cls._domain_name} ID is outside SQLite's signed 64-bit range"
-            )
+        if type(stored_value) is not int or not _SIGNED_64_MIN <= stored_value <= _SIGNED_64_MAX:
+            raise RodexIdError(f"stored {cls._domain_name} ID is outside SQLite's signed 64-bit range")
         return cls(stored_value % _UNSIGNED_64_LIMIT)
 
     def as_signed_bigint(self) -> int:
         """Map all 64 ID bits into SQLite's signed BIGINT range."""
-        return (
-            self.value if self.value <= _SIGNED_64_MAX else self.value - _UNSIGNED_64_LIMIT
-        )
+        return self.value if self.value <= _SIGNED_64_MAX else self.value - _UNSIGNED_64_LIMIT
 
     def __str__(self) -> str:
         return f"{self.value:016x}"
@@ -202,34 +193,22 @@ def parse_codex_item_id(value: CodexItemId | str) -> CodexItemId:
     return _parse_codex_uuid(value, "item")
 
 
-def join_signed_bigints_into_a_codex_session_id(
-    high_signed: int, low_signed: int
-) -> CodexSessionId:
+def join_signed_bigints_into_a_codex_session_id(high_signed: int, low_signed: int) -> CodexSessionId:
     """Restore one 128-bit Codex session ID from two signed BIGINTs."""
-    return uuid.UUID(
-        int=(_signed_64_to_unsigned(high_signed) << 64) | _signed_64_to_unsigned(low_signed)
-    )
+    return uuid.UUID(int=(_signed_64_to_unsigned(high_signed) << 64) | _signed_64_to_unsigned(low_signed))
 
 
-def join_signed_bigints_into_a_codex_thread_id(
-    high_signed: int, low_signed: int
-) -> CodexThreadId:
+def join_signed_bigints_into_a_codex_thread_id(high_signed: int, low_signed: int) -> CodexThreadId:
     """Restore one 128-bit Codex thread ID from two signed BIGINTs."""
-    return uuid.UUID(
-        int=(_signed_64_to_unsigned(high_signed) << 64) | _signed_64_to_unsigned(low_signed)
-    )
+    return uuid.UUID(int=(_signed_64_to_unsigned(high_signed) << 64) | _signed_64_to_unsigned(low_signed))
 
 
-def join_signed_bigints_into_a_codex_turn_id(
-    high_signed: int, low_signed: int
-) -> CodexTurnId:
+def join_signed_bigints_into_a_codex_turn_id(high_signed: int, low_signed: int) -> CodexTurnId:
     """Restore one 128-bit Codex turn ID from two signed BIGINTs."""
     return _join_signed_bigints_into_a_uuid(high_signed, low_signed)
 
 
-def join_signed_bigints_into_a_codex_item_id(
-    high_signed: int, low_signed: int
-) -> CodexItemId:
+def join_signed_bigints_into_a_codex_item_id(high_signed: int, low_signed: int) -> CodexItemId:
     """Restore one 128-bit Codex item ID from two signed BIGINTs."""
     return _join_signed_bigints_into_a_uuid(high_signed, low_signed)
 
@@ -249,9 +228,7 @@ def _parse_codex_uuid(value: uuid.UUID | str, domain: str) -> uuid.UUID:
 
 
 def _join_signed_bigints_into_a_uuid(high_signed: int, low_signed: int) -> uuid.UUID:
-    return uuid.UUID(
-        int=(_signed_64_to_unsigned(high_signed) << 64) | _signed_64_to_unsigned(low_signed)
-    )
+    return uuid.UUID(int=(_signed_64_to_unsigned(high_signed) << 64) | _signed_64_to_unsigned(low_signed))
 
 
 def _split_128_bit_id_into_signed_bigints(value: uuid.UUID) -> tuple[int, int]:

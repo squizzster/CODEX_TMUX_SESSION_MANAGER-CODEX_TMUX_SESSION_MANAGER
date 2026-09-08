@@ -116,9 +116,7 @@ class RodexAnalyticsRegistry:
             identity_fence=self._identity,
         )
 
-    def publish(
-        self, publication: RodexAnalyticsPublication
-    ) -> RodexAnalyticsPublishReceipt:
+    def publish(self, publication: RodexAnalyticsPublication) -> RodexAnalyticsPublishReceipt:
         """Publish one identity-fenced calculation through the registry API."""
         model_name_ids = dict(self._model_name_ids)
         reasoning_effort_name_ids = dict(self._reasoning_effort_name_ids)
@@ -128,12 +126,8 @@ class RodexAnalyticsRegistry:
                 self._database_path,
                 expected_current_codex_session_id=self._identity.codex_session_id,
                 identity_fence=self._identity,
-                based_on_statistics_publication_sequence=(
-                    publication.based_on_statistics_publication_sequence
-                ),
-                statistics_projection_schema_version=(
-                    publication.statistics_projection_schema_version
-                ),
+                based_on_statistics_publication_sequence=(publication.based_on_statistics_publication_sequence),
+                statistics_projection_schema_version=(publication.statistics_projection_schema_version),
                 calculated_at_utc=publication.calculated_at_utc,
                 coverage_state=publication.coverage_state,
                 statistics_projection=publication.statistics_projection,

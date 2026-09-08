@@ -19,9 +19,7 @@ TAIL_POLL_INTERVAL_SECONDS: Final = 0.4
 TAIL_MAX_IDLE_POLL_INTERVAL_SECONDS: Final = 3.2
 TAIL_SETTLED_POLL_COUNT: Final = 3
 TAIL_CURSOR_HISTORY_LINE_COUNT: Final = 256
-TAIL_USAGE: Final = (
-    "usage: rodex _tail [-f|--follow] [-n NUM|--lines NUM|--lines=NUM|-NUM] SESSION_NAME"
-)
+TAIL_USAGE: Final = "usage: rodex _tail [-f|--follow] [-n NUM|--lines NUM|--lines=NUM|-NUM] SESSION_NAME"
 _SHORT_LINE_COUNT = re.compile(r"-[0-9]+")
 _LINE_COUNT = re.compile(r"[+-]?[0-9]+")
 _ACTIVE_STATUS_LINE = re.compile(
@@ -59,15 +57,18 @@ class PlainTailCursor:
         if settled_poll_count < 1:
             raise ValueError("settled poll count must be positive")
         self._history_line_count = initial_snapshot.history_line_count
-        self._history_lines = initial_snapshot.history_lines[
-            -TAIL_CURSOR_HISTORY_LINE_COUNT:
-        ]
+        self._history_lines = initial_snapshot.history_lines[-TAIL_CURSOR_HISTORY_LINE_COUNT:]
         self._observed_visible = deque(initial_snapshot.visible_lines)
         initial_visible = _settled_visible_lines(initial_snapshot.visible_lines)
         self._published_visible = initial_visible
         self._candidate_visible = initial_visible
         self._candidate_poll_count = 0
         self._settled_poll_count = settled_poll_count
+
+    @property
+    def has_unsettled_visible_output(self) -> bool:
+        """Keep observing a candidate until it is published or replaced."""
+        return self._candidate_visible != self._published_visible
 
     def advance(self, current_snapshot: TmuxScrollbackSnapshot) -> tuple[str, ...]:
         emitted = self._advance(
@@ -113,10 +114,7 @@ class PlainTailCursor:
             self._candidate_poll_count = 1
         else:
             self._candidate_poll_count += 1
-        if (
-            self._candidate_poll_count >= self._settled_poll_count
-            and settled_visible != self._published_visible
-        ):
+        if self._candidate_poll_count >= self._settled_poll_count and settled_visible != self._published_visible:
             emitted.extend(_new_rendered_lines(self._published_visible, settled_visible))
             self._published_visible = settled_visible
             self._observed_visible = deque(current_visible)
@@ -236,7 +234,7 @@ def follow_session_tail(
     while True:
         sleep(next_poll_interval)
         current_state = capture_scrollback_state(runtime)
-        if current_state == observed_state:
+        if current_state == observed_state and not cursor.has_unsettled_visible_output:
             next_poll_interval = min(
                 next_poll_interval * 2,
                 max_idle_poll_interval_seconds,
@@ -271,9 +269,7 @@ def _parse_line_count(value: str) -> tuple[int, bool]:
     return line_count, value.startswith("+")
 
 
-def _select_initial_lines(
-    snapshot: tuple[str, ...], request: SessionTailRequest
-) -> tuple[str, ...]:
+def _select_initial_lines(snapshot: tuple[str, ...], request: SessionTailRequest) -> tuple[str, ...]:
     if request.from_start:
         return snapshot[max(request.line_count - 1, 0) :]
     if request.line_count == 0:
@@ -298,9 +294,7 @@ def _settled_visible_lines(visible_lines: tuple[str, ...]) -> tuple[str, ...]:
     return visible_lines
 
 
-def _new_rendered_lines(
-    previous: tuple[str, ...], current: tuple[str, ...]
-) -> tuple[str, ...]:
+def _new_rendered_lines(previous: tuple[str, ...], current: tuple[str, ...]) -> tuple[str, ...]:
     if previous == current:
         return ()
 
@@ -316,10 +310,7 @@ def _new_rendered_lines(
 
     common_suffix = 0
     maximum_suffix = min(len(previous), len(current)) - common_prefix
-    while (
-        common_suffix < maximum_suffix
-        and previous[-common_suffix - 1] == current[-common_suffix - 1]
-    ):
+    while common_suffix < maximum_suffix and previous[-common_suffix - 1] == current[-common_suffix - 1]:
         common_suffix += 1
 
     end = len(current) - common_suffix if common_suffix else len(current)
@@ -358,11 +349,7 @@ def _history_sequence_end(
     latest_possible_end = len(current) - history_growth
     if latest_possible_end < 0:
         return None
-    if (
-        history_growth == 0
-        and len(current) >= len(previous)
-        and current[-len(previous) :] == previous
-    ):
+    if history_growth == 0 and len(current) >= len(previous) and current[-len(previous) :] == previous:
         return len(current)
 
     candidates = {
@@ -374,9 +361,7 @@ def _history_sequence_end(
         if end <= latest_possible_end
     }
     matching_candidates = [
-        end
-        for end in candidates
-        if _committed_prefix_matches_visible(current[end:], observed_visible)
+        end for end in candidates if _committed_prefix_matches_visible(current[end:], observed_visible)
     ]
     if len(matching_candidates) == 1:
         return matching_candidates[0]

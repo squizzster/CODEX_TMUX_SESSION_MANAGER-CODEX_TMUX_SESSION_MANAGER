@@ -60,7 +60,7 @@ def _create_registered_session_at_pane_four(
         "set-option",
         "-s",
         "@rodex_shared_tmux_protocol",
-        "rodex-shared-tmux-v1",
+        "rodex-shared-tmux-v2",
     )
     tmux(
         "set-option",
@@ -68,9 +68,7 @@ def _create_registered_session_at_pane_four(
         "@rodex_shared_tmux_server_id",
         capability.tmux_server_id,
     )
-    primary_pane_id = tmux(
-        "display-message", "-p", "-t", f"={session_name}:", "-F", "#{pane_id}"
-    ).stdout.strip()
+    primary_pane_id = tmux("display-message", "-p", "-t", f"={session_name}:", "-F", "#{pane_id}").stdout.strip()
     assert primary_pane_id == "%4"
     for option_name, value in (
         ("@rodex_primary_pane_id", primary_pane_id),
@@ -94,9 +92,7 @@ class RecordingTmux:
         self.status_options: dict[str, str] = {}
         self.status_left = RODEX_STATUS_LEFT_FORMAT
 
-    def __call__(
-        self, command: list[str], **_options: object
-    ) -> subprocess.CompletedProcess[str]:
+    def __call__(self, command: list[str], **_options: object) -> subprocess.CompletedProcess[str]:
         self.commands.append(command)
         returncode, output = self._execute(command[3:])
         return subprocess.CompletedProcess(
@@ -241,14 +237,9 @@ def test_private_ctrl_c_is_withheld_if_a_client_attaches_before_send(
 ) -> None:
     runner = RecordingTmux(attached_count=1)
 
-    def attach_after_attachment_query(
-        command: list[str], **options: object
-    ) -> subprocess.CompletedProcess[str]:
+    def attach_after_attachment_query(command: list[str], **options: object) -> subprocess.CompletedProcess[str]:
         result = runner(command, **options)
-        if any(
-            "display-message" in argument and "#{session_attached}" in argument
-            for argument in command
-        ):
+        if any("display-message" in argument and "#{session_attached}" in argument for argument in command):
             runner.attached_count = 2
         return result
 
@@ -286,14 +277,9 @@ def test_prearmed_private_ctrl_c_race_clears_hidden_confirmation(
     assert runner.confirmation
     runner.attached_count = 1
 
-    def attach_after_attachment_query(
-        command: list[str], **options: object
-    ) -> subprocess.CompletedProcess[str]:
+    def attach_after_attachment_query(command: list[str], **options: object) -> subprocess.CompletedProcess[str]:
         result = runner(command, **options)
-        if any(
-            "display-message" in argument and "#{session_attached}" in argument
-            for argument in command
-        ):
+        if any("display-message" in argument and "#{session_attached}" in argument for argument in command):
             runner.attached_count = 2
         return result
 
@@ -380,10 +366,7 @@ def test_same_client_second_shared_ctrl_c_ends_session_within_window(
         )
 
     assert runner.confirmation == ""
-    assert any(
-        command[3:4] == ["if-shell"] and "kill-session" in " ".join(command)
-        for command in runner.commands
-    )
+    assert any(command[3:4] == ["if-shell"] and "kill-session" in " ".join(command) for command in runner.commands)
 
 
 @pytest.mark.parametrize(

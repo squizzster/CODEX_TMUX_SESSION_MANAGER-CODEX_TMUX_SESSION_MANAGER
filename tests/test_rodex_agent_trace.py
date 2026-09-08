@@ -75,9 +75,7 @@ def test_trace_cursor_is_empty_then_tracks_the_latest_public_event(tmp_path: Pat
 
     snapshot = read_rodex_agent_trace(1, database)
 
-    assert read_rodex_agent_trace_cursor(1, database) == uuid.UUID(
-        snapshot.events[-1]["event_id"]
-    )
+    assert read_rodex_agent_trace_cursor(1, database) == uuid.UUID(snapshot.events[-1]["event_id"])
 
 
 def test_stateful_trace_links_later_item_batches_to_the_accepted_turn() -> None:
@@ -112,9 +110,7 @@ def test_stateful_trace_links_later_item_batches_to_the_accepted_turn() -> None:
         based_on_trace_publication_sequence=None,
         calculated_at_utc="2026-08-26T12:00:02Z",
     )
-    assert {event.codex_turn_id for event in first.events} == {
-        "00000000-0000-7000-8000-00000000000a"
-    }
+    assert {event.codex_turn_id for event in first.events} == {"00000000-0000-7000-8000-00000000000a"}
     normalizer.accept_batch()
 
     second = normalizer.prepare(
@@ -286,8 +282,7 @@ def test_response_item_turn_metadata_keeps_collaboration_activity_in_one_scope(
     activity = next(
         event
         for event in publication.events
-        if isinstance(event.detail, TraceSubagentActivity)
-        and event.detail.collaboration_call_id == call_id
+        if isinstance(event.detail, TraceSubagentActivity) and event.detail.collaboration_call_id == call_id
     )
     assert call.codex_turn_id == TURN_B_ID
     assert activity.codex_turn_id == TURN_B_ID
@@ -326,18 +321,16 @@ def test_normalizer_derives_typed_message_usage_rate_limit_and_unknown_events() 
                         "type": "event_msg",
                         "payload": {
                             "type": "token_count",
-                            "usage": {"total_tokens": 120},
-                            "rate_limits": [
-                                {
-                                    "limit_id": "codex",
-                                    "primary": {
-                                        "used_percent": 28,
-                                        "window_minutes": 10080,
-                                        "resets_at": 2_000_000_000,
-                                    },
-                                    "plan_type": "pro",
-                                }
-                            ],
+                            "info": {"total_token_usage": {"total_tokens": 120}},
+                            "rate_limits": {
+                                "limit_id": "codex",
+                                "primary": {
+                                    "used_percent": 28,
+                                    "window_minutes": 10080,
+                                    "resets_at": 2_000_000_000,
+                                },
+                                "plan_type": "pro",
+                            },
                         },
                     },
                     {"ordinal": 3, "type": "future_record", "payload": {}},
@@ -382,6 +375,73 @@ def test_normalizer_uses_authenticated_physical_ordinals_and_append_offset() -> 
     assert publication.coverage_state == "complete"
 
 
+@pytest.mark.parametrize(
+    ("primary_minutes", "secondary_minutes"),
+    [(300, 10080), (300, None), (None, 10080), (None, None)],
+)
+def test_rate_limit_windows_survive_normalization_publication_and_readback(
+    tmp_path: Path,
+    primary_minutes: int | None,
+    secondary_minutes: int | None,
+) -> None:
+    supplied_windows = {
+        "primary": None
+        if primary_minutes is None
+        else {
+            "used_percent": 12,
+            "window_minutes": primary_minutes,
+            "resets_at": 2_000_000_000,
+        },
+        "secondary": None
+        if secondary_minutes is None
+        else {
+            "used_percent": 97,
+            "window_minutes": secondary_minutes,
+            "resets_at": 2_000_100_000,
+        },
+    }
+    publication = normalize_rollout_trace(
+        (
+            (
+                THREAD_ID,
+                _content(
+                    {
+                        "type": "event_msg",
+                        "payload": {
+                            "type": "token_count",
+                            "info": {"total_token_usage": {"total_tokens": 120}},
+                            "rate_limits": {"limit_id": "codex", "plan_type": "pro", **supplied_windows},
+                        },
+                    }
+                ),
+            ),
+        ),
+        based_on_trace_publication_sequence=None,
+        calculated_at_utc="2026-09-08T20:00:00Z",
+    )
+    database = tmp_path / "rodex.sqlite3"
+    create_a_rodex_session(database, codex_session_id=THREAD_ID)
+    _publish_trace(database, publication)
+    snapshot = read_rodex_agent_trace(1, database)
+    rate_events = [event for event in snapshot.events if event["event_kind"] == "rate_limit"]
+    expected_windows = [
+        {
+            "window_ordinal": ordinal,
+            "limit_id": "codex",
+            "plan_type": "pro",
+            "used_percent": float(window["used_percent"]),
+            "window_minutes": window["window_minutes"],
+            "resets_at_unix_seconds": window["resets_at"],
+        }
+        for ordinal, window in enumerate(window for window in supplied_windows.values() if window is not None)
+    ]
+
+    assert snapshot.coverage_state == "complete"
+    assert len(rate_events) == int(bool(expected_windows))
+    if expected_windows:
+        assert rate_events[0]["detail"]["windows"] == expected_windows
+
+
 def test_normalizer_covers_canonical_message_custom_tool_and_subagent_shapes() -> None:
     publication = normalize_rollout_trace(
         (
@@ -402,7 +462,7 @@ def test_normalizer_covers_canonical_message_custom_tool_and_subagent_shapes() -
                         "type": "response_item",
                         "payload": {
                             "type": "custom_tool_call",
-                            "tool": "collaboration.spawn_agent",
+                            "name": "collaboration.spawn_agent",
                             "input": "request",
                         },
                     },
@@ -412,7 +472,7 @@ def test_normalizer_covers_canonical_message_custom_tool_and_subagent_shapes() -
                         "payload": {
                             "type": "sub_agent_activity",
                             "agent_thread_id": str(CHILD_THREAD_ID),
-                            "status": "completed",
+                            "kind": "completed",
                             "agent_path": "/root/review",
                         },
                     },
@@ -478,10 +538,10 @@ def test_normalizer_retains_empty_tool_request_and_output_activity_kinds(
     database = tmp_path / "rodex.sqlite3"
     create_a_rodex_session(database, codex_session_id=THREAD_ID)
     _publish_trace(database, publication)
-    assert [
-        event["detail"]["activity_kind"]
-        for event in read_rodex_agent_trace(1, database).events
-    ] == ["request", "output"]
+    assert [event["detail"]["activity_kind"] for event in read_rodex_agent_trace(1, database).events] == [
+        "request",
+        "output",
+    ]
 
 
 def test_trace_publication_is_deduplicated_typed_and_contains_no_bodies(
@@ -568,11 +628,7 @@ def test_trace_coverage_remains_gapped_while_unrecognized_events_are_durable(
             "test-v1",
             "2026-08-26T12:00:00Z",
             "gapped",
-            (
-                RodexAgentTraceEvent(
-                    THREAD_ID, None, 1, 0, "unrecognized_record", None, None
-                ),
-            ),
+            (RodexAgentTraceEvent(THREAD_ID, None, 1, 0, "unrecognized_record", None, None),),
         ),
     )
 
@@ -695,30 +751,20 @@ def test_tool_request_and_output_share_one_canonical_public_tool_call(
     assert events[1]["detail"]["item_alias"] == "request-item"
     assert events[0]["detail"]["item_public_id"] == events[1]["detail"]["item_public_id"]
     assert uuid.UUID(events[0]["detail"]["item_public_id"])
-    assert {event["detail"]["tool_name"] for event in events} == {
-        "collaboration.spawn_agent"
-    }
+    assert {event["detail"]["tool_name"] for event in events} == {"collaboration.spawn_agent"}
     assert uuid.UUID(events[0]["event_id"])
     assert uuid.UUID(events[1]["event_id"])
-    assert read_rodex_agent_trace(
-        1, database, after_event_id=events[0]["event_id"]
-    ).events == (events[1],)
+    assert read_rodex_agent_trace(1, database, after_event_id=events[0]["event_id"]).events == (events[1],)
     with sqlite3.connect(database) as connection:
-        assert connection.execute(
-            "SELECT COUNT(*) FROM rodex_sessions_codex_tool_calls"
-        ).fetchone() == (1,)
-        assert connection.execute(
-            "SELECT COUNT(*) FROM rodex_sessions_agent_trace_tool_call_activities"
-        ).fetchone() == (2,)
-        assert connection.execute(
-            "SELECT COUNT(*) FROM rodex_sessions_codex_items"
-        ).fetchone() == (1,)
-        assert connection.execute(
-            "SELECT codex_item_alias FROM rodex_sessions_codex_item_aliases"
-        ).fetchone() == ("request-item",)
-        assert connection.execute(
-            "SELECT COUNT(*) FROM rodex_sessions_codex_tool_call_aliases"
-        ).fetchone() == (2,)
+        assert connection.execute("SELECT COUNT(*) FROM rodex_sessions_codex_tool_calls").fetchone() == (1,)
+        assert connection.execute("SELECT COUNT(*) FROM rodex_sessions_agent_trace_tool_call_activities").fetchone() == (
+            2,
+        )
+        assert connection.execute("SELECT COUNT(*) FROM rodex_sessions_codex_items").fetchone() == (1,)
+        assert connection.execute("SELECT codex_item_alias FROM rodex_sessions_codex_item_aliases").fetchone() == (
+            "request-item",
+        )
+        assert connection.execute("SELECT COUNT(*) FROM rodex_sessions_codex_tool_call_aliases").fetchone() == (2,)
         replacement_name_id = connection.execute(
             "INSERT INTO tool_names (tool_name) VALUES ('replacement.tool') RETURNING id"
         ).fetchone()[0]
@@ -823,9 +869,7 @@ def test_canonical_item_uuid_has_distinct_semantic_and_public_identities(
         assert row is not None
         assert row[:2] == split_codex_item_id_into_signed_bigints(uuid.UUID(ITEM_A_ID))
         assert row[:2] != row[2:]
-        assert connection.execute(
-            "SELECT COUNT(*) FROM rodex_sessions_codex_item_aliases"
-        ).fetchone() == (0,)
+        assert connection.execute("SELECT COUNT(*) FROM rodex_sessions_codex_item_aliases").fetchone() == (0,)
 
     noncanonical = RodexAgentTracePublication(
         1,
@@ -907,32 +951,27 @@ def test_activity_scope_fences_every_typed_dependency_and_is_immutable(
 
         with pytest.raises(sqlite3.IntegrityError, match="trace detail is immutable"):
             connection.execute(
-                "UPDATE rodex_sessions_agent_trace_messages "
-                "SET rodex_sessions_codex_activity_scopes_id = ? WHERE id = ?",
+                "UPDATE rodex_sessions_agent_trace_messages SET rodex_sessions_codex_activity_scopes_id = ? WHERE id = ?",
                 (second_scope_id, first_message_id),
             )
         with pytest.raises(sqlite3.IntegrityError, match="trace detail is immutable"):
             connection.execute(
-                "UPDATE rodex_sessions_agent_trace_messages "
-                "SET rodex_sessions_codex_items_id = ? WHERE id = ?",
+                "UPDATE rodex_sessions_agent_trace_messages SET rodex_sessions_codex_items_id = ? WHERE id = ?",
                 (second_item_id, first_message_id),
             )
         with pytest.raises(sqlite3.IntegrityError, match="scope identity is immutable"):
             connection.execute(
-                "UPDATE rodex_sessions_codex_activity_scopes "
-                "SET rodex_sessions_codex_turns_id = NULL WHERE id = ?",
+                "UPDATE rodex_sessions_codex_activity_scopes SET rodex_sessions_codex_turns_id = NULL WHERE id = ?",
                 (first_scope_id,),
             )
         with pytest.raises(sqlite3.IntegrityError, match="event provenance is immutable"):
             connection.execute(
-                "UPDATE rodex_sessions_agent_trace_events "
-                "SET event_time_utc = '2026-08-26T12:00:09Z' WHERE id = ?",
+                "UPDATE rodex_sessions_agent_trace_events SET event_time_utc = '2026-08-26T12:00:09Z' WHERE id = ?",
                 (first_event_id,),
             )
         with pytest.raises(sqlite3.IntegrityError, match="item identity is immutable"):
             connection.execute(
-                "UPDATE rodex_sessions_codex_items "
-                "SET item_public_id_signed_bigint_1 = 99 WHERE id = ?",
+                "UPDATE rodex_sessions_codex_items SET item_public_id_signed_bigint_1 = 99 WHERE id = ?",
                 (first_item_id,),
             )
         with pytest.raises(sqlite3.IntegrityError, match="trace detail is immutable"):
@@ -945,9 +984,7 @@ def test_activity_scope_fences_every_typed_dependency_and_is_immutable(
                 "DELETE FROM rodex_sessions_agent_trace_events WHERE id = ?",
                 (first_event_id,),
             )
-        with pytest.raises(
-            sqlite3.IntegrityError, match="item alias identity is immutable"
-        ):
+        with pytest.raises(sqlite3.IntegrityError, match="item alias identity is immutable"):
             connection.execute(
                 "UPDATE rodex_sessions_codex_item_aliases "
                 "SET rodex_sessions_codex_items_id = ? "
@@ -997,14 +1034,9 @@ def test_trace_append_advances_persisted_counts_without_recounting_the_ledger(
     normalized_sql = [" ".join(statement.upper().split()) for statement in statements]
     assert not any("SELECT COUNT(*)" in statement for statement in normalized_sql)
     assert not any("SUM(EVENT_KIND" in statement for statement in normalized_sql)
-    assert not any(
-        "INSERT INTO RODEX_SESSIONS_CODEX_ACTIVITY_SCOPES" in statement
-        for statement in normalized_sql
-    )
+    assert not any("INSERT INTO RODEX_SESSIONS_CODEX_ACTIVITY_SCOPES" in statement for statement in normalized_sql)
     with sqlite3.connect(database) as connection:
-        assert connection.execute(
-            "SELECT COUNT(*) FROM rodex_sessions_codex_activity_scopes"
-        ).fetchone() == (1,)
+        assert connection.execute("SELECT COUNT(*) FROM rodex_sessions_codex_activity_scopes").fetchone() == (1,)
 
 
 def test_trace_rejects_mutation_at_an_already_published_rollout_coordinate(
@@ -1048,9 +1080,7 @@ def test_trace_rejects_mutation_at_an_already_published_rollout_coordinate(
         ),
     )
 
-    with pytest.raises(
-        RodexSessionStatisticsConflictError, match="changed after trace publication"
-    ):
+    with pytest.raises(RodexSessionStatisticsConflictError, match="changed after trace publication"):
         _publish_trace(database, changed)
     assert read_rodex_agent_trace(1, database).trace_publication_sequence == 1
 
@@ -1135,10 +1165,7 @@ def test_subagent_activity_event_foreign_key_fences_its_session(tmp_path: Path) 
         pytest.raises(sqlite3.IntegrityError),
         open_rodex_transaction(database) as connection,
     ):
-        connection.execute(
-            "UPDATE rodex_sessions_agent_trace_subagent_activities "
-            "SET rodex_sessions_id = 2"
-        )
+        connection.execute("UPDATE rodex_sessions_agent_trace_subagent_activities SET rodex_sessions_id = 2")
 
 
 def test_initial_and_followup_requests_are_distinct_and_link_distinct_agent_turns(
@@ -1276,9 +1303,7 @@ def test_initial_and_followup_requests_are_distinct_and_link_distinct_agent_turn
                             "item": {
                                 "type": "UserMessage",
                                 "id": "00000000-0000-7000-8000-0000000000d2",
-                                "content": [
-                                    {"type": "text", "text": "stock market Iran Trump"}
-                                ],
+                                "content": [{"type": "text", "text": "stock market Iran Trump"}],
                             },
                         },
                     },
@@ -1333,8 +1358,7 @@ def test_initial_and_followup_requests_are_distinct_and_link_distinct_agent_turn
             "ORDER BY requests.id"
         ).fetchall()
         request_public_ids = [
-            uuid.UUID(int=((first % (1 << 64)) << 64) | (second % (1 << 64)))
-            for _, first, second, _, _ in rows
+            uuid.UUID(int=((first % (1 << 64)) << 64) | (second % (1 << 64))) for _, first, second, _, _ in rows
         ]
     assert len(rows) == 2
     assert request_public_ids[0] != request_public_ids[1]
@@ -1344,9 +1368,7 @@ def test_initial_and_followup_requests_are_distinct_and_link_distinct_agent_turn
         if event["event_kind"] == "message"
     ] == [2, 7]
     request_events = [
-        event
-        for event in read_rodex_agent_trace(1, database).events
-        if event["event_kind"] == "subagent_activity"
+        event for event in read_rodex_agent_trace(1, database).events if event["event_kind"] == "subagent_activity"
     ]
     turn_requests = [event["detail"]["turn_request"] for event in request_events]
     assert [request["request_id"] for request in turn_requests] == [
@@ -1357,9 +1379,7 @@ def test_initial_and_followup_requests_are_distinct_and_link_distinct_agent_turn
         "initial",
         "follow_up",
     ]
-    assert [
-        event["detail"]["collaboration_invocation"]["tool_name"] for event in request_events
-    ] == [
+    assert [event["detail"]["collaboration_invocation"]["tool_name"] for event in request_events] == [
         "collaboration.spawn_agent",
         "collaboration.followup_task",
     ]
@@ -1433,12 +1453,8 @@ def test_send_message_activity_exposes_invocation_without_a_turn_request(
     _publish_trace(database, publication)
 
     with sqlite3.connect(database) as connection:
-        assert connection.execute(
-            "SELECT COUNT(*) FROM rodex_sessions_agent_requests"
-        ).fetchone() == (0,)
-        assert connection.execute(
-            "SELECT COUNT(*) FROM rodex_sessions_agent_request_target_turns"
-        ).fetchone() == (0,)
+        assert connection.execute("SELECT COUNT(*) FROM rodex_sessions_agent_requests").fetchone() == (0,)
+        assert connection.execute("SELECT COUNT(*) FROM rodex_sessions_agent_request_target_turns").fetchone() == (0,)
     detail = next(
         event["detail"]
         for event in read_rodex_agent_trace(1, database).events
@@ -1535,16 +1551,9 @@ def test_request_commits_before_target_registration_then_links_only_its_target_t
     _publish_trace(database, first_publication)
 
     with sqlite3.connect(database) as connection:
-        request_row = connection.execute(
-            "SELECT id FROM rodex_sessions_agent_requests"
-        ).fetchone()
+        request_row = connection.execute("SELECT id FROM rodex_sessions_agent_requests").fetchone()
         assert request_row is not None
-        assert (
-            connection.execute(
-                "SELECT COUNT(*) FROM rodex_sessions_agent_request_target_turns"
-            ).fetchone()[0]
-            == 0
-        )
+        assert connection.execute("SELECT COUNT(*) FROM rodex_sessions_agent_request_target_turns").fetchone()[0] == 0
     with open_rodex_transaction(database) as connection:
         wrong_identity_id = connection.execute(
             "INSERT INTO codex_threads "
@@ -1573,9 +1582,7 @@ def test_request_commits_before_target_registration_then_links_only_its_target_t
             "(1, ?, '2026-08-27T03:25:31Z', 'open')",
             (wrong_turn_row,),
         )
-        with pytest.raises(
-            sqlite3.IntegrityError, match="agent request target turn is inconsistent"
-        ):
+        with pytest.raises(sqlite3.IntegrityError, match="agent request target turn is inconsistent"):
             connection.execute(
                 "INSERT INTO rodex_sessions_agent_request_target_turns "
                 "(rodex_sessions_id, rodex_sessions_agent_requests_id, "
@@ -1626,9 +1633,7 @@ def test_request_commits_before_target_registration_then_links_only_its_target_t
                 (turn_row, started_at),
             )
             target_turn_rows.append(turn_row)
-        with pytest.raises(
-            sqlite3.IntegrityError, match="agent request target turn is inconsistent"
-        ):
+        with pytest.raises(sqlite3.IntegrityError, match="agent request target turn is inconsistent"):
             connection.execute(
                 "INSERT INTO rodex_sessions_agent_request_target_turns "
                 "(rodex_sessions_id, rodex_sessions_agent_requests_id, "
@@ -1660,10 +1665,7 @@ def test_request_commits_before_target_registration_then_links_only_its_target_t
         if event["event_kind"] == "subagent_activity"
     )
     assert request_detail["turn_request"]["target_codex_turn_id"] == target_turn_id
-    assert (
-        request_detail["turn_request"]["target_turn_association_kind"]
-        == "next_observed_turn"
-    )
+    assert request_detail["turn_request"]["target_turn_association_kind"] == "next_observed_turn"
 
 
 def test_agent_request_parent_is_latest_user_message_before_the_tool_request(
@@ -1717,9 +1719,7 @@ def test_agent_request_parent_is_latest_user_message_before_the_tool_request(
                             "item": {
                                 "type": "UserMessage",
                                 "id": "00000000-0000-7000-8000-0000000000f2",
-                                "content": [
-                                    {"type": "text", "text": "arrived after invocation"}
-                                ],
+                                "content": [{"type": "text", "text": "arrived after invocation"}],
                             },
                         },
                     },
@@ -1790,7 +1790,7 @@ def test_include_body_adapter_is_allowlisted_and_redacts_hidden_or_encrypted_dat
         {
             "payload": {
                 "type": "custom_tool_call",
-                "tool": "example",
+                "name": "example",
                 "input": {"secret": "gAAAA-encrypted"},
             }
         },
@@ -1911,17 +1911,13 @@ def test_include_bodies_resolves_an_authenticated_historical_root(
         runtime_id=RodexRuntimeId.generate(),
     )
 
-    execute_agent_trace_command(
-        ["_trace", session.cool_name, "--include-bodies", "--json"], database
-    )
+    execute_agent_trace_command(["_trace", session.cool_name, "--include-bodies", "--json"], database)
 
     trace = json.loads(capsys.readouterr().out)
     assert trace["events"][0]["body"]["value"]["content"] == "historic answer"
 
 
-def test_agent_trace_commands_render_lineage_and_snapshot(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
+def test_agent_trace_commands_render_lineage_and_snapshot(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     database = tmp_path / "rodex.sqlite3"
     session = create_a_rodex_session(database, codex_session_id=THREAD_ID)
 
@@ -1954,9 +1950,7 @@ def test_agent_trace_commands_render_lineage_and_snapshot(
                 1,
                 101,
                 102,
-                *split_codex_thread_id_into_signed_bigints(
-                    uuid.UUID("00000000-0000-7000-8000-00000000000b")
-                ),
+                *split_codex_thread_id_into_signed_bigints(uuid.UUID("00000000-0000-7000-8000-00000000000b")),
             ),
         ).fetchone()[0]
         connection.execute(
@@ -2021,6 +2015,4 @@ def test_trace_cursor_requires_canonical_public_uuid_text(
         with pytest.raises(ValueError, match="canonical lowercase UUID text"):
             read_rodex_agent_trace(1, database, after_event_id=noncanonical)
         with pytest.raises(RodexLaunchError, match="usage: rodex _trace"):
-            execute_agent_trace_command(
-                ["_trace", session.cool_name, "--after", noncanonical], database
-            )
+            execute_agent_trace_command(["_trace", session.cool_name, "--after", noncanonical], database)

@@ -48,7 +48,6 @@ def _session_host_arguments(rodex_session_id: str) -> list[str]:
 def test_session_host_preserves_a_leading_zero_session_id_as_a_domain_value() -> None:
     config = SessionHostConfig.parse(_session_host_arguments(str(LEADING_ZERO_SESSION_ID)))
 
-    assert config.analytics is not None
     assert config.analytics.rodex_session_id == LEADING_ZERO_SESSION_ID
     assert str(config.analytics.rodex_session_id) == "0000000000000001"
 
@@ -96,6 +95,17 @@ def test_process_configs_own_round_trippable_wire_contracts() -> None:
 
     assert AnalyticsWorkerConfig.parse(analytics.to_argv()) == analytics
     assert SessionHostConfig.parse(host.to_argv()) == host
+
+
+@pytest.mark.parametrize(
+    "missing_option", ["--rodex-database", "--codex-sessions-root", "--rodex-session-id", "--rodex-registry-id"]
+)
+def test_session_host_requires_complete_managed_identity(missing_option: str) -> None:
+    arguments = _session_host_arguments(str(LEADING_ZERO_SESSION_ID))
+    index = arguments.index(missing_option)
+    del arguments[index : index + 2]
+    with pytest.raises(SystemExit):
+        SessionHostConfig.parse(arguments)
 
 
 @pytest.mark.parametrize(

@@ -96,9 +96,7 @@ def test_round1_post_success_access_telemetry_failure_is_only_a_warning(
     monkeypatch.setattr(
         machine_commands_module,
         "record_a_rodex_session_access",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            sqlite3.OperationalError("access telemetry unavailable")
-        ),
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(sqlite3.OperationalError("access telemetry unavailable")),
     )
     monkeypatch.setattr(sys, "stdin", io.StringIO("perform once\n"))
 

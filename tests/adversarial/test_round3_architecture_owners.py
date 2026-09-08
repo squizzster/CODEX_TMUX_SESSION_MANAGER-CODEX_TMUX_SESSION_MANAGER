@@ -64,12 +64,8 @@ def test_round3_mutation_transport_is_reachable_only_from_the_coordinator() -> N
 
 
 def test_round3_alias_has_one_coordinator_entry_without_public_lock_fragments() -> None:
-    coordinator_source = (SOURCE_ROOT / "rodex" / "exact_turn_mutation.py").read_text(
-        encoding="utf-8"
-    )
-    session_source = (SOURCE_ROOT / "rodex" / "session_commands.py").read_text(
-        encoding="utf-8"
-    )
+    coordinator_source = (SOURCE_ROOT / "rodex" / "exact_turn_mutation.py").read_text(encoding="utf-8")
+    session_source = (SOURCE_ROOT / "rodex" / "session_commands.py").read_text(encoding="utf-8")
 
     for obsolete_name in (
         "LockedSessionSelection",
@@ -89,9 +85,7 @@ def test_round3_request_reconciliation_has_no_independent_public_entry() -> None
     source_path = SOURCE_ROOT / "rodex_registry" / "agent_request_reconciliation.py"
     tree = ast.parse(source_path.read_text(encoding="utf-8"))
     public_functions = {
-        node.name
-        for node in tree.body
-        if isinstance(node, ast.FunctionDef) and not node.name.startswith("_")
+        node.name for node in tree.body if isinstance(node, ast.FunctionDef) and not node.name.startswith("_")
     }
 
     assert public_functions == set()

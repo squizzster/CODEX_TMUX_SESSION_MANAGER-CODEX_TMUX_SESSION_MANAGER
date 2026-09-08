@@ -171,11 +171,7 @@ class CodexCliContract:
                 arguments,
                 CodexCliClassificationReason.MULTIPLE_POSITIONALS,
             )
-        selector_candidate = (
-            positionals[0]
-            if len(arguments) == 1 and positionals == [arguments[0]]
-            else None
-        )
+        selector_candidate = positionals[0] if len(arguments) == 1 and positionals == [arguments[0]] else None
         return CodexCliInvocation(
             arguments,
             CodexCliRoute.MANAGED_INTERACTIVE,
@@ -212,6 +208,6 @@ def _managed_option_conflict(seen_options: set[str]) -> bool:
     automatic = "approve-for-me"
     bypass = "dangerously-bypass-approvals-and-sandbox"
     manual_controls = {"ask-for-approval", "sandbox"}
-    return (
-        automatic in seen_options and bool((manual_controls | {bypass}) & seen_options)
-    ) or (bypass in seen_options and bool(manual_controls & seen_options))
+    return (automatic in seen_options and bool((manual_controls | {bypass}) & seen_options)) or (
+        bypass in seen_options and bool(manual_controls & seen_options)
+    )

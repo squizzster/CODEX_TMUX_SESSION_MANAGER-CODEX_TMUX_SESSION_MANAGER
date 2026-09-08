@@ -20,6 +20,28 @@ TMUX_OWNED_CHILD_ENVIRONMENT_VARIABLES: Final = frozenset(
 )
 
 
+def canonical_python_environment_executable(executable: str) -> str:
+    """Unify Python aliases inside one environment without resolving to base Python."""
+    selected = Path(executable)
+    if not selected.is_absolute():
+        return executable
+    environment_directory = selected.parent.resolve()
+    selected = environment_directory / selected.name
+    environment_python = environment_directory / "python"
+    try:
+        if environment_python.samefile(selected):
+            return str(environment_python)
+    except OSError:
+        pass
+    return str(selected)
+
+
+def canonical_native_executable(executable: str) -> str:
+    """Give an already selected native binary one path across filesystem aliases."""
+    selected = Path(executable)
+    return str(selected.resolve()) if selected.is_absolute() else executable
+
+
 def user_process_environment(
     inherited: Mapping[str, str],
     *,
@@ -28,9 +50,7 @@ def user_process_environment(
     """Return caller state without a virtualenv used only to bootstrap Rodex."""
     environment = dict(inherited)
     active_virtual_environment = environment.get("VIRTUAL_ENV")
-    internal_virtual_environment = (
-        Path(sys.prefix) if rodex_virtual_environment is None else rodex_virtual_environment
-    )
+    internal_virtual_environment = Path(sys.prefix) if rodex_virtual_environment is None else rodex_virtual_environment
     if not active_virtual_environment or not _same_path(
         active_virtual_environment,
         internal_virtual_environment,

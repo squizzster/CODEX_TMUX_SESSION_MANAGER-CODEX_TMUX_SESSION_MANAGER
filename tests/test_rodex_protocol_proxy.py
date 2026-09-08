@@ -364,9 +364,7 @@ def test_proxy_forwards_both_directions_and_counts_server_tool_items(
     try:
         proxy.start()
         assert proxy_socket.stat().st_mode & 0o777 == 0o600
-        with unix_connect(
-            str(proxy_socket), uri="ws://localhost/rpc", compression=None
-        ) as tui:
+        with unix_connect(str(proxy_socket), uri="ws://localhost/rpc", compression=None) as tui:
             tui.send(client_message)
             assert tui.recv() == server_message
     finally:
@@ -413,9 +411,7 @@ def test_proxy_delivers_rodex_notice_to_tui_without_forwarding_it_upstream(
     client_message = json.dumps({"method": "initialize", "id": 1, "params": {}})
     try:
         proxy.start()
-        with unix_connect(
-            str(proxy_socket), uri="ws://localhost/rpc", compression=None
-        ) as tui:
+        with unix_connect(str(proxy_socket), uri="ws://localhost/rpc", compression=None) as tui:
             tui.send(client_message)
             assert tui.recv(timeout=1) == thread_started
 
@@ -515,9 +511,7 @@ def test_proxy_hands_primary_event_ownership_to_a_reconnecting_tui(tmp_path: Pat
     )
     try:
         proxy.start()
-        with unix_connect(
-            str(proxy_socket), uri="ws://localhost/rpc", compression=None
-        ) as first_tui:
+        with unix_connect(str(proxy_socket), uri="ws://localhost/rpc", compression=None) as first_tui:
             first_tui.send(json.dumps({"method": "first"}))
             first_tui.recv(timeout=1)
         proxy.wait_for_primary_connection_release(1)
@@ -529,9 +523,7 @@ def test_proxy_hands_primary_event_ownership_to_a_reconnecting_tui(tmp_path: Pat
         ) as machine_control:
             machine_control.send(json.dumps({"method": "control"}))
             machine_control.recv(timeout=1)
-            with unix_connect(
-                str(proxy_socket), uri="ws://localhost/rpc", compression=None
-            ) as retry_tui:
+            with unix_connect(str(proxy_socket), uri="ws://localhost/rpc", compression=None) as retry_tui:
                 retry_tui.send(json.dumps({"method": "retry"}))
                 retry_tui.recv(timeout=1)
             proxy.wait_for_primary_connection_release(1)
@@ -554,9 +546,7 @@ def test_event_tap_streams_runtime_events_and_removes_its_socket(tmp_path: Path)
     try:
         tap.start()
         assert event_socket.stat().st_mode & 0o777 == 0o600
-        with unix_connect(
-            str(event_socket), uri="ws://localhost/events", compression=None
-        ) as subscriber:
+        with unix_connect(str(event_socket), uri="ws://localhost/events", compression=None) as subscriber:
             assert subscriber.recv(timeout=1) == EVENT_STREAM_READY_MESSAGE
             tap.publish(message)
             assert subscriber.recv(timeout=1) == message
@@ -571,18 +561,10 @@ def test_event_tap_sends_only_semantic_wake_events_to_internal_workers(
 ) -> None:
     event_socket = tmp_path / "events.sock"
     tap = CodexProtocolEventTap(event_socket)
-    thread_started = json.dumps(
-        {"method": "thread/started", "params": {"thread": {"id": "thread-1"}}}
-    )
-    token_delta = json.dumps(
-        {"method": "item/agentMessage/delta", "params": {"delta": "noise"}}
-    )
-    turn_completed = json.dumps(
-        {"method": "turn/completed", "params": {"threadId": "thread-1"}}
-    )
-    item_completed = json.dumps(
-        {"method": "item/completed", "params": {"threadId": "thread-1"}}
-    )
+    thread_started = json.dumps({"method": "thread/started", "params": {"thread": {"id": "thread-1"}}})
+    token_delta = json.dumps({"method": "item/agentMessage/delta", "params": {"delta": "noise"}})
+    turn_completed = json.dumps({"method": "turn/completed", "params": {"threadId": "thread-1"}})
+    item_completed = json.dumps({"method": "item/completed", "params": {"threadId": "thread-1"}})
 
     try:
         tap.start()
@@ -597,9 +579,7 @@ def test_event_tap_sends_only_semantic_wake_events_to_internal_workers(
                 uri=f"ws://localhost{AGENT_OBSERVER_EVENT_STREAM_PATH}",
                 compression=None,
             ) as observer,
-            unix_connect(
-                str(event_socket), uri="ws://localhost/events", compression=None
-            ) as external,
+            unix_connect(str(event_socket), uri="ws://localhost/events", compression=None) as external,
         ):
             assert analytics.recv(timeout=1) == EVENT_STREAM_READY_MESSAGE
             assert observer.recv(timeout=1) == EVENT_STREAM_READY_MESSAGE
@@ -667,9 +647,7 @@ def test_event_tap_ready_signal_reports_the_current_active_turn(tmp_path: Path) 
         tap.start()
         tap.publish(thread_started)
         tap.publish(started)
-        with unix_connect(
-            str(event_socket), uri="ws://localhost/events", compression=None
-        ) as subscriber:
+        with unix_connect(str(event_socket), uri="ws://localhost/events", compression=None) as subscriber:
             assert json.loads(subscriber.recv(timeout=1)) == {
                 "method": "rodex/event-stream/ready",
                 "params": {
@@ -678,9 +656,7 @@ def test_event_tap_ready_signal_reports_the_current_active_turn(tmp_path: Path) 
                 },
             }
         tap.publish(completed)
-        with unix_connect(
-            str(event_socket), uri="ws://localhost/events", compression=None
-        ) as subscriber:
+        with unix_connect(str(event_socket), uri="ws://localhost/events", compression=None) as subscriber:
             assert json.loads(subscriber.recv(timeout=1)) == {
                 "method": "rodex/event-stream/ready",
                 "params": {

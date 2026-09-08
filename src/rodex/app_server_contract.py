@@ -98,21 +98,16 @@ class CodexAppServerContract:
     def require_minimum_version(self, initialize_result: dict[str, Any]) -> str:
         version = self.version(initialize_result)
         if version == "unknown":
-            raise RodexAppServerVersionError(
-                "App Server initialize response has no recognized Codex user agent"
-            )
+            raise RodexAppServerVersionError("App Server initialize response has no recognized Codex user agent")
         live_release = _stable_release(version)
         minimum_release = _stable_release(self.minimum_version)
         if live_release is None:
-            raise RodexAppServerVersionError(
-                f"App Server reported an unrecognized Codex version: {version}"
-            )
+            raise RodexAppServerVersionError(f"App Server reported an unrecognized Codex version: {version}")
         if minimum_release is None:  # pragma: no cover - module constant invariant.
             raise AssertionError("Rodex App Server minimum version is invalid")
         if live_release < minimum_release:
             raise RodexAppServerVersionError(
-                "exact control requires Codex App Server "
-                f"{self.minimum_version} or newer; live server is {version}"
+                f"exact control requires Codex App Server {self.minimum_version} or newer; live server is {version}"
             )
         return version
 

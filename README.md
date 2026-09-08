@@ -11,6 +11,11 @@ interactive grammar pass through unchanged.
 > described here is complete for its current scope, but interfaces may still change
 > before a stable release.
 
+Current release: **Rodex 0.6.0a3**, SQL generation **19**, shared tmux protocol **v2**.
+This ALPHA supports only its current storage and runtime contracts. It creates
+`rodex-v19.sqlite3` and `tmux-shared-v2.sock`; earlier generations are outside this
+installation's session catalog. There are no database migrations or old-runtime adapters.
+
 ## Why Rodex
 
 Rodex's first job is to accommodate the person at the terminal: replacing `codex` with
@@ -377,8 +382,10 @@ when an explicit boundary improves clarity. `_cat` is a finite snapshot, so stan
 tools such as `head`, `tail`, and `grep` compose with it normally. `_tail` prints a
 familiar initial line selection and then remains open. It publishes rows as soon as they
 enter tmux history and publishes stable visible-pane changes after three 0.4-second
-observations. The live `Working` status region and composer are excluded so timer frames
-and partially typed prompts do not become duplicate transcript lines. `_events` is the
+observations. Pending visible output finishes settling before idle backoff begins, even
+when no further tmux changes arrive. The live `Working` status region and composer are
+excluded so timer frames and partially typed prompts do not become duplicate transcript
+lines. `_events` is the
 distinct machine-readable stream: it remains open and emits selected subsequent protocol
 events as JSON lines until interrupted. Names use 1–80 ASCII letters, digits,
 underscores, or hyphens and begin with a letter or digit. The reserved-name vocabulary is
@@ -401,8 +408,8 @@ diagnostics. Current command names are reserved from Rodex aliases.
 ## Local data
 
 The durable database resolved for the current Linux user is
-`$XDG_STATE_HOME/rodex/rodex-v18.sqlite3`, or
-`~/.local/state/rodex/rodex-v18.sqlite3` when `XDG_STATE_HOME` is unset. Rodex does not
+`$XDG_STATE_HOME/rodex/rodex-v19.sqlite3`, or
+`~/.local/state/rodex/rodex-v19.sqlite3` when `XDG_STATE_HOME` is unset. Rodex does not
 support an application-specific database-path override. A successful new-session
 transaction permanently reserves its generated cool name in this database against both
 generated names and user-defined aliases, so a later session using the same database
@@ -422,7 +429,7 @@ enforces its domain uniqueness. Codex session IDs remain Codex-owned 128-bit val
 Each is stored once in the canonical `codex_threads` table across two `BIGINT` columns;
 memberships, current-root selection, activities, and lineage use integer foreign keys.
 
-The registry uses schema generation 18. An internal generation marker admits an
+The registry uses schema generation 19. An internal generation marker admits an
 already-current database cheaply inside each operation's transaction. Explicit
 first-use bootstrap creates a missing private registry atomically; nonempty unmarked,
 incomplete, and wrong-generation databases fail closed. The explicit integrity audit is
@@ -431,7 +438,7 @@ a read-only canonical allowlist check and is not part of ordinary mutation hot p
 Short-lived Unix sockets and app-server logs use `$XDG_RUNTIME_DIR/rodex`, normally
 `/run/user/<uid>/rodex`. When `XDG_RUNTIME_DIR` is unset or that socket path would be
 too long, Rodex uses the private fallback `/tmp/rodex-<uid>`. Set `RODEX_RUNTIME_DIR`
-to override it. Managed tmux sessions share `tmux-shared-v1.sock` within that private
+to override it. Managed tmux sessions share `tmux-shared-v2.sock` within that private
 root; selecting a different runtime root therefore selects a different shared tmux
 server without changing the database selected above. Each app-server, proxy, event
 stream, observer, and log remains runtime-specific.
@@ -512,8 +519,10 @@ pagination, and follow behavior belong to the read side.
 Rodex persists stable thread/turn/item identity, replaceable typed statistics metrics,
 normalized distribution and named-count rows, and typed trace detail tables. Model and
 reasoning effort remain separate nullable turn-state facts whose stable
-integer IDs reference dedicated lookup tables; their session counts are derived from
-those exact turn rows. Metrics therefore remain directly queryable and JSON output can
+integer IDs reference dedicated lookup tables; their session counts use only turn rows
+in the current root's verified thread tree, excluding retained historical roots. Both
+supplied rate-limit windows are retained in primary-then-secondary order; absent windows
+do not create empty trace rows. Metrics remain directly queryable and JSON output can
 be rebuilt deterministically. Trace SQL stores event metadata, byte counts, and
 accepted rollout coordinates—not copied message, command, tool, or output bodies.
 Codex thread identities retain all 128 bits once in canonical rows; unresolved
@@ -556,7 +565,7 @@ SQL.
 ```bash
 uv run ruff format --check .
 uv run ruff check .
-uv run pytest --cov --cov-report=term-missing
+uv run pytest --require-live-startup --cov --cov-report=term-missing
 uv build
 ```
 
@@ -564,3 +573,11 @@ The coverage floor is 70%. Tests lock the exhaustive application route/preparati
 matrix and thin CLI boundary, with real App Server Unix-socket and real-tmux coverage for
 scrollback retention and following, inherited mouse configuration, rename, identity
 markers, and status configuration.
+
+The live-startup gate runs real Codex through the installed shim on isolated SQL and
+tmux state. It verifies the rendered TUI, live thread, detach, reopen without replacing
+the runtime, and a second launch sharing the same server. It submits no model prompts
+and cleans up its runtimes. Run it alone with `uv run pytest -m live_startup --require-live-startup`.
+The required flag makes missing Codex/tmux or authentication fail validation; a normal
+test run may skip the gate when those prerequisites are unavailable. Do not claim startup
+is verified from a run that skipped it.

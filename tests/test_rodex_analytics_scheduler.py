@@ -444,9 +444,7 @@ def test_dirty_identities_are_lossless_while_wake_queue_is_full() -> None:
     scheduler.close()
     thread.join(timeout=1)
     assert batches[0] == AnalyticsDirtyBatch(frozenset(), full_reconcile=True)
-    assert batches[1].thread_ids == frozenset(
-        {uuid.UUID(THREAD_ID), uuid.UUID(SECOND_THREAD_ID)}
-    )
+    assert batches[1].thread_ids == frozenset({uuid.UUID(THREAD_ID), uuid.UUID(SECOND_THREAD_ID)})
 
 
 @pytest.mark.parametrize(
@@ -466,9 +464,7 @@ def test_dirty_identities_are_lossless_while_wake_queue_is_full() -> None:
         ),
     ],
 )
-def test_analytics_wake_events_retain_their_exact_dirty_identity(
-    event: dict[str, object], expected: str
-) -> None:
+def test_analytics_wake_events_retain_their_exact_dirty_identity(event: dict[str, object], expected: str) -> None:
     scheduler = AnalyticsEventScheduler(quiet_seconds=0.01, max_batch_seconds=0.05)
     reconciled = Event()
     batches: list[AnalyticsDirtyBatch] = []
@@ -492,7 +488,5 @@ def test_only_authoritative_semantic_messages_mark_analytics_dirty() -> None:
     assert _is_relevant_protocol_event('{"method":"turn/completed","params":{}}')
     assert _is_relevant_protocol_event(b'{"method":"thread/started","params":{}}')
     assert _is_relevant_protocol_event(b'{"method":"item/completed","params":{}}')
-    assert not _is_relevant_protocol_event(
-        '{"method":"item/agentMessage/delta","params":{}}'
-    )
+    assert not _is_relevant_protocol_event('{"method":"item/agentMessage/delta","params":{}}')
     assert not _is_relevant_protocol_event("not-json")

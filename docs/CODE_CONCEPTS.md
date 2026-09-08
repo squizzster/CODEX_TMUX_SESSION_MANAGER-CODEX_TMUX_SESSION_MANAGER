@@ -19,6 +19,9 @@ boundary; domain policy has one canonical owner underneath it.
 - Rodex registries, Rodex sessions, runtime incarnations, Codex threads, Codex turns,
   tmux server/session capabilities, operating-system users, and display names are separate identity
   domains.
+- Executable aliases normalize once at the runtime launcher before host and hook command
+  construction. Python identity retains its environment directory; a shared base Python
+  executable does not make two virtual environments the same Rodex installation.
 - A permanent generated name is an immutable storage anchor. A user-defined alias, when
   present, is the preferred outward name.
 - Persisted runtime information is evidence of a link, not proof that the runtime is
@@ -35,8 +38,9 @@ boundary; domain policy has one canonical owner underneath it.
 - Human-readable terminal observation comes from verified tmux plain text. Structured
   lifecycle observation comes from the App Server protocol. Neither is used as a
   substitute for authoritative exact-turn state.
-- A terminal follower emits committed rows promptly, settles mutable visible rows, and
-  never treats observation as proof that a turn completed.
+- A terminal follower emits committed rows promptly and settles pending visible rows
+  before idle backoff, even without another pane change. Observation is never proof that
+  a turn completed.
 
 ## Exact-turn mutation
 

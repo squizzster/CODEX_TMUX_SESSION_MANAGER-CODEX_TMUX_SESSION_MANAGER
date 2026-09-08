@@ -25,9 +25,7 @@ from rodex_registry import (
 from .agent_trace_privacy import contains_codex_encrypted_value
 
 AGENT_TRACE_SCHEMA_VERSION = "rodex-agent-trace-v2"
-type AgentTraceSource = (
-    tuple[CodexThreadId, bytes] | tuple[CodexThreadId, bytes, int | Sequence[int]]
-)
+type AgentTraceSource = tuple[CodexThreadId, bytes] | tuple[CodexThreadId, bytes, int | Sequence[int]]
 
 
 class StatefulAgentTraceNormalizer:
@@ -115,8 +113,7 @@ def normalize_rollout_trace(
         else:
             physical_ordinals = tuple(coordinate_spec)
             if len(physical_ordinals) != len(lines) or any(
-                isinstance(value, bool) or not isinstance(value, int) or value < 0
-                for value in physical_ordinals
+                isinstance(value, bool) or not isinstance(value, int) or value < 0 for value in physical_ordinals
             ):
                 raise ValueError("agent trace source ordinals must match its records")
         parsed_thread_id = parse_codex_thread_id(thread_id)
@@ -152,10 +149,7 @@ def normalize_rollout_trace(
                 active_turn_id = None
         active_turns[parsed_thread_id] = active_turn_id
     coverage = (
-        "gapped"
-        if coverage_gapped
-        or any(event.event_kind == "unrecognized_record" for event in events)
-        else "complete"
+        "gapped" if coverage_gapped or any(event.event_kind == "unrecognized_record" for event in events) else "complete"
     )
     return RodexAgentTracePublication(
         based_on_trace_publication_sequence=based_on_trace_publication_sequence,
@@ -171,20 +165,10 @@ def _canonical_record_turn_id(
     payload: Mapping[str, Any],
 ) -> str | None:
     """Resolve one record's turn through the authoritative Codex metadata path."""
-    direct_turn_id = _text(_first_present(payload, "turn_id", "turnId"))
-    response_metadata = _mapping(
-        _first_present(
-            payload,
-            "internal_chat_message_metadata_passthrough",
-            "internalChatMessageMetadataPassthrough",
-        )
+    turn_metadata = (
+        _mapping(payload.get("internal_chat_message_metadata_passthrough")) if record_type == "response_item" else payload
     )
-    response_turn_id = _text(_first_present(response_metadata, "turn_id", "turnId"))
-    candidate = (
-        response_turn_id or direct_turn_id
-        if record_type == "response_item"
-        else direct_turn_id or response_turn_id
-    )
+    candidate = _text(turn_metadata.get("turn_id"))
     return None if candidate is None else str(parse_codex_turn_id(candidate))
 
 
@@ -207,9 +191,9 @@ def _normalize_record(
     if record_type == "session_meta":
         return (RodexAgentTraceEvent(**base, event_kind="session_metadata"),)
     if record_type == "turn_context":
-        roots = payload.get("workspace_roots") or payload.get("workspaceRoots")
+        roots = payload.get("workspace_roots")
         permission = _mapping(payload.get("permission_profile"))
-        sandbox = payload.get("sandbox_policy") or payload.get("sandboxPolicy")
+        sandbox = payload.get("sandbox_policy")
         sandbox_mapping = _mapping(sandbox)
         return (
             RodexAgentTraceEvent(
@@ -217,18 +201,10 @@ def _normalize_record(
                 event_kind="turn_context",
                 detail=TraceContext(
                     model=_text(payload.get("model")),
-                    reasoning_effort=_text(
-                        payload.get("effort") or payload.get("reasoning_effort")
-                    ),
+                    reasoning_effort=_text(payload.get("effort")),
                     working_directory=_text(payload.get("cwd")),
-                    sandbox_mode=_text(
-                        sandbox_mapping.get("type")
-                        or sandbox_mapping.get("mode")
-                        or sandbox
-                    ),
-                    approval_policy=_text(
-                        payload.get("approval_policy") or payload.get("approvalPolicy")
-                    ),
+                    sandbox_mode=_text(sandbox_mapping.get("type")),
+                    approval_policy=_text(payload.get("approval_policy")),
                     permission_profile_type=_text(permission.get("type")),
                     workspace_root_count=(len(roots) if isinstance(roots, list) else 0),
                 ),
@@ -286,9 +262,7 @@ def _normalize_record(
     return (RodexAgentTraceEvent(**base, event_kind="unrecognized_record"),)
 
 
-def _normalize_item(
-    base: dict[str, Any], item: Mapping[str, Any]
-) -> tuple[RodexAgentTraceEvent, ...]:
+def _normalize_item(base: dict[str, Any], item: Mapping[str, Any]) -> tuple[RodexAgentTraceEvent, ...]:
     item_type = _text(item.get("type"))
     if item_type == "CommandExecution":
         return (
@@ -312,9 +286,7 @@ def _normalize_item(
             ),
         )
     if item_type == "SubAgentActivity":
-        target = _optional_thread_id(
-            item.get("agent_thread_id") or item.get("agentThreadId")
-        )
+        target = _optional_thread_id(item.get("agent_thread_id"))
         return (
             RodexAgentTraceEvent(
                 **base,
@@ -350,10 +322,12 @@ def _normalize_response_item(
             tool_names[tool_key] = tool_name
         elif payload_type in output_types and tool_key is not None:
             tool_name = tool_names.pop(tool_key, tool_name)
-        body = (
-            _first_present(payload, "arguments", "input")
-            if payload_type in request_types
-            else payload.get("output")
+        body = payload.get(
+            "arguments"
+            if payload_type == "function_call"
+            else "input"
+            if payload_type == "custom_tool_call"
+            else "output"
         )
         detail = TraceToolCall(
             item_id=_text(payload.get("id")),
@@ -367,7 +341,7 @@ def _normalize_response_item(
         )
         return (RodexAgentTraceEvent(**base, event_kind="tool_call", detail=detail),)
     if payload_type in {"message", "agent_message"}:
-        content = _first_present(payload, "content", "message", "text")
+        content = payload.get("content")
         detail = _message_detail(
             payload,
             content,
@@ -378,22 +352,16 @@ def _normalize_response_item(
 
 
 def _qualified_tool_name(payload: Mapping[str, Any]) -> str:
-    name = _text(_first_present(payload, "name", "tool")) or "unknown"
+    name = _text(payload.get("name")) or "unknown"
     namespace = _text(payload.get("namespace"))
     if namespace is None or name == "unknown" or name.startswith(f"{namespace}."):
         return name
     return f"{namespace}.{name}"
 
 
-def _normalize_token_record(
-    base: dict[str, Any], payload: Mapping[str, Any]
-) -> tuple[RodexAgentTraceEvent, ...]:
+def _normalize_token_record(base: dict[str, Any], payload: Mapping[str, Any]) -> tuple[RodexAgentTraceEvent, ...]:
     info = _mapping(payload.get("info"))
-    usage = _mapping(
-        payload.get("usage")
-        or info.get("total_token_usage")
-        or info.get("last_token_usage")
-    )
+    usage = _mapping(info.get("total_token_usage"))
     context = _first_present(payload, "context_used_percent")
     if context is None:
         context = _first_present(info, "context_used_percent")
@@ -411,9 +379,7 @@ def _normalize_token_record(
             ),
         )
     ]
-    limits = _first_present(payload, "rate_limits", "rateLimits")
-    if limits is None:
-        limits = _first_present(info, "rate_limits")
+    limits = payload.get("rate_limits")
     windows = _rate_limit_windows(limits)
     if windows:
         rate_base = dict(base)
@@ -433,13 +399,13 @@ def _command_detail(item: Mapping[str, Any]) -> TraceCommandExecution:
     arguments = command if isinstance(command, list) else [command] if command else []
     stdout = item.get("stdout")
     stderr = item.get("stderr")
-    aggregated = _first_present(item, "aggregated_output", "aggregatedOutput")
+    aggregated = item.get("aggregated_output")
     return TraceCommandExecution(
         item_id=_text(item.get("id") or item.get("call_id")),
         command_argument_count=len(arguments),
         working_directory=_text(item.get("cwd")),
         command_status=_text(item.get("status")),
-        duration_ms=_duration_ms(_first_present(item, "duration_ms", "duration")),
+        duration_ms=_duration_milliseconds(item.get("duration")),
         exit_code=_integer(item.get("exit_code")),
         stdout_utf8_bytes=_utf8_bytes(stdout),
         stderr_utf8_bytes=_utf8_bytes(stderr),
@@ -462,7 +428,7 @@ def _tool_detail(item: Mapping[str, Any], fallback_name: str) -> TraceToolCall:
     )
     return TraceToolCall(
         item_id=_text(item.get("id")),
-        call_id=_text(item.get("call_id") or item.get("callId")),
+        call_id=_text(item.get("call_id")),
         tool_name=_text(item.get("name") or item.get("tool")) or fallback_name,
         tool_status=_text(item.get("status")),
         request_utf8_bytes=_utf8_bytes(request),
@@ -472,12 +438,8 @@ def _tool_detail(item: Mapping[str, Any], fallback_name: str) -> TraceToolCall:
     )
 
 
-def _message_detail(
-    item: Mapping[str, Any], content: object, *, role: object
-) -> TraceMessage:
-    blocks = (
-        content if isinstance(content, list) else [content] if content is not None else []
-    )
+def _message_detail(item: Mapping[str, Any], content: object, *, role: object) -> TraceMessage:
+    blocks = content if isinstance(content, list) else [content] if content is not None else []
     return TraceMessage(
         item_id=_text(item.get("id")),
         message_phase=_message_phase(item.get("phase")),
@@ -488,56 +450,34 @@ def _message_detail(
     )
 
 
-def _subagent_detail(
-    item: Mapping[str, Any], *, target: CodexThreadId | None = None
-) -> TraceSubagentActivity:
+def _subagent_detail(item: Mapping[str, Any], *, target: CodexThreadId | None = None) -> TraceSubagentActivity:
     if target is None:
-        target = _optional_thread_id(
-            _first_present(
-                item,
-                "agent_thread_id",
-                "agentThreadId",
-                "target_thread_id",
-                "targetThreadId",
-            )
-        )
+        target = _optional_thread_id(item.get("agent_thread_id"))
     return TraceSubagentActivity(
         target_codex_thread_id=target,
-        activity_kind=_text(_first_present(item, "kind", "status", "activity"))
-        or "unknown",
-        agent_path=_text(_first_present(item, "agent_path", "agentPath")),
+        activity_kind=_text(item.get("kind")) or "unknown",
+        agent_path=_text(item.get("agent_path")),
         collaboration_call_id=_text(item.get("id")),
     )
 
 
 def _rate_limit_windows(value: object) -> list[TraceRateLimitWindow]:
-    values = (
-        value if isinstance(value, list) else [value] if isinstance(value, Mapping) else []
-    )
-    windows: list[TraceRateLimitWindow] = []
-    for raw in values:
-        item = _mapping(raw)
-        primary = _mapping(item.get("primary"))
-        observed = primary or item
-        limit_id = _text(item.get("limit_id") or item.get("limitId"))
-        if limit_id is None:
-            continue
-        windows.append(
-            TraceRateLimitWindow(
-                limit_id=limit_id,
-                used_percent=_percentage(
-                    _first_present(observed, "used_percent", "usedPercent")
-                ),
-                window_minutes=_integer(
-                    _first_present(observed, "window_minutes", "windowMinutes")
-                ),
-                resets_at_unix_seconds=_integer(
-                    _first_present(observed, "resets_at", "resetsAt")
-                ),
-                plan_type=_text(item.get("plan_type") or item.get("planType")),
-            )
+    """Preserve each supplied window in primary-then-secondary snapshot order."""
+    snapshot = _mapping(value)
+    limit_id = _text(snapshot.get("limit_id"))
+    if limit_id is None:
+        return []
+    return [
+        TraceRateLimitWindow(
+            limit_id=limit_id,
+            used_percent=_percentage(window.get("used_percent")),
+            window_minutes=_integer(window.get("window_minutes")),
+            resets_at_unix_seconds=_integer(window.get("resets_at")),
+            plan_type=_text(snapshot.get("plan_type")),
         )
-    return windows
+        for window in (snapshot.get("primary"), snapshot.get("secondary"))
+        if isinstance(window, Mapping)
+    ]
 
 
 def _mapping(value: object) -> Mapping[str, Any]:
@@ -566,15 +506,14 @@ def _percentage(value: object) -> float | None:
     return None
 
 
-def _duration_ms(value: object) -> int | None:
-    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
-        return value
-    if isinstance(value, float) and value >= 0:
-        return round(value * 1000)
+def _duration_milliseconds(value: object) -> int | None:
+    """Convert the rollout's serialized Duration (secs/nanos) into milliseconds."""
     mapping = _mapping(value)
-    seconds = _integer(_first_present(mapping, "secs", "seconds"))
-    nanoseconds = _integer(_first_present(mapping, "nanos", "nanoseconds")) or 0
-    return None if seconds is None else seconds * 1000 + nanoseconds // 1_000_000
+    seconds = _integer(mapping.get("secs"))
+    nanoseconds = _integer(mapping.get("nanos")) or 0
+    if seconds is None or seconds < 0 or nanoseconds < 0:
+        return None
+    return seconds * 1000 + nanoseconds // 1_000_000
 
 
 def _utf8_bytes(value: object) -> int:

@@ -40,14 +40,10 @@ def test_scalar_layouts_follow_projection_field_order_without_parallel_lists() -
     }
 
     assert SESSION_STATISTICS_SCALARS.columns == tuple(
-        field.name
-        for field in fields(SessionStatisticsProjection)
-        if field.name not in session_non_scalars
+        field.name for field in fields(SessionStatisticsProjection) if field.name not in session_non_scalars
     )
     assert TURN_STATISTICS_SCALARS.columns == tuple(
-        field.name
-        for field in fields(TurnStatisticsProjection)
-        if field.name not in turn_non_scalars
+        field.name for field in fields(TurnStatisticsProjection) if field.name not in turn_non_scalars
     )
 
 
@@ -56,12 +52,8 @@ def test_scalar_layout_generates_complete_sql_fragments() -> None:
 
     assert layout.columns_sql.split(", ") == list(layout.columns)
     assert layout.placeholders_sql.split(", ") == ["?"] * len(layout.fields)
-    assert layout.excluded_updates_sql.split(", ") == [
-        f"{name} = excluded.{name}" for name in layout.columns
-    ]
-    assert layout.excluded_changes_sql.split(" OR ") == [
-        f"{name} IS NOT excluded.{name}" for name in layout.columns
-    ]
+    assert layout.excluded_updates_sql.split(", ") == [f"{name} = excluded.{name}" for name in layout.columns]
+    assert layout.excluded_changes_sql.split(" OR ") == [f"{name} IS NOT excluded.{name}" for name in layout.columns]
 
 
 def test_scalar_fields_own_nullability_storage_and_row_decoding() -> None:

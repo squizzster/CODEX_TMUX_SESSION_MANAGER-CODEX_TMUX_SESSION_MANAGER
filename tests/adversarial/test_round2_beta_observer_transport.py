@@ -67,8 +67,7 @@ def test_round2_observer_dispatch_queue_is_bounded_while_disconnected(
             dispatcher.send(tmp_path / "observer.sock", _snapshot(revision))
 
         assert dispatcher._events.qsize() <= MAX_PENDING_OBSERVER_EVENTS, (
-            "a disconnected observer must have a fixed memory bound; "
-            f"queued {dispatcher._events.qsize()} events"
+            f"a disconnected observer must have a fixed memory bound; queued {dispatcher._events.qsize()} events"
         )
     finally:
         dispatcher.close()
@@ -110,8 +109,7 @@ def test_round2_observer_reconnect_delivers_only_the_latest_coalesced_snapshot(
         dispatcher.close()
 
     assert delivered == [_snapshot(newest_revision)], (
-        "reconnect must publish one current snapshot, not replay stale deltas; "
-        f"delivered {len(delivered)} frames"
+        f"reconnect must publish one current snapshot, not replay stale deltas; delivered {len(delivered)} frames"
     )
 
 
@@ -216,9 +214,7 @@ def test_round2_observer_parked_retry_has_a_low_capped_cadence(
 
     monkeypatch.setattr(observer_module, "_send_observer_event_frame", unavailable)
     parked_interval = 0.05
-    dispatcher = observer_module._ObserverEventDispatcher(
-        parked_retry_seconds=parked_interval
-    )
+    dispatcher = observer_module._ObserverEventDispatcher(parked_retry_seconds=parked_interval)
     try:
         dispatcher.send(tmp_path / "observer.sock", _snapshot(1))
         assert initial_budget_exhausted.wait(2)
@@ -229,8 +225,7 @@ def test_round2_observer_parked_retry_has_a_low_capped_cadence(
 
     parked_attempts = attempts - attempts_after_initial_budget
     assert 2 <= parked_attempts <= 4, (
-        "a parked retained snapshot should retry once per low-cadence interval, "
-        f"observed {parked_attempts} attempts"
+        f"a parked retained snapshot should retry once per low-cadence interval, observed {parked_attempts} attempts"
     )
 
 
@@ -309,13 +304,8 @@ def test_round2_projection_bounds_multi_megabyte_fields_before_json_encoding() -
         "truncated_fields": ["item.text"],
         "omitted_list_items": {},
     }
-    assert len(frame) - observer_module._OBSERVER_FRAME_LENGTH.size <= (
-        observer_module.OBSERVER_MAX_FRAME_BYTES
-    )
-    assert peak < 1024 * 1024, (
-        "projection and encoding allocated in proportion to the multi-megabyte input: "
-        f"peak={peak}"
-    )
+    assert len(frame) - observer_module._OBSERVER_FRAME_LENGTH.size <= (observer_module.OBSERVER_MAX_FRAME_BYTES)
+    assert peak < 1024 * 1024, f"projection and encoding allocated in proportion to the multi-megabyte input: peak={peak}"
 
 
 def test_round2_all_projected_free_text_and_lists_have_explicit_bounds() -> None:
@@ -366,9 +356,7 @@ def test_round2_all_projected_free_text_and_lists_have_explicit_bounds() -> None
                 "item": {
                     "type": "userMessage",
                     "id": "user-1",
-                    "content": [
-                        {"type": "text", "text": huge_text} for _index in range(100)
-                    ],
+                    "content": [{"type": "text", "text": huge_text} for _index in range(100)],
                 },
             },
         }
@@ -392,8 +380,7 @@ def test_round2_all_projected_free_text_and_lists_have_explicit_bounds() -> None
     for projected in (activity, invocation, user_message):
         assert "projection_overflow" in projected
         assert len(observer_module._observer_event_frame(projected)) <= (
-            observer_module.OBSERVER_MAX_FRAME_BYTES
-            + observer_module._OBSERVER_FRAME_LENGTH.size
+            observer_module.OBSERVER_MAX_FRAME_BYTES + observer_module._OBSERVER_FRAME_LENGTH.size
         )
 
 
@@ -474,14 +461,11 @@ def test_round2_observer_receiver_rejects_oversize_frame_before_reading_payload(
 
     assert events.empty(), "oversize observer frame reached the application queue"
     assert connection.bytes_read == observer_module._OBSERVER_FRAME_LENGTH.size, (
-        "oversize frames must be rejected from their header without allocating or "
-        f"reading the {len(frame)}-byte payload"
+        f"oversize frames must be rejected from their header without allocating or reading the {len(frame)}-byte payload"
     )
 
 
-def test_round2_observer_receiver_accepts_exact_frame_limit_before_json_validation() -> (
-    None
-):
+def test_round2_observer_receiver_accepts_exact_frame_limit_before_json_validation() -> None:
     payload = b"x" * observer_module.OBSERVER_MAX_FRAME_BYTES
     frame = observer_module._OBSERVER_FRAME_LENGTH.pack(len(payload)) + payload
     connection = _MemoryConnection(frame)

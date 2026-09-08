@@ -105,11 +105,7 @@ class TmuxStatusBar:
         if with_what.part is not part:
             raise ValueError("replacement segment must own the selected status part")
         self.segment(part)
-        return TmuxStatusBar(
-            tuple(
-                with_what if segment.part is part else segment for segment in self.segments
-            )
-        )
+        return TmuxStatusBar(tuple(with_what if segment.part is part else segment for segment in self.segments))
 
     def modify_colour(
         self,
@@ -247,9 +243,7 @@ RODEX_STATUS_COLOURS: Final = StatusBarColours(
         "colour22",
     ),
 )
-RODEX_STATUS_STYLE: Final = (
-    f"bg={RODEX_STATUS_COLOURS.base_background},fg={RODEX_STATUS_COLOURS.base_foreground}"
-)
+RODEX_STATUS_STYLE: Final = f"bg={RODEX_STATUS_COLOURS.base_background},fg={RODEX_STATUS_COLOURS.base_foreground}"
 
 _CONTEXT_FALLBACK_SEGMENT: Final = StatusBarSegment(
     part=StatusBarPart.CONTEXT,
@@ -357,11 +351,7 @@ def context_status_segment(context_percent: float | None) -> str:
         raise ValueError("context percent must be a finite non-negative number or None")
     exact_percent = float(context_percent)
     displayed_percent = math.floor(exact_percent + 0.5)
-    foreground = next(
-        band.foreground
-        for band in _CONTEXT_COLOUR_BANDS
-        if exact_percent >= band.minimum_percent
-    )
+    foreground = next(band.foreground for band in _CONTEXT_COLOUR_BANDS if exact_percent >= band.minimum_percent)
     return replace(
         _CONTEXT_FALLBACK_SEGMENT,
         foreground=foreground,

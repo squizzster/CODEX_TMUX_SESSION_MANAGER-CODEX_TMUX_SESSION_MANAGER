@@ -55,9 +55,7 @@ def test_new_cool_name_stores_the_full_md5_as_two_signed_integers(
     tmp_path: Path,
 ) -> None:
     database = tmp_path / "rodex.sqlite3"
-    allocated = get_unique_new_cool_name(
-        database, name_generator=lambda _word_count: "alpha-beta"
-    )
+    allocated = get_unique_new_cool_name(database, name_generator=lambda _word_count: "alpha-beta")
     digest = hashlib.md5(b"alpha-beta", usedforsecurity=False).digest()
     expected = (
         signed_64(int.from_bytes(digest[:8], byteorder="big")),
@@ -116,9 +114,7 @@ def test_twenty_blocked_names_fail_after_ten_attempts_at_each_size(
         get_unique_new_cool_name(database, name_generator=generate_blocked_name)
 
     assert requested_word_counts == [2] * 10 + [3] * 10
-    assert fetch_all(database, "SELECT id, cool_name FROM cool_names") == [
-        (1, "blocked-name")
-    ]
+    assert fetch_all(database, "SELECT id, cool_name FROM cool_names") == [(1, "blocked-name")]
 
 
 def test_reserved_names_are_case_insensitive_and_automatic_allocation_skips_them(
@@ -141,13 +137,9 @@ def test_reserved_names_are_case_insensitive_and_automatic_allocation_skips_them
     assert is_reserved_rodex_name("RUNNING")
     assert not is_reserved_rodex_name("SESSIONS")
     assert not is_reserved_rodex_name("running-fox")
-    assert get_unique_new_cool_name(database, name_generator=generate_name) == (
-        "fresh-three-name"
-    )
+    assert get_unique_new_cool_name(database, name_generator=generate_name) == ("fresh-three-name")
     assert requested_word_counts == [2] * 10 + [3]
-    assert fetch_all(database, "SELECT id, cool_name FROM cool_names") == [
-        (1, "fresh-three-name")
-    ]
+    assert fetch_all(database, "SELECT id, cool_name FROM cool_names") == [(1, "fresh-three-name")]
 
 
 @pytest.mark.parametrize("reserved_name", sorted(RODEX_RESERVED_WORDS))
@@ -158,14 +150,10 @@ def test_automatic_allocation_skips_every_reserved_name_without_consuming_an_id(
     database = tmp_path / "rodex.sqlite3"
     candidates = iter([reserved_name.upper(), "safe-generated-name"])
 
-    allocated = get_unique_new_cool_name(
-        database, name_generator=lambda _word_count: next(candidates)
-    )
+    allocated = get_unique_new_cool_name(database, name_generator=lambda _word_count: next(candidates))
 
     assert allocated == "safe-generated-name"
-    assert fetch_all(database, "SELECT id, cool_name FROM cool_names") == [
-        (1, "safe-generated-name")
-    ]
+    assert fetch_all(database, "SELECT id, cool_name FROM cool_names") == [(1, "safe-generated-name")]
 
 
 def test_md5_integer_pair_unique_index_rejects_duplicates(tmp_path: Path) -> None:
@@ -178,16 +166,12 @@ def test_md5_integer_pair_unique_index_rejects_duplicates(tmp_path: Path) -> Non
 
     with sqlite3.connect(database) as connection, pytest.raises(sqlite3.IntegrityError):
         connection.execute(
-            "INSERT INTO cool_names "
-            "(cool_name_md5_int_1, cool_name_md5_int_2, cool_name) "
-            "VALUES (?, ?, ?)",
+            "INSERT INTO cool_names (cool_name_md5_int_1, cool_name_md5_int_2, cool_name) VALUES (?, ?, ?)",
             (*stored_ints, "different-text"),
         )
 
 
-def test_session_creation_allocates_and_owns_one_cool_name(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_session_creation_allocates_and_owns_one_cool_name(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     database = tmp_path / "rodex.sqlite3"
     monkeypatch.setattr(
         "cool_name.functions.coolname.generate_slug",
@@ -205,9 +189,7 @@ def test_session_creation_allocates_and_owns_one_cool_name(
         database,
         "SELECT cool_names_id, user_defined_cool_names_id FROM rodex_sessions",
     ) == [(1, None)]
-    assert fetch_all(database, "SELECT id, cool_name FROM cool_names") == [
-        (1, "precise-schema")
-    ]
+    assert fetch_all(database, "SELECT id, cool_name FROM cool_names") == [(1, "precise-schema")]
 
 
 def test_user_defined_cool_name_field_is_nullable_unique_and_integer_linked(
@@ -222,15 +204,11 @@ def test_user_defined_cool_name_field_is_nullable_unique_and_integer_linked(
         "PRAGMA index_info(rodex_sessions_user_defined_cool_names_id_unique)",
     )
 
-    user_defined_column = next(
-        row for row in columns if row[1] == "user_defined_cool_names_id"
-    )
+    user_defined_column = next(row for row in columns if row[1] == "user_defined_cool_names_id")
     assert (user_defined_column[2], user_defined_column[3], user_defined_column[4]) == (
         "INTEGER",
         0,
         "NULL",
     )
-    assert ("rodex_sessions_user_defined_cool_names_id_unique", 1) in {
-        (row[1], row[2]) for row in indexes
-    }
+    assert ("rodex_sessions_user_defined_cool_names_id_unique", 1) in {(row[1], row[2]) for row in indexes}
     assert [row[2] for row in index_columns] == ["user_defined_cool_names_id"]

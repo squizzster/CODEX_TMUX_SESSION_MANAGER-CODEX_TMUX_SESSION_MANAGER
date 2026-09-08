@@ -39,9 +39,7 @@ class StatisticsScalarField:
     def read(self, value: object) -> object:
         if value is None:
             if not self.nullable:
-                raise ValueError(
-                    f"stored statistics scalar is unexpectedly null: {self.name}"
-                )
+                raise ValueError(f"stored statistics scalar is unexpectedly null: {self.name}")
             return None
         if self.kind is StatisticsScalarKind.BOOLEAN:
             return bool(value)
@@ -77,9 +75,7 @@ class StatisticsScalarLayout:
     @property
     def excluded_changes_sql(self) -> str:
         """Return a null-safe predicate that rejects unchanged UPSERT writes."""
-        return " OR ".join(
-            f"{field.name} IS NOT excluded.{field.name}" for field in self.fields
-        )
+        return " OR ".join(f"{field.name} IS NOT excluded.{field.name}" for field in self.fields)
 
     @property
     def schema_columns(self) -> tuple[tuple[str, str, int, int], ...]:
@@ -89,10 +85,7 @@ class StatisticsScalarLayout:
         return tuple(getattr(projection, field.name) for field in self.fields)
 
     def read_values(self, values: tuple[object, ...]) -> dict[str, object]:
-        return {
-            field.name: field.read(value)
-            for field, value in zip(self.fields, values, strict=True)
-        }
+        return {field.name: field.read(value) for field, value in zip(self.fields, values, strict=True)}
 
 
 def _scalar_layout(
@@ -121,9 +114,7 @@ def _scalar_layout(
         elif scalar_type is str:
             kind = StatisticsScalarKind.TEXT
         else:
-            raise TypeError(
-                f"unsupported statistics scalar annotation for {item.name}: {annotation}"
-            )
+            raise TypeError(f"unsupported statistics scalar annotation for {item.name}: {annotation}")
         scalar_fields.append(StatisticsScalarField(item.name, kind, nullable))
     return StatisticsScalarLayout(tuple(scalar_fields))
 

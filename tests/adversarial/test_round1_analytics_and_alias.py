@@ -55,9 +55,7 @@ class PermanentlyFailingAdapter:
 def _analytics_fixture(tmp_path: Path) -> tuple[AnalyticsWorkerConfig, Path]:
     database = tmp_path / "rodex.sqlite3"
     sessions_root = tmp_path / "sessions"
-    rollout = (
-        sessions_root / "2026" / "08" / "29" / f"rollout-round1-{CODEX_SESSION_ID}.jsonl"
-    )
+    rollout = sessions_root / "2026" / "08" / "29" / f"rollout-round1-{CODEX_SESSION_ID}.jsonl"
     rollout.parent.mkdir(parents=True)
     records = [
         {

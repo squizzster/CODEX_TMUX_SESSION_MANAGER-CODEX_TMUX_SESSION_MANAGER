@@ -39,11 +39,9 @@ from .control import (
     RodexWaitTimeoutError,
 )
 from .errors import ExactRuntimeIdentityRequiredError, RodexLaunchError
-from .exact_turn_mutation import (
-    ExactTurnMutationCoordinator,
-    require_durable_runtime_instance,
-)
+from .exact_turn_mutation import ExactTurnMutationCoordinator
 from .live_runtime import (
+    require_durable_runtime_instance,
     resolve_live_control,
     revalidate_live_control,
 )
@@ -154,17 +152,15 @@ def execute_machine_command(
                 data=success_data,
             )
             return 0
-        session_id, runtime, control = resolve_live_control(
-            session_name, database_path, launcher
-        )
+        session_id, runtime, control = resolve_live_control(session_name, database_path, launcher)
         names = lookup_rodex_session_names(session_id, database_path)
         if names is None:
             raise RodexLaunchError(f"Rodex session disappeared: {session_name}")
         display_name = names.display_name
-        require_durable_runtime_instance(session_id, database_path, control)
 
         def revalidate() -> None:
             revalidate_live_control(launcher, runtime, control)
+            require_durable_runtime_instance(session_id, database_path, control)
 
         if command == INSPECT_COMMAND:
             state = control_client.inspect_live(control)
@@ -192,11 +188,7 @@ def execute_machine_command(
                 revalidate=revalidate,
             )
             success_state = state
-            success_turn_id = (
-                dispatch_status.matches[0].turn_id
-                if dispatch_status.observation == "accepted"
-                else None
-            )
+            success_turn_id = dispatch_status.matches[0].turn_id if dispatch_status.observation == "accepted" else None
             success_thread_id = None
             success_codex_session_id = None
             success_data = {
@@ -311,8 +303,7 @@ def execute_machine_command(
             control=control,
             turn_id=(
                 error.turn_id
-                if isinstance(error, RodexDispatchIndeterminateError)
-                and error.turn_id is not None
+                if isinstance(error, RodexDispatchIndeterminateError) and error.turn_id is not None
                 else turn_id
             ),
             data=error_data,
@@ -431,10 +422,7 @@ def _dispatch_status_recommendation(
         return {
             "action": "poll_dispatch_status",
             "command": status_command,
-            "reason": (
-                "the dispatch is not yet present in thread history; this is not "
-                "evidence that it was rejected"
-            ),
+            "reason": ("the dispatch is not yet present in thread history; this is not evidence that it was rejected"),
         }
     return {
         "action": "controller_decision_required",
@@ -517,26 +505,19 @@ def _machine_envelope(
         "ok": ok,
         "rodex": {
             "session_identifier": (
-                None
-                if control is None or control.rodex_session_id is None
-                else str(control.rodex_session_id)
+                None if control is None or control.rodex_session_id is None else str(control.rodex_session_id)
             ),
             "display_name": session_name,
         },
         "runtime": {
-            "runtime_id": (
-                None
-                if control is None or control.runtime_id is None
-                else str(control.runtime_id)
-            ),
+            "runtime_id": (None if control is None or control.runtime_id is None else str(control.runtime_id)),
             "state": None if control is None else "running",
         },
         "codex": {
             "thread_id": (
                 state.thread_id
                 if state is not None
-                else thread_id
-                or (None if control is None else str(control.codex_session_id))
+                else thread_id or (None if control is None else str(control.codex_session_id))
             ),
             "session_id": (state.session_id if state is not None else codex_session_id),
             "turn_id": turn_id,

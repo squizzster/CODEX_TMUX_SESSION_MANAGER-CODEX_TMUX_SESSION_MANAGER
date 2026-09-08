@@ -121,7 +121,7 @@ never construct or execute the tmux process prefix themselves.
 ## Shared tmux authority
 
 All managed sessions intentionally multiplex through the per-user versioned
-`tmux-shared-v1.sock`. This is analogous to many clients sharing one Unix socket: the
+`tmux-shared-v2.sock`. This is analogous to many clients sharing one Unix socket: the
 socket selects a server but grants no session authority. Rodex records server-scope
 protocol and random incarnation markers. Only creation may claim a completely unmarked
 server, and only while it has no session; an unmarked nonempty server or protocol mismatch
@@ -184,7 +184,9 @@ redirect it. Standard tools select from the result, for example
 `rodex _cat NAME | head -n 10` or `rodex _cat NAME | tail -n 10`. `_tail NAME` uses
 the same verified tmux source but remains open: it prints the selected recent lines,
 emits rows entering committed history immediately, and emits stable visible changes
-after three 0.4-second captures. Its plain-text cursor excludes the current Codex
+after three 0.4-second captures. Pending visible output keeps being sampled until it
+settles; an unchanged pane cannot trigger idle backoff while that output remains pending.
+Its plain-text cursor excludes the current Codex
 `Working`/background status region and live composer, avoiding partial prompt fragments,
 timer duplication, ANSI replay, and screen-clearing side effects. Familiar `-n`,
 `--lines`, and `-NUM` selection forms change the initial output; following is the

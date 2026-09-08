@@ -37,8 +37,7 @@ def _distribution(*values: int) -> dict[str, int | float | None]:
     return {
         "n": len(ordered),
         "total": sum(ordered),
-        "median": sum(ordered[(len(ordered) - 1) // 2 : len(ordered) // 2 + 1])
-        / (2 if len(ordered) % 2 == 0 else 1),
+        "median": sum(ordered[(len(ordered) - 1) // 2 : len(ordered) // 2 + 1]) / (2 if len(ordered) % 2 == 0 else 1),
         "p75": ordered[-1],
         "p90": ordered[-1],
         "p95": ordered[-1],
@@ -258,9 +257,7 @@ def test_complete_snapshot_becomes_typed_immutable_relational_values() -> None:
     assert projection.audit_limits == ("first", "second")
     assert all(isinstance(item, StatisticsNamedCount) for item in projection.named_counts)
     tool_counts = [
-        (item.count_name, item.occurrence_count)
-        for item in projection.named_counts
-        if item.count_kind == "model_tool"
+        (item.count_name, item.occurrence_count) for item in projection.named_counts if item.count_kind == "model_tool"
     ]
     assert tool_counts == [("exec", 1), ("wait", 1)]
 
@@ -289,8 +286,7 @@ def test_every_analyzer_stat_is_reconstructed_exactly_from_typed_values() -> Non
         )
     }
     assert turn_statistics_as_dict(projection.turn_statistics[0]) == {
-        key: snapshot["turn_statistics"][0][key]
-        for key in ("must_have_basic_stats", "recommended_insight_stats")
+        key: snapshot["turn_statistics"][0][key] for key in ("must_have_basic_stats", "recommended_insight_stats")
     }
 
 
@@ -304,15 +300,11 @@ def test_every_analyzer_stat_is_reconstructed_exactly_from_typed_values() -> Non
             "turns keys do not match",
         ),
         (
-            lambda value: value["recommended_insight_stats"].pop(
-                "revisited_distinct_path_count"
-            ),
+            lambda value: value["recommended_insight_stats"].pop("revisited_distinct_path_count"),
             "recommended_insight_stats keys do not match",
         ),
         (
-            lambda value: value["turn_statistics"][0]["must_have_basic_stats"][
-                "timing"
-            ].__setitem__("future", 1),
+            lambda value: value["turn_statistics"][0]["must_have_basic_stats"]["timing"].__setitem__("future", 1),
             "timing keys do not match",
         ),
     ],
@@ -329,39 +321,27 @@ def test_schema_drift_is_rejected(mutation, message: str) -> None:
     ("mutation", "message"),
     [
         (
-            lambda value: value["must_have_basic_stats"]["turns"].__setitem__(
-                "started", True
-            ),
+            lambda value: value["must_have_basic_stats"]["turns"].__setitem__("started", True),
             "nonnegative integer",
         ),
         (
-            lambda value: value["recommended_insight_stats"].__setitem__(
-                "hands_on_turn_rate_percent", math.nan
-            ),
+            lambda value: value["recommended_insight_stats"].__setitem__("hands_on_turn_rate_percent", math.nan),
             "finite number",
         ),
         (
-            lambda value: value["must_have_basic_stats"]["model_tool_requests"][
-                "by_tool"
-            ].__setitem__("exec", 0),
+            lambda value: value["must_have_basic_stats"]["model_tool_requests"]["by_tool"].__setitem__("exec", 0),
             "positive integer",
         ),
         (
-            lambda value: value["must_have_basic_stats"][
-                "completed_turn_duration_ms"
-            ].__setitem__("p90", None),
+            lambda value: value["must_have_basic_stats"]["completed_turn_duration_ms"].__setitem__("p90", None),
             "requires all summaries",
         ),
         (
-            lambda value: value["turn_statistics"][0][
-                "recommended_insight_stats"
-            ].__setitem__("hands_on", 1),
+            lambda value: value["turn_statistics"][0]["recommended_insight_stats"].__setitem__("hands_on", 1),
             "must be a boolean",
         ),
         (
-            lambda value: value["turn_statistics"][0].__setitem__(
-                "terminal_at", "2026-08-16T11:59:59Z"
-            ),
+            lambda value: value["turn_statistics"][0].__setitem__("terminal_at", "2026-08-16T11:59:59Z"),
             "precedes start",
         ),
     ],
@@ -402,9 +382,7 @@ def test_empty_distributions_and_null_rates_remain_explicit() -> None:
 def test_model_and_reasoning_effort_are_independently_nullable_turn_facts() -> None:
     snapshot = _snapshot()
     snapshot["must_have_basic_stats"]["workspaces_and_models"]["reasoning_efforts"] = {}
-    snapshot["turn_statistics"][0]["must_have_basic_stats"]["workspace_and_model"][
-        "reasoning_effort"
-    ] = None
+    snapshot["turn_statistics"][0]["must_have_basic_stats"]["workspace_and_model"]["reasoning_effort"] = None
 
     projection = parse_session_statistics_snapshot(snapshot)
 
@@ -434,22 +412,16 @@ def test_turn_collection_must_match_aggregate_count_and_outcomes() -> None:
 
 def test_turn_context_rollups_must_match_final_exact_turn_facts() -> None:
     wrong_models = _snapshot()
-    wrong_models["must_have_basic_stats"]["workspaces_and_models"]["models"] = {
-        "other-model": 1
-    }
+    wrong_models["must_have_basic_stats"]["workspaces_and_models"]["models"] = {"other-model": 1}
     with pytest.raises(StatisticsProjectionError, match="aggregate model counts"):
         parse_session_statistics_snapshot(wrong_models)
 
     wrong_efforts = _snapshot()
-    wrong_efforts["must_have_basic_stats"]["workspaces_and_models"]["reasoning_efforts"] = {
-        "medium": 1
-    }
+    wrong_efforts["must_have_basic_stats"]["workspaces_and_models"]["reasoning_efforts"] = {"medium": 1}
     with pytest.raises(StatisticsProjectionError, match="reasoning effort counts"):
         parse_session_statistics_snapshot(wrong_efforts)
 
     wrong_workspaces = _snapshot()
-    wrong_workspaces["must_have_basic_stats"]["workspaces_and_models"][
-        "distinct_workspaces"
-    ] = 2
+    wrong_workspaces["must_have_basic_stats"]["workspaces_and_models"]["distinct_workspaces"] = 2
     with pytest.raises(StatisticsProjectionError, match="distinct workspace count"):
         parse_session_statistics_snapshot(wrong_workspaces)

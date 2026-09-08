@@ -42,13 +42,22 @@ group/world-write access, and symlinks that escape the environment. It separatel
 the entrypoint's absolute interpreter. This prevents a command installed at a trusted
 location from silently crossing into mutable executable code owned by another user.
 
-Verify the installation:
+Check command resolution and registry access, then verify actual interactive startup:
 
 ```bash
 command -v rodex
 rodex _help
 rodex _running
+rodex
 ```
+
+Confirm that the Codex TUI renders and note the attached Rodex name. Press `Ctrl-d` to
+detach, then run `rodex NAME` to reopen that same live runtime. Help and roster output
+alone do not prove startup. From the project root, the automated release gate is
+`uv run pytest -m live_startup --require-live-startup`; it tests real startup, rendered
+TUI, detach, reopen, and shared-server reuse with isolated SQL/tmux state, submits no
+model prompts, and stops its test runtimes. It requires an authenticated Codex CLI and
+tmux; missing prerequisites fail the required gate.
 
 Rodex may report that a newer Codex release exists, but it never installs one. Run
 `codex update` outside Rodex when you choose to update Codex.
@@ -70,9 +79,40 @@ rodex _running
 ```
 
 Add that export to the shell's startup configuration when the override should persist.
-Exit every running Rodex runtime before moving a checkout, update the shim/override, run
-the verification commands above, and then resume the sessions. A running Python process
-must never be expected to follow a moved checkout, database, or protected parent.
+Exit every running Rodex runtime before moving a checkout, update the shim/override,
+recreate `.venv` with `uv venv --clear --python 3.12 .venv`, and run `uv sync --locked`.
+Virtual environments contain absolute interpreter, activation, and editable-source paths;
+reinstalling only the Rodex package does not rebuild all of them. Run the verification
+commands above and then start current-generation sessions. A running Python process
+cannot follow a moved checkout, database, or protected parent.
+
+## Storage location and release boundaries
+
+The [current release](README.md) owns SQL generation 19 and shared tmux protocol v2.
+Earlier databases and servers are not discovered or migrated. A new SQL generation
+starts a separate Rodex name catalog; patch releases within that generation retain it.
+Existing Codex transcripts remain in the separately configured Codex session directory.
+
+Set an absolute `XDG_STATE_HOME` to choose the parent of the `rodex` storage directory.
+Each process resolves its database path once at startup, independently of the caller's
+project directory. To relocate current-generation storage, exit all of its runtimes,
+move the complete `rodex` storage directory, set the new `XDG_STATE_HOME` for every caller,
+and restart Rodex. The schema and stored identities do not change during this offline
+move. External Codex rollout paths and tmux endpoints are absolute references to their
+own resources; moving the database does not relocate those resources.
+
+The launcher canonicalizes `python`/`python3` aliases within the same environment and
+filesystem aliases of the selected tmux binary before constructing host and hook commands.
+It preserves the virtual environment instead of resolving Python to a shared base
+interpreter, so distinct environments remain distinct installations. Routine `uv sync`
+entrypoint changes between those Python aliases do not change installation identity.
+
+If startup still reports that the shared coordinator belongs to another installation,
+inspect that exact server's ownership commands and the selected checkout/environment.
+A server carrying commands from another installation must be retired during the
+maintenance window after its runtimes exit. Rodex does not rewrite ownership markers
+to adopt another installation. Updating code also does not replace code already loaded
+by a live host; detach/reopen alone is not a runtime upgrade.
 
 ## System-wide installation
 
@@ -96,7 +136,8 @@ Apply an update in a maintenance window:
    existing Python process and its loaded code alive.
 2. Pull the reviewed code and run `uv sync` from the trusted checkout.
 3. Reinstall the shim when it changed.
-4. Run `rodex _help` and `rodex _running`, then resume the required sessions.
+4. Run the required live-startup gate, then verify the installed command's actual
+   startup/detach/reopen workflow above before resuming the required sessions.
 
 Do not move or replace the live SQLite database as part of an update. Rodex treats
 database or protected-parent movement as terminal and requires a fresh process.

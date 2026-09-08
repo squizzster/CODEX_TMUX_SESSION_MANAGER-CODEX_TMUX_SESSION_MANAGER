@@ -382,8 +382,10 @@ when an explicit boundary improves clarity. `_cat` is a finite snapshot, so stan
 tools such as `head`, `tail`, and `grep` compose with it normally. `_tail` prints a
 familiar initial line selection and then remains open. It publishes rows as soon as they
 enter tmux history and publishes stable visible-pane changes after three 0.4-second
-observations. The live `Working` status region and composer are excluded so timer frames
-and partially typed prompts do not become duplicate transcript lines. `_events` is the
+observations. Pending visible output finishes settling before idle backoff begins, even
+when no further tmux changes arrive. The live `Working` status region and composer are
+excluded so timer frames and partially typed prompts do not become duplicate transcript
+lines. `_events` is the
 distinct machine-readable stream: it remains open and emits selected subsequent protocol
 events as JSON lines until interrupted. Names use 1–80 ASCII letters, digits,
 underscores, or hyphens and begin with a letter or digit. The reserved-name vocabulary is
@@ -427,7 +429,7 @@ enforces its domain uniqueness. Codex session IDs remain Codex-owned 128-bit val
 Each is stored once in the canonical `codex_threads` table across two `BIGINT` columns;
 memberships, current-root selection, activities, and lineage use integer foreign keys.
 
-The registry uses schema generation 18. An internal generation marker admits an
+The registry uses schema generation 19. An internal generation marker admits an
 already-current database cheaply inside each operation's transaction. Explicit
 first-use bootstrap creates a missing private registry atomically; nonempty unmarked,
 incomplete, and wrong-generation databases fail closed. The explicit integrity audit is
@@ -517,8 +519,10 @@ pagination, and follow behavior belong to the read side.
 Rodex persists stable thread/turn/item identity, replaceable typed statistics metrics,
 normalized distribution and named-count rows, and typed trace detail tables. Model and
 reasoning effort remain separate nullable turn-state facts whose stable
-integer IDs reference dedicated lookup tables; their session counts are derived from
-those exact turn rows. Metrics therefore remain directly queryable and JSON output can
+integer IDs reference dedicated lookup tables; their session counts use only turn rows
+in the current root's verified thread tree, excluding retained historical roots. Both
+supplied rate-limit windows are retained in primary-then-secondary order; absent windows
+do not create empty trace rows. Metrics remain directly queryable and JSON output can
 be rebuilt deterministically. Trace SQL stores event metadata, byte counts, and
 accepted rollout coordinates—not copied message, command, tool, or output bodies.
 Codex thread identities retain all 128 bits once in canonical rows; unresolved

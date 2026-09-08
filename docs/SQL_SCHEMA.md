@@ -183,7 +183,9 @@ suggestion followed by user agreement.
   update and delete after verification. The one-to-one
   `rodex_sessions_current_codex_threads` relationship selects the active root.
   Historical root memberships may remain after recovery without entering the active
-  recursive tree. Database triggers reject both insertion and update paths that would
+  recursive tree. Session model/reasoning counts use that same current tree in the same
+  read transaction as the source projection; retained old roots cannot inflate them.
+  Database triggers reject both insertion and update paths that would
   make the current root a sub-agent spawn, and the lifecycle boundary rejects the same
   transition before writing.
 - `rodex_sessions_codex_rollout_sources` owns the immutable canonical rollout path
@@ -279,7 +281,9 @@ suggestion followed by user agreement.
   Replaying authenticated history is idempotent; changed facts at a published source
   coordinate are rejected as a conflict.
 - Trace detail tables are typed by domain: messages, tool calls, command executions,
-  contexts, token usage, rate-limit windows, and sub-agent activities. There are no JSON
+  contexts, token usage, rate-limit windows, and sub-agent activities. Rate-limit
+  normalization retains every supplied primary and secondary window in that order,
+  without manufacturing rows for absent windows. There are no JSON
   columns. SQL stores bounded metadata and body byte counts; message, command, tool, and
   output bodies remain references to the authenticated rollout by default. Explicit
   body reads select authenticated rollout checkpoints for all current and historical

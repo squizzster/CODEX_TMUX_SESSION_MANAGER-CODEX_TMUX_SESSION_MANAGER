@@ -220,6 +220,23 @@ def test_installed_rodex_starts_reuses_and_adopts_sessions(
             timeout=10,
         )
 
+    def stop_fixture_session(name: str) -> None:
+        host = tmux("display-message", "-p", "-t", f"={name}:", "#{pane_pid}")
+        assert host.returncode == 0 and host.stdout.strip().isdigit(), host.stdout + host.stderr
+        host_stat = Path(f"/proc/{host.stdout.strip()}/stat")
+        stopped = tmux("kill-session", "-t", f"={name}")
+        assert stopped.returncode == 0, stopped.stderr
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            try:
+                process_state = host_stat.read_text().rsplit(") ", 1)[1].split()[0]
+            except FileNotFoundError:
+                return
+            if process_state == "Z":
+                return
+            time.sleep(0.02)
+        pytest.fail(f"Test-owned Rodex host for {name} did not finish shutting down")
+
     def exercise_client(command: list[str], *, expected_codex_id: str | None = None) -> tuple[str, str]:
         with RodexTerminalClient(command, environment, project) as client:
             name = client.wait_for_attach()
@@ -276,6 +293,7 @@ def test_installed_rodex_starts_reuses_and_adopts_sessions(
         # console entry point may use python3 after a routine uv sync.
         first = exercise_client([str(Path(sys.prefix) / "bin/python"), str(project / ".venv/bin/rodex")])
         assert exercise_client([str(installed_shim), first[0]]) == first
+        assert exercise_client([str(installed_shim), "resume", first[0]]) == first
         assert exercise_client([str(installed_shim), "resume", inspected_codex_ids[first[0]]]) == first
         second = exercise_client([str(installed_shim)])
         assert second[0] != first[0]
@@ -287,7 +305,37 @@ def test_installed_rodex_starts_reuses_and_adopts_sessions(
             [str(installed_shim), "resume", standalone_codex_id], expected_codex_id=standalone_codex_id
         )
         assert adopted[0] not in {first[0], second[0]}
-        assert exercise_client([str(installed_shim), standalone_codex_id]) == adopted
+        # A live alias change announces itself through a model turn. Assign the
+        # fixture alias while stopped so this startup matrix remains model-free.
+        stop_fixture_session(adopted[0])
+        alias = "startup-resume-alias"
+        aliased = subprocess.run(
+            [str(installed_shim), "_alias", adopted[0], alias],
+            env=environment,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        assert aliased.returncode == 0, aliased.stdout + aliased.stderr
+        selectors = (adopted[0], alias, standalone_codex_id)
+        restarted = exercise_client([str(installed_shim), alias], expected_codex_id=standalone_codex_id)
+        assert restarted[0] == alias
+        assert restarted[1] != adopted[1]
+        current_runtime_id = restarted[1]
+        for prefix in ((), ("resume",)):
+            for selector in selectors:
+                assert exercise_client(
+                    [str(installed_shim), *prefix, selector], expected_codex_id=standalone_codex_id
+                ) == (alias, current_runtime_id)
+        for prefix in ((), ("resume",)):
+            for selector in selectors:
+                # Stop only this fixture on the private test server, then prove
+                # every spelling resumes its saved Codex identity in a new runtime.
+                stop_fixture_session(alias)
+                resumed = exercise_client([str(installed_shim), *prefix, selector], expected_codex_id=standalone_codex_id)
+                assert resumed[0] == alias
+                assert resumed[1] != current_runtime_id
+                current_runtime_id = resumed[1]
         assert len(tmux("list-sessions").stdout.splitlines()) == 3
     finally:
         # This fresh per-test socket can contain only the runtimes created above.

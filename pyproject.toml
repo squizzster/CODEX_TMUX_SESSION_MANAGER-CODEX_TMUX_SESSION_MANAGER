@@ -1,6 +1,6 @@
 [project]
 name = "codex-tmux-session-manager"
-version = "0.6.0a4"
+version = "0.6.0a5"
 description = "Durable Codex sessions bridging native tmux use and exact local automation"
 readme = "README.md"
 authors = [

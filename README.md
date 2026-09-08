@@ -4,14 +4,15 @@ Rodex makes a durable tmux-hosted Codex session feel like Codex itself. Start no
 with `./rodex`, work in the ordinary Codex TUI, detach when needed, and return later by
 a memorable name such as `automatic-beluga`. Rodex-specific commands live in an
 underscore namespace. Current Codex interactive options and an optional initial prompt
-run inside managed Rodex; Codex subcommands and syntax outside Rodex's managed
-interactive grammar pass through unchanged.
+run inside managed Rodex. A matching name, alias, or Codex UUID opens its managed
+session, with or without `resume`; other Codex subcommands and unsupported syntax
+pass through unchanged.
 
 > **Development status: ALPHA.** Rodex is an in-house Linux pre-release. The application
 > described here is complete for its current scope, but interfaces may still change
 > before a stable release.
 
-Current release: **Rodex 0.6.0a4**, SQL generation **19**, shared tmux protocol **v2**.
+Current release: **Rodex 0.6.0a5**, SQL generation **19**, shared tmux protocol **v2**.
 This ALPHA supports only its current storage and runtime contracts. It creates
 `rodex-v19.sqlite3` and `tmux-shared-v2.sock`; earlier generations are outside this
 installation's session catalog. There are no database migrations or old-runtime adapters.
@@ -91,7 +92,8 @@ filesystem or tmux monitoring.
 One declarative Codex 0.151.0 CLI contract owns this boundary. Exact underscore Rodex
 commands stay local. Native interactive options and an optional prompt create and attach
 to a managed session, while a sole bare token first gets the chance to resolve an
-existing Rodex name or persisted Codex UUID. Current Codex subcommands, help/version,
+existing Rodex name or persisted Codex UUID. Exact `resume SELECTOR` makes the same
+lookup and opens a matching session. Unmatched resume commands, other Codex subcommands, help/version,
 external `--remote`, malformed shapes, and unknown option-shaped syntax replace Rodex
 with Codex while preserving arguments, terminal streams, signals, and exit status.
 
@@ -278,8 +280,9 @@ preference. See the current [tmux manual](https://man.openbsd.org/tmux.1) and
 | `./rodex _create project_1234` | Create a session with a preferred display name. |
 | `./rodex _detach` | Create without attaching and print expanded identity JSON. |
 | `./rodex automatic-beluga` | Attach if live; otherwise resume or recover its Codex session. |
+| `./rodex resume automatic-beluga` | Open the same Rodex session as the bare name; preferred aliases work too. |
 | `./rodex 01a015f4-f27c-7592-8060-d12313e8d0ce` | Open its linked Rodex session, or verify and adopt the persisted standalone Codex thread. |
-| `./rodex resume 01a015f4-f27c-7592-8060-d12313e8d0ce` | Resume the same managed session or adopt saved Codex history; missing history is an error. |
+| `./rodex resume 01a015f4-f27c-7592-8060-d12313e8d0ce` | Open the same managed session or adopt saved Codex history; without a match, Codex handles the original command. |
 | `./rodex _running` | List this Linux user's running Rodex sessions. |
 | `./rodex _context` | Emit this pane's verified Rodex, Codex, tmux, and sharing context as JSON. |
 | `./rodex _alias automatic-beluga edgar-work` | Assign a preferred display name. |
@@ -401,12 +404,16 @@ An unregistered canonical Codex UUID is checked through a short-lived App Server
 UUID becomes a normal managed prompt. `rodex -- TOKEN` forces prompt meaning without
 selector or subcommand interpretation.
 
-Exact `rodex resume CODEX_UUID` uses that same managed selector pipeline. A linked live
-session is reused; a saved standalone Codex thread is adopted. Explicit resume never
-falls back to a prompt or an unrelated replacement thread when history is unavailable.
-The UUID uses Codex's hyphenated, case-insensitive spelling. Other resume forms, including
-the picker, `--last`, named Codex sessions, and additional options or prompts, remain
-Codex-owned passthrough in this release.
+Exact `rodex resume SELECTOR` uses that same managed selector pipeline. Generated Rodex
+names, preferred aliases, and linked Codex UUIDs identify the same session with or without
+`resume`: reattach if live, otherwise resume or recover its linked thread. A saved
+standalone Codex UUID is adopted inside Rodex. UUIDs use hyphenated, case-insensitive spelling.
+
+Without a match, bare text creates a managed session with that exact initial prompt:
+`rodex "woof woof woof"` starts Rodex and delivers `woof woof woof` to Codex. An unmatched
+`resume SELECTOR` instead passes its original arguments to native Codex resume; it never
+becomes an unrelated Rodex prompt. The resume picker, `--last`, and resume forms with
+additional options or prompts also remain Codex-owned passthrough in this release.
 
 Other Codex subcommands and aliases pass through directly, as do help/version,
 external remote connections, malformed current syntax, multiple positional arguments,
@@ -583,9 +590,10 @@ scrollback retention and following, inherited mouse configuration, rename, ident
 markers, and status configuration.
 
 The live-startup gate runs real Codex through the installed shim on isolated SQL, tmux,
-and Codex history. It verifies the rendered TUI, live thread, detach, reopen by name and explicit
-resume without replacing the runtime, shared-server reuse, and adoption of a standalone
-Codex thread with test-only saved history. It submits no model prompts
+and Codex history. It verifies the rendered TUI, live thread, detach, shared-server reuse,
+and standalone-thread adoption. For a generated name, alias, and Codex UUID, both bare
+and explicit resume must reuse a live runtime or restart a stopped runtime with the same
+saved Codex identity. It submits no model prompts
 and cleans up its runtimes. Run it alone with `uv run pytest -m live_startup --require-live-startup`.
 The required flag makes missing Codex/tmux or authentication fail validation; a normal
 test run may skip the gate when those prerequisites are unavailable. Do not claim startup

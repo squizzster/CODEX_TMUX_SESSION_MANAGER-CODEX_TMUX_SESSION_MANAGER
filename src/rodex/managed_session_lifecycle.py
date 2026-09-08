@@ -123,7 +123,6 @@ class ManagedSessionLifecycle:
         *,
         codex_available: bool,
         configured_codex: str,
-        allow_missing_history_recovery: bool = True,
     ) -> SelectorExecution:
         if isinstance(selection, OwnedSessionSelection):
             _open_selected_session(
@@ -133,14 +132,11 @@ class ManagedSessionLifecycle:
                 codex_available=codex_available,
                 configured_codex=configured_codex,
                 detach=False,
-                allow_missing_history_recovery=allow_missing_history_recovery,
             )
             return SelectorExecution.OPENED
 
         if not codex_available:
             raise RodexExecutableNotFoundError(f"Codex executable was not found: {configured_codex}")
-        if not launcher.codex_session_is_persisted(selection.codex_session_id):
-            return SelectorExecution.NOT_FOUND
         request = ManagedSessionLaunchRequest(
             ("resume", str(selection.codex_session_id)),
             requested_name=None,
@@ -323,7 +319,6 @@ def _open_selected_session(
     codex_available: bool,
     configured_codex: str,
     detach: bool,
-    allow_missing_history_recovery: bool = True,
 ) -> None:
     session_id = selection.rodex_sessions_id
     rodex_session_id = lookup_rodex_session_id_from_a_rodex_sessions_id(session_id, database_path)
@@ -337,7 +332,6 @@ def _open_selected_session(
             launcher,
             codex_available=codex_available,
             configured_codex=configured_codex,
-            allow_missing_history_recovery=allow_missing_history_recovery,
         )
     if detach:
         _print_existing_detached_runtime(
@@ -357,7 +351,6 @@ def _prepare_selected_session(
     *,
     codex_available: bool,
     configured_codex: str,
-    allow_missing_history_recovery: bool,
 ) -> _PreparedSelectedSession:
     """Resolve or resume one identity while its cross-process transition is locked."""
     names = lookup_rodex_session_names(session_id, database_path)
@@ -465,9 +458,7 @@ def _prepare_selected_session(
             rodex_session_id=rodex_session_id,
             rodex_registry_id=registry_id,
         )
-    except RodexCodexSessionNotFoundError as error:
-        if not allow_missing_history_recovery:
-            raise RodexLaunchError(f"Codex session {codex_session_id} is not available to resume") from error
+    except RodexCodexSessionNotFoundError:
         try:
             resumed_runtime, observed_codex_session_id = _start_managed_runtime(
                 launcher,

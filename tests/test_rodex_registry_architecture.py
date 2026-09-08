@@ -14,25 +14,13 @@ SQL_ROOT = SOURCE_ROOT / "rodex_sql"
 
 def _relative_imports(module_name: str) -> set[str]:
     tree = ast.parse((REGISTRY_ROOT / f"{module_name}.py").read_text(encoding="utf-8"))
-    return {
-        node.module or ""
-        for node in ast.walk(tree)
-        if isinstance(node, ast.ImportFrom) and node.level > 0
-    }
+    return {node.module or "" for node in ast.walk(tree) if isinstance(node, ast.ImportFrom) and node.level > 0}
 
 
 def _function_calls(module_name: str, function_name: str) -> set[str]:
     tree = ast.parse((REGISTRY_ROOT / f"{module_name}.py").read_text(encoding="utf-8"))
-    function = next(
-        node
-        for node in tree.body
-        if isinstance(node, ast.FunctionDef) and node.name == function_name
-    )
-    return {
-        node.func.id
-        for node in ast.walk(function)
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
-    }
+    function = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == function_name)
+    return {node.func.id for node in ast.walk(function) if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)}
 
 
 def _top_level_callers(call_name: str) -> set[tuple[str, str]]:
@@ -43,9 +31,7 @@ def _top_level_callers(call_name: str) -> set[tuple[str, str]]:
             if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
             if any(
-                isinstance(call, ast.Call)
-                and isinstance(call.func, ast.Name)
-                and call.func.id == call_name
+                isinstance(call, ast.Call) and isinstance(call.func, ast.Name) and call.func.id == call_name
                 for call in ast.walk(node)
             ):
                 callers.add((path.relative_to(SOURCE_ROOT).as_posix(), node.name))
@@ -140,12 +126,7 @@ def test_registry_modules_do_not_import_their_public_facade() -> None:
         "validation",
     ):
         tree = ast.parse((REGISTRY_ROOT / f"{module_name}.py").read_text(encoding="utf-8"))
-        imported = {
-            alias.name
-            for node in ast.walk(tree)
-            if isinstance(node, ast.Import)
-            for alias in node.names
-        }
+        imported = {alias.name for node in ast.walk(tree) if isinstance(node, ast.Import) for alias in node.names}
         assert "rodex_registry" not in imported
 
 
@@ -257,9 +238,7 @@ def test_only_explicit_first_use_flows_can_bootstrap_storage() -> None:
 
 
 def test_sql_storage_has_no_watcher_or_runtime_subscription_path() -> None:
-    all_source = "\n".join(
-        path.read_text(encoding="utf-8") for path in SOURCE_ROOT.rglob("*.py")
-    )
+    all_source = "\n".join(path.read_text(encoding="utf-8") for path in SOURCE_ROOT.rglob("*.py"))
     assert "close_database_location_guards_for_testing" not in all_source
     assert "require_existing_rodex_database_path" not in all_source
     assert "prepare_rodex_database_path" not in all_source

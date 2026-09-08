@@ -60,9 +60,7 @@ def status_animation_admission_command(
         owner_token_format,
     )
     generation_increment = (
-        "#{e|+:"
-        f"#{{?#{{{STATUS_ANIMATION_GENERATION_OPTION}}},"
-        f"#{{{STATUS_ANIMATION_GENERATION_OPTION}}},0}},1}}"
+        f"#{{e|+:#{{?#{{{STATUS_ANIMATION_GENERATION_OPTION}}},#{{{STATUS_ANIMATION_GENERATION_OPTION}}},0}},1}}"
     )
     owner_is_empty = f"#{{==:#{{{STATUS_ANIMATION_OWNER_TOKEN_OPTION}}},}}"
     watchdog_is_empty = f"#{{==:#{{{STATUS_ANIMATION_WATCHDOG_TOKEN_OPTION}}},}}"
@@ -162,18 +160,10 @@ async def animate_admitted_status(
 
     if not await _registered_capability_is_current(tmux, capability):
         return
-    if (
-        await _read_tmux_option(tmux, pane_target, STATUS_ANIMATION_OWNER_TOKEN_OPTION)
-        != owner_token
-    ):
+    if await _read_tmux_option(tmux, pane_target, STATUS_ANIMATION_OWNER_TOKEN_OPTION) != owner_token:
         return
     if watchdog:
-        if (
-            await _read_tmux_option(
-                tmux, pane_target, STATUS_ANIMATION_WATCHDOG_TOKEN_OPTION
-            )
-            is not None
-        ):
+        if await _read_tmux_option(tmux, pane_target, STATUS_ANIMATION_WATCHDOG_TOKEN_OPTION) is not None:
             return
         recovered_owner = f"recovery-{token_factory()}"
         successor_gate = _delayed_watchdog_gate_command(
@@ -217,10 +207,7 @@ async def animate_admitted_status(
             ),
             recovery_commands,
         )
-        if (
-            await _read_tmux_option(tmux, pane_target, STATUS_ANIMATION_OWNER_TOKEN_OPTION)
-            != recovered_owner
-        ):
+        if await _read_tmux_option(tmux, pane_target, STATUS_ANIMATION_OWNER_TOKEN_OPTION) != recovered_owner:
             return
         owner_token = recovered_owner
 
@@ -229,10 +216,7 @@ async def animate_admitted_status(
         while True:
             if (
                 not await _registered_capability_is_current(tmux, capability)
-                or await _read_tmux_option(
-                    tmux, pane_target, STATUS_ANIMATION_OWNER_TOKEN_OPTION
-                )
-                != owner_token
+                or await _read_tmux_option(tmux, pane_target, STATUS_ANIMATION_OWNER_TOKEN_OPTION) != owner_token
             ):
                 return
             pending = await _read_pending_transition(tmux, pane_target)
@@ -261,9 +245,7 @@ async def animate_admitted_status(
                 consumed_generation,
                 capability,
             )
-            current_owner = await _read_tmux_option(
-                tmux, pane_target, STATUS_ANIMATION_OWNER_TOKEN_OPTION
-            )
+            current_owner = await _read_tmux_option(tmux, pane_target, STATUS_ANIMATION_OWNER_TOKEN_OPTION)
             if current_owner != owner_token:
                 return
             latest_generation = await _read_tmux_option(
@@ -288,12 +270,8 @@ async def _read_pending_transition(
     tmux: Callable[..., Awaitable[TmuxCommandResult]],
     pane_target: str,
 ) -> tuple[str, StatusEvent] | None:
-    generation = await _read_tmux_option(
-        tmux, pane_target, STATUS_ANIMATION_GENERATION_OPTION
-    )
-    event = await _read_tmux_option(
-        tmux, pane_target, STATUS_ANIMATION_PENDING_EVENT_OPTION
-    )
+    generation = await _read_tmux_option(tmux, pane_target, STATUS_ANIMATION_GENERATION_OPTION)
+    event = await _read_tmux_option(tmux, pane_target, STATUS_ANIMATION_PENDING_EVENT_OPTION)
     if generation is None or event not in {"attached", "detached"}:
         return None
     return generation, event
@@ -303,9 +281,7 @@ async def _registered_capability_is_current(
     tmux: Callable[..., Awaitable[TmuxCommandResult]],
     capability: TmuxSessionCapability,
 ) -> bool:
-    result = await tmux(
-        *registered_primary_pane_read_arguments(capability, "#{pane_id}")
-    )
+    result = await tmux(*registered_primary_pane_read_arguments(capability, "#{pane_id}"))
     return result.returncode == 0 and result.stdout.strip() == capability.pane_target
 
 
@@ -347,9 +323,7 @@ async def _release_consumed_transition(
         "-t",
         pane_target,
         "-F",
-        combine_tmux_if_shell_conditions(
-            registered_primary_pane_if_shell_condition(capability), condition
-        ),
+        combine_tmux_if_shell_conditions(registered_primary_pane_if_shell_condition(capability), condition),
         commands,
     )
 

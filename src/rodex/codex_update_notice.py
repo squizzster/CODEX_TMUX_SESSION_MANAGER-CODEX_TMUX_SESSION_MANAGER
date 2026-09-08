@@ -91,11 +91,7 @@ class CodexUpdateNotice:
             latest = self._latest_version()
             if latest is None or latest.release <= installed.release:
                 return None
-            return (
-                "Rodex: Codex update available: "
-                f"{installed.text} -> {latest.text} "
-                "(run 'codex update' outside Rodex)"
-            )
+            return f"Rodex: Codex update available: {installed.text} -> {latest.text} (run 'codex update' outside Rodex)"
         except Exception:
             # Update awareness is optional and must never delay or break attachment.
             return None
@@ -176,9 +172,7 @@ class CodexUpdateNotice:
             return False
         return True
 
-    def _run_version_command(
-        self, command: list[str], *, timeout: float
-    ) -> subprocess.CompletedProcess[str] | None:
+    def _run_version_command(self, command: list[str], *, timeout: float) -> subprocess.CompletedProcess[str] | None:
         try:
             return self._run(
                 command,
@@ -192,9 +186,7 @@ class CodexUpdateNotice:
 
     def _read_cached_version(self) -> StableCodexVersion | None:
         try:
-            return StableCodexVersion.parse_exact(
-                self._cache_path.read_text(encoding="utf-8")
-            )
+            return StableCodexVersion.parse_exact(self._cache_path.read_text(encoding="utf-8"))
         except OSError:
             return None
 

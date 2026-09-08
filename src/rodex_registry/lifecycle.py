@@ -189,14 +189,10 @@ def create_a_rodex_session(
 ) -> RodexSession:
     """Atomically persist a session and any live Codex/tmux linkage."""
     path = _database_path_for_mutation(database_path)
-    identity = (
-        current_rodex_sessions_user_identity()
-        if user_identity is None
-        else _validate_user_identity(user_identity)
-    )
+    identity = current_rodex_sessions_user_identity() if user_identity is None else _validate_user_identity(user_identity)
     parsed_codex_session_id = parse_codex_session_id(codex_session_id)
-    codex_session_id_signed_bigint_1, codex_session_id_signed_bigint_2 = (
-        split_codex_session_id_into_signed_bigints(parsed_codex_session_id)
+    codex_session_id_signed_bigint_1, codex_session_id_signed_bigint_2 = split_codex_session_id_into_signed_bigints(
+        parsed_codex_session_id
     )
     tmux_link = _normalise_tmux_link(tmux_server_socket_path, tmux_session_name)
     parsed_runtime_id = None if runtime_id is None else parse_rodex_runtime_id(runtime_id)
@@ -205,9 +201,7 @@ def create_a_rodex_session(
     created_at_utc = _utc_now_timestamp()
     with open_rodex_bootstrap_transaction(path) as connection:
         require_current_rodex_schema(connection)
-        rodex_sessions_users_id = _lookup_or_insert_rodex_sessions_user_id(
-            connection, identity
-        )
+        rodex_sessions_users_id = _lookup_or_insert_rodex_sessions_user_id(connection, identity)
         existing_row = connection.execute(
             f"SELECT memberships.rodex_sessions_id FROM {CODEX_THREADS_TABLE} AS ids "
             f"JOIN {RODEX_SESSIONS_CODEX_THREADS_TABLE} AS memberships "
@@ -223,27 +217,20 @@ def create_a_rodex_session(
                 raise RodexSessionError(f"Rodex session disappeared: {existing_session_id}")
             display_name = _session_names_from_row(names_row).display_name
             raise RodexSessionError(
-                f"Codex session already belongs to Rodex {display_name}.\n"
-                f"Resume with: rodex {display_name}"
+                f"Codex session already belongs to Rodex {display_name}.\nResume with: rodex {display_name}"
             )
         allocated_name = allocate_unique_cool_name(connection)
-        preallocated_session_id = (
-            None if rodex_session_id is None else parse_rodex_session_id(rodex_session_id)
-        )
+        preallocated_session_id = None if rodex_session_id is None else parse_rodex_session_id(rodex_session_id)
         candidates = (
             (preallocated_session_id,)
             if preallocated_session_id is not None
-            else (
-                RodexSessionId.generate()
-                for _attempt_number in index_re_try_attempt_numbers()
-            )
+            else (RodexSessionId.generate() for _attempt_number in index_re_try_attempt_numbers())
         )
         for rodex_session_id_candidate in candidates:
             stored_session_id = rodex_session_id_candidate.as_signed_bigint()
             try:
                 cursor = connection.execute(
-                    f"INSERT INTO {RODEX_SESSIONS_TABLE} "
-                    "(rodex_session_id_signed_bigint, cool_names_id) VALUES (?, ?)",
+                    f"INSERT INTO {RODEX_SESSIONS_TABLE} (rodex_session_id_signed_bigint, cool_names_id) VALUES (?, ?)",
                     (
                         stored_session_id,
                         allocated_name.id,
@@ -251,16 +238,14 @@ def create_a_rodex_session(
                 )
             except sqlite3.IntegrityError as error:
                 occupied = connection.execute(
-                    f"SELECT 1 FROM {RODEX_SESSIONS_TABLE} "
-                    "WHERE rodex_session_id_signed_bigint = ?",
+                    f"SELECT 1 FROM {RODEX_SESSIONS_TABLE} WHERE rodex_session_id_signed_bigint = ?",
                     (stored_session_id,),
                 ).fetchone()
                 if occupied is None:
                     raise
                 if preallocated_session_id is not None:
                     raise RodexSessionIdCollisionError(
-                        "preallocated Rodex session ID is already occupied: "
-                        f"{preallocated_session_id}"
+                        f"preallocated Rodex session ID is already occupied: {preallocated_session_id}"
                     ) from error
                 continue
             if cursor.lastrowid is None:
@@ -316,8 +301,7 @@ def create_a_rodex_session(
                 )
             return session
         raise RodexSessionIdCollisionError(
-            "could not allocate a unique Rodex session ID after "
-            f"{INDEX_RE_TRY_ATTEMPTS} attempts"
+            f"could not allocate a unique Rodex session ID after {INDEX_RE_TRY_ATTEMPTS} attempts"
         )
 
 
@@ -349,9 +333,7 @@ def generate_an_unregistered_rodex_runtime_id_candidate(
     )
 
 
-def _generate_an_unregistered_rodex_id_candidate[
-    GeneratedRodexId: (RodexSessionId, RodexRuntimeId)
-](
+def _generate_an_unregistered_rodex_id_candidate[GeneratedRodexId: (RodexSessionId, RodexRuntimeId)](
     database_path: str | os.PathLike[str] | None,
     *,
     id_type: type[GeneratedRodexId],
@@ -372,8 +354,7 @@ def _generate_an_unregistered_rodex_id_candidate[
             if row is None:
                 return candidate
     raise collision_error(
-        f"could not generate an unused {domain_name} ID candidate after "
-        f"{INDEX_RE_TRY_ATTEMPTS} attempts"
+        f"could not generate an unused {domain_name} ID candidate after {INDEX_RE_TRY_ATTEMPTS} attempts"
     )
 
 
@@ -397,9 +378,7 @@ def lookup_or_create_rodex_sessions_user(
     database_path: str | os.PathLike[str] | None = None,
 ) -> RodexSessionsUser:
     """Select a user lookup row first, inserting it only when absent."""
-    identity = _validate_user_identity(
-        RodexSessionsUserIdentity(uid=uid, gid=gid, user_name=user_name)
-    )
+    identity = _validate_user_identity(RodexSessionsUserIdentity(uid=uid, gid=gid, user_name=user_name))
     path = _database_path_for_mutation(database_path)
     with open_rodex_bootstrap_transaction(path) as connection:
         require_current_rodex_schema(connection)
@@ -421,15 +400,12 @@ def lookup_rodex_sessions_user(
     path = normalise_rodex_database_path(database_path)
     with open_rodex_read_transaction(path) as connection:
         row = connection.execute(
-            f"SELECT id, uid, gid, user_name FROM {RODEX_SESSIONS_USERS_TABLE} "
-            "WHERE id = ?",
+            f"SELECT id, uid, gid, user_name FROM {RODEX_SESSIONS_USERS_TABLE} WHERE id = ?",
             (user_id,),
         ).fetchone()
     if row is None:
         return None
-    return RodexSessionsUser(
-        id=int(row[0]), uid=int(row[1]), gid=int(row[2]), user_name=str(row[3])
-    )
+    return RodexSessionsUser(id=int(row[0]), uid=int(row[1]), gid=int(row[2]), user_name=str(row[3]))
 
 
 def lookup_rodex_sessions_id_from_a_rodex_session_id(
@@ -441,8 +417,7 @@ def lookup_rodex_sessions_id_from_a_rodex_session_id(
     parsed_session_id = parse_rodex_session_id(rodex_session_id)
     with open_rodex_read_transaction(path) as connection:
         row = connection.execute(
-            f"SELECT id FROM {RODEX_SESSIONS_TABLE} "
-            "WHERE rodex_session_id_signed_bigint = ?",
+            f"SELECT id FROM {RODEX_SESSIONS_TABLE} WHERE rodex_session_id_signed_bigint = ?",
             (parsed_session_id.as_signed_bigint(),),
         ).fetchone()
     return None if row is None else int(row[0])
@@ -457,8 +432,7 @@ def lookup_rodex_session_id_from_a_rodex_sessions_id(
     path = normalise_rodex_database_path(database_path)
     with open_rodex_read_transaction(path) as connection:
         row = connection.execute(
-            f"SELECT rodex_session_id_signed_bigint "
-            f"FROM {RODEX_SESSIONS_TABLE} WHERE id = ?",
+            f"SELECT rodex_session_id_signed_bigint FROM {RODEX_SESSIONS_TABLE} WHERE id = ?",
             (session_id,),
         ).fetchone()
     if row is None:
@@ -503,13 +477,9 @@ def record_a_rodex_session_access(
         ).fetchone()
         if row is None:
             raise RodexSessionError(f"Rodex session log does not exist: {session_id}")
-        timestamp = _monotonic_durable_timestamp(
-            str(row[4]), timestamp, field_name="last_accessed_at_utc"
-        )
+        timestamp = _monotonic_durable_timestamp(str(row[4]), timestamp, field_name="last_accessed_at_utc")
         connection.execute(
-            f"UPDATE {RODEX_SESSIONS_LOG_TABLE} "
-            "SET last_accessed_at_utc = ? "
-            "WHERE rodex_sessions_id = ?",
+            f"UPDATE {RODEX_SESSIONS_LOG_TABLE} SET last_accessed_at_utc = ? WHERE rodex_sessions_id = ?",
             (timestamp, session_id),
         )
     return RodexSessionLog(
@@ -541,9 +511,7 @@ def record_a_rodex_session_runtime_resume(
         raise ValueError("a resumed session requires a tmux endpoint")
     socket_path, session_name = tmux_link
     codex_session_id_halves = (
-        None
-        if codex_session_id is None
-        else split_codex_session_id_into_signed_bigints(codex_session_id)
+        None if codex_session_id is None else split_codex_session_id_into_signed_bigints(codex_session_id)
     )
     parsed_runtime_id = parse_rodex_runtime_id(runtime_id)
     timestamp = _normalise_utc_datetime(accessed_at_utc)
@@ -559,8 +527,7 @@ def record_a_rodex_session_runtime_resume(
         if tmux_row is None:
             raise RodexSessionError(f"Rodex tmux session does not exist: {session_id}")
         log_row = connection.execute(
-            f"SELECT last_accessed_at_utc FROM {RODEX_SESSIONS_LOG_TABLE} "
-            "WHERE rodex_sessions_id = ?",
+            f"SELECT last_accessed_at_utc FROM {RODEX_SESSIONS_LOG_TABLE} WHERE rodex_sessions_id = ?",
             (session_id,),
         ).fetchone()
         if log_row is None:
@@ -574,23 +541,13 @@ def record_a_rodex_session_runtime_resume(
             (session_id,),
         ).fetchone()
         if runtime_row is not None:
-            current_started_at = _parse_canonical_durable_timestamp(
-                str(runtime_row[1]), field_name="started_at_utc"
-            )
-            candidate_started_at = _parse_canonical_durable_timestamp(
-                timestamp, field_name="started_at_utc"
-            )
-            poisoned_future = (
-                current_started_at
-                > candidate_started_at + _DURABLE_TIMESTAMP_MAX_FORWARD_SKEW
-            )
+            current_started_at = _parse_canonical_durable_timestamp(str(runtime_row[1]), field_name="started_at_utc")
+            candidate_started_at = _parse_canonical_durable_timestamp(timestamp, field_name="started_at_utc")
+            poisoned_future = current_started_at > candidate_started_at + _DURABLE_TIMESTAMP_MAX_FORWARD_SKEW
             ambiguous_tie = (
-                candidate_started_at == current_started_at
-                and int(runtime_row[0]) != parsed_runtime_id.as_signed_bigint()
+                candidate_started_at == current_started_at and int(runtime_row[0]) != parsed_runtime_id.as_signed_bigint()
             )
-            if (
-                candidate_started_at < current_started_at or ambiguous_tie
-            ) and not poisoned_future:
+            if (candidate_started_at < current_started_at or ambiguous_tie) and not poisoned_future:
                 return RodexTmuxSession(
                     id=int(tmux_row[0]),
                     rodex_sessions_id=int(tmux_row[1]),
@@ -599,12 +556,7 @@ def record_a_rodex_session_runtime_resume(
                 )
         if codex_session_id_halves is not None:
             parsed_codex_session_id = parse_codex_session_id(codex_session_id)
-            if (
-                connection.execute(
-                    f"SELECT 1 FROM {RODEX_SESSIONS_TABLE} WHERE id = ?", (session_id,)
-                ).fetchone()
-                is None
-            ):
+            if connection.execute(f"SELECT 1 FROM {RODEX_SESSIONS_TABLE} WHERE id = ?", (session_id,)).fetchone() is None:
                 raise RodexSessionError(f"Rodex session does not exist: {session_id}")
             register_codex_root_thread_in_transaction(
                 connection,
@@ -627,9 +579,7 @@ def record_a_rodex_session_runtime_resume(
             timestamp,
         )
         connection.execute(
-            f"UPDATE {RODEX_SESSIONS_LOG_TABLE} "
-            "SET last_accessed_at_utc = ? "
-            "WHERE rodex_sessions_id = ?",
+            f"UPDATE {RODEX_SESSIONS_LOG_TABLE} SET last_accessed_at_utc = ? WHERE rodex_sessions_id = ?",
             (next_access_timestamp, session_id),
         )
         row = connection.execute(
@@ -691,15 +641,12 @@ def _record_rodex_runtime_instance(
         )
     except sqlite3.IntegrityError as error:
         occupied = connection.execute(
-            f"SELECT rodex_sessions_id FROM {RODEX_RUNTIME_INSTANCES_TABLE} "
-            "WHERE runtime_id_signed_bigint = ?",
+            f"SELECT rodex_sessions_id FROM {RODEX_RUNTIME_INSTANCES_TABLE} WHERE runtime_id_signed_bigint = ?",
             (stored_runtime_id,),
         ).fetchone()
         if occupied is None or int(occupied[0]) == session_id:
             raise
-        raise RodexRuntimeIdCollisionError(
-            f"preallocated Rodex runtime ID is already occupied: {runtime_id}"
-        ) from error
+        raise RodexRuntimeIdCollisionError(f"preallocated Rodex runtime ID is already occupied: {runtime_id}") from error
 
 
 def lookup_codex_session_id_from_a_rodex_sessions_id(
@@ -778,9 +725,7 @@ def lookup_owned_rodex_sessions_id_from_a_cool_name(
             raise RodexSessionError(f"cool name resolves to multiple sessions: {cool_name}")
         user_id = _lookup_rodex_sessions_user_id(connection, identity)
         if user_id is None or int(rows[0][5]) != user_id:
-            raise RodexSessionError(
-                f"Rodex session is not owned by the current user: {cool_name}"
-            )
+            raise RodexSessionError(f"Rodex session is not owned by the current user: {cool_name}")
         return int(rows[0][0])
 
 
@@ -810,9 +755,7 @@ def assign_a_user_defined_cool_name(
         raise TypeError("force must be a boolean")
     identity = _resolve_user_identity(user_identity)
     persisted_tmux_name = (
-        None
-        if renamed_tmux_session_name is None
-        else _normalise_tmux_session_name(renamed_tmux_session_name)
+        None if renamed_tmux_session_name is None else _normalise_tmux_session_name(renamed_tmux_session_name)
     )
     path = _database_path_for_mutation(database_path)
     with open_rodex_transaction(path) as connection:
@@ -877,17 +820,11 @@ def open_a_user_defined_cool_name_assignment(
             mutate=False,
             renamed_tmux_session_name=None,
         )
-        expected_names_row = _select_rodex_session_names(
-            connection, planned_names.rodex_sessions_id
-        )
+        expected_names_row = _select_rodex_session_names(connection, planned_names.rodex_sessions_id)
         if expected_names_row is None:
-            raise RodexSessionError(
-                f"Rodex session disappeared: {planned_names.rodex_sessions_id}"
-            )
+            raise RodexSessionError(f"Rodex session disappeared: {planned_names.rodex_sessions_id}")
         expected_names = _session_names_from_row(expected_names_row)
-        expected_tmux = _select_rodex_tmux_session(
-            connection, planned_names.rodex_sessions_id
-        )
+        expected_tmux = _select_rodex_tmux_session(connection, planned_names.rodex_sessions_id)
     transition = RodexUserDefinedCoolNameAssignment(
         names=planned_names,
         tmux_session=expected_tmux,
@@ -900,21 +837,11 @@ def open_a_user_defined_cool_name_assignment(
     )
     with open_rodex_transaction(path) as connection:
         require_current_rodex_schema(connection)
-        current_names_row = _select_rodex_session_names(
-            connection, planned_names.rodex_sessions_id
-        )
-        current_names = (
-            None
-            if current_names_row is None
-            else _session_names_from_row(current_names_row)
-        )
-        current_tmux = _select_rodex_tmux_session(
-            connection, planned_names.rodex_sessions_id
-        )
+        current_names_row = _select_rodex_session_names(connection, planned_names.rodex_sessions_id)
+        current_names = None if current_names_row is None else _session_names_from_row(current_names_row)
+        current_tmux = _select_rodex_tmux_session(connection, planned_names.rodex_sessions_id)
         if current_names != expected_names or current_tmux != expected_tmux:
-            raise RodexSessionError(
-                "Rodex session changed during its user-defined name transition"
-            )
+            raise RodexSessionError("Rodex session changed during its user-defined name transition")
         transition.names = _apply_user_defined_cool_name_assignment(
             connection,
             session_cool_name,
@@ -932,11 +859,7 @@ def list_rodex_session_runtimes_for_a_user(
     user_identity: RodexSessionsUserIdentity | None = None,
 ) -> list[RodexSessionRuntime]:
     """List persisted runtime identities owned by one POSIX user."""
-    identity = (
-        current_rodex_sessions_user_identity()
-        if user_identity is None
-        else _validate_user_identity(user_identity)
-    )
+    identity = current_rodex_sessions_user_identity() if user_identity is None else _validate_user_identity(user_identity)
     path = normalise_rodex_database_path(database_path)
     with open_rodex_read_transaction(path) as connection:
         user_id = select_lookup_id(
@@ -994,8 +917,7 @@ def update_rodex_tmux_session_name(
     with open_rodex_transaction(path) as connection:
         require_current_rodex_schema(connection)
         cursor = connection.execute(
-            f"UPDATE {RODEX_TMUX_SESSIONS_TABLE} SET tmux_session_name = ? "
-            "WHERE rodex_sessions_id = ?",
+            f"UPDATE {RODEX_TMUX_SESSIONS_TABLE} SET tmux_session_name = ? WHERE rodex_sessions_id = ?",
             (session_name, session_id),
         )
         if cursor.rowcount != 1:
@@ -1021,9 +943,7 @@ def lookup_rodex_sessions_id_from_a_codex_session_id(
     database_path: str | os.PathLike[str] | None = None,
 ) -> int | None:
     """Return the internal Rodex session ID linked to a Codex session ID."""
-    codex_session_id_part_1, codex_session_id_part_2 = (
-        split_codex_session_id_into_signed_bigints(codex_session_id)
-    )
+    codex_session_id_part_1, codex_session_id_part_2 = split_codex_session_id_into_signed_bigints(codex_session_id)
     path = normalise_rodex_database_path(database_path)
     with open_rodex_read_transaction(path) as connection:
         row = connection.execute(
@@ -1047,9 +967,7 @@ def lookup_owned_rodex_sessions_id_from_a_codex_session_id(
 ) -> int | None:
     """Resolve a Codex identity only when its Rodex session has the selected owner."""
     identity = _resolve_user_identity(user_identity)
-    codex_session_id_part_1, codex_session_id_part_2 = (
-        split_codex_session_id_into_signed_bigints(codex_session_id)
-    )
+    codex_session_id_part_1, codex_session_id_part_2 = split_codex_session_id_into_signed_bigints(codex_session_id)
     path = normalise_rodex_database_path(database_path)
     with open_rodex_read_transaction(path) as connection:
         row = connection.execute(
@@ -1076,8 +994,7 @@ def lookup_owned_rodex_sessions_id_from_a_codex_session_id(
         )
     if user_id is None or int(row[1]) != user_id:
         raise RodexSessionError(
-            "Rodex session is not owned by the current user: "
-            f"{parse_codex_session_id(codex_session_id)}"
+            f"Rodex session is not owned by the current user: {parse_codex_session_id(codex_session_id)}"
         )
     return int(row[0])
 
@@ -1090,9 +1007,7 @@ def _normalise_tmux_link(
     if all(value is None for value in values):
         return None
     if any(value is None for value in values):
-        raise ValueError(
-            "tmux_server_socket_path and tmux_session_name must be provided together"
-        )
+        raise ValueError("tmux_server_socket_path and tmux_session_name must be provided together")
     socket_path = os.fspath(tmux_server_socket_path)
     if not socket_path.strip():
         raise ValueError("tmux_server_socket_path must be non-empty")
@@ -1105,9 +1020,7 @@ def _normalise_tmux_session_name(value: str) -> str:
     return value.strip()
 
 
-def _lookup_or_insert_rodex_sessions_user_id(
-    connection: sqlite3.Connection, identity: RodexSessionsUserIdentity
-) -> int:
+def _lookup_or_insert_rodex_sessions_user_id(connection: sqlite3.Connection, identity: RodexSessionsUserIdentity) -> int:
     return select_or_insert_lookup_id(
         connection,
         RODEX_SESSIONS_USERS_TABLE,
@@ -1129,36 +1042,27 @@ def _apply_user_defined_cool_name_assignment(
     requested_session_name = lookup_cool_name(connection, session_cool_name)
     if requested_session_name is None:
         raise RodexSessionError(f"Rodex session does not exist: {session_cool_name}")
-    session_rows = _select_sessions_and_owners_by_cool_names_id(
-        connection, requested_session_name.id
-    )
+    session_rows = _select_sessions_and_owners_by_cool_names_id(connection, requested_session_name.id)
     if not session_rows:
         raise RodexSessionError(f"Rodex session does not exist: {session_cool_name}")
     if len(session_rows) > 1:
-        raise RodexSessionError(
-            f"cool name resolves to multiple sessions: {session_cool_name}"
-        )
+        raise RodexSessionError(f"cool name resolves to multiple sessions: {session_cool_name}")
     session_row = session_rows[0]
     user_id = _lookup_rodex_sessions_user_id(connection, identity)
     if user_id is None or int(session_row[5]) != user_id:
-        raise RodexSessionError(
-            f"Rodex session is not owned by the current user: {session_cool_name}"
-        )
+        raise RodexSessionError(f"Rodex session is not owned by the current user: {session_cool_name}")
 
     existing_alias_id = None if session_row[2] is None else int(session_row[2])
     candidate_alias = lookup_cool_name(connection, normalised_alias)
     if candidate_alias is None or existing_alias_id != candidate_alias.id:
         if existing_alias_id is not None and not force:
             raise RodexSessionError(
-                f"Rodex session already has user-defined name {session_row[4]!r}; "
-                "use --force to replace it"
+                f"Rodex session already has user-defined name {session_row[4]!r}; use --force to replace it"
             )
         if candidate_alias is not None:
             owners = _select_session_ids_by_cool_names_id(connection, candidate_alias.id)
             if any(int(owner[0]) != int(session_row[0]) for owner in owners):
-                raise RodexSessionError(
-                    f"Rodex name already belongs to another session: {normalised_alias}"
-                )
+                raise RodexSessionError(f"Rodex name already belongs to another session: {normalised_alias}")
 
     planned_names = RodexSessionNames(
         rodex_sessions_id=int(session_row[0]),
@@ -1171,9 +1075,7 @@ def _apply_user_defined_cool_name_assignment(
     allocated_alias = reserve_specific_cool_name(connection, normalised_alias)
     owners = _select_session_ids_by_cool_names_id(connection, allocated_alias.id)
     if any(int(owner[0]) != int(session_row[0]) for owner in owners):
-        raise RodexSessionError(
-            f"Rodex name already belongs to another session: {normalised_alias}"
-        )
+        raise RodexSessionError(f"Rodex name already belongs to another session: {normalised_alias}")
     cursor = connection.execute(
         f"UPDATE {RODEX_SESSIONS_TABLE} SET user_defined_cool_names_id = ? WHERE id = ?",
         (allocated_alias.id, int(session_row[0])),
@@ -1182,14 +1084,11 @@ def _apply_user_defined_cool_name_assignment(
         raise RodexSessionError(f"Rodex session disappeared: {int(session_row[0])}")
     if renamed_tmux_session_name is not None:
         tmux_cursor = connection.execute(
-            f"UPDATE {RODEX_TMUX_SESSIONS_TABLE} SET tmux_session_name = ? "
-            "WHERE rodex_sessions_id = ?",
+            f"UPDATE {RODEX_TMUX_SESSIONS_TABLE} SET tmux_session_name = ? WHERE rodex_sessions_id = ?",
             (renamed_tmux_session_name, int(session_row[0])),
         )
         if tmux_cursor.rowcount != 1:
-            raise RodexSessionError(
-                f"Rodex tmux session does not exist: {int(session_row[0])}"
-            )
+            raise RodexSessionError(f"Rodex tmux session does not exist: {int(session_row[0])}")
     return planned_names
 
 
@@ -1212,9 +1111,7 @@ def _select_sessions_and_owners_by_cool_names_id(
     ).fetchall()
 
 
-def _select_session_ids_by_cool_names_id(
-    connection: sqlite3.Connection, cool_names_id: int
-) -> list[tuple[object, ...]]:
+def _select_session_ids_by_cool_names_id(connection: sqlite3.Connection, cool_names_id: int) -> list[tuple[object, ...]]:
     return connection.execute(
         f"SELECT id FROM {RODEX_SESSIONS_TABLE} "
         "WHERE cool_names_id = ? OR user_defined_cool_names_id = ? "
@@ -1223,9 +1120,7 @@ def _select_session_ids_by_cool_names_id(
     ).fetchall()
 
 
-def _lookup_rodex_sessions_user_id(
-    connection: sqlite3.Connection, identity: RodexSessionsUserIdentity
-) -> int | None:
+def _lookup_rodex_sessions_user_id(connection: sqlite3.Connection, identity: RodexSessionsUserIdentity) -> int | None:
     return select_lookup_id(
         connection,
         RODEX_SESSIONS_USERS_TABLE,
@@ -1236,16 +1131,10 @@ def _lookup_rodex_sessions_user_id(
 def _resolve_user_identity(
     user_identity: RodexSessionsUserIdentity | None,
 ) -> RodexSessionsUserIdentity:
-    return (
-        current_rodex_sessions_user_identity()
-        if user_identity is None
-        else _validate_user_identity(user_identity)
-    )
+    return current_rodex_sessions_user_identity() if user_identity is None else _validate_user_identity(user_identity)
 
 
-def _select_rodex_session_names(
-    connection: sqlite3.Connection, session_id: int
-) -> tuple[object, ...] | None:
+def _select_rodex_session_names(connection: sqlite3.Connection, session_id: int) -> tuple[object, ...] | None:
     return connection.execute(
         f"SELECT sessions.id, permanent.cool_name, user_defined.cool_name "
         f"FROM {RODEX_SESSIONS_TABLE} AS sessions "
@@ -1257,9 +1146,7 @@ def _select_rodex_session_names(
     ).fetchone()
 
 
-def _select_rodex_tmux_session(
-    connection: sqlite3.Connection, session_id: int
-) -> RodexTmuxSession | None:
+def _select_rodex_tmux_session(connection: sqlite3.Connection, session_id: int) -> RodexTmuxSession | None:
     row = connection.execute(
         f"SELECT id, rodex_sessions_id, tmux_server_socket_path, tmux_session_name "
         f"FROM {RODEX_TMUX_SESSIONS_TABLE} WHERE rodex_sessions_id = ?",
@@ -1288,17 +1175,9 @@ def _validate_user_identity(
 ) -> RodexSessionsUserIdentity:
     if not isinstance(identity, RodexSessionsUserIdentity):
         raise TypeError("user_identity must be a RodexSessionsUserIdentity")
-    if (
-        not isinstance(identity.uid, int)
-        or isinstance(identity.uid, bool)
-        or identity.uid < 0
-    ):
+    if not isinstance(identity.uid, int) or isinstance(identity.uid, bool) or identity.uid < 0:
         raise ValueError("uid must be a non-negative integer")
-    if (
-        not isinstance(identity.gid, int)
-        or isinstance(identity.gid, bool)
-        or identity.gid < 0
-    ):
+    if not isinstance(identity.gid, int) or isinstance(identity.gid, bool) or identity.gid < 0:
         raise ValueError("gid must be a non-negative integer")
     if not isinstance(identity.user_name, str) or not identity.user_name.strip():
         raise ValueError("user_name must be a non-empty string")
@@ -1323,9 +1202,7 @@ def _parse_canonical_durable_timestamp(value: str, *, field_name: str) -> dateti
     try:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except (TypeError, ValueError) as error:
-        raise RodexSessionError(
-            f"{field_name} is not a canonical UTC timestamp: {value!r}"
-        ) from error
+        raise RodexSessionError(f"{field_name} is not a canonical UTC timestamp: {value!r}") from error
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         raise RodexSessionError(f"{field_name} is not a canonical UTC timestamp: {value!r}")
     parsed = parsed.astimezone(UTC)

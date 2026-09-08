@@ -281,9 +281,7 @@ def test_round1_twenty_idle_rollout_followers_have_bounded_metadata_only_work(
             advance_virtual_time,
         )
         with pytest.raises(VirtualMinuteComplete):
-            observer._follow_rollout_context(
-                f"thread-{follower_index}", rollout_path, Event()
-            )
+            observer._follow_rollout_context(f"thread-{follower_index}", rollout_path, Event())
         intervals_by_follower.append(tuple(intervals))
 
     observer.close()
@@ -301,10 +299,7 @@ def test_round1_twenty_idle_rollout_followers_have_bounded_metadata_only_work(
         )
         for intervals in intervals_by_follower
     )
-    assert all(
-        max(intervals) == ROLLOUT_CONTEXT_MAX_IDLE_POLL_INTERVAL_SECONDS
-        for intervals in intervals_by_follower
-    )
+    assert all(max(intervals) == ROLLOUT_CONTEXT_MAX_IDLE_POLL_INTERVAL_SECONDS for intervals in intervals_by_follower)
 
 
 @pytest.mark.parametrize("invalid_kind", ["missing", "outside_root"])
@@ -318,11 +313,7 @@ def test_round1_invalid_rollout_path_retries_with_bounded_idle_backoff(
 
     sessions_root = tmp_path / "sessions"
     sessions_root.mkdir()
-    rollout_path = (
-        sessions_root / "missing.jsonl"
-        if invalid_kind == "missing"
-        else tmp_path / "outside.jsonl"
-    )
+    rollout_path = sessions_root / "missing.jsonl" if invalid_kind == "missing" else tmp_path / "outside.jsonl"
     if invalid_kind == "outside_root":
         rollout_path.write_bytes(b"")
     observer = CodexContextStatusObserver(
@@ -726,9 +717,7 @@ def test_round1_tail_history_count_disambiguates_consecutive_identical_append() 
 
 
 def test_round1_tail_repeated_block_rollover_consumes_visible_rows_in_order() -> None:
-    cursor = PlainTailCursor(
-        TmuxScrollbackSnapshot(("same", "same", "same", "same", "next"), 3)
-    )
+    cursor = PlainTailCursor(TmuxScrollbackSnapshot(("same", "same", "same", "same", "next"), 3))
 
     assert (
         cursor.try_advance_state(
@@ -777,9 +766,7 @@ def test_round1_idle_full_history_tail_stays_within_process_and_byte_budgets() -
         visible_lines=("prompt",),
         runtime_identity="round1-runtime",
     )
-    bytes_per_state = sum(
-        len(line.encode()) + 1 for line in (*state.history_tail_lines, *state.visible_lines)
-    )
+    bytes_per_state = sum(len(line.encode()) + 1 for line in (*state.history_tail_lines, *state.visible_lines))
     process_calls = 0
     bytes_captured = 0
     ticks = 0

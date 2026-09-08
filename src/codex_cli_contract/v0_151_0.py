@@ -68,9 +68,7 @@ CODEX_CLI_0_151_0_OPTION_SPECS: Final = (
         "dangerously-bypass-approvals-and-sandbox",
         ("--dangerously-bypass-approvals-and-sandbox",),
     ),
-    CodexCliOptionSpec(
-        "dangerously-bypass-hook-trust", ("--dangerously-bypass-hook-trust",)
-    ),
+    CodexCliOptionSpec("dangerously-bypass-hook-trust", ("--dangerously-bypass-hook-trust",)),
     CodexCliOptionSpec("cd", ("-C", "--cd"), CodexOptionValueArity.ONE),
     CodexCliOptionSpec("add-dir", ("--add-dir",), CodexOptionValueArity.ONE),
     CodexCliOptionSpec(

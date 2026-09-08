@@ -97,9 +97,7 @@ def test_transactions_reuse_one_process_local_validated_database_descriptor(
         with open_rodex_transaction(database) as connection:
             connection.execute("INSERT INTO marker VALUES (?)", (str(value),))
         with open_rodex_read_transaction(database) as connection:
-            assert connection.execute("SELECT COUNT(*) FROM marker").fetchone() == (
-                value + 1,
-            )
+            assert connection.execute("SELECT COUNT(*) FROM marker").fetchone() == (value + 1,)
         current = transactions_module._PROCESS_WAL_LIFETIME_OWNER
         assert current is owner
         assert current.database_descriptor == descriptor
@@ -182,9 +180,7 @@ if close is not None:
     truncate_calls = sum("ftruncate(" in call for call in calls)
     assert fsync_calls <= 8, f"25 sparse commits issued {fsync_calls} fsync calls"
     assert unlink_calls <= 4, f"25 sparse commits issued {unlink_calls} sidecar unlinks"
-    assert truncate_calls <= 4, (
-        f"25 sparse commits issued {truncate_calls} sidecar truncations"
-    )
+    assert truncate_calls <= 4, f"25 sparse commits issued {truncate_calls} sidecar truncations"
 
 
 def test_twenty_clients_retain_wal_until_the_last_clean_process_exit(
@@ -280,9 +276,7 @@ def test_process_wal_owner_is_closed_before_fork_and_recreated_per_process(
             payload = json.dumps(
                 {
                     "inherited_owner_absent": inherited_owner is None,
-                    "child_owner_pid": (
-                        None if child_owner is None else child_owner.process_id
-                    ),
+                    "child_owner_pid": (None if child_owner is None else child_owner.process_id),
                     "child_pid": os.getpid(),
                 }
             ).encode()
@@ -431,6 +425,4 @@ os._exit(23)
 
     assert completed.returncode == 23
     with closing(sqlite3.connect(database)) as connection:
-        assert connection.execute("SELECT value FROM marker").fetchall() == [
-            ("committed-before-crash",)
-        ]
+        assert connection.execute("SELECT value FROM marker").fetchall() == [("committed-before-crash",)]

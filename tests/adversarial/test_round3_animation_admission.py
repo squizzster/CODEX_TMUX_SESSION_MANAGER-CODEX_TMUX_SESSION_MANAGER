@@ -79,10 +79,7 @@ class _OwnerTmux:
         self.options[STATUS_ANIMATION_PENDING_EVENT_OPTION] = event
         generation = str(int(self.options.get(STATUS_ANIMATION_GENERATION_OPTION, "0")) + 1)
         self.options[STATUS_ANIMATION_GENERATION_OPTION] = generation
-        if (
-            STATUS_ANIMATION_OWNER_TOKEN_OPTION in self.options
-            and STATUS_ANIMATION_WATCHDOG_TOKEN_OPTION in self.options
-        ):
+        if STATUS_ANIMATION_OWNER_TOKEN_OPTION in self.options and STATUS_ANIMATION_WATCHDOG_TOKEN_OPTION in self.options:
             return None
         self.options[STATUS_ANIMATION_OWNER_TOKEN_OPTION] = generation
         self.options[STATUS_ANIMATION_WATCHDOG_TOKEN_OPTION] = generation
@@ -114,16 +111,11 @@ class _OwnerTmux:
             if self.fail_release_once and STATUS_ANIMATION_GENERATION_OPTION in condition:
                 self.fail_release_once = False
                 return AsyncCommandResult(124)
-            if (
-                STATUS_ANIMATION_GENERATION_OPTION in condition
-                and self.before_release is not None
-            ):
+            if STATUS_ANIMATION_GENERATION_OPTION in condition and self.before_release is not None:
                 callback = self.before_release
                 self.before_release = None
                 callback()
-            branch_index = format_index + (
-                2 if self._condition_is_true(condition) else 3
-            )
+            branch_index = format_index + (2 if self._condition_is_true(condition) else 3)
             if branch_index < len(arguments):
                 result = AsyncCommandResult(0)
                 for tmux_command in arguments[branch_index].split(" ; "):
@@ -134,10 +126,7 @@ class _OwnerTmux:
                         result = self._execute(nested)
                     else:
                         self._apply(nested)
-                if (
-                    STATUS_ANIMATION_GENERATION_OPTION in condition
-                    and self.after_release is not None
-                ):
+                if STATUS_ANIMATION_GENERATION_OPTION in condition and self.after_release is not None:
                     callback = self.after_release
                     self.after_release = None
                     callback()
@@ -222,9 +211,7 @@ def test_round3_owner_aba_coalesces_to_latest_without_spawning_a_loser() -> None
     claims = [
         command
         for command in tmux.commands
-        if "if-shell" in command
-        and STATUS_CLAIM_TOKEN_OPTION in command[-1]
-        and "status-format[0]" in command[-1]
+        if "if-shell" in command and STATUS_CLAIM_TOKEN_OPTION in command[-1] and "status-format[0]" in command[-1]
     ]
     assert len(claims) == 2
     assert tmux.spawned_owner_tokens == ["1"]
@@ -279,8 +266,7 @@ def test_round3_stale_watchdog_is_a_noop_after_owner_generation_changes() -> Non
 
     assert tmux.options[STATUS_ANIMATION_OWNER_TOKEN_OPTION] == "new-owner"
     assert not any(
-        "if-shell" in command
-        and not any("display-message" in argument for argument in command)
+        "if-shell" in command and not any("display-message" in argument for argument in command)
         for command in tmux.commands
     )
 
@@ -378,9 +364,7 @@ def test_round3_animation_uses_a_rename_stable_tmux_session_id() -> None:
         )
     )
 
-    targeted = [
-        command[command.index("-t") + 1] for command in tmux.commands if "-t" in command
-    ]
+    targeted = [command[command.index("-t") + 1] for command in tmux.commands if "-t" in command]
     assert targeted
     assert set(targeted) == {"%9"}
     assert any("$7" in argument for command in tmux.commands for argument in command)

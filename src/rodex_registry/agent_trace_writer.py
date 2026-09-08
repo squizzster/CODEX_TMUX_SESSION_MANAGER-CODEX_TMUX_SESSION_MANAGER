@@ -93,9 +93,7 @@ def publish_agent_trace_in_transaction(
     prior_unrecognized_count = 0 if current is None else int(current[2])
     prior_coverage = None if current is None else str(current[3])
     if current_sequence != prepared.based_on_trace_publication_sequence:
-        raise RodexSessionStatisticsPublicationRaceError(
-            "agent trace publication sequence changed during calculation"
-        )
+        raise RodexSessionStatisticsPublicationRaceError("agent trace publication sequence changed during calculation")
     sequence = 1 if current_sequence is None else current_sequence + 1
     thread_memberships = _trace_thread_memberships(
         connection,
@@ -116,9 +114,7 @@ def publish_agent_trace_in_transaction(
         detail_sha256 = prepared_event.detail_sha256
         thread_membership = thread_memberships.get(prepared_event.codex_thread_id)
         if thread_membership is None:
-            raise RodexSessionStatisticsConflictError(
-                "agent trace event identifies an unregistered Codex thread"
-            )
+            raise RodexSessionStatisticsConflictError("agent trace event identifies an unregistered Codex thread")
         thread_row_id, codex_threads_id = thread_membership
         turn_row_id = _resolve_optional_trace_turn_id(
             connection,
@@ -180,9 +176,7 @@ def publish_agent_trace_in_transaction(
         if inserted is None:
             expected = (scope_id, kind, event.event_time_utc, detail_sha256)
             if stored is None or tuple(stored[1:]) != expected:
-                raise RodexSessionStatisticsConflictError(
-                    "authenticated rollout event changed after trace publication"
-                )
+                raise RodexSessionStatisticsConflictError("authenticated rollout event changed after trace publication")
             continue
         assert trace_event_public_id is not None
         inserted_event_count += 1
@@ -236,9 +230,7 @@ def publish_agent_trace_in_transaction(
             "unrecognized_record_count = ? WHERE rodex_sessions_id = ?",
             (*values, session_id),
         )
-    return RodexAgentTracePublishReceipt(
-        sequence, int(durable_event_count), int(unrecognized_count)
-    )
+    return RodexAgentTracePublishReceipt(sequence, int(durable_event_count), int(unrecognized_count))
 
 
 def _resolve_optional_trace_turn_id(
@@ -292,13 +284,7 @@ def _resolve_optional_trace_turn_id(
     if row is None:
         raise RodexSessionStatisticsConflictError("trace turn identity was not registered")
     turn_row_id = int(row[0])
-    outcome = (
-        "completed"
-        if event_kind == "turn_completed"
-        else "aborted"
-        if event_kind == "turn_aborted"
-        else "open"
-    )
+    outcome = "completed" if event_kind == "turn_completed" else "aborted" if event_kind == "turn_aborted" else "open"
     connection.execute(
         f"INSERT OR IGNORE INTO {RODEX_SESSIONS_CODEX_TURN_STATES_TABLE} "
         "(rodex_sessions_id, rodex_sessions_codex_turns_id, started_at_utc, "
@@ -345,9 +331,7 @@ def _resolve_or_insert_activity_scope(
     if cached is not None:
         return cached
     if turn_row_id is None:
-        condition = (
-            "rodex_sessions_codex_threads_id = ? AND rodex_sessions_codex_turns_id IS NULL"
-        )
+        condition = "rodex_sessions_codex_threads_id = ? AND rodex_sessions_codex_turns_id IS NULL"
         parameters: tuple[object, ...] = (thread_row_id,)
     else:
         condition = "rodex_sessions_codex_turns_id = ?"
@@ -364,9 +348,7 @@ def _resolve_or_insert_activity_scope(
             (session_id, thread_row_id, turn_row_id),
         ).fetchone()
     if row is None:
-        raise RodexSessionStatisticsConflictError(
-            "Codex activity scope insertion returned no identity"
-        )
+        raise RodexSessionStatisticsConflictError("Codex activity scope insertion returned no identity")
     scope_id = int(row[0])
     cache[key] = scope_id
     return scope_id
@@ -475,9 +457,7 @@ def _insert_trace_detail(
             ),
         )
     elif isinstance(detail, TraceContext):
-        model_id = _lookup_name(
-            connection, MODEL_NAMES_TABLE, "name_of_the_model", detail.model, model_name_ids
-        )
+        model_id = _lookup_name(connection, MODEL_NAMES_TABLE, "name_of_the_model", detail.model, model_name_ids)
         effort_id = _lookup_name(
             connection,
             REASONING_EFFORT_NAMES_TABLE,
@@ -541,9 +521,7 @@ def _insert_trace_detail(
         target_codex_threads_id = (
             None
             if detail.target_codex_thread_id is None
-            else resolve_codex_thread_identity_in_transaction(
-                connection, detail.target_codex_thread_id
-            )
+            else resolve_codex_thread_identity_in_transaction(connection, detail.target_codex_thread_id)
         )
         collaboration_tool_call_id = _resolve_existing_tool_call_by_call_id(
             connection,
@@ -568,9 +546,7 @@ def _insert_trace_detail(
             ),
         ).fetchone()
         if inserted_activity is None:
-            raise RodexSessionStatisticsConflictError(
-                "sub-agent trace activity insertion returned no identity"
-            )
+            raise RodexSessionStatisticsConflictError("sub-agent trace activity insertion returned no identity")
         if target_codex_threads_id is None or collaboration_tool_call_id is None:
             return None
         inserted_request = _insert_agent_request_from_activity(
@@ -595,10 +571,7 @@ def _trace_thread_memberships(
 ) -> dict[CodexThreadId, tuple[int, int]]:
     """Resolve only distinct source threads through bounded VALUES queries."""
     resolved: dict[CodexThreadId, tuple[int, int]] = {}
-    identities = sorted(
-        split_codex_thread_id_into_signed_bigints(thread_id)
-        for thread_id in source_thread_ids
-    )
+    identities = sorted(split_codex_thread_id_into_signed_bigints(thread_id) for thread_id in source_thread_ids)
     chunk_size = 400
     for offset in range(0, len(identities), chunk_size):
         chunk = identities[offset : offset + chunk_size]
@@ -679,19 +652,13 @@ def _resolve_or_insert_codex_item(
             ).fetchone()
         if stored is not None:
             if stored[2] is not None and str(stored[2]) != source_item_id:
-                raise RodexSessionStatisticsConflictError(
-                    "Codex item alias digest collision"
-                )
+                raise RodexSessionStatisticsConflictError("Codex item alias digest collision")
             if stored[1] != scope_id:
-                raise RodexSessionStatisticsConflictError(
-                    "canonical Codex item identity changed across trace events"
-                )
+                raise RodexSessionStatisticsConflictError("canonical Codex item identity changed across trace events")
             return int(stored[0])
         public_id = uuid.uuid4()
         identity_columns = (
-            ""
-            if item_identity is None
-            else ", codex_item_id_signed_bigint_1, codex_item_id_signed_bigint_2"
+            "" if item_identity is None else ", codex_item_id_signed_bigint_1, codex_item_id_signed_bigint_2"
         )
         identity_placeholders = "" if item_identity is None else ", ?, ?"
         inserted = connection.execute(
@@ -764,9 +731,7 @@ def _resolve_or_insert_tool_call(
         ).fetchone()
         if alias is not None:
             if str(alias[1]) != call_id:
-                raise RodexSessionStatisticsConflictError(
-                    "Codex tool-call ID digest collision"
-                )
+                raise RodexSessionStatisticsConflictError("Codex tool-call ID digest collision")
             matched_call_ids.add(int(alias[0]))
     if item_id is not None:
         alias = connection.execute(
@@ -778,9 +743,7 @@ def _resolve_or_insert_tool_call(
         if alias is not None:
             matched_call_ids.add(int(alias[0]))
     if len(matched_call_ids) > 1:
-        raise RodexSessionStatisticsConflictError(
-            "tool-call aliases resolve to different canonical calls"
-        )
+        raise RodexSessionStatisticsConflictError("tool-call aliases resolve to different canonical calls")
     tool_names_id = (
         _lookup_name(
             connection,
@@ -800,20 +763,15 @@ def _resolve_or_insert_tool_call(
             (tool_call_id,),
         ).fetchone()
         if stored is None or stored[0] != scope_id:
-            raise RodexSessionStatisticsConflictError(
-                "canonical tool-call identity changed across activity events"
-            )
+            raise RodexSessionStatisticsConflictError("canonical tool-call identity changed across activity events")
         if tool_names_id is not None:
             if stored[1] is None:
                 connection.execute(
-                    f"UPDATE {RODEX_SESSIONS_CODEX_TOOL_CALLS_TABLE} "
-                    "SET tool_names_id = ? WHERE id = ?",
+                    f"UPDATE {RODEX_SESSIONS_CODEX_TOOL_CALLS_TABLE} SET tool_names_id = ? WHERE id = ?",
                     (tool_names_id, tool_call_id),
                 )
             elif int(stored[1]) != tool_names_id:
-                raise RodexSessionStatisticsConflictError(
-                    "canonical tool-call name changed after request verification"
-                )
+                raise RodexSessionStatisticsConflictError("canonical tool-call name changed after request verification")
     else:
         for _attempt_number in index_re_try_attempt_numbers():
             public_id = uuid.uuid4()
@@ -836,9 +794,7 @@ def _resolve_or_insert_tool_call(
                 tool_call_id = int(inserted[0])
                 break
         else:
-            raise RodexSessionStatisticsConflictError(
-                "could not allocate a tool-call public ID"
-            )
+            raise RodexSessionStatisticsConflictError("could not allocate a tool-call public ID")
     if call_id is not None and call_id_digest is not None:
         _insert_and_verify_tool_call_alias(
             connection,
@@ -886,9 +842,7 @@ def _insert_and_verify_tool_call_alias(
     item_id: int | None = None,
     event_id: int | None = None,
 ) -> None:
-    hash_values: tuple[int | None, ...] = (
-        (None, None, None, None) if call_id_digest is None else call_id_digest
-    )
+    hash_values: tuple[int | None, ...] = (None, None, None, None) if call_id_digest is None else call_id_digest
     connection.execute(
         f"INSERT OR IGNORE INTO {RODEX_SESSIONS_CODEX_TOOL_CALL_ALIASES_TABLE} "
         "(rodex_sessions_id, rodex_sessions_codex_threads_id, "
@@ -937,22 +891,13 @@ def _insert_and_verify_tool_call_alias(
         f"FROM {RODEX_SESSIONS_CODEX_TOOL_CALL_ALIASES_TABLE} WHERE {condition}",
         parameters,
     ).fetchone()
-    if (
-        stored is None
-        or int(stored[0]) != tool_call_id
-        or (alias_kind == "call_id" and str(stored[1]) != call_id)
-    ):
-        raise RodexSessionStatisticsConflictError(
-            "canonical tool-call alias changed across trace events"
-        )
+    if stored is None or int(stored[0]) != tool_call_id or (alias_kind == "call_id" and str(stored[1]) != call_id):
+        raise RodexSessionStatisticsConflictError("canonical tool-call alias changed across trace events")
 
 
 def _sha256_signed_bigints(value: str) -> tuple[int, int, int, int]:
     digest = hashlib.sha256(value.encode("utf-8")).digest()
-    pieces = tuple(
-        int.from_bytes(digest[offset : offset + 8], "big", signed=True)
-        for offset in range(0, 32, 8)
-    )
+    pieces = tuple(int.from_bytes(digest[offset : offset + 8], "big", signed=True) for offset in range(0, 32, 8))
     return pieces[0], pieces[1], pieces[2], pieces[3]
 
 

@@ -64,9 +64,7 @@ class _BlockingSendSocket:
             self.release.wait(5)
 
     def recv(self, timeout: float | None = None) -> str:
-        return json.dumps(
-            {"id": 0, "result": {"userAgent": "rodex-control/0.151.0 (Linux)"}}
-        )
+        return json.dumps({"id": 0, "result": {"userAgent": "rodex-control/0.151.0 (Linux)"}})
 
 
 def _run_in_daemon(call: object) -> tuple[Thread, list[BaseException]]:
@@ -85,9 +83,7 @@ def _run_in_daemon(call: object) -> tuple[Thread, list[BaseException]]:
 
 def test_round1_expired_mutation_deadline_sends_no_frame() -> None:
     socket = _BlockingSendSocket(block_on_call=99)
-    context = control_module._MutationDispatchContext(
-        "dispatch-one", "thread-one", "turn-one"
-    )
+    context = control_module._MutationDispatchContext("dispatch-one", "thread-one", "turn-one")
 
     with pytest.raises(RodexControlError) as raised:
         control_module._request(
@@ -106,9 +102,7 @@ def test_round1_expired_mutation_deadline_sends_no_frame() -> None:
 
 def test_round1_blocked_request_send_tears_down_transport_at_deadline() -> None:
     socket = _BlockingSendSocket(block_on_call=1)
-    context = control_module._MutationDispatchContext(
-        "dispatch-one", "thread-one", "turn-one"
-    )
+    context = control_module._MutationDispatchContext("dispatch-one", "thread-one", "turn-one")
     deadline = time.monotonic() + 0.02
     caller, errors = _run_in_daemon(
         lambda: control_module._request(
@@ -170,9 +164,7 @@ class ChatteringReadSocket:
     def recv(self, _timeout: float | None = None, *, timeout: float | None = None) -> str:
         self.recv_calls += 1
         if self.recv_calls == 1:
-            return json.dumps(
-                {"id": 0, "result": {"userAgent": "rodex-control/0.151.0 (Linux)"}}
-            )
+            return json.dumps({"id": 0, "result": {"userAgent": "rodex-control/0.151.0 (Linux)"}})
         if self.recv_calls > 32:
             raise AssertionError("read RPC consumed unbounded unrelated frames")
         return json.dumps({"method": "unrelated/notification", "params": {}})
@@ -209,15 +201,9 @@ def test_round1_shared_ctrl_c_rechecks_current_attachment_count(tmp_path: Path) 
     def runner(command: list[str], **_options: object) -> subprocess.CompletedProcess[str]:
         commands.append(command)
         arguments = command[3:]
-        if (
-            arguments[:1] == ["if-shell"]
-            and "display-message" in arguments[-2]
-            and "#{pane_id}" in arguments[-2]
-        ):
+        if arguments[:1] == ["if-shell"] and "display-message" in arguments[-2] and "#{pane_id}" in arguments[-2]:
             return subprocess.CompletedProcess(command, 0, stdout="%9\n", stderr="")
-        if "display-message" in arguments or any(
-            "session_attached" in argument for argument in arguments
-        ):
+        if "display-message" in arguments or any("session_attached" in argument for argument in arguments):
             return subprocess.CompletedProcess(command, 0, stdout="2\n", stderr="")
         if arguments[:2] == ["show-options", "-v"]:
             return subprocess.CompletedProcess(command, 1, stdout="", stderr="")
@@ -259,11 +245,7 @@ def test_round1_shared_ctrl_c_confirmation_is_atomic_across_callers(
         nonlocal confirmation, kill_count
         arguments = command[3:]
         joined = " ".join(arguments)
-        if (
-            arguments[:1] == ["if-shell"]
-            and "display-message" in arguments[-2]
-            and "#{pane_id}" in arguments[-2]
-        ):
+        if arguments[:1] == ["if-shell"] and "display-message" in arguments[-2] and "#{pane_id}" in arguments[-2]:
             return subprocess.CompletedProcess(command, 0, stdout="%9\n", stderr="")
         if arguments[:1] == ["if-shell"] and "show-options" in joined:
             if CONFIRMATION_OPTION not in joined:

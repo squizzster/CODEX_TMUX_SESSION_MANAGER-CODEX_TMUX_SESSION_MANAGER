@@ -50,17 +50,13 @@ def select_or_insert_lookup_id(
     return int(cursor.lastrowid)
 
 
-def _validated_lookup_columns(
-    table_name: str, lookup_values: Mapping[str, SQLValue]
-) -> tuple[str, ...]:
+def _validated_lookup_columns(table_name: str, lookup_values: Mapping[str, SQLValue]) -> tuple[str, ...]:
     if not _SQL_IDENTIFIER.fullmatch(table_name):
         raise ValueError(f"invalid SQL table identifier: {table_name!r}")
     columns = tuple(lookup_values)
     if not columns:
         raise ValueError("lookup_values must contain at least one field")
-    invalid_columns = [
-        column for column in columns if not _SQL_IDENTIFIER.fullmatch(column)
-    ]
+    invalid_columns = [column for column in columns if not _SQL_IDENTIFIER.fullmatch(column)]
     if invalid_columns:
         raise ValueError(f"invalid SQL column identifier: {invalid_columns[0]!r}")
     return columns

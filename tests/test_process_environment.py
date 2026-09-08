@@ -92,9 +92,7 @@ def test_user_project_virtualenv_is_preserved_unchanged(tmp_path: Path) -> None:
     rodex_virtual_environment = tmp_path / "rodex" / ".venv"
     user_virtual_environment = tmp_path / "project-xyz" / ".venv"
     inherited = {
-        "PATH": os.pathsep.join(
-            (str(user_virtual_environment / "bin"), "/usr/local/bin", "/usr/bin")
-        ),
+        "PATH": os.pathsep.join((str(user_virtual_environment / "bin"), "/usr/local/bin", "/usr/bin")),
         "VIRTUAL_ENV": str(user_virtual_environment),
         "VIRTUAL_ENV_PROMPT": "(project-xyz)",
         "UV_RUN_RECURSION_DEPTH": "2",

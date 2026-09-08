@@ -52,9 +52,7 @@ class FakeWebSocket:
 
 
 class RoutingConnector:
-    def __init__(
-        self, protocol: FakeWebSocket, events: FakeWebSocket | None = None
-    ) -> None:
+    def __init__(self, protocol: FakeWebSocket, events: FakeWebSocket | None = None) -> None:
         self.protocol = protocol
         self.events = events
 
@@ -73,9 +71,7 @@ def control(tmp_path: Path) -> LiveRodexControl:
     )
 
 
-def verified_responses(
-    *, status: str, turns: list[dict[str, Any]] | None = None
-) -> list[dict[str, Any]]:
+def verified_responses(*, status: str, turns: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
     return [
         {"id": 0, "result": {"userAgent": "rodex-control/0.151.0 (Linux)"}},
         {"id": 1, "result": {"data": [str(CODEX_SESSION_ID)]}},
@@ -130,9 +126,7 @@ def test_live_inspection_includes_the_event_taps_exact_active_turn(
 
 
 def test_exact_control_version_uses_the_live_initialize_contract(tmp_path: Path) -> None:
-    protocol = FakeWebSocket(
-        [{"id": 0, "result": {"userAgent": "rodex-control/0.151.0 (Linux)"}}]
-    )
+    protocol = FakeWebSocket([{"id": 0, "result": {"userAgent": "rodex-control/0.151.0 (Linux)"}}])
     client = CodexControlClient(connector=RoutingConnector(protocol))
 
     assert client.exact_control_version(control(tmp_path)) == "0.151.0"
@@ -142,9 +136,7 @@ def test_exact_control_version_uses_the_live_initialize_contract(tmp_path: Path)
 def test_every_control_read_rejects_a_noncharacterized_app_server(
     tmp_path: Path,
 ) -> None:
-    protocol = FakeWebSocket(
-        [{"id": 0, "result": {"userAgent": "rodex-control/0.150.1 (Linux)"}}]
-    )
+    protocol = FakeWebSocket([{"id": 0, "result": {"userAgent": "rodex-control/0.150.1 (Linux)"}}])
     client = CodexControlClient(connector=RoutingConnector(protocol))
 
     with pytest.raises(RodexAppServerVersionError, match=r"live server is 0\.150\.1"):
@@ -171,9 +163,7 @@ def test_control_rejects_an_endpoint_without_the_expected_codex_session_id(
 def test_wait_subscribes_before_inspection_and_returns_on_turn_completion(
     tmp_path: Path,
 ) -> None:
-    protocol = FakeWebSocket(
-        [*verified_responses(status="active"), *verified_responses(status="idle")]
-    )
+    protocol = FakeWebSocket([*verified_responses(status="active"), *verified_responses(status="idle")])
     events = FakeWebSocket(
         responses=[json.loads(EVENT_STREAM_READY_MESSAGE)],
         events=[
@@ -274,9 +264,7 @@ def test_event_stream_emits_structured_collaboration_events_but_not_token_deltas
         )
     ]
     assert format_protocol_log_event({"method": "agentMessage/delta"}) is None
-    assert (
-        format_protocol_log_event({"method": "item/commandExecution/outputDelta"}) is None
-    )
+    assert format_protocol_log_event({"method": "item/commandExecution/outputDelta"}) is None
     assert format_protocol_log_event({"method": "item/completed", "params": {}}) == (
         '{"method":"item/completed","params":{}}'
     )
@@ -422,18 +410,14 @@ def test_exact_steer_succeeds_before_event_tap_observes_turn_started(
 def test_exact_interrupt_succeeds_before_event_tap_observes_turn_started(
     tmp_path: Path,
 ) -> None:
-    protocol = FakeWebSocket(
-        [*verified_responses(status="active"), {"id": "rodex:test", "result": {}}]
-    )
+    protocol = FakeWebSocket([*verified_responses(status="active"), {"id": "rodex:test", "result": {}}])
     events = FakeWebSocket(responses=[json.loads(EVENT_STREAM_READY_MESSAGE)])
     client = CodexControlClient(
         connector=RoutingConnector(protocol, events),
         request_id_factory=lambda: "rodex:test",
     )
 
-    state = client._interrupt_turn(
-        control(tmp_path), "turn-target", revalidate=lambda: None
-    )
+    state = client._interrupt_turn(control(tmp_path), "turn-target", revalidate=lambda: None)
 
     assert state.active_turn_id == "turn-target"
     assert protocol.sent[-1]["params"] == {
@@ -830,9 +814,7 @@ def test_lost_mutation_response_preserves_dispatch_status_hook(tmp_path: Path) -
         dispatch_id_factory=lambda: "controller:dispatch:42",
     )
 
-    with pytest.raises(
-        RodexDispatchIndeterminateError, match="acceptance is unknown"
-    ) as raised:
+    with pytest.raises(RodexDispatchIndeterminateError, match="acceptance is unknown") as raised:
         client._start_turn(control(tmp_path), "run tests", revalidate=lambda: None)
 
     assert raised.value.dispatch_id == "controller:dispatch:42"
@@ -879,9 +861,7 @@ def test_mutation_response_has_a_total_deadline_despite_unrelated_frames(
         monotonic=lambda: clock[0],
     )
 
-    with pytest.raises(
-        RodexDispatchIndeterminateError, match="acceptance is unknown"
-    ) as raised:
+    with pytest.raises(RodexDispatchIndeterminateError, match="acceptance is unknown") as raised:
         client._start_turn(control(tmp_path), "run tests", revalidate=lambda: None)
 
     assert raised.value.dispatch_id == "controller:dispatch:deadline"

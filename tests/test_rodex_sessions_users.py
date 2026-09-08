@@ -47,8 +47,7 @@ def test_sessions_users_id_uses_autoincrement(tmp_path: Path) -> None:
 
     definition = fetch_all(
         database,
-        "SELECT sql FROM sqlite_master "
-        "WHERE type = 'table' AND name = 'rodex_sessions_users'",
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'rodex_sessions_users'",
     )[0][0]
 
     assert isinstance(definition, str)
@@ -64,9 +63,7 @@ def test_sessions_users_has_the_exact_composite_unique_index(tmp_path: Path) -> 
         "PRAGMA index_info(rodex_sessions_users_uid_gid_user_name_unique)",
     )
 
-    assert [(row[1], row[2]) for row in indexes] == [
-        ("rodex_sessions_users_uid_gid_user_name_unique", 1)
-    ]
+    assert [(row[1], row[2]) for row in indexes] == [("rodex_sessions_users_uid_gid_user_name_unique", 1)]
     assert [row[2] for row in columns] == ["uid", "gid", "user_name"]
 
 
@@ -89,9 +86,7 @@ def test_repeated_user_lookup_returns_existing_id_without_a_gap(tmp_path: Path) 
     ("uid", "gid", "user_name"),
     [(1009, 1010, "DNA"), (1009, 1011, "dna"), (1010, 1010, "dna")],
 )
-def test_each_natural_key_field_participates_in_uniqueness(
-    tmp_path: Path, uid: int, gid: int, user_name: str
-) -> None:
+def test_each_natural_key_field_participates_in_uniqueness(tmp_path: Path, uid: int, gid: int, user_name: str) -> None:
     database = tmp_path / "rodex.sqlite3"
     lookup_or_create_rodex_sessions_user(1009, 1010, "dna", database)
 
@@ -123,12 +118,8 @@ def test_new_session_log_references_the_normalized_user_lookup(tmp_path: Path) -
     database = tmp_path / "rodex.sqlite3"
     identity = RodexSessionsUserIdentity(1009, 1010, "dna")
 
-    first = create_a_rodex_session(
-        database, codex_session_id=CODEX_SESSION_ID_1, user_identity=identity
-    )
-    second = create_a_rodex_session(
-        database, codex_session_id=CODEX_SESSION_ID_2, user_identity=identity
-    )
+    first = create_a_rodex_session(database, codex_session_id=CODEX_SESSION_ID_1, user_identity=identity)
+    second = create_a_rodex_session(database, codex_session_id=CODEX_SESSION_ID_2, user_identity=identity)
 
     first_log = lookup_rodex_session_log(first.rodex_sessions_id, database)
     second_log = lookup_rodex_session_log(second.rodex_sessions_id, database)
@@ -154,9 +145,7 @@ def test_user_can_be_looked_up_by_internal_id(tmp_path: Path) -> None:
         RodexSessionsUserIdentity(1, 1, ""),
     ],
 )
-def test_invalid_posix_user_identity_is_rejected(
-    tmp_path: Path, identity: RodexSessionsUserIdentity
-) -> None:
+def test_invalid_posix_user_identity_is_rejected(tmp_path: Path, identity: RodexSessionsUserIdentity) -> None:
     with pytest.raises(ValueError):
         create_a_rodex_session(
             tmp_path / "rodex.sqlite3",

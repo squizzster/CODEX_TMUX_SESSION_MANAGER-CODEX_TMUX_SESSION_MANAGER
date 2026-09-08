@@ -274,9 +274,7 @@ class UnifiedRodexApplicationPipeline:
         if invocation.preparation is PipelinePreparation.SELECTOR:
             assert invocation.route is CommandRoute.SELECTOR
             selector = invocation.arguments[0]
-            selection = self._session_lifecycle.resolve_selector(
-                selector, self._database_path
-            )
+            selection = self._session_lifecycle.resolve_selector(selector, self._database_path)
             return PreparedRodexInvocation(
                 invocation,
                 self._acquire_runtime(),
@@ -296,9 +294,7 @@ class UnifiedRodexApplicationPipeline:
                 "runtime_unavailable",
                 str(error),
                 retryable=True,
-                session_name=(
-                    invocation.arguments[1] if len(invocation.arguments) > 1 else None
-                ),
+                session_name=(invocation.arguments[1] if len(invocation.arguments) > 1 else None),
                 control=None,
             )
             return 3
@@ -313,9 +309,7 @@ class UnifiedRodexApplicationPipeline:
     def _execute_codex(self, arguments: list[str]) -> int:
         codex_binary = self._resolve_executable(self._configured_codex)
         if codex_binary is None:
-            raise RodexExecutableNotFoundError(
-                f"Codex executable was not found: {self._configured_codex}"
-            )
+            raise RodexExecutableNotFoundError(f"Codex executable was not found: {self._configured_codex}")
         return self._codex_delegator(codex_binary, arguments)
 
     def _execute_managed_codex(
@@ -337,9 +331,7 @@ class UnifiedRodexApplicationPipeline:
     def _acquire_runtime(self) -> RuntimeServices:
         tmux_binary = self._resolve_executable(self._configured_tmux)
         if tmux_binary is None:
-            raise RodexExecutableNotFoundError(
-                f"tmux executable was not found: {self._configured_tmux}"
-            )
+            raise RodexExecutableNotFoundError(f"tmux executable was not found: {self._configured_tmux}")
         codex_binary = self._resolve_executable(self._configured_codex)
         launcher = self._provided_launcher or self._runtime_launcher_factory(
             codex_binary or self._configured_codex,

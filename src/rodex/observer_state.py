@@ -250,19 +250,11 @@ class ObserverStateReducer:
             self._tombstones.clear()
             self._removed_targets.clear()
         prior_active = dict(self._active)
-        upserted = tuple(
-            event
-            for key, event in incoming_active.items()
-            if prior_active.get(key) != event
-        )
+        upserted = tuple(event for key, event in incoming_active.items() if prior_active.get(key) != event)
         tombstone_events = tuple(
-            event
-            for key, event in incoming_tombstones.items()
-            if self._tombstones.get(key) != event
+            event for key, event in incoming_tombstones.items() if self._tombstones.get(key) != event
         )
-        newly_removed_targets = frozenset(
-            target for target in removed_targets if target not in self._removed_targets
-        )
+        newly_removed_targets = frozenset(target for target in removed_targets if target not in self._removed_targets)
         self._epoch = epoch
         self._revision = revision
         self._dropped_event_count = dropped_event_count
@@ -301,10 +293,7 @@ class ObserverStateReducer:
         self._revision += 1
 
     def _enforce_bounds(self) -> None:
-        while (
-            len(self._active) + len(self._tombstones) + len(self._removed_targets)
-            > OBSERVER_SNAPSHOT_EVENT_LIMIT
-        ):
+        while len(self._active) + len(self._tombstones) + len(self._removed_targets) > OBSERVER_SNAPSHOT_EVENT_LIMIT:
             if self._tombstones:
                 self._tombstones.pop(next(iter(self._tombstones)))
             elif self._removed_targets:
@@ -409,9 +398,7 @@ def _parse_snapshot(
     ]
     | None
 ):
-    if snapshot.get("schema") != OBSERVER_SCHEMA or snapshot.get("kind") != (
-        "observer_state_snapshot"
-    ):
+    if snapshot.get("schema") != OBSERVER_SCHEMA or snapshot.get("kind") != ("observer_state_snapshot"):
         return None
     epoch = snapshot.get("epoch")
     revision = snapshot.get("revision")
@@ -445,9 +432,7 @@ def _parse_snapshot(
         return None
     if len(active) + len(tombstones) + len(removed) > OBSERVER_SNAPSHOT_EVENT_LIMIT:
         return None
-    removed_targets = tuple(
-        target for target in removed if isinstance(target, str) and target
-    )
+    removed_targets = tuple(target for target in removed if isinstance(target, str) and target)
     return (
         epoch,
         revision,
@@ -471,8 +456,4 @@ def _event_mapping(value: object) -> dict[ObserverStateKey, dict[str, object]] |
 
 
 def _snapshot_size(snapshot: Mapping[str, object]) -> int:
-    return len(
-        json.dumps(
-            snapshot, ensure_ascii=False, separators=(",", ":"), sort_keys=True
-        ).encode("utf-8")
-    )
+    return len(json.dumps(snapshot, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8"))

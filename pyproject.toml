@@ -47,6 +47,7 @@ show_missing = true
 [tool.ruff]
 line-length = 122
 target-version = "py312"
+extend-exclude = [".tmp_*"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]

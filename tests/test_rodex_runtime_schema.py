@@ -105,10 +105,7 @@ def test_codex_identity_is_canonical_and_current_root_is_a_relationship(
         database,
         "PRAGMA table_info(rodex_sessions_current_codex_threads)",
     )
-    membership_columns = [
-        row[1]
-        for row in fetch_all(database, "PRAGMA table_info(rodex_sessions_codex_threads)")
-    ]
+    membership_columns = [row[1] for row in fetch_all(database, "PRAGMA table_info(rodex_sessions_codex_threads)")]
     assert membership_columns == [
         "id",
         "rodex_sessions_id",
@@ -128,14 +125,11 @@ def test_current_root_and_subagent_roles_are_exclusive_for_insert_and_update(
     with open_rodex_transaction(database) as connection:
         root_membership_id = int(
             connection.execute(
-                "SELECT rodex_sessions_codex_threads_id "
-                "FROM rodex_sessions_current_codex_threads"
+                "SELECT rodex_sessions_codex_threads_id FROM rodex_sessions_current_codex_threads"
             ).fetchone()[0]
         )
         child_membership_id = _insert_codex_thread_membership(connection, child_thread_id)
-        sibling_membership_id = _insert_codex_thread_membership(
-            connection, sibling_thread_id
-        )
+        sibling_membership_id = _insert_codex_thread_membership(connection, sibling_thread_id)
         spawning_turn_id = _insert_codex_turn(
             connection,
             root_membership_id,
@@ -160,8 +154,7 @@ def test_current_root_and_subagent_roles_are_exclusive_for_insert_and_update(
         )
         with pytest.raises(sqlite3.IntegrityError, match="current Codex thread"):
             connection.execute(
-                "UPDATE rodex_sessions_current_codex_threads "
-                "SET rodex_sessions_codex_threads_id = ?",
+                "UPDATE rodex_sessions_current_codex_threads SET rodex_sessions_codex_threads_id = ?",
                 (child_membership_id,),
             )
 
@@ -190,13 +183,11 @@ def test_current_root_and_subagent_roles_are_exclusive_for_insert_and_update(
             )
 
         assert connection.execute(
-            "SELECT rodex_sessions_codex_threads_id "
-            "FROM rodex_sessions_current_codex_threads"
+            "SELECT rodex_sessions_codex_threads_id FROM rodex_sessions_current_codex_threads"
         ).fetchone() == (root_membership_id,)
         assert set(
             connection.execute(
-                "SELECT subagent_rodex_sessions_codex_threads_id "
-                "FROM rodex_sessions_subagent_spawns"
+                "SELECT subagent_rodex_sessions_codex_threads_id FROM rodex_sessions_subagent_spawns"
             ).fetchall()
         ) == {(child_membership_id,), (sibling_membership_id,)}
 
@@ -223,9 +214,7 @@ def test_exact_foreign_key_verifier_preserves_composite_grouping() -> None:
     from rodex_registry import schema as schema_module
 
     with sqlite3.connect(":memory:") as connection:
-        connection.execute(
-            "CREATE TABLE parent (a INTEGER, b INTEGER, c INTEGER, UNIQUE (a, c))"
-        )
+        connection.execute("CREATE TABLE parent (a INTEGER, b INTEGER, c INTEGER, UNIQUE (a, c))")
         connection.execute(
             "CREATE TABLE malformed (x INTEGER, y INTEGER, z INTEGER, "
             "FOREIGN KEY (x, z) REFERENCES parent (a, c), "
@@ -253,8 +242,7 @@ def test_resume_cannot_promote_a_subagent_and_rolls_back_runtime_changes(
     with open_rodex_transaction(database) as connection:
         root_membership_id = int(
             connection.execute(
-                "SELECT rodex_sessions_codex_threads_id "
-                "FROM rodex_sessions_current_codex_threads"
+                "SELECT rodex_sessions_codex_threads_id FROM rodex_sessions_current_codex_threads"
             ).fetchone()[0]
         )
         child_membership_id = _insert_codex_thread_membership(connection, child_thread_id)
@@ -285,12 +273,7 @@ def test_resume_cannot_promote_a_subagent_and_rolls_back_runtime_changes(
     tmux_link = lookup_rodex_tmux_session(session.rodex_sessions_id, database)
     assert tmux_link is not None
     assert tmux_link.tmux_server_socket_path == "/tmp/rodex/old.sock"
-    assert (
-        lookup_codex_session_id_from_a_rodex_sessions_id(
-            session.rodex_sessions_id, database
-        )
-        == CODEX_SESSION_ID
-    )
+    assert lookup_codex_session_id_from_a_rodex_sessions_id(session.rodex_sessions_id, database) == CODEX_SESSION_ID
 
 
 def test_tmux_sessions_table_has_its_own_id_and_two_unique_keys(tmp_path: Path) -> None:
@@ -357,9 +340,7 @@ def test_noncurrent_runtime_uuid_shape_is_rejected_without_repair(tmp_path: Path
     with pytest.raises(RodexSessionError, match="definition mismatch"):
         audit_rodex_database_integrity(database)
 
-    assert [
-        row[1] for row in fetch_all(database, "PRAGMA table_info(rodex_runtime_instances)")
-    ] == [
+    assert [row[1] for row in fetch_all(database, "PRAGMA table_info(rodex_runtime_instances)")] == [
         "id",
         "rodex_sessions_id",
         "runtime_identifier_signed_bigint_1",
@@ -419,8 +400,7 @@ def test_runtime_id_bigints_reject_non_integer_storage(
         pytest.raises(sqlite3.IntegrityError, match="CHECK constraint failed"),
     ):
         connection.execute(
-            "UPDATE rodex_runtime_instances SET runtime_id_signed_bigint = 1.5 "
-            "WHERE rodex_sessions_id = ?",
+            "UPDATE rodex_runtime_instances SET runtime_id_signed_bigint = 1.5 WHERE rodex_sessions_id = ?",
             (session.rodex_sessions_id,),
         )
 
@@ -439,9 +419,7 @@ def test_runtime_id_reader_does_not_coerce_corrupt_storage(
     with sqlite3.connect(database) as connection:
         connection.execute("PRAGMA ignore_check_constraints = ON")
         connection.execute(
-            "UPDATE rodex_runtime_instances "
-            "SET runtime_id_signed_bigint = 1.5 "
-            "WHERE rodex_sessions_id = ?",
+            "UPDATE rodex_runtime_instances SET runtime_id_signed_bigint = 1.5 WHERE rodex_sessions_id = ?",
             (session.rodex_sessions_id,),
         )
 
@@ -472,9 +450,7 @@ def test_pending_runtime_id_candidate_succeeds_on_the_tenth_indexed_selection(
     assert candidate == RodexRuntimeId(200)
 
 
-def test_pending_runtime_id_candidate_exhaustion_is_fatal(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_pending_runtime_id_candidate_exhaustion_is_fatal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     database = tmp_path / "rodex.sqlite3"
     create_a_rodex_session(
         database,
@@ -508,16 +484,8 @@ def test_one_transaction_matches_rodex_codex_and_tmux_without_mixing_ids(
     assert session.rodex_session_id != CODEX_SESSION_ID
     tmux_link = lookup_rodex_tmux_session(session.rodex_sessions_id, database)
     assert session.codex_session_id == CODEX_SESSION_ID
-    assert (
-        lookup_codex_session_id_from_a_rodex_sessions_id(
-            session.rodex_sessions_id, database
-        )
-        == CODEX_SESSION_ID
-    )
-    assert (
-        lookup_rodex_sessions_id_from_a_codex_session_id(CODEX_SESSION_ID, database)
-        == session.rodex_sessions_id
-    )
+    assert lookup_codex_session_id_from_a_rodex_sessions_id(session.rodex_sessions_id, database) == CODEX_SESSION_ID
+    assert lookup_rodex_sessions_id_from_a_codex_session_id(CODEX_SESSION_ID, database) == session.rodex_sessions_id
     assert tmux_link is not None
     assert tmux_link.rodex_sessions_id == session.rodex_sessions_id
     assert tmux_link.tmux_session_name == "rodex-example"
@@ -538,15 +506,11 @@ def test_codex_identity_lookup_enforces_the_complete_posix_owner(
     )
 
     assert (
-        lookup_owned_rodex_sessions_id_from_a_codex_session_id(
-            CODEX_SESSION_ID, database, user_identity=owner
-        )
+        lookup_owned_rodex_sessions_id_from_a_codex_session_id(CODEX_SESSION_ID, database, user_identity=owner)
         == session.rodex_sessions_id
     )
     with pytest.raises(RodexSessionError, match="not owned"):
-        lookup_owned_rodex_sessions_id_from_a_codex_session_id(
-            CODEX_SESSION_ID, database, user_identity=other_user
-        )
+        lookup_owned_rodex_sessions_id_from_a_codex_session_id(CODEX_SESSION_ID, database, user_identity=other_user)
     assert (
         lookup_owned_rodex_sessions_id_from_a_codex_session_id(
             REPLACEMENT_CODEX_SESSION_ID, database, user_identity=owner
@@ -568,10 +532,7 @@ def test_codex_session_id_unique_index_rejects_a_second_rodex_owner(tmp_path: Pa
     database = tmp_path / "rodex.sqlite3"
     session = create_a_rodex_session(database, codex_session_id=CODEX_SESSION_ID)
 
-    expected = (
-        f"Codex session already belongs to Rodex {session.cool_name}.\n"
-        f"Resume with: rodex {session.cool_name}"
-    )
+    expected = f"Codex session already belongs to Rodex {session.cool_name}.\nResume with: rodex {session.cool_name}"
     with pytest.raises(RodexSessionError) as raised:
         create_a_rodex_session(database, codex_session_id=CODEX_SESSION_ID)
 
@@ -656,18 +617,12 @@ def test_runtime_recovery_atomically_relinks_the_codex_session_id_and_endpoint(
 
     assert updated.tmux_server_socket_path == "/tmp/rodex/new.sock"
     assert (
-        lookup_codex_session_id_from_a_rodex_sessions_id(
-            session.rodex_sessions_id, database
-        )
+        lookup_codex_session_id_from_a_rodex_sessions_id(session.rodex_sessions_id, database)
         == REPLACEMENT_CODEX_SESSION_ID
     )
+    assert lookup_rodex_sessions_id_from_a_codex_session_id(CODEX_SESSION_ID, database) is None
     assert (
-        lookup_rodex_sessions_id_from_a_codex_session_id(CODEX_SESSION_ID, database) is None
-    )
-    assert (
-        lookup_rodex_sessions_id_from_a_codex_session_id(
-            REPLACEMENT_CODEX_SESSION_ID, database
-        )
+        lookup_rodex_sessions_id_from_a_codex_session_id(REPLACEMENT_CODEX_SESSION_ID, database)
         == session.rodex_sessions_id
     )
 
@@ -699,12 +654,7 @@ def test_runtime_resume_rolls_back_endpoint_when_access_log_update_fails(
             runtime_id=RodexRuntimeId.generate(),
         )
 
-    assert (
-        lookup_codex_session_id_from_a_rodex_sessions_id(
-            session.rodex_sessions_id, database
-        )
-        == CODEX_SESSION_ID
-    )
+    assert lookup_codex_session_id_from_a_rodex_sessions_id(session.rodex_sessions_id, database) == CODEX_SESSION_ID
     tmux_link = lookup_rodex_tmux_session(session.rodex_sessions_id, database)
     assert tmux_link is not None
     assert tmux_link.tmux_server_socket_path == "/tmp/rodex/old.sock"

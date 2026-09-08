@@ -50,9 +50,7 @@ def user_process_environment(
     """Return caller state without a virtualenv used only to bootstrap Rodex."""
     environment = dict(inherited)
     active_virtual_environment = environment.get("VIRTUAL_ENV")
-    internal_virtual_environment = (
-        Path(sys.prefix) if rodex_virtual_environment is None else rodex_virtual_environment
-    )
+    internal_virtual_environment = Path(sys.prefix) if rodex_virtual_environment is None else rodex_virtual_environment
     if not active_virtual_environment or not _same_path(
         active_virtual_environment,
         internal_virtual_environment,

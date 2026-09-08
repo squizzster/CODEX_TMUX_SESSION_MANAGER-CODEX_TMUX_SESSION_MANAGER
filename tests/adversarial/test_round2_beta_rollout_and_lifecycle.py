@@ -165,8 +165,7 @@ def test_round2_rollout_follower_recovers_when_the_file_is_truncated(
 
     assert any("Context: 10% |" in status for status in observed)
     assert any("Context: 80% |" in status for status in observed), (
-        "a follower whose offset is past the new file size must reopen from a "
-        "bounded authenticated baseline"
+        "a follower whose offset is past the new file size must reopen from a bounded authenticated baseline"
     )
 
 
@@ -195,11 +194,11 @@ def test_round2_rollout_follower_preserves_append_after_inode_replacement(
 
     observer._follow_rollout_context("thread-1", rollout, stop)  # type: ignore[arg-type]
 
-    assert [
-        percent
-        for percent in (10, 70, 90)
-        if any(f"Context: {percent}% |" in status for status in observed)
-    ] == [10, 70, 90]
+    assert [percent for percent in (10, 70, 90) if any(f"Context: {percent}% |" in status for status in observed)] == [
+        10,
+        70,
+        90,
+    ]
 
 
 def test_round2_rollout_follower_completes_a_startup_partial_record(
@@ -310,8 +309,7 @@ def test_round2_rollout_checkpoint_advancement_rejects_a_pre_refresh_rewrite(
         )
 
     assert advanced is None, (
-        "checkpoint refresh must validate the preceding trusted boundary before "
-        "replacing its fingerprint"
+        "checkpoint refresh must validate the preceding trusted boundary before replacing its fingerprint"
     )
 
 
@@ -482,8 +480,7 @@ def test_round2_access_timestamp_never_regresses_when_commits_arrive_out_of_orde
     stored = lookup_rodex_session_log(session.rodex_sessions_id, database)
     assert stored is not None
     assert stored.last_accessed_at_utc == "2030-01-01T12:00:00.000000Z", (
-        "an older access computed by a delayed writer must not overwrite a newer "
-        "committed timestamp"
+        "an older access computed by a delayed writer must not overwrite a newer committed timestamp"
     )
 
 

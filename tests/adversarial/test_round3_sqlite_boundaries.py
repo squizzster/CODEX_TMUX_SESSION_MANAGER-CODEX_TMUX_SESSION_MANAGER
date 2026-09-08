@@ -128,9 +128,7 @@ def test_round3_successful_reads_do_not_leak_database_descriptors(
 
     for _ in range(20):
         with open_rodex_read_transaction(database) as connection:
-            assert connection.execute("SELECT value FROM marker").fetchone() == (
-                "validated",
-            )
+            assert connection.execute("SELECT value FROM marker").fetchone() == ("validated",)
 
     assert _open_targets_below(tmp_path) == retained_wal_owner_targets
     transactions_module._close_process_wal_lifetime_owner()
@@ -215,9 +213,7 @@ def test_round3_readers_are_not_head_of_line_blocked_by_a_writer(tmp_path: Path)
     assert writer_entered.wait(2)
     try:
         with open_rodex_read_transaction(database) as connection:
-            assert connection.execute("SELECT value FROM marker").fetchall() == [
-                ("validated",)
-            ]
+            assert connection.execute("SELECT value FROM marker").fetchall() == [("validated",)]
     finally:
         release_writer.set()
         writer.join(2)
@@ -383,10 +379,8 @@ def test_round3_sqlite_crash_boundary_is_explicit_for_the_configured_mode(
     )
     assert "synchronous" in documented_boundary and "normal" in documented_boundary
     assert any(
-        phrase in documented_boundary
-        for phrase in ("power loss", "power failure", "operating-system crash", "os crash")
+        phrase in documented_boundary for phrase in ("power loss", "power failure", "operating-system crash", "os crash")
     )
     assert any(
-        phrase in documented_boundary
-        for phrase in ("may lose", "can lose", "not guaranteed", "durability boundary")
+        phrase in documented_boundary for phrase in ("may lose", "can lose", "not guaranteed", "durability boundary")
     )

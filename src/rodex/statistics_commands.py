@@ -41,8 +41,7 @@ def execute_statistics_command(arguments: list[str], database_path: Path) -> Non
     else:
         if len(arguments) < 2:
             raise RodexLaunchError(
-                "usage: rodex _stats SESSION_NAME "
-                "[--turn TURN_ID] [--thread CODEX_THREAD_ID] [--json]"
+                "usage: rodex _stats SESSION_NAME [--turn TURN_ID] [--thread CODEX_THREAD_ID] [--json]"
             )
         session_name = arguments[1]
         as_json = False
@@ -58,32 +57,21 @@ def execute_statistics_command(arguments: list[str], database_path: Path) -> Non
                 try:
                     turn_id = parse_codex_turn_id(arguments[index + 1])
                 except ValueError as error:
-                    raise RodexLaunchError(
-                        "--turn requires a valid Codex turn ID"
-                    ) from error
+                    raise RodexLaunchError("--turn requires a valid Codex turn ID") from error
                 index += 2
-            elif (
-                option == "--thread"
-                and source_codex_thread_id is None
-                and index + 1 < len(arguments)
-            ):
+            elif option == "--thread" and source_codex_thread_id is None and index + 1 < len(arguments):
                 try:
                     source_codex_thread_id = parse_codex_thread_id(arguments[index + 1])
                 except ValueError as error:
-                    raise RodexLaunchError(
-                        "--thread requires a valid Codex thread ID"
-                    ) from error
+                    raise RodexLaunchError("--thread requires a valid Codex thread ID") from error
                 index += 2
             else:
                 raise RodexLaunchError(
-                    "usage: rodex _stats SESSION_NAME "
-                    "[--turn TURN_ID] [--thread CODEX_THREAD_ID] [--json]"
+                    "usage: rodex _stats SESSION_NAME [--turn TURN_ID] [--thread CODEX_THREAD_ID] [--json]"
                 )
         if source_codex_thread_id is not None and turn_id is None:
             raise RodexLaunchError("--thread requires --turn")
-    session_id = lookup_owned_rodex_sessions_id_from_a_cool_name(
-        session_name, database_path
-    )
+    session_id = lookup_owned_rodex_sessions_id_from_a_cool_name(session_name, database_path)
     if session_id is None:
         raise RodexLaunchError(f"unknown Rodex session: {session_name}")
     try:
@@ -103,9 +91,7 @@ def execute_statistics_command(arguments: list[str], database_path: Path) -> Non
     worker = view.worker
     payload = {
         "rodex_session_name": session_name,
-        "statistics_publication_sequence": (
-            None if snapshot is None else snapshot.statistics_publication_sequence
-        ),
+        "statistics_publication_sequence": (None if snapshot is None else snapshot.statistics_publication_sequence),
         "statistics_projection_schema_version": (
             None if snapshot is None else snapshot.statistics_projection_schema_version
         ),
@@ -117,43 +103,29 @@ def execute_statistics_command(arguments: list[str], database_path: Path) -> Non
         "consecutive_failures": (0 if worker is None else worker.consecutive_failures),
         "next_retry_at_utc": None if worker is None else worker.next_retry_at_utc,
         "registered_thread_count": len(view.sources),
-        "analyzed_thread_count": sum(
-            source.verified_at_utc is not None for source in view.sources
-        ),
+        "analyzed_thread_count": sum(source.verified_at_utc is not None for source in view.sources),
     }
     if command == STATS_STATUS_COMMAND:
         print(json.dumps(payload, indent=2, sort_keys=True), flush=True)
         return
     if snapshot is None:
-        raise RodexLaunchError(
-            f"Rodex session has no analytics snapshot yet: {session_name}"
-        )
+        raise RodexLaunchError(f"Rodex session has no analytics snapshot yet: {session_name}")
     if turn_id is None:
         payload["statistics"] = session_statistics_as_dict(snapshot.projection)
         try:
             summaries = read_rodex_session_codex_thread_summaries(
                 session_id,
                 database_path,
-                expected_statistics_publication_sequence=(
-                    snapshot.statistics_publication_sequence
-                ),
+                expected_statistics_publication_sequence=(snapshot.statistics_publication_sequence),
             )
         except RodexSessionStatisticsConflictError as error:
-            raise RodexLaunchError(
-                "statistics changed during the read; retry the command"
-            ) from error
-        thread_ids_by_row_id = {
-            item.source.id: str(item.source.codex_thread_id) for item in summaries
-        }
-        payload["threads"] = [
-            _source_summary_as_dict(item, thread_ids_by_row_id) for item in summaries
-        ]
+            raise RodexLaunchError("statistics changed during the read; retry the command") from error
+        thread_ids_by_row_id = {item.source.id: str(item.source.codex_thread_id) for item in summaries}
+        payload["threads"] = [_source_summary_as_dict(item, thread_ids_by_row_id) for item in summaries]
     else:
         turn = view.turn
         if turn is None:
-            raise RodexLaunchError(
-                f"turn is not present in the latest statistics snapshot: {turn_id}"
-            )
+            raise RodexLaunchError(f"turn is not present in the latest statistics snapshot: {turn_id}")
         payload["turn"] = {
             "codex_thread_id": str(turn.codex_thread_id),
             "turn_id": str(turn.turn_public_id),
@@ -177,15 +149,11 @@ def _source_summary_as_dict(
     source = summary.source
     count_maps: dict[str, dict[str, int]] = {}
     for count in summary.named_counts:
-        count_maps.setdefault(count.count_kind, {})[count.count_name] = (
-            count.occurrence_count
-        )
+        count_maps.setdefault(count.count_kind, {})[count.count_name] = count.occurrence_count
     return {
         "codex_thread_id": str(source.codex_thread_id),
         "source_kind": source.source_kind,
-        "parent_codex_thread_id": thread_ids_by_row_id.get(
-            source.parent_rodex_sessions_codex_threads_id
-        ),
+        "parent_codex_thread_id": thread_ids_by_row_id.get(source.parent_rodex_sessions_codex_threads_id),
         "thread_depth": source.thread_depth,
         "agent_path": source.agent_path,
         "agent_nickname": source.agent_nickname,
@@ -234,10 +202,7 @@ def _print_human_statistics(payload: dict[str, object]) -> None:
     subject: str | None = None
     if isinstance(turn, dict):
         subject = f"turn {turn.get('turn_id')}"
-    detail = (
-        f"publication sequence {payload['statistics_publication_sequence']}; "
-        f"{payload['worker_state']}"
-    )
+    detail = f"publication sequence {payload['statistics_publication_sequence']}; {payload['worker_state']}"
     if subject is not None:
         detail = f"{subject}; {detail}"
     print(

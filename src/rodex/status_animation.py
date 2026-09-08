@@ -130,9 +130,7 @@ def status_frames(event: StatusEvent, attached_count: int) -> tuple[StatusFrame,
     if event == "detached" and attached_count == 1:
         return tuple(
             StatusFrame(background, text)
-            for background, text in zip(
-                _DEPARTURE_BACKGROUNDS, _DEPARTURE_TEXT, strict=True
-            )
+            for background, text in zip(_DEPARTURE_BACKGROUNDS, _DEPARTURE_TEXT, strict=True)
         )
     return ()
 
@@ -182,9 +180,7 @@ async def _animate_status_once(
     async def tmux(*arguments: str) -> AsyncCommandResult:
         return await executor.run(arguments)
 
-    count_result = await tmux(
-        *registered_primary_pane_read_arguments(capability, _ATTACHED_COUNT_FORMAT)
-    )
+    count_result = await tmux(*registered_primary_pane_read_arguments(capability, _ATTACHED_COUNT_FORMAT))
     try:
         attached_count = int(count_result.stdout.strip())
     except (TypeError, ValueError):
@@ -224,9 +220,7 @@ async def _animate_status_once(
             presentation=_frame_presentation(frames[0]),
         ),
     )
-    if claim_result.returncode != 0 or not await _animation_token_matches(
-        tmux, capability, token
-    ):
+    if claim_result.returncode != 0 or not await _animation_token_matches(tmux, capability, token):
         return
 
     loop = asyncio.get_running_loop()
@@ -306,8 +300,6 @@ async def _restore_normal_status(
 
 def _frame_presentation(frame: StatusFrame) -> TmuxStatusPresentation:
     return TmuxStatusPresentation(
-        status_style=(
-            f"bg={frame.background},fg={RODEX_STATUS_COLOURS.animation_foreground},bold"
-        ),
+        status_style=(f"bg={frame.background},fg={RODEX_STATUS_COLOURS.animation_foreground},bold"),
         status_format=f"#[align=centre]{frame.text}",
     )

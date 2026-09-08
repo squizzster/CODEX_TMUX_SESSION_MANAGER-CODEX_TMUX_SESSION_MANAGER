@@ -19,7 +19,4 @@ class RodexDatabaseMovedError(RodexSQLError):
     code = "database_moved"
 
     def __init__(self, database_path: object, reason: str) -> None:
-        super().__init__(
-            f"database_moved: database storage changed at {database_path}: {reason}; "
-            "please restart Rodex"
-        )
+        super().__init__(f"database_moved: database storage changed at {database_path}: {reason}; please restart Rodex")

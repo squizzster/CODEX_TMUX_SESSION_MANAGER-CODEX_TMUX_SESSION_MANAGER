@@ -98,9 +98,7 @@ def test_every_declared_route_has_one_preparation_and_every_command_uses_it() ->
         assert invocation.route is spec.route
         assert invocation.preparation is ROUTE_PREPARATIONS[spec.route]
 
-    exact_wait = select_rodex_invocation(
-        [WAIT_COMMAND, "worker", "--turn", "turn-1", "--json"]
-    )
+    exact_wait = select_rodex_invocation([WAIT_COMMAND, "worker", "--turn", "turn-1", "--json"])
     assert exact_wait.route is CommandRoute.MACHINE
     assert exact_wait.preparation is PipelinePreparation.RUNTIME
 
@@ -113,9 +111,7 @@ def _pipeline(
     selector_outcome: SelectorExecution = SelectorExecution.OPENED,
     available: dict[str, str | None] | None = None,
 ) -> UnifiedRodexApplicationPipeline:
-    executables = (
-        {"codex": "/bin/codex", "tmux": "/bin/tmux"} if available is None else available
-    )
+    executables = {"codex": "/bin/codex", "tmux": "/bin/tmux"} if available is None else available
 
     def resolve_executable(name: str) -> str | None:
         trace.append(("resolve_executable", name))
@@ -126,9 +122,7 @@ def _pipeline(
         return 17
 
     class FakeSessionLifecycle:
-        def resolve_selector(
-            self, selector: str, database_path: Path
-        ) -> SessionSelection | None:
+        def resolve_selector(self, selector: str, database_path: Path) -> SessionSelection | None:
             trace.append(("selector_resolver", selector, database_path))
             return selected_session
 
@@ -215,9 +209,7 @@ def test_statistics_route_uses_database_context_without_acquiring_runtime(
     monkeypatch.setattr(
         pipeline_module,
         "execute_statistics_command",
-        lambda arguments, database: trace.append(
-            ("statistics", tuple(arguments), database)
-        ),
+        lambda arguments, database: trace.append(("statistics", tuple(arguments), database)),
     )
 
     assert _pipeline(tmp_path, trace).execute(["_stats", "worker"]) == 0
@@ -330,9 +322,7 @@ def test_unregistered_codex_uuid_can_become_a_managed_prompt_after_runtime_probe
     database = tmp_path / "rodex.sqlite3"
     trace: list[object] = []
     selector = "01a015f4-f27c-7592-8060-d12313e8d0ce"
-    selection = UnregisteredCodexSessionSelection(
-        selector, parse_codex_session_id(selector)
-    )
+    selection = UnregisteredCodexSessionSelection(selector, parse_codex_session_id(selector))
 
     assert (
         _pipeline(
@@ -377,9 +367,7 @@ def test_codex_passthrough_never_touches_database_or_tmux(tmp_path: Path) -> Non
     ]
 
 
-def test_missing_tmux_is_rendered_as_a_machine_outcome(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_missing_tmux_is_rendered_as_a_machine_outcome(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     trace: list[object] = []
 
     def print_error(*arguments: object, **fields: object) -> None:
@@ -417,9 +405,7 @@ def test_missing_codex_fails_passthrough_without_consulting_tmux(tmp_path: Path)
     ]
 
 
-def test_machine_execution_receives_the_single_classified_spec(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_machine_execution_receives_the_single_classified_spec(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     trace: list[object] = []
     classifications: list[ClassifiedRodexCommand | None] = []
     executed_specs: list[object] = []

@@ -54,13 +54,9 @@ def _resolve_existing_tool_call_by_call_id(
     if row is None:
         return None
     if str(row[1]) != source_call_id:
-        raise RodexSessionStatisticsConflictError(
-            "Codex collaboration call ID digest collision"
-        )
+        raise RodexSessionStatisticsConflictError("Codex collaboration call ID digest collision")
     if int(row[2]) != scope_id:
-        raise RodexSessionStatisticsConflictError(
-            "sub-agent activity call belongs to a different parent turn"
-        )
+        raise RodexSessionStatisticsConflictError("sub-agent activity call belongs to a different parent turn")
     return int(row[0])
 
 
@@ -154,9 +150,7 @@ def _insert_agent_request_from_activity(
         ).fetchone()
         if stored is not None:
             return False
-    raise RodexSessionStatisticsConflictError(
-        "could not allocate an agent request public ID"
-    )
+    raise RodexSessionStatisticsConflictError("could not allocate an agent request public ID")
 
 
 def _reconcile_agent_request_target_turns(
@@ -214,8 +208,5 @@ def _reconcile_agent_request_target_turns(
 
 def _sha256_signed_bigints(value: str) -> tuple[int, int, int, int]:
     digest = hashlib.sha256(value.encode("utf-8")).digest()
-    pieces = tuple(
-        int.from_bytes(digest[offset : offset + 8], "big", signed=True)
-        for offset in range(0, 32, 8)
-    )
+    pieces = tuple(int.from_bytes(digest[offset : offset + 8], "big", signed=True) for offset in range(0, 32, 8))
     return pieces[0], pieces[1], pieces[2], pieces[3]

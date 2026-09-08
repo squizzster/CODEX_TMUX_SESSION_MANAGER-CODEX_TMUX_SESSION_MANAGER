@@ -66,11 +66,7 @@ def test_real_app_server_accepts_string_ids_on_a_private_unix_socket() -> None:
 
             loaded_id = "rodex:integration:loaded"
             websocket.send(
-                json.dumps(
-                    CODEX_APP_SERVER.request(
-                        loaded_id, CODEX_APP_SERVER.thread_loaded_list_method, {}
-                    )
-                )
+                json.dumps(CODEX_APP_SERVER.request(loaded_id, CODEX_APP_SERVER.thread_loaded_list_method, {}))
             )
             loaded = _response_for(websocket, loaded_id)
             assert isinstance(loaded["result"]["data"], list)
@@ -110,9 +106,7 @@ def test_live_turn_survives_initiator_disconnect_and_streams_to_subscriber() -> 
     """Current contract: subscriber owns lifecycle and persisted correlation."""
     live_turn_environment = "RODEX_RUN_LIVE_TURN_INTEGRATION"
     if os.environ.get(live_turn_environment) != "1":
-        pytest.skip(
-            f"set {live_turn_environment}=1 to run the authenticated model-backed test"
-        )
+        pytest.skip(f"set {live_turn_environment}=1 to run the authenticated model-backed test")
     codex_binary = shutil.which("codex")
     if codex_binary is None:
         pytest.fail("opted-in live test requires Codex CLI")
@@ -188,9 +182,7 @@ def test_live_turn_survives_initiator_disconnect_and_streams_to_subscriber() -> 
                         "input": [
                             {
                                 "type": "text",
-                                "text": (
-                                    "Reply exactly RODEX_FIDELITY_OK. Do not use tools."
-                                ),
+                                "text": ("Reply exactly RODEX_FIDELITY_OK. Do not use tools."),
                             }
                         ],
                         "clientUserMessageId": "rodex:live:steer-fidelity",
@@ -222,15 +214,9 @@ def test_live_turn_survives_initiator_disconnect_and_streams_to_subscriber() -> 
                 {"threadId": thread_id, "includeTurns": True},
             )
             persisted_thread = read_response["result"]["thread"]
-            persisted_turn = next(
-                candidate
-                for candidate in persisted_thread["turns"]
-                if candidate.get("id") == turn_id
-            )
+            persisted_turn = next(candidate for candidate in persisted_thread["turns"] if candidate.get("id") == turn_id)
             persisted_dispatch_ids = {
-                item.get("clientId")
-                for item in persisted_turn["items"]
-                if item.get("type") == "userMessage"
+                item.get("clientId") for item in persisted_turn["items"] if item.get("type") == "userMessage"
             }
             assert persisted_dispatch_ids == {
                 "rodex:live:start-fidelity",
@@ -267,16 +253,11 @@ def test_live_user_input_routes_to_subscriber_after_initiator_disconnect() -> No
     """Current contract: subscribed primary owns request_user_input."""
     live_user_input_environment = "RODEX_RUN_LIVE_USER_INPUT_INTEGRATION"
     if os.environ.get(live_user_input_environment) != "1":
-        pytest.skip(
-            f"set {live_user_input_environment}=1 to run the authenticated "
-            "model-backed test"
-        )
+        pytest.skip(f"set {live_user_input_environment}=1 to run the authenticated model-backed test")
     codex_binary = shutil.which("codex")
     if codex_binary is None:
         pytest.fail("opted-in live test requires Codex CLI")
-    integration_root = Path(
-        tempfile.mkdtemp(prefix="input-it-", dir=default_runtime_root())
-    )
+    integration_root = Path(tempfile.mkdtemp(prefix="input-it-", dir=default_runtime_root()))
     integration_root.chmod(0o700)
     workspace = integration_root / "workspace"
     workspace.mkdir(mode=0o700)
@@ -299,9 +280,7 @@ def test_live_user_input_routes_to_subscriber_after_initiator_disconnect() -> No
             )
             models = model_response["result"].get("data", [])
             default_model = next(
-                model["model"]
-                for model in models
-                if isinstance(model, dict) and model.get("isDefault") is True
+                model["model"] for model in models if isinstance(model, dict) and model.get("isDefault") is True
             )
             with _connect(socket_path) as initiator:
                 _initialize(initiator, "user-input-initiator", experimental_api=True)
@@ -456,11 +435,7 @@ def _wait_for_exact_turn_started(
             raise TimeoutError(f"timed out waiting for exact turn {turn_id} to start")
         payload = json.loads(websocket.recv(timeout=remaining))
         params = payload.get("params")
-        if (
-            payload.get("method") != "turn/started"
-            or not isinstance(params, dict)
-            or params.get("threadId") != thread_id
-        ):
+        if payload.get("method") != "turn/started" or not isinstance(params, dict) or params.get("threadId") != thread_id:
             continue
         turn = params.get("turn")
         if isinstance(turn, dict) and turn.get("id") == turn_id:
@@ -514,11 +489,7 @@ def _exact_turn_lifecycle(
                 client_id = item.get("clientId")
                 if isinstance(client_id, str):
                     observed_dispatch_ids.append(client_id)
-            elif (
-                isinstance(item, dict)
-                and item.get("type") == "agentMessage"
-                and item.get("phase") == "final_answer"
-            ):
+            elif isinstance(item, dict) and item.get("type") == "agentMessage" and item.get("phase") == "final_answer":
                 text = item.get("text")
                 final_text = text if isinstance(text, str) else None
         elif method == "turn/completed":
@@ -608,11 +579,7 @@ def _answer_exact_user_input(
             request_resolved = True
         elif method == "item/completed" and params.get("turnId") == turn_id:
             item = params.get("item", {})
-            if (
-                isinstance(item, dict)
-                and item.get("type") == "agentMessage"
-                and item.get("phase") == "final_answer"
-            ):
+            if isinstance(item, dict) and item.get("type") == "agentMessage" and item.get("phase") == "final_answer":
                 text = item.get("text")
                 final_text = text if isinstance(text, str) else None
         elif method == "turn/completed":
@@ -660,9 +627,5 @@ def _response_for(
                 )
             )
             continue
-        if (
-            isinstance(payload, dict)
-            and payload.get("id") == request_id
-            and ("result" in payload or "error" in payload)
-        ):
+        if isinstance(payload, dict) and payload.get("id") == request_id and ("result" in payload or "error" in payload):
             return payload

@@ -40,9 +40,7 @@ def test_catalog_learns_non_v7_thread_date_from_ready_lifecycle_state(
     catalog.observe_protocol_event(
         {
             "method": "rodex/event-stream/ready",
-            "params": {
-                "knownThreads": [{"id": str(thread_id), "createdAt": 1_787_616_000}]
-            },
+            "params": {"knownThreads": [{"id": str(thread_id), "createdAt": 1_787_616_000}]},
         }
     )
 

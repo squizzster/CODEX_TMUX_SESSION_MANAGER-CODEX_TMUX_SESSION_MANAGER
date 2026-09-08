@@ -81,38 +81,26 @@ class AnalyticsSourceReader:
     def read(self, source: AnalyticsAppendSource) -> AnalyticsSourceRead:
         """Capture the source's current complete prefix with append-only work."""
         normalized = _normalise_source(source)
-        resolved = resolve_rollout_path(
-            normalized.path, allowed_root=normalized.allowed_root
-        )
+        resolved = resolve_rollout_path(normalized.path, allowed_root=normalized.allowed_root)
         descriptor = open_rollout_descriptor(resolved)
         try:
             before = os.fstat(descriptor)
             cursor = self._cursors.get(normalized.codex_thread_id)
-            start = (
-                0
-                if cursor is None or self._replay_required
-                else _append_start(cursor, normalized, resolved, before)
-            )
+            start = 0 if cursor is None or self._replay_required else _append_start(cursor, normalized, resolved, before)
             if cursor is not None and self._replay_required:
                 _append_start(cursor, normalized, resolved, before)
             added = _pread_exact(descriptor, start, before.st_size - start)
             after = os.fstat(descriptor)
             path_state = os.stat(resolved, follow_symlinks=False)
         except OSError as error:
-            raise AnalyticsSourceReadError(
-                f"could not read rollout append: {error}"
-            ) from error
+            raise AnalyticsSourceReadError(f"could not read rollout append: {error}") from error
         finally:
             os.close(descriptor)
         _require_stable_source(before, after, path_state)
         if cursor is None:
             _require_durable_prefix(normalized, added)
         if cursor is None or self._replay_required:
-            append_after_size = (
-                normalized.accepted_prefix_size_bytes
-                if cursor is None
-                else cursor.raw_complete_size
-            )
+            append_after_size = normalized.accepted_prefix_size_bytes if cursor is None else cursor.raw_complete_size
             (
                 next_cursor,
                 analyzer_content,
@@ -129,16 +117,12 @@ class AnalyticsSourceReader:
             if cursor is not None:
                 _require_accepted_prefix(cursor, added)
         else:
-            next_cursor, appended, appended_ordinals = _advance_cursor(
-                cursor, resolved, after, added
-            )
+            next_cursor, appended, appended_ordinals = _advance_cursor(cursor, resolved, after, added)
             analyzer_content = appended
             accepted_content = b""
         return AnalyticsSourceRead(
             analyzer_content=analyzer_content,
-            has_accepted_baseline=(
-                cursor is not None or normalized.accepted_prefix_size_bytes is not None
-            ),
+            has_accepted_baseline=(cursor is not None or normalized.accepted_prefix_size_bytes is not None),
             accepted_analyzer_content=accepted_content,
             appended_analyzer_content=appended,
             appended_source_line_ordinals=appended_ordinals,
@@ -163,9 +147,7 @@ class AnalyticsSourceReader:
                 os.close(descriptor)
             path_state = os.stat(captured.path, follow_symlinks=False)
         except OSError as error:
-            raise AnalyticsSourceReadError(
-                f"could not verify captured rollout prefix: {error}"
-            ) from error
+            raise AnalyticsSourceReadError(f"could not verify captured rollout prefix: {error}") from error
         if (current.st_dev, current.st_ino) != (
             captured.source_device,
             captured.source_inode,
@@ -173,9 +155,7 @@ class AnalyticsSourceReader:
             captured.source_device,
             captured.source_inode,
         ):
-            raise AnalyticsSourceReadError(
-                "rollout source identity changed during analysis"
-            )
+            raise AnalyticsSourceReadError("rollout source identity changed during analysis")
         if current.st_size < captured.source_size_bytes:
             raise AnalyticsSourceReadError("rollout source was truncated during analysis")
         if current.st_size == captured.source_size_bytes and (
@@ -198,9 +178,7 @@ def resolve_rollout_path(path: str | Path, *, allowed_root: Path | None = None) 
         try:
             resolved.relative_to(root)
         except ValueError as error:
-            raise AnalyticsSourceReadError(
-                f"rollout source escapes the configured sessions root: {candidate}"
-            ) from error
+            raise AnalyticsSourceReadError(f"rollout source escapes the configured sessions root: {candidate}") from error
     return resolved
 
 
@@ -213,9 +191,7 @@ def open_rollout_descriptor(path: Path) -> int:
         if not stat.S_ISREG(state.st_mode):
             raise AnalyticsSourceReadError(f"rollout source is not a regular file: {path}")
         if state.st_uid != os.getuid():
-            raise AnalyticsSourceReadError(
-                f"rollout source is not owned by uid {os.getuid()}: {path}"
-            )
+            raise AnalyticsSourceReadError(f"rollout source is not owned by uid {os.getuid()}: {path}")
         return descriptor
     except BaseException:
         os.close(descriptor)
@@ -257,9 +233,7 @@ def _require_durable_prefix(source: AnalyticsAppendSource, content: bytes) -> No
     ):
         raise AnalyticsSourceReadError("durable rollout checkpoint is invalid")
     if len(content) < size or hashlib.sha256(content[:size]).hexdigest() != digest:
-        raise AnalyticsSourceReadError(
-            "rollout accepted prefix changed since the durable checkpoint"
-        )
+        raise AnalyticsSourceReadError("rollout accepted prefix changed since the durable checkpoint")
 
 
 def _append_start(
@@ -272,8 +246,7 @@ def _append_start(
     if (
         cursor.source.codex_thread_id != source.codex_thread_id
         or cursor.source.source_kind != source.source_kind
-        or cursor.source.subagent_history_start_ordinal
-        != source.subagent_history_start_ordinal
+        or cursor.source.subagent_history_start_ordinal != source.subagent_history_start_ordinal
     ):
         raise AnalyticsSourceReadError("rollout cursor metadata changed")
     if prior.path != resolved or (prior.source_device, prior.source_inode) != (
@@ -305,26 +278,18 @@ def _new_cursor(
     raw_complete, tail = _split_complete_prefix(content)
     if not _content_declares_thread(raw_complete, source.codex_thread_id):
         raise AnalyticsSourceReadError("rollout has an unexpected Codex identity")
-    analyzer_content, _analyzer_ordinals = _filter_analyzer_lines(
-        source, raw_complete, line_offset=0
-    )
+    analyzer_content, _analyzer_ordinals = _filter_analyzer_lines(source, raw_complete, line_offset=0)
     accepted_size = 0 if append_after_size is None else append_after_size
     if accepted_size < 0 or accepted_size > len(raw_complete):
-        raise AnalyticsSourceReadError(
-            "durable rollout checkpoint is outside the complete-record prefix"
-        )
-    accepted_content, _accepted_ordinals = _filter_analyzer_lines(
-        source, raw_complete[:accepted_size], line_offset=0
-    )
+        raise AnalyticsSourceReadError("durable rollout checkpoint is outside the complete-record prefix")
+    accepted_content, _accepted_ordinals = _filter_analyzer_lines(source, raw_complete[:accepted_size], line_offset=0)
     appended_content, appended_ordinals = _filter_analyzer_lines(
         source,
         raw_complete[accepted_size:],
         line_offset=raw_complete[:accepted_size].count(b"\n"),
     )
     if source.source_kind == "subagent" and analyzer_content.count(b"\n") == 1:
-        raise AnalyticsSourceReadError(
-            "sub-agent rollout contains no child history records"
-        )
+        raise AnalyticsSourceReadError("sub-agent rollout contains no child history records")
     digest = hashlib.sha256(raw_complete)
     authenticated = _authentication(
         resolved,
@@ -377,9 +342,7 @@ def _advance_cursor(
             authenticated_source=authenticated,
             raw_complete_size=raw_complete_size,
             incomplete_tail=tail,
-            complete_line_count=(
-                cursor.complete_line_count + complete_addition.count(b"\n")
-            ),
+            complete_line_count=(cursor.complete_line_count + complete_addition.count(b"\n")),
             digest=digest,
         ),
         analyzer_addition,
@@ -419,9 +382,7 @@ def _require_accepted_prefix(cursor: _AppendCursor, current_content: bytes) -> N
 def _split_complete_prefix(content: bytes) -> tuple[bytes, bytes]:
     final_newline = content.rfind(b"\n")
     if final_newline < 0:
-        raise AnalyticsSourceReadError(
-            "rollout contains no complete newline-terminated record"
-        )
+        raise AnalyticsSourceReadError("rollout contains no complete newline-terminated record")
     return content[: final_newline + 1], content[final_newline + 1 :]
 
 

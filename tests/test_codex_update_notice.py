@@ -24,9 +24,7 @@ class VersionCommandRunner:
         self.latest = latest
         self.calls: list[tuple[list[str], dict[str, object]]] = []
 
-    def __call__(
-        self, command: list[str], **options: object
-    ) -> subprocess.CompletedProcess[str]:
+    def __call__(self, command: list[str], **options: object) -> subprocess.CompletedProcess[str]:
         self.calls.append((command, options))
         if command[-1] == "--version":
             return subprocess.CompletedProcess(command, 0, stdout=self.installed, stderr="")
@@ -43,9 +41,7 @@ def _run_contended_update_notice(
 ) -> None:
     def runner(command: list[str], **_options: object) -> subprocess.CompletedProcess[str]:
         if command[-1] == "--version":
-            return subprocess.CompletedProcess(
-                command, 0, stdout="codex-cli 0.151.0\n", stderr=""
-            )
+            return subprocess.CompletedProcess(command, 0, stdout="codex-cli 0.151.0\n", stderr="")
         descriptor = os.open(
             npm_counter_path,
             os.O_WRONLY | os.O_CREAT | os.O_APPEND,
@@ -58,9 +54,7 @@ def _run_contended_update_notice(
         time.sleep(0.3)
         return subprocess.CompletedProcess(command, 0, stdout="0.152.0\n", stderr="")
 
-    before_threads = sorted(
-        (thread.name, thread.daemon) for thread in threading.enumerate()
-    )
+    before_threads = sorted((thread.name, thread.daemon) for thread in threading.enumerate())
     wait = start_barrier.wait
     wait()
     started_at = time.monotonic()
@@ -85,9 +79,7 @@ def _run_contended_update_notice(
                 "message": message,
                 "duration": duration,
                 "threads_before": before_threads,
-                "threads_after": sorted(
-                    (thread.name, thread.daemon) for thread in threading.enumerate()
-                ),
+                "threads_after": sorted((thread.name, thread.daemon) for thread in threading.enumerate()),
                 "open_cache_targets": open_cache_targets,
             }
         ),
@@ -96,12 +88,10 @@ def _run_contended_update_notice(
 
 
 def test_stable_codex_versions_require_exact_three_part_releases() -> None:
-    assert StableCodexVersion.parse_exact("0.151.0\n") == StableCodexVersion(
-        (0, 151, 0), "0.151.0"
+    assert StableCodexVersion.parse_exact("0.151.0\n") == StableCodexVersion((0, 151, 0), "0.151.0")
+    assert StableCodexVersion.parse_codex_version_output("codex-cli 0.152.0\n") == StableCodexVersion(
+        (0, 152, 0), "0.152.0"
     )
-    assert StableCodexVersion.parse_codex_version_output(
-        "codex-cli 0.152.0\n"
-    ) == StableCodexVersion((0, 152, 0), "0.152.0")
     assert StableCodexVersion.parse_exact("v0.151.0") is None
     assert StableCodexVersion.parse_exact("0.151.0-beta.1") is None
     assert StableCodexVersion.parse_codex_version_output("Codex 0.151.0") is None
@@ -122,10 +112,7 @@ def test_fresh_npm_cache_reports_update_without_a_network_lookup(tmp_path: Path)
         now=lambda: 1_000 + CODEX_UPDATE_CACHE_TTL_SECONDS,
     ).message_if_available()
 
-    assert message == (
-        "Rodex: Codex update available: 0.151.0 -> 0.152.0 "
-        "(run 'codex update' outside Rodex)"
-    )
+    assert message == ("Rodex: Codex update available: 0.151.0 -> 0.152.0 (run 'codex update' outside Rodex)")
     assert resolver_calls == []
     assert runner.calls == [
         (
@@ -186,9 +173,7 @@ def test_contending_stale_cache_reader_does_not_wait_for_the_refresh_owner(
     def runner(command: list[str], **_options: object) -> subprocess.CompletedProcess[str]:
         nonlocal npm_calls
         if command[-1] == "--version":
-            return subprocess.CompletedProcess(
-                command, 0, stdout="codex-cli 0.151.0\n", stderr=""
-            )
+            return subprocess.CompletedProcess(command, 0, stdout="codex-cli 0.151.0\n", stderr="")
         with calls_lock:
             npm_calls += 1
         npm_entered.set()
@@ -228,13 +213,9 @@ def test_contending_stale_cache_reader_does_not_wait_for_the_refresh_owner(
     assert errors == []
     assert npm_calls == 1
     assert messages["contender"] == (
-        "Rodex: Codex update available: 0.151.0 -> 0.152.0 "
-        "(run 'codex update' outside Rodex)"
+        "Rodex: Codex update available: 0.151.0 -> 0.152.0 (run 'codex update' outside Rodex)"
     )
-    assert messages["owner"] == (
-        "Rodex: Codex update available: 0.151.0 -> 0.153.0 "
-        "(run 'codex update' outside Rodex)"
-    )
+    assert messages["owner"] == ("Rodex: Codex update available: 0.151.0 -> 0.153.0 (run 'codex update' outside Rodex)")
     assert cache_path.read_text(encoding="utf-8") == "0.153.0\n"
 
 
@@ -244,9 +225,7 @@ def test_twenty_processes_perform_one_atomic_cache_refresh_without_leaks(
     process_count = 20
     cache_path = tmp_path / "latest_codex_npm_version.txt"
     npm_counter_path = tmp_path / "npm-calls.txt"
-    result_paths = tuple(
-        tmp_path / f"result-{index}.json" for index in range(process_count)
-    )
+    result_paths = tuple(tmp_path / f"result-{index}.json" for index in range(process_count))
     process_context = multiprocessing.get_context("fork")
     start_barrier = process_context.Barrier(process_count)
     processes = [
@@ -304,10 +283,7 @@ def test_failed_npm_refresh_uses_valid_stale_cache_and_never_breaks_attach_notic
         now=lambda: 1_000_000,
     ).message_if_available()
 
-    assert message == (
-        "Rodex: Codex update available: 0.151.0 -> 0.152.0 "
-        "(run 'codex update' outside Rodex)"
-    )
+    assert message == ("Rodex: Codex update available: 0.151.0 -> 0.152.0 (run 'codex update' outside Rodex)")
 
 
 def test_invalid_or_unavailable_version_evidence_is_silent(tmp_path: Path) -> None:
@@ -327,8 +303,6 @@ def test_invalid_or_unavailable_version_evidence_is_silent(tmp_path: Path) -> No
 
 def test_default_cache_path_names_npm_version_provenance(tmp_path: Path) -> None:
     assert (
-        default_codex_update_cache_path(
-            {"HOME": str(tmp_path), "XDG_CACHE_HOME": str(tmp_path / "cache")}
-        )
+        default_codex_update_cache_path({"HOME": str(tmp_path), "XDG_CACHE_HOME": str(tmp_path / "cache")})
         == tmp_path / "cache" / "rodex" / "latest_codex_npm_version.txt"
     )

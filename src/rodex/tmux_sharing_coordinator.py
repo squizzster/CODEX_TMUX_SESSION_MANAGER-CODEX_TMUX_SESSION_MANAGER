@@ -112,10 +112,7 @@ def reconcile_sharing_state(
             RODEX_SHARED_TMUX_SERVER_ID_OPTION,
         )
     )
-    if (
-        protocol.returncode != 0
-        or protocol.stdout.strip() != f"{RODEX_SHARED_TMUX_PROTOCOL}\n{expected_server_id}"
-    ):
+    if protocol.returncode != 0 or protocol.stdout.strip() != f"{RODEX_SHARED_TMUX_PROTOCOL}\n{expected_server_id}":
         return 1
     listed = executor.run(("list-sessions", "-F", _SESSION_RECORD_FORMAT))
     if listed.returncode != 0:
@@ -196,18 +193,9 @@ def _require_unique_registered_roster(states: tuple[_SharingState, ...]) -> None
         (state.capability.tmux_session_id for state in states),
         (state.capability.tmux_primary_pane_id for state in states),
         (state.capability.runtime_id for state in states),
-        (
-            (state.capability.registry_id, state.capability.rodex_session_id)
-            for state in states
-        ),
-        (
-            (state.capability.registry_id, state.capability.internal_session_id)
-            for state in states
-        ),
-        (
-            (state.capability.registry_id, state.capability.codex_session_id)
-            for state in states
-        ),
+        ((state.capability.registry_id, state.capability.rodex_session_id) for state in states),
+        ((state.capability.registry_id, state.capability.internal_session_id) for state in states),
+        ((state.capability.registry_id, state.capability.codex_session_id) for state in states),
     )
     for projection in identity_projections:
         identities = tuple(projection)
@@ -237,15 +225,8 @@ def _reconcile_one(
     elif state.previous_attached_count == state.attached_count:
         return 0
     else:
-        previous_count_condition = (
-            f"#{{==:#{{{RODEX_SHARING_ATTACHED_COUNT_OPTION}}},"
-            f"{state.previous_attached_count}}}"
-        )
-        event = (
-            "attached"
-            if state.attached_count > state.previous_attached_count
-            else "detached"
-        )
+        previous_count_condition = f"#{{==:#{{{RODEX_SHARING_ATTACHED_COUNT_OPTION}}},{state.previous_attached_count}}}"
+        event = "attached" if state.attached_count > state.previous_attached_count else "detached"
         action = _command_sequence(
             (
                 "set-option",
@@ -278,9 +259,7 @@ def _reconcile_one(
 
 
 def _command_sequence(*commands: tuple[str, ...] | str) -> str:
-    return " ; ".join(
-        command if isinstance(command, str) else shlex.join(command) for command in commands
-    )
+    return " ; ".join(command if isinstance(command, str) else shlex.join(command) for command in commands)
 
 
 def _build_parser() -> argparse.ArgumentParser:

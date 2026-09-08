@@ -60,8 +60,7 @@ def test_sessions_log_id_uses_autoincrement(tmp_path: Path) -> None:
 
     definition = fetch_all(
         database,
-        "SELECT sql FROM sqlite_master "
-        "WHERE type = 'table' AND name = 'rodex_sessions_log'",
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'rodex_sessions_log'",
     )[0][0]
 
     assert isinstance(definition, str)
@@ -92,22 +91,16 @@ def test_sessions_log_has_named_unique_index_on_rodex_sessions_id(
         "PRAGMA index_info(rodex_sessions_log_rodex_sessions_id_unique)",
     )
 
-    assert [(row[1], row[2]) for row in indexes] == [
-        ("rodex_sessions_log_rodex_sessions_id_unique", 1)
-    ]
+    assert [(row[1], row[2]) for row in indexes] == [("rodex_sessions_log_rodex_sessions_id_unique", 1)]
     assert [row[2] for row in columns] == ["rodex_sessions_id"]
 
 
-def test_creating_a_session_also_creates_its_one_log_row(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_creating_a_session_also_creates_its_one_log_row(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     database = tmp_path / "rodex.sqlite3"
     timestamp = "2026-08-15T12:34:56.123456Z"
     monkeypatch.setattr(session_module, "_utc_now_timestamp", lambda: timestamp)
 
-    session = create_a_rodex_session(
-        database, codex_session_id=CODEX_SESSION_ID_1, user_identity=ALICE
-    )
+    session = create_a_rodex_session(database, codex_session_id=CODEX_SESSION_ID_1, user_identity=ALICE)
 
     assert fetch_all(
         database,
@@ -150,12 +143,8 @@ def test_user_name_must_not_be_empty(tmp_path: Path, invalid_user: str) -> None:
 def test_log_ids_auto_increment_independently_from_session_ids(tmp_path: Path) -> None:
     database = tmp_path / "rodex.sqlite3"
 
-    first = create_a_rodex_session(
-        database, codex_session_id=CODEX_SESSION_ID_1, user_identity=ALICE
-    )
-    second = create_a_rodex_session(
-        database, codex_session_id=CODEX_SESSION_ID_2, user_identity=BOB
-    )
+    first = create_a_rodex_session(database, codex_session_id=CODEX_SESSION_ID_1, user_identity=ALICE)
+    second = create_a_rodex_session(database, codex_session_id=CODEX_SESSION_ID_2, user_identity=BOB)
 
     assert fetch_all(
         database,
@@ -169,9 +158,7 @@ def test_log_ids_auto_increment_independently_from_session_ids(tmp_path: Path) -
 
 def test_unique_index_rejects_a_second_log_for_the_same_session(tmp_path: Path) -> None:
     database = tmp_path / "rodex.sqlite3"
-    session = create_a_rodex_session(
-        database, codex_session_id=CODEX_SESSION_ID_1, user_identity=ALICE
-    )
+    session = create_a_rodex_session(database, codex_session_id=CODEX_SESSION_ID_1, user_identity=ALICE)
 
     with (
         sqlite3.connect(database) as connection,
@@ -200,9 +187,7 @@ def test_foreign_key_rejects_a_log_for_an_unknown_session(tmp_path: Path) -> Non
 
 def test_lookup_returns_the_log_for_a_session(tmp_path: Path) -> None:
     database = tmp_path / "rodex.sqlite3"
-    session = create_a_rodex_session(
-        database, codex_session_id=CODEX_SESSION_ID_1, user_identity=ALICE
-    )
+    session = create_a_rodex_session(database, codex_session_id=CODEX_SESSION_ID_1, user_identity=ALICE)
 
     log = lookup_rodex_session_log(session.rodex_sessions_id, database)
 
@@ -218,29 +203,21 @@ def test_lookup_returns_none_when_a_session_has_no_log(tmp_path: Path) -> None:
     assert lookup_rodex_session_log(999, database) is None
 
 
-def test_record_access_changes_only_the_last_access_timestamp(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_record_access_changes_only_the_last_access_timestamp(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     database = tmp_path / "rodex.sqlite3"
     created = "2026-08-15T10:00:00.000000Z"
     monkeypatch.setattr(session_module, "_utc_now_timestamp", lambda: created)
-    session = create_a_rodex_session(
-        database, codex_session_id=CODEX_SESSION_ID_1, user_identity=ALICE
-    )
+    session = create_a_rodex_session(database, codex_session_id=CODEX_SESSION_ID_1, user_identity=ALICE)
     accessed = datetime(2026, 8, 15, 11, 30, tzinfo=UTC)
 
-    updated = record_a_rodex_session_access(
-        session.rodex_sessions_id, database, accessed_at_utc=accessed
-    )
+    updated = record_a_rodex_session_access(session.rodex_sessions_id, database, accessed_at_utc=accessed)
 
     assert updated.created_at_utc == created
     assert updated.rodex_sessions_users_id == 1
     assert updated.last_accessed_at_utc == "2026-08-15T11:30:00.000000Z"
 
 
-def test_access_timestamp_is_converted_to_utc(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_access_timestamp_is_converted_to_utc(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     database = tmp_path / "rodex.sqlite3"
     monkeypatch.setattr(
         session_module,

@@ -70,9 +70,7 @@ def _records() -> list[dict[str, object]]:
     ]
 
 
-def _source(
-    full: bytes, appended: bytes, thread_id: uuid.UUID = THREAD_ID
-) -> AnalyticsAnalyzerSource:
+def _source(full: bytes, appended: bytes, thread_id: uuid.UUID = THREAD_ID) -> AnalyticsAnalyzerSource:
     return AnalyticsAnalyzerSource(
         codex_thread_id=thread_id,
         analyzer_content=full,
@@ -83,9 +81,7 @@ def _source(
 def test_stateful_analyzer_matches_full_replay_at_every_record_boundary() -> None:
     records = _records()
     full = _content(records)
-    oracle = CodexProtocolAnalyticsAdapter().analyze_rollouts(
-        [_source(full, full)], "test-user"
-    )
+    oracle = CodexProtocolAnalyticsAdapter().analyze_rollouts([_source(full, full)], "test-user")
 
     for split_at in range(1, len(records)):
         prefix = _content(records[:split_at])
@@ -144,13 +140,9 @@ def test_incremental_projection_materializes_only_the_changed_turn(
     )
 
     incremental = adapter.analyze_rollouts([_source(full, suffix)], "test-user")
-    oracle = CodexProtocolAnalyticsAdapter().analyze_rollouts(
-        [_source(full, full)], "test-user"
-    )
+    oracle = CodexProtocolAnalyticsAdapter().analyze_rollouts([_source(full, full)], "test-user")
 
-    assert [
-        turn.codex_turn_id for turn in incremental.statistics_projection.turn_statistics
-    ] == [TURN_B_ID]
+    assert [turn.codex_turn_id for turn in incremental.statistics_projection.turn_statistics] == [TURN_B_ID]
     assert turn_reports == 1
     assert (
         replace(
@@ -169,9 +161,7 @@ def test_unaccepted_stateful_batch_extends_without_double_counting() -> None:
 
     first_attempt = adapter.analyze_rollouts([_source(prefix, prefix)], "test-user")
     retry_with_more = adapter.analyze_rollouts([_source(full, full)], "test-user")
-    oracle = CodexProtocolAnalyticsAdapter().analyze_rollouts(
-        [_source(full, full)], "test-user"
-    )
+    oracle = CodexProtocolAnalyticsAdapter().analyze_rollouts([_source(full, full)], "test-user")
 
     assert first_attempt.statistics_projection.history_records_count == 2
     assert retry_with_more == oracle
@@ -217,9 +207,7 @@ def test_stateful_analyzer_matches_full_replay_for_multiple_threads() -> None:
     ]
 
     oracle = CodexProtocolAnalyticsAdapter().analyze_rollouts(sources, "test-user")
-    stateful = StatefulCodexProtocolAnalyticsAdapter().analyze_rollouts(
-        sources, "test-user"
-    )
+    stateful = StatefulCodexProtocolAnalyticsAdapter().analyze_rollouts(sources, "test-user")
 
     assert stateful == oracle
 
@@ -248,9 +236,7 @@ def test_stateful_analyzer_prevalidates_identity_before_mutating() -> None:
     adapter = StatefulCodexProtocolAnalyticsAdapter()
 
     with pytest.raises(RodexAnalyticsError, match="identity changed"):
-        adapter.analyze_rollouts(
-            [_source(_content(records), _content(records))], "test-user"
-        )
+        adapter.analyze_rollouts([_source(_content(records), _content(records))], "test-user")
 
     assert adapter._analyzer.records == 0
 

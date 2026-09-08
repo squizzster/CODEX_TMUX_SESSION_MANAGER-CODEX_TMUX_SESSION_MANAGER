@@ -83,10 +83,7 @@ class ObserverPaneController:
                 f"#{{pane_id}}|#{{{OBSERVER_OWNER_PANE_OPTION}}}|#{{pane_dead}}",
             )
         )
-        if (
-            identity.returncode != 0
-            or identity.stdout.strip() != f"{candidate}|{self._primary_pane_target}|0"
-        ):
+        if identity.returncode != 0 or identity.stdout.strip() != f"{candidate}|{self._primary_pane_target}|0":
             self._observer_pane_target = None
             return None
         self._observer_pane_target = candidate
@@ -109,12 +106,7 @@ class ObserverPaneController:
             )
         )
         cwd_fields = cwd.stdout.rstrip("\n").split("|", maxsplit=1)
-        if (
-            cwd.returncode != 0
-            or len(cwd_fields) != 2
-            or cwd_fields[0] != self._primary_pane_target
-            or not cwd_fields[1]
-        ):
+        if cwd.returncode != 0 or len(cwd_fields) != 2 or cwd_fields[0] != self._primary_pane_target or not cwd_fields[1]:
             return None
         observer_command = [
             self._python_executable,
@@ -139,9 +131,7 @@ class ObserverPaneController:
             ),
         ]
         try:
-            environment_names = tuple(
-                name for name, _value in validated_user_environment_entries(os.environ)
-            )
+            environment_names = tuple(name for name, _value in validated_user_environment_entries(os.environ))
             command = exact_environment_exec_command(
                 self._python_executable,
                 environment_names,

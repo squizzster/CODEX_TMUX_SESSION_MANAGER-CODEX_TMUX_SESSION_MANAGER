@@ -57,9 +57,7 @@ def test_static_status_segments_render_their_own_colours_in_order() -> None:
         f"#[fg={RODEX_STATUS_COLOURS.tool_count}]#[bold]| Tools: #{{@rodex_tool_calls}} ",
         f"#[fg={RODEX_STATUS_COLOURS.mouse_mode}]#[bold]| Mouse: #{{?mouse,ON,OFF}} ",
     )
-    positions = tuple(
-        RODEX_BASE_STATUS_LEFT_FORMAT.index(item) for item in rendered_segments
-    )
+    positions = tuple(RODEX_BASE_STATUS_LEFT_FORMAT.index(item) for item in rendered_segments)
     assert positions == tuple(sorted(positions))
 
 
@@ -75,13 +73,9 @@ def test_status_bar_library_updates_only_the_named_part() -> None:
         StatusBarPart.RODEX_IDENTITY,
         StatusBarSegment(StatusBarPart.RODEX_IDENTITY, "#1402D8", " Rodex: #S "),
     )
-    assert replaced.render_part(StatusBarPart.RODEX_IDENTITY) == (
-        "#[fg=#1402D8]#[bold] Rodex: #S "
-    )
+    assert replaced.render_part(StatusBarPart.RODEX_IDENTITY) == ("#[fg=#1402D8]#[bold] Rodex: #S ")
     assert replaced.render_part(StatusBarPart.MOUSE_MODE) == ("#[fg=yellow]#[bold]| Mouse ")
-    assert status_bar.render_part(StatusBarPart.RODEX_IDENTITY) == (
-        "#[fg=blue]#[bold] Rodex "
-    )
+    assert status_bar.render_part(StatusBarPart.RODEX_IDENTITY) == ("#[fg=blue]#[bold] Rodex ")
     assert status_bar.render() == ("#[fg=blue]#[bold] Rodex #[fg=yellow]#[bold]| Mouse ")
 
 
@@ -95,9 +89,7 @@ def test_status_renderers_do_not_define_raw_tmux_colours_outside_the_theme() -> 
     )
     raw_tmux_colour = re.compile(r"#\[(?:fg|bg)=(?!\{)")
     assert {
-        module_name: raw_tmux_colour.findall(
-            (source_root / module_name).read_text(encoding="utf-8")
-        )
+        module_name: raw_tmux_colour.findall((source_root / module_name).read_text(encoding="utf-8"))
         for module_name in themed_modules
     } == {module_name: [] for module_name in themed_modules}
 
@@ -105,10 +97,7 @@ def test_status_renderers_do_not_define_raw_tmux_colours_outside_the_theme() -> 
 @pytest.mark.evolutionary_regression
 def test_context_palette_does_not_change_the_independent_mouse_colour() -> None:
     """Current evidence: context cannot recolour Mouse; supersede only by contract."""
-    assert (
-        f"#[fg={RODEX_STATUS_COLOURS.mouse_mode}]#[bold]| Mouse: #{{?mouse,ON,OFF}}"
-        in RODEX_BASE_STATUS_LEFT_FORMAT
-    )
+    assert f"#[fg={RODEX_STATUS_COLOURS.mouse_mode}]#[bold]| Mouse: #{{?mouse,ON,OFF}}" in RODEX_BASE_STATUS_LEFT_FORMAT
 
 
 @pytest.mark.parametrize(

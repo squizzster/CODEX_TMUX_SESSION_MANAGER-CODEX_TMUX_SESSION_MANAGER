@@ -31,10 +31,7 @@ def test_round3_future_dated_update_cache_is_not_fresh(tmp_path: Path) -> None:
         ["/usr/bin/codex", "--version"],
         ["/usr/bin/npm", "view", "@openai/codex", "version"],
     ]
-    assert message == (
-        "Rodex: Codex update available: 0.151.0 -> 0.153.0 "
-        "(run 'codex update' outside Rodex)"
-    )
+    assert message == ("Rodex: Codex update available: 0.151.0 -> 0.153.0 (run 'codex update' outside Rodex)")
 
 
 def test_round3_cache_age_bounds_include_zero_and_the_exact_ttl(
@@ -49,12 +46,8 @@ def test_round3_cache_age_bounds_include_zero_and_the_exact_ttl(
         notice = CodexUpdateNotice(
             "/usr/bin/codex",
             cache_path=cache,
-            runner=lambda command, **_options: subprocess.CompletedProcess(
-                command, 0, "codex-cli 0.151.0\n", ""
-            ),
-            resolve_executable=lambda name, calls=resolver_calls: (
-                calls.append(name) or None
-            ),
+            runner=lambda command, **_options: subprocess.CompletedProcess(command, 0, "codex-cli 0.151.0\n", ""),
+            resolve_executable=lambda name, calls=resolver_calls: calls.append(name) or None,
             now=lambda now=now: now,
         )
 

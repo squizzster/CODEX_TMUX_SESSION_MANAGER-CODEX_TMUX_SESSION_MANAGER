@@ -22,9 +22,7 @@ def _resolved_read(tmp_path: Path) -> tuple[int, LiveTmuxSession, LiveRodexContr
     return 7, runtime, control
 
 
-def test_snapshot_pipeline_has_one_authoritative_success_order(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_snapshot_pipeline_has_one_authoritative_success_order(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     database = tmp_path / "rodex.sqlite3"
     session_id, runtime, control = _resolved_read(tmp_path)
     observed: list[str] = []
@@ -64,9 +62,7 @@ def test_snapshot_pipeline_has_one_authoritative_success_order(
     assert observed == ["resolve", "read", "revalidate", "record_access"]
 
 
-def test_snapshot_pipeline_does_not_record_a_failed_read(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_snapshot_pipeline_does_not_record_a_failed_read(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     database = tmp_path / "rodex.sqlite3"
     resolved = _resolved_read(tmp_path)
     observed: list[str] = []

@@ -62,9 +62,7 @@ class AnalyticsAnalyzerSource:
 
 
 class AnalyticsBoundary(Protocol):
-    def analyze_rollouts(
-        self, sources: Sequence[AnalyticsAnalyzerSource], user_id: str
-    ) -> AnalyticsCalculation: ...
+    def analyze_rollouts(self, sources: Sequence[AnalyticsAnalyzerSource], user_id: str) -> AnalyticsCalculation: ...
 
     def accept_batch(self) -> None: ...
 
@@ -75,13 +73,9 @@ AnalyticsBoundaryFactory = Callable[[], AnalyticsBoundary]
 class _AnalyzerLibrary(Protocol):
     def create_new_codex_protocol_id(self, user_id: str) -> OperationResult[str]: ...
 
-    def load_file(
-        self, protocol_id: str, path: Path
-    ) -> OperationResult[LoadFileResult]: ...
+    def load_file(self, protocol_id: str, path: Path) -> OperationResult[LoadFileResult]: ...
 
-    def get_stats(
-        self, protocol_id: str, *, include_turn_statistics: bool = False
-    ) -> OperationResult[StatsSnapshot]: ...
+    def get_stats(self, protocol_id: str, *, include_turn_statistics: bool = False) -> OperationResult[StatsSnapshot]: ...
 
     def close(self) -> OperationResult[bool]: ...
 
@@ -89,15 +83,11 @@ class _AnalyzerLibrary(Protocol):
 class CodexProtocolAnalyticsAdapter:
     """Full-replay adapter retained as the semantic test oracle."""
 
-    def analyze_rollouts(
-        self, sources: Sequence[AnalyticsAnalyzerSource], user_id: str
-    ) -> AnalyticsCalculation:
+    def analyze_rollouts(self, sources: Sequence[AnalyticsAnalyzerSource], user_id: str) -> AnalyticsCalculation:
         try:
             library: _AnalyzerLibrary = CodexProtocolLibrary()
         except Exception as error:
-            raise RodexAnalyticsError(
-                f"could not initialize Codex protocol analytics: {error}"
-            ) from error
+            raise RodexAnalyticsError(f"could not initialize Codex protocol analytics: {error}") from error
         try:
             protocol_id = _protocol_id(
                 _operation_value(
@@ -107,9 +97,7 @@ class CodexProtocolAnalyticsAdapter:
             )
             coverage_state = "complete"
             for index, source in enumerate(sources):
-                loaded = _load_analyzer_bytes(
-                    library, protocol_id, source.analyzer_content, index
-                )
+                loaded = _load_analyzer_bytes(library, protocol_id, source.analyzer_content, index)
                 _operation_value(
                     loaded,
                     "load verified Codex rollout",
@@ -333,9 +321,7 @@ class _IncrementalProjectionIndex:
         self._context_observation_count = len(analyzer.context_observations)
         self._context_high_water = max(analyzer.context_observations, default=0.0)
         self._command_hash_counts = dict(analyzer.command_hashes)
-        self.repeated_commands = sum(
-            count for count in self._command_hash_counts.values() if count > 1
-        )
+        self.repeated_commands = sum(count for count in self._command_hash_counts.values() if count > 1)
         self._path_counts = dict(analyzer.path_operation_counts)
         self.revisited_paths = sum(count >= 2 for count in self._path_counts.values())
         self._tool_requests = dict(analyzer.tool_requests)
@@ -372,9 +358,7 @@ class _IncrementalProjectionIndex:
         for command_hash in touches.command_hashes:
             previous = self._command_hash_counts.get(command_hash, 0)
             current = analyzer.command_hashes[command_hash]
-            self.repeated_commands += _repeat_contribution(current) - _repeat_contribution(
-                previous
-            )
+            self.repeated_commands += _repeat_contribution(current) - _repeat_contribution(previous)
             self._command_hash_counts[command_hash] = current
         for path_hash in touches.path_hashes:
             previous = self._path_counts.get(path_hash, 0)
@@ -475,20 +459,12 @@ class _IncrementalProjectionIndex:
             hands_on_turn_rate_percent=_rate(self.hands_on, total_turns),
             turns_with_nonzero_command_count=self.failed_command_turns,
             turns_subsequently_completed_count=self.recovered_turns,
-            completed_after_nonzero_command_percent=_rate(
-                self.recovered_turns, self.failed_command_turns
-            ),
+            completed_after_nonzero_command_percent=_rate(self.recovered_turns, self.failed_command_turns),
             command_zero_exit_rate_percent=_rate(zero_exit, zero_exit + nonzero_exit),
             repeated_command_execution_count=self.repeated_commands,
-            exact_command_repeat_rate_percent=_rate(
-                self.repeated_commands, len(analyzer.commands)
-            ),
-            cached_input_share_percent=_rate(
-                analyzer.token_totals["cached_input_tokens"], input_tokens
-            ),
-            reasoning_output_share_percent=_rate(
-                analyzer.token_totals["reasoning_output_tokens"], output_tokens
-            ),
+            exact_command_repeat_rate_percent=_rate(self.repeated_commands, len(analyzer.commands)),
+            cached_input_share_percent=_rate(analyzer.token_totals["cached_input_tokens"], input_tokens),
+            reasoning_output_share_percent=_rate(analyzer.token_totals["reasoning_output_tokens"], output_tokens),
             edited_turns_count=self.edited_turns,
             verified_after_edit_count=self.verified_after_edit,
             edit_then_verify_percent=_rate(self.verified_after_edit, self.edited_turns),
@@ -496,30 +472,20 @@ class _IncrementalProjectionIndex:
             web_later_command_or_file_work_count=self.web_follow_through,
             web_follow_through_percent=_rate(self.web_follow_through, self.web_turns),
             revisited_distinct_path_count=self.revisited_paths,
-            file_revisit_rate_percent=_rate(
-                self.revisited_paths, len(analyzer.path_operation_counts)
-            ),
+            file_revisit_rate_percent=_rate(self.revisited_paths, len(analyzer.path_operation_counts)),
             workspace_tagged_turn_count=workspace_turns,
             turns_in_busiest_workspace_count=max(self.workspaces.values(), default=0),
-            busiest_workspace_turn_share_percent=_rate(
-                max(self.workspaces.values(), default=0), workspace_turns
-            ),
+            busiest_workspace_turn_share_percent=_rate(max(self.workspaces.values(), default=0), workspace_turns),
             turns_with_local_hour_count=sum(self.local_hours.values()),
-            busiest_local_hour=(
-                self.local_hours.most_common(1)[0][0] if self.local_hours else None
-            ),
-            turns_in_busiest_local_hour_count=(
-                self.local_hours.most_common(1)[0][1] if self.local_hours else 0
-            ),
+            busiest_local_hour=(self.local_hours.most_common(1)[0][0] if self.local_hours else None),
+            turns_in_busiest_local_hour_count=(self.local_hours.most_common(1)[0][1] if self.local_hours else 0),
             goal_updates_count=analyzer.goal_updates,
             audit_token_snapshots_count=analyzer.token_snapshots,
             audit_repeated_token_snapshots_count=analyzer.token_repeated_snapshots,
             audit_token_epochs_count=sum(analyzer.token_epochs.values()),
             audit_duplicate_operations_ignored_count=analyzer.duplicate_operations,
             audit_duplicate_terminals_ignored_count=analyzer.duplicate_terminals,
-            audit_terminal_events_without_start_ignored_count=(
-                analyzer.terminal_without_start
-            ),
+            audit_terminal_events_without_start_ignored_count=(analyzer.terminal_without_start),
             audit_new_event_type_warnings_count=new_event_type_warnings,
             distributions=distributions,
             named_counts=named_counts,
@@ -547,9 +513,7 @@ class _IncrementalProjectionIndex:
             _adjust_counter(self.local_hours, turn.local_start_hour, direction)
         self.hands_on += direction * int(turn.hands_on)
         has_failed_command = any(
-            item.count_kind == "command_exit_status"
-            and item.count_name == "nonzero_exit"
-            and item.occurrence_count > 0
+            item.count_kind == "command_exit_status" and item.count_name == "nonzero_exit" and item.occurrence_count > 0
             for item in turn.named_counts
         )
         self.failed_command_turns += direction * int(has_failed_command)
@@ -557,9 +521,7 @@ class _IncrementalProjectionIndex:
         self.edited_turns += direction * int(turn.file_change_operations_count > 0)
         self.verified_after_edit += direction * int(turn.edited_then_verified)
         self.web_turns += direction * int(turn.web_operations_count > 0)
-        self.web_follow_through += direction * int(
-            turn.web_research_followed_by_command_or_file_work
-        )
+        self.web_follow_through += direction * int(turn.web_research_followed_by_command_or_file_work)
         _adjust_distribution(
             self.completed_durations,
             turn.duration_ms if turn.outcome == "completed" else None,
@@ -616,9 +578,7 @@ def _named_count_projections(
         if use_most_common and isinstance(counts, Counter)
         else sorted(counts.items(), key=lambda item: str(item[0]))
     )
-    return tuple(
-        StatisticsNamedCount(kind, str(name), count) for name, count in items if count > 0
-    )
+    return tuple(StatisticsNamedCount(kind, str(name), count) for name, count in items if count > 0)
 
 
 class StatefulCodexProtocolAnalyticsAdapter:
@@ -638,13 +598,9 @@ class StatefulCodexProtocolAnalyticsAdapter:
         self._projection_index: _IncrementalProjectionIndex | None = None
         self._poisoned_reason: str | None = None
 
-    def analyze_rollouts(
-        self, sources: Sequence[AnalyticsAnalyzerSource], user_id: str
-    ) -> AnalyticsCalculation:
+    def analyze_rollouts(self, sources: Sequence[AnalyticsAnalyzerSource], user_id: str) -> AnalyticsCalculation:
         if self._poisoned_reason is not None:
-            raise RodexAnalyticsError(
-                f"stateful analyzer requires clean restart: {self._poisoned_reason}"
-            )
+            raise RodexAnalyticsError(f"stateful analyzer requires clean restart: {self._poisoned_reason}")
         if self._user_id is None:
             self._user_id = user_id
         elif self._user_id != user_id:
@@ -652,22 +608,14 @@ class StatefulCodexProtocolAnalyticsAdapter:
         by_thread = {source.codex_thread_id: source for source in sources}
         if len(by_thread) != len(sources):
             raise RodexAnalyticsError("analyzer batch contains duplicate thread identity")
-        prepared: list[
-            tuple[AnalyticsAnalyzerSource, bytes, list[dict[str, Any]], int]
-        ] = []
+        prepared: list[tuple[AnalyticsAnalyzerSource, bytes, list[dict[str, Any]], int]] = []
         touches = _BatchTouches()
         for source in sources:
             state = self._sources.get(source.codex_thread_id)
-            offered = (
-                source.analyzer_content
-                if state is None
-                else source.appended_analyzer_content
-            )
+            offered = source.analyzer_content if state is None else source.appended_analyzer_content
             pending = b"" if state is None else state.pending_content
             if pending and not offered.startswith(pending):
-                raise RodexAnalyticsError(
-                    f"analyzer retry diverged for thread {source.codex_thread_id}"
-                )
+                raise RodexAnalyticsError(f"analyzer retry diverged for thread {source.codex_thread_id}")
             new_content = offered[len(pending) :]
             records, malformed = _decode_complete_records(new_content)
             _validate_source_records(source.codex_thread_id, records)
@@ -678,9 +626,7 @@ class StatefulCodexProtocolAnalyticsAdapter:
             for source, new_content, records, malformed in prepared:
                 state = self._sources.get(source.codex_thread_id)
                 if state is None:
-                    identity_digest = hashlib.sha256(
-                        str(source.codex_thread_id).encode()
-                    ).hexdigest()
+                    identity_digest = hashlib.sha256(str(source.codex_thread_id).encode()).hexdigest()
                     source_key = f"source:{identity_digest}"
                     state = _SourceState(source_key)
                     self._sources[source.codex_thread_id] = state
@@ -698,24 +644,18 @@ class StatefulCodexProtocolAnalyticsAdapter:
                     )
                     event_name = self._new_event_name(record)
                     if event_name is not None:
-                        self._unknown_event_types_by_source.setdefault(
-                            source.codex_thread_id, set()
-                        ).add(str(event_name))
+                        self._unknown_event_types_by_source.setdefault(source.codex_thread_id, set()).add(str(event_name))
                         self._coverage_gapped = True
                     changed = True
                 state.pending_content += new_content
         except Exception as error:
             self._poisoned_reason = type(error).__name__
-            raise RodexAnalyticsError(
-                "resident analyzer failed while consuming a validated append"
-            ) from error
+            raise RodexAnalyticsError("resident analyzer failed while consuming a validated append") from error
         if not changed and self._candidate_calculation is not None:
             return self._candidate_calculation
         if changed:
             self._revision += 1
-        warning_count = sum(
-            len(names) for names in self._unknown_event_types_by_source.values()
-        )
+        warning_count = sum(len(names) for names in self._unknown_event_types_by_source.values())
         projection_index = self._projection_index
         if projection_index is None:
             report = self._analyzer.report(source="rodex stateful rollout sources")
@@ -842,9 +782,7 @@ def _decode_complete_records(content: bytes) -> tuple[list[dict[str, Any]], int]
     return records, malformed
 
 
-def _validate_source_records(
-    thread_id: CodexThreadId, records: Sequence[Mapping[str, Any]]
-) -> None:
+def _validate_source_records(thread_id: CodexThreadId, records: Sequence[Mapping[str, Any]]) -> None:
     """Reject identity errors before the resident analyzer mutates state."""
     for record in records:
         if record.get("type") != "session_meta":
@@ -852,9 +790,7 @@ def _validate_source_records(
         payload = record.get("payload")
         identifier = payload.get("id") if isinstance(payload, Mapping) else None
         if identifier != str(thread_id):
-            raise RodexAnalyticsError(
-                f"analyzer source identity changed for thread {thread_id}"
-            )
+            raise RodexAnalyticsError(f"analyzer source identity changed for thread {thread_id}")
 
 
 def _reject_json_constant(value: str) -> None:
@@ -865,9 +801,7 @@ def _parse_projection(stats: Mapping[str, Any]) -> SessionStatisticsProjection:
     try:
         return parse_session_statistics_snapshot(stats)
     except StatisticsProjectionError as error:
-        raise RodexAnalyticsError(
-            f"analyzer statistics contract mismatch: {error}"
-        ) from error
+        raise RodexAnalyticsError(f"analyzer statistics contract mismatch: {error}") from error
 
 
 def _operation_value[OperationValue](
@@ -915,9 +849,7 @@ def _load_analyzer_bytes(
         _seal_memory_file(descriptor)
         return library.load_file(protocol_id, Path(f"/proc/self/fd/{descriptor}"))
     except OSError as error:
-        raise RodexAnalyticsError(
-            f"could not prepare memory-backed analyzer file: {error}"
-        ) from error
+        raise RodexAnalyticsError(f"could not prepare memory-backed analyzer file: {error}") from error
     finally:
         os.close(descriptor)
 
@@ -931,6 +863,4 @@ def _seal_memory_file(descriptor: int) -> None:
     try:
         fcntl.fcntl(descriptor, 1033, 0x0001 | 0x0002 | 0x0004 | 0x0008)
     except OSError as error:
-        raise RodexAnalyticsError(
-            f"could not seal memory-backed analyzer file: {error}"
-        ) from error
+        raise RodexAnalyticsError(f"could not seal memory-backed analyzer file: {error}") from error

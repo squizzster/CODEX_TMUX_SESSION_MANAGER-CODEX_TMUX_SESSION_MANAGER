@@ -31,13 +31,9 @@ _DIRTY: Final = object()
 _STOP: Final = object()
 _STREAM_CLOSED: Final = object()
 _SIGNAL_QUEUE_CAPACITY: Final = 2
-_WINDOW_RETRY_RESULTS: Final = frozenset(
-    {"awaiting_append", "catching_up", "publication_retry"}
-)
+_WINDOW_RETRY_RESULTS: Final = frozenset({"awaiting_append", "catching_up", "publication_retry"})
 _ONE_SHOT_RETRY_RESULT: Final = "clean_replay"
-_POST_RECONCILIATION_RETRY_RESULTS: Final = frozenset(
-    {"publication_retry", _ONE_SHOT_RETRY_RESULT}
-)
+_POST_RECONCILIATION_RETRY_RESULTS: Final = frozenset({"publication_retry", _ONE_SHOT_RETRY_RESULT})
 
 
 class AnalyticsEventStreamClosed(RuntimeError):
@@ -114,11 +110,7 @@ class _AnalyticsRetryWindow:
         )
 
     def retain_after(self, result: object, now: float) -> bool:
-        if (
-            not self.repeatable
-            or result not in _WINDOW_RETRY_RESULTS
-            or now >= self.deadline
-        ):
+        if not self.repeatable or result not in _WINDOW_RETRY_RESULTS or now >= self.deadline:
             return False
         self.next_retry_at = min(now + self.next_delay_seconds, self.deadline)
         self.next_delay_seconds *= 2
@@ -220,12 +212,8 @@ class AnalyticsEventScheduler:
                 generation_started_at = retry_window.generation_started_at
                 result = reconcile(AnalyticsDirtyBatch(frozenset()))
                 if not retry_window.retain_after(result, self._monotonic()):
-                    repeatable_window_finished = (
-                        completed_repeatable_retry and result in _WINDOW_RETRY_RESULTS
-                    )
-                    one_shot_replay_finished = (
-                        not completed_repeatable_retry and result == _ONE_SHOT_RETRY_RESULT
-                    )
+                    repeatable_window_finished = completed_repeatable_retry and result in _WINDOW_RETRY_RESULTS
+                    one_shot_replay_finished = not completed_repeatable_retry and result == _ONE_SHOT_RETRY_RESULT
                     if repeatable_window_finished or one_shot_replay_finished:
                         retry_window = None
                     else:
@@ -235,9 +223,7 @@ class AnalyticsEventScheduler:
                         )
                 continue
             retry_deadline = None if retry_window is None else retry_window.next_retry_at
-            deadlines = tuple(
-                item for item in (pending_deadline, retry_deadline) if item is not None
-            )
+            deadlines = tuple(item for item in (pending_deadline, retry_deadline) if item is not None)
             deadline = min(deadlines) if deadlines else None
             timeout = None if deadline is None else max(0.0, deadline - now)
             try:
@@ -268,9 +254,7 @@ class AnalyticsEventScheduler:
         if result not in _WINDOW_RETRY_RESULTS and result != _ONE_SHOT_RETRY_RESULT:
             return None
         now = self._monotonic()
-        window_started_at = (
-            now if result in _POST_RECONCILIATION_RETRY_RESULTS else generation_started_at
-        )
+        window_started_at = now if result in _POST_RECONCILIATION_RETRY_RESULTS else generation_started_at
         if now >= window_started_at + self._max_retry_window_seconds:
             return None
         return _AnalyticsRetryWindow.start(
@@ -349,9 +333,7 @@ class AnalyticsProtocolEventSubscriber:
             raise AnalyticsEventStreamClosed("analytics event stream did not become ready")
         if self._startup_error is not None:
             self.close()
-            raise AnalyticsEventStreamClosed(
-                "analytics event stream failed during startup"
-            ) from self._startup_error
+            raise AnalyticsEventStreamClosed("analytics event stream failed during startup") from self._startup_error
 
     def close(self) -> None:
         self._stop.set()
@@ -380,12 +362,8 @@ class AnalyticsProtocolEventSubscriber:
                         unexpected_close = False
                         return
                     event = _decode_protocol_event(message)
-                    if not self._ready.is_set() and (
-                        event is None or event.get("method") != EVENT_STREAM_READY_METHOD
-                    ):
-                        raise AnalyticsEventStreamClosed(
-                            "analytics event stream sent no ready snapshot"
-                        )
+                    if not self._ready.is_set() and (event is None or event.get("method") != EVENT_STREAM_READY_METHOD):
+                        raise AnalyticsEventStreamClosed("analytics event stream sent no ready snapshot")
                     if event is not None:
                         self._scheduler.offer_protocol_event(event)
                     self._ready.set()

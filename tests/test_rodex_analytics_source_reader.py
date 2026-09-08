@@ -39,9 +39,7 @@ def _root_content() -> bytes:
     )
 
 
-def test_committed_cursor_reads_only_appended_bytes(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_committed_cursor_reads_only_appended_bytes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     root = tmp_path / "sessions"
     path = root / "2026" / "08" / "16" / f"rollout-{THREAD_ID}.jsonl"
     path.parent.mkdir(parents=True)
@@ -218,16 +216,11 @@ def test_subagent_cursor_filters_inherited_and_malformed_suffix_records(
     assert b"malformed_for_child" in appended.appended_analyzer_content
     assert b'"ordinal": 4' in appended.appended_analyzer_content
     assert appended.appended_source_line_ordinals == (5, 6)
-    assert (
-        appended.authenticated_source.analyzed_prefix_sha256
-        == hashlib.sha256(initial_content + suffix).hexdigest()
-    )
+    assert appended.authenticated_source.analyzed_prefix_sha256 == hashlib.sha256(initial_content + suffix).hexdigest()
 
 
 @pytest.mark.parametrize("mutation", ["truncate", "replace"])
-def test_committed_cursor_rejects_non_append_source_identity(
-    tmp_path: Path, mutation: str
-) -> None:
+def test_committed_cursor_rejects_non_append_source_identity(tmp_path: Path, mutation: str) -> None:
     root = tmp_path / "sessions"
     path = root / "2026" / "08" / "16" / f"rollout-{THREAD_ID}.jsonl"
     path.parent.mkdir(parents=True)

@@ -48,10 +48,7 @@ def test_session_identity_accepts_owned_observer_but_primary_identity_does_not(
 ) -> None:
     capability = _registered_capability(tmp_path / "tmux.sock")
     exact_current_pane = f"#{{==:#{{pane_id}},#{{l:{capability.tmux_primary_pane_id}}}}}"
-    stored_primary_pane = (
-        f"#{{==:#{{{RODEX_PRIMARY_PANE_ID_OPTION}}},"
-        f"#{{l:{capability.tmux_primary_pane_id}}}}}"
-    )
+    stored_primary_pane = f"#{{==:#{{{RODEX_PRIMARY_PANE_ID_OPTION}}},#{{l:{capability.tmux_primary_pane_id}}}}}"
 
     session_identity = capability_identity_if_shell_condition(capability)
     primary_identity = primary_pane_capability_if_shell_condition(capability)
@@ -105,14 +102,18 @@ def test_registered_primary_read_owns_condition_context_at_high_pane_ids(
         tmux("kill-session", "-t", f"={dummy_name}")
     tmux("new-session", "-d", "-s", "managed", "sleep 30")
     try:
-        session_id, pane_id = tmux(
-            "display-message",
-            "-p",
-            "-t",
-            "=managed:",
-            "-F",
-            "#{session_id}\t#{pane_id}",
-        ).stdout.strip().split("\t")
+        session_id, pane_id = (
+            tmux(
+                "display-message",
+                "-p",
+                "-t",
+                "=managed:",
+                "-F",
+                "#{session_id}\t#{pane_id}",
+            )
+            .stdout.strip()
+            .split("\t")
+        )
         assert pane_id == expected_pane_id
         template = _registered_capability(socket_path)
         capability = TmuxSessionCapability(

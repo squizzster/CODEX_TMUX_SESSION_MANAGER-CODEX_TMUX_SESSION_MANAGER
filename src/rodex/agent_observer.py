@@ -61,9 +61,7 @@ _TURN_REQUEST_KINDS: Final = {
     "collaboration.followup_task": "follow_up",
 }
 _ANSI_ESCAPE_PATTERN: Final = re.compile(r"\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
-_SCOPE_UNAVAILABLE_DETAIL: Final = (
-    "Rodex could not correlate an exact same-turn root user message."
-)
+_SCOPE_UNAVAILABLE_DETAIL: Final = "Rodex could not correlate an exact same-turn root user message."
 Runner = Callable[..., subprocess.CompletedProcess[str]]
 CursorReader = Callable[[int, Path], uuid.UUID | None]
 EventSender = Callable[[Path, dict[str, object]], None]
@@ -78,12 +76,8 @@ OBSERVER_SOCKET_OPERATION_TIMEOUT_SECONDS: Final = 0.25
 
 def observer_control_socket_path(protocol_event_socket_path: Path) -> Path:
     """Return one private observer-control socket per exact runtime event socket."""
-    runtime_digest = hashlib.sha256(
-        os.fsencode(os.path.abspath(protocol_event_socket_path))
-    ).hexdigest()[:16]
-    return protocol_event_socket_path.with_name(
-        f"{OBSERVER_CONTROL_SOCKET_PREFIX}{runtime_digest}.sock"
-    )
+    runtime_digest = hashlib.sha256(os.fsencode(os.path.abspath(protocol_event_socket_path))).hexdigest()[:16]
+    return protocol_event_socket_path.with_name(f"{OBSERVER_CONTROL_SOCKET_PREFIX}{runtime_digest}.sock")
 
 
 def _observer_event_frame(event: dict[str, object]) -> bytes:
@@ -131,9 +125,7 @@ class _ObserverEventDispatcher:
     ) -> None:
         if parked_retry_seconds <= 0:
             raise ValueError("observer parked retry interval must be positive")
-        self._events: queue.Queue[tuple[int, Path, dict[str, object]] | None] = queue.Queue(
-            maxsize=1
-        )
+        self._events: queue.Queue[tuple[int, Path, dict[str, object]] | None] = queue.Queue(maxsize=1)
         self._stop = Event()
         self._updated = Event()
         self._monotonic = monotonic
@@ -293,14 +285,8 @@ class AgentObserverCoordinator:
             python_executable=python_executable,
         )
         self._cursor_reader = cursor_reader
-        self._event_dispatcher = (
-            _ObserverEventDispatcher() if event_sender is None else None
-        )
-        self._event_sender = (
-            self._event_dispatcher.send
-            if self._event_dispatcher is not None
-            else event_sender
-        )
+        self._event_dispatcher = _ObserverEventDispatcher() if event_sender is None else None
+        self._event_sender = self._event_dispatcher.send if self._event_dispatcher is not None else event_sender
         self._observer_state = ObserverStateReducer.producer()
         self._database_path: Path | None = None
         self._rodex_sessions_id: int | None = None
@@ -368,18 +354,13 @@ class AgentObserverCoordinator:
         agent_message = project_agent_message_event(event)
         if agent_message is not None:
             target_thread_id = agent_message["thread_id"]
-            if (
-                self._observer_state.tracks_target(str(target_thread_id))
-                and self._pane.locate() is not None
-            ):
+            if self._observer_state.tracks_target(str(target_thread_id)) and self._pane.locate() is not None:
                 self._send_observer_event(agent_message)
             return
         parent_user_message = project_user_message_event(event)
         if parent_user_message is not None:
             root_thread_id = self._root_thread_id
-            if root_thread_id is not None and parent_user_message["thread_id"] == str(
-                root_thread_id
-            ):
+            if root_thread_id is not None and parent_user_message["thread_id"] == str(root_thread_id):
                 self._observer_state.remember_parent_user_message(parent_user_message)
             return
         projected = project_subagent_activity_event(event)
@@ -395,9 +376,7 @@ class AgentObserverCoordinator:
         collaboration_invocation = self._observer_state.collaboration_invocation(item_id)
         if collaboration_invocation is not None:
             projected["collaboration_invocation"] = collaboration_invocation["item"]
-        is_new_spawn = (
-            projected["method"] == "item/started" and item["activity_kind"] == "started"
-        )
+        is_new_spawn = projected["method"] == "item/started" and item["activity_kind"] == "started"
         is_known = self._observer_state.is_known_activity(item_id)
         target_is_tracked = self._observer_state.tracks_target(target_thread_id)
         if not is_new_spawn and not is_known and not target_is_tracked:
@@ -413,14 +392,8 @@ class AgentObserverCoordinator:
             new_spawn=is_new_spawn,
         )
         tool_name = _projected_invocation_tool_name(collaboration_invocation)
-        has_root_request_context = tool_name in _TURN_REQUEST_KINDS or tool_name == (
-            "collaboration.send_message"
-        )
-        request_event = (
-            self._root_request_context_event(projected)
-            if has_root_request_context
-            else None
-        )
+        has_root_request_context = tool_name in _TURN_REQUEST_KINDS or tool_name == ("collaboration.send_message")
+        request_event = self._root_request_context_event(projected) if has_root_request_context else None
         if request_event is not None:
             projected["root_request_context_follows"] = True
         pane_target = self._pane.locate()
@@ -470,8 +443,7 @@ class AgentObserverCoordinator:
             activity["collaboration_invocation"] = item
         receiver_ids = item.get("receiver_thread_ids")
         targets_tracked = isinstance(receiver_ids, list) and any(
-            isinstance(target, str) and self._observer_state.tracks_target(target)
-            for target in receiver_ids
+            isinstance(target, str) and self._observer_state.tracks_target(target) for target in receiver_ids
         )
         if activity is None and not targets_tracked:
             if invocation.get("method") == "item/completed":
@@ -481,9 +453,7 @@ class AgentObserverCoordinator:
         if pane_target is None:
             return
         request_event = None
-        if activity is not None and not self._observer_state.root_request_context_was_sent(
-            item_id
-        ):
+        if activity is not None and not self._observer_state.root_request_context_was_sent(item_id):
             request_event = self._root_request_context_event(activity)
             if request_event is not None:
                 invocation["root_request_context_follows"] = True
@@ -515,9 +485,7 @@ class AgentObserverCoordinator:
         thread_id = params.get("threadId")
         if not isinstance(thread_id, str):
             return
-        if method == CODEX_APP_SERVER.turn_completed_method and thread_id == str(
-            self._root_thread_id
-        ):
+        if method == CODEX_APP_SERVER.turn_completed_method and thread_id == str(self._root_thread_id):
             self._observer_state.remember_parent_user_message(None)
         inactive = method == CODEX_APP_SERVER.turn_completed_method
         if method == CODEX_APP_SERVER.thread_status_changed_method:
@@ -527,9 +495,7 @@ class AgentObserverCoordinator:
             self._prune_target_thread(thread_id)
 
     def _prune_target_thread(self, target_thread_id: str) -> None:
-        self._send_observer_snapshot(
-            self._observer_state.prune_protocol_target(target_thread_id)
-        )
+        self._send_observer_snapshot(self._observer_state.prune_protocol_target(target_thread_id))
 
     def reset_after_disconnect(self) -> None:
         """Prune all primary-connection correlation state after its producer exits."""
@@ -553,9 +519,7 @@ class AgentObserverCoordinator:
         activity_event: Mapping[str, object],
     ) -> dict[str, object] | None:
         parent_user_message = self._observer_state.latest_parent_user_message
-        if parent_user_message is None or parent_user_message.get(
-            "turn_id"
-        ) != activity_event.get("turn_id"):
+        if parent_user_message is None or parent_user_message.get("turn_id") != activity_event.get("turn_id"):
             return None
         activity_item = activity_event.get("item")
         user_item = parent_user_message.get("item")
@@ -760,9 +724,7 @@ class AgentObserverView:
                 agent_path=agent_path,
                 activity_kind=activity_kind,
                 invocation=invocation,
-                root_request_context_follows=(
-                    event.get("root_request_context_follows") is True
-                ),
+                root_request_context_follows=(event.get("root_request_context_follows") is True),
             )
         if activity_kind in {"started", "interacted"}:
             return [
@@ -786,24 +748,16 @@ class AgentObserverView:
         if not isinstance(item, dict):
             return []
         item_id = item.get("id")
-        if (
-            not isinstance(item_id, str)
-            or not item_id
-            or item.get("sender_thread_id") != self._root_thread_id
-        ):
+        if not isinstance(item_id, str) or not item_id or item.get("sender_thread_id") != self._root_thread_id:
             return []
         receiver_ids = item.get("receiver_thread_ids")
         if not isinstance(receiver_ids, list):
             return []
         activity_keys = [
-            (target_thread_id, item_id)
-            for target_thread_id in receiver_ids
-            if isinstance(target_thread_id, str)
+            (target_thread_id, item_id) for target_thread_id in receiver_ids if isinstance(target_thread_id, str)
         ]
         matching_activities = [
-            activity
-            for activity_key in activity_keys
-            if (activity := self._activity_items.get(activity_key)) is not None
+            activity for activity_key in activity_keys if (activity := self._activity_items.get(activity_key)) is not None
         ]
         if not matching_activities:
             for activity_key in activity_keys:
@@ -818,9 +772,7 @@ class AgentObserverView:
                     agent_path=agent_path,
                     activity_kind=activity_kind,
                     invocation=item,
-                    root_request_context_follows=(
-                        event.get("root_request_context_follows") is True
-                    ),
+                    root_request_context_follows=(event.get("root_request_context_follows") is True),
                 )
             )
         return lines
@@ -882,14 +834,8 @@ class AgentObserverView:
                 )
             )
             if not root_request_context_follows and request_kind is not None:
-                lines.extend(
-                    ["", "ROOT TURN REQUEST UNAVAILABLE", f"  {_SCOPE_UNAVAILABLE_DETAIL}"]
-                )
-        if (
-            isinstance(prompt, str)
-            and prompt
-            and invocation_identity not in self._rendered_prompt_ids
-        ):
+                lines.extend(["", "ROOT TURN REQUEST UNAVAILABLE", f"  {_SCOPE_UNAVAILABLE_DETAIL}"])
+        if isinstance(prompt, str) and prompt and invocation_identity not in self._rendered_prompt_ids:
             self._rendered_prompt_ids.add(invocation_identity)
             lines.extend(_exact_collaboration_prompt_lines(tool_name, prompt))
         elif (
@@ -940,16 +886,10 @@ class AgentObserverView:
         activity_item_id = event.get("activity_item_id")
         pending_requests = self._pending_requests.get(str(target_thread_id), ())
         pending_request = next(
-            (
-                request
-                for request in pending_requests
-                if request.activity_item_id == activity_item_id
-            ),
+            (request for request in pending_requests if request.activity_item_id == activity_item_id),
             None,
         )
-        matching_turn_key = self._activity_turn_keys.get(
-            (str(target_thread_id), str(activity_item_id))
-        )
+        matching_turn_key = self._activity_turn_keys.get((str(target_thread_id), str(activity_item_id)))
         matching_turn = self._turn_presentations.get(matching_turn_key)
         if (
             target_thread_id not in self._target_states
@@ -975,9 +915,7 @@ class AgentObserverView:
         if not rendered:
             return []
         self._seen_parent_request_keys.add(request_key)
-        self._root_request_text_by_activity[(str(target_thread_id), activity_item_id)] = (
-            tuple(text_blocks)
-        )
+        self._root_request_text_by_activity[(str(target_thread_id), activity_item_id)] = tuple(text_blocks)
         if pending_request is not None:
             pending_request.text_blocks = tuple(text_blocks)
         elif matching_turn is not None:
@@ -1022,10 +960,7 @@ class AgentObserverView:
         if not plain_text:
             return []
         turn_key = (str(thread_id), turn_id)
-        if (
-            turn_key not in self._turn_presentations
-            or self._turn_presentations[turn_key].activity_item_id is None
-        ):
+        if turn_key not in self._turn_presentations or self._turn_presentations[turn_key].activity_item_id is None:
             self._bind_turn(*turn_key)
         path = self._target_paths.get(str(thread_id), str(thread_id))
         agent_name = _agent_display_name(path)
@@ -1052,11 +987,7 @@ class AgentObserverView:
             event_kind = event.get("event_kind")
             detail = event.get("detail")
             relevant = thread_id in self._target_states
-            if (
-                thread_id == self._root_thread_id
-                and event_kind == "subagent_activity"
-                and isinstance(detail, Mapping)
-            ):
+            if thread_id == self._root_thread_id and event_kind == "subagent_activity" and isinstance(detail, Mapping):
                 target = optional_uuid_text(detail.get("target_codex_thread_id"))
                 if (
                     recover_unknown_targets
@@ -1066,14 +997,10 @@ class AgentObserverView:
                 ):
                     recovered_activity_kind = detail.get("activity_kind")
                     self._target_states[target] = (
-                        recovered_activity_kind
-                        if isinstance(recovered_activity_kind, str)
-                        else None
+                        recovered_activity_kind if isinstance(recovered_activity_kind, str) else None
                     )
                     recovered_path = detail.get("agent_path")
-                    self._target_paths[target] = (
-                        recovered_path if isinstance(recovered_path, str) else target
-                    )
+                    self._target_paths[target] = recovered_path if isinstance(recovered_path, str) else target
                 relevant = target in self._target_states
                 if relevant and isinstance(target, str):
                     path = detail.get("agent_path")
@@ -1102,20 +1029,13 @@ class AgentObserverView:
                                     activity_kind=activity_kind,
                                     invocation=invocation,
                                     root_request_context_follows=(
-                                        (target, source_call_id)
-                                        in self._root_request_text_by_activity
+                                        (target, source_call_id) in self._root_request_text_by_activity
                                     ),
                                 )
                             )
-                    request_kind = (
-                        turn_request.get("request_kind")
-                        if isinstance(turn_request, Mapping)
-                        else None
-                    )
+                    request_kind = turn_request.get("request_kind") if isinstance(turn_request, Mapping) else None
                     target_turn_id = (
-                        turn_request.get("target_codex_turn_id")
-                        if isinstance(turn_request, Mapping)
-                        else None
+                        turn_request.get("target_codex_turn_id") if isinstance(turn_request, Mapping) else None
                     )
                     if isinstance(target_turn_id, str):
                         turn = self._bind_turn(target, target_turn_id)
@@ -1193,9 +1113,7 @@ class AgentObserverView:
         self._pending_requests.pop(thread_id, None)
         self._target_states.pop(thread_id, None)
         self._target_paths.pop(thread_id, None)
-        self._active_request_ids = {
-            key for key in self._active_request_ids if key[0] != thread_id
-        }
+        self._active_request_ids = {key for key in self._active_request_ids if key[0] != thread_id}
         for collection in (
             self._seen_activity_item_ids,
             self._rendered_invocation_ids,
@@ -1218,9 +1136,7 @@ class AgentObserverView:
             for identity in tuple(collection):
                 if identity[0] == thread_id:
                     collection.pop(identity, None)
-        self._seen_parent_request_keys = {
-            key for key in self._seen_parent_request_keys if key[0] != thread_id
-        }
+        self._seen_parent_request_keys = {key for key in self._seen_parent_request_keys if key[0] != thread_id}
 
     def _accept_target_trace_event(
         self,
@@ -1279,8 +1195,7 @@ class AgentObserverView:
                     "reasoning_output_tokens",
                     "total_tokens",
                 )
-                if isinstance((value := detail.get(name)), int)
-                and not isinstance(value, bool)
+                if isinstance((value := detail.get(name)), int) and not isinstance(value, bool)
             }
             if usage:
                 turn.token_usage = usage
@@ -1299,14 +1214,10 @@ class AgentObserverView:
             ]
         if event_kind not in {"turn_completed", "turn_aborted"}:
             return []
-        if thread_id in self._pending_requests and (
-            not turn_was_known or turn.activity_item_id is None
-        ):
+        if thread_id in self._pending_requests and (not turn_was_known or turn.activity_item_id is None):
             turn = self._bind_turn(thread_id, codex_turn_id)
             turn_key = (thread_id, codex_turn_id)
-        self._target_states[thread_id] = (
-            "turnCompleted" if event_kind == "turn_completed" else "turnAborted"
-        )
+        self._target_states[thread_id] = "turnCompleted" if event_kind == "turn_completed" else "turnAborted"
         if turn.activity_item_id is not None:
             self._active_request_ids.discard((thread_id, turn.activity_item_id))
         self._turns_needing_evidence.add(turn_key)
@@ -1327,14 +1238,9 @@ class AgentObserverView:
         elif evidence.history_inheritance_kind == "inherited":
             ordinal = evidence.inherited_history_start_ordinal
             suffix = "" if ordinal is None else f" at source ordinal {ordinal}"
-            description = (
-                "NEW INHERITED AGENT · separate thread/turn · "
-                f"inherited-history cutoff{suffix}"
-            )
+            description = f"NEW INHERITED AGENT · separate thread/turn · inherited-history cutoff{suffix}"
         else:
-            description = (
-                "NEW CLEAN AGENT · separate thread/turn · no parent history inherited"
-            )
+            description = "NEW CLEAN AGENT · separate thread/turn · no parent history inherited"
         return ["", f"CONTEXT · {agent_name}", f"  {description}"]
 
     def _render_work(self, turn_key: AgentTurnKey, fields: tuple[str, ...]) -> list[str]:
@@ -1543,11 +1449,7 @@ def _projected_invocation_tool_name(
 
 def _plain_terminal_text(value: str) -> str:
     without_escapes = _ANSI_ESCAPE_PATTERN.sub("", value)
-    return "".join(
-        character
-        for character in without_escapes
-        if character in {"\n", "\t"} or 32 <= ord(character) != 127
-    )
+    return "".join(character for character in without_escapes if character in {"\n", "\t"} or 32 <= ord(character) != 127)
 
 
 def _render_exact_text_blocks(text_blocks: list[str]) -> list[str]:
@@ -1625,8 +1527,7 @@ def _format_elapsed(start: str | None, end: object) -> str | None:
     with suppress(ValueError):
         seconds = round(
             (
-                datetime.fromisoformat(end.replace("Z", "+00:00"))
-                - datetime.fromisoformat(start.replace("Z", "+00:00"))
+                datetime.fromisoformat(end.replace("Z", "+00:00")) - datetime.fromisoformat(start.replace("Z", "+00:00"))
             ).total_seconds()
         )
         if seconds < 0:
@@ -1829,26 +1730,20 @@ def main(arguments: list[str] | None = None) -> int:
                     break
             if any(event.get("kind") == "runtime_closed" for event in batch):
                 return 0
-            snapshots = [
-                event for event in batch if event.get("kind") == "observer_state_snapshot"
-            ]
+            snapshots = [event for event in batch if event.get("kind") == "observer_state_snapshot"]
             latest_snapshot = max(
                 snapshots,
                 key=lambda event: (
                     event.get("epoch")
-                    if isinstance(event.get("epoch"), int)
-                    and not isinstance(event.get("epoch"), bool)
+                    if isinstance(event.get("epoch"), int) and not isinstance(event.get("epoch"), bool)
                     else -1,
                     event.get("revision")
-                    if isinstance(event.get("revision"), int)
-                    and not isinstance(event.get("revision"), bool)
+                    if isinstance(event.get("revision"), int) and not isinstance(event.get("revision"), bool)
                     else -1,
                 ),
                 default=None,
             )
-            semantic_events = [
-                event for event in batch if event.get("kind") != "observer_state_snapshot"
-            ]
+            semantic_events = [event for event in batch if event.get("kind") != "observer_state_snapshot"]
             transport_overflowed = False
             if latest_snapshot is not None:
                 semantic_events = [
@@ -1856,11 +1751,7 @@ def main(arguments: list[str] | None = None) -> int:
                     *semantic_events,
                 ]
                 overflow = latest_snapshot.get("overflow")
-                dropped_event_count = (
-                    overflow.get("dropped_event_count")
-                    if isinstance(overflow, Mapping)
-                    else None
-                )
+                dropped_event_count = overflow.get("dropped_event_count") if isinstance(overflow, Mapping) else None
                 if (
                     isinstance(dropped_event_count, int)
                     and not isinstance(dropped_event_count, bool)

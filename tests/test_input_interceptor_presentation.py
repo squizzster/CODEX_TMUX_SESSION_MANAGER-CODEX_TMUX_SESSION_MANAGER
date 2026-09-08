@@ -8,12 +8,14 @@ import pytest
 
 from rodex.input_interceptor_config import (
     INPUT_INTERCEPTORS,
+    ArgumentMenuConfig,
     InputInterceptorRegistration,
-    InterceptionCommand,
+    InterceptionOption,
     InterceptionRule,
     LiveInterceptionRule,
 )
 from rodex.input_interceptor_presentation import InputInterceptorPresentation
+from rodex.input_menu import INPUT_MENU_TARGET, InputInterceptionMenu, InputMenuView
 from rodex.interaction_pipeline import (
     DeliveryStatus,
     InteractionOperation,
@@ -23,7 +25,6 @@ from rodex.interaction_pipeline import (
     SessionInteractionPipeline,
 )
 from rodex.pane_control import TmuxPaneController
-from rodex.terminal_completion import TerminalCompletionState
 from rodex.tmux_session_capability import TmuxRuntimeCapability
 from rodex_registry import RodexRuntimeId
 
@@ -72,16 +73,25 @@ def setup_presentation(registrations=INPUT_INTERCEPTORS, *, display_available=Tr
     return pipeline, presentation, pane, messages
 
 
+def menu_request(text, registrations=INPUT_INTERCEPTORS, prefix="/r"):
+    menu = InputInterceptionMenu(registrations, text)
+    return InteractionRequest(
+        INPUT_MENU_TARGET,
+        InteractionOperation.INTERACTIVE_INPUT,
+        "test",
+        text=text,
+        payload=menu.view(prefix).serialize(),
+    )
+
+
 @pytest.mark.parametrize("text", ["/ro", "/rod", "/rode", "/rodex"])
 def test_every_live_regex_match_displays_the_same_configured_completion(text):
     pipeline, _presentation, _pane, messages = setup_presentation()
-    entry = INPUT_INTERCEPTORS[0]
-    assert pipeline.execute(
-        InteractionRequest(entry.target, InteractionOperation.INTERACTIVE_INPUT, "test", text=text, payload="/r")
-    ).accepted
+    assert pipeline.execute(menu_request(text)).accepted
     assert len(messages) == 1 and messages[0].operation == InteractionOperation.DISPLAY_STATE
-    state = TerminalCompletionState.deserialize(messages[0].payload)
-    assert state == TerminalCompletionState(text, "/r", "/rodex", "issue a rodex command")
+    state = InputMenuView.deserialize(messages[0].payload)
+    assert state == InputInterceptionMenu(INPUT_INTERCEPTORS, text).view("/r")
+    assert state.rows[0].label == "/rodex" and state.rows[0].helper_text == "issue a rodex command"
     assert not messages[0].start_model_turn
 
 
@@ -93,7 +103,7 @@ def test_placeholder_submission_is_display_only_and_release_clears_terminal_stat
     ).accepted
     assert len(messages) == 1 and "placeholder only" in messages[0].text
     assert all(not message.start_model_turn for message in messages)
-    pipeline.execute(InteractionRequest(entry.target, InteractionOperation.INPUT_RELEASE, "test", text="/rodex hi"))
+    pipeline.execute(InteractionRequest(INPUT_MENU_TARGET, InteractionOperation.INPUT_RELEASE, "test", text="/rodex hi"))
     assert messages[-1].operation == InteractionOperation.DISPLAY_STATE and messages[-1].payload is None
     presentation.close()
     assert entry.target not in pipeline._targets
@@ -101,40 +111,33 @@ def test_placeholder_submission_is_display_only_and_release_clears_terminal_stat
 
 def test_unavailable_display_rejects_takeover():
     pipeline, _presentation, _pane, messages = setup_presentation(display_available=False)
-    entry = INPUT_INTERCEPTORS[0]
-    result = pipeline.execute(
-        InteractionRequest(
-            entry.target,
-            InteractionOperation.INTERACTIVE_INPUT,
-            "test",
-            text="/rodex #(echo should-not-execute)\n#{pane_id}",
-            payload="/r",
-        )
-    )
+    result = pipeline.execute(menu_request("/rodex #(echo should-not-execute)\n#{pane_id}"))
     assert result.status == DeliveryStatus.REJECTED
     assert messages == []
 
 
-def test_another_configuration_drives_matching_helper_completion_and_command_list():
+def test_another_configuration_drives_matching_helper_completion_and_argument_menu():
     entry = InputInterceptorRegistration(
         "example",
         "!hello",
         LiveInterceptionRule(r"^!h(?:ello)?$", helper_text="custom helper text"),
         InterceptionRule(r"^!hello (.*?)$"),
-        (InterceptionCommand("future", "a future command"),),
+        ArgumentMenuConfig("Custom heading", "Custom subheading", (InterceptionOption("future", "a future option"),)),
     )
     pipeline, _presentation, _pane, messages = setup_presentation((entry,))
-    request = InteractionRequest(entry.target, InteractionOperation.INTERACTIVE_INPUT, "test", text="!h", payload="!")
+    request = menu_request("!h", (entry,), "!")
     assert pipeline.execute(request).accepted
-    assert TerminalCompletionState.deserialize(messages[-1].payload).helper_text == "custom helper text"
-    assert TerminalCompletionState.deserialize(messages[-1].payload).completion_text == "!hello"
-    assert pipeline.execute(replace(request, text="!help")).accepted
-    assert TerminalCompletionState.deserialize(messages[-1].payload).completion_text == ""
-    assert not pipeline.execute(replace(request, operation=InteractionOperation.SUBMITTED_COMMAND)).accepted
-    assert pipeline.execute(
-        replace(request, operation=InteractionOperation.SUBMITTED_COMMAND, text="!hello future")
+    assert InputMenuView.deserialize(messages[-1].payload).rows[0].helper_text == "custom helper text"
+    assert InputMenuView.deserialize(messages[-1].payload).rows[0].label == "!hello"
+    assert pipeline.execute(menu_request("!help", (entry,), "!")).accepted
+    assert InputMenuView.deserialize(messages[-1].payload).rows == ()
+    assert not pipeline.execute(
+        replace(request, target=entry.target, operation=InteractionOperation.SUBMITTED_COMMAND)
     ).accepted
-    assert "future — a future command" in messages[-1].text
+    assert pipeline.execute(
+        replace(request, target=entry.target, operation=InteractionOperation.SUBMITTED_COMMAND, text="!hello future")
+    ).accepted
+    assert "!hello future: placeholder only" in messages[-1].text
     assert all(not message.start_model_turn for message in messages)
 
 

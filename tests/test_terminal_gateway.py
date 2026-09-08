@@ -15,6 +15,7 @@ from contextlib import contextmanager, suppress
 import pytest
 
 from rodex.input_interceptor_config import INPUT_INTERCEPTORS
+from rodex.input_menu import INPUT_MENU_TARGET
 from rodex.interaction_pipeline import (
     DeliveryStatus,
     InteractionOperation,
@@ -116,6 +117,15 @@ def test_real_child_terminal_pass_through_resize_signal_exit_and_outer_restorati
 def test_local_input_and_submission_share_pipeline_but_never_send_native_enter():
     delivered = []
     pipeline = SessionInteractionPipeline()
+    pipeline.register(
+        InteractionTarget(
+            INPUT_MENU_TARGET,
+            "runtime",
+            frozenset({InteractionOperation.INTERACTIVE_INPUT, InteractionOperation.INPUT_RELEASE}),
+            exists=lambda: True,
+            deliver=lambda request: delivered.append(request) or InteractionResult(DeliveryStatus.DELIVERED),
+        )
+    )
     pipeline.register(
         InteractionTarget(
             INPUT_INTERCEPTORS[0].target,

@@ -7,10 +7,12 @@ import pytest
 
 from rodex.input_interceptor_config import (
     INPUT_INTERCEPTORS,
+    ArgumentMenuConfig,
     InputInterceptorRegistration,
     InterceptionRule,
     LiveInterceptionRule,
 )
+from rodex.input_menu import INPUT_MENU_TARGET, InputMenuStage, InputMenuView
 from rodex.interaction_pipeline import (
     DeliveryStatus,
     InteractionOperation,
@@ -60,6 +62,15 @@ class InputHarness:
         self.events = []
         self.prefix_checks = []
         self.pipeline = SessionInteractionPipeline()
+        self.pipeline.register(
+            InteractionTarget(
+                INPUT_MENU_TARGET,
+                "test-runtime",
+                frozenset({InteractionOperation.INTERACTIVE_INPUT, InteractionOperation.INPUT_RELEASE}),
+                exists=lambda: True,
+                deliver=self.deliver,
+            )
+        )
         for entry in registrations:
             self.pipeline.register(
                 InteractionTarget(
@@ -111,6 +122,138 @@ def test_slash_and_r_are_immediate_native_input_then_o_enters_local_owner():
     assert harness.prefix_checks == ["/r"]
     assert harness.events[-1].text == "/ro"
     assert harness.events[-1].operation == InteractionOperation.INTERACTIVE_INPUT
+
+
+def menu_view(harness):
+    return InputMenuView.deserialize(
+        next(
+            event.payload
+            for event in reversed(harness.events)
+            if event.operation == InteractionOperation.INTERACTIVE_INPUT
+        )
+    )
+
+
+@pytest.mark.parametrize("up,down", [(b"\x1b[A", b"\x1b[B"), (b"\x1bOA", b"\x1bOB"), (b"\x1b[57352u", b"\x1b[57353u")])
+@pytest.mark.parametrize("chunk_size", [1, 100])
+def test_arrow_encodings_navigate_both_menus_without_leaking_native_input(up, down, chunk_size):
+    harness = InputHarness()
+
+    def feed(data):
+        for offset in range(0, len(data), chunk_size):
+            harness.feed(data[offset : offset + chunk_size])
+
+    feed(b"/rod" + up)
+    assert menu_view(harness).selected_index == 1
+    feed(down)
+    assert menu_view(harness).selected_index == 0
+    feed(b"\r\n")
+    assert menu_view(harness).stage == InputMenuStage.ARGUMENTS
+    assert menu_view(harness).selected_index == 0
+    assert not any(event.operation == InteractionOperation.SUBMITTED_COMMAND for event in harness.events)
+    feed(up)
+    assert menu_view(harness).selected_index == 2
+    feed(down + down)
+    assert menu_view(harness).selected_index == 1
+    assert harness.forwarded == b"/r"
+    feed(b"\r\n")
+    assert [event.text for event in harness.events if event.operation == InteractionOperation.SUBMITTED_COMMAND] == [
+        "/rodex dark"
+    ]
+    assert harness.forwarded == b"/r\x7f\x7f" and not harness.interceptor.active
+
+
+def test_escape_returns_to_prior_command_selection_then_closes_local_menu():
+    harness = InputHarness()
+    harness.feed(b"/rod\x1b[B\r")
+    assert menu_view(harness).stage == InputMenuStage.ARGUMENTS and menu_view(harness).rows == ()
+    harness.feed(b"\r\x1b[A\x1b[B")  # Empty picker cannot confirm or acquire a selection.
+    assert harness.forwarded == b"/r"
+    harness.escape()
+    assert menu_view(harness).stage == InputMenuStage.COMMANDS
+    assert menu_view(harness).selected_index == 1 and menu_view(harness).draft == "/rod"
+    harness.escape()
+    assert not harness.interceptor.active and harness.forwarded == b"/r"
+
+
+def test_two_rapid_escapes_and_escape_followed_by_arrow_keep_their_key_boundaries():
+    harness = InputHarness()
+    harness.feed(b"/rod\r\x1b\x1b[B")
+    assert menu_view(harness).stage == InputMenuStage.COMMANDS and menu_view(harness).selected_index == 1
+    harness.feed(b"\r\x1b\x1b")
+    for event in harness.decoder.expire_incomplete(1):
+        harness.interceptor.accept(event)
+    assert not harness.interceptor.active and harness.forwarded == b"/r"
+
+
+def test_rejected_menu_navigation_does_not_change_what_enter_will_select():
+    harness = InputHarness()
+    harness.feed(b"/rod")
+    harness.reject = True
+    harness.feed(b"\x1b[B")
+    harness.reject = False
+    harness.feed(b"\r")
+    assert [row.label for row in menu_view(harness).rows] == ["light", "dark", "dusk"]
+
+
+def test_rejected_confirmation_keeps_the_option_picker_for_an_explicit_retry():
+    harness = InputHarness()
+    harness.feed(b"/rod\r\x1b[B")
+    harness.reject = True
+    harness.feed(b"\r\n")
+    assert harness.interceptor.active and harness.forwarded == b"/r"
+    harness.reject = False
+    harness.feed(b"\r")
+    submitted = [event for event in harness.events if event.operation == InteractionOperation.SUBMITTED_COMMAND]
+    assert [event.text for event in submitted] == ["/rodex dark", "/rodex dark"]
+    assert not harness.interceptor.active and harness.forwarded == b"/r\x7f\x7f"
+
+
+def test_changed_native_composer_prevents_confirmation_without_losing_option_selection():
+    harness = InputHarness()
+    harness.feed(b"/rod\r\x1b[A")
+    harness.interceptor._confirm_native_prefix = lambda _prefix: False
+    harness.feed(b"\r\n")
+    assert harness.interceptor.active and harness.forwarded == b"/r"
+    assert not any(event.operation == InteractionOperation.SUBMITTED_COMMAND for event in harness.events)
+    harness.interceptor._confirm_native_prefix = lambda _prefix: True
+    harness.feed(b"\r")
+    submitted = [event.text for event in harness.events if event.operation == InteractionOperation.SUBMITTED_COMMAND]
+    assert submitted == ["/rodex dusk"]
+
+
+def test_rejected_back_and_tab_keep_the_last_accepted_menu_state():
+    harness = InputHarness()
+    harness.feed(b"/rod\x1b[B")
+    harness.reject = True
+    harness.feed(b"\t")
+    harness.reject = False
+    harness.feed(b"\x7f")
+    assert menu_view(harness).draft == "/ro" and menu_view(harness).selected_index == 1
+    harness.feed(b"\r")
+    harness.reject = True
+    harness.escape()
+    harness.reject = False
+    harness.feed(b"\x1b[B")
+    assert menu_view(harness).stage == InputMenuStage.ARGUMENTS
+    assert menu_view(harness).rows == () and harness.forwarded == b"/r"
+
+
+@pytest.mark.parametrize("raw", [b"\x1b\x1b", b"\x1b\x1b[A", b"\x1b[A\x1bOB", b"\x1b[57352u"])
+def test_escape_and_navigation_framing_preserves_every_byte_outside_local_menus(raw):
+    harness = InputHarness()
+    harness.feed(raw)
+    for event in harness.decoder.expire_incomplete(1):
+        harness.interceptor.accept(event)
+    assert harness.forwarded == raw and harness.events == []
+
+
+def test_picker_ignores_unrelated_editor_keys_and_pastes_and_forwards_terminal_replies():
+    harness = InputHarness()
+    harness.feed(b"/rod\r\x1b[Dhello" + PASTE_START + b"/elsewhere\r\n" + PASTE_END + b"\x1b[12;3R")
+    assert harness.forwarded == b"/r\x1b[12;3R"
+    assert menu_view(harness).stage == InputMenuStage.ARGUMENTS
+    assert not any(event.operation == InteractionOperation.SUBMITTED_COMMAND for event in harness.events)
 
 
 @pytest.mark.parametrize("chunk_size", [1, 2, 3, 4, 7, 100])
@@ -173,20 +316,22 @@ def test_enter_intercepts_an_atomic_paste_that_never_matched_the_live_expression
     assert harness.forwarded == PASTE_START + draft + PASTE_END + b"\x7f" * len(draft)
 
 
-def test_an_ambiguous_phase_does_not_choose_a_command_by_registration_order():
+def test_ambiguous_typed_submission_stays_native_despite_shared_live_menu():
     duplicate = replace(INPUT_INTERCEPTORS[0], name="another")
     harness = InputHarness(registrations=(*INPUT_INTERCEPTORS, duplicate))
     harness.feed(b"/rodex example\r")
-    assert harness.forwarded == b"/rodex example\r"
-    assert harness.events == []
+    assert harness.forwarded == b"/r" + PASTE_START + b"odex example" + PASTE_END + b"\r"
+    assert not any(event.operation == InteractionOperation.SUBMITTED_COMMAND for event in harness.events)
 
 
 def test_changing_only_enter_configuration_changes_submission_behavior():
-    registration = replace(INPUT_INTERCEPTORS[0], on_enter=InterceptionRule(r"^/rode$"))
+    registration = replace(
+        INPUT_INTERCEPTORS[0], on_enter=InterceptionRule(r"^/rode example$"), argument_menu=ArgumentMenuConfig()
+    )
     harness = InputHarness(registrations=(registration,))
-    harness.feed(b"/rode\r")
+    harness.feed(b"/rode example\r")
     assert [event.text for event in harness.events if event.operation == InteractionOperation.SUBMITTED_COMMAND] == [
-        "/rode"
+        "/rode example"
     ]
     assert harness.forwarded == b"/r\x7f\x7f"
 

@@ -155,6 +155,17 @@ work. The record buffer contains metadata, not prompt bodies or another durable 
 | Native editor state | Codex; Rodex observes a bounded candidate and verifies the native composer at handoff |
 | Inline completion rendering | `TerminalCompletionRenderer` → gateway output queue; native-only screen projection, no editor mutation or second writer |
 
+### Escape timing
+
+A lone Escape must be distinguished from the start of an arrow or Alt-key sequence.
+The inspected tmux 3.2a server reported `escape-time 500`; Rodex leaves that server
+setting unchanged. `TerminalInputDecoder` adds a 35 ms lone-Escape wait, expired by the
+gateway's 20 ms relay loop even when no further keyboard or child-output bytes arrive.
+The combined waits explain the user's roughly 0.6-second Escape response; complete
+Up/Down frames are decoded immediately. This is input framing, not a menu transition
+delay. The valid argument picker goes back one level; the command list releases local
+input. Commands without options never enter a picker and need no Escape recovery.
+
 ## Enforced audit and evidence
 
 `test_interaction_path_ownership.py` recursively scans every production package and
@@ -179,6 +190,8 @@ missing-option errors and immediate keyboard release. An isolated Python-child P
 single-Escape back/release without a follow-up key or child output. Tests also cover
 height/width changes, native-byte preservation and no implicit model turn. Tests exercise
 the real Python input/presentation/gateway adapters without launching Codex or a live Rodex
-session. The user confirmed live appearance, Up/Down and Enter selection for the preceding
-menu change, then reported the confusing empty picker fixed here. This correction has not
-been live-tested; the automated live-startup suite was not rerun.
+session. The release passed 261 focused tests, Ruff lint/format checks and a package build.
+The user confirmed live appearance, Up/Down, Enter selection and the missing-options
+correction. The automated live-startup suite was not rerun, and the push reused this
+completed verification without rerunning tests. SQL generation 19 and tmux protocol v2
+require no changes for these menu operations.

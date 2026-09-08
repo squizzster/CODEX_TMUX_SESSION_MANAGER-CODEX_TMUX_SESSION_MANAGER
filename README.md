@@ -194,9 +194,17 @@ projection or the native editor. Partial redraws defer painting without releasin
 generated output is clipped and cannot wrap into scrollback. The placeholder draft is a
 single visible line, with control characters shown as spaces. Native output keeps rendering.
 Configuration, phase routing, inline rendering and adapter integration have Python tests.
-The user has confirmed the live appearance, Up/Down and Enter selection; the automated
-live-startup suite was not rerun for this release. Existing live hosts retain their loaded code; this feature
-is available in newly started hosts, without restarting any current session.
+The user has confirmed the live appearance, Up/Down, Enter selection and the missing-options
+fix. The release passed 261 focused Python tests, Ruff lint/format checks and a package build;
+the automated live-startup suite was not rerun. Existing live hosts retain their loaded code;
+the changes apply to newly started hosts without restarting any current session.
+
+Escape can feel slower than Up/Down because a lone Escape byte also starts terminal key
+sequences. The inspected tmux 3.2a server had `escape-time 500` (milliseconds); Rodex then
+waits another 35 ms to frame a lone Escape, with a 20 ms relay polling interval. Together
+these explain the observed roughly 0.6-second response. Complete arrow sequences do not
+need that ambiguity wait. Rodex does not override tmux's `escape-time` in this release;
+one Escape still performs one back/cancel action after decoding, without a second press.
 
 Every interactive create, resume, recovery, and reattach uses one concise lifecycle:
 

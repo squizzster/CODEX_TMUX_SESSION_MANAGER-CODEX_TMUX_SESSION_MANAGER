@@ -14,6 +14,22 @@ boundary; domain policy has one canonical owner underneath it.
   leave an owner, partially perform its policy, and later rejoin it.
 - Command vocabulary is centralized and excluded from every name-allocation route.
 
+## Local input and menu ownership
+
+- One host-owned PTY gateway carries keyboard input and native output through the shared
+  interaction pipeline. Attaching another client does not create another input owner.
+- Each interception config supplies live/Enter expressions, display text and argument
+  options. No command-name branch belongs in the decoder, menu or renderer.
+- `InputInterceptionMenu` owns filtering and cyclic selection. Immutable views carry the
+  selected identity to presentation; rejected navigation retains the last accepted state.
+- Empty option lists cannot become argument pickers. Selecting one produces an explicit
+  configuration-error operation, not a command submission, and releases input after its
+  display-only response and verified native-prefix handoff succeed.
+- Option confirmation and matching typed input converge on the submitted-command handler.
+  Current dummy responses use `MESSAGE(start_model_turn=False)` to the main target.
+- Escape framing belongs to terminal decoding; back/cancel behavior belongs to menu state.
+  Display cannot infer model-turn intent. See the [interaction inventory](INTERACTION_PATHS.md).
+
 ## Identity and observation
 
 - Rodex registries, Rodex sessions, runtime incarnations, Codex threads, Codex turns,

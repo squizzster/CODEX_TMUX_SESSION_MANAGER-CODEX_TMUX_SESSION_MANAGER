@@ -481,7 +481,8 @@ def test_help_prints_rodex_commands_without_codex_tmux_or_database(
     assert "_running" in output.out
     assert "_context" in output.out
     assert "current interactive options" in output.out
-    assert "Codex 0.151.0 subcommands" in output.out
+    assert "Other Codex 0.151.0 subcommand forms" in output.out
+    assert "'resume CODEX_UUID' uses the same managed session pipeline" in output.out
     assert "canonical Codex UUID" in output.out
     assert delegator.calls == []
     assert not database.exists()
@@ -2967,10 +2968,12 @@ def test_live_cool_name_argument_renames_configures_and_reattaches_without_start
 
 
 @pytest.mark.evolutionary_regression
+@pytest.mark.parametrize("prefix", [[], ["resume"]], ids=["bare-id", "explicit-resume"])
 def test_live_codex_uuid_argument_opens_its_registered_rodex_display_identity(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
+    prefix: list[str],
 ) -> None:
     """A user may retain only the Codex UUID for a live Rodex-managed session."""
     database = tmp_path / "rodex.sqlite3"
@@ -2983,7 +2986,7 @@ def test_live_codex_uuid_argument_opens_its_registered_rodex_display_identity(
 
     assert (
         run(
-            [str(CODEX_SESSION_ID)],
+            [*prefix, str(CODEX_SESSION_ID)],
             database_path=database,
             launcher=launcher,  # type: ignore[arg-type]
         )
@@ -2999,10 +3002,12 @@ def test_live_codex_uuid_argument_opens_its_registered_rodex_display_identity(
     assert capsys.readouterr().out == ("Rodex attach [remarkable-aardvark].\nRodex exited [remarkable-aardvark].\n")
 
 
+@pytest.mark.parametrize("prefix", [[], ["resume"]], ids=["bare-id", "explicit-resume"])
 def test_ended_codex_uuid_argument_resumes_the_registered_rodex_session(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
+    prefix: list[str],
 ) -> None:
     database = tmp_path / "rodex.sqlite3"
     monkeypatch.setattr("cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga")
@@ -3020,7 +3025,7 @@ def test_ended_codex_uuid_argument_resumes_the_registered_rodex_session(
 
     assert (
         run(
-            [str(CODEX_SESSION_ID)],
+            [*prefix, str(CODEX_SESSION_ID)],
             database_path=database,
             launcher=launcher,  # type: ignore[arg-type]
         )
@@ -3033,10 +3038,12 @@ def test_ended_codex_uuid_argument_resumes_the_registered_rodex_session(
     assert capsys.readouterr().out == ("Rodex attach [automatic-beluga].\nRodex exited [automatic-beluga].\n")
 
 
+@pytest.mark.parametrize("prefix", [[], ["resume"]], ids=["bare-id", "explicit-resume"])
 def test_persisted_unregistered_codex_uuid_becomes_a_managed_rodex_session(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
+    prefix: list[str],
 ) -> None:
     database = tmp_path / "rodex.sqlite3"
     monkeypatch.setattr("cool_name.functions.coolname.generate_slug", lambda _count: "remarkable-aardvark")
@@ -3048,7 +3055,7 @@ def test_persisted_unregistered_codex_uuid_becomes_a_managed_rodex_session(
 
     assert (
         run(
-            [str(REPLACEMENT_CODEX_SESSION_ID)],
+            [*prefix, str(REPLACEMENT_CODEX_SESSION_ID)],
             database_path=database,
             launcher=launcher,  # type: ignore[arg-type]
         )
@@ -3062,6 +3069,63 @@ def test_persisted_unregistered_codex_uuid_becomes_a_managed_rodex_session(
     assert launcher.attached[0].tmux_session_name == "remarkable-aardvark"
     assert lookup_rodex_sessions_id_from_a_codex_session_id(REPLACEMENT_CODEX_SESSION_ID, database) == 1
     assert capsys.readouterr().out == ("Rodex attach [remarkable-aardvark].\nRodex exited [remarkable-aardvark].\n")
+
+
+@pytest.mark.parametrize("disappears_after_probe", [False, True])
+def test_explicit_resume_missing_codex_history_never_starts_an_unrelated_thread(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    disappears_after_probe: bool,
+) -> None:
+    database = tmp_path / "rodex.sqlite3"
+    monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
+    launcher = StubLauncher(tmp_path)
+    if disappears_after_probe:
+        launcher.persisted_codex_session_ids.add(REPLACEMENT_CODEX_SESSION_ID)
+        launcher.start_error = RodexCodexSessionNotFoundError("history disappeared")
+    delegator = RecordingCodexDelegator(returncode=23)
+
+    with pytest.raises(RodexLaunchError, match="not available to resume"):
+        run(
+            ["resume", str(REPLACEMENT_CODEX_SESSION_ID)],
+            database_path=database,
+            launcher=launcher,  # type: ignore[arg-type]
+            codex_delegator=delegator,
+        )
+
+    assert launcher.started == (
+        [(Path.cwd(), ["resume", str(REPLACEMENT_CODEX_SESSION_ID)])] if disappears_after_probe else []
+    )
+    assert launcher.attached == []
+    assert delegator.calls == []
+    if database.exists():
+        assert lookup_rodex_sessions_id_from_a_codex_session_id(REPLACEMENT_CODEX_SESSION_ID, database) is None
+
+
+def test_explicit_resume_keeps_a_registered_codex_identity_when_its_history_is_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database = tmp_path / "rodex.sqlite3"
+    monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
+    monkeypatch.setattr("cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga")
+    monkeypatch.setattr("rodex_registry.lifecycle.current_rodex_sessions_user_identity", lambda: DNA)
+    create_exact_controlled_session(database, tmp_path)
+    launcher = StubLauncher(tmp_path)
+    launcher.live = False
+    launcher.start_error = RodexCodexSessionNotFoundError("history disappeared")
+
+    with pytest.raises(RodexLaunchError, match="not available to resume"):
+        run(
+            ["resume", str(CODEX_SESSION_ID)],
+            database_path=database,
+            launcher=launcher,  # type: ignore[arg-type]
+        )
+
+    assert launcher.started == [(Path.cwd(), ["resume", str(CODEX_SESSION_ID)])]
+    assert launcher.attached == []
+    assert lookup_codex_session_id_from_a_rodex_sessions_id(1, database) == CODEX_SESSION_ID
+    assert lookup_rodex_runtime_instance(1, database).runtime_id == RUNTIME_ID
 
 
 def test_missing_canonical_codex_uuid_becomes_a_managed_initial_prompt(

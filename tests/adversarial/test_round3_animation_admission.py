@@ -6,13 +6,18 @@ import shlex
 import uuid
 from collections.abc import Callable, Sequence
 from pathlib import Path
+from typing import Literal
+
+import pytest
 
 from rodex.status_animation import AsyncCommandResult, animate_status
 from rodex.status_animation_admission import (
+    ANIMATION_OWNER_WATCHDOG_DELAY_SECONDS,
     STATUS_ANIMATION_GENERATION_OPTION,
     STATUS_ANIMATION_OWNER_TOKEN_OPTION,
     STATUS_ANIMATION_PENDING_EVENT_OPTION,
     STATUS_ANIMATION_WATCHDOG_TOKEN_OPTION,
+    _animation_launch_command,
     animate_admitted_status,
     run_watchdog_gate,
     status_animation_admission_command,
@@ -159,6 +164,25 @@ async def _no_wait(_deadline: float) -> None:
     await asyncio.sleep(0)
 
 
+@pytest.mark.parametrize("mode", ["admitted", "watchdog", "watchdog-gate"])
+def test_animation_launch_owns_the_exact_pane_and_scheduling_for_every_stage(
+    mode: Literal["admitted", "watchdog", "watchdog-gate"],
+) -> None:
+    capability = _capability(Path("/isolated/round3/tmux.sock"))
+    command = _animation_launch_command(
+        "/venv/bin/python", "/usr/bin/tmux", capability, "attached", "exact-owner-token", mode=mode
+    )
+
+    assert command[:4] == ("run-shell", "-b", "-t", capability.pane_target)
+    expected_schedule = ("-d", str(ANIMATION_OWNER_WATCHDOG_DELAY_SECONDS)) if mode == "watchdog-gate" else ()
+    assert command[4:-1] == expected_schedule
+    process_arguments = shlex.split(command[-1])
+    assert process_arguments[:4] == ["exec", "/venv/bin/python", "-m", "rodex.status_animation_admission"]
+    assert process_arguments[process_arguments.index("--tmux-primary-pane-id") + 1] == capability.pane_target
+    assert process_arguments[process_arguments.index("--owner-token") + 1] == "exact-owner-token"
+    assert f"--{mode}" in process_arguments
+
+
 def _run_owner(
     tmux: _OwnerTmux,
     owner_token: str,
@@ -252,6 +276,7 @@ def test_round3_stale_owner_watchdog_performs_one_bounded_recovery() -> None:
         if "if-shell" in command and STATUS_ANIMATION_OWNER_TOKEN_OPTION in command[-1]
     ]
     assert len(owner_writes) >= 1
+    assert any("run-shell -b -t %9 -d 15.0" in command[-1] for command in owner_writes)
     assert STATUS_ANIMATION_OWNER_TOKEN_OPTION not in tmux.options
     assert tmux.options[STATUS_ANIMATION_GENERATION_OPTION] == "1"
 
@@ -309,6 +334,7 @@ def test_round3_watchdog_gate_exposes_crashes_before_starting_recovery() -> None
     recovery_process = gate_action.index("--watchdog")
 
     assert watchdog_marker_clear < recovery_process
+    assert "run-shell -b -t %9 " in gate_action
     assert STATUS_ANIMATION_WATCHDOG_TOKEN_OPTION not in tmux.options
 
 
@@ -344,7 +370,8 @@ def test_round3_hook_burst_has_one_immediate_owner_and_one_delayed_watchdog() ->
     assert "-t '#{session_id}" not in hook
     assert "--tmux-session-id '#{session_id}" not in hook
     assert hook.count(capability.tmux_session_id) >= 2
-    assert "run-shell -b -d 15.0" in hook
+    assert hook.count(f"run-shell -b -t {capability.pane_target} ") == 2
+    assert f"run-shell -b -t {capability.pane_target} -d 15.0" in hook
     assert hook.count(STATUS_ANIMATION_PENDING_EVENT_OPTION) == 1
     assert hook.count(STATUS_ANIMATION_GENERATION_OPTION) >= 4
     assert hook.count(STATUS_ANIMATION_OWNER_TOKEN_OPTION) >= 2

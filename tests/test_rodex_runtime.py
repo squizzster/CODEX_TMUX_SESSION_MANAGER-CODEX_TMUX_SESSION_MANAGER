@@ -39,6 +39,7 @@ from rodex.runtime import (
     TmuxScrollbackState,
     run_session_host,
 )
+from rodex.status_animation import FRAME_INTERVAL_SECONDS, status_frames
 from rodex.tmux_session_capability import (
     RODEX_SHARED_TMUX_PROTOCOL,
     RODEX_SHARED_TMUX_PROTOCOL_OPTION,
@@ -3188,14 +3189,25 @@ def test_real_tmux_survives_rename_and_status_configuration(tmp_path: Path) -> N
         expected = "populated" if populated else "unset"
         pytest.fail(f"tmux option {option_name} did not become {expected}")
 
-    def wait_for_session_option_text(option_name: str, expected_text: str) -> str:
-        deadline = time.monotonic() + 7
+    def wait_for_session_option_text(option_name: str, expected_text: str, *, timeout_seconds: float = 7) -> str:
+        deadline = time.monotonic() + timeout_seconds
+        observed_values: list[str] = []
         while time.monotonic() < deadline:
             value = session_option(option_name)
+            if not observed_values or observed_values[-1] != value:
+                observed_values.append(value)
             if expected_text in value:
                 return value
             time.sleep(0.01)
-        pytest.fail(f"tmux option {option_name} did not contain {expected_text!r}")
+        options = subprocess.run(
+            [tmux_binary, "-S", str(socket_path), "show-options", "-t", "=automatic-beluga:"],
+            check=True,
+            text=True,
+            capture_output=True,
+        ).stdout
+        pytest.fail(
+            f"tmux option {option_name} did not contain {expected_text!r}; observed: {observed_values!r}\n{options}"
+        )
 
     # Keep one session alive while consuming three pane IDs. The managed pane is
     # `%4`, the first ID whose direct-if-shell literal semantics differ from
@@ -3465,7 +3477,12 @@ def test_real_tmux_survives_rename_and_status_configuration(tmp_path: Path) -> N
 
         rendered_status = tmux_format("#{E:status-right}")
         assert "%H" not in rendered_status
-        animated_status = wait_for_session_option_text("status-format[0]", "SHARED WITH 2 OTHERS")
+        # Client 3 can queue behind client 2's complete animation. Allow both
+        # presentations plus coordinator/process overhead, regardless of scheduling.
+        queued_arrival_seconds = sum(len(status_frames("attached", count)) for count in (2, 3)) * FRAME_INTERVAL_SECONDS
+        animated_status = wait_for_session_option_text(
+            "status-format[0]", "SHARED WITH 2 OTHERS", timeout_seconds=queued_arrival_seconds + 3
+        )
         assert "#[align=centre]" in animated_status
         wait_for_session_option("status-format[0]", populated=False)
         assert session_option("status-style") == RODEX_STATUS_STYLE

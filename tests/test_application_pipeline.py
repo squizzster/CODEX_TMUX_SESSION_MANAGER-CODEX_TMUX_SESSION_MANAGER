@@ -18,7 +18,7 @@ from rodex.command_contract import (
     ClassifiedRodexCommand,
     CommandRoute,
 )
-from rodex.errors import RodexExecutableNotFoundError
+from rodex.errors import RodexExecutableNotFoundError, RodexLaunchError
 from rodex.managed_session_lifecycle import (
     OwnedSessionSelection,
     SelectorExecution,
@@ -69,6 +69,12 @@ from rodex_registry import parse_codex_session_id
             PipelinePreparation.RUNTIME,
         ),
         (["exec"], ("exec",), CommandRoute.CODEX, PipelinePreparation.DIRECT),
+        (
+            ["resume", "01a081ed-0a6e-7a13-a3e9-062e70df918e"],
+            ("resume", "01a081ed-0a6e-7a13-a3e9-062e70df918e"),
+            CommandRoute.SELECTOR,
+            PipelinePreparation.SELECTOR,
+        ),
         (
             ["--future-codex-option"],
             ("--future-codex-option",),
@@ -134,6 +140,7 @@ def _pipeline(
             *,
             codex_available: bool,
             configured_codex: str,
+            allow_missing_history_recovery: bool,
         ) -> SelectorExecution:
             trace.append(
                 (
@@ -143,6 +150,7 @@ def _pipeline(
                     launcher,
                     codex_available,
                     configured_codex,
+                    allow_missing_history_recovery,
                 )
             )
             return selector_outcome
@@ -289,6 +297,7 @@ def test_selector_resolves_before_runtime_and_never_probes_another_domain(
             "launcher",
             True,
             "codex",
+            True,
         ),
     ]
 
@@ -329,7 +338,7 @@ def test_unregistered_codex_uuid_can_become_a_managed_prompt_after_runtime_probe
             tmp_path,
             trace,
             selected_session=selection,
-            selector_outcome=SelectorExecution.MANAGED_PROMPT,
+            selector_outcome=SelectorExecution.NOT_FOUND,
         ).execute([selector])
         == 29
     )
@@ -345,6 +354,7 @@ def test_unregistered_codex_uuid_can_become_a_managed_prompt_after_runtime_probe
             "launcher",
             True,
             "codex",
+            True,
         ),
         (
             "managed_codex",
@@ -355,6 +365,32 @@ def test_unregistered_codex_uuid_can_become_a_managed_prompt_after_runtime_probe
             "codex",
         ),
     ]
+
+
+def test_explicit_resume_uses_the_exact_id_and_existing_selector_owner(tmp_path: Path) -> None:
+    trace: list[object] = []
+    selector = "01a081ed-0a6e-7a13-a3e9-062e70df918e"
+    selection = UnregisteredCodexSessionSelection(selector, parse_codex_session_id(selector))
+
+    assert _pipeline(tmp_path, trace, selected_session=selection).execute(["resume", selector]) == 0
+    assert trace == [
+        ("selector_resolver", selector, tmp_path / "rodex.sqlite3"),
+        ("resolve_executable", "tmux"),
+        ("resolve_executable", "codex"),
+        ("selector", selection, tmp_path / "rodex.sqlite3", "launcher", True, "codex", False),
+    ]
+
+
+@pytest.mark.parametrize("has_selection", [False, True])
+def test_explicit_resume_never_falls_back_to_an_initial_prompt(tmp_path: Path, has_selection: bool) -> None:
+    trace: list[object] = []
+    selector = "01a081ed-0a6e-7a13-a3e9-062e70df918e"
+    selection = UnregisteredCodexSessionSelection(selector, parse_codex_session_id(selector)) if has_selection else None
+    with pytest.raises(RodexLaunchError, match="not available to resume"):
+        _pipeline(tmp_path, trace, selected_session=selection, selector_outcome=SelectorExecution.NOT_FOUND).execute(
+            ["resume", selector]
+        )
+    assert not any(event[0] in {"managed_codex", "codex", "launch"} for event in trace)
 
 
 def test_codex_passthrough_never_touches_database_or_tmux(tmp_path: Path) -> None:

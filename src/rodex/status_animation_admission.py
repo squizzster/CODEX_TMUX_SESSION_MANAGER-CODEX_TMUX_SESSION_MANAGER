@@ -44,7 +44,7 @@ def status_animation_admission_command(
     if event not in {"attached", "detached"}:
         raise ValueError(f"unsupported status animation event: {event}")
     owner_token_format = f"#{{{STATUS_ANIMATION_GENERATION_OPTION}}}"
-    owner_command = _animation_process_command(
+    owner_launch = _animation_launch_command(
         python_executable,
         tmux_binary,
         capability,
@@ -52,12 +52,13 @@ def status_animation_admission_command(
         owner_token_format,
         mode="admitted",
     )
-    watchdog_gate = _delayed_watchdog_gate_command(
+    watchdog_launch = _animation_launch_command(
         python_executable,
         tmux_binary,
         capability,
         event,
         owner_token_format,
+        mode="watchdog-gate",
     )
     generation_increment = (
         f"#{{e|+:#{{?#{{{STATUS_ANIMATION_GENERATION_OPTION}}},#{{{STATUS_ANIMATION_GENERATION_OPTION}}},0}},1}}"
@@ -82,14 +83,8 @@ def status_animation_admission_command(
             STATUS_ANIMATION_WATCHDOG_TOKEN_OPTION,
             owner_token_format,
         ),
-        ("run-shell", "-b", f"exec {owner_command} >/dev/null 2>&1"),
-        (
-            "run-shell",
-            "-b",
-            "-d",
-            str(ANIMATION_OWNER_WATCHDOG_DELAY_SECONDS),
-            watchdog_gate,
-        ),
+        owner_launch,
+        watchdog_launch,
     )
     admission_commands = _command_sequence(
         (
@@ -166,12 +161,13 @@ async def animate_admitted_status(
         if await _read_tmux_option(tmux, pane_target, STATUS_ANIMATION_WATCHDOG_TOKEN_OPTION) is not None:
             return
         recovered_owner = f"recovery-{token_factory()}"
-        successor_gate = _delayed_watchdog_gate_command(
+        successor_watchdog_launch = _animation_launch_command(
             python_executable,
             tmux_binary,
             capability,
             fallback_event,
             recovered_owner,
+            mode="watchdog-gate",
         )
         recovery_commands = _command_sequence(
             (
@@ -188,13 +184,7 @@ async def animate_admitted_status(
                 STATUS_ANIMATION_WATCHDOG_TOKEN_OPTION,
                 recovered_owner,
             ),
-            (
-                "run-shell",
-                "-b",
-                "-d",
-                str(ANIMATION_OWNER_WATCHDOG_DELAY_SECONDS),
-                successor_gate,
-            ),
+            successor_watchdog_launch,
         )
         await tmux(
             "if-shell",
@@ -356,7 +346,7 @@ async def _release_animation_owner(
     )
 
 
-def _animation_process_command(
+def _animation_launch_command(
     python_executable: str,
     tmux_binary: str,
     capability: TmuxSessionCapability,
@@ -364,7 +354,8 @@ def _animation_process_command(
     owner_token: str,
     *,
     mode: Literal["admitted", "watchdog", "watchdog-gate"],
-) -> str:
+) -> tuple[str, ...]:
+    """Own process arguments, pane-bound format expansion, and watchdog scheduling."""
     arguments = [
         tmux_format_literal(python_executable),
         "-m",
@@ -395,24 +386,13 @@ def _animation_process_command(
         owner_token,
     ]
     arguments.append(f"--{mode}")
-    return shlex.join(arguments)
-
-
-def _delayed_watchdog_gate_command(
-    python_executable: str,
-    tmux_binary: str,
-    capability: TmuxSessionCapability,
-    event: StatusEvent,
-    owner_token: str,
-) -> str:
-    return _animation_process_command(
-        python_executable,
-        tmux_binary,
-        capability,
-        event,
-        owner_token,
-        mode="watchdog-gate",
-    )
+    # run-shell expands session options in its own target context, not the
+    # enclosing if-shell's. Every lifecycle stage must use this launch boundary.
+    launch = ["run-shell", "-b", "-t", capability.pane_target]
+    if mode == "watchdog-gate":
+        launch.extend(("-d", str(ANIMATION_OWNER_WATCHDOG_DELAY_SECONDS)))
+    launch.append(f"exec {shlex.join(arguments)} >/dev/null 2>&1")
+    return tuple(launch)
 
 
 async def run_watchdog_gate(
@@ -433,7 +413,7 @@ async def run_watchdog_gate(
         timeout_seconds=command_timeout_seconds,
     )
     pane_target = capability.pane_target
-    watchdog_command = _animation_process_command(
+    recovery_launch = _animation_launch_command(
         python_executable,
         tmux_binary,
         capability,
@@ -459,7 +439,7 @@ async def run_watchdog_gate(
             pane_target,
             STATUS_ANIMATION_WATCHDOG_TOKEN_OPTION,
         ),
-        ("run-shell", "-b", f"exec {watchdog_command} >/dev/null 2>&1"),
+        recovery_launch,
     )
     await executor.run(
         (

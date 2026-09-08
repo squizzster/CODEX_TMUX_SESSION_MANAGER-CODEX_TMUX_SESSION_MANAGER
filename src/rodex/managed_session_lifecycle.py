@@ -76,10 +76,10 @@ type SessionSelection = OwnedSessionSelection | UnregisteredCodexSessionSelectio
 
 
 class SelectorExecution(StrEnum):
-    """The complete outcome of executing one bare Rodex selector."""
+    """Whether a resolved session opened or its requested Codex history was absent."""
 
     OPENED = "opened"
-    MANAGED_PROMPT = "managed_prompt"
+    NOT_FOUND = "not_found"
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,6 +123,7 @@ class ManagedSessionLifecycle:
         *,
         codex_available: bool,
         configured_codex: str,
+        allow_missing_history_recovery: bool = True,
     ) -> SelectorExecution:
         if isinstance(selection, OwnedSessionSelection):
             _open_selected_session(
@@ -132,13 +133,14 @@ class ManagedSessionLifecycle:
                 codex_available=codex_available,
                 configured_codex=configured_codex,
                 detach=False,
+                allow_missing_history_recovery=allow_missing_history_recovery,
             )
             return SelectorExecution.OPENED
 
         if not codex_available:
             raise RodexExecutableNotFoundError(f"Codex executable was not found: {configured_codex}")
         if not launcher.codex_session_is_persisted(selection.codex_session_id):
-            return SelectorExecution.MANAGED_PROMPT
+            return SelectorExecution.NOT_FOUND
         request = ManagedSessionLaunchRequest(
             ("resume", str(selection.codex_session_id)),
             requested_name=None,
@@ -155,7 +157,7 @@ class ManagedSessionLifecycle:
             )
         except RodexCodexSessionNotFoundError:
             # The persisted thread can disappear between the read and exact resume.
-            return SelectorExecution.MANAGED_PROMPT
+            return SelectorExecution.NOT_FOUND
         return SelectorExecution.OPENED
 
     def execute_launch(
@@ -321,6 +323,7 @@ def _open_selected_session(
     codex_available: bool,
     configured_codex: str,
     detach: bool,
+    allow_missing_history_recovery: bool = True,
 ) -> None:
     session_id = selection.rodex_sessions_id
     rodex_session_id = lookup_rodex_session_id_from_a_rodex_sessions_id(session_id, database_path)
@@ -334,6 +337,7 @@ def _open_selected_session(
             launcher,
             codex_available=codex_available,
             configured_codex=configured_codex,
+            allow_missing_history_recovery=allow_missing_history_recovery,
         )
     if detach:
         _print_existing_detached_runtime(
@@ -353,6 +357,7 @@ def _prepare_selected_session(
     *,
     codex_available: bool,
     configured_codex: str,
+    allow_missing_history_recovery: bool,
 ) -> _PreparedSelectedSession:
     """Resolve or resume one identity while its cross-process transition is locked."""
     names = lookup_rodex_session_names(session_id, database_path)
@@ -460,7 +465,9 @@ def _prepare_selected_session(
             rodex_session_id=rodex_session_id,
             rodex_registry_id=registry_id,
         )
-    except RodexCodexSessionNotFoundError:
+    except RodexCodexSessionNotFoundError as error:
+        if not allow_missing_history_recovery:
+            raise RodexLaunchError(f"Codex session {codex_session_id} is not available to resume") from error
         try:
             resumed_runtime, observed_codex_session_id = _start_managed_runtime(
                 launcher,

@@ -78,6 +78,7 @@ class SessionLifecycle(Protocol):
         *,
         codex_available: bool,
         configured_codex: str,
+        allow_missing_history_recovery: bool,
     ) -> SelectorExecution: ...
 
     def execute_launch(
@@ -218,19 +219,24 @@ class UnifiedRodexApplicationPipeline:
         if invocation.route is CommandRoute.SELECTOR:
             services = prepared.runtime
             assert services is not None
+            codex_invocation = invocation.codex_invocation
+            assert codex_invocation is not None
+            explicit_resume = codex_invocation.route is CodexCliRoute.MANAGED_RESUME
             selection = prepared.selected_session
-            if selection is None:
-                return self._execute_managed_codex(invocation, services)
-            outcome = self._session_lifecycle.execute_selector(
-                selection,
-                self._database_path,
-                services.launcher,
-                codex_available=services.codex_binary is not None,
-                configured_codex=self._configured_codex,
-            )
-            if outcome is SelectorExecution.OPENED:
-                return 0
-            assert outcome is SelectorExecution.MANAGED_PROMPT
+            if selection is not None:
+                outcome = self._session_lifecycle.execute_selector(
+                    selection,
+                    self._database_path,
+                    services.launcher,
+                    codex_available=services.codex_binary is not None,
+                    configured_codex=self._configured_codex,
+                    allow_missing_history_recovery=not explicit_resume,
+                )
+                if outcome is SelectorExecution.OPENED:
+                    return 0
+                assert outcome is SelectorExecution.NOT_FOUND
+            if explicit_resume:
+                raise RodexLaunchError(f"Codex session {codex_invocation.selector_candidate} is not available to resume")
             return self._execute_managed_codex(invocation, services)
 
         services = prepared.runtime
@@ -273,7 +279,9 @@ class UnifiedRodexApplicationPipeline:
             return PreparedRodexInvocation(invocation, None)
         if invocation.preparation is PipelinePreparation.SELECTOR:
             assert invocation.route is CommandRoute.SELECTOR
-            selector = invocation.arguments[0]
+            assert invocation.codex_invocation is not None
+            selector = invocation.codex_invocation.selector_candidate
+            assert selector is not None
             selection = self._session_lifecycle.resolve_selector(selector, self._database_path)
             return PreparedRodexInvocation(
                 invocation,

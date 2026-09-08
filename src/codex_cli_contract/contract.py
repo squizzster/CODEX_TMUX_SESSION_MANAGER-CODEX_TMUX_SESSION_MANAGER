@@ -5,12 +5,14 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import StrEnum
 from types import MappingProxyType
+from uuid import UUID
 
 
 class CodexCliRoute(StrEnum):
     """Whether one native Codex invocation belongs inside managed Rodex."""
 
     MANAGED_INTERACTIVE = "managed_interactive"
+    MANAGED_RESUME = "managed_resume"
     PASSTHROUGH = "passthrough"
 
 
@@ -18,6 +20,7 @@ class CodexCliClassificationReason(StrEnum):
     """The exact contract decision behind one selected route."""
 
     INTERACTIVE = "interactive"
+    EXPLICIT_RESUME = "explicit_resume"
     SUBCOMMAND = "subcommand"
     DIRECT_OPTION = "direct_option"
     UNKNOWN_OPTION = "unknown_option"
@@ -85,6 +88,13 @@ class CodexCliContract:
 
     def classify(self, arguments: tuple[str, ...]) -> CodexCliInvocation:
         """Classify current interactive syntax; let Codex own every uncertainty."""
+        if len(arguments) == 2 and arguments[0] == "resume" and _is_canonical_session_uuid(arguments[1]):
+            return CodexCliInvocation(
+                arguments,
+                CodexCliRoute.MANAGED_RESUME,
+                CodexCliClassificationReason.EXPLICIT_RESUME,
+                selector_candidate=arguments[1],
+            )
         positionals: list[str] = []
         seen_options: set[str] = set()
         index = 0
@@ -202,6 +212,14 @@ class CodexCliContract:
         reason: CodexCliClassificationReason,
     ) -> CodexCliInvocation:
         return CodexCliInvocation(arguments, CodexCliRoute.PASSTHROUGH, reason)
+
+
+def _is_canonical_session_uuid(value: str) -> bool:
+    """Recognize only exact UUID syntax; session existence belongs to the lifecycle."""
+    try:
+        return str(UUID(value)) == value.lower()
+    except ValueError:
+        return False
 
 
 def _managed_option_conflict(seen_options: set[str]) -> bool:

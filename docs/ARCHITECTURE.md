@@ -35,8 +35,8 @@ identity requires a transient App Server check.
 | `rodex.session_read_pipeline` / `session_tail` | Verified reads and incremental terminal history. |
 | `rodex.process_environment` / `environment_exec` | Exact caller-owned environment at child exec. |
 | `rodex.runtime` / `process_contracts` / `session_host` | Discovery, launch, attach, supervision and cleanup. |
-| `rodex.terminal_gateway` / `terminal_exec` | Session PTY, byte pipelines, fresh exec, resize, signals and restoration. |
-| `rodex.terminal_input` / `input_interceptor_config` / `input_interceptor_presentation` | Framing, single-pattern admission, local editing/submission/release and presentation. |
+| `rodex.terminal_gateway` / `terminal_exec` / `terminal_completion` | PTY, byte pipelines, native projection, inline display and restoration. |
+| `rodex.terminal_input` / `input_interceptor_config` / `input_interceptor_presentation` | Configured live/Enter rules, editing, submission, release and helper text. |
 | `rodex.tmux_session_capability` | Server/runtime/session authority and exact read/mutation fences. |
 | `rodex.tmux_shared_ctrl_c` | Exact private exit or same-client confirmed shared exit. |
 | `rodex.tmux_sharing_coordinator` | Turn hook wakeups into exact roster transitions. |
@@ -90,10 +90,10 @@ arbitrates status; animation admission owns capability/generation/lease/token/re
 
 Interactive routes print `Rodex attach [name].` before tmux and `Rodex exited [name].`
 after return. Tmux's exit line is erased first. One host-owned PTY adapts all TUI I/O;
-attachers never create separate input owners. One match pattern admits each interceptor;
-its active handler receives editing and Enter without a second submission matcher.
+attachers never create separate input owners. Each interception config owns live/Enter
+expressions, completion/helper text and command list; unmatched Enter returns to native.
 Native prefix/cursor confirmation is bounded at handoff, never polled in the background.
-Unknown editor state stays native. Menu text uses display-only messages and status claims.
+Unknown editor state stays native. Inline display uses terminal DISPLAY_STATE; replies use MESSAGE(false).
 
 ## Identity and lifecycle
 

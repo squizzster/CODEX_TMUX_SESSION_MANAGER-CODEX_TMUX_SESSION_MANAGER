@@ -12,7 +12,7 @@ pass through unchanged.
 > described here is complete for its current scope, but interfaces may still change
 > before a stable release.
 
-Current release: **Rodex 0.8.0a1**, SQL generation **19**, shared tmux protocol **v2**.
+Current release: **Rodex 0.9.0a1**, SQL generation **19**, shared tmux protocol **v2**.
 This ALPHA supports only its current storage and runtime contracts. It creates
 `rodex-v19.sqlite3` and `tmux-shared-v2.sock`; earlier generations are outside this
 installation's session catalog. There are no database migrations or old-runtime adapters.
@@ -153,20 +153,36 @@ initialization failure instead of silently weakening the lifecycle contract.
 ### Local input interceptor (placeholder)
 
 Managed sessions have one session-owned keyboard adapter before Codex, configured in
-`src/rodex/input_interceptor_config.py`. Each interceptor has exactly one `match_pattern`;
-Rodex uses `^/ro(?:d(?:ex?)?)?$`. `/` and `/r` reach the native TUI immediately. `/ro`
-activates local ownership after verifying the already-forwarded native `/r` at its end
-cursor. The status bar shows the local draft; `/rodex` displays a placeholder menu.
-There are no Rodex commands yet. Enter handles the owned draft locally, clears the
-native prefix only after successful delivery, and never starts a model turn.
+`src/rodex/input_interceptor_config.py`. Each interception owns its completion text,
+`live` rule (expression and helper text), `on_enter` rule, and `command_list`.
+The shared pipeline uses those configurations without command-name branches:
 
-The pattern decides entry, not subsequent submission: once active, additional text
-belongs to that interceptor until release. Escape drops the held suffix, leaving native
-`/r`; backspacing to `/r` also releases. Tab completes `/rodex`. Native editing keys
+- Live: `^/ro(?:d(?:ex?)?)?$`, completion `/rodex`, helper `issue a rodex command`.
+- Enter: `^/rodex (.*?)$` with multiline enabled. Rules match the **whole input**;
+  a matching line inside another message does not intercept that message.
+- Command list: empty; no executable Rodex commands are registered yet.
+
+Unmatched live input reaches Codex immediately. A live match verifies the native prefix
+and displays the held draft with its configured completion underneath. Every matching
+draft gets the same configured helper, not just the full completion text. Tab selects
+that text. Enter applies its own expression, including to an atomically pasted command
+that never activated live completion. A match displays the placeholder response locally
+and clears only the verified native prefix after successful delivery; no model turn starts.
+An unmatched Enter returns the held suffix and the user's Enter to Codex. In particular,
+bare `/rodex` does not match the configured Enter expression; `/rodex example` does.
+
+Escape drops the held suffix, leaving the native prefix; backspacing to that prefix
+also releases. Native editing keys
 outside this small placeholder editor return the held text as bracketed paste before
 forwarding the key. Paste is framed atomically, not replayed as individual keypresses.
-An uncertain native editor position or unavailable local status leaves input native.
-Native output keeps rendering throughout. Existing live hosts retain their loaded code;
+An uncertain native editor position or unavailable initial presentation leaves input native.
+The terminal adapter projects native output with `pyte`; local painting never enters that
+projection or the native editor. Partial redraws defer painting without releasing ownership;
+generated output is clipped and cannot wrap into scrollback. The placeholder draft is a
+single visible line, with control characters shown as spaces. Native output keeps rendering.
+Configuration, phase routing, inline rendering and adapter integration have Python tests;
+the live-startup suite was not run for this change, as requested.
+Existing live hosts retain their loaded code;
 this feature is available in newly started hosts, without restarting any current session.
 
 Every interactive create, resume, recovery, and reattach uses one concise lifecycle:

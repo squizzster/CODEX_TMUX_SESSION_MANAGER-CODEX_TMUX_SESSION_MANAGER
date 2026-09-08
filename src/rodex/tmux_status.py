@@ -170,7 +170,6 @@ class StatusPriority(IntEnum):
 
     COMPLETION = 10
     SHARING_ANIMATION = 20
-    LOCAL_INPUT = 30
     SAFETY_WARNING = 100
 
 

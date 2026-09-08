@@ -194,7 +194,7 @@ class TerminalInputInterceptor:
             return
         if event.kind in {"text", "paste"}:
             candidate = self._candidate + event.text
-            matches = [entry for entry in self._registrations if entry.matches(candidate)]
+            matches = [entry for entry in self._registrations if entry.live.matches(candidate)]
             # An ambiguous registry cannot own input. Leave native input intact.
             if len(matches) == 1 and self._confirm_native_prefix(self._candidate):
                 self._active = matches[0]
@@ -203,7 +203,12 @@ class TerminalInputInterceptor:
                 if self._publish(InteractionOperation.INTERACTIVE_INPUT):
                     return
                 self.release()
-            self._candidate = candidate if len(candidate) <= 128 else ""
+            self._candidate = candidate if len(candidate.encode()) <= MAX_LOCAL_DRAFT_BYTES else ""
+        elif event.kind == "control" and event.key in {b"\r", b"\n"}:
+            if self._submit(self._candidate, self._candidate):
+                self._discard_paired_lf = event.key == b"\r"
+                return
+            self._candidate = ""
         elif event.kind == "control" and event.key in {b"\x7f", b"\x08"}:
             self._candidate = self._candidate[:-1]
         else:
@@ -224,18 +229,15 @@ class TerminalInputInterceptor:
             if event.key in {b"\x7f", b"\x08"}:
                 self._draft = self._draft[:-1]
             elif event.key == b"\t":
-                if self._active.matches(self._draft):
-                    self._draft = self._active.command
+                if self._active.live.matches(self._draft):
+                    self._draft = self._active.completion_text
             elif event.key in {b"\r", b"\n"}:
                 self._discard_paired_lf = event.key == b"\r"
-                # Only remove the exact previously-forwarded prefix, never clear
-                # an unknown draft or synthesize Enter into the native TUI.
-                if self._confirm_native_prefix(self._forwarded_prefix) and self._publish(
-                    InteractionOperation.SUBMITTED_COMMAND
-                ):
-                    self._forward(b"\x7f" * len(self._forwarded_prefix))
-                    self.release()
-                    self._candidate = ""
+                matches = [entry for entry in self._registrations if entry.on_enter.matches(self._draft)]
+                if len(matches) != 1:
+                    self._return_to_native(event)
+                else:
+                    self._submit(self._draft, self._forwarded_prefix)
                 return
             else:
                 self._return_to_native(event)
@@ -249,6 +251,24 @@ class TerminalInputInterceptor:
             if not self._publish(InteractionOperation.INTERACTIVE_INPUT):
                 self._return_to_native(TerminalInputEvent("opaque", b""))
 
+    def _submit(self, draft: str, forwarded_prefix: str) -> bool:
+        matches = [entry for entry in self._registrations if entry.on_enter.matches(draft)]
+        if len(matches) != 1 or not self._confirm_native_prefix(forwarded_prefix):
+            return False
+        result = self._pipeline.execute(
+            InteractionRequest(
+                matches[0].target, InteractionOperation.SUBMITTED_COMMAND, "terminal-interceptor", text=draft
+            )
+        )
+        if not result.accepted:
+            return False
+        # Remove only verified native text, after accepted local handling. Never
+        # synthesize Enter: an unmatched Enter alone keeps the user's native intent.
+        self._forward(b"\x7f" * len(forwarded_prefix))
+        self.release()
+        self._candidate = ""
+        return True
+
     def _return_to_native(self, event: TerminalInputEvent) -> None:
         """Unsupported native editing releases a lossless, non-submitting draft."""
         held_suffix = self._draft[len(self._forwarded_prefix) :].encode()
@@ -260,7 +280,9 @@ class TerminalInputInterceptor:
     def _publish(self, operation: InteractionOperation) -> bool:
         assert self._active is not None
         result = self._pipeline.execute(
-            InteractionRequest(self._active.target, operation, "terminal-interceptor", text=self._draft)
+            InteractionRequest(
+                self._active.target, operation, "terminal-interceptor", text=self._draft, payload=self._forwarded_prefix
+            )
         )
         return result.accepted
 

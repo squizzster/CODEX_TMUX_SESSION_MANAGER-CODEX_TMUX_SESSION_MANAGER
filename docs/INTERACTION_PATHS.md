@@ -1,6 +1,6 @@
 # Interaction contract and production-path inventory
 
-Rodex 0.8.0a1, ALPHA. SQL generation 19 and shared tmux protocol v2 are unchanged.
+Rodex 0.9.0a1, ALPHA. SQL generation 19 and shared tmux protocol v2 are unchanged.
 There is no old interaction endpoint or fallback adapter. Existing processes retain
 the code they already loaded; this change does not restart existing sessions.
 
@@ -94,11 +94,12 @@ work. The record buffer contains metadata, not prompt bodies or another durable 
 | Existing name/alias/UUID, with or without `resume` | Same selector/open/resume/adoption pipeline |
 | Unmatched explicit resume, delegated native syntax | `cli._exec_codex`; native replacement, outside managed interaction |
 | Native typing and terminal replies | TERMINAL_INPUT → decoder/interceptor → native child PTY → TUI → protocol-input pipeline |
-| Configured match | One `match_pattern` → verified native prefix → INTERACTIVE_INPUT target; subsequent Enter → SUBMITTED_COMMAND, no second matcher |
-| Local release | INPUT_RELEASE → restore own status claim; cancellation leaves native prefix; unsupported editing restores held suffix before key |
-| Local placeholder/menu | MESSAGE(false) → main display adapter; status draft → existing status-claim pipeline |
+| Configured live match | Interception `live.reg_exp_intercept` → verified native prefix → INTERACTIVE_INPUT → terminal DISPLAY_STATE; configured completion/helper text |
+| Configured Enter match | Interception `on_enter.reg_exp_intercept` → SUBMITTED_COMMAND, including pasted input without live takeover; unmatched Enter stays native |
+| Local release | INPUT_RELEASE → clear terminal DISPLAY_STATE; cancellation leaves native prefix; unsupported editing restores held suffix before key |
+| Local placeholder reply | Configured command list → MESSAGE(false) → main display adapter; no command execution yet |
 | Initial prompts and native TUI protocol operations | Native TUI → protocol-input pipeline → App Server |
-| Native terminal output | TERMINAL_OUTPUT → bounded display queue → outer tmux PTY; unchanged without content hooks |
+| Native terminal output | TERMINAL_OUTPUT → native-only projection + inline compositor → bounded display queue → outer PTY; native bytes retain their order/content |
 | App Server primary/control-client output | Protocol-output pipeline → destination; same accepted frame → projections |
 | `_start`, `_steer`, `_interrupt` | Exact selector lock → interaction operation → exact-control adapter → proxy |
 | `_alias` | Serialized SQL/tmux rename → explicit start/steer announcement |

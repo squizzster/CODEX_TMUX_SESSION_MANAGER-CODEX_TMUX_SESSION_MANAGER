@@ -11,6 +11,7 @@ import fcntl
 import os
 import pty
 import select
+import struct
 import subprocess
 import sys
 import termios
@@ -29,6 +30,7 @@ from .interaction_pipeline import (
     InteractionTarget,
     SessionInteractionPipeline,
 )
+from .terminal_completion import TerminalCompletionRenderer, TerminalCompletionState
 from .terminal_input import TerminalInputDecoder, TerminalInputInterceptor
 
 QUEUE_LIMIT_BYTES = 1024 * 1024
@@ -60,12 +62,14 @@ class TerminalSessionGateway:
         self._slave = -1
         self._closed = False
         self._native_eof = False
+        self._resize_pending = True
         self._native_queue = bytearray()
         self._display_queue = bytearray()
         self._saved_flags: dict[int, int] = {}
         self._saved_attributes: list | None = None
         self.process: subprocess.Popen[bytes] | None = None
         self._decoder = TerminalInputDecoder()
+        self._completion = TerminalCompletionRenderer()
         self._confirm_presentation = confirm_native_prefix
         self._interceptor = TerminalInputInterceptor(
             registrations, pipeline, self._native_queue.extend, self._confirm_prefix
@@ -73,7 +77,13 @@ class TerminalSessionGateway:
         self._target = InteractionTarget(
             "terminal",
             runtime_identity,
-            frozenset({InteractionOperation.TERMINAL_INPUT, InteractionOperation.TERMINAL_OUTPUT}),
+            frozenset(
+                {
+                    InteractionOperation.TERMINAL_INPUT,
+                    InteractionOperation.TERMINAL_OUTPUT,
+                    InteractionOperation.DISPLAY_STATE,
+                }
+            ),
             exists=lambda: not self._closed,
             deliver=self._deliver,
         )
@@ -84,7 +94,7 @@ class TerminalSessionGateway:
             # Read every original flag before changing descriptors that may share
             # one open-file description (normal stdin/stdout in a tmux pane).
             self._saved_flags = {fd: fcntl.fcntl(fd, fcntl.F_GETFL) for fd in {input_fd, output_fd}}
-            self.resize()
+            self._apply_resize()
             tty.setraw(input_fd, termios.TCSANOW)
             for fd in (*self._saved_flags, self._master):
                 os.set_blocking(fd, False)
@@ -104,9 +114,16 @@ class TerminalSessionGateway:
             raise
 
     def resize(self) -> None:
+        """Signal handlers schedule resize; the relay loop alone mutates terminal state."""
+        self._resize_pending = True
+
+    def _apply_resize(self) -> None:
         """Copy the actual pane dimensions; TIOCSWINSZ signals the child foreground group."""
-        if self._master >= 0:
+        if self._resize_pending and self._master >= 0:
+            self._resize_pending = False
             dimensions = fcntl.ioctl(self._input_fd, termios.TIOCGWINSZ, bytes(8))
+            rows, columns, _, _ = struct.unpack("HHHH", dimensions)
+            self._display_queue.extend(self._completion.resize(max(columns, 1), max(rows, 1)))
             fcntl.ioctl(self._master, termios.TIOCSWINSZ, dimensions)
 
     def forward_signal(self, signum: int) -> None:
@@ -135,12 +152,19 @@ class TerminalSessionGateway:
             self._relay_once(allow_input=returncode is None)
 
     def _deliver(self, request: InteractionRequest) -> InteractionResult:
+        if request.operation == InteractionOperation.DISPLAY_STATE:
+            if request.payload is not None and not isinstance(request.payload, str):
+                return InteractionResult(DeliveryStatus.REJECTED, "completion display requires serialized text state")
+            state = TerminalCompletionState.deserialize(request.payload) if request.payload is not None else None
+            accepted, rendered = self._completion.display(state)
+            self._display_queue.extend(rendered)
+            return InteractionResult(DeliveryStatus.DELIVERED if accepted else DeliveryStatus.REJECTED)
         assert isinstance(request.payload, bytes)
         if request.operation == InteractionOperation.TERMINAL_INPUT:
             for event in self._decoder.feed(request.payload):
                 self._interceptor.accept(event)
         else:
-            self._display_queue.extend(request.payload)
+            self._display_queue.extend(self._completion.native_output(request.payload))
         return InteractionResult(DeliveryStatus.DELIVERED)
 
     def _dispatch(self, operation: InteractionOperation, data: bytes) -> None:
@@ -152,14 +176,19 @@ class TerminalSessionGateway:
         # This bounded handoff check is event-driven, never background scraping.
         # Continue draining rendering but admit no more keyboard input while the
         # already-forwarded prefix reaches the native editor.
-        deadline = time.monotonic() + HANDOFF_TIMEOUT_SECONDS
-        while time.monotonic() < deadline and not self._native_eof:
-            self._relay_once(allow_input=False)
-            if not self._native_queue and not self._display_queue and self._confirm_presentation(prefix):
-                return True
-        return False
+        self._display_queue.extend(self._completion.suspend())
+        try:
+            deadline = time.monotonic() + HANDOFF_TIMEOUT_SECONDS
+            while time.monotonic() < deadline and not self._native_eof:
+                self._relay_once(allow_input=False)
+                if not self._native_queue and not self._display_queue and self._confirm_presentation(prefix):
+                    return True
+            return False
+        finally:
+            self._display_queue.extend(self._completion.resume())
 
     def _relay_once(self, *, allow_input: bool) -> None:
+        self._apply_resize()
         reads: list[int] = []
         writes: list[int] = []
         if not self._native_eof and len(self._display_queue) < QUEUE_LIMIT_BYTES:

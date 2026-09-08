@@ -62,6 +62,33 @@ def test_every_current_codex_command_and_alias_is_direct(command: str) -> None:
     assert invocation.reason is CodexCliClassificationReason.SUBCOMMAND
 
 
+@pytest.mark.parametrize("uppercase", [False, True])
+def test_exact_codex_resume_is_a_managed_selector(uppercase: bool) -> None:
+    codex_id = "01a081ed-0a6e-7a13-a3e9-062e70df918e"
+    if uppercase:
+        codex_id = codex_id.upper()
+    invocation = classify("resume", codex_id)
+
+    assert invocation.route is CodexCliRoute.MANAGED_RESUME
+    assert invocation.selector_candidate == codex_id
+    assert invocation.arguments == ("resume", codex_id)
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ("resume",),
+        ("resume", "--last"),
+        ("resume", "--help"),
+        ("resume", "a-native-codex-session-name"),
+        ("resume", "01a081ed-0a6e-7a13-a3e9-062e70df918e", "another prompt"),
+        ("resume", "01a081ed-0a6e-7a13-a3e9-062e70df918e", "--last"),
+    ],
+)
+def test_other_native_resume_forms_remain_codex_owned(arguments: tuple[str, ...]) -> None:
+    assert CODEX_CLI_0_151_0.classify(arguments).route is CodexCliRoute.PASSTHROUGH
+
+
 @pytest.mark.parametrize(
     "arguments",
     [

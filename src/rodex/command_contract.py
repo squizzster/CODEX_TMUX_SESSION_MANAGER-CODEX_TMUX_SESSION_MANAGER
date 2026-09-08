@@ -200,9 +200,10 @@ def _help_text() -> str:
             "",
             "Use a Rodex session name or canonical Codex UUID as the sole argument "
             "to attach, resume, recover, or adopt it.",
+            "'resume CODEX_UUID' uses the same managed session pipeline, but requires existing Codex history.",
             "A sole unmatched token, current interactive options, or an optional prompt starts a managed session.",
             "Use '--' before one token to force prompt meaning without selector or subcommand interpretation.",
-            f"Codex {CODEX_CLI_0_151_0.characterized_release} subcommands and "
+            f"Other Codex {CODEX_CLI_0_151_0.characterized_release} subcommand forms and "
             "uncertain option forms pass unchanged to Codex.",
             "",
         )

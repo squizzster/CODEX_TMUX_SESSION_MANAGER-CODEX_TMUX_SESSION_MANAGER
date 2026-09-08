@@ -1,7 +1,7 @@
 """Primary workflow gate: real CLI, Codex, tmux, attachment, and shared-server reuse.
 
-No model prompts are submitted. SQL and tmux are isolated; the installed Codex login
-is used only to bring up the ordinary TUI. Every test-owned runtime is cleaned up.
+No model prompts are submitted. SQL, tmux, and Codex history are isolated; copied
+login/configuration files bring up the ordinary TUI and are removed after the test.
 """
 
 from __future__ import annotations
@@ -24,7 +24,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import pytest
+from websockets.sync.client import unix_connect
 
+from rodex.app_server_contract import CODEX_APP_SERVER, AppServerClientInfo
 from rodex.tmux_session_capability import RODEX_SHARED_TMUX_SOCKET_NAME
 
 
@@ -110,8 +112,77 @@ def test_terminal_client_reports_exec_failure_without_reentering_pytest(tmp_path
         assert client.exit_code == 127
 
 
+def _create_standalone_codex_thread(codex: str, socket_path: Path, environment: dict[str, str], workspace: Path) -> str:
+    """Create a real saved Codex thread without Rodex registration or a model turn."""
+    process = subprocess.Popen(
+        CODEX_APP_SERVER.command(codex, socket_path),
+        env=environment,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        deadline = time.monotonic() + 10
+        while not socket_path.exists():
+            assert process.poll() is None, "Standalone Codex fixture exited before binding"
+            assert time.monotonic() < deadline, "Standalone Codex fixture did not bind"
+            time.sleep(0.02)
+        with unix_connect(
+            str(socket_path),
+            uri=f"ws://localhost{CODEX_APP_SERVER.rpc_connection_path}",
+            compression=None,
+            open_timeout=2,
+            close_timeout=1,
+        ) as websocket:
+
+            def response(request: dict) -> dict:
+                websocket.send(json.dumps(request))
+                deadline = time.monotonic() + 10
+                while True:
+                    payload = json.loads(websocket.recv(timeout=max(0, deadline - time.monotonic())))
+                    if payload.get("id") == request["id"]:
+                        assert "error" not in payload, payload
+                        return payload["result"]
+
+            response(
+                CODEX_APP_SERVER.initialize_request(
+                    "startup:initialize", AppServerClientInfo("rodex-startup-test", "Rodex startup test", "1")
+                )
+            )
+            websocket.send(json.dumps(CODEX_APP_SERVER.initialized_notification()))
+            started = response(
+                CODEX_APP_SERVER.request("startup:thread", "thread/start", {"ephemeral": False, "cwd": str(workspace)})
+            )
+            # The documented injection API persists fixture history without running a model.
+            # https://learn.chatgpt.com/docs/app-server#inject-items-into-a-thread
+            response(
+                CODEX_APP_SERVER.request(
+                    "startup:history",
+                    "thread/inject_items",
+                    {
+                        "threadId": started["thread"]["id"],
+                        "items": [
+                            {
+                                "type": "message",
+                                "role": "assistant",
+                                "content": [{"type": "output_text", "text": "Rodex standalone-resume test fixture."}],
+                            }
+                        ],
+                    },
+                )
+            )
+            return started["thread"]["id"]
+    finally:
+        process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=5)
+
+
 @pytest.mark.live_startup
-def test_installed_rodex_starts_detaches_reopens_and_starts_again(
+def test_installed_rodex_starts_reuses_and_adopts_sessions(
     tmp_path_factory: pytest.TempPathFactory,
     request: pytest.FixtureRequest,
 ) -> None:
@@ -119,10 +190,11 @@ def test_installed_rodex_starts_detaches_reopens_and_starts_again(
     tmux_binary = shutil.which("tmux")
     _require_startup_prerequisite(request, codex is not None and tmux_binary is not None, "Codex and tmux are required")
     assert codex is not None and tmux_binary is not None
-    login = subprocess.run([codex, "login", "status"], capture_output=True, text=True, timeout=10)
-    _require_startup_prerequisite(request, login.returncode == 0, "An authenticated Codex CLI is required")
     project = Path(__file__).parents[1]
     isolated = tmp_path_factory.mktemp("startup")
+    installed_codex_home = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
+    isolated_codex_home = isolated / "codex"
+    isolated_codex_home.mkdir(mode=0o700)
     installed_shim = isolated / "rodex"
     shutil.copy2(project / "usr/local/bin/rodex", installed_shim)
     environment = {
@@ -133,10 +205,12 @@ def test_installed_rodex_starts_detaches_reopens_and_starts_again(
         "RODEX_TMUX_BINARY": tmux_binary,
         "RODEX_RUNTIME_DIR": str(isolated / "r"),
         "XDG_STATE_HOME": str(isolated / "state"),
+        "CODEX_HOME": str(isolated_codex_home),
     }
     environment.pop("TMUX", None)
     environment.pop("TMUX_PANE", None)
     socket_path = isolated / "r" / RODEX_SHARED_TMUX_SOCKET_NAME
+    inspected_codex_ids: dict[str, str] = {}
 
     def tmux(*arguments: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
@@ -146,7 +220,7 @@ def test_installed_rodex_starts_detaches_reopens_and_starts_again(
             timeout=10,
         )
 
-    def exercise_client(command: list[str]) -> tuple[str, str]:
+    def exercise_client(command: list[str], *, expected_codex_id: str | None = None) -> tuple[str, str]:
         with RodexTerminalClient(command, environment, project) as client:
             name = client.wait_for_attach()
             deadline = time.monotonic() + 10
@@ -172,6 +246,9 @@ def test_installed_rodex_starts_detaches_reopens_and_starts_again(
             assert envelope["data"]["thread"]["cwd"] == str(project)
             assert envelope["data"]["thread"]["can_accept_direct_input"] is not False
             assert envelope["codex"]["turn_id"] is None
+            inspected_codex_ids[name] = envelope["codex"]["session_id"]
+            if expected_codex_id is not None:
+                assert inspected_codex_ids[name] == expected_codex_id
             deadline = time.monotonic() + 10
             while time.monotonic() < deadline:
                 pane = tmux("capture-pane", "-p", "-t", f"={name}:")
@@ -187,14 +264,35 @@ def test_installed_rodex_starts_detaches_reopens_and_starts_again(
         return name, runtime_id
 
     try:
+        # Preserve installed authentication and workspace trust without sharing
+        # history, indexes, or other mutable Codex state with the user's sessions.
+        for filename in ("auth.json", "config.toml"):
+            source = installed_codex_home / filename
+            if source.is_file():
+                shutil.copy2(source, isolated_codex_home / filename)
+        login = subprocess.run([codex, "login", "status"], env=environment, capture_output=True, text=True, timeout=10)
+        _require_startup_prerequisite(request, login.returncode == 0, "An authenticated Codex CLI is required")
         # The first host deliberately starts through python; the installed shim's
         # console entry point may use python3 after a routine uv sync.
         first = exercise_client([str(Path(sys.prefix) / "bin/python"), str(project / ".venv/bin/rodex")])
         assert exercise_client([str(installed_shim), first[0]]) == first
+        assert exercise_client([str(installed_shim), "resume", inspected_codex_ids[first[0]]]) == first
         second = exercise_client([str(installed_shim)])
         assert second[0] != first[0]
         assert second[1] != first[1]
         assert len(tmux("list-sessions").stdout.splitlines()) == 2
+        standalone_codex_id = _create_standalone_codex_thread(codex, isolated / "standalone.sock", environment, project)
+        assert standalone_codex_id not in inspected_codex_ids.values()
+        adopted = exercise_client(
+            [str(installed_shim), "resume", standalone_codex_id], expected_codex_id=standalone_codex_id
+        )
+        assert adopted[0] not in {first[0], second[0]}
+        assert exercise_client([str(installed_shim), standalone_codex_id]) == adopted
+        assert len(tmux("list-sessions").stdout.splitlines()) == 3
     finally:
         # This fresh per-test socket can contain only the runtimes created above.
-        tmux("kill-server")
+        try:
+            tmux("kill-server")
+        finally:
+            for filename in ("auth.json", "config.toml"):
+                (isolated_codex_home / filename).unlink(missing_ok=True)

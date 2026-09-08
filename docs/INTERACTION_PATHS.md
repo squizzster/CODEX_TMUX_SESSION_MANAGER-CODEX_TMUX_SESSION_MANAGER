@@ -1,6 +1,6 @@
 # Interaction contract and production-path inventory
 
-Rodex 0.7.0a1, ALPHA. SQL generation 19 and shared tmux protocol v2 are unchanged.
+Rodex 0.8.0a1, ALPHA. SQL generation 19 and shared tmux protocol v2 are unchanged.
 There is no old interaction endpoint or fallback adapter. Existing processes retain
 the code they already loaded; this change does not restart existing sessions.
 
@@ -8,7 +8,7 @@ the code they already loaded; this change does not restart existing sessions.
 
 `SessionInteractionPipeline` owns target resolution, validation, ordered content hooks,
 post-hook checks, delivery and bounded content-free outcome records. The host shares one
-instance between proxy and observer. Exact-turn commands use the same contract inside
+instance between terminal gateway, interceptors, proxy and observer. Exact-turn commands use the same contract inside
 their existing transition lock. The observer renderer uses it in its own process.
 
 ```python
@@ -19,7 +19,7 @@ pipeline.send_message(target="main", text="Please investigate", start_model_turn
 
 `publish_session_interaction(socket_path, InteractionRequest(...))` submits the same
 operations over the private `/rodex-interaction` endpoint. It cannot submit raw protocol
-frames, observer snapshots, launch commands or hooks. `publish_tui_notice` is an explicit
+frames, raw terminal bytes, interceptor events, observer snapshots, launch commands or hooks. `publish_tui_notice` is an explicit
 display-only convenience function using this transport, not a second delivery path.
 
 | Target | Display | Model input | Pane operations |
@@ -28,6 +28,8 @@ display-only convenience function using this transport, not a second delivery pa
 | `agent-observer` | Observer text | Rejected: multi-agent view has no single thread binding | Open/reuse, locate, focus, resize, close |
 | Registered model target | No independent display | Exact coordinator start, steer or interrupt | None |
 | Per-connection protocol target | Input/output frames | Native RPC intent preserved | None |
+| `terminal` | Native output bytes | Native keyboard bytes; no implicit model intent | None |
+| `input-interceptor:<name>` | Interactive draft, submitted command, release | Local handler; placeholder is display-only | None |
 
 Future agent-chat targets need an explicit thread and adapter; labels never imply one.
 Primary open/close are session lifecycle operations, not pane-control operations.
@@ -79,6 +81,7 @@ work. The record buffer contains metadata, not prompt bodies or another durable 
 | `python -m rodex.analytics_worker` | Worker contract → analytics scheduler |
 | `python -m rodex.agent_observer` | Receiver/liveness → consumer/view → terminal presentation |
 | `python -m rodex.environment_exec` | Prepared environment → process exec |
+| `python -I -m rodex.terminal_exec` | Fresh session → controlling child PTY → unchanged native TUI argv/environment |
 | `python -m rodex.tmux_sharing_coordinator` | Server identity → roster reconciliation |
 | `python -m rodex.tmux_shared_ctrl_c` | Capability → private/shared exit policy |
 | `python -m rodex.status_animation_admission` | Admitted animation, watchdog, watchdog gate |
@@ -90,7 +93,12 @@ work. The record buffer contains metadata, not prompt bodies or another durable 
 | No arguments, `_create`, `_detach`, native interactive options/prompt | Application → managed lifecycle → host/TUI → protocol-input pipeline |
 | Existing name/alias/UUID, with or without `resume` | Same selector/open/resume/adoption pipeline |
 | Unmatched explicit resume, delegated native syntax | `cli._exec_codex`; native replacement, outside managed interaction |
-| Typing, initial prompts, slash commands, approval replies | Native TUI → protocol-input pipeline → App Server |
+| Native typing and terminal replies | TERMINAL_INPUT → decoder/interceptor → native child PTY → TUI → protocol-input pipeline |
+| Configured match | One `match_pattern` → verified native prefix → INTERACTIVE_INPUT target; subsequent Enter → SUBMITTED_COMMAND, no second matcher |
+| Local release | INPUT_RELEASE → restore own status claim; cancellation leaves native prefix; unsupported editing restores held suffix before key |
+| Local placeholder/menu | MESSAGE(false) → main display adapter; status draft → existing status-claim pipeline |
+| Initial prompts and native TUI protocol operations | Native TUI → protocol-input pipeline → App Server |
+| Native terminal output | TERMINAL_OUTPUT → bounded display queue → outer tmux PTY; unchanged without content hooks |
 | App Server primary/control-client output | Protocol-output pipeline → destination; same accepted frame → projections |
 | `_start`, `_steer`, `_interrupt` | Exact selector lock → interaction operation → exact-control adapter → proxy |
 | `_alias` | Serialized SQL/tmux rename → explicit start/steer announcement |
@@ -123,7 +131,8 @@ work. The record buffer contains metadata, not prompt bodies or another durable 
 | Startup rollback/stop | Managed lifecycle/runtime → exact session kill |
 | Ctrl-D | Owned root binding → detach current client only |
 | Ctrl-C | Private/shared confirmation policy → exact session termination |
-| Natural exit, signals, keepalive failure | Host closes owned children/proxy/observer/analytics/status/event tap and owned paths |
+| Resize, external SIGINT | Host → gateway → child terminal dimensions/foreground process group |
+| Natural exit, signals, keepalive failure | Host closes owned children/gateway/proxy/observer/analytics/status/event tap and paths; gateway restores terminal attributes/FD flags |
 
 ## Deliberate domain boundaries
 
@@ -136,7 +145,9 @@ work. The record buffer contains metadata, not prompt bodies or another durable 
 | Transient catalog/startup App Server probes | Runtime's read-only initialize/thread-read/loaded-list adapters |
 | SQL connection/publication | `rodex_sql` transactions and registry publication pipeline |
 | Runtime logs, update cache, analyzer memory files | File/diagnostic owners, not chat |
-| Raw keyboard handling, terminal resize/escape rendering | Codex/tmux; Rodex intercepts protocol operations, not every keystroke/pixel |
+| Keyboard framing and native PTY writes | `TerminalInputDecoder` / `TerminalInputInterceptor` → `TerminalSessionGateway`; tmux retains its owned lifecycle keys |
+| Native composer presentation at takeover/submission | Exact primary-pane fenced snapshot; prefix and end cursor must agree, no background screen polling |
+| Escape rendering and general native editor state | Codex/tmux; Rodex forwards output and does not mirror the complete editor |
 
 ## Enforced audit and evidence
 
@@ -151,5 +162,7 @@ Behavioral tests cover hook ordering, intent preservation, missing/stale targets
 explicit model input, indeterminate receipts, both proxy directions/control clients,
 bounded observer probes, real tmux operations, real observer startup/reopen/rendering,
 and runtime exit. The installed-command gate isolates tmux, SQLite and Codex history;
-it verifies startup/resume, real main-TUI display and no model turn from display-only
-delivery. Tests never attach to or stop an existing user session.
+it verifies startup/resume, real native slash menus, local takeover/menu/submission/release,
+ordinary editing afterwards, and no model turn from display-only delivery. Isolated PTYs
+test controlling-terminal identity, input/output hooks, final-output drain, resize, signals,
+spawn failure and terminal restoration. Tests never attach to or stop an existing user session.

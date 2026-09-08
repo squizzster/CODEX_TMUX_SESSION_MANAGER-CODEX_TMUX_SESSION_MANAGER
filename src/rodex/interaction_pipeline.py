@@ -21,6 +21,11 @@ class InteractionOperation(StrEnum):
     DISPLAY_STATE = "display_state"
     PROTOCOL_INPUT = "protocol_input"
     PROTOCOL_OUTPUT = "protocol_output"
+    TERMINAL_INPUT = "terminal_input"
+    TERMINAL_OUTPUT = "terminal_output"
+    INTERACTIVE_INPUT = "interactive_input"
+    SUBMITTED_COMMAND = "submitted_command"
+    INPUT_RELEASE = "input_release"
     OPEN = "open"
     LOCATE = "locate"
     FOCUS = "focus"
@@ -272,6 +277,17 @@ class SessionInteractionPipeline:
             type(request.size_percent) is not int or not 1 <= request.size_percent <= 99
         ):
             raise InteractionRejected("pane size must be an integer percentage from 1 to 99")
+        if request.operation in {
+            InteractionOperation.TERMINAL_INPUT,
+            InteractionOperation.TERMINAL_OUTPUT,
+        } and not isinstance(request.payload, bytes):
+            raise InteractionRejected("terminal operations require a byte-stream payload")
+        if request.operation in {
+            InteractionOperation.INTERACTIVE_INPUT,
+            InteractionOperation.SUBMITTED_COMMAND,
+            InteractionOperation.INPUT_RELEASE,
+        } and not isinstance(request.text, str):
+            raise InteractionRejected("interceptor operations require a text draft")
 
     @staticmethod
     def _validate_transform(original: InteractionRequest, transformed: InteractionRequest) -> None:
@@ -280,7 +296,10 @@ class SessionInteractionPipeline:
         if replace(transformed, text=original.text, payload=original.payload) != original:
             raise InteractionRejected("interaction hooks may transform content, not target, authority, or intent")
         if original.payload != transformed.payload:
-            if original.operation in {InteractionOperation.PROTOCOL_INPUT, InteractionOperation.PROTOCOL_OUTPUT}:
+            if original.operation in {InteractionOperation.TERMINAL_INPUT, InteractionOperation.TERMINAL_OUTPUT}:
+                if not isinstance(transformed.payload, bytes):
+                    raise InteractionRejected("terminal hooks must preserve a byte-stream payload")
+            elif original.operation in {InteractionOperation.PROTOCOL_INPUT, InteractionOperation.PROTOCOL_OUTPUT}:
                 # Only text leaves may change: RPC IDs, methods, thread/turn identity,
                 # approval decisions, control fields and message structure stay exact.
                 if _protocol_structure(original.payload) != _protocol_structure(transformed.payload):

@@ -46,6 +46,8 @@ from .primary_connection_lifecycle import PrimaryConnectionLifecycleCoordinator
 from .process_contracts import AnalyticsWorkerConfig, SessionHostConfig
 from .process_environment import (
     TMUX_OWNED_CHILD_ENVIRONMENT_VARIABLES,
+    canonical_native_executable,
+    canonical_python_environment_executable,
     exact_environment_exec_command,
     user_process_environment,
     validated_user_environment_entries,
@@ -482,7 +484,7 @@ class RodexRuntimeLauncher:
         runner: Runner = subprocess.run,
         connector: Connector = unix_connect,
         process_spawner: ProcessSpawner = subprocess.Popen,
-        python_executable: str = sys.executable,
+        python_executable: str | None = None,
         monotonic: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
         startup_timeout_seconds: float = DEFAULT_STARTUP_TIMEOUT_SECONDS,
@@ -491,11 +493,13 @@ class RodexRuntimeLauncher:
         environment: Mapping[str, str] | None = None,
     ) -> None:
         self._codex_binary = codex_binary
-        self._tmux_binary = tmux_binary
+        self._tmux_binary = canonical_native_executable(tmux_binary)
         self._run = runner
         self._connect = connector
         self._spawn_process = process_spawner
-        self._python_executable = python_executable
+        self._python_executable = canonical_python_environment_executable(
+            sys.executable if python_executable is None else python_executable
+        )
         self._monotonic = monotonic
         self._sleep = sleep
         self._startup_timeout_seconds = startup_timeout_seconds

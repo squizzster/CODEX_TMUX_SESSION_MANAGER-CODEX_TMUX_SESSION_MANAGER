@@ -1,6 +1,6 @@
 [project]
 name = "codex-tmux-session-manager"
-version = "0.6.0a2"
+version = "0.6.0a3"
 description = "Durable Codex sessions bridging native tmux use and exact local automation"
 readme = "README.md"
 authors = [
@@ -32,6 +32,7 @@ dev = [
 addopts = "--strict-markers --strict-config"
 testpaths = ["tests"]
 markers = [
+    "live_startup: exercises the installed Rodex CLI with real authenticated Codex and isolated tmux/SQL",
     "evolutionary_regression: guards a production fix based on current best evidence; deliberately replace it when broader evidence supersedes the model",
 ]
 

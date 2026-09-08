@@ -1937,6 +1937,64 @@ def test_ctrl_d_detach_contract_fails_closed_on_a_user_owned_binding(
     )
 
 
+@pytest.mark.parametrize("python_names", [("python", "python3"), ("python3", "python")])
+def test_real_shared_server_accepts_same_environment_executable_aliases(
+    tmp_path: Path,
+    python_names: tuple[str, str],
+) -> None:
+    tmux_binary = shutil.which("tmux")
+    if tmux_binary is None:
+        pytest.skip("tmux is not installed")
+    python_directory = Path(sys.prefix) / "bin"
+    python_executables = tuple(python_directory / name for name in python_names)
+    assert python_executables[0].samefile(python_executables[1])
+    tmux_alias = tmp_path / "tmux-alias"
+    tmux_alias.symlink_to(tmux_binary)
+    socket_path = tmp_path / "tmux.sock"
+
+    def tmux(*arguments: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [tmux_binary, "-S", str(socket_path), *arguments],
+            check=check,
+            text=True,
+            capture_output=True,
+        )
+
+    tmux("new-session", "-d", "-s", "interpreter-alias-check", "sleep 30")
+    try:
+        runtime = _register_real_tmux_session(tmux, socket_path, "interpreter-alias-check")
+        first_launcher = RodexRuntimeLauncher(
+            "codex",
+            tmux_binary,
+            python_executable=str(python_executables[0]),
+        )
+        second_launcher = RodexRuntimeLauncher(
+            "codex",
+            str(tmux_alias),
+            python_executable=str(python_executables[1]),
+        )
+        first_launcher.initialise_session_ui(runtime)
+        owned_before = tmux("show-options", "-s").stdout
+        second_launcher.reconcile_session_ui(runtime)
+        assert tmux("show-options", "-s").stdout == owned_before
+        assert tmux("has-session", "-t", "=interpreter-alias-check").returncode == 0
+
+        # Sharing the base binary does not make a different environment this installation.
+        other_environment_python = tmp_path / "different-environment" / "bin" / "python"
+        other_environment_python.parent.mkdir(parents=True)
+        other_environment_python.symlink_to(python_executables[0].resolve())
+        other_launcher = RodexRuntimeLauncher(
+            "codex",
+            tmux_binary,
+            python_executable=str(other_environment_python),
+        )
+        with pytest.raises(RodexRuntimeError, match="different Rodex installation"):
+            other_launcher.reconcile_session_ui(runtime)
+        assert tmux("show-options", "-s").stdout == owned_before
+    finally:
+        tmux("kill-server", check=False)
+
+
 def test_stale_server_capability_cannot_submit_a_server_global_write(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

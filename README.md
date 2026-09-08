@@ -11,7 +11,7 @@ interactive grammar pass through unchanged.
 > described here is complete for its current scope, but interfaces may still change
 > before a stable release.
 
-Current release: **Rodex 0.6.0a2**, SQL generation **19**, shared tmux protocol **v2**.
+Current release: **Rodex 0.6.0a3**, SQL generation **19**, shared tmux protocol **v2**.
 This ALPHA supports only its current storage and runtime contracts. It creates
 `rodex-v19.sqlite3` and `tmux-shared-v2.sock`; earlier generations are outside this
 installation's session catalog. There are no database migrations or old-runtime adapters.
@@ -561,7 +561,7 @@ SQL.
 ```bash
 uv run ruff format --check .
 uv run ruff check .
-uv run pytest --cov --cov-report=term-missing
+uv run pytest --require-live-startup --cov --cov-report=term-missing
 uv build
 ```
 
@@ -569,3 +569,11 @@ The coverage floor is 70%. Tests lock the exhaustive application route/preparati
 matrix and thin CLI boundary, with real App Server Unix-socket and real-tmux coverage for
 scrollback retention and following, inherited mouse configuration, rename, identity
 markers, and status configuration.
+
+The live-startup gate runs real Codex through the installed shim on isolated SQL and
+tmux state. It verifies the rendered TUI, live thread, detach, reopen without replacing
+the runtime, and a second launch sharing the same server. It submits no model prompts
+and cleans up its runtimes. Run it alone with `uv run pytest -m live_startup --require-live-startup`.
+The required flag makes missing Codex/tmux or authentication fail validation; a normal
+test run may skip the gate when those prerequisites are unavailable. Do not claim startup
+is verified from a run that skipped it.

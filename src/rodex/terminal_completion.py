@@ -203,7 +203,7 @@ def _menu_lines(state: InputMenuView, draft: str, available_rows: int) -> list[t
         prefix = f"{'\u203a' if selected else ' '} {index + 1}. " if state.stage == InputMenuStage.ARGUMENTS else "  "
         lines.append((f"{prefix}{label}   {row.helper_text}", selected))
     if not state.rows:
-        lines.append(("  no matches" if state.stage == InputMenuStage.COMMANDS else "  No options configured.", False))
+        lines.append(("  no matches", False))
     return lines + [(line, False) for line in footer]
 
 

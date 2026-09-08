@@ -187,10 +187,35 @@ def test_filtering_to_one_command_keeps_it_highlighted_and_escape_restores_the_c
     assert harness.messages == [] and harness.native_input == b"/r"
 
 
-def test_rodx_has_an_empty_configured_picker_with_no_dummy_action_to_confirm():
-    harness = make_pipeline()
-    harness.send(b"/rodx\r\n\x1b[A\x1b[B\r")
-    assert any(line.rstrip() == "Dummy test command" for line in harness.screen.display)
-    assert any(line.strip() == "No options configured." for line in harness.screen.display)
-    assert any(line.rstrip() == ARGUMENT_MENU_FOOTER for line in harness.screen.display)
-    assert harness.messages == [] and harness.native_input == b"/r"
+@pytest.mark.parametrize(
+    "entry,selection,prefix",
+    [(INPUT_INTERCEPTORS[1], selection, "/r") for selection in (b"/rodx\r\n", b"/rod\x1b[B\r\n")]
+    + [
+        (
+            InputInterceptorRegistration(
+                "example",
+                "!hello",
+                LiveInterceptionRule(r"^!h(?:ello)?$", helper_text="Custom command"),
+                InterceptionRule(r"^!hello (.*?)$"),
+            ),
+            b"!hello\r\n",
+            "!",
+        ),
+    ],
+)
+def test_no_option_command_reports_bad_config_without_a_picker_and_releases_keyboard(entry, selection, prefix):
+    registrations = INPUT_INTERCEPTORS if entry in INPUT_INTERCEPTORS else (entry,)
+    harness = make_pipeline(registrations, prefix)
+    harness.send(selection)
+    assert not harness.gateway._interceptor.active
+    assert [message.text for message in harness.messages] == [
+        f"{entry.completion_text}: bad config — no argument options are configured."
+    ]
+    cleared_prefix = prefix.encode() + b"\x7f" * len(prefix)
+    assert harness.native_input == cleared_prefix
+    assert harness.screen.display == harness.gateway._completion.native.screen.display
+    assert not any(line.rstrip() == ARGUMENT_MENU_FOOTER for line in harness.screen.display)
+    harness.send(b"ordinary typing")
+    assert harness.native_input == cleared_prefix + b"ordinary typing"
+    assert all(not record.start_model_turn for record in harness.pipeline.records)
+    assert not any(record.operation == InteractionOperation.SUBMITTED_COMMAND for record in harness.pipeline.records)

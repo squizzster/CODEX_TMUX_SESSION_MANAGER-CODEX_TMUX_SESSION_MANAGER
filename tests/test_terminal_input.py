@@ -80,6 +80,7 @@ class InputHarness:
                         {
                             InteractionOperation.INTERACTIVE_INPUT,
                             InteractionOperation.SUBMITTED_COMMAND,
+                            InteractionOperation.INPUT_CONFIGURATION_ERROR,
                             InteractionOperation.INPUT_RELEASE,
                         }
                     ),
@@ -164,10 +165,11 @@ def test_arrow_encodings_navigate_both_menus_without_leaking_native_input(up, do
 
 
 def test_escape_returns_to_prior_command_selection_then_closes_local_menu():
-    harness = InputHarness()
+    rodex, rodx = INPUT_INTERCEPTORS
+    harness = InputHarness(registrations=(rodex, replace(rodx, argument_menu=rodex.argument_menu)))
     harness.feed(b"/rod\x1b[B\r")
-    assert menu_view(harness).stage == InputMenuStage.ARGUMENTS and menu_view(harness).rows == ()
-    harness.feed(b"\r\x1b[A\x1b[B")  # Empty picker cannot confirm or acquire a selection.
+    assert menu_view(harness).stage == InputMenuStage.ARGUMENTS and len(menu_view(harness).rows) == 3
+    harness.feed(b"\x1b[A\x1b[B")
     assert harness.forwarded == b"/r"
     harness.escape()
     assert menu_view(harness).stage == InputMenuStage.COMMANDS
@@ -180,7 +182,7 @@ def test_two_rapid_escapes_and_escape_followed_by_arrow_keep_their_key_boundarie
     harness = InputHarness()
     harness.feed(b"/rod\r\x1b\x1b[B")
     assert menu_view(harness).stage == InputMenuStage.COMMANDS and menu_view(harness).selected_index == 1
-    harness.feed(b"\r\x1b\x1b")
+    harness.feed(b"\x1b[A\r\x1b\x1b")
     for event in harness.decoder.expire_incomplete(1):
         harness.interceptor.accept(event)
     assert not harness.interceptor.active and harness.forwarded == b"/r"
@@ -223,7 +225,8 @@ def test_changed_native_composer_prevents_confirmation_without_losing_option_sel
 
 
 def test_rejected_back_and_tab_keep_the_last_accepted_menu_state():
-    harness = InputHarness()
+    rodex, rodx = INPUT_INTERCEPTORS
+    harness = InputHarness(registrations=(rodex, replace(rodx, argument_menu=rodex.argument_menu)))
     harness.feed(b"/rod\x1b[B")
     harness.reject = True
     harness.feed(b"\t")
@@ -236,7 +239,25 @@ def test_rejected_back_and_tab_keep_the_last_accepted_menu_state():
     harness.reject = False
     harness.feed(b"\x1b[B")
     assert menu_view(harness).stage == InputMenuStage.ARGUMENTS
-    assert menu_view(harness).rows == () and harness.forwarded == b"/r"
+    assert menu_view(harness).selected_index == 1 and harness.forwarded == b"/r"
+
+
+@pytest.mark.parametrize("failure", ["delivery", "native-prefix"])
+def test_unavailable_configuration_error_handoff_keeps_an_editable_command_menu_until_retry(failure):
+    harness = InputHarness()
+    harness.feed(b"/rodx")
+    harness.reject = failure == "delivery"
+    harness.interceptor._confirm_native_prefix = lambda _prefix: failure != "native-prefix"
+    harness.feed(b"\r\n")
+    assert harness.interceptor.active and harness.forwarded == b"/r"
+    assert menu_view(harness).stage == InputMenuStage.COMMANDS
+    harness.reject = False
+    harness.interceptor._confirm_native_prefix = lambda _prefix: True
+    harness.feed(b"\x7f")
+    assert menu_view(harness).draft == "/rod" and menu_view(harness).selected_index == 1
+    harness.feed(b"\r\nordinary typing")
+    assert not harness.interceptor.active and harness.forwarded == b"/r\x7f\x7fordinary typing"
+    assert not any(event.operation == InteractionOperation.SUBMITTED_COMMAND for event in harness.events)
 
 
 @pytest.mark.parametrize("raw", [b"\x1b\x1b", b"\x1b\x1b[A", b"\x1b[A\x1bOB", b"\x1b[57352u"])

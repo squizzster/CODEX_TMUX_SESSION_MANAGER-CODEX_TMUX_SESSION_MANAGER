@@ -1,6 +1,6 @@
 # Interaction contract and production-path inventory
 
-Rodex 0.10.0a1, ALPHA. SQL generation 19 and shared tmux protocol v2 are unchanged.
+Rodex 0.10.1a1, ALPHA. SQL generation 19 and shared tmux protocol v2 are unchanged.
 There is no old interaction endpoint or fallback adapter. Existing processes retain
 the code they already loaded; this change does not restart existing sessions.
 
@@ -30,7 +30,7 @@ display-only convenience function using this transport, not a second delivery pa
 | Per-connection protocol target | Input/output frames | Native RPC intent preserved | None |
 | `terminal` | Native output and configured inline completion | Native keyboard bytes; no implicit model intent | None |
 | `input-interceptor-menu` | Shared command/argument view and release | Selection only; never starts a turn | None |
-| `input-interceptor:<name>` | Submitted dummy response | Local handler; placeholder is display-only | None |
+| `input-interceptor:<name>` | Dummy response or configuration error | Local handler; display-only | None |
 
 Future agent-chat targets need an explicit thread and adapter; labels never imply one.
 Primary open/close are session lifecycle operations, not pane-control operations.
@@ -98,6 +98,7 @@ work. The record buffer contains metadata, not prompt bodies or another durable 
 | Configured live matches | Every `live.reg_exp_intercept` match → verified native prefix → shared menu INTERACTIVE_INPUT → terminal DISPLAY_STATE |
 | Command/option navigation | One `InputInterceptionMenu` owns filtering, wrapping selection, Enter/open and Escape/back; immutable view → same display pipeline |
 | Option confirmation | Explicit selected command + configured option → SUBMITTED_COMMAND → display-only dummy response; no theme or model mutation |
+| Selected command without options | INPUT_CONFIGURATION_ERROR → main MESSAGE(false); report bad config, clear verified native prefix, release keyboard; no empty picker or command submission |
 | Configured Enter match | Interception `on_enter.reg_exp_intercept` → SUBMITTED_COMMAND, including pasted input without live takeover; unmatched Enter stays native |
 | Local release | INPUT_RELEASE → clear terminal DISPLAY_STATE; cancellation leaves native prefix; unsupported editing restores held suffix before key |
 | Local placeholder reply | Configured command/option text → MESSAGE(false) → main display adapter; no command execution yet |
@@ -172,9 +173,12 @@ ordinary editing afterwards, and no model turn from display-only delivery. Isola
 test controlling-terminal identity, input/output hooks, final-output drain, resize, signals,
 spawn failure and terminal restoration. Tests never attach to or stop an existing user session.
 
-Release 0.10.0a1 has focused Python coverage of both menu levels, regex filtering, cyclic
+Release 0.10.1a1 has focused Python coverage of both menu levels, regex filtering, cyclic
 selection, configured headings/options, fixed footer, CRLF, rapid Escape, rejected delivery,
+missing-option errors and immediate keyboard release. An isolated Python-child PTY checks
+single-Escape back/release without a follow-up key or child output. Tests also cover
 height/width changes, native-byte preservation and no implicit model turn. Tests exercise
 the real Python input/presentation/gateway adapters without launching Codex or a live Rodex
-session. The user confirmed live appearance, Up/Down and Enter selection; the automated
-live-startup suite was not rerun.
+session. The user confirmed live appearance, Up/Down and Enter selection for the preceding
+menu change, then reported the confusing empty picker fixed here. This correction has not
+been live-tested; the automated live-startup suite was not rerun.

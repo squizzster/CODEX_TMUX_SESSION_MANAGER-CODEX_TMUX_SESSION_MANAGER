@@ -40,6 +40,8 @@ class InputMenuView:
     def __post_init__(self) -> None:
         if not all(isinstance(value, str) for value in (self.draft, self.native_prefix, self.heading, self.subheading)):
             raise ValueError("menu presentation fields must be text")
+        if self.stage == InputMenuStage.ARGUMENTS and not self.rows:
+            raise ValueError("an argument picker requires selectable options")
         if self.rows:
             if type(self.selected_index) is not int or not 0 <= self.selected_index < len(self.rows):
                 raise ValueError("menu selection must identify a displayed row")
@@ -101,7 +103,7 @@ class InputInterceptionMenu:
                 self._selected_command_name = matches[(index + offset) % len(matches)].name
 
     def open_arguments(self) -> bool:
-        if self.selected_command is None:
+        if self.selected_command is None or not self.selected_command.argument_menu.options:
             return False
         self.stage = InputMenuStage.ARGUMENTS
         self._selected_option_index = 0

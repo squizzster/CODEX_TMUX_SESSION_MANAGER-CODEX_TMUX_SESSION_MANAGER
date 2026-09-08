@@ -12,7 +12,7 @@ pass through unchanged.
 > described here is complete for its current scope, but interfaces may still change
 > before a stable release.
 
-Current release: **Rodex 0.10.0a1**, SQL generation **19**, shared tmux protocol **v2**.
+Current release: **Rodex 0.10.1a1**, SQL generation **19**, shared tmux protocol **v2**.
 This ALPHA supports only its current storage and runtime contracts. It creates
 `rodex-v19.sqlite3` and `tmux-shared-v2.sock`; earlier generations are outside this
 installation's session catalog. There are no database migrations or old-runtime adapters.
@@ -168,13 +168,15 @@ Unmatched live input reaches Codex immediately. A live match verifies the native
 and displays **all** matching commands underneath, with their configured helper text.
 Up/Down wraps through the list; the selected row is cyan and bold, even with one match.
 Filtering preserves the selected command where it still matches. Tab completes that
-command's text. Enter on a selected command opens its configured argument picker.
+command's text. Enter on a selected command opens its configured argument picker if
+it has options. A command without options displays `<command>: bad config — no argument
+options are configured.` and returns directly to normal typing, with no empty picker.
 
 The picker displays its configured headings and numbered options. Up/Down wraps through
 the options; Enter confirms the selected option through the same submitted-command pipeline.
 The fixed footer is `Press enter to confirm or esc to go back`. Escape returns to the
-prior command list and selection. `/rodx` opens an empty picker: Enter does nothing and
-Escape goes back. Other editor/paste keys are ignored inside the picker.
+prior command list and selection with one press. Other editor/paste keys are ignored
+inside the picker. `/rodx` currently exercises the missing-options configuration error.
 
 Confirmation only displays a dummy response such as `/rodex dark: placeholder only —
 no action performed.` It does not change a theme or start a model turn. The native prefix

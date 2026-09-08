@@ -102,6 +102,5 @@ INPUT_INTERCEPTORS = (
             helper_text="dummy test to see if we can move up and down in the rodex/rodx menu here",
         ),
         on_enter=InterceptionRule(reg_exp_intercept=r"^/rodx (.*?)$", flags=re.MULTILINE),
-        argument_menu=ArgumentMenuConfig(heading="Dummy test command", subheading="No options configured yet."),
     ),
 )

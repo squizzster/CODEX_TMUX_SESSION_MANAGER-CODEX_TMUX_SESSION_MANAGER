@@ -255,8 +255,16 @@ class TerminalInputInterceptor:
                 return
             elif event.key in {b"\r", b"\n"}:
                 self._discard_paired_lf = event.key == b"\r"
-                if self._menu.selected_command is not None:
-                    self._transition_menu(lambda menu: menu.open_arguments())
+                if (entry := self._menu.selected_command) is not None:
+                    if entry.argument_menu.options:
+                        self._transition_menu(lambda menu: menu.open_arguments())
+                    else:
+                        self._complete_local_request(
+                            entry,
+                            InteractionOperation.INPUT_CONFIGURATION_ERROR,
+                            entry.completion_text,
+                            self._forwarded_prefix,
+                        )
                 elif len([entry for entry in self._registrations if entry.on_enter.matches(self._menu.draft)]) != 1:
                     self._return_to_native(event)
                 else:
@@ -287,13 +295,17 @@ class TerminalInputInterceptor:
     ) -> bool:
         registrations = (selected_registration,) if selected_registration is not None else self._registrations
         matches = [entry for entry in registrations if entry.on_enter.matches(draft)]
-        if len(matches) != 1 or not self._confirm_native_prefix(forwarded_prefix):
+        if len(matches) != 1:
             return False
-        result = self._pipeline.execute(
-            InteractionRequest(
-                matches[0].target, InteractionOperation.SUBMITTED_COMMAND, "terminal-interceptor", text=draft
-            )
-        )
+        return self._complete_local_request(matches[0], InteractionOperation.SUBMITTED_COMMAND, draft, forwarded_prefix)
+
+    def _complete_local_request(
+        self, entry: InputInterceptorRegistration, operation: InteractionOperation, text: str, forwarded_prefix: str
+    ) -> bool:
+        """Visible local outcomes release input only after delivery and a verified native handoff."""
+        if not self._confirm_native_prefix(forwarded_prefix):
+            return False
+        result = self._pipeline.execute(InteractionRequest(entry.target, operation, "terminal-interceptor", text=text))
         if not result.accepted:
             return False
         # Remove only verified native text, after accepted local handling. Never

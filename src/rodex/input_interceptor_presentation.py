@@ -43,7 +43,7 @@ class InputInterceptorPresentation:
                 InteractionTarget(
                     entry.target,
                     str(capability.runtime_id),
-                    frozenset({InteractionOperation.SUBMITTED_COMMAND}),
+                    frozenset({InteractionOperation.SUBMITTED_COMMAND, InteractionOperation.INPUT_CONFIGURATION_ERROR}),
                     exists=lambda: True,
                     deliver=self._deliver,
                 )
@@ -66,14 +66,25 @@ class InputInterceptorPresentation:
     def _deliver(self, request: InteractionRequest) -> InteractionResult:
         if request.operation == InteractionOperation.INPUT_RELEASE:
             return self._display(None)
-        elif request.operation == InteractionOperation.SUBMITTED_COMMAND:
+        elif request.operation in {
+            InteractionOperation.SUBMITTED_COMMAND,
+            InteractionOperation.INPUT_CONFIGURATION_ERROR,
+        }:
             entry = self._registrations[request.target]
             assert request.text is not None
-            if not entry.on_enter.matches(request.text):
-                return InteractionResult(DeliveryStatus.REJECTED, "submitted input does not match its configured rule")
+            if request.operation == InteractionOperation.INPUT_CONFIGURATION_ERROR:
+                if entry.argument_menu.options:
+                    return InteractionResult(DeliveryStatus.REJECTED, "command has selectable argument options")
+                text = f"{entry.completion_text}: bad config — no argument options are configured."
+            else:
+                if not entry.on_enter.matches(request.text):
+                    return InteractionResult(
+                        DeliveryStatus.REJECTED, "submitted input does not match its configured rule"
+                    )
+                text = f"{request.text}: placeholder only — no action performed."
             return self._pipeline.send_message(
                 target="main",
-                text=f"{request.text}: placeholder only — no action performed.",
+                text=text,
                 source=entry.target,
                 start_model_turn=False,
             )

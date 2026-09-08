@@ -25,6 +25,7 @@ class InteractionOperation(StrEnum):
     TERMINAL_OUTPUT = "terminal_output"
     INTERACTIVE_INPUT = "interactive_input"
     SUBMITTED_COMMAND = "submitted_command"
+    INPUT_CONFIGURATION_ERROR = "input_configuration_error"
     INPUT_RELEASE = "input_release"
     OPEN = "open"
     LOCATE = "locate"
@@ -285,6 +286,7 @@ class SessionInteractionPipeline:
         if request.operation in {
             InteractionOperation.INTERACTIVE_INPUT,
             InteractionOperation.SUBMITTED_COMMAND,
+            InteractionOperation.INPUT_CONFIGURATION_ERROR,
             InteractionOperation.INPUT_RELEASE,
         } and not isinstance(request.text, str):
             raise InteractionRejected("interceptor operations require a text draft")

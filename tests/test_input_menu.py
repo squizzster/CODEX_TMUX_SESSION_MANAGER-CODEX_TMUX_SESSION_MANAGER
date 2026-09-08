@@ -78,15 +78,21 @@ def test_argument_titles_rows_selection_and_escape_are_configured_menu_state():
     assert menu.stage == InputMenuStage.COMMANDS and menu.selected_option is None
 
 
-def test_empty_argument_picker_is_valid_and_back_restores_the_selected_command():
+def test_empty_option_list_cannot_open_an_argument_picker():
     menu = InputInterceptionMenu(INPUT_INTERCEPTORS, "/rod")
     menu.move_selection(1)
-    assert menu.open_arguments()
-    for offset in (-1, 1, 1):
-        menu.move_selection(offset)
-        assert menu.selected_option is None and menu.view("/r").selected_index is None
-    menu.back_to_commands()
+    assert not menu.open_arguments()
+    assert menu.stage == InputMenuStage.COMMANDS
     assert menu.selected_command.name == "rodx" and menu.view("/r").selected_index == 1
+
+
+def test_empty_argument_picker_is_rejected_at_the_presentation_contract():
+    menu = InputInterceptionMenu(INPUT_INTERCEPTORS, "/robot")
+    with pytest.raises(ValueError, match="requires selectable options"):
+        replace(menu.view("/r"), stage=InputMenuStage.ARGUMENTS)
+    serialized = menu.view("/r").serialize().replace('"commands"', '"arguments"')
+    with pytest.raises(ValueError, match="requires selectable options"):
+        InputMenuView.deserialize(serialized)
 
 
 def test_a_differently_named_configuration_supplies_every_menu_field():

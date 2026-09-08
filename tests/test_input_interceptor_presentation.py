@@ -109,6 +109,26 @@ def test_placeholder_submission_is_display_only_and_release_clears_terminal_stat
     assert entry.target not in pipeline._targets
 
 
+@pytest.mark.parametrize("entry", INPUT_INTERCEPTORS)
+def test_configuration_error_is_display_only_and_only_valid_for_missing_options(entry):
+    pipeline, _presentation, _pane, messages = setup_presentation()
+    request = InteractionRequest(
+        entry.target, InteractionOperation.INPUT_CONFIGURATION_ERROR, "test", text=entry.completion_text
+    )
+    assert not pipeline.execute(replace(request, text=None)).accepted
+    assert not pipeline.execute(replace(request, start_model_turn=True)).accepted
+    result = pipeline.execute(request)
+    if entry.argument_menu.options:
+        assert not result.accepted and messages == []
+    else:
+        assert result.accepted
+        assert len(messages) == 1
+        message = messages[0]
+        assert message.operation == InteractionOperation.MESSAGE and message.target == "main"
+        assert message.text == f"{entry.completion_text}: bad config — no argument options are configured."
+        assert not message.start_model_turn
+
+
 def test_unavailable_display_rejects_takeover():
     pipeline, _presentation, _pane, messages = setup_presentation(display_available=False)
     result = pipeline.execute(menu_request("/rodex #(echo should-not-execute)\n#{pane_id}"))

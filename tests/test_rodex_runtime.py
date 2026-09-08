@@ -53,6 +53,7 @@ from rodex.tmux_status import (
     STATUS_CLAIM_PUBLISHER_OPTION,
     STATUS_CLAIM_TOKEN_OPTION,
 )
+from rodex.version import RODEX_VERSION
 from rodex_registry import (
     RodexRegistryId,
     RodexRuntimeId,
@@ -358,7 +359,7 @@ def test_observer_uses_distinct_codex_identity_fields_and_no_compression(
                 "clientInfo": {
                     "name": "rodex",
                     "title": "Rodex",
-                    "version": "0.6.0a1",
+                    "version": RODEX_VERSION,
                 }
             },
         },
@@ -439,7 +440,7 @@ def test_transient_app_server_reads_exact_persisted_codex_identity_and_cleans_up
                 "clientInfo": {
                     "name": "rodex-session-catalog",
                     "title": "Rodex Session Catalog",
-                    "version": "0.6.0a1",
+                    "version": RODEX_VERSION,
                 }
             },
         },

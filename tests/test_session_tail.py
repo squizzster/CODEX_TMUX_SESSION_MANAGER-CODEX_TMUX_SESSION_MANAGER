@@ -8,6 +8,7 @@ import pytest
 from rodex.errors import RodexLaunchError
 from rodex.runtime import LiveTmuxSession, TmuxScrollbackSnapshot, TmuxScrollbackState
 from rodex.session_tail import (
+    TAIL_MAX_IDLE_POLL_INTERVAL_SECONDS,
     TAIL_POLL_INTERVAL_SECONDS,
     PlainTailCursor,
     SessionTailRequest,
@@ -168,6 +169,50 @@ def test_plain_cursor_suppresses_rows_already_visible_initially() -> None:
             4,
         )
     ) == ("new one",)
+
+
+@pytest.mark.parametrize("redraw_before_settling", [False, True])
+def test_tail_settles_the_final_visible_answer_before_backing_off_idle_polls(
+    redraw_before_settling: bool,
+) -> None:
+    composer = "\N{SINGLE RIGHT-POINTING ANGLE QUOTATION MARK} "
+    initial = TmuxScrollbackSnapshot(("earlier output", composer), 0)
+    finished = TmuxScrollbackSnapshot(("earlier output", "FINAL ANSWER", composer), 0)
+    snapshots = [initial]
+    if redraw_before_settling:
+        snapshots.append(TmuxScrollbackSnapshot(("earlier output", "partial answer", composer), 0))
+    snapshots.extend([finished] * 8)
+    states = iter(map(_state, snapshots))
+    output = io.StringIO()
+    intervals: list[float] = []
+    full_captures = 0
+
+    def capture(_runtime: LiveTmuxSession) -> TmuxScrollbackSnapshot:
+        nonlocal full_captures
+        full_captures += 1
+        return initial
+
+    def observe_next_poll(interval: float) -> None:
+        intervals.append(interval)
+        if len(intervals) == len(snapshots):
+            raise KeyboardInterrupt
+
+    with pytest.raises(KeyboardInterrupt):
+        follow_session_tail(
+            SessionTailRequest("worker", 0),
+            LiveTmuxSession(Path("/tmp/rodex-test.sock"), "worker"),
+            capture,
+            lambda _runtime: next(states),
+            lambda: None,
+            output=output,
+            sleep=observe_next_poll,
+        )
+
+    assert output.getvalue() == "FINAL ANSWER\n"
+    assert full_captures == 1
+    settling_poll_count = 3 + int(redraw_before_settling)
+    assert intervals[:settling_poll_count] == [TAIL_POLL_INTERVAL_SECONDS] * settling_poll_count
+    assert intervals[-1] == TAIL_MAX_IDLE_POLL_INTERVAL_SECONDS
 
 
 def test_plain_cursor_emits_a_visible_row_if_it_changed_before_scrolling() -> None:

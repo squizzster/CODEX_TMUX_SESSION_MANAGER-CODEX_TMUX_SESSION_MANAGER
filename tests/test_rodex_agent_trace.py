@@ -375,6 +375,73 @@ def test_normalizer_uses_authenticated_physical_ordinals_and_append_offset() -> 
     assert publication.coverage_state == "complete"
 
 
+@pytest.mark.parametrize(
+    ("primary_minutes", "secondary_minutes"),
+    [(300, 10080), (300, None), (None, 10080), (None, None)],
+)
+def test_rate_limit_windows_survive_normalization_publication_and_readback(
+    tmp_path: Path,
+    primary_minutes: int | None,
+    secondary_minutes: int | None,
+) -> None:
+    supplied_windows = {
+        "primary": None
+        if primary_minutes is None
+        else {
+            "used_percent": 12,
+            "window_minutes": primary_minutes,
+            "resets_at": 2_000_000_000,
+        },
+        "secondary": None
+        if secondary_minutes is None
+        else {
+            "used_percent": 97,
+            "window_minutes": secondary_minutes,
+            "resets_at": 2_000_100_000,
+        },
+    }
+    publication = normalize_rollout_trace(
+        (
+            (
+                THREAD_ID,
+                _content(
+                    {
+                        "type": "event_msg",
+                        "payload": {
+                            "type": "token_count",
+                            "info": {"total_token_usage": {"total_tokens": 120}},
+                            "rate_limits": {"limit_id": "codex", "plan_type": "pro", **supplied_windows},
+                        },
+                    }
+                ),
+            ),
+        ),
+        based_on_trace_publication_sequence=None,
+        calculated_at_utc="2026-09-08T20:00:00Z",
+    )
+    database = tmp_path / "rodex.sqlite3"
+    create_a_rodex_session(database, codex_session_id=THREAD_ID)
+    _publish_trace(database, publication)
+    snapshot = read_rodex_agent_trace(1, database)
+    rate_events = [event for event in snapshot.events if event["event_kind"] == "rate_limit"]
+    expected_windows = [
+        {
+            "window_ordinal": ordinal,
+            "limit_id": "codex",
+            "plan_type": "pro",
+            "used_percent": float(window["used_percent"]),
+            "window_minutes": window["window_minutes"],
+            "resets_at_unix_seconds": window["resets_at"],
+        }
+        for ordinal, window in enumerate(window for window in supplied_windows.values() if window is not None)
+    ]
+
+    assert snapshot.coverage_state == "complete"
+    assert len(rate_events) == int(bool(expected_windows))
+    if expected_windows:
+        assert rate_events[0]["detail"]["windows"] == expected_windows
+
+
 def test_normalizer_covers_canonical_message_custom_tool_and_subagent_shapes() -> None:
     publication = normalize_rollout_trace(
         (

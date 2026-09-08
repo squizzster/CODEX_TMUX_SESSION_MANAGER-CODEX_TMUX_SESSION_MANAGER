@@ -1096,13 +1096,16 @@ def read_rodex_session_statistics(
     with open_rodex_read_transaction(path) as connection:
         statistics_row = _select_statistics(connection, session_id)
         distribution_rows = _select_statistics_distributions(connection, session_id)
+        source_rows = _select_codex_threads(connection, session_id)
         named_count_rows = [
             *_select_statistics_named_counts(connection, session_id),
-            *_select_statistics_turn_lookup_counts(connection, session_id),
+            *_select_current_thread_lookup_counts(
+                connection,
+                current_thread_membership_ids=tuple(int(row[0]) for row in source_rows),
+            ),
         ]
         audit_limit_rows = _select_statistics_audit_limits(connection, session_id)
         worker_row = _select_analytics_worker(connection, session_id)
-        source_rows = _select_codex_threads(connection, session_id)
     verified_subagent_count = sum(row[10] is not None for row in source_rows)
     return RodexSessionStatisticsView(
         statistics=(
@@ -1141,16 +1144,17 @@ def read_rodex_session_turn_statistics(
     with open_rodex_read_transaction(path) as connection:
         statistics_row = _select_statistics(connection, session_id)
         distribution_rows = _select_statistics_distributions(connection, session_id)
+        source_rows = _select_codex_threads(connection, session_id)
         named_count_rows = [
             *_select_statistics_named_counts(connection, session_id),
-            *_select_statistics_turn_lookup_counts(connection, session_id),
+            *_select_current_thread_lookup_counts(
+                connection,
+                current_thread_membership_ids=tuple(int(row[0]) for row in source_rows),
+            ),
         ]
         audit_limit_rows = _select_statistics_audit_limits(connection, session_id)
         worker_row = _select_analytics_worker(connection, session_id)
-        source_rows = _select_codex_threads(connection, session_id)
-        turn_scalar_columns = ", ".join(
-            f"metrics.{column}" for column in TURN_STATISTICS_SCALARS.columns
-        )
+        turn_scalar_columns = ", ".join(f"metrics.{column}" for column in TURN_STATISTICS_SCALARS.columns)
         query = (
             f"SELECT turns.id, turns.rodex_sessions_id, "
             "turns.rodex_sessions_codex_threads_id, "
@@ -1835,10 +1839,15 @@ def _select_statistics_named_counts(
     ).fetchall()
 
 
-def _select_statistics_turn_lookup_counts(
+def _select_current_thread_lookup_counts(
     connection: sqlite3.Connection,
-    session_id: int,
+    *,
+    current_thread_membership_ids: tuple[int, ...],
 ) -> list[tuple[object, ...]]:
+    """Count models and efforts only within the source view's current rooted tree."""
+    if not current_thread_membership_ids:
+        return []
+    current_thread_placeholders = ", ".join("?" for _ in current_thread_membership_ids)
     rows: list[tuple[object, ...]] = []
     for count_kind, table_name, foreign_key, name_column in (
         ("model", MODEL_NAMES_TABLE, "model_names_id", "name_of_the_model"),
@@ -1858,10 +1867,11 @@ def _select_statistics_turn_lookup_counts(
                 f"JOIN {RODEX_SESSIONS_STATISTICS_TURN_METRICS_TABLE} AS metrics "
                 "ON metrics.rodex_sessions_codex_turns_id = turns.id "
                 f"JOIN {table_name} AS names ON names.id = states.{foreign_key} "
-                "WHERE turns.rodex_sessions_id = ? "
+                "WHERE turns.rodex_sessions_codex_threads_id IN "
+                f"({current_thread_placeholders}) "
                 f"GROUP BY names.id, names.{name_column} "
                 f"ORDER BY names.{name_column}",
-                (count_kind, session_id),
+                (count_kind, *current_thread_membership_ids),
             ).fetchall()
         )
     return rows

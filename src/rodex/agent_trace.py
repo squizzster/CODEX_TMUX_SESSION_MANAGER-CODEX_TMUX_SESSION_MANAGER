@@ -462,20 +462,21 @@ def _subagent_detail(item: Mapping[str, Any], *, target: CodexThreadId | None = 
 
 
 def _rate_limit_windows(value: object) -> list[TraceRateLimitWindow]:
-    """Read the primary window from a rollout token_count rate-limit snapshot."""
+    """Preserve each supplied window in primary-then-secondary snapshot order."""
     snapshot = _mapping(value)
-    primary_window = _mapping(snapshot.get("primary"))
     limit_id = _text(snapshot.get("limit_id"))
     if limit_id is None:
         return []
     return [
         TraceRateLimitWindow(
             limit_id=limit_id,
-            used_percent=_percentage(primary_window.get("used_percent")),
-            window_minutes=_integer(primary_window.get("window_minutes")),
-            resets_at_unix_seconds=_integer(primary_window.get("resets_at")),
+            used_percent=_percentage(window.get("used_percent")),
+            window_minutes=_integer(window.get("window_minutes")),
+            resets_at_unix_seconds=_integer(window.get("resets_at")),
             plan_type=_text(snapshot.get("plan_type")),
         )
+        for window in (snapshot.get("primary"), snapshot.get("secondary"))
+        if isinstance(window, Mapping)
     ]
 
 

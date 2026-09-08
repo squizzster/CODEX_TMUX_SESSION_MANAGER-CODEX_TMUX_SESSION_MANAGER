@@ -901,6 +901,134 @@ def test_same_turn_id_in_two_sources_requires_exact_source(tmp_path: Path) -> No
     assert exact is not None and exact.projection.total_tokens == 20
 
 
+def test_recovery_model_and_effort_counts_use_only_the_current_thread_tree(tmp_path: Path) -> None:
+    database = tmp_path / "rodex.sqlite3"
+    historical_child_id = uuid.UUID(int=CODEX_SESSION_ID.int + 2)
+    current_child_id = uuid.UUID(int=CODEX_SESSION_ID.int + 3)
+    current_grandchild_id = uuid.UUID(int=CODEX_SESSION_ID.int + 4)
+    historical_turns = (
+        replace(_turn("historical-root"), model="historical-model", reasoning_effort="medium"),
+        replace(
+            _turn("historical-child", codex_session_id=historical_child_id),
+            model="historical-model",
+            reasoning_effort="medium",
+        ),
+    )
+    current_turns = (
+        replace(
+            _turn("current-root", codex_session_id=REPLACEMENT_CODEX_SESSION_ID),
+            model="current-model",
+            reasoning_effort="high",
+        ),
+        replace(
+            _turn("current-child", codex_session_id=current_child_id),
+            model="current-model",
+            reasoning_effort="high",
+        ),
+        replace(
+            _turn("current-grandchild", codex_session_id=current_grandchild_id),
+            model="nested-model",
+            reasoning_effort="low",
+        ),
+    )
+    create_a_rodex_session(
+        database,
+        codex_session_id=CODEX_SESSION_ID,
+        tmux_server_socket_path=tmp_path / "tmux.sock",
+        tmux_session_name="original",
+        runtime_id=RodexRuntimeId.generate(),
+    )
+    historical_projection = _projection(historical_turns)
+    historical_projection = replace(
+        historical_projection,
+        collaboration_agents_started_count=1,
+        turn_statistics=(
+            replace(historical_projection.turn_statistics[0], collaboration_agents_started_count=1),
+            historical_projection.turn_statistics[1],
+        ),
+    )
+    _publish(
+        database,
+        tmp_path,
+        projection=historical_projection,
+        observations=(
+            _observation(tmp_path, CODEX_SESSION_ID),
+            replace(
+                _child_observation(tmp_path, historical_child_id),
+                spawning_codex_turn_id=historical_turns[0].codex_turn_id,
+            ),
+        ),
+    )
+    record_a_rodex_session_runtime_resume(
+        1,
+        tmp_path / "tmux.sock",
+        "replacement",
+        database,
+        codex_session_id=REPLACEMENT_CODEX_SESSION_ID,
+        runtime_id=RodexRuntimeId.generate(),
+    )
+    current_projection = _projection(current_turns)
+    current_projection = replace(
+        current_projection,
+        collaboration_agents_started_count=2,
+        turn_statistics=tuple(
+            replace(turn, collaboration_agents_started_count=int(index < 2))
+            for index, turn in enumerate(current_projection.turn_statistics)
+        ),
+    )
+    _publish(
+        database,
+        tmp_path,
+        based_on=1,
+        projection=current_projection,
+        expected_codex_session_id=REPLACEMENT_CODEX_SESSION_ID,
+        observations=(
+            _observation(tmp_path, REPLACEMENT_CODEX_SESSION_ID),
+            replace(
+                _child_observation(tmp_path, current_child_id),
+                parent_codex_thread_id=REPLACEMENT_CODEX_SESSION_ID,
+                spawning_codex_turn_id=current_turns[0].codex_turn_id,
+            ),
+            replace(
+                _child_observation(tmp_path, current_grandchild_id),
+                parent_codex_thread_id=current_child_id,
+                thread_depth=2,
+                agent_path="/root/review/nested",
+                spawning_codex_turn_id=current_turns[1].codex_turn_id,
+            ),
+        ),
+    )
+    session_view = read_rodex_session_statistics(1, database)
+    assert {source.codex_thread_id for source in session_view.sources} == {
+        REPLACEMENT_CODEX_SESSION_ID,
+        current_child_id,
+        current_grandchild_id,
+    }
+    turn_views = [
+        read_rodex_session_turn_statistics(
+            1,
+            turn.codex_turn_id,
+            database,
+            codex_thread_id=turn.codex_thread_id,
+        )
+        for turn in (*historical_turns, *current_turns)
+    ]
+    assert all(view.turn is not None for view in turn_views)
+    for statistics in (session_view.statistics, *(view.statistics for view in turn_views)):
+        assert statistics is not None
+        assert statistics.projection.turns_started_count == 3
+        assert {
+            (count.count_kind, count.count_name): count.occurrence_count
+            for count in statistics.projection.named_counts
+            if count.count_kind in {"model", "reasoning_effort"}
+        } == {
+            ("model", "current-model"): 2,
+            ("model", "nested-model"): 1,
+            ("reasoning_effort", "high"): 2,
+            ("reasoning_effort", "low"): 1,
+        }
+
+
 def test_unanalyzed_source_is_an_atomic_conflict(tmp_path: Path) -> None:
     database = tmp_path / "rodex.sqlite3"
     create_a_rodex_session(

@@ -69,6 +69,11 @@ class PlainTailCursor:
         self._candidate_poll_count = 0
         self._settled_poll_count = settled_poll_count
 
+    @property
+    def has_unsettled_visible_output(self) -> bool:
+        """Keep observing a candidate until it is published or replaced."""
+        return self._candidate_visible != self._published_visible
+
     def advance(self, current_snapshot: TmuxScrollbackSnapshot) -> tuple[str, ...]:
         emitted = self._advance(
             current_snapshot.history_lines,
@@ -236,7 +241,7 @@ def follow_session_tail(
     while True:
         sleep(next_poll_interval)
         current_state = capture_scrollback_state(runtime)
-        if current_state == observed_state:
+        if current_state == observed_state and not cursor.has_unsettled_visible_output:
             next_poll_interval = min(
                 next_poll_interval * 2,
                 max_idle_poll_interval_seconds,

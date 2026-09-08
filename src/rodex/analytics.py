@@ -190,7 +190,7 @@ def _trace_target_thread_ids(
     return frozenset(
         event.detail.target_codex_thread_id
         for event in events
-        if isinstance(getattr(event, "detail", None), TraceSubagentActivity)
+        if isinstance(event.detail, TraceSubagentActivity)
         and event.detail.target_codex_thread_id is not None
         and event.detail.target_codex_thread_id not in already_observed
     )
@@ -291,9 +291,7 @@ class AnalyticsRolloutWorker:
         adapter_factory: AnalyticsBoundaryFactory = (StatefulCodexProtocolAnalyticsAdapter),
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
         monotonic: Callable[[], float] = time.monotonic,
-        trace_publication_notifier: Callable[[Path, int, bool], None] = (
-            notify_agent_observer_trace_publication
-        ),
+        trace_publication_notifier: Callable[[Path, int, bool], None] = (notify_agent_observer_trace_publication),
     ) -> None:
         if not config.is_activated:
             raise ValueError("analytics worker requires committed runtime identity")
@@ -311,9 +309,7 @@ class AnalyticsRolloutWorker:
         self._checkpoint: RodexAnalyticsCheckpoint | None = None
         self._publication_sequence: int | None = None
         self._trace_publication_sequence: int | None = None
-        self._accepted_observations: dict[
-            CodexThreadId, RodexSessionCodexThreadObservation
-        ] = {}
+        self._accepted_observations: dict[CodexThreadId, RodexSessionCodexThreadObservation] = {}
         self._requires_full_reconcile = True
         self._prepared_publication: _PreparedAnalyticsPublication | None = None
         self._deferred_dirty_thread_ids: set[CodexThreadId] = set()
@@ -329,9 +325,7 @@ class AnalyticsRolloutWorker:
         self._parked_failure: _AnalyticsFailureFingerprint | None = None
         self._pending_failure_health: _PendingAnalyticsFailureHealth | None = None
         self._consecutive_failures = 0
-        self._published_turns: (
-            dict[tuple[CodexThreadId, str], TurnStatisticsProjection] | None
-        ) = None
+        self._published_turns: dict[tuple[CodexThreadId, str], TurnStatisticsProjection] | None = None
         self._latest_turns: dict[CodexThreadId, TurnStatisticsProjection] = {}
 
     def observe_protocol_event(self, event: Mapping[str, Any]) -> None:
@@ -361,32 +355,17 @@ class AnalyticsRolloutWorker:
             if checkpoint is None:
                 checkpoint = registry.load_checkpoint()
                 if (checkpoint.statistics is None) != (checkpoint.trace is None):
-                    raise RodexAnalyticsError(
-                        "analytics checkpoint has only one of its atomic publication heads"
-                    )
-                if (
-                    checkpoint.trace is not None
-                    and checkpoint.trace.trace_schema_version != AGENT_TRACE_SCHEMA_VERSION
-                ):
-                    raise RodexAnalyticsError(
-                        "agent trace schema does not match this Rodex generation"
-                    )
+                    raise RodexAnalyticsError("analytics checkpoint has only one of its atomic publication heads")
+                if checkpoint.trace is not None and checkpoint.trace.trace_schema_version != AGENT_TRACE_SCHEMA_VERSION:
+                    raise RodexAnalyticsError("agent trace schema does not match this Rodex generation")
                 self._checkpoint = checkpoint
-                self._accepted_observations = _checkpoint_source_observations(
-                    checkpoint.sources
-                )
-                self._pending_resolution_thread_ids.update(
-                    checkpoint.unresolved_activity_targets
-                )
+                self._accepted_observations = _checkpoint_source_observations(checkpoint.sources)
+                self._pending_resolution_thread_ids.update(checkpoint.unresolved_activity_targets)
                 self._publication_sequence = (
-                    None
-                    if checkpoint.statistics is None
-                    else checkpoint.statistics.statistics_publication_sequence
+                    None if checkpoint.statistics is None else checkpoint.statistics.statistics_publication_sequence
                 )
                 self._trace_publication_sequence = (
-                    None
-                    if checkpoint.trace is None
-                    else checkpoint.trace.trace_publication_sequence
+                    None if checkpoint.trace is None else checkpoint.trace.trace_publication_sequence
                 )
             if checkpoint.worker is not None and cold_start:
                 self._last_health_transition = (
@@ -424,9 +403,7 @@ class AnalyticsRolloutWorker:
                     self._prepared_publication = prepared
                 receipt = registry.publish(prepared.publication)
                 return self._accept_prepared_publication(prepared, receipt)
-            full_reconcile = (
-                self._requires_full_reconcile or batch is None or batch.full_reconcile
-            )
+            full_reconcile = self._requires_full_reconcile or batch is None or batch.full_reconcile
             requested_thread_ids: frozenset[CodexThreadId] = frozenset()
             if full_reconcile:
                 stable_reads = self._read_registered_sources(checkpoint.sources)
@@ -436,12 +413,8 @@ class AnalyticsRolloutWorker:
                     )
                 unresolved_thread_ids = frozenset(self._pending_resolution_thread_ids)
             else:
-                requested_thread_ids = frozenset(
-                    batch.thread_ids | self._pending_resolution_thread_ids
-                )
-                stable_reads, unresolved_thread_ids = self._read_exact_sources(
-                    requested_thread_ids
-                )
+                requested_thread_ids = frozenset(batch.thread_ids | self._pending_resolution_thread_ids)
+                stable_reads, unresolved_thread_ids = self._read_exact_sources(requested_thread_ids)
                 self._pending_resolution_thread_ids = set(unresolved_thread_ids)
             failure_reads = () if stable_reads is None else tuple(stable_reads)
             if stable_reads is None or (not stable_reads and unresolved_thread_ids):
@@ -454,10 +427,7 @@ class AnalyticsRolloutWorker:
             )
             accepted_observations = dict(self._accepted_observations)
             if checkpoint_matches:
-                accepted_observations = {
-                    item.observation.codex_thread_id: item.observation
-                    for item in stable_reads
-                }
+                accepted_observations = {item.observation.codex_thread_id: item.observation for item in stable_reads}
             changed_source_thread_ids = _changed_observation_thread_ids(
                 accepted_observations,
                 stable_reads,
@@ -469,8 +439,7 @@ class AnalyticsRolloutWorker:
                 self._adapter = adapter
             if not adapter_needs_warmup and not changed_source_thread_ids:
                 source_growth = tuple(
-                    self._source_reader.verify_captured_prefix(item.authenticated_source)
-                    for item in stable_reads
+                    self._source_reader.verify_captured_prefix(item.authenticated_source) for item in stable_reads
                 )
                 self._source_reader.accept([item.prepared_read for item in stable_reads])
                 self._promote_verified_sources(stable_reads)
@@ -482,28 +451,19 @@ class AnalyticsRolloutWorker:
                                 self._schedule_followup(item.observation.codex_thread_id)
                     return "pending_append"
                 if unresolved_thread_ids:
-                    self._project_health(
-                        "catching_up", "rollout_not_found", codex_session_id
-                    )
+                    self._project_health("catching_up", "rollout_not_found", codex_session_id)
                     return "catching_up"
-                wake_thread_ids = (
-                    batch.thread_ids
-                    if batch is not None and batch.thread_ids
-                    else requested_thread_ids
-                )
+                wake_thread_ids = batch.thread_ids if batch is not None and batch.thread_ids else requested_thread_ids
                 if wake_thread_ids:
                     self._pending_resolution_thread_ids.update(wake_thread_ids)
                     return "awaiting_append"
                 self._project_health("up_to_date", None, codex_session_id)
                 return "up_to_date"
-            baseline_reads = tuple(
-                item for item in stable_reads if item.has_accepted_baseline
-            )
+            baseline_reads = tuple(item for item in stable_reads if item.has_accepted_baseline)
             has_current_baseline = (
                 adapter_needs_warmup
                 and checkpoint.statistics is not None
-                and checkpoint.statistics.statistics_projection_schema_version
-                == STATISTICS_PROJECTION_SCHEMA_VERSION
+                and checkpoint.statistics.statistics_projection_schema_version == STATISTICS_PROJECTION_SCHEMA_VERSION
                 and self._trace_publication_sequence is not None
                 and bool(baseline_reads)
             )
@@ -520,19 +480,14 @@ class AnalyticsRolloutWorker:
                     _current_analytics_user_id(),
                 )
                 baseline_observations = tuple(
-                    self._accepted_observations[item.observation.codex_thread_id]
-                    for item in baseline_reads
+                    self._accepted_observations[item.observation.codex_thread_id] for item in baseline_reads
                 )
                 baseline_projection = _derive_verified_collaboration_projection(
                     baseline_calculation.statistics_projection,
                     analyzed_sources=baseline_observations,
                 )
-                self._published_turns = _turns_by_key(
-                    baseline_projection.statistics_projection.turn_statistics
-                )
-                self._latest_turns = _latest_turns_by_thread(
-                    baseline_projection.statistics_projection.turn_statistics
-                )
+                self._published_turns = _turns_by_key(baseline_projection.statistics_projection.turn_statistics)
+                self._latest_turns = _latest_turns_by_thread(baseline_projection.statistics_projection.turn_statistics)
                 adapter.accept_batch()
                 self._trace_normalizer.warmup(
                     tuple(
@@ -548,8 +503,7 @@ class AnalyticsRolloutWorker:
                 _current_analytics_user_id(),
             )
             source_growth = tuple(
-                self._source_reader.verify_captured_prefix(item.authenticated_source)
-                for item in stable_reads
+                self._source_reader.verify_captured_prefix(item.authenticated_source) for item in stable_reads
             )
             append_arrived_during_analysis = any(source_growth)
             next_observations = _merge_source_observations(
@@ -576,26 +530,18 @@ class AnalyticsRolloutWorker:
                     calculation.statistics_projection,
                     analyzed_sources=tuple(next_observations.values()),
                 )
-                turn_updates = _turns_by_key(
-                    verified_collaboration.statistics_projection.turn_statistics
-                )
+                turn_updates = _turns_by_key(verified_collaboration.statistics_projection.turn_statistics)
                 changed_turn_keys = None
                 resident_turn_updates = turn_updates
             else:
-                verified_collaboration = (
-                    _derive_incremental_verified_collaboration_projection(
-                        calculation.statistics_projection,
-                        analyzed_sources=tuple(next_observations.values()),
-                        resident_turns=previous_turns,
-                    )
+                verified_collaboration = _derive_incremental_verified_collaboration_projection(
+                    calculation.statistics_projection,
+                    analyzed_sources=tuple(next_observations.values()),
+                    resident_turns=previous_turns,
                 )
-                projected_updates = _turns_by_key(
-                    verified_collaboration.statistics_projection.turn_statistics
-                )
+                projected_updates = _turns_by_key(verified_collaboration.statistics_projection.turn_statistics)
                 changed_turn_keys = frozenset(
-                    key
-                    for key, turn in projected_updates.items()
-                    if previous_turns.get(key) != turn
+                    key for key, turn in projected_updates.items() if previous_turns.get(key) != turn
                 )
                 turn_updates = {key: projected_updates[key] for key in changed_turn_keys}
                 resident_turn_updates = turn_updates
@@ -608,8 +554,7 @@ class AnalyticsRolloutWorker:
                     or trace_publication.events
                     or changed_turn_keys
                     or checkpoint.statistics is None
-                    or checkpoint.statistics.statistics_projection_schema_version
-                    != STATISTICS_PROJECTION_SCHEMA_VERSION
+                    or checkpoint.statistics.statistics_projection_schema_version != STATISTICS_PROJECTION_SCHEMA_VERSION
                 )
             )
             trace_target_thread_ids = _trace_target_thread_ids(
@@ -622,16 +567,12 @@ class AnalyticsRolloutWorker:
                     if changed_turn_keys is None
                     else replace(
                         verified_collaboration.statistics_projection,
-                        turn_statistics=tuple(
-                            turn_updates[key] for key in sorted(changed_turn_keys, key=str)
-                        ),
+                        turn_statistics=tuple(turn_updates[key] for key in sorted(changed_turn_keys, key=str)),
                     )
                 )
                 publication = RodexAnalyticsPublication(
                     based_on_statistics_publication_sequence=self._publication_sequence,
-                    statistics_projection_schema_version=(
-                        STATISTICS_PROJECTION_SCHEMA_VERSION
-                    ),
+                    statistics_projection_schema_version=(STATISTICS_PROJECTION_SCHEMA_VERSION),
                     calculated_at_utc=calculated_at_utc,
                     coverage_state=calculation.coverage_state,
                     statistics_projection=publication_projection,
@@ -666,16 +607,11 @@ class AnalyticsRolloutWorker:
                 return self._accept_prepared_publication(prepared, receipt)
             if previous_turns is None:
                 self._published_turns = dict(resident_turn_updates)
-                self._latest_turns = _latest_turns_by_thread(
-                    tuple(resident_turn_updates.values())
-                )
+                self._latest_turns = _latest_turns_by_thread(tuple(resident_turn_updates.values()))
             else:
                 previous_turns.update(turn_updates)
                 self._update_latest_turns(turn_updates.values())
-            self._accepted_observations = {
-                item.codex_thread_id: item
-                for item in verified_collaboration.analyzed_sources
-            }
+            self._accepted_observations = {item.codex_thread_id: item for item in verified_collaboration.analyzed_sources}
             adapter.accept_batch()
             self._trace_normalizer.accept_batch()
             self._source_reader.accept([item.prepared_read for item in stable_reads])
@@ -732,10 +668,7 @@ class AnalyticsRolloutWorker:
                 diagnostic_detail=f"{type(error).__qualname__}: {error}",
                 sources=tuple(
                     sorted(
-                        (
-                            (item.observation.codex_thread_id, item.authenticated_source)
-                            for item in failure_reads
-                        ),
+                        ((item.observation.codex_thread_id, item.authenticated_source) for item in failure_reads),
                         key=lambda item: str(item[0]),
                     )
                 ),
@@ -759,9 +692,7 @@ class AnalyticsRolloutWorker:
             self._pending_failure_health = (
                 _PendingAnalyticsFailureHealth(
                     fingerprint=failure_fingerprint,
-                    retry_not_before_monotonic=(
-                        self._monotonic() + ANALYTICS_HEALTH_RETRY_DELAY_SECONDS
-                    ),
+                    retry_not_before_monotonic=(self._monotonic() + ANALYTICS_HEALTH_RETRY_DELAY_SECONDS),
                 )
                 if self._parked_failure is not None and not health_persisted
                 else None
@@ -788,10 +719,7 @@ class AnalyticsRolloutWorker:
             self._pending_failure_health = None
             return False
         try:
-            changed = any(
-                self._source_reader.verify_captured_prefix(source)
-                for _thread_id, source in parked.sources
-            )
+            changed = any(self._source_reader.verify_captured_prefix(source) for _thread_id, source in parked.sources)
         except AnalyticsSourceReadError:
             self._parked_failure = None
             self._pending_failure_health = None
@@ -823,9 +751,7 @@ class AnalyticsRolloutWorker:
             return
         self._pending_failure_health = replace(
             pending,
-            retry_not_before_monotonic=(
-                monotonic_now + ANALYTICS_HEALTH_RETRY_DELAY_SECONDS
-            ),
+            retry_not_before_monotonic=(monotonic_now + ANALYTICS_HEALTH_RETRY_DELAY_SECONDS),
         )
 
     def run_until_stopped(
@@ -837,9 +763,7 @@ class AnalyticsRolloutWorker:
             [Path, AnalyticsEventScheduler], AnalyticsProtocolEventSubscriber
         ] = AnalyticsProtocolEventSubscriber,
     ) -> None:
-        active_scheduler = scheduler or AnalyticsEventScheduler(
-            event_observer=self.observe_protocol_event
-        )
+        active_scheduler = scheduler or AnalyticsEventScheduler(event_observer=self.observe_protocol_event)
         self._schedule_followup = active_scheduler.offer_dirty
         subscriber = subscriber_factory(
             self._config.protocol_event_socket_path,
@@ -872,9 +796,7 @@ class AnalyticsRolloutWorker:
             sources,
             self._source_catalog,
             verified_cache=self._verified_sources,
-            bootstrap_session_tree=(
-                not self._session_tree_bootstrap_complete and len(sources) == 1
-            ),
+            bootstrap_session_tree=(not self._session_tree_bootstrap_complete and len(sources) == 1),
         )
         if verified_sources is None:
             return None
@@ -888,16 +810,10 @@ class AnalyticsRolloutWorker:
                     path=verified.path,
                     codex_thread_id=verified.codex_thread_id,
                     source_kind=verified.source_kind,
-                    subagent_history_start_ordinal=(
-                        verified.subagent_history_start_ordinal
-                    ),
+                    subagent_history_start_ordinal=(verified.subagent_history_start_ordinal),
                     allowed_root=self._config.codex_sessions_root,
-                    accepted_prefix_size_bytes=(
-                        None if checkpoint is None else checkpoint.analyzed_size_bytes
-                    ),
-                    accepted_prefix_sha256=(
-                        None if checkpoint is None else checkpoint.analyzed_prefix_sha256
-                    ),
+                    accepted_prefix_size_bytes=(None if checkpoint is None else checkpoint.analyzed_size_bytes),
+                    accepted_prefix_sha256=(None if checkpoint is None else checkpoint.analyzed_prefix_sha256),
                 )
             )
             reads.append(_stable_rollout_read(verified, captured, self._timestamp()))
@@ -945,17 +861,13 @@ class AnalyticsRolloutWorker:
                 parent_thread_id = source.parent_codex_thread_id
                 if parent_thread_id is None:
                     if thread_id != self._expected_codex_session_id:
-                        raise RodexAnalyticsError(
-                            f"non-root source lost its parent: {thread_id}"
-                        )
+                        raise RodexAnalyticsError(f"non-root source lost its parent: {thread_id}")
                 else:
                     parent = closure.get(parent_thread_id)
                     if parent is None:
                         continue
                     if source.thread_depth != parent.thread_depth + 1:
-                        raise RodexAnalyticsError(
-                            f"sub-agent thread depth disagrees with parent: {thread_id}"
-                        )
+                        raise RodexAnalyticsError(f"sub-agent thread depth disagrees with parent: {thread_id}")
                 closure[thread_id] = source
                 del pending_candidates[thread_id]
                 added = True
@@ -977,9 +889,7 @@ class AnalyticsRolloutWorker:
             while parent_thread_id is not None:
                 parent = closure.get(parent_thread_id)
                 if parent is None:
-                    raise RodexAnalyticsError(
-                        f"verified source lost its ancestor: {source.codex_thread_id}"
-                    )
+                    raise RodexAnalyticsError(f"verified source lost its ancestor: {source.codex_thread_id}")
                 selected.setdefault(parent.codex_thread_id, parent)
                 parent_thread_id = parent.parent_codex_thread_id
         reads: list[StableRolloutRead] = []
@@ -1018,20 +928,14 @@ class AnalyticsRolloutWorker:
         self._consecutive_failures = 0
         if prepared.replace_all_turns:
             self._published_turns = dict(prepared.turn_updates_by_key)
-            self._latest_turns = _latest_turns_by_thread(
-                tuple(prepared.turn_updates_by_key.values())
-            )
+            self._latest_turns = _latest_turns_by_thread(tuple(prepared.turn_updates_by_key.values()))
         else:
             published_turns = self._published_turns
             if published_turns is None:
-                raise RodexAnalyticsError(
-                    "incremental analytics publication lost resident turns"
-                )
+                raise RodexAnalyticsError("incremental analytics publication lost resident turns")
             published_turns.update(prepared.turn_updates_by_key)
             self._update_latest_turns(prepared.turn_updates_by_key.values())
-        self._accepted_observations = {
-            item.codex_thread_id: item for item in prepared.observations
-        }
+        self._accepted_observations = {item.codex_thread_id: item for item in prepared.observations}
         adapter.accept_batch()
         self._trace_normalizer.accept_batch()
         self._source_reader.accept([item.prepared_read for item in prepared.stable_reads])
@@ -1112,10 +1016,7 @@ class AnalyticsRolloutWorker:
                 return False
             transition = (state, diagnostic_code)
             if failed:
-                if (
-                    failure_fingerprint is not None
-                    and self._last_failure_health_fingerprint == failure_fingerprint
-                ):
+                if failure_fingerprint is not None and self._last_failure_health_fingerprint == failure_fingerprint:
                     return True
             elif self._last_health_transition == transition:
                 return True
@@ -1309,16 +1210,11 @@ def locate_verified_rollout(
     catalog = source_catalog or AnalyticsSourceCatalog(root)
     verified = [
         source
-        for path in catalog.candidate_paths(
-            codex_session_id, first_linked_at_utc=first_linked_at_utc
-        )
-        if (source := _verify_root_rollout(path, codex_session_id, allowed_root=root))
-        is not None
+        for path in catalog.candidate_paths(codex_session_id, first_linked_at_utc=first_linked_at_utc)
+        if (source := _verify_root_rollout(path, codex_session_id, allowed_root=root)) is not None
     ]
     if len(verified) > 1:
-        raise RodexAnalyticsError(
-            f"multiple rollout files declare Codex identity {codex_session_id}"
-        )
+        raise RodexAnalyticsError(f"multiple rollout files declare Codex identity {codex_session_id}")
     if not verified:
         return None
     catalog.remember_resolved_path(codex_session_id, verified[0].path)
@@ -1487,9 +1383,7 @@ def _discover_verified_thread_rollouts(
 ) -> list[VerifiedRollout] | None:
     """Discover the authenticated descendant closure for registered root history."""
     registered = {source.codex_thread_id: source for source in registered_sources}
-    root_sources = tuple(
-        source for source in registered_sources if source.source_kind == "root"
-    )
+    root_sources = tuple(source for source in registered_sources if source.source_kind == "root")
     if not root_sources:
         return None
     cached = {} if verified_cache is None else verified_cache
@@ -1498,10 +1392,7 @@ def _discover_verified_thread_rollouts(
         root_verified = cached.get(root_source.codex_thread_id)
         if root_verified is not None and (
             root_verified.source_kind != "root"
-            or (
-                root_source.rollout_file_path is not None
-                and root_verified.path != Path(root_source.rollout_file_path)
-            )
+            or (root_source.rollout_file_path is not None and root_verified.path != Path(root_source.rollout_file_path))
         ):
             root_verified = None
         if root_verified is None and root_source.rollout_file_path is not None:
@@ -1519,9 +1410,7 @@ def _discover_verified_thread_rollouts(
             )
         if root_verified is None:
             return None
-        closure[root_source.codex_thread_id] = replace(
-            root_verified, first_linked_at_utc=root_source.first_linked_at_utc
-        )
+        closure[root_source.codex_thread_id] = replace(root_verified, first_linked_at_utc=root_source.first_linked_at_utc)
     root_thread_ids = frozenset(source.codex_thread_id for source in root_sources)
     bootstrapped_paths: dict[CodexThreadId, Path] = {}
     if bootstrap_session_tree:
@@ -1539,10 +1428,7 @@ def _discover_verified_thread_rollouts(
                     continue
                 prior_path = bootstrapped_paths.get(candidate.codex_thread_id)
                 if prior_path is not None and prior_path != candidate.path:
-                    raise RodexAnalyticsError(
-                        "multiple rollout files declare Codex thread "
-                        f"{candidate.codex_thread_id}"
-                    )
+                    raise RodexAnalyticsError(f"multiple rollout files declare Codex thread {candidate.codex_thread_id}")
                 bootstrapped_paths[candidate.codex_thread_id] = candidate.path
                 source_catalog.remember_resolved_path(
                     candidate.codex_thread_id,
@@ -1568,28 +1454,17 @@ def _discover_verified_thread_rollouts(
             if known_path is not None
             else source_catalog.candidate_paths(
                 thread_id,
-                first_linked_at_utc=(
-                    None
-                    if registered_source is None
-                    else registered_source.first_linked_at_utc
-                ),
+                first_linked_at_utc=(None if registered_source is None else registered_source.first_linked_at_utc),
             )
         )
         verified_for_thread = [
             candidate
             for path in paths
-            if (
-                candidate := _verify_subagent_rollout(
-                    path, root_thread_ids, allowed_root=root
-                )
-            )
-            is not None
+            if (candidate := _verify_subagent_rollout(path, root_thread_ids, allowed_root=root)) is not None
             and candidate.codex_thread_id == thread_id
         ]
         if len(verified_for_thread) > 1:
-            raise RodexAnalyticsError(
-                f"multiple rollout files declare Codex thread {thread_id}"
-            )
+            raise RodexAnalyticsError(f"multiple rollout files declare Codex thread {thread_id}")
         if verified_for_thread:
             candidate = verified_for_thread[0]
             candidates[thread_id] = candidate
@@ -1602,9 +1477,7 @@ def _discover_verified_thread_rollouts(
             if parent is None:
                 continue
             if candidate.thread_depth != parent.thread_depth + 1:
-                raise RodexAnalyticsError(
-                    f"sub-agent thread depth disagrees with parent: {thread_id}"
-                )
+                raise RodexAnalyticsError(f"sub-agent thread depth disagrees with parent: {thread_id}")
             closure[thread_id] = candidate
             del pending[thread_id]
             added = True
@@ -1631,11 +1504,7 @@ def _discover_verified_thread_rollouts(
             None
             if source.parent_rodex_sessions_codex_threads_id is None
             else next(
-                (
-                    item
-                    for item in registered_sources
-                    if item.id == source.parent_rodex_sessions_codex_threads_id
-                ),
+                (item for item in registered_sources if item.id == source.parent_rodex_sessions_codex_threads_id),
                 None,
             )
         )
@@ -1649,15 +1518,9 @@ def _discover_verified_thread_rollouts(
             source.history_inheritance_kind,
         )
         if candidate_metadata != stored_metadata:
-            raise RodexAnalyticsError(
-                f"stored hierarchy disagrees with rollout thread {thread_id}"
-            )
-        closure[thread_id] = replace(
-            candidate, first_linked_at_utc=source.first_linked_at_utc
-        )
-    return sorted(
-        closure.values(), key=lambda item: (item.thread_depth, str(item.codex_thread_id))
-    )
+            raise RodexAnalyticsError(f"stored hierarchy disagrees with rollout thread {thread_id}")
+        closure[thread_id] = replace(candidate, first_linked_at_utc=source.first_linked_at_utc)
+    return sorted(closure.values(), key=lambda item: (item.thread_depth, str(item.codex_thread_id)))
 
 
 def _discover_exact_thread_rollout(
@@ -1689,9 +1552,7 @@ def _discover_exact_thread_rollout(
         and source.codex_thread_id == parsed_thread_id
     ]
     if len(verified) > 1:
-        raise RodexAnalyticsError(
-            f"multiple rollout files declare Codex thread {parsed_thread_id}"
-        )
+        raise RodexAnalyticsError(f"multiple rollout files declare Codex thread {parsed_thread_id}")
     if not verified:
         return None
     source = verified[0]
@@ -1708,9 +1569,7 @@ def _derive_verified_collaboration_projection(
     sources = tuple(analyzed_sources)
     sources_by_thread = {item.codex_thread_id: item for item in sources}
     if len(sources_by_thread) != len(sources):
-        raise RodexAnalyticsError(
-            "verified collaboration sources contain a duplicate thread"
-        )
+        raise RodexAnalyticsError("verified collaboration sources contain a duplicate thread")
 
     spawning_turn_id_by_child_thread: dict[CodexThreadId, str] = {}
     for child in sources:
@@ -1718,9 +1577,7 @@ def _derive_verified_collaboration_projection(
         if parent_thread_id is None:
             continue
         if parent_thread_id not in sources_by_thread:
-            raise RodexAnalyticsError(
-                f"verified sub-agent has no parent source: {child.codex_thread_id}"
-            )
+            raise RodexAnalyticsError(f"verified sub-agent has no parent source: {child.codex_thread_id}")
         linked_at = _collaboration_timestamp(
             child.first_linked_at_utc,
             f"sub-agent {child.codex_thread_id} first-linked time",
@@ -1746,8 +1603,7 @@ def _derive_verified_collaboration_projection(
         ]
         if len(owners) != 1:
             raise RodexAnalyticsError(
-                "verified sub-agent must belong to exactly one direct-parent turn: "
-                f"{child.codex_thread_id}"
+                f"verified sub-agent must belong to exactly one direct-parent turn: {child.codex_thread_id}"
             )
         owner = owners[0]
         spawning_turn_id_by_child_thread[child.codex_thread_id] = owner.codex_turn_id
@@ -1759,16 +1615,12 @@ def _derive_verified_collaboration_projection(
             continue
         spawning_turn_id = spawning_turn_id_by_child_thread[child.codex_thread_id]
         spawning_turn_key = (parent_thread_id, spawning_turn_id)
-        children_started_by_turn[spawning_turn_key] = (
-            children_started_by_turn.get(spawning_turn_key, 0) + 1
-        )
+        children_started_by_turn[spawning_turn_key] = children_started_by_turn.get(spawning_turn_key, 0) + 1
 
     projected_turns = tuple(
         _derive_verified_turn_collaboration(
             turn,
-            agents_started=children_started_by_turn.get(
-                (turn.codex_thread_id, turn.codex_turn_id), 0
-            ),
+            agents_started=children_started_by_turn.get((turn.codex_thread_id, turn.codex_turn_id), 0),
         )
         for turn in projection.turn_statistics
     )
@@ -1778,19 +1630,13 @@ def _derive_verified_collaboration_projection(
         for item in turn.named_counts:
             if item.count_kind != "collaboration_tool":
                 continue
-            turn_by_tool[item.count_name] = (
-                turn_by_tool.get(item.count_name, 0) + item.occurrence_count
-            )
+            turn_by_tool[item.count_name] = turn_by_tool.get(item.count_name, 0) + item.occurrence_count
     aggregate_by_tool = {item.count_name: item.occurrence_count for item in by_tool}
     if turn_by_tool != aggregate_by_tool:
-        raise RodexAnalyticsError(
-            "aggregate collaboration tools disagree with exact-turn model tools"
-        )
+        raise RodexAnalyticsError("aggregate collaboration tools disagree with exact-turn model tools")
     descendant_count = sum(item.parent_codex_thread_id is not None for item in sources)
     if sum(children_started_by_turn.values()) != descendant_count:
-        raise RodexAnalyticsError(
-            "verified sub-agent count disagrees with exact-turn ownership"
-        )
+        raise RodexAnalyticsError("verified sub-agent count disagrees with exact-turn ownership")
     named_counts = _replace_collaboration_counts(projection.named_counts, by_tool)
     return VerifiedCollaborationProjection(
         statistics_projection=replace(
@@ -1803,9 +1649,7 @@ def _derive_verified_collaboration_projection(
         analyzed_sources=tuple(
             replace(
                 source,
-                spawning_codex_turn_id=spawning_turn_id_by_child_thread.get(
-                    source.codex_thread_id
-                ),
+                spawning_codex_turn_id=spawning_turn_id_by_child_thread.get(source.codex_thread_id),
             )
             for source in sources
         ),
@@ -1823,12 +1667,8 @@ def _derive_incremental_verified_collaboration_projection(
     supplied_sources = tuple(analyzed_sources)
     sources_by_thread = {item.codex_thread_id: item for item in supplied_sources}
     if len(sources_by_thread) != len(supplied_sources):
-        raise RodexAnalyticsError(
-            "verified collaboration sources contain a duplicate thread"
-        )
-    candidate_turns_by_thread: dict[
-        CodexThreadId, dict[tuple[CodexThreadId, str], TurnStatisticsProjection]
-    ] = {}
+        raise RodexAnalyticsError("verified collaboration sources contain a duplicate thread")
+    candidate_turns_by_thread: dict[CodexThreadId, dict[tuple[CodexThreadId, str], TurnStatisticsProjection]] = {}
     resolved_sources: list[RodexSessionCodexThreadObservation] = []
     for source in supplied_sources:
         parent_thread_id = source.parent_codex_thread_id
@@ -1836,9 +1676,7 @@ def _derive_incremental_verified_collaboration_projection(
             resolved_sources.append(source)
             continue
         if parent_thread_id not in sources_by_thread:
-            raise RodexAnalyticsError(
-                f"verified sub-agent has no parent source: {source.codex_thread_id}"
-            )
+            raise RodexAnalyticsError(f"verified sub-agent has no parent source: {source.codex_thread_id}")
         if source.spawning_codex_turn_id is not None:
             resolved_sources.append(source)
             continue
@@ -1861,20 +1699,13 @@ def _derive_incremental_verified_collaboration_projection(
             source.first_linked_at_utc,
             f"sub-agent {source.codex_thread_id} first-linked time",
         )
-        owners = [
-            turn
-            for turn in candidates.values()
-            if _turn_owns_collaboration_timestamp(turn, linked_at)
-        ]
+        owners = [turn for turn in candidates.values() if _turn_owns_collaboration_timestamp(turn, linked_at)]
         if len(owners) != 1:
             raise RodexAnalyticsError(
-                "new verified sub-agent must belong to exactly one direct-parent turn: "
-                f"{source.codex_thread_id}"
+                f"new verified sub-agent must belong to exactly one direct-parent turn: {source.codex_thread_id}"
             )
         owner = owners[0]
-        projected_turns_by_key.setdefault(
-            (owner.codex_thread_id, owner.codex_turn_id), owner
-        )
+        projected_turns_by_key.setdefault((owner.codex_thread_id, owner.codex_turn_id), owner)
         resolved_sources.append(replace(source, spawning_codex_turn_id=owner.codex_turn_id))
     sources = tuple(resolved_sources)
     sources_by_thread = {item.codex_thread_id: item for item in sources}
@@ -1884,14 +1715,10 @@ def _derive_incremental_verified_collaboration_projection(
         if parent_thread_id is None:
             continue
         if parent_thread_id not in sources_by_thread:
-            raise RodexAnalyticsError(
-                f"verified sub-agent has no parent source: {source.codex_thread_id}"
-            )
+            raise RodexAnalyticsError(f"verified sub-agent has no parent source: {source.codex_thread_id}")
         spawning_turn_id = source.spawning_codex_turn_id
         if spawning_turn_id is None:
-            raise RodexAnalyticsError(
-                f"verified sub-agent has no spawning turn: {source.codex_thread_id}"
-            )
+            raise RodexAnalyticsError(f"verified sub-agent has no spawning turn: {source.codex_thread_id}")
         children_started_by_turn[(parent_thread_id, spawning_turn_id)] += 1
     projected_turns = tuple(
         _derive_verified_turn_collaboration(
@@ -1907,9 +1734,7 @@ def _derive_incremental_verified_collaboration_projection(
     return VerifiedCollaborationProjection(
         statistics_projection=replace(
             projection,
-            collaboration_operations_count=sum(
-                item.occurrence_count for item in canonical_counts
-            ),
+            collaboration_operations_count=sum(item.occurrence_count for item in canonical_counts),
             collaboration_agents_started_count=sum(children_started_by_turn.values()),
             named_counts=_replace_collaboration_counts(
                 projection.named_counts,
@@ -1946,8 +1771,7 @@ def _canonical_collaboration_counts(
             occurrence_count=item.occurrence_count,
         )
         for item in named_counts
-        if item.count_kind == "model_tool"
-        and item.count_name in COLLABORATION_MODEL_TOOL_NAMES
+        if item.count_kind == "model_tool" and item.count_name in COLLABORATION_MODEL_TOOL_NAMES
     )
 
 
@@ -1955,9 +1779,7 @@ def _replace_collaboration_counts(
     named_counts: Sequence[StatisticsNamedCount],
     canonical_counts: Sequence[StatisticsNamedCount],
 ) -> tuple[StatisticsNamedCount, ...]:
-    return tuple(
-        item for item in named_counts if item.count_kind != "collaboration_tool"
-    ) + tuple(canonical_counts)
+    return tuple(item for item in named_counts if item.count_kind != "collaboration_tool") + tuple(canonical_counts)
 
 
 def _turn_owns_collaboration_timestamp(
@@ -2030,8 +1852,7 @@ def _view_matches_source_reads(
 ) -> bool:
     if (
         statistics is None
-        or statistics.statistics_projection_schema_version
-        != STATISTICS_PROJECTION_SCHEMA_VERSION
+        or statistics.statistics_projection_schema_version != STATISTICS_PROJECTION_SCHEMA_VERSION
         or len(sources) != len(reads)
     ):
         return False
@@ -2103,9 +1924,7 @@ def _project_supervisor_health(
             attempted_at_utc=now.isoformat(timespec="microseconds"),
             failed=True,
             next_retry_at_utc=(
-                (now + timedelta(seconds=retry_delay_seconds)).isoformat(
-                    timespec="microseconds"
-                )
+                (now + timedelta(seconds=retry_delay_seconds)).isoformat(timespec="microseconds")
                 if retry_scheduled
                 else None
             ),

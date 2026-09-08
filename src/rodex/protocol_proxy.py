@@ -168,9 +168,7 @@ class CodexProtocolEventTap:
                 )
                 self._event_socket_path.chmod(0o600)
             except OSError as error:
-                raise RodexProtocolProxyError(
-                    f"could not bind Codex protocol event tap: {error}"
-                ) from error
+                raise RodexProtocolProxyError(f"could not bind Codex protocol event tap: {error}") from error
             server_thread = Thread(
                 target=server.serve_forever,
                 name="rodex-codex-protocol-event-tap",
@@ -197,9 +195,7 @@ class CodexProtocolEventTap:
                 _update_active_turns(self._active_turns, event)
                 _update_known_threads(self._known_threads, self._active_turns, event)
             subscribers = tuple(self._subscribers.items())
-        is_analytics_event = (
-            event is not None and event.get("method") in ANALYTICS_WAKE_EVENT_METHODS
-        )
+        is_analytics_event = event is not None and event.get("method") in ANALYTICS_WAKE_EVENT_METHODS
         for subscriber, (analytics_only, _connection) in subscribers:
             if analytics_only and not is_analytics_event:
                 continue
@@ -277,9 +273,7 @@ class CodexProtocolEventTap:
                 self._subscribers.pop(subscriber, None)
             _interrupt_subscriber_connection(connection)
 
-    def _disconnect_slow_subscriber(
-        self, subscriber: queue.Queue[str | bytes | object]
-    ) -> None:
+    def _disconnect_slow_subscriber(self, subscriber: queue.Queue[str | bytes | object]) -> None:
         with self._subscribers_lock:
             registration = self._subscribers.pop(subscriber, None)
             if registration is None:
@@ -393,41 +387,29 @@ class CodexContextStatusObserver:
         compaction_watchdog_seconds: float = CONTEXT_COMPACTION_WATCHDOG_SECONDS,
         codex_sessions_root: Path | None = None,
         rollout_poll_interval_seconds: float = ROLLOUT_CONTEXT_POLL_INTERVAL_SECONDS,
-        rollout_max_idle_poll_interval_seconds: float = (
-            ROLLOUT_CONTEXT_MAX_IDLE_POLL_INTERVAL_SECONDS
-        ),
+        rollout_max_idle_poll_interval_seconds: float = (ROLLOUT_CONTEXT_MAX_IDLE_POLL_INTERVAL_SECONDS),
     ) -> None:
         if animation_interval_seconds <= 0 or not math.isfinite(animation_interval_seconds):
             raise ValueError("animation interval must be finite and positive")
-        if compaction_watchdog_seconds <= 0 or not math.isfinite(
-            compaction_watchdog_seconds
-        ):
+        if compaction_watchdog_seconds <= 0 or not math.isfinite(compaction_watchdog_seconds):
             raise ValueError("compaction watchdog must be finite and positive")
-        if rollout_poll_interval_seconds <= 0 or not math.isfinite(
-            rollout_poll_interval_seconds
-        ):
+        if rollout_poll_interval_seconds <= 0 or not math.isfinite(rollout_poll_interval_seconds):
             raise ValueError("rollout poll interval must be finite and positive")
-        if (
-            rollout_max_idle_poll_interval_seconds < rollout_poll_interval_seconds
-            or not math.isfinite(rollout_max_idle_poll_interval_seconds)
+        if rollout_max_idle_poll_interval_seconds < rollout_poll_interval_seconds or not math.isfinite(
+            rollout_max_idle_poll_interval_seconds
         ):
             raise ValueError(
-                "rollout maximum idle poll interval must be finite and no shorter "
-                "than the rollout poll interval"
+                "rollout maximum idle poll interval must be finite and no shorter than the rollout poll interval"
             )
         self._on_status_changed = on_status_changed
         self._animation_interval_seconds = animation_interval_seconds
         self._compaction_watchdog_seconds = compaction_watchdog_seconds
         self._monotonic = time.monotonic
         self._codex_sessions_root = (
-            None
-            if codex_sessions_root is None
-            else Path(codex_sessions_root).resolve(strict=False)
+            None if codex_sessions_root is None else Path(codex_sessions_root).resolve(strict=False)
         )
         self._rollout_poll_interval_seconds = rollout_poll_interval_seconds
-        self._rollout_max_idle_poll_interval_seconds = (
-            rollout_max_idle_poll_interval_seconds
-        )
+        self._rollout_max_idle_poll_interval_seconds = rollout_max_idle_poll_interval_seconds
         self._primary_thread_id: str | None = None
         self._latest_context_status = context_status_segment(None)
         self._active_compaction_item_ids: set[str] = set()
@@ -454,9 +436,7 @@ class CodexContextStatusObserver:
         if not isinstance(params, dict):
             return
         event_thread_id = (
-            _started_thread_id(params)
-            if method == CODEX_APP_SERVER.thread_started_method
-            else _event_thread_id(params)
+            _started_thread_id(params) if method == CODEX_APP_SERVER.thread_started_method else _event_thread_id(params)
         )
         if event_thread_id is not None:
             self._wake_rollout_follower(event_thread_id)
@@ -609,9 +589,7 @@ class CodexContextStatusObserver:
                 rollout_stop.set()
             self._primary_thread_id = None
             disconnected_status = context_status_segment(None)
-            should_publish = (
-                had_active_compaction or self._latest_context_status != disconnected_status
-            )
+            should_publish = had_active_compaction or self._latest_context_status != disconnected_status
             self._latest_context_status = disconnected_status
             if should_publish:
                 self._publish_status_locked(disconnected_status)
@@ -622,9 +600,7 @@ class CodexContextStatusObserver:
         if rollout_thread is not None:
             rollout_thread.join(timeout=1)
         with self._lock:
-            self._animation_threads = [
-                thread for thread in self._animation_threads if thread.is_alive()
-            ]
+            self._animation_threads = [thread for thread in self._animation_threads if thread.is_alive()]
 
     def _accept_thread_locked(self, thread_id: str) -> bool:
         if self._primary_thread_id is None:
@@ -633,11 +609,7 @@ class CodexContextStatusObserver:
 
     def _wake_rollout_follower(self, thread_id: str) -> None:
         with self._lock:
-            should_wake = (
-                not self._closed
-                and self._primary_thread_id == thread_id
-                and self._rollout_thread is not None
-            )
+            should_wake = not self._closed and self._primary_thread_id == thread_id and self._rollout_thread is not None
         if should_wake:
             self._signal_rollout_follower()
 
@@ -660,9 +632,7 @@ class CodexContextStatusObserver:
         with self._rollout_wake_condition:
             if not stop.is_set() and self._rollout_wake_generation == wake_generation:
                 self._rollout_wake_condition.wait_for(
-                    lambda: (
-                        stop.is_set() or self._rollout_wake_generation != wake_generation
-                    ),
+                    lambda: stop.is_set() or self._rollout_wake_generation != wake_generation,
                     timeout=timeout_seconds,
                 )
             return stop.is_set(), self._rollout_wake_generation
@@ -672,9 +642,7 @@ class CodexContextStatusObserver:
         generation = self._animation_generation
         stop = Event()
         self._animation_stop = stop
-        self._animation_threads = [
-            thread for thread in self._animation_threads if thread.is_alive()
-        ]
+        self._animation_threads = [thread for thread in self._animation_threads if thread.is_alive()]
         animation_thread = Thread(
             target=self._animate_compaction,
             args=(generation, stop),
@@ -732,9 +700,7 @@ class CodexContextStatusObserver:
                 ) as rollout:
                     retry_interval_seconds = self._rollout_poll_interval_seconds
                     idle_interval_seconds = self._rollout_poll_interval_seconds
-                    initial_percent, initial_offset = (
-                        _latest_rollout_context_from_open_file(rollout)
-                    )
+                    initial_percent, initial_offset = _latest_rollout_context_from_open_file(rollout)
                     if initial_percent is not None:
                         self._observe_rollout_context_percent(
                             thread_id,
@@ -881,9 +847,7 @@ class CodexProtocolProxy:
             )
             self._proxy_socket_path.chmod(0o600)
         except OSError as error:
-            raise RodexProtocolProxyError(
-                f"could not bind Codex protocol proxy: {error}"
-            ) from error
+            raise RodexProtocolProxyError(f"could not bind Codex protocol proxy: {error}") from error
         self._server_thread = Thread(
             target=self._server.serve_forever,
             name="rodex-codex-protocol-proxy",
@@ -917,9 +881,7 @@ class CodexProtocolProxy:
         if timeout_seconds <= 0:
             raise ValueError("timeout must be positive")
         if not self._primary_connection_released.wait(timeout_seconds):
-            raise RodexProtocolProxyError(
-                "primary Codex protocol connection did not close before retry"
-            )
+            raise RodexProtocolProxyError("primary Codex protocol connection did not close before retry")
 
     def _handle_connection(self, tui_connection: Any) -> None:
         if _connection_path(tui_connection) == TUI_NOTICE_CONNECTION_PATH:
@@ -979,14 +941,8 @@ class CodexProtocolProxy:
                 request_id = request.get("id")
                 params = request.get("params")
                 message = params.get("message") if isinstance(params, dict) else None
-                if (
-                    request.get("method") == TUI_NOTICE_METHOD
-                    and isinstance(message, str)
-                    and message.strip()
-                ):
-                    delivered = self._send_primary_tui_message(
-                        self._warning_notification(message)
-                    )
+                if request.get("method") == TUI_NOTICE_METHOD and isinstance(message, str) and message.strip():
+                    delivered = self._send_primary_tui_message(self._warning_notification(message))
             connection.send(
                 json.dumps(
                     {"id": request_id, "result": {"delivered": delivered}},
@@ -1163,7 +1119,7 @@ def _started_thread_id(params: dict[str, Any]) -> str | None:
         thread_id = thread.get("id")
         if isinstance(thread_id, str) and thread_id:
             return thread_id
-    return _event_thread_id(params)
+    return None
 
 
 def _started_thread_rollout_path(
@@ -1222,7 +1178,7 @@ def _update_known_threads(
         return
     remembered: dict[str, object] = {"id": thread_id}
     created_at = thread.get("createdAt")
-    if isinstance(created_at, (str, int, float)) and not isinstance(created_at, bool):
+    if isinstance(created_at, int) and not isinstance(created_at, bool):
         remembered["createdAt"] = created_at
     known_threads[thread_id] = remembered
 
@@ -1237,20 +1193,11 @@ def _context_percent(params: dict[str, Any]) -> float | None:
     token_usage = params.get("tokenUsage")
     if not isinstance(token_usage, dict):
         return None
-    last_usage: dict[str, Any] | None = None
-    for key in ("last", "lastTokenUsage", "last_token_usage"):
-        candidate = token_usage.get(key)
-        if isinstance(candidate, dict):
-            last_usage = candidate
-            break
-    if last_usage is None:
+    last_usage = token_usage.get("last")
+    if not isinstance(last_usage, dict):
         return None
-    total_tokens = _finite_number(last_usage, "totalTokens", "total_tokens")
-    context_window = _finite_number(
-        token_usage,
-        "modelContextWindow",
-        "model_context_window",
-    )
+    total_tokens = _finite_number(last_usage.get("totalTokens"))
+    context_window = _finite_number(token_usage.get("modelContextWindow"))
     if total_tokens is None or context_window is None:
         return None
     if total_tokens < 0 or context_window <= 0:
@@ -1273,16 +1220,12 @@ def _open_rollout_for_following(
         path_state = os.stat(rollout_path, follow_symlinks=False)
         resolved_path = rollout_path.resolve(strict=True)
         if not resolved_path.is_relative_to(root):
-            raise AnalyticsSourceReadError(
-                "rollout source escapes the configured sessions root"
-            )
+            raise AnalyticsSourceReadError("rollout source escapes the configured sessions root")
         if not stat.S_ISREG(path_state.st_mode) or (
             descriptor_state.st_dev,
             descriptor_state.st_ino,
         ) != (path_state.st_dev, path_state.st_ino):
-            raise AnalyticsSourceReadError(
-                "rollout source identity changed while it was opened"
-            )
+            raise AnalyticsSourceReadError("rollout source identity changed while it was opened")
         return os.fdopen(descriptor, "rb", closefd=True)
     except BaseException:
         os.close(descriptor)
@@ -1403,10 +1346,7 @@ def _rollout_path_requires_reopen(
         )
     ):
         return True
-    if (
-        descriptor_state.st_size < checkpoint.cursor_offset
-        or descriptor_state.st_size < checkpoint.source_size_bytes
-    ):
+    if descriptor_state.st_size < checkpoint.cursor_offset or descriptor_state.st_size < checkpoint.source_size_bytes:
         return True
     metadata_changed = (
         descriptor_state.st_size,
@@ -1419,10 +1359,7 @@ def _rollout_path_requires_reopen(
     )
     if not metadata_changed:
         return False
-    if (
-        _rollout_boundary_sha256(rollout.fileno(), checkpoint.cursor_offset)
-        != checkpoint.boundary_sha256
-    ):
+    if _rollout_boundary_sha256(rollout.fileno(), checkpoint.cursor_offset) != checkpoint.boundary_sha256:
         return True
     return descriptor_state.st_size == checkpoint.source_size_bytes
 
@@ -1443,12 +1380,8 @@ def _rollout_context_percent(line: bytes) -> float | None:
     last_usage = info.get("last_token_usage")
     if not isinstance(last_usage, dict):
         return None
-    total_tokens = _finite_number(last_usage, "total_tokens", "totalTokens")
-    context_window = _finite_number(
-        info,
-        "model_context_window",
-        "modelContextWindow",
-    )
+    total_tokens = _finite_number(last_usage.get("total_tokens"))
+    context_window = _finite_number(info.get("model_context_window"))
     if total_tokens is None or context_window is None:
         return None
     if total_tokens < 0 or context_window <= 0:
@@ -1456,13 +1389,7 @@ def _rollout_context_percent(line: bytes) -> float | None:
     return 100.0 * total_tokens / context_window
 
 
-def _finite_number(source: dict[str, Any], *keys: str) -> float | None:
-    for key in keys:
-        value = source.get(key)
-        if (
-            not isinstance(value, bool)
-            and isinstance(value, (int, float))
-            and math.isfinite(value)
-        ):
-            return float(value)
+def _finite_number(value: object) -> float | None:
+    if not isinstance(value, bool) and isinstance(value, (int, float)) and math.isfinite(value):
+        return float(value)
     return None

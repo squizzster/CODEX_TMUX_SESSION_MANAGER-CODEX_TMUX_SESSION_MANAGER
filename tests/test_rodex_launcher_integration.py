@@ -53,9 +53,7 @@ def _process_command(pid: int) -> tuple[str, ...] | None:
         payload = Path(f"/proc/{pid}/cmdline").read_bytes()
     except OSError:
         return None
-    command = tuple(
-        argument.decode(errors="replace") for argument in payload.split(b"\0") if argument
-    )
+    command = tuple(argument.decode(errors="replace") for argument in payload.split(b"\0") if argument)
     return command or None
 
 
@@ -127,9 +125,9 @@ def test_fresh_detached_launcher_keeps_the_registered_session_host_alive() -> No
     integration_root = Path(tempfile.mkdtemp(prefix="rodex-launch-", dir="/tmp"))
     integration_root.chmod(0o700)
     state_home = integration_root / "state"
-    database = state_home / "rodex" / "rodex-v18.sqlite3"
+    database = state_home / "rodex" / "rodex-v19.sqlite3"
     runtime_root = integration_root / "runtime"
-    tmux_socket = runtime_root / "tmux-shared-v1.sock"
+    tmux_socket = runtime_root / "tmux-shared-v2.sock"
     codex_home = integration_root / "codex-home"
     workspace = integration_root / "workspace"
     codex_home.mkdir(mode=0o700)
@@ -229,11 +227,7 @@ def test_fresh_detached_launcher_keeps_the_registered_session_host_alive() -> No
 
         def analytics_started_after_registration() -> bool | None:
             commands = _descendant_commands(session_host_pid)
-            return (
-                True
-                if any("rodex.analytics_worker" in command for command in commands.values())
-                else None
-            )
+            return True if any("rodex.analytics_worker" in command for command in commands.values()) else None
 
         _wait_for(
             "analytics activation after registration",
@@ -305,16 +299,12 @@ def test_fresh_detached_launcher_keeps_the_registered_session_host_alive() -> No
                 break
             terminal_output.extend(chunk)
         assert f"Rodex attach [{session_name}].\r\n".encode() in terminal_output
-        assert terminal_output.endswith(
-            b"\x1b[1A\x1b[2K\r" + f"Rodex exited [{session_name}].\r\n".encode()
-        )
+        assert terminal_output.endswith(b"\x1b[1A\x1b[2K\r" + f"Rodex exited [{session_name}].\r\n".encode())
 
         def descendants_have_exited() -> bool | None:
             return True if _isolated_codex_process_ids(codex_home) == () else None
 
-        _wait_for(
-            "the isolated Codex descendants to exit after Ctrl-C", descendants_have_exited
-        )
+        _wait_for("the isolated Codex descendants to exit after Ctrl-C", descendants_have_exited)
         assert _isolated_codex_process_ids(codex_home) == ()
         assert (
             _tmux(
@@ -349,9 +339,7 @@ def test_fresh_detached_launcher_keeps_the_registered_session_host_alive() -> No
                         check=False,
                     )
             _tmux(tmux_binary, tmux_socket, "kill-server", check=False)
-        remaining_host = (
-            None if session_host_pid is None else _process_command(session_host_pid)
-        )
+        remaining_host = None if session_host_pid is None else _process_command(session_host_pid)
         if remaining_host is not None and "rodex.session_host" in remaining_host:
             with suppress(ProcessLookupError):
                 os.kill(session_host_pid, signal.SIGTERM)

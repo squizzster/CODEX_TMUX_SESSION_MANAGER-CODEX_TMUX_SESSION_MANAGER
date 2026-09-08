@@ -121,7 +121,7 @@ never construct or execute the tmux process prefix themselves.
 ## Shared tmux authority
 
 All managed sessions intentionally multiplex through the per-user versioned
-`tmux-shared-v1.sock`. This is analogous to many clients sharing one Unix socket: the
+`tmux-shared-v2.sock`. This is analogous to many clients sharing one Unix socket: the
 socket selects a server but grants no session authority. Rodex records server-scope
 protocol and random incarnation markers. Only creation may claim a completely unmarked
 server, and only while it has no session; an unmarked nonempty server or protocol mismatch

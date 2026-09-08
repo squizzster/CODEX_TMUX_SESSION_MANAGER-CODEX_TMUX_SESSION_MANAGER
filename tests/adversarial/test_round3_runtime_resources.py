@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 import rodex.exact_turn_mutation as mutation_module
+import rodex.live_runtime as live_runtime_module
 from rodex.agent_observer import (
     AgentObserverCoordinator,
     AgentObserverView,
@@ -104,7 +105,7 @@ def test_round3_supported_start_dispatches_under_the_runtime_transition_lock(
         lambda *_args: type("Names", (), {"display_name": "round3"})(),
     )
     monkeypatch.setattr(
-        mutation_module,
+        live_runtime_module,
         "lookup_rodex_runtime_instance",
         lambda *_args: type("Runtime", (), {"runtime_id": "runtime-7"})(),
     )
@@ -149,9 +150,7 @@ class _AdmissionTmux:
         if arguments[:1] == ["if-shell"]:
             format_index = arguments.index("-F")
             condition = arguments[format_index + 1]
-            branch_index = format_index + (
-                2 if self._condition_is_true(condition) else 3
-            )
+            branch_index = format_index + (2 if self._condition_is_true(condition) else 3)
             if branch_index < len(arguments):
                 result = AsyncCommandResult(0)
                 for tmux_command in arguments[branch_index].split(" ; "):
@@ -305,9 +304,7 @@ def test_round3_blocked_renderer_and_protocol_churn_stay_bounded() -> None:
             len(counter._item_ids),
         )
 
-    peak_runners, runner_calls, known_threads, active_tool_ids = asyncio.run(
-        exercise_burst()
-    )
+    peak_runners, runner_calls, known_threads, active_tool_ids = asyncio.run(exercise_burst())
 
     assert peak_runners == 1
     assert runner_calls <= 2
@@ -485,9 +482,7 @@ def test_round3_observer_controller_prunes_completed_activity_lifetimes(
 
     for index in range(64):
         child_id = uuid.UUID(int=CHILD_THREAD_ID.int + index)
-        controller.observe_protocol_event(
-            _spawn_event(item_id=f"call-{index}", child_thread_id=child_id)
-        )
+        controller.observe_protocol_event(_spawn_event(item_id=f"call-{index}", child_thread_id=child_id))
         controller.observe_protocol_event(
             _spawn_event(
                 method="item/completed",

@@ -11,6 +11,11 @@ interactive grammar pass through unchanged.
 > described here is complete for its current scope, but interfaces may still change
 > before a stable release.
 
+Current release: **Rodex 0.6.0a1**, SQL generation **19**, shared tmux protocol **v2**.
+This ALPHA supports only its current storage and runtime contracts. It creates
+`rodex-v19.sqlite3` and `tmux-shared-v2.sock`; earlier generations are outside this
+installation's session catalog. There are no database migrations or old-runtime adapters.
+
 ## Why Rodex
 
 Rodex's first job is to accommodate the person at the terminal: replacing `codex` with
@@ -401,8 +406,8 @@ diagnostics. Current command names are reserved from Rodex aliases.
 ## Local data
 
 The durable database resolved for the current Linux user is
-`$XDG_STATE_HOME/rodex/rodex-v18.sqlite3`, or
-`~/.local/state/rodex/rodex-v18.sqlite3` when `XDG_STATE_HOME` is unset. Rodex does not
+`$XDG_STATE_HOME/rodex/rodex-v19.sqlite3`, or
+`~/.local/state/rodex/rodex-v19.sqlite3` when `XDG_STATE_HOME` is unset. Rodex does not
 support an application-specific database-path override. A successful new-session
 transaction permanently reserves its generated cool name in this database against both
 generated names and user-defined aliases, so a later session using the same database
@@ -431,7 +436,7 @@ a read-only canonical allowlist check and is not part of ordinary mutation hot p
 Short-lived Unix sockets and app-server logs use `$XDG_RUNTIME_DIR/rodex`, normally
 `/run/user/<uid>/rodex`. When `XDG_RUNTIME_DIR` is unset or that socket path would be
 too long, Rodex uses the private fallback `/tmp/rodex-<uid>`. Set `RODEX_RUNTIME_DIR`
-to override it. Managed tmux sessions share `tmux-shared-v1.sock` within that private
+to override it. Managed tmux sessions share `tmux-shared-v2.sock` within that private
 root; selecting a different runtime root therefore selects a different shared tmux
 server without changing the database selected above. Each app-server, proxy, event
 stream, observer, and log remains runtime-specific.

@@ -30,9 +30,10 @@ RODEX_SESSION_ID_OPTION: Final = "@rodex_session_id"
 RODEX_REGISTRATION_PENDING: Final = "pending"
 RODEX_REGISTRATION_REGISTERED: Final = "registered"
 RODEX_SHARED_TMUX_PROTOCOL_OPTION: Final = "@rodex_shared_tmux_protocol"
-RODEX_SHARED_TMUX_PROTOCOL: Final = "rodex-shared-tmux-v1"
+RODEX_SHARED_TMUX_PROTOCOL_GENERATION: Final = 2
+RODEX_SHARED_TMUX_PROTOCOL: Final = f"rodex-shared-tmux-v{RODEX_SHARED_TMUX_PROTOCOL_GENERATION}"
 RODEX_SHARED_TMUX_SERVER_ID_OPTION: Final = "@rodex_shared_tmux_server_id"
-RODEX_SHARED_TMUX_SOCKET_NAME: Final = "tmux-shared-v1.sock"
+RODEX_SHARED_TMUX_SOCKET_NAME: Final = f"tmux-shared-v{RODEX_SHARED_TMUX_PROTOCOL_GENERATION}.sock"
 
 _TMUX_SESSION_ID_PATTERN: Final = re.compile(r"\$[0-9]+")
 _TMUX_PANE_ID_PATTERN: Final = re.compile(r"%[0-9]+")
@@ -305,9 +306,7 @@ def _capability_read_arguments(
         pane_target,
         "-F",
         condition,
-        shlex.join(
-            ("display-message", "-p", "-t", pane_target, "-F", payload_format)
-        ),
+        shlex.join(("display-message", "-p", "-t", pane_target, "-F", payload_format)),
         shlex.join(("run-shell", "false")),
     )
 

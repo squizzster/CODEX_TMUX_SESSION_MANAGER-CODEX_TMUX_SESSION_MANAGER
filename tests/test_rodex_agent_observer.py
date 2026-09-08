@@ -387,9 +387,7 @@ def test_agent_message_projection_accepts_only_completed_agent_authored_text() -
             "text": "I am checking the official source now.",
         },
     }
-    assert (
-        project_agent_message_event(_agent_message_event(item_type="userMessage")) is None
-    )
+    assert project_agent_message_event(_agent_message_event(item_type="userMessage")) is None
     started = _agent_message_event()
     started["method"] = "item/started"
     assert project_agent_message_event(started) is None
@@ -450,9 +448,7 @@ def test_exact_spawn_creates_a_disabled_top_third_without_changing_focus(
         tmp_path / "events.sock",
         runner=runner,
         cursor_reader=lambda session_id, database: (
-            TRACE_CURSOR
-            if (session_id, database) == (3, tmp_path / "rodex.sqlite3")
-            else None
+            TRACE_CURSOR if (session_id, database) == (3, tmp_path / "rodex.sqlite3") else None
         ),
         event_sender=lambda path, event: sent.append((path, event)),
         python_executable="/usr/bin/python3",
@@ -466,9 +462,7 @@ def test_exact_spawn_creates_a_disabled_top_third_without_changing_focus(
 
     controller.observe_protocol_event(_spawn_event())
 
-    split = shlex.split(
-        next(command[-2] for command in calls if "split-window" in command[-2])
-    )
+    split = shlex.split(next(command[-2] for command in calls if "split-window" in command[-2]))
     assert split[1:11] == [
         "-v",
         "-b",
@@ -645,18 +639,14 @@ def test_same_turn_parent_request_is_sent_exactly_without_entering_process_args(
     controller.observe_protocol_event(_collaboration_invocation_event())
     controller.observe_protocol_event(_spawn_event())
 
-    split = shlex.split(
-        next(command[-2] for command in calls if "split-window" in command[-2])
-    )
+    split = shlex.split(next(command[-2] for command in calls if "split-window" in command[-2]))
     assert request not in split[-1]
     assert "root_request_context_follows" in split[-1]
     assert len(sent) == 1
     path, snapshot = sent[0]
     assert path == observer_control_socket_path(tmp_path / "events-runtime-a.sock")
     root_request_context = next(
-        event
-        for event in _observer_snapshot_events(snapshot)
-        if event["kind"] == "root_request_context"
+        event for event in _observer_snapshot_events(snapshot) if event["kind"] == "root_request_context"
     )
     assert root_request_context == {
         "schema": "rodex-agent-observer-v2",
@@ -702,9 +692,7 @@ def test_parent_request_is_not_correlated_across_turns_or_roots(tmp_path: Path) 
     )
 
     controller.observe_protocol_event(_user_message_event(turn_id="turn-before"))
-    controller.observe_protocol_event(
-        _user_message_event(thread_id=OTHER_THREAD_ID, text="other root")
-    )
+    controller.observe_protocol_event(_user_message_event(thread_id=OTHER_THREAD_ID, text="other root"))
     controller.observe_protocol_event(_collaboration_invocation_event())
     controller.observe_protocol_event(_spawn_event())
 
@@ -780,9 +768,7 @@ def test_same_agent_followup_receives_its_new_exact_parent_request(tmp_path: Pat
     ]
     assert terminal_events[1]["root_request_context_follows"] is True  # type: ignore[index]
     root_request_context = next(
-        event
-        for event in _observer_snapshot_events(sent[-1][1])
-        if event["kind"] == "root_request_context"
+        event for event in _observer_snapshot_events(sent[-1][1]) if event["kind"] == "root_request_context"
     )
     assert root_request_context["item"] == {
         "type": "userMessage",
@@ -827,9 +813,7 @@ def test_primary_event_path_forwards_tracked_agent_prose_without_subscriber_gap(
 
     assert len(sent) == 1
     assert sent[0][0] == observer_control_socket_path(tmp_path / "events.sock")
-    assert _observer_snapshot_events(sent[0][1])[-1] == project_agent_message_event(
-        _agent_message_event()
-    )
+    assert _observer_snapshot_events(sent[0][1])[-1] == project_agent_message_event(_agent_message_event())
 
 
 def test_controller_close_waits_for_inflight_callback_and_blocks_late_mutation(
@@ -976,9 +960,7 @@ def test_existing_observer_reconnects_with_current_bounded_semantic_snapshot(
 
 def test_observer_view_renders_exact_parent_request_after_tracked_spawn() -> None:
     initial = _projected_activity()
-    parent = project_user_message_event(
-        _user_message_event(text="First line exactly.\nSecond line exactly.")
-    )
+    parent = project_user_message_event(_user_message_event(text="First line exactly.\nSecond line exactly."))
     assert initial is not None
     assert parent is not None
     initial["root_request_context_follows"] = True
@@ -1226,9 +1208,7 @@ def test_observer_view_renders_only_exact_target_trace_metadata() -> None:
 
 def test_observer_view_shows_agent_english_but_not_other_threads_or_control_codes() -> None:
     initial = _projected_activity()
-    commentary = project_agent_message_event(
-        _agent_message_event(text="Checking GOV.UK.\n\x1b[31mOne moment…\x1b[0m")
-    )
+    commentary = project_agent_message_event(_agent_message_event(text="Checking GOV.UK.\n\x1b[31mOne moment…\x1b[0m"))
     final = project_agent_message_event(
         _agent_message_event(
             item_id="message-2",
@@ -1554,9 +1534,7 @@ def test_unseen_first_turn_stays_bound_to_first_request_after_followup_arrives()
         )
     )
     assert delayed_first_answer is not None
-    assert "  First answer arrived late." in view.accept_agent_message_event(
-        delayed_first_answer
-    )
+    assert "  First answer arrived late." in view.accept_agent_message_event(delayed_first_answer)
     view.accept_trace_snapshot(
         RodexAgentTraceSnapshot(
             2,
@@ -1899,8 +1877,7 @@ def test_observer_view_renders_exact_clean_lineage_work_and_terminal_recap() -> 
         "",
         "✓ live-review finished · 2s",
         "  Invocation: spawn_agent · NEW CLEAN AGENT",
-        "  Work: 35 actions · 27 web operations · 15 queries · "
-        "437 result records · 1 compaction",
+        "  Work: 35 actions · 27 web operations · 15 queries · 437 result records · 1 compaction",
         "  Tokens: 1,200 processed · 900 cached input · 100 output · 40 reasoning",
         "",
         "ROOT TURN REQUEST RECAP · exact user message",
@@ -1947,8 +1924,7 @@ def test_observer_view_renders_inherited_agent_without_calling_it_same_agent() -
     assert lines[:3] == [
         "",
         "CONTEXT · live-review",
-        "  NEW INHERITED AGENT · separate thread/turn · "
-        "inherited-history cutoff at source ordinal 12",
+        "  NEW INHERITED AGENT · separate thread/turn · inherited-history cutoff at source ordinal 12",
     ]
     assert "SAME AGENT" not in "\n".join(lines)
 
@@ -1974,8 +1950,7 @@ def test_agent_observer_evidence_reader_uses_exact_thread_and_turn(tmp_path: Pat
         "compactions_count": 1,
     }
     metric_values = [
-        metric_overrides.get(field.name, None if field.nullable else 0)
-        for field in TURN_STATISTICS_SCALARS.fields
+        metric_overrides.get(field.name, None if field.nullable else 0) for field in TURN_STATISTICS_SCALARS.fields
     ]
     with open_rodex_transaction(database) as connection:
         root_turn_row = connection.execute(
@@ -2376,7 +2351,7 @@ def test_real_tmux_observer_renders_request_and_exits_with_its_runtime(
                 "set-option",
                 "-s",
                 "@rodex_shared_tmux_protocol",
-                "rodex-shared-tmux-v1",
+                "rodex-shared-tmux-v2",
                 ";",
                 "set-option",
                 "-s",
@@ -2434,9 +2409,7 @@ def test_real_tmux_observer_renders_request_and_exits_with_its_runtime(
         )
         exact_request = "Review the real tmux boundary exactly as requested."
         controller.observe_protocol_event(_user_message_event(text=exact_request))
-        controller.observe_protocol_event(
-            _collaboration_invocation_event(prompt=exact_request)
-        )
+        controller.observe_protocol_event(_collaboration_invocation_event(prompt=exact_request))
         controller.observe_protocol_event(_spawn_event())
 
         panes = _wait_for_tmux_panes(tmux, tmux_socket, 2)
@@ -2614,8 +2587,7 @@ def _wait_for_tmux_panes(
                 "-t",
                 "observer-test",
                 "-F",
-                "#{pane_id}|#{pane_input_off}|#{pane_current_command}|"
-                "#{pane_top}|#{pane_height}|#{pane_active}",
+                "#{pane_id}|#{pane_input_off}|#{pane_current_command}|#{pane_top}|#{pane_height}|#{pane_active}",
             ],
             check=False,
             text=True,
@@ -2660,6 +2632,4 @@ def _wait_for_captured_text(
         if expected in captured:
             return captured
         time.sleep(0.05)
-    raise AssertionError(
-        f"observer pane did not display {expected!r}; captured={captured!r}"
-    )
+    raise AssertionError(f"observer pane did not display {expected!r}; captured={captured!r}")

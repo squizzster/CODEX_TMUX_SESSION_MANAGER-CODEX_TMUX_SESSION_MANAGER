@@ -99,17 +99,13 @@ def test_registry_id_has_one_bigint_column_and_named_unique_index(
 
     columns = fetch_all(database, "PRAGMA table_info(rodex_registries)")
     indexes = fetch_all(database, "PRAGMA index_list(rodex_registries)")
-    index_columns = fetch_all(
-        database, "PRAGMA index_info(rodex_registries_registry_id_unique)"
-    )
+    index_columns = fetch_all(database, "PRAGMA index_info(rodex_registries_registry_id_unique)")
 
     assert [(row[1], row[2], row[3], row[5]) for row in columns] == [
         ("id", "INTEGER", 0, 1),
         ("rodex_registry_id_signed_bigint", "BIGINT", 1, 0),
     ]
-    assert {(row[1], row[2]) for row in indexes} == {
-        ("rodex_registries_registry_id_unique", 1)
-    }
+    assert {(row[1], row[2]) for row in indexes} == {("rodex_registries_registry_id_unique", 1)}
     assert [row[2] for row in index_columns] == ["rodex_registry_id_signed_bigint"]
 
 
@@ -160,10 +156,7 @@ def test_session_and_codex_identities_have_separate_canonical_rows(tmp_path: Pat
         ("cool_names", "user_defined_cool_names_id", "id"),
     }
     assert columns[-1][4] == "NULL"
-    assert [
-        (row[1], row[2], row[3], row[5])
-        for row in fetch_all(database, "PRAGMA table_info(codex_threads)")
-    ] == [
+    assert [(row[1], row[2], row[3], row[5]) for row in fetch_all(database, "PRAGMA table_info(codex_threads)")] == [
         ("id", "INTEGER", 0, 1),
         ("codex_thread_public_id_signed_bigint_1", "BIGINT", 1, 0),
         ("codex_thread_public_id_signed_bigint_2", "BIGINT", 1, 0),
@@ -188,11 +181,7 @@ def test_identity_bigint_columns_reject_non_integer_storage(tmp_path: Path) -> N
 
     with sqlite3.connect(database) as connection:
         for table_name, column_name in identity_columns:
-            expected = (
-                "thread identity is immutable"
-                if table_name == "codex_threads"
-                else "CHECK constraint failed"
-            )
+            expected = "thread identity is immutable" if table_name == "codex_threads" else "CHECK constraint failed"
             with pytest.raises(sqlite3.IntegrityError, match=expected):
                 connection.execute(f"UPDATE {table_name} SET {column_name} = 1.5")
 
@@ -230,13 +219,10 @@ def test_codex_thread_membership_is_append_only(tmp_path: Path) -> None:
     create_a_rodex_session(database, codex_session_id=codex_session_id(1))
 
     with sqlite3.connect(database) as connection:
-        membership_id = connection.execute(
-            "SELECT id FROM rodex_sessions_codex_threads"
-        ).fetchone()[0]
+        membership_id = connection.execute("SELECT id FROM rodex_sessions_codex_threads").fetchone()[0]
         with pytest.raises(sqlite3.IntegrityError, match="membership is immutable"):
             connection.execute(
-                "UPDATE rodex_sessions_codex_threads "
-                "SET first_linked_at_utc = '2026-08-26T00:00:00Z' WHERE id = ?",
+                "UPDATE rodex_sessions_codex_threads SET first_linked_at_utc = '2026-08-26T00:00:00Z' WHERE id = ?",
                 (membership_id,),
             )
         with pytest.raises(sqlite3.IntegrityError, match="membership is immutable"):
@@ -412,9 +398,7 @@ def test_codex_session_id_storage_helpers_preserve_the_codex_identity() -> None:
     assert join_signed_bigints_into_a_codex_session_id(*stored) == original
 
 
-def test_create_returns_the_internal_id_and_canonical_session_id(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_create_returns_the_internal_id_and_canonical_session_id(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     database = tmp_path / "rodex.sqlite3"
     random_value = 0xFEDCBA9876543210
     monkeypatch.setattr(identity_module.secrets, "randbits", lambda bits: random_value)
@@ -427,9 +411,7 @@ def test_create_returns_the_internal_id_and_canonical_session_id(
     assert created.codex_session_id == codex_session_id(1)
 
 
-def test_create_stores_all_session_id_bits_as_one_sqlite_integer(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_create_stores_all_session_id_bits_as_one_sqlite_integer(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     database = tmp_path / "rodex.sqlite3"
     monkeypatch.setattr(identity_module.secrets, "randbits", lambda bits: (1 << 64) - 1)
 
@@ -437,8 +419,7 @@ def test_create_stores_all_session_id_bits_as_one_sqlite_integer(
 
     assert fetch_all(
         database,
-        "SELECT rodex_session_id_signed_bigint, "
-        "typeof(rodex_session_id_signed_bigint) FROM rodex_sessions",
+        "SELECT rodex_session_id_signed_bigint, typeof(rodex_session_id_signed_bigint) FROM rodex_sessions",
     ) == [(-1, "integer")]
 
 
@@ -482,9 +463,7 @@ def test_database_unique_index_rejects_duplicate_session_id(tmp_path: Path) -> N
     assert first.rodex_sessions_id == 1
 
 
-def test_generated_session_id_succeeds_on_the_tenth_attempt(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_generated_session_id_succeeds_on_the_tenth_attempt(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     database = tmp_path / "rodex.sqlite3"
     candidates = iter([100] * 10 + [200])
     monkeypatch.setattr(identity_module.secrets, "randbits", lambda bits: next(candidates))
@@ -497,9 +476,7 @@ def test_generated_session_id_succeeds_on_the_tenth_attempt(
     assert second.rodex_sessions_id == 2
 
 
-def test_create_reports_ten_repeated_session_id_collisions(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_create_reports_ten_repeated_session_id_collisions(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     database = tmp_path / "rodex.sqlite3"
     monkeypatch.setattr(identity_module.secrets, "randbits", lambda bits: 100)
     create_a_rodex_session(database, codex_session_id=codex_session_id(1))
@@ -544,9 +521,7 @@ def test_pending_session_id_candidate_succeeds_on_the_tenth_attempt(
     assert lookup_rodex_sessions_id_from_a_rodex_session_id(candidate, database) is None
 
 
-def test_pending_session_id_candidate_exhaustion_is_fatal(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_pending_session_id_candidate_exhaustion_is_fatal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     database = tmp_path / "rodex.sqlite3"
     create_a_rodex_session(
         database,
@@ -564,8 +539,7 @@ def test_lookup_id_finds_a_session_id_object(tmp_path: Path) -> None:
     created = create_a_rodex_session(database, codex_session_id=codex_session_id(1))
 
     assert (
-        lookup_rodex_sessions_id_from_a_rodex_session_id(created.rodex_session_id, database)
-        == created.rodex_sessions_id
+        lookup_rodex_sessions_id_from_a_rodex_session_id(created.rodex_session_id, database) == created.rodex_sessions_id
     )
 
 
@@ -574,9 +548,7 @@ def test_lookup_id_finds_a_canonical_session_id_string(tmp_path: Path) -> None:
     created = create_a_rodex_session(database, codex_session_id=codex_session_id(1))
 
     assert (
-        lookup_rodex_sessions_id_from_a_rodex_session_id(
-            str(created.rodex_session_id), database
-        )
+        lookup_rodex_sessions_id_from_a_rodex_session_id(str(created.rodex_session_id), database)
         == created.rodex_sessions_id
     )
 
@@ -584,10 +556,7 @@ def test_lookup_id_finds_a_canonical_session_id_string(tmp_path: Path) -> None:
 def test_lookup_id_returns_none_for_an_unknown_session_id(tmp_path: Path) -> None:
     database = initialise_rodex_database(tmp_path / "rodex.sqlite3")
 
-    assert (
-        lookup_rodex_sessions_id_from_a_rodex_session_id("000000000000002a", database)
-        is None
-    )
+    assert lookup_rodex_sessions_id_from_a_rodex_session_id("000000000000002a", database) is None
 
 
 def test_lookup_session_id_finds_an_internal_id(tmp_path: Path) -> None:
@@ -595,10 +564,7 @@ def test_lookup_session_id_finds_an_internal_id(tmp_path: Path) -> None:
     created = create_a_rodex_session(database, codex_session_id=codex_session_id(1))
 
     assert (
-        lookup_rodex_session_id_from_a_rodex_sessions_id(
-            created.rodex_sessions_id, database
-        )
-        == created.rodex_session_id
+        lookup_rodex_session_id_from_a_rodex_sessions_id(created.rodex_sessions_id, database) == created.rodex_session_id
     )
 
 
@@ -608,9 +574,7 @@ def test_codex_session_id_is_looked_up_directly_from_the_root_session(
     database = tmp_path / "rodex.sqlite3"
     created = create_a_rodex_session(database, codex_session_id=codex_session_id(1))
 
-    assert lookup_codex_session_id_from_a_rodex_sessions_id(
-        created.rodex_sessions_id, database
-    ) == codex_session_id(1)
+    assert lookup_codex_session_id_from_a_rodex_sessions_id(created.rodex_sessions_id, database) == codex_session_id(1)
 
 
 def test_lookup_session_id_returns_none_for_an_unknown_id(tmp_path: Path) -> None:
@@ -620,20 +584,16 @@ def test_lookup_session_id_returns_none_for_an_unknown_id(tmp_path: Path) -> Non
 
 
 @pytest.mark.parametrize("bad_id", [0, -1, True, 1.5, "1"])
-def test_lookup_session_id_rejects_invalid_internal_ids(
-    tmp_path: Path, bad_id: object
-) -> None:
+def test_lookup_session_id_rejects_invalid_internal_ids(tmp_path: Path, bad_id: object) -> None:
     with pytest.raises(ValueError, match="positive integer"):
         lookup_rodex_session_id_from_a_rodex_sessions_id(bad_id, tmp_path / "db.sqlite3")  # type: ignore[arg-type]
 
 
-def test_default_database_path_uses_xdg_state_home(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_default_database_path_uses_xdg_state_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     state_home = tmp_path / "state"
     monkeypatch.setenv("XDG_STATE_HOME", str(state_home))
 
-    assert default_rodex_database_path() == state_home / "rodex" / "rodex-v18.sqlite3"
+    assert default_rodex_database_path() == state_home / "rodex" / "rodex-v19.sqlite3"
 
 
 def test_default_database_path_uses_home_state_directory_without_xdg_override(
@@ -643,37 +603,32 @@ def test_default_database_path_uses_home_state_directory_without_xdg_override(
     home = tmp_path / "home"
     monkeypatch.setattr(Path, "home", lambda: home)
 
-    assert default_rodex_database_path() == (
-        home / ".local" / "state" / "rodex" / "rodex-v18.sqlite3"
-    )
+    assert default_rodex_database_path() == (home / ".local" / "state" / "rodex" / "rodex-v19.sqlite3")
 
 
 @pytest.mark.evolutionary_regression
-def test_new_schema_generation_leaves_v17_database_untouched(
+def test_current_generation_bootstrap_does_not_read_an_earlier_database(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Current evidence: incompatible ALPHA schemas use a new durable filename.
-
-    Supersede this guard only with an explicit migration or database-reset decision.
-    """
+    """An earlier database stays outside current-generation bootstrap and discovery."""
     state_home = tmp_path / "state"
     registry_directory = state_home / "rodex"
     registry_directory.mkdir(mode=0o700, parents=True)
     registry_directory.chmod(0o700)
-    previous_database = registry_directory / "rodex-v17.sqlite3"
-    previous_contents = b"preserved-v17-database-sentinel"
+    previous_database = registry_directory / "rodex-v18.sqlite3"
+    previous_contents = b"earlier-generation-sentinel"
     previous_database.write_bytes(previous_contents)
     previous_database.chmod(0o600)
     monkeypatch.setenv("XDG_STATE_HOME", str(state_home))
 
     current_database = initialise_rodex_database()
 
-    assert current_database == registry_directory / "rodex-v18.sqlite3"
+    assert current_database == registry_directory / "rodex-v19.sqlite3"
     assert current_database.is_file()
     assert previous_database.read_bytes() == previous_contents
 
 
-def test_nonempty_unmarked_database_is_rejected_before_v18_tables_are_created(
+def test_nonempty_unmarked_database_is_rejected_before_domain_tables_are_created(
     tmp_path: Path,
 ) -> None:
     database = tmp_path / "rodex.sqlite3"
@@ -685,13 +640,10 @@ def test_nonempty_unmarked_database_is_rejected_before_v18_tables_are_created(
         initialise_rodex_database(database)
 
     with sqlite3.connect(database) as connection:
-        assert connection.execute("SELECT value FROM unmarked_sentinel").fetchall() == [
-            ("untouched",)
-        ]
+        assert connection.execute("SELECT value FROM unmarked_sentinel").fetchall() == [("untouched",)]
         assert (
             connection.execute(
-                "SELECT name FROM sqlite_master WHERE type = 'table' "
-                "AND name = 'rodex_sessions'"
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'rodex_sessions'"
             ).fetchone()
             is None
         )
@@ -708,24 +660,18 @@ def test_wrong_explicit_schema_generation_is_rejected_without_repair(
             "schema_generation INTEGER NOT NULL CHECK (schema_generation >= 1), "
             "CHECK (id = 1))"
         )
-        connection.execute(
-            "INSERT INTO rodex_schema_generations (schema_generation) VALUES (10)"
-        )
+        connection.execute("INSERT INTO rodex_schema_generations (schema_generation) VALUES (10)")
 
     with pytest.raises(RodexSessionError, match="schema generation does not match"):
         initialise_rodex_database(database)
 
-    assert fetch_all(
-        database, "SELECT schema_generation FROM rodex_schema_generations"
-    ) == [(10,)]
+    assert fetch_all(database, "SELECT schema_generation FROM rodex_schema_generations") == [(10,)]
 
 
-def test_default_database_path_ignores_removed_database_override(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_default_database_path_ignores_removed_database_override(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     configured = tmp_path / "custom.sqlite3"
     state_home = tmp_path / "state"
     monkeypatch.setenv("RODEX_DATABASE_PATH", str(configured))
     monkeypatch.setenv("XDG_STATE_HOME", str(state_home))
 
-    assert default_rodex_database_path() == state_home / "rodex" / "rodex-v18.sqlite3"
+    assert default_rodex_database_path() == state_home / "rodex" / "rodex-v19.sqlite3"

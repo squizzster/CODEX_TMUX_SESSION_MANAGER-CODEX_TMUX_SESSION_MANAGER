@@ -14,7 +14,6 @@ from rodex_registry import (
     list_rodex_session_runtimes_for_a_user,
     lookup_owned_rodex_sessions_id_from_a_cool_name,
     lookup_rodex_registry_id,
-    lookup_rodex_runtime_instance,
     lookup_rodex_session_id_from_a_rodex_sessions_id,
     lookup_rodex_sessions_id_from_a_rodex_session_id,
     lookup_rodex_tmux_session,
@@ -76,14 +75,10 @@ def execute_session_command(
         return
     if command == MOUSE_COMMAND:
         if len(arguments) not in {2, 3}:
-            raise RodexLaunchError(
-                "usage: rodex _mouse SESSION_NAME [on|off|toggle|inherit|status]"
-            )
+            raise RodexLaunchError("usage: rodex _mouse SESSION_NAME [on|off|toggle|inherit|status]")
         mode = arguments[2] if len(arguments) == 3 else "status"
         if mode not in {"on", "off", "toggle", "inherit", "status"}:
-            raise RodexLaunchError(
-                "usage: rodex _mouse SESSION_NAME [on|off|toggle|inherit|status]"
-            )
+            raise RodexLaunchError("usage: rodex _mouse SESSION_NAME [on|off|toggle|inherit|status]")
         target, mouse_state = ExactTurnMutationCoordinator(
             database_path,
             launcher,
@@ -102,9 +97,7 @@ def execute_session_command(
     if command == WAIT_COMMAND:
         if len(arguments) != 2:
             raise RodexLaunchError("usage: rodex _wait SESSION_NAME")
-        session_id, runtime, control = resolve_live_control(
-            arguments[1], database_path, launcher
-        )
+        session_id, runtime, control = resolve_live_control(arguments[1], database_path, launcher)
         control_client.wait_until_idle(
             control,
             revalidate=lambda: revalidate_live_control(launcher, runtime, control),
@@ -115,9 +108,7 @@ def execute_session_command(
     if command == CAT_COMMAND:
         if len(arguments) != 2:
             raise RodexLaunchError("usage: rodex _cat SESSION_NAME")
-        scrollback = LiveSessionReadPipeline(database_path, launcher).snapshot(
-            arguments[1], launcher.capture_scrollback
-        )
+        scrollback = LiveSessionReadPipeline(database_path, launcher).snapshot(arguments[1], launcher.capture_scrollback)
         if scrollback:
             sys.stdout.write("\n".join(scrollback) + "\n")
             sys.stdout.flush()
@@ -152,9 +143,7 @@ def execute_session_command(
     if command == ALIAS_COMMAND:
         force, operands = _parse_alias_arguments(arguments[1:])
         if len(operands) != 2:
-            raise RodexLaunchError(
-                "usage: rodex _alias [--force] SESSION_NAME USER_DEFINED_NAME"
-            )
+            raise RodexLaunchError("usage: rodex _alias [--force] SESSION_NAME USER_DEFINED_NAME")
         mutation_coordinator = ExactTurnMutationCoordinator(
             database_path,
             launcher,
@@ -167,9 +156,7 @@ def execute_session_command(
         )
         print(rodex_session_message("alias", display_name), flush=True)
         return
-    raise AssertionError(
-        f"application pipeline selected unknown session command: {command}"
-    )
+    raise AssertionError(f"application pipeline selected unknown session command: {command}")
 
 
 def _parse_alias_arguments(arguments: list[str]) -> tuple[bool, list[str]]:
@@ -229,9 +216,7 @@ def _print_current_rodex_context(
     live_tmux = tmux_context.tmux_session
     advertised = launcher.discover_runtime_control(live_tmux)
     if advertised.rodex_session_id is None:
-        raise RodexLaunchError(
-            "the current tmux pane does not advertise a Rodex session identity"
-        )
+        raise RodexLaunchError("the current tmux pane does not advertise a Rodex session identity")
     registry_id = lookup_rodex_registry_id(database_path)
     if advertised.rodex_registry_id != registry_id:
         raise RodexLaunchError(
@@ -244,9 +229,7 @@ def _print_current_rodex_context(
         database_path,
     )
     if session_id is None:
-        raise RodexLaunchError(
-            "the current tmux pane advertises a Rodex identity absent from this registry"
-        )
+        raise RodexLaunchError("the current tmux pane advertises a Rodex identity absent from this registry")
     persisted = next(
         (
             runtime
@@ -256,9 +239,7 @@ def _print_current_rodex_context(
         None,
     )
     if persisted is None:
-        raise RodexLaunchError(
-            "the current tmux pane is not owned by the current POSIX user"
-        )
+        raise RodexLaunchError("the current tmux pane is not owned by the current POSIX user")
     recorded_tmux = LiveTmuxSession(
         Path(persisted.tmux_server_socket_path),
         persisted.tmux_session_name,
@@ -279,12 +260,6 @@ def _print_current_rodex_context(
         expected_registry_id=registry_id,
         expected_codex_session_id=persisted.codex_session_id,
     )
-    persisted_runtime = lookup_rodex_runtime_instance(session_id, database_path)
-    runtime_identity_persisted = (
-        persisted_runtime is not None and control.runtime_id == persisted_runtime.runtime_id
-    )
-    if persisted_runtime is not None and control.runtime_id != persisted_runtime.runtime_id:
-        raise RodexLaunchError("the current tmux pane advertises an unexpected runtime ID")
     print(
         json.dumps(
             {
@@ -302,10 +277,8 @@ def _print_current_rodex_context(
                 "tmux_window_id": tmux_context.tmux_window_id,
                 "tmux_pane_id": tmux_context.tmux_pane_id,
                 "registration_state": control.registration_state,
-                "runtime_id": (
-                    None if control.runtime_id is None else str(control.runtime_id)
-                ),
-                "runtime_identity_persisted": runtime_identity_persisted,
+                "runtime_id": (None if control.runtime_id is None else str(control.runtime_id)),
+                "runtime_identity_persisted": True,
                 "attached_clients": tmux_context.attached_client_count,
                 "shared": tmux_context.attached_client_count > 1,
             },
@@ -323,9 +296,7 @@ def _refuse_same_session_event_sink(
     """Prevent protocol-event output from feeding the pane it observes."""
     if not os.environ.get("TMUX") or not os.environ.get("TMUX_PANE"):
         return
-    session_id = lookup_owned_rodex_sessions_id_from_a_cool_name(
-        session_name, database_path
-    )
+    session_id = lookup_owned_rodex_sessions_id_from_a_cool_name(session_name, database_path)
     if session_id is None:
         return
     tmux = lookup_rodex_tmux_session(session_id, database_path)
@@ -340,8 +311,7 @@ def _refuse_same_session_event_sink(
         ) from error
     if (
         current.tmux_session.tmux_session_name == tmux.tmux_session_name
-        and current.tmux_session.tmux_server_socket_path
-        == Path(tmux.tmux_server_socket_path)
+        and current.tmux_session.tmux_server_socket_path == Path(tmux.tmux_server_socket_path)
     ):
         raise RodexLaunchError(
             "_events output cannot use the same Rodex session it observes; "
@@ -353,11 +323,7 @@ def _print_running_sessions(
     database_path: Path,
     launcher: RodexRuntimeLauncher,
 ) -> None:
-    persisted = (
-        list_rodex_session_runtimes_for_a_user(database_path)
-        if database_path.exists()
-        else []
-    )
+    persisted = list_rodex_session_runtimes_for_a_user(database_path) if database_path.exists() else []
     registry_id = lookup_rodex_registry_id(database_path) if persisted else None
     running = []
     identity_failures: list[tuple[str, str]] = []
@@ -374,9 +340,7 @@ def _print_running_sessions(
             runtime.rodex_sessions_id, database_path
         )
         if expected_rodex_session_id is None:
-            identity_failures.append(
-                (runtime.display_name, "missing durable Rodex session ID")
-            )
+            identity_failures.append((runtime.display_name, "missing durable Rodex session ID"))
             continue
         assert registry_id is not None
         try:

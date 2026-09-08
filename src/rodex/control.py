@@ -261,9 +261,7 @@ class CodexControlClient:
                     )
                     state = _thread_state(thread)
                     if state.status != "idle":
-                        raise RodexControlError(
-                            "Codex thread is not idle; use _steer with the exact turn ID"
-                        )
+                        raise RodexControlError("Codex thread is not idle; use _steer with the exact turn ID")
                     if state.can_accept_direct_input is False:
                         raise RodexControlError("Codex thread does not accept direct input")
                     revalidate()
@@ -285,7 +283,7 @@ class CodexControlClient:
                     )
                     return PromptDispatch(
                         "started",
-                        _turn_id(result),
+                        _started_turn_id(result),
                         resolved_dispatch_id,
                         state.thread_id,
                         state.session_id,
@@ -331,8 +329,7 @@ class CodexControlClient:
                     state = _thread_state(thread, active_turn_id=turn_id)
                     if state.status != "active":
                         raise RodexControlError(
-                            f"exact Codex turn is not active: expected {turn_id}, "
-                            f"observed thread {state.status}"
+                            f"exact Codex turn is not active: expected {turn_id}, observed thread {state.status}"
                         )
                     if state.can_accept_direct_input is False:
                         raise RodexControlError("Codex thread does not accept direct input")
@@ -357,7 +354,7 @@ class CodexControlClient:
                     )
                     return PromptDispatch(
                         "steered",
-                        _turn_id(result),
+                        _steered_turn_id(result),
                         resolved_dispatch_id,
                         state.thread_id,
                         state.session_id,
@@ -398,8 +395,7 @@ class CodexControlClient:
                     state = _thread_state(thread, active_turn_id=turn_id)
                     if state.status != "active":
                         raise RodexControlError(
-                            f"exact Codex turn is not active: expected {turn_id}, "
-                            f"observed thread {state.status}"
+                            f"exact Codex turn is not active: expected {turn_id}, observed thread {state.status}"
                         )
                     revalidate()
                     _request(
@@ -536,25 +532,18 @@ class CodexControlClient:
                     return state, result
                 if state.status != "active":
                     raise RodexControlError(
-                        f"exact Codex turn is not active: expected {turn_id}, "
-                        f"observed thread {state.status}"
+                        f"exact Codex turn is not active: expected {turn_id}, observed thread {state.status}"
                     )
                 while True:
                     remaining = None if deadline is None else deadline - self._monotonic()
                     if remaining is not None and remaining <= 0:
-                        raise RodexWaitTimeoutError(
-                            f"timed out waiting for exact Codex turn {turn_id}"
-                        )
+                        raise RodexWaitTimeoutError(f"timed out waiting for exact Codex turn {turn_id}")
                     try:
                         message = events.recv(timeout=remaining)
                     except TimeoutError as error:
-                        raise RodexWaitTimeoutError(
-                            f"timed out waiting for exact Codex turn {turn_id}"
-                        ) from error
+                        raise RodexWaitTimeoutError(f"timed out waiting for exact Codex turn {turn_id}") from error
                     payload = _protocol_payload(message)
-                    if payload is None or not _belongs_to_thread(
-                        payload, control.codex_session_id
-                    ):
+                    if payload is None or not _belongs_to_thread(payload, control.codex_session_id):
                         continue
                     if payload.get("method") != CODEX_APP_SERVER.turn_completed_method:
                         continue
@@ -571,27 +560,19 @@ class CodexControlClient:
                             include_turns=True,
                             deadline=deadline,
                         )
-                    terminal_result = _turn_result(
-                        _turn_from_thread(terminal_thread, turn_id)
-                    )
+                    terminal_result = _turn_result(_turn_from_thread(terminal_thread, turn_id))
                     if terminal_result.status == "inProgress":
-                        raise RodexControlError(
-                            "Codex completion event preceded terminal turn state"
-                        )
+                        raise RodexControlError("Codex completion event preceded terminal turn state")
                     revalidate()
                     _wait_remaining(deadline, self._monotonic, turn_id)
                     return _thread_state(terminal_thread), terminal_result
         except RodexWaitTimeoutError:
             raise
         except _RodexRequestDeadlineError as error:
-            raise RodexWaitTimeoutError(
-                f"timed out waiting for exact Codex turn {turn_id}"
-            ) from error
+            raise RodexWaitTimeoutError(f"timed out waiting for exact Codex turn {turn_id}") from error
         except TimeoutError as error:
             if deadline is not None and self._monotonic() >= deadline:
-                raise RodexWaitTimeoutError(
-                    f"timed out waiting for exact Codex turn {turn_id}"
-                ) from error
+                raise RodexWaitTimeoutError(f"timed out waiting for exact Codex turn {turn_id}") from error
             raise RodexControlError("timed out opening Codex event stream") from error
         except (ConnectionClosed, InvalidHandshake, OSError) as error:
             raise RodexControlError(f"Codex event stream ended: {error}") from error
@@ -612,20 +593,15 @@ class CodexControlClient:
                 if state.status == "idle":
                     return
                 if state.status != "active":
-                    raise RodexControlError(
-                        f"Codex thread cannot be waited on while {state.status}"
-                    )
+                    raise RodexControlError(f"Codex thread cannot be waited on while {state.status}")
                 for message in events:
                     payload = _protocol_payload(message)
-                    if payload is None or not _belongs_to_thread(
-                        payload, control.codex_session_id
-                    ):
+                    if payload is None or not _belongs_to_thread(payload, control.codex_session_id):
                         continue
                     method = payload.get("method")
                     status = _nested(payload, "params", "status", "type")
                     if method == CODEX_APP_SERVER.turn_completed_method or (
-                        method == CODEX_APP_SERVER.thread_status_changed_method
-                        and status == "idle"
+                        method == CODEX_APP_SERVER.thread_status_changed_method and status == "idle"
                     ):
                         current = self.inspect(control)
                         revalidate()
@@ -653,9 +629,7 @@ class CodexControlClient:
                 revalidate()
                 for message in events:
                     payload = _protocol_payload(message)
-                    if payload is None or not _belongs_to_thread(
-                        payload, control.codex_session_id
-                    ):
+                    if payload is None or not _belongs_to_thread(payload, control.codex_session_id):
                         continue
                     formatted = format_protocol_log_event(payload)
                     if formatted is not None:
@@ -706,9 +680,7 @@ class CodexControlClient:
         loaded_ids = loaded.get("data")
         expected = str(expected_codex_session_id)
         if not isinstance(loaded_ids, list) or expected not in loaded_ids:
-            raise RodexControlError(
-                f"live endpoint does not contain expected Codex session {expected}"
-            )
+            raise RodexControlError(f"live endpoint does not contain expected Codex session {expected}")
         result = _request(
             websocket,
             2,
@@ -718,11 +690,7 @@ class CodexControlClient:
             monotonic=self._monotonic,
         )
         thread = result.get("thread")
-        if (
-            not isinstance(thread, dict)
-            or thread.get("id") != expected
-            or not isinstance(thread.get("sessionId"), str)
-        ):
+        if not isinstance(thread, dict) or thread.get("id") != expected or not isinstance(thread.get("sessionId"), str):
             raise RodexControlError("app-server returned an unexpected Codex thread")
         return thread
 
@@ -741,9 +709,7 @@ class CodexControlClient:
             monotonic=self._monotonic,
         )
         version = CODEX_APP_SERVER.require_minimum_version(initialize_result)
-        notification_deadline = (
-            self._control_rpc_deadline() if deadline is None else deadline
-        )
+        notification_deadline = self._control_rpc_deadline() if deadline is None else deadline
         _send_protocol_frame(
             websocket,
             json.dumps(CODEX_APP_SERVER.initialized_notification()),
@@ -771,17 +737,13 @@ def format_protocol_log_event(payload: dict[str, Any]) -> str | None:
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
 
 
-def _thread_state(
-    thread: dict[str, Any], *, active_turn_id: str | None = None
-) -> CodexThreadState:
+def _thread_state(thread: dict[str, Any], *, active_turn_id: str | None = None) -> CodexThreadState:
     status_value = thread.get("status")
     if not isinstance(status_value, dict) or not isinstance(status_value.get("type"), str):
         raise RodexControlError("app-server returned an invalid thread status")
     status = status_value["type"]
     raw_flags = status_value.get("activeFlags", [])
-    if not isinstance(raw_flags, list) or not all(
-        isinstance(flag, str) for flag in raw_flags
-    ):
+    if not isinstance(raw_flags, list) or not all(isinstance(flag, str) for flag in raw_flags):
         raise RodexControlError("app-server returned invalid active flags")
     turns = thread.get("turns")
     if not isinstance(turns, list):
@@ -880,9 +842,7 @@ def _request(
                         thread_id=indeterminate_context.thread_id,
                         turn_id=indeterminate_context.turn_id,
                     ) from error
-                raise _RodexRequestDeadlineError(
-                    f"deadline expired during {method}"
-                ) from error
+                raise _RodexRequestDeadlineError(f"deadline expired during {method}") from error
             if indeterminate_context is not None:
                 raise RodexDispatchIndeterminateError(
                     f"{method} was sent but its acceptance is unknown",
@@ -954,14 +914,20 @@ def _teardown_websocket_transport(websocket: Any) -> None:
         transport.close()
 
 
-def _turn_id(result: dict[str, Any]) -> str:
-    direct_turn_id = result.get("turnId")
-    if isinstance(direct_turn_id, str) and direct_turn_id:
-        return direct_turn_id
+def _started_turn_id(result: dict[str, Any]) -> str:
+    """Read the turn/start response's required nested turn identity."""
     turn = result.get("turn")
-    if not isinstance(turn, dict) or not isinstance(turn.get("id"), str):
-        raise RodexControlError("Codex did not return a turn id")
+    if not isinstance(turn, dict) or not isinstance(turn.get("id"), str) or not turn["id"].strip():
+        raise RodexControlError("Codex turn/start did not return a turn.id")
     return turn["id"]
+
+
+def _steered_turn_id(result: dict[str, Any]) -> str:
+    """Read the turn/steer response's required direct turn identity."""
+    turn_id = result.get("turnId")
+    if not isinstance(turn_id, str) or not turn_id.strip():
+        raise RodexControlError("Codex turn/steer did not return a turnId")
+    return turn_id
 
 
 def _require_turn_id(turn_id: str) -> None:
@@ -995,11 +961,7 @@ def _dispatch_status(thread: dict[str, Any], dispatch_id: str) -> CodexDispatchS
         if not isinstance(items, list):
             raise RodexControlError("app-server returned invalid Codex turn items")
         for item in items:
-            if (
-                not isinstance(item, dict)
-                or item.get("type") != "userMessage"
-                or item.get("clientId") != dispatch_id
-            ):
+            if not isinstance(item, dict) or item.get("type") != "userMessage" or item.get("clientId") != dispatch_id:
                 continue
             item_id = item.get("id")
             if not isinstance(item_id, str) or not item_id:
@@ -1019,9 +981,7 @@ def _turn_from_thread(thread: dict[str, Any], turn_id: str) -> dict[str, Any]:
     turns = thread.get("turns")
     if not isinstance(turns, list):
         raise RodexControlError("app-server returned invalid thread turns")
-    matches = [
-        turn for turn in turns if isinstance(turn, dict) and turn.get("id") == turn_id
-    ]
+    matches = [turn for turn in turns if isinstance(turn, dict) and turn.get("id") == turn_id]
     if len(matches) != 1:
         raise RodexControlError(f"Codex turn was not found on the exact thread: {turn_id}")
     return matches[0]
@@ -1063,29 +1023,23 @@ def _turn_result(turn: dict[str, Any]) -> CodexTurnResult:
         if phase_unknown_messages
         else None
     )
-    final_agent_message, final_agent_message_bytes, final_agent_message_truncated = (
-        _bounded_utf8_text(full_final_agent_message, _FINAL_AGENT_MESSAGE_BYTE_LIMIT)
+    final_agent_message, final_agent_message_bytes, final_agent_message_truncated = _bounded_utf8_text(
+        full_final_agent_message, _FINAL_AGENT_MESSAGE_BYTE_LIMIT
     )
     structured_output: object | None = None
     if final_agent_message is not None and not final_agent_message_truncated:
         with suppress(json.JSONDecodeError, ValueError):
             structured_output = json.loads(
                 final_agent_message,
-                parse_constant=lambda value: (_ for _ in ()).throw(
-                    ValueError(f"non-standard JSON constant: {value}")
-                ),
+                parse_constant=lambda value: (_ for _ in ()).throw(ValueError(f"non-standard JSON constant: {value}")),
             )
     all_paths = sorted(
         {
             str(change["path"])
             for item in items
-            if isinstance(item, dict)
-            and item.get("type") == "fileChange"
-            and item.get("status") == "completed"
+            if isinstance(item, dict) and item.get("type") == "fileChange" and item.get("status") == "completed"
             for change in item.get("changes", [])
-            if isinstance(change, dict)
-            and isinstance(change.get("path"), str)
-            and change["path"]
+            if isinstance(change, dict) and isinstance(change.get("path"), str) and change["path"]
         }
     )
     path_limit = 100
@@ -1178,9 +1132,7 @@ def _wait_remaining(
     return remaining if cap is None else min(remaining, cap)
 
 
-def _ready_active_turn_id(
-    ready: dict[str, Any], codex_session_id: CodexSessionId
-) -> str | None:
+def _ready_active_turn_id(ready: dict[str, Any], codex_session_id: CodexSessionId) -> str | None:
     active_turns = _nested(ready, "params", "activeTurns")
     if not isinstance(active_turns, dict):
         raise RodexControlError("Codex event stream sent invalid active-turn state")

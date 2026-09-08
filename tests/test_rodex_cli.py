@@ -63,6 +63,7 @@ from rodex_registry import (
     lookup_rodex_sessions_id_from_a_cool_name,
     lookup_rodex_tmux_session,
     open_a_user_defined_cool_name_assignment,
+    record_a_rodex_session_runtime_resume,
 )
 from rodex_sql import RodexSQLError
 
@@ -113,9 +114,7 @@ class StubLauncher:
         self.session_names: tuple[str, ...] = ()
         self.mouse_state = "off"
         self.mouse_targets: list[LiveTmuxSession] = []
-        self.current_tmux_session = LiveTmuxSession(
-            tmp_path / "tmux.sock", "automatic-beluga"
-        )
+        self.current_tmux_session = LiveTmuxSession(tmp_path / "tmux.sock", "automatic-beluga")
         self.attached_client_count = 1
         self.tmp_path = tmp_path
 
@@ -170,12 +169,8 @@ class StubLauncher:
         self.scrollback_captures.append(runtime)
         return self.scrollback
 
-    def capture_scrollback_snapshot(
-        self, runtime: LiveTmuxSession
-    ) -> TmuxScrollbackSnapshot:
-        return TmuxScrollbackSnapshot(
-            self.capture_scrollback(runtime), max(len(self.scrollback) - 2, 0)
-        )
+    def capture_scrollback_snapshot(self, runtime: LiveTmuxSession) -> TmuxScrollbackSnapshot:
+        return TmuxScrollbackSnapshot(self.capture_scrollback(runtime), max(len(self.scrollback) - 2, 0))
 
     def capture_scrollback_state(self, runtime: LiveTmuxSession) -> TmuxScrollbackState:
         snapshot = self.capture_scrollback_snapshot(runtime)
@@ -195,40 +190,27 @@ class StubLauncher:
             self.control.rodex_session_id is not None
             and self.control.rodex_registry_id is not None
             and self.control.registration_state is not None
-            and (
-                self.control.registration_state != "registered"
-                or self.control.tmux_capability is not None
-            )
+            and (self.control.registration_state != "registered" or self.control.tmux_capability is not None)
         ):
             return self.control
         for database in self.tmp_path.rglob("*.sqlite3"):
             try:
-                session_id = lookup_rodex_sessions_id_from_a_codex_session_id(
-                    self.control.codex_session_id, database
-                )
+                session_id = lookup_rodex_sessions_id_from_a_codex_session_id(self.control.codex_session_id, database)
                 if session_id is None:
                     continue
-                rodex_session_id = lookup_rodex_session_id_from_a_rodex_sessions_id(
-                    session_id, database
-                )
+                rodex_session_id = lookup_rodex_session_id_from_a_rodex_sessions_id(session_id, database)
             except (sqlite3.Error, ValueError):
                 continue
             if rodex_session_id is not None:
                 registry_id = lookup_rodex_registry_id(database)
                 advertised_rodex_session_id = (
-                    rodex_session_id
-                    if self.control.rodex_session_id is None
-                    else self.control.rodex_session_id
+                    rodex_session_id if self.control.rodex_session_id is None else self.control.rodex_session_id
                 )
                 advertised_registry_id = (
-                    registry_id
-                    if self.control.rodex_registry_id is None
-                    else self.control.rodex_registry_id
+                    registry_id if self.control.rodex_registry_id is None else self.control.rodex_registry_id
                 )
                 registration_state = (
-                    "registered"
-                    if self.control.registration_state is None
-                    else self.control.registration_state
+                    "registered" if self.control.registration_state is None else self.control.registration_state
                 )
                 capability = (
                     TmuxSessionCapability(
@@ -242,10 +224,7 @@ class StubLauncher:
                         session_id,
                         self.control.codex_session_id,
                     )
-                    if (
-                        registration_state == "registered"
-                        and self.control.runtime_id is not None
-                    )
+                    if (registration_state == "registered" and self.control.runtime_id is not None)
                     else None
                 )
                 self.control = replace(
@@ -403,9 +382,7 @@ class StubControlClient:
         revalidate()
         return self.state, replace(self.dispatch_status_result, dispatch_id=dispatch_id)
 
-    def _interrupt_turn(
-        self, control: LiveRodexControl, turn_id: str, *, revalidate: Any
-    ) -> CodexThreadState:
+    def _interrupt_turn(self, control: LiveRodexControl, turn_id: str, *, revalidate: Any) -> CodexThreadState:
         revalidate()
         self.interrupted.append((control, turn_id))
         return replace(self.state, status="active", active_turn_id=turn_id)
@@ -532,9 +509,7 @@ def test_context_reports_the_verified_current_rodex_session_as_json(
 ) -> None:
     database = tmp_path / "rodex.sqlite3"
     monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
-    monkeypatch.setattr(
-        "cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga"
-    )
+    monkeypatch.setattr("cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga")
     create_exact_controlled_session(database, tmp_path)
     launcher = StubLauncher(tmp_path)
     launcher.attached_client_count = 2
@@ -600,9 +575,7 @@ def test_context_distinguishes_permanent_and_user_defined_names(
 ) -> None:
     database = tmp_path / "rodex.sqlite3"
     monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
-    monkeypatch.setattr(
-        "cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga"
-    )
+    monkeypatch.setattr("cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga")
     create_exact_controlled_session(database, tmp_path)
     assign_a_user_defined_cool_name(
         "automatic-beluga",
@@ -648,9 +621,7 @@ def test_context_rejects_a_registered_session_owned_by_another_posix_user(
 ) -> None:
     database = tmp_path / "rodex.sqlite3"
     monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
-    monkeypatch.setattr(
-        "rodex_registry.lifecycle.current_rodex_sessions_user_identity", lambda: DNA
-    )
+    monkeypatch.setattr("rodex_registry.lifecycle.current_rodex_sessions_user_identity", lambda: DNA)
     session = create_a_rodex_session(
         database,
         codex_session_id=CODEX_SESSION_ID,
@@ -704,9 +675,7 @@ def test_initial_prompt_starts_one_managed_session_without_codex_passthrough(
     launcher = StubLauncher(tmp_path)
     delegator = RecordingCodexDelegator()
     monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
-    monkeypatch.setattr(
-        "cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga"
-    )
+    monkeypatch.setattr("cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga")
 
     assert (
         run(
@@ -743,9 +712,7 @@ def test_native_interactive_options_reach_managed_codex_unchanged(
     launcher = StubLauncher(tmp_path)
     delegator = RecordingCodexDelegator()
     monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
-    monkeypatch.setattr(
-        "cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga"
-    )
+    monkeypatch.setattr("cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga")
 
     assert (
         run(
@@ -768,9 +735,7 @@ def test_pending_runtime_with_exact_durable_identity_is_recovered(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     database = tmp_path / "rodex.sqlite3"
-    monkeypatch.setattr(
-        "cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga"
-    )
+    monkeypatch.setattr("cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga")
     monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
     create_controlled_session(database, tmp_path)
     rodex_session_id = lookup_rodex_session_id_from_a_rodex_sessions_id(1, database)
@@ -802,9 +767,7 @@ def test_named_attach_rejects_a_wrong_live_rodex_identity_without_side_effects(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     database = tmp_path / "rodex.sqlite3"
-    monkeypatch.setattr(
-        "cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga"
-    )
+    monkeypatch.setattr("cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga")
     monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
     create_controlled_session(database, tmp_path)
     launcher = StubLauncher(tmp_path)
@@ -828,9 +791,7 @@ def test_named_attach_rejects_a_runtime_from_another_registry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     database = tmp_path / "rodex.sqlite3"
-    monkeypatch.setattr(
-        "cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga"
-    )
+    monkeypatch.setattr("cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga")
     monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
     create_controlled_session(database, tmp_path)
     rodex_session_id = lookup_rodex_session_id_from_a_rodex_sessions_id(1, database)
@@ -864,9 +825,7 @@ def test_named_attach_fails_closed_when_a_runtime_identity_marker_is_missing(
     expected_diagnostic: str,
 ) -> None:
     database = tmp_path / "rodex.sqlite3"
-    monkeypatch.setattr(
-        "cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga"
-    )
+    monkeypatch.setattr("cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga")
     monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
     create_controlled_session(database, tmp_path)
     rodex_session_id = lookup_rodex_session_id_from_a_rodex_sessions_id(1, database)
@@ -893,9 +852,7 @@ def test_named_attach_fails_closed_when_the_codex_identity_marker_is_wrong(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     database = tmp_path / "rodex.sqlite3"
-    monkeypatch.setattr(
-        "cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga"
-    )
+    monkeypatch.setattr("cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga")
     monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
     create_controlled_session(database, tmp_path)
     rodex_session_id = lookup_rodex_session_id_from_a_rodex_sessions_id(1, database)
@@ -921,9 +878,7 @@ def test_named_attach_recovers_one_externally_renamed_exact_runtime(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     database = tmp_path / "rodex.sqlite3"
-    monkeypatch.setattr(
-        "cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga"
-    )
+    monkeypatch.setattr("cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga")
     monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
     create_controlled_session(database, tmp_path)
     rodex_session_id = lookup_rodex_session_id_from_a_rodex_sessions_id(1, database)
@@ -954,9 +909,7 @@ def test_named_attach_recovers_one_relocated_pending_runtime(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     database = tmp_path / "rodex.sqlite3"
-    monkeypatch.setattr(
-        "cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga"
-    )
+    monkeypatch.setattr("cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga")
     monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
     create_controlled_session(database, tmp_path)
     rodex_session_id = lookup_rodex_session_id_from_a_rodex_sessions_id(1, database)
@@ -996,9 +949,7 @@ def test_named_attach_refuses_multiple_relocated_exact_runtimes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     database = tmp_path / "rodex.sqlite3"
-    monkeypatch.setattr(
-        "cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga"
-    )
+    monkeypatch.setattr("cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga")
     monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
     create_controlled_session(database, tmp_path)
     rodex_session_id = lookup_rodex_session_id_from_a_rodex_sessions_id(1, database)
@@ -1071,9 +1022,7 @@ def test_display_name_is_the_complete_tmux_session_name(
     renamed_to: list[str] = []
 
     class RenameLauncher:
-        def rename(
-            self, runtime: LiveTmuxSession, tmux_session_name: str
-        ) -> LiveTmuxSession:
+        def rename(self, runtime: LiveTmuxSession, tmux_session_name: str) -> LiveTmuxSession:
             renamed_to.append(tmux_session_name)
             return replace(runtime, tmux_session_name=tmux_session_name)
 
@@ -1100,20 +1049,14 @@ def test_running_reports_an_unregistered_live_tmux_session(
     socket_path.touch()
     launcher = StubLauncher(tmp_path)
     launcher.session_names = ("orphan-name",)
-    monkeypatch.setattr(
-        "rodex.session_commands.default_tmux_server_socket_path", lambda: socket_path
-    )
+    monkeypatch.setattr("rodex.session_commands.default_tmux_server_socket_path", lambda: socket_path)
     monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
 
-    assert (
-        run(["_running"], database_path=tmp_path / "rodex.sqlite3", launcher=launcher) == 0
-    )  # type: ignore[arg-type]
+    assert run(["_running"], database_path=tmp_path / "rodex.sqlite3", launcher=launcher) == 0  # type: ignore[arg-type]
 
     output = capsys.readouterr().out
     assert output == (
-        "Rodex running: 0.\n"
-        "Rodex unregistered: 1.\n"
-        f"Rodex unregistered [orphan-name]: tmux socket {socket_path}.\n"
+        f"Rodex running: 0.\nRodex unregistered: 1.\nRodex unregistered [orphan-name]: tmux socket {socket_path}.\n"
     )
 
 
@@ -1146,9 +1089,7 @@ def test_wait_command_waits_for_the_verified_named_runtime(
     command: str,
 ) -> None:
     database = tmp_path / "rodex.sqlite3"
-    monkeypatch.setattr(
-        "cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga"
-    )
+    monkeypatch.setattr("cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga")
     monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
     create_exact_controlled_session(database, tmp_path)
     launcher = StubLauncher(tmp_path)
@@ -1174,9 +1115,7 @@ def test_machine_start_reads_stdin_and_emits_the_versioned_identity_envelope(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     database = tmp_path / "rodex.sqlite3"
-    monkeypatch.setattr(
-        "cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga"
-    )
+    monkeypatch.setattr("cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga")
     monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
     monkeypatch.setattr(sys, "stdin", io.StringIO("run focused tests\n"))
     create_exact_controlled_session(database, tmp_path)
@@ -1236,9 +1175,7 @@ def test_accepted_machine_mutation_emits_one_success_when_access_bookkeeping_fai
 ) -> None:
     """Current evidence: auxiliary SQL failure cannot reverse an accepted turn start."""
     database = tmp_path / "rodex.sqlite3"
-    monkeypatch.setattr(
-        "cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga"
-    )
+    monkeypatch.setattr("cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga")
     monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
     monkeypatch.setattr(sys, "stdin", io.StringIO("run focused tests\n"))
     create_exact_controlled_session(database, tmp_path)
@@ -1309,9 +1246,7 @@ def test_machine_exact_control_requires_a_persisted_runtime_id(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     database = tmp_path / "rodex.sqlite3"
-    monkeypatch.setattr(
-        "cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga"
-    )
+    monkeypatch.setattr("cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga")
     monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
     monkeypatch.setattr(sys, "stdin", io.StringIO("run tests"))
     create_controlled_session(database, tmp_path)
@@ -1339,9 +1274,7 @@ def test_machine_steer_targets_only_the_supplied_turn_and_stdin(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     database = tmp_path / "rodex.sqlite3"
-    monkeypatch.setattr(
-        "cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga"
-    )
+    monkeypatch.setattr("cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga")
     monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
     monkeypatch.setattr(sys, "stdin", io.StringIO("also lint"))
     create_exact_controlled_session(database, tmp_path)
@@ -1376,9 +1309,7 @@ def test_machine_wait_parses_timeout_and_reports_exact_terminal_status(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     database = tmp_path / "rodex.sqlite3"
-    monkeypatch.setattr(
-        "cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga"
-    )
+    monkeypatch.setattr("cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga")
     monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
     create_exact_controlled_session(database, tmp_path)
     launcher = StubLauncher(tmp_path)
@@ -1412,9 +1343,7 @@ def test_machine_wait_timeout_is_retryable_and_does_not_call_interrupt(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     database = tmp_path / "rodex.sqlite3"
-    monkeypatch.setattr(
-        "cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga"
-    )
+    monkeypatch.setattr("cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga")
     monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
     create_exact_controlled_session(database, tmp_path)
     launcher = StubLauncher(tmp_path)
@@ -1470,9 +1399,7 @@ def test_machine_indeterminate_dispatch_returns_status_hook_and_next_command(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     database = tmp_path / "rodex.sqlite3"
-    monkeypatch.setattr(
-        "cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga"
-    )
+    monkeypatch.setattr("cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga")
     monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
     monkeypatch.setattr(sys, "stdin", io.StringIO("run tests"))
     create_exact_controlled_session(database, tmp_path)
@@ -1529,9 +1456,7 @@ def test_machine_dispatch_status_recommends_the_next_exact_turn_command(
 ) -> None:
     """Current evidence: status lookup reports facts and a controller-ready next call."""
     database = tmp_path / "rodex.sqlite3"
-    monkeypatch.setattr(
-        "cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga"
-    )
+    monkeypatch.setattr("cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga")
     monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
     create_exact_controlled_session(database, tmp_path)
     launcher = StubLauncher(tmp_path)
@@ -1582,9 +1507,7 @@ def test_machine_dispatch_status_does_not_treat_absence_as_rejection(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     database = tmp_path / "rodex.sqlite3"
-    monkeypatch.setattr(
-        "cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga"
-    )
+    monkeypatch.setattr("cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga")
     monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
     create_exact_controlled_session(database, tmp_path)
     launcher = StubLauncher(tmp_path)
@@ -1622,9 +1545,7 @@ def test_machine_wait_distinguishes_a_failed_turn_outcome(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     database = tmp_path / "rodex.sqlite3"
-    monkeypatch.setattr(
-        "cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga"
-    )
+    monkeypatch.setattr("cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga")
     monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
     create_exact_controlled_session(database, tmp_path)
     launcher = StubLauncher(tmp_path)
@@ -1654,9 +1575,7 @@ def test_machine_inspect_rejects_a_runtime_without_durable_identity(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     database = tmp_path / "rodex.sqlite3"
-    monkeypatch.setattr(
-        "cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga"
-    )
+    monkeypatch.setattr("cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga")
     monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
     create_controlled_session(database, tmp_path)
     launcher = StubLauncher(tmp_path)
@@ -1686,9 +1605,7 @@ def test_machine_inspect_emits_only_the_current_runtime_and_app_server_contract(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     database = tmp_path / "rodex.sqlite3"
-    monkeypatch.setattr(
-        "cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga"
-    )
+    monkeypatch.setattr("cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga")
     monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
     create_exact_controlled_session(database, tmp_path)
     launcher = StubLauncher(tmp_path)
@@ -1733,9 +1650,7 @@ def test_machine_inspect_rejects_a_noncharacterized_app_server_version(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     database = tmp_path / "rodex.sqlite3"
-    monkeypatch.setattr(
-        "cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga"
-    )
+    monkeypatch.setattr("cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga")
     monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
     create_exact_controlled_session(database, tmp_path)
     launcher = StubLauncher(tmp_path)
@@ -1756,10 +1671,7 @@ def test_machine_inspect_rejects_a_noncharacterized_app_server_version(
     assert payload["ok"] is False
     assert payload["error"] == {
         "code": "app_server_version_mismatch",
-        "message": (
-            "exact control requires Codex App Server 0.151.0 or newer; "
-            "live server is 0.150.1"
-        ),
+        "message": ("exact control requires Codex App Server 0.151.0 or newer; live server is 0.150.1"),
         "retryable": False,
     }
 
@@ -1770,9 +1682,7 @@ def test_machine_result_returns_live_final_message_and_bounded_changes(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     database = tmp_path / "rodex.sqlite3"
-    monkeypatch.setattr(
-        "cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga"
-    )
+    monkeypatch.setattr("cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga")
     monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
     create_exact_controlled_session(database, tmp_path)
     launcher = StubLauncher(tmp_path)
@@ -1806,16 +1716,12 @@ def test_machine_result_maps_failed_turn_outcome_to_exit_six(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     database = tmp_path / "rodex.sqlite3"
-    monkeypatch.setattr(
-        "cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga"
-    )
+    monkeypatch.setattr("cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga")
     monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
     create_exact_controlled_session(database, tmp_path)
     launcher = StubLauncher(tmp_path)
     control = StubControlClient()
-    control.turn_result = replace(
-        control.turn_result, status="failed", error={"message": "x"}
-    )
+    control.turn_result = replace(control.turn_result, status="failed", error={"message": "x"})
 
     status = run(
         ["_result", "automatic-beluga", "--turn", "turn-1", "--json"],
@@ -1849,9 +1755,7 @@ def test_mouse_command_targets_only_the_verified_named_runtime(
     expected: str,
 ) -> None:
     database = tmp_path / "rodex.sqlite3"
-    monkeypatch.setattr(
-        "cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga"
-    )
+    monkeypatch.setattr("cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga")
     monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
     create_exact_controlled_session(database, tmp_path)
     launcher = StubLauncher(tmp_path)
@@ -1879,11 +1783,9 @@ def test_cat_prints_the_complete_verified_session_snapshot_and_exits(
 ) -> None:
     """Finite session text remains composable with the system head and tail tools."""
     database = tmp_path / "rodex.sqlite3"
-    monkeypatch.setattr(
-        "cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga"
-    )
+    monkeypatch.setattr("cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga")
     monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
-    create_controlled_session(database, tmp_path)
+    create_exact_controlled_session(database, tmp_path)
     launcher = StubLauncher(tmp_path)
 
     assert (
@@ -1916,11 +1818,9 @@ def test_events_continues_the_verified_protocol_stream_without_session_text(
     database = tmp_path / "rodex.sqlite3"
     monkeypatch.delenv("TMUX", raising=False)
     monkeypatch.delenv("TMUX_PANE", raising=False)
-    monkeypatch.setattr(
-        "cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga"
-    )
+    monkeypatch.setattr("cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga")
     monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
-    create_controlled_session(database, tmp_path)
+    create_exact_controlled_session(database, tmp_path)
     launcher = StubLauncher(tmp_path)
     control = StubControlClient()
 
@@ -1936,14 +1836,8 @@ def test_events_continues_the_verified_protocol_stream_without_session_text(
 
     captured = capsys.readouterr()
     assert control.event_streams == [launcher.control]
-    assert captured.out == (
-        '{"method":"thread/status/changed"}\n'
-        '{"method":"turn/started"}\n'
-        '{"method":"item/started"}\n'
-    )
-    assert captured.err == (
-        "Rodex events [automatic-beluga]: following live Codex protocol events.\n"
-    )
+    assert captured.out == ('{"method":"thread/status/changed"}\n{"method":"turn/started"}\n{"method":"item/started"}\n')
+    assert captured.err == ("Rodex events [automatic-beluga]: following live Codex protocol events.\n")
     assert launcher.scrollback_captures == []
 
 
@@ -1954,9 +1848,7 @@ def test_events_refuses_to_write_into_the_same_session_it_observes(
     database = tmp_path / "rodex.sqlite3"
     monkeypatch.setenv("TMUX", f"{tmp_path / 'tmux.sock'},1,0")
     monkeypatch.setenv("TMUX_PANE", "%4")
-    monkeypatch.setattr(
-        "cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga"
-    )
+    monkeypatch.setattr("cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga")
     monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
     create_controlled_session(database, tmp_path)
     launcher = StubLauncher(tmp_path)
@@ -1977,9 +1869,7 @@ def test_events_fail_closed_when_current_tmux_identity_cannot_be_verified(
     database = tmp_path / "rodex.sqlite3"
     monkeypatch.setenv("TMUX", f"{tmp_path / 'tmux.sock'},1,0")
     monkeypatch.setenv("TMUX_PANE", "%4")
-    monkeypatch.setattr(
-        "cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga"
-    )
+    monkeypatch.setattr("cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga")
     monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
     create_controlled_session(database, tmp_path)
     launcher = StubLauncher(tmp_path)
@@ -2004,11 +1894,9 @@ def test_tail_follows_verified_session_text_without_protocol_events(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     database = tmp_path / "rodex.sqlite3"
-    monkeypatch.setattr(
-        "cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga"
-    )
+    monkeypatch.setattr("cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga")
     monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
-    create_controlled_session(database, tmp_path)
+    create_exact_controlled_session(database, tmp_path)
     launcher = StubLauncher(tmp_path)
     control = StubControlClient()
     observed: list[object] = []
@@ -2077,10 +1965,7 @@ def test_removed_ambiguous_head_command_passes_through_to_codex_unchanged(
     command = "_head"
     arguments = [command, "automatic-beluga"]
 
-    assert (
-        run(arguments, database_path=database, codex_delegator=delegator)
-        == delegator.returncode
-    )
+    assert run(arguments, database_path=database, codex_delegator=delegator) == delegator.returncode
 
     assert delegator.calls == [("/usr/bin/codex", arguments)]
     assert not database.exists()
@@ -2112,9 +1997,7 @@ def test_default_and_explicit_create_link_identities_before_attach(
 
     assert launcher.started == [(Path.cwd(), [])]
     planned_session_id, planned_database = launcher.analytics_identities[0]
-    assert planned_session_id == lookup_rodex_session_id_from_a_rodex_sessions_id(
-        1, database
-    )
+    assert planned_session_id == lookup_rodex_session_id_from_a_rodex_sessions_id(1, database)
     assert planned_database == database
     registry_id = lookup_rodex_registry_id(database)
     tmux_session_name = "automatic-beluga"
@@ -2126,14 +2009,10 @@ def test_default_and_explicit_create_link_identities_before_attach(
     tmux_link = lookup_rodex_tmux_session(1, database)
     assert lookup_codex_session_id_from_a_rodex_sessions_id(1, database) == CODEX_SESSION_ID
     assert tmux_link is not None
-    assert tmux_link.tmux_server_socket_path == str(
-        launcher.runtime.tmux_server_socket_path
-    )
+    assert tmux_link.tmux_server_socket_path == str(launcher.runtime.tmux_server_socket_path)
     assert tmux_link.tmux_session_name == tmux_session_name
     output = capsys.readouterr().out
-    assert output == (
-        "Rodex attach [automatic-beluga].\nRodex exited [automatic-beluga].\n"
-    )
+    assert output == ("Rodex attach [automatic-beluga].\nRodex exited [automatic-beluga].\n")
 
 
 def test_failed_attach_does_not_claim_that_rodex_exited_cleanly(
@@ -2197,10 +2076,7 @@ def test_codex_passthrough_invocations_delegate_unchanged_without_tmux_or_databa
         lambda command: "/usr/bin/codex" if command == "codex" else None,
     )
 
-    assert (
-        run(arguments, database_path=database, codex_delegator=delegator)
-        == delegator.returncode
-    )
+    assert run(arguments, database_path=database, codex_delegator=delegator) == delegator.returncode
 
     assert delegator.calls == [("/usr/bin/codex", arguments)]
     assert not database.exists()
@@ -2260,9 +2136,7 @@ def test_bare_invocation_never_delegates_to_codex(
     launcher = StubLauncher(tmp_path)
     delegator = RecordingCodexDelegator(returncode=23)
     monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
-    monkeypatch.setattr(
-        "cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga"
-    )
+    monkeypatch.setattr("cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga")
 
     assert (
         run(
@@ -2284,9 +2158,7 @@ def test_bare_invocation_is_observably_equivalent_to_explicit_create(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
-    monkeypatch.setattr(
-        "cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga"
-    )
+    monkeypatch.setattr("cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga")
     observed: list[tuple[object, ...]] = []
 
     for label, arguments in (("bare", []), ("explicit", ["_create"])):
@@ -2301,12 +2173,8 @@ def test_bare_invocation_is_observably_equivalent_to_explicit_create(
         assert tmux_link is not None
         assert names is not None
         expected_tmux_name = "automatic-beluga"
-        assert [runtime.tmux_session_name for runtime in launcher.configured] == [
-            expected_tmux_name
-        ]
-        assert [runtime.tmux_session_name for runtime in launcher.attached] == [
-            expected_tmux_name
-        ]
+        assert [runtime.tmux_session_name for runtime in launcher.configured] == [expected_tmux_name]
+        assert [runtime.tmux_session_name for runtime in launcher.attached] == [expected_tmux_name]
         assert tmux_link.tmux_session_name == expected_tmux_name
         observed.append(
             (
@@ -2326,9 +2194,7 @@ def test_create_command_forwards_interactive_codex_arguments_to_managed_runtime(
     launcher = StubLauncher(tmp_path)
     delegator = RecordingCodexDelegator()
     monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
-    monkeypatch.setattr(
-        "cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga"
-    )
+    monkeypatch.setattr("cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga")
 
     assert (
         run(
@@ -2353,9 +2219,7 @@ def test_explicit_create_assigns_the_requested_display_name(
     database = tmp_path / "rodex.sqlite3"
     launcher = StubLauncher(tmp_path)
     monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
-    monkeypatch.setattr(
-        "cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga"
-    )
+    monkeypatch.setattr("cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga")
 
     assert (
         run(
@@ -2386,17 +2250,13 @@ def test_named_creation_holds_transition_lock_during_alias_transition(
     database = tmp_path / "rodex.sqlite3"
     launcher = StubLauncher(tmp_path)
     monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
-    monkeypatch.setattr(
-        "cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga"
-    )
+    monkeypatch.setattr("cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga")
     real_assignment = managed_lifecycle_module.open_a_user_defined_cool_name_assignment
 
     def require_transition_lock(*args: object, **kwargs: object):  # type: ignore[no-untyped-def]
         session_id = lookup_rodex_sessions_id_from_a_cool_name("automatic-beluga", database)
         assert session_id is not None
-        transition_identity = lookup_rodex_session_id_from_a_rodex_sessions_id(
-            session_id, database
-        )
+        transition_identity = lookup_rodex_session_id_from_a_rodex_sessions_id(session_id, database)
         assert transition_identity is not None
         lock_path = database.parent / f".{database.name}.session-{transition_identity}.lock"
         descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
@@ -2430,12 +2290,8 @@ def test_new_session_publication_waits_for_identity_ui_and_registration(
     database = tmp_path / "rodex.sqlite3"
     initialise_rodex_database(database)
     monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
-    monkeypatch.setattr(
-        "rodex_registry.lifecycle.current_rodex_sessions_user_identity", lambda: DNA
-    )
-    monkeypatch.setattr(
-        "cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga"
-    )
+    monkeypatch.setattr("rodex_registry.lifecycle.current_rodex_sessions_user_identity", lambda: DNA)
+    monkeypatch.setattr("cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga")
 
     row_published = Event()
     allow_creator_to_finalize = Event()
@@ -2460,12 +2316,8 @@ def test_new_session_publication_waits_for_identity_ui_and_registration(
         with real_transition_lock(lock_database, session_identity):
             yield
 
-    monkeypatch.setattr(
-        managed_lifecycle_module, "create_a_rodex_session", publish_then_pause
-    )
-    monkeypatch.setattr(
-        managed_lifecycle_module, "session_transition_lock", observed_transition_lock
-    )
+    monkeypatch.setattr(managed_lifecycle_module, "create_a_rodex_session", publish_then_pause)
+    monkeypatch.setattr(managed_lifecycle_module, "session_transition_lock", observed_transition_lock)
 
     class PublicationLauncher(StubLauncher):
         def __init__(self) -> None:
@@ -2506,9 +2358,7 @@ def test_new_session_publication_waits_for_identity_ui_and_registration(
             self.existing_checks.append(runtime)
             return runtime.tmux_session_name == self.live_name
 
-        def rename(
-            self, runtime: LiveTmuxSession, tmux_session_name: str
-        ) -> LiveTmuxSession:
+        def rename(self, runtime: LiveTmuxSession, tmux_session_name: str) -> LiveTmuxSession:
             assert runtime.tmux_session_name == self.live_name
             renamed = super().rename(runtime, tmux_session_name)
             self.live_name = renamed.tmux_session_name
@@ -2647,9 +2497,7 @@ def test_concurrent_requested_name_creation_leaves_only_the_successful_session(
 ) -> None:
     database = tmp_path / "rodex.sqlite3"
     monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
-    monkeypatch.setattr(
-        "rodex_registry.lifecycle.current_rodex_sessions_user_identity", lambda: DNA
-    )
+    monkeypatch.setattr("rodex_registry.lifecycle.current_rodex_sessions_user_identity", lambda: DNA)
     monkeypatch.setattr(
         "cool_name.functions.coolname.generate_slug",
         lambda _count: f"{current_thread().name}-generated",
@@ -2730,9 +2578,7 @@ def test_explicit_create_forwards_ordinary_codex_options(
     database = tmp_path / "rodex.sqlite3"
     launcher = StubLauncher(tmp_path)
     monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
-    monkeypatch.setattr(
-        "cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga"
-    )
+    monkeypatch.setattr("cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga")
 
     assert (
         run(
@@ -2759,9 +2605,7 @@ def test_codex_short_config_starts_a_managed_interactive_session(
     launcher = StubLauncher(tmp_path)
     delegator = RecordingCodexDelegator()
     monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
-    monkeypatch.setattr(
-        "cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga"
-    )
+    monkeypatch.setattr("cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga")
 
     assert (
         run(
@@ -2825,9 +2669,7 @@ def test_explicit_create_can_forward_codex_arguments_after_end_of_options(
     database = tmp_path / "rodex.sqlite3"
     launcher = StubLauncher(tmp_path)
     monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
-    monkeypatch.setattr(
-        "cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga"
-    )
+    monkeypatch.setattr("cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga")
 
     assert (
         run(
@@ -2854,9 +2696,7 @@ def test_detach_starts_without_attaching_and_prints_compact_json(
     database = tmp_path / "rodex.sqlite3"
     launcher = StubLauncher(tmp_path)
     monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
-    monkeypatch.setattr(
-        "cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga"
-    )
+    monkeypatch.setattr("cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga")
 
     assert (
         run(
@@ -2874,9 +2714,7 @@ def test_detach_starts_without_attaching_and_prints_compact_json(
     assert payload == {
         "status": "running",
         "rodex_session_name": "automatic-beluga",
-        "rodex_session_id": str(
-            lookup_rodex_session_id_from_a_rodex_sessions_id(1, database)
-        ),
+        "rodex_session_id": str(lookup_rodex_session_id_from_a_rodex_sessions_id(1, database)),
         "codex_session_id": str(CODEX_SESSION_ID),
     }
     assert output == f"{json.dumps(payload, indent=2)}\n"
@@ -2892,9 +2730,7 @@ def test_detach_command_forwards_interactive_codex_arguments(
     database = tmp_path / "rodex.sqlite3"
     launcher = StubLauncher(tmp_path)
     monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
-    monkeypatch.setattr(
-        "cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga"
-    )
+    monkeypatch.setattr("cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga")
 
     assert (
         run(
@@ -2918,9 +2754,7 @@ def test_detach_existing_name_resolves_without_attaching(
     detach_flag: str,
 ) -> None:
     database = tmp_path / "rodex.sqlite3"
-    monkeypatch.setattr(
-        "cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga"
-    )
+    monkeypatch.setattr("cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga")
     monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
     create_exact_controlled_session(database, tmp_path)
     launcher = StubLauncher(tmp_path)
@@ -2945,9 +2779,7 @@ def test_detach_ended_name_resumes_exact_codex_session_without_attaching(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     database = tmp_path / "rodex.sqlite3"
-    monkeypatch.setattr(
-        "cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga"
-    )
+    monkeypatch.setattr("cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga")
     monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
     session = create_a_rodex_session(
         database,
@@ -2989,9 +2821,7 @@ def test_detach_unsaved_name_recovers_identity_without_attaching(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     database = tmp_path / "rodex.sqlite3"
-    monkeypatch.setattr(
-        "cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga"
-    )
+    monkeypatch.setattr("cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga")
     monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
     session = create_a_rodex_session(
         database,
@@ -3028,15 +2858,10 @@ def test_detach_unsaved_name_recovers_identity_without_attaching(
     assert launcher.configured[0].tmux_session_name == "automatic-beluga"
     assert launcher.attached == []
     assert (
-        lookup_rodex_session_id_from_a_rodex_sessions_id(
-            session.rodex_sessions_id, database
-        )
-        == session.rodex_session_id
+        lookup_rodex_session_id_from_a_rodex_sessions_id(session.rodex_sessions_id, database) == session.rodex_session_id
     )
     assert (
-        lookup_codex_session_id_from_a_rodex_sessions_id(
-            session.rodex_sessions_id, database
-        )
+        lookup_codex_session_id_from_a_rodex_sessions_id(session.rodex_sessions_id, database)
         == REPLACEMENT_CODEX_SESSION_ID
     )
     assert output == {
@@ -3047,9 +2872,7 @@ def test_detach_unsaved_name_recovers_identity_without_attaching(
     }
 
 
-def test_unknown_underscore_command_passes_through_unchanged(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_unknown_underscore_command_passes_through_unchanged(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     delegator = RecordingCodexDelegator()
     monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
     arguments = ["_future-command", "argument"]
@@ -3064,9 +2887,7 @@ def test_existing_name_wins_over_a_possible_future_codex_command(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     database = tmp_path / "rodex.sqlite3"
-    monkeypatch.setattr(
-        "cool_name.functions.coolname.generate_slug", lambda _count: "future-command"
-    )
+    monkeypatch.setattr("cool_name.functions.coolname.generate_slug", lambda _count: "future-command")
     monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
     create_a_rodex_session(
         database,
@@ -3129,9 +2950,7 @@ def test_live_cool_name_argument_renames_configures_and_reattaches_without_start
     )
 
     assert launcher.started == []
-    assert launcher.existing_checks == [
-        LiveTmuxSession(tmp_path / "tmux.sock", "rodex-token")
-    ]
+    assert launcher.existing_checks == [LiveTmuxSession(tmp_path / "tmux.sock", "rodex-token")]
     assert len(launcher.renamed) == 1
     assert launcher.renamed[0][0].tmux_session_name == "rodex-token"
     tmux_session_name = "automatic-beluga"
@@ -3144,9 +2963,7 @@ def test_live_cool_name_argument_renames_configures_and_reattaches_without_start
     tmux_link = lookup_rodex_tmux_session(1, database)
     assert tmux_link is not None
     assert tmux_link.tmux_session_name == tmux_session_name
-    assert capsys.readouterr().out == (
-        "Rodex attach [automatic-beluga].\nRodex exited [automatic-beluga].\n"
-    )
+    assert capsys.readouterr().out == ("Rodex attach [automatic-beluga].\nRodex exited [automatic-beluga].\n")
 
 
 @pytest.mark.evolutionary_regression
@@ -3157,17 +2974,11 @@ def test_live_codex_uuid_argument_opens_its_registered_rodex_display_identity(
 ) -> None:
     """A user may retain only the Codex UUID for a live Rodex-managed session."""
     database = tmp_path / "rodex.sqlite3"
-    monkeypatch.setattr(
-        "cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga"
-    )
-    monkeypatch.setattr(
-        "rodex_registry.lifecycle.current_rodex_sessions_user_identity", lambda: DNA
-    )
+    monkeypatch.setattr("cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga")
+    monkeypatch.setattr("rodex_registry.lifecycle.current_rodex_sessions_user_identity", lambda: DNA)
     monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
     create_exact_controlled_session(database, tmp_path)
-    assign_a_user_defined_cool_name(
-        "automatic-beluga", "remarkable-aardvark", database, user_identity=DNA
-    )
+    assign_a_user_defined_cool_name("automatic-beluga", "remarkable-aardvark", database, user_identity=DNA)
     launcher = StubLauncher(tmp_path)
 
     assert (
@@ -3185,9 +2996,7 @@ def test_live_codex_uuid_argument_opens_its_registered_rodex_display_identity(
     assert launcher.attached[0].tmux_session_name == "remarkable-aardvark"
     assert launcher.attached[0].runtime_id == RUNTIME_ID
     assert launcher.attached[0].tmux_capability is not None
-    assert capsys.readouterr().out == (
-        "Rodex attach [remarkable-aardvark].\nRodex exited [remarkable-aardvark].\n"
-    )
+    assert capsys.readouterr().out == ("Rodex attach [remarkable-aardvark].\nRodex exited [remarkable-aardvark].\n")
 
 
 def test_ended_codex_uuid_argument_resumes_the_registered_rodex_session(
@@ -3196,12 +3005,8 @@ def test_ended_codex_uuid_argument_resumes_the_registered_rodex_session(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     database = tmp_path / "rodex.sqlite3"
-    monkeypatch.setattr(
-        "cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga"
-    )
-    monkeypatch.setattr(
-        "rodex_registry.lifecycle.current_rodex_sessions_user_identity", lambda: DNA
-    )
+    monkeypatch.setattr("cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga")
+    monkeypatch.setattr("rodex_registry.lifecycle.current_rodex_sessions_user_identity", lambda: DNA)
     monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
     create_a_rodex_session(
         database,
@@ -3225,9 +3030,7 @@ def test_ended_codex_uuid_argument_resumes_the_registered_rodex_session(
     assert launcher.started == [(Path.cwd(), ["resume", str(CODEX_SESSION_ID)])]
     assert launcher.persistence_checks == []
     assert launcher.attached[0].tmux_session_name == "automatic-beluga"
-    assert capsys.readouterr().out == (
-        "Rodex attach [automatic-beluga].\nRodex exited [automatic-beluga].\n"
-    )
+    assert capsys.readouterr().out == ("Rodex attach [automatic-beluga].\nRodex exited [automatic-beluga].\n")
 
 
 def test_persisted_unregistered_codex_uuid_becomes_a_managed_rodex_session(
@@ -3236,12 +3039,8 @@ def test_persisted_unregistered_codex_uuid_becomes_a_managed_rodex_session(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     database = tmp_path / "rodex.sqlite3"
-    monkeypatch.setattr(
-        "cool_name.functions.coolname.generate_slug", lambda _count: "remarkable-aardvark"
-    )
-    monkeypatch.setattr(
-        "rodex_registry.lifecycle.current_rodex_sessions_user_identity", lambda: DNA
-    )
+    monkeypatch.setattr("cool_name.functions.coolname.generate_slug", lambda _count: "remarkable-aardvark")
+    monkeypatch.setattr("rodex_registry.lifecycle.current_rodex_sessions_user_identity", lambda: DNA)
     monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
     launcher = StubLauncher(tmp_path)
     launcher.persisted_codex_session_ids.add(REPLACEMENT_CODEX_SESSION_ID)
@@ -3261,15 +3060,8 @@ def test_persisted_unregistered_codex_uuid_becomes_a_managed_rodex_session(
     assert len(launcher.attached) == 1
     assert launcher.attached[0].tmux_server_socket_path == tmp_path / "tmux.sock"
     assert launcher.attached[0].tmux_session_name == "remarkable-aardvark"
-    assert (
-        lookup_rodex_sessions_id_from_a_codex_session_id(
-            REPLACEMENT_CODEX_SESSION_ID, database
-        )
-        == 1
-    )
-    assert capsys.readouterr().out == (
-        "Rodex attach [remarkable-aardvark].\nRodex exited [remarkable-aardvark].\n"
-    )
+    assert lookup_rodex_sessions_id_from_a_codex_session_id(REPLACEMENT_CODEX_SESSION_ID, database) == 1
+    assert capsys.readouterr().out == ("Rodex attach [remarkable-aardvark].\nRodex exited [remarkable-aardvark].\n")
 
 
 def test_missing_canonical_codex_uuid_becomes_a_managed_initial_prompt(
@@ -3278,9 +3070,7 @@ def test_missing_canonical_codex_uuid_becomes_a_managed_initial_prompt(
 ) -> None:
     database = tmp_path / "rodex.sqlite3"
     monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
-    monkeypatch.setattr(
-        "cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga"
-    )
+    monkeypatch.setattr("cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga")
     session_selector = str(REPLACEMENT_CODEX_SESSION_ID)
     launcher = StubLauncher(tmp_path)
     delegator = RecordingCodexDelegator(returncode=23)
@@ -3309,9 +3099,7 @@ def test_noncanonical_codex_uuid_spelling_becomes_a_managed_initial_prompt(
     database = tmp_path / "rodex.sqlite3"
     launcher = StubLauncher(tmp_path)
     monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
-    monkeypatch.setattr(
-        "cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga"
-    )
+    monkeypatch.setattr("cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga")
     delegator = RecordingCodexDelegator(returncode=23)
 
     assert (
@@ -3367,13 +3155,9 @@ def test_ended_cool_name_argument_transparently_resumes_its_codex_session(
     assert launcher.attached[0].tmux_session_name == tmux_session_name
     tmux_link = lookup_rodex_tmux_session(1, database)
     assert tmux_link is not None
-    assert tmux_link.tmux_server_socket_path == str(
-        launcher.runtime.tmux_server_socket_path
-    )
+    assert tmux_link.tmux_server_socket_path == str(launcher.runtime.tmux_server_socket_path)
     assert tmux_link.tmux_session_name == tmux_session_name
-    assert capsys.readouterr().out == (
-        "Rodex attach [automatic-beluga].\nRodex exited [automatic-beluga].\n"
-    )
+    assert capsys.readouterr().out == ("Rodex attach [automatic-beluga].\nRodex exited [automatic-beluga].\n")
 
 
 def test_concurrent_ended_session_opens_start_only_one_runtime(
@@ -3381,12 +3165,8 @@ def test_concurrent_ended_session_opens_start_only_one_runtime(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     database = tmp_path / "rodex.sqlite3"
-    monkeypatch.setattr(
-        "cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga"
-    )
-    monkeypatch.setattr(
-        "rodex_registry.lifecycle.current_rodex_sessions_user_identity", lambda: DNA
-    )
+    monkeypatch.setattr("cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga")
+    monkeypatch.setattr("rodex_registry.lifecycle.current_rodex_sessions_user_identity", lambda: DNA)
     monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
     session = create_a_rodex_session(
         database,
@@ -3434,9 +3214,7 @@ def test_concurrent_ended_session_opens_start_only_one_runtime(
                 live_name[0] = self.runtime.tmux_session_name
             return self.runtime, CODEX_SESSION_ID
 
-        def rename(
-            self, runtime: LiveTmuxSession, tmux_session_name: str
-        ) -> LiveTmuxSession:
+        def rename(self, runtime: LiveTmuxSession, tmux_session_name: str) -> LiveTmuxSession:
             renamed = super().rename(runtime, tmux_session_name)
             with state_lock:
                 live_name[0] = tmux_session_name
@@ -3457,9 +3235,7 @@ def test_concurrent_ended_session_opens_start_only_one_runtime(
             if second:
                 second_finished.set()
 
-    first_thread = Thread(
-        target=open_session, args=(first_launcher,), kwargs={"second": False}
-    )
+    first_thread = Thread(target=open_session, args=(first_launcher,), kwargs={"second": False})
     second_thread = Thread(
         target=open_session,
         args=(second_launcher,),
@@ -3492,9 +3268,7 @@ def test_named_session_transition_lock_rejects_a_symlink(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     database = tmp_path / "rodex.sqlite3"
-    monkeypatch.setattr(
-        "cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga"
-    )
+    monkeypatch.setattr("cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga")
     monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
     session = create_a_rodex_session(
         database,
@@ -3505,9 +3279,7 @@ def test_named_session_transition_lock_rejects_a_symlink(
     )
     lock_target = tmp_path / "lock-target"
     lock_target.touch()
-    (tmp_path / f".rodex.sqlite3.session-{session.rodex_session_id}.lock").symlink_to(
-        lock_target
-    )
+    (tmp_path / f".rodex.sqlite3.session-{session.rodex_session_id}.lock").symlink_to(lock_target)
     launcher = StubLauncher(tmp_path)
 
     with pytest.raises(OSError):
@@ -3522,9 +3294,7 @@ def test_unsaved_codex_session_starts_fresh_and_relinks_the_rodex_identity(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     database = tmp_path / "rodex.sqlite3"
-    monkeypatch.setattr(
-        "cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga"
-    )
+    monkeypatch.setattr("cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga")
     monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
     session = create_a_rodex_session(
         database,
@@ -3550,15 +3320,10 @@ def test_unsaved_codex_session_starts_fresh_and_relinks_the_rodex_identity(
     )
 
     assert (
-        lookup_rodex_session_id_from_a_rodex_sessions_id(
-            session.rodex_sessions_id, database
-        )
-        == session.rodex_session_id
+        lookup_rodex_session_id_from_a_rodex_sessions_id(session.rodex_sessions_id, database) == session.rodex_session_id
     )
     assert (
-        lookup_codex_session_id_from_a_rodex_sessions_id(
-            session.rodex_sessions_id, database
-        )
+        lookup_codex_session_id_from_a_rodex_sessions_id(session.rodex_sessions_id, database)
         == REPLACEMENT_CODEX_SESSION_ID
     )
     assert launcher.started == [
@@ -3572,21 +3337,15 @@ def test_unsaved_codex_session_starts_fresh_and_relinks_the_rodex_identity(
     assert launcher.stopped == []
     tmux_link = lookup_rodex_tmux_session(session.rodex_sessions_id, database)
     assert tmux_link is not None
-    assert tmux_link.tmux_server_socket_path == str(
-        launcher.runtime.tmux_server_socket_path
-    )
-    assert capsys.readouterr().out == (
-        "Rodex attach [automatic-beluga].\nRodex exited [automatic-beluga].\n"
-    )
+    assert tmux_link.tmux_server_socket_path == str(launcher.runtime.tmux_server_socket_path)
+    assert capsys.readouterr().out == ("Rodex attach [automatic-beluga].\nRodex exited [automatic-beluga].\n")
 
 
 def test_non_missing_history_resume_failure_does_not_start_a_replacement(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     database = tmp_path / "rodex.sqlite3"
-    monkeypatch.setattr(
-        "cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga"
-    )
+    monkeypatch.setattr("cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga")
     monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
     create_a_rodex_session(
         database,
@@ -3616,9 +3375,7 @@ def test_unsaved_session_remains_linked_to_the_stored_codex_session_id_if_recove
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     database = tmp_path / "rodex.sqlite3"
-    monkeypatch.setattr(
-        "cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga"
-    )
+    monkeypatch.setattr("cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga")
     monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
     create_a_rodex_session(
         database,
@@ -3630,9 +3387,7 @@ def test_unsaved_session_remains_linked_to_the_stored_codex_session_id_if_recove
     launcher = StubLauncher(tmp_path)
     launcher.live = False
     launcher.start_errors = [
-        RodexCodexSessionNotFoundError(
-            f"Codex has no saved session for exact identity {CODEX_SESSION_ID}"
-        ),
+        RodexCodexSessionNotFoundError(f"Codex has no saved session for exact identity {CODEX_SESSION_ID}"),
         RodexRuntimeError("fresh Codex startup failed"),
     ]
     recorded_tmux = lookup_rodex_tmux_session(1, database)
@@ -3716,9 +3471,7 @@ def test_alias_command_accepts_force_without_starting_codex(
         "cool_name.functions.coolname.generate_slug",
         lambda _word_count: "black-sawfly",
     )
-    monkeypatch.setattr(
-        "rodex_registry.lifecycle.current_rodex_sessions_user_identity", lambda: DNA
-    )
+    monkeypatch.setattr("rodex_registry.lifecycle.current_rodex_sessions_user_identity", lambda: DNA)
     monkeypatch.setattr(
         "rodex.cli.shutil.which",
         lambda name: None if name == "codex" else available_prerequisite(name),
@@ -3763,14 +3516,8 @@ def test_alias_command_accepts_force_without_starting_codex(
     assert tmux_link is not None
     assert tmux_link.tmux_session_name == "replacement"
     assert [prompt for _live_control, prompt in control.started] == [
-        (
-            f"RODEX_AUTO_INFO: Rodex session {session.rodex_session_id} "
-            "is now named 'first'."
-        ),
-        (
-            f"RODEX_AUTO_INFO: Rodex session {session.rodex_session_id} "
-            "is now named 'replacement'."
-        ),
+        (f"RODEX_AUTO_INFO: Rodex session {session.rodex_session_id} is now named 'first'."),
+        (f"RODEX_AUTO_INFO: Rodex session {session.rodex_session_id} is now named 'replacement'."),
     ]
     assert capsys.readouterr().out == ("Rodex alias [first].\nRodex alias [replacement].\n")
 
@@ -3780,9 +3527,7 @@ def test_alias_does_not_send_auto_info_when_the_session_is_not_running(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     database = tmp_path / "rodex.sqlite3"
-    monkeypatch.setattr(
-        "cool_name.functions.coolname.generate_slug", lambda _count: "black-sawfly"
-    )
+    monkeypatch.setattr("cool_name.functions.coolname.generate_slug", lambda _count: "black-sawfly")
     monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
     create_a_rodex_session(
         database,
@@ -3814,9 +3559,7 @@ def test_alias_does_not_send_auto_info_when_the_display_name_is_unchanged(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     database = tmp_path / "rodex.sqlite3"
-    monkeypatch.setattr(
-        "cool_name.functions.coolname.generate_slug", lambda _count: "black-sawfly"
-    )
+    monkeypatch.setattr("cool_name.functions.coolname.generate_slug", lambda _count: "black-sawfly")
     monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
     create_a_rodex_session(
         database,
@@ -3854,9 +3597,7 @@ def test_alias_reports_auto_info_failure_without_rolling_back_the_new_name(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     database = tmp_path / "rodex.sqlite3"
-    monkeypatch.setattr(
-        "cool_name.functions.coolname.generate_slug", lambda _count: "black-sawfly"
-    )
+    monkeypatch.setattr("cool_name.functions.coolname.generate_slug", lambda _count: "black-sawfly")
     monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
     create_a_rodex_session(
         database,
@@ -3895,14 +3636,12 @@ def test_alias_replacement_without_force_is_reported_on_stderr(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     state_home = tmp_path / "state"
-    database = state_home / "rodex" / "rodex-v18.sqlite3"
+    database = state_home / "rodex" / "rodex-v19.sqlite3"
     monkeypatch.setattr(
         "cool_name.functions.coolname.generate_slug",
         lambda _word_count: "black-sawfly",
     )
-    monkeypatch.setattr(
-        "rodex_registry.lifecycle.current_rodex_sessions_user_identity", lambda: DNA
-    )
+    monkeypatch.setattr("rodex_registry.lifecycle.current_rodex_sessions_user_identity", lambda: DNA)
     monkeypatch.setattr(
         "rodex.cli.shutil.which",
         lambda name: None if name == "codex" else available_prerequisite(name),
@@ -3948,13 +3687,9 @@ def test_empty_alias_is_a_concise_stderr_error(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     state_home = tmp_path / "state"
-    database = state_home / "rodex" / "rodex-v18.sqlite3"
-    monkeypatch.setattr(
-        "cool_name.functions.coolname.generate_slug", lambda _word_count: "safe-name"
-    )
-    monkeypatch.setattr(
-        "rodex_registry.lifecycle.current_rodex_sessions_user_identity", lambda: DNA
-    )
+    database = state_home / "rodex" / "rodex-v19.sqlite3"
+    monkeypatch.setattr("cool_name.functions.coolname.generate_slug", lambda _word_count: "safe-name")
+    monkeypatch.setattr("rodex_registry.lifecycle.current_rodex_sessions_user_identity", lambda: DNA)
     monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
     create_a_rodex_session(
         database,
@@ -3998,9 +3733,7 @@ def test_missing_executable_retains_command_not_found_exit_status(
 ) -> None:
     monkeypatch.setattr(
         "rodex.cli.run",
-        lambda: (_ for _ in ()).throw(
-            RodexExecutableNotFoundError("tmux executable was not found: tmux")
-        ),
+        lambda: (_ for _ in ()).throw(RodexExecutableNotFoundError("tmux executable was not found: tmux")),
     )
 
     with pytest.raises(SystemExit) as raised:
@@ -4029,6 +3762,13 @@ def test_running_commands_show_only_the_current_users_live_sessions(
         tmux_server_socket_path=tmp_path / "dna.sock",
         tmux_session_name="black-sawfly",
     )
+    record_a_rodex_session_runtime_resume(
+        1,
+        tmp_path / "dna.sock",
+        "black-sawfly",
+        database,
+        runtime_id=RUNTIME_ID,
+    )
     monkeypatch.setattr(
         "cool_name.functions.coolname.generate_slug",
         lambda _word_count: "silver-otter",
@@ -4041,9 +3781,7 @@ def test_running_commands_show_only_the_current_users_live_sessions(
         tmux_session_name="silver-otter",
     )
     assign_a_user_defined_cool_name("black-sawfly", "work", database, user_identity=DNA)
-    monkeypatch.setattr(
-        "rodex_registry.lifecycle.current_rodex_sessions_user_identity", lambda: DNA
-    )
+    monkeypatch.setattr("rodex_registry.lifecycle.current_rodex_sessions_user_identity", lambda: DNA)
     monkeypatch.setattr(
         "rodex.cli.shutil.which",
         lambda name: None if name == "codex" else available_prerequisite(name),
@@ -4053,9 +3791,7 @@ def test_running_commands_show_only_the_current_users_live_sessions(
     assert run([command], database_path=database, launcher=launcher) == 0  # type: ignore[arg-type]
 
     assert launcher.started == []
-    assert launcher.existing_checks == [
-        LiveTmuxSession(tmp_path / "dna.sock", "black-sawfly")
-    ]
+    assert launcher.existing_checks == [LiveTmuxSession(tmp_path / "dna.sock", "black-sawfly")]
     output = capsys.readouterr().out
     assert output == "Rodex running: 1.\nRodex running [work].\n"
     assert "black-sawfly" not in output
@@ -4069,9 +3805,7 @@ def test_new_launch_cleans_up_the_renamed_runtime_when_persistence_fails(
     database = tmp_path / "rodex.sqlite3"
     launcher = StubLauncher(tmp_path)
     monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
-    monkeypatch.setattr(
-        "cool_name.functions.coolname.generate_slug", lambda _word_count: "safe-name"
-    )
+    monkeypatch.setattr("cool_name.functions.coolname.generate_slug", lambda _word_count: "safe-name")
     monkeypatch.setattr(
         "rodex.managed_session_lifecycle.update_rodex_tmux_session_name",
         lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("persist failed")),
@@ -4082,9 +3816,7 @@ def test_new_launch_cleans_up_the_renamed_runtime_when_persistence_fails(
 
     tmux_session_name = "safe-name"
     assert launcher.renamed == [(launcher.runtime, tmux_session_name)]
-    assert launcher.stopped == [
-        (replace(launcher.runtime, tmux_session_name=tmux_session_name), False)
-    ]
+    assert launcher.stopped == [(replace(launcher.runtime, tmux_session_name=tmux_session_name), False)]
     assert launcher.attached == []
 
 
@@ -4092,9 +3824,7 @@ def test_live_reattach_restores_the_recorded_name_when_persistence_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     database = tmp_path / "rodex.sqlite3"
-    monkeypatch.setattr(
-        "cool_name.functions.coolname.generate_slug", lambda _word_count: "safe-name"
-    )
+    monkeypatch.setattr("cool_name.functions.coolname.generate_slug", lambda _word_count: "safe-name")
     create_a_rodex_session(
         database,
         codex_session_id=CODEX_SESSION_ID,
@@ -4127,12 +3857,8 @@ def test_alias_rename_failure_preserves_the_previous_name_everywhere(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     database = tmp_path / "rodex.sqlite3"
-    monkeypatch.setattr(
-        "cool_name.functions.coolname.generate_slug", lambda _word_count: "safe-name"
-    )
-    monkeypatch.setattr(
-        "rodex_registry.lifecycle.current_rodex_sessions_user_identity", lambda: DNA
-    )
+    monkeypatch.setattr("cool_name.functions.coolname.generate_slug", lambda _word_count: "safe-name")
+    monkeypatch.setattr("rodex_registry.lifecycle.current_rodex_sessions_user_identity", lambda: DNA)
     monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
     create_a_rodex_session(
         database,
@@ -4179,12 +3905,8 @@ def test_alias_database_failure_renames_tmux_back_and_leaves_no_alias(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     database = tmp_path / "rodex.sqlite3"
-    monkeypatch.setattr(
-        "cool_name.functions.coolname.generate_slug", lambda _word_count: "safe-name"
-    )
-    monkeypatch.setattr(
-        "rodex_registry.lifecycle.current_rodex_sessions_user_identity", lambda: DNA
-    )
+    monkeypatch.setattr("cool_name.functions.coolname.generate_slug", lambda _word_count: "safe-name")
+    monkeypatch.setattr("rodex_registry.lifecycle.current_rodex_sessions_user_identity", lambda: DNA)
     monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
     create_a_rodex_session(
         database,
@@ -4197,9 +3919,7 @@ def test_alias_database_failure_renames_tmux_back_and_leaves_no_alias(
     launcher = StubLauncher(tmp_path)
     monkeypatch.setattr(
         "rodex_registry.lifecycle.reserve_specific_cool_name",
-        lambda *args, **kwargs: (_ for _ in ()).throw(
-            sqlite3.OperationalError("database failed")
-        ),
+        lambda *args, **kwargs: (_ for _ in ()).throw(sqlite3.OperationalError("database failed")),
     )
 
     with pytest.raises(sqlite3.OperationalError, match="database failed"):
@@ -4226,12 +3946,8 @@ def test_concurrent_alias_commands_serialize_across_tmux_and_database(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     database = tmp_path / "rodex.sqlite3"
-    monkeypatch.setattr(
-        "cool_name.functions.coolname.generate_slug", lambda _word_count: "safe-name"
-    )
-    monkeypatch.setattr(
-        "rodex_registry.lifecycle.current_rodex_sessions_user_identity", lambda: DNA
-    )
+    monkeypatch.setattr("cool_name.functions.coolname.generate_slug", lambda _word_count: "safe-name")
+    monkeypatch.setattr("rodex_registry.lifecycle.current_rodex_sessions_user_identity", lambda: DNA)
     monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
     session = create_a_rodex_session(
         database,
@@ -4257,9 +3973,7 @@ def test_concurrent_alias_commands_serialize_across_tmux_and_database(
             with state_lock:
                 return runtime.tmux_session_name == live_name[0]
 
-        def rename(
-            self, runtime: LiveTmuxSession, tmux_session_name: str
-        ) -> LiveTmuxSession:
+        def rename(self, runtime: LiveTmuxSession, tmux_session_name: str) -> LiveTmuxSession:
             with state_lock:
                 assert runtime.tmux_session_name == live_name[0]
                 live_name[0] = tmux_session_name
@@ -4376,9 +4090,7 @@ def test_named_open_rejects_a_session_owned_by_another_posix_user(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     database = tmp_path / "rodex.sqlite3"
-    monkeypatch.setattr(
-        "cool_name.functions.coolname.generate_slug", lambda _word_count: "other-work"
-    )
+    monkeypatch.setattr("cool_name.functions.coolname.generate_slug", lambda _word_count: "other-work")
     create_a_rodex_session(
         database,
         codex_session_id=CODEX_SESSION_ID,
@@ -4386,9 +4098,7 @@ def test_named_open_rejects_a_session_owned_by_another_posix_user(
         tmux_server_socket_path=tmp_path / "other.sock",
         tmux_session_name="other-work",
     )
-    monkeypatch.setattr(
-        "rodex_registry.lifecycle.current_rodex_sessions_user_identity", lambda: DNA
-    )
+    monkeypatch.setattr("rodex_registry.lifecycle.current_rodex_sessions_user_identity", lambda: DNA)
     monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
     launcher = StubLauncher(tmp_path)
 
@@ -4495,9 +4205,7 @@ def test_cleanup_failure_does_not_replace_the_causal_transition_failure(
     monkeypatch.setattr(
         launcher,
         "stop",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            RodexRuntimeError("cleanup capability changed")
-        ),
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RodexRuntimeError("cleanup capability changed")),
     )
 
     with pytest.raises(RuntimeError, match="database failed") as raised:
@@ -4507,9 +4215,7 @@ def test_cleanup_failure_does_not_replace_the_causal_transition_failure(
             launcher=launcher,  # type: ignore[arg-type]
         )
 
-    assert raised.value.__notes__ == [
-        "tmux cleanup also failed: cleanup capability changed"
-    ]
+    assert raised.value.__notes__ == ["tmux cleanup also failed: cleanup capability changed"]
 
 
 def test_registration_confirmation_failure_stops_the_pending_runtime(
@@ -4518,15 +4224,11 @@ def test_registration_confirmation_failure_stops_the_pending_runtime(
 ) -> None:
     launcher = StubLauncher(tmp_path)
     monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
-    monkeypatch.setattr(
-        "cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga"
-    )
+    monkeypatch.setattr("cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga")
     monkeypatch.setattr(
         launcher,
         "confirm_runtime_registration",
-        lambda _runtime, _session_id, **_identity: (_ for _ in ()).throw(
-            RodexRuntimeError("confirm failed")
-        ),
+        lambda _runtime, _session_id, **_identity: (_ for _ in ()).throw(RodexRuntimeError("confirm failed")),
     )
 
     with pytest.raises(RodexRuntimeError, match="confirm failed"):
@@ -4559,10 +4261,7 @@ def test_main_prints_actionable_multiline_resume_guidance(
     monkeypatch.setattr(
         "rodex.cli.run",
         lambda: (_ for _ in ()).throw(
-            RodexSessionError(
-                "Codex session already belongs to Rodex sturdy-warthog.\n"
-                "Resume with: rodex sturdy-warthog"
-            )
+            RodexSessionError("Codex session already belongs to Rodex sturdy-warthog.\nResume with: rodex sturdy-warthog")
         ),
     )
 
@@ -4571,6 +4270,5 @@ def test_main_prints_actionable_multiline_resume_guidance(
 
     assert raised.value.code == 1
     assert capsys.readouterr().err == (
-        "rodex: Codex session already belongs to Rodex sturdy-warthog.\n"
-        "Resume with: rodex sturdy-warthog\n"
+        "rodex: Codex session already belongs to Rodex sturdy-warthog.\nResume with: rodex sturdy-warthog\n"
     )

@@ -1,6 +1,6 @@
 # SQL schema methodology
 
-This document describes the current v18 SQLite boundary and the standards applied to
+This document describes the current v19 SQLite boundary and the standards applied to
 future schema decisions. These authoritative standards may be modified only by an agent
 suggestion followed by user agreement.
 
@@ -101,7 +101,7 @@ suggestion followed by user agreement.
   that marker in one cheap WAL-aware read transaction. Every ordinary mutation rechecks
   the generation inside its one writer transaction; only empty marker-less private
   storage receives the cold schema bootstrap in that same transaction. A nonempty
-  marker-less database or a different generation fails closed before v18 domain DDL.
+  marker-less database or a different generation fails closed before v19 domain DDL.
 - `synchronous=NORMAL` preserves SQLite consistency, but an operating-system crash or
   power loss can lose recently committed transactions that have not reached durable
   storage; this is not a `FULL` synchronous durability promise.
@@ -139,18 +139,18 @@ suggestion followed by user agreement.
 - Rodex does not implicitly reset, rewrite, or repair incompatible schema generations.
   Additive, verified schema extensions preserve current-generation contents.
 
-## Current v18 execution, request, statistics, and agent-trace projection
+## Current v19 execution, request, statistics, and agent-trace projection
 
 - `rodex_registries` contains the database instance's one durable 64-bit ID row. Live tmux
   identity includes it so another registry cannot adopt the same session/Codex pair.
 - `rodex_sessions` contains one signed-BIGINT Rodex session ID and
   permanent/optional display-name links. The public Rodex
   session ID is always serialized as a 16-character lowercase hex string, never a JSON
-  number. The current ALPHA v18 generation is stored in `rodex-v18.sqlite3`.
+  number. The current ALPHA v19 generation is stored in `rodex-v19.sqlite3`.
   `rodex_schema_generations` marks the exact generation inside the database; Rodex
   rejects nonempty unmarked databases and wrong generations before creating any domain
-  table. Files for every other generation remain outside the current v18 database path
-  and are never opened, read, migrated, or rewritten by v18 bootstrap.
+  table. Files for every other generation remain outside the current v19 database path
+  and are never opened, read, migrated, or rewritten by v19 bootstrap.
 - `rodex_runtime_instances` contains one signed-`BIGINT` random 64-bit `runtime_id` and
   its start time for a Rodex session. Unique indexes fence both session cardinality and
   runtime ID reuse. Allocation uses the same ten-candidate indexed-selection pipeline

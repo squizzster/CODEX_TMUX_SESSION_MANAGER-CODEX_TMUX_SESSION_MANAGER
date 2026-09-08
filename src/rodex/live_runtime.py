@@ -24,7 +24,7 @@ from rodex_registry import (
 )
 
 from .control import LiveRodexControl
-from .errors import RodexLaunchError
+from .errors import ExactRuntimeIdentityRequiredError, RodexLaunchError
 from .runtime import (
     RODEX_REGISTRATION_PENDING,
     RODEX_REGISTRATION_REGISTERED,
@@ -42,17 +42,13 @@ def session_transition_lock(
     """Serialize one durable session's publication, liveness, and replacement."""
     if not isinstance(session_identity, RodexSessionId):
         raise TypeError("session transition identity must be a RodexSessionId")
-    lock_path = (
-        database_path.parent / f".{database_path.name}.session-{session_identity}.lock"
-    )
+    lock_path = database_path.parent / f".{database_path.name}.session-{session_identity}.lock"
     flags = os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW
     descriptor = os.open(lock_path, flags, 0o600)
     try:
         state = os.fstat(descriptor)
         if not stat_module.S_ISREG(state.st_mode) or state.st_uid != os.getuid():
-            raise RodexLaunchError(
-                f"session transition lock is not a private regular file: {lock_path}"
-            )
+            raise RodexLaunchError(f"session transition lock is not a private regular file: {lock_path}")
         os.fchmod(descriptor, 0o600)
         fcntl.flock(descriptor, fcntl.LOCK_EX)
         yield
@@ -66,27 +62,19 @@ def resolve_live_control(
     database_path: Path,
     launcher: RodexRuntimeLauncher,
 ) -> tuple[int, LiveTmuxSession, LiveRodexControl]:
-    session_id = lookup_owned_rodex_sessions_id_from_a_cool_name(
-        session_name, database_path
-    )
+    session_id = lookup_owned_rodex_sessions_id_from_a_cool_name(session_name, database_path)
     if session_id is None:
         raise RodexLaunchError(f"unknown Rodex session: {session_name}")
     tmux_link = lookup_rodex_tmux_session(session_id, database_path)
     if tmux_link is None:
         raise RodexLaunchError(f"Rodex session has no tmux endpoint: {session_name}")
-    runtime = LiveTmuxSession(
-        Path(tmux_link.tmux_server_socket_path), tmux_link.tmux_session_name
-    )
+    runtime = LiveTmuxSession(Path(tmux_link.tmux_server_socket_path), tmux_link.tmux_session_name)
     if not launcher.session_exists(runtime):
         raise RodexLaunchError(f"Rodex session is not running: {session_name}")
-    expected_codex_session_id = lookup_codex_session_id_from_a_rodex_sessions_id(
-        session_id, database_path
-    )
+    expected_codex_session_id = lookup_codex_session_id_from_a_rodex_sessions_id(session_id, database_path)
     if expected_codex_session_id is None:
         raise RodexLaunchError(f"Rodex session has no Codex identity: {session_name}")
-    expected_rodex_session_id = lookup_rodex_session_id_from_a_rodex_sessions_id(
-        session_id, database_path
-    )
+    expected_rodex_session_id = lookup_rodex_session_id_from_a_rodex_sessions_id(session_id, database_path)
     if expected_rodex_session_id is None:
         raise RodexLaunchError(f"Rodex session has no Rodex identity: {session_name}")
     expected_registry_id = lookup_rodex_registry_id(database_path)
@@ -100,9 +88,7 @@ def resolve_live_control(
         expected_codex_session_id=expected_codex_session_id,
     )
     if control.runtime_id is None:
-        raise RodexLaunchError(
-            "live runtime did not advertise its exact runtime incarnation"
-        )
+        raise RodexLaunchError("live runtime did not advertise its exact runtime incarnation")
     if control.tmux_capability is None:
         raise RodexLaunchError("live runtime did not advertise registered tmux authority")
     runtime = replace(
@@ -131,9 +117,7 @@ def verify_live_runtime_identity(
         and control.codex_session_id == expected_codex_session_id
     ):
         if control.runtime_id is None:
-            raise RodexLaunchError(
-                "pending live runtime did not advertise its exact runtime identity"
-            )
+            raise RodexLaunchError("pending live runtime did not advertise its exact runtime identity")
         identified_runtime = replace(runtime, runtime_id=control.runtime_id)
         record_a_rodex_session_runtime_resume(
             session_id,
@@ -158,15 +142,22 @@ def verify_live_runtime_identity(
     )
     capability = control.tmux_capability
     if capability is None or capability.internal_session_id != session_id:
-        raise RodexLaunchError(
-            "live runtime advertised an unexpected internal session identity"
-        )
-    durable_runtime = lookup_rodex_runtime_instance(session_id, database_path)
-    if durable_runtime is not None and durable_runtime.runtime_id != control.runtime_id:
-        raise RodexLaunchError(
-            "live runtime advertised an unexpected durable runtime incarnation"
-        )
+        raise RodexLaunchError("live runtime advertised an unexpected internal session identity")
+    require_durable_runtime_instance(session_id, database_path, control)
     return control
+
+
+def require_durable_runtime_instance(
+    session_id: int,
+    database_path: Path,
+    control: LiveRodexControl,
+) -> None:
+    """Require the current durable incarnation for every managed read, attach, or mutation."""
+    durable_runtime = lookup_rodex_runtime_instance(session_id, database_path)
+    if durable_runtime is None or control.runtime_id is None:
+        raise ExactRuntimeIdentityRequiredError("live runtime lacks its required durable incarnation")
+    if durable_runtime.runtime_id != control.runtime_id:
+        raise RodexLaunchError("live runtime advertised an unexpected durable runtime incarnation")
 
 
 def require_live_runtime_identity(
@@ -183,9 +174,7 @@ def require_live_runtime_identity(
             f"observed {control.registration_state or 'missing'}"
         )
     if control.runtime_id is None:
-        raise RodexLaunchError(
-            "live runtime did not advertise its exact runtime incarnation"
-        )
+        raise RodexLaunchError("live runtime did not advertise its exact runtime incarnation")
     if control.rodex_session_id != expected_rodex_session_id:
         raise RodexLaunchError(
             "live runtime advertised an unexpected Rodex identity: "
@@ -226,8 +215,7 @@ def find_relocated_live_runtime(
         if (
             control.rodex_session_id == expected_rodex_session_id
             and control.rodex_registry_id == expected_registry_id
-            and control.registration_state
-            in {RODEX_REGISTRATION_PENDING, RODEX_REGISTRATION_REGISTERED}
+            and control.registration_state in {RODEX_REGISTRATION_PENDING, RODEX_REGISTRATION_REGISTERED}
         ):
             matches.append((candidate, control))
         elif control.rodex_registry_id == expected_registry_id:

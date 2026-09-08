@@ -5,8 +5,7 @@ agreement, retain clear ownership, and keep this file within 150 lines and 10,24
 
 # Rodex architecture
 
-Rodex binds a durable session and 64-bit runtime incarnation to one Codex thread tree
-and one authenticated tmux endpoint.
+Rodex binds session/runtime IDs to a Codex thread tree and verified tmux endpoint.
 
 ## Runtime shape
 
@@ -53,7 +52,7 @@ identity requires a transient App Server check.
 
 ## Shared tmux capability boundary
 
-`tmux-shared-v1.sock` is multiplexed transport, never session authority. Protocol and
+`tmux-shared-v2.sock` is multiplexed transport, never session authority. Protocol and
 random-incarnation markers identify the server. Creation may claim only a completely
 unmarked, empty server; mismatches remain untouched. Each stable XDG/runtime context has
 one canonical database and server. SQL makes complete display names unique within its
@@ -99,6 +98,9 @@ after return. Tmux's exit line is erased first; TUI I/O stays direct without a P
 trace-event, and tool-call identities never substitute for one another. See
 [SQL_SCHEMA.md](SQL_SCHEMA.md).
 
+ALPHA hosts require complete identity. One durable incarnation check serves reads,
+attachment, and mutation. Protocol messages use only their own current field names.
+
 New sessions allocate IDs, create detached tmux, start the private host, observe one Codex
 root ID, and advertise a `pending` tuple. The immutable session-ID transition lock spans
 SQL publication, registration, namespaced tmux rename, and UI setup; competing selectors
@@ -130,12 +132,10 @@ check database identity synchronously; the runtime host has no database watcher.
 
 ## Persistence and integrity
 
-One blocking scheduler coalesces protocol activity and feeds authenticated, complete
-rollout suffixes to a resident analyzer and trace normalizer. One fenced transaction
-publishes checkpoints, statistics, append-only trace, associations, and health. Permanent
-source failures park by fingerprint until source change, preserve the last good view, and
-cannot affect the TUI. Codex response metadata supplies turn identity; only sequence races
-reset cursors, while deterministic conflicts park.
+One scheduler feeds authenticated rollout suffixes to the analyzer and trace normalizer.
+One fenced transaction publishes checkpoints, statistics, trace, associations, and health.
+Source failures park by fingerprint until change and preserve the last good view. Codex
+metadata supplies turn identity; only sequence races reset cursors. Failures cannot affect the TUI.
 
 - Rodex, Codex, tmux, user, session, and runtime identities never substitute for one another.
 - Related writes use explicit transactions; one fork-safe process-local idle connection

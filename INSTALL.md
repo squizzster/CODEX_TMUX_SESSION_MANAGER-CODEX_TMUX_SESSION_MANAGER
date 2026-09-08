@@ -70,9 +70,32 @@ rodex _running
 ```
 
 Add that export to the shell's startup configuration when the override should persist.
-Exit every running Rodex runtime before moving a checkout, update the shim/override, run
-the verification commands above, and then resume the sessions. A running Python process
-must never be expected to follow a moved checkout, database, or protected parent.
+Exit every running Rodex runtime before moving a checkout, update the shim/override,
+recreate `.venv` with `uv venv --clear --python 3.12 .venv`, and run `uv sync --locked`.
+Virtual environments contain absolute interpreter, activation, and editable-source paths;
+reinstalling only the Rodex package does not rebuild all of them. Run the verification
+commands above and then start current-generation sessions. A running Python process
+cannot follow a moved checkout, database, or protected parent.
+
+## Storage location and release boundaries
+
+Rodex 0.6.0a1 owns SQL generation 19 and shared tmux protocol v2. Earlier databases and
+servers are not discovered or migrated. A fresh release starts a new Rodex name catalog;
+existing Codex transcripts remain in the separately configured Codex session directory.
+
+Set an absolute `XDG_STATE_HOME` to choose the parent of the `rodex` storage directory.
+Each process resolves its database path once at startup, independently of the caller's
+project directory. To relocate current-generation storage, exit all of its runtimes,
+move the complete `rodex` storage directory, set the new `XDG_STATE_HOME` for every caller,
+and restart Rodex. The schema and stored identities do not change during this offline
+move. External Codex rollout paths and tmux endpoints are absolute references to their
+own resources; moving the database does not relocate those resources.
+
+If startup reports that the shared coordinator belongs to another installation, a
+server still contains commands from the previous checkout location. Stop the runtimes
+on that exact Rodex server and retire the empty server during the maintenance window.
+The launcher requires the current installation's commands and does not rewrite ownership
+markers to adopt the old installation.
 
 ## System-wide installation
 

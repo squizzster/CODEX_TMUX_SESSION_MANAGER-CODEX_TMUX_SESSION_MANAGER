@@ -224,7 +224,7 @@ def test_mouse_holds_transition_lock_through_mutation_and_readback(
 ) -> None:
     database = tmp_path / "registry.sqlite3"
     runtime = LiveTmuxSession(tmp_path / "tmux.sock", "worker")
-    live_control = SimpleNamespace(runtime_id="runtime")
+    live_control = SimpleNamespace(runtime_id="runtime", codex_session_id="thread")
     revalidations: list[tuple[object, object, object]] = []
 
     class Launcher:
@@ -284,7 +284,7 @@ def test_mouse_revalidates_selector_after_tmux_readback(
 ) -> None:
     mapping = {"worker": 1}
     runtime = LiveTmuxSession(tmp_path / "tmux.sock", "worker")
-    live_control = SimpleNamespace(runtime_id="runtime")
+    live_control = SimpleNamespace(runtime_id="runtime", codex_session_id="thread")
 
     @contextmanager
     def lock(_database: Path, _session_id: int):
@@ -331,7 +331,7 @@ def test_start_revalidates_selector_after_transport_wait_before_first_frame(
 ) -> None:
     mapping = {"worker": 1}
     runtime = object()
-    live_control = SimpleNamespace(runtime_id="runtime")
+    live_control = SimpleNamespace(runtime_id="runtime", codex_session_id="thread")
 
     @contextmanager
     def lock(_database: Path, _session_id: int):
@@ -376,7 +376,7 @@ def test_start_revalidates_runtime_after_transport_wait_before_first_frame(
 ) -> None:
     persisted = {"runtime_id": "runtime"}
     runtime = object()
-    live_control = SimpleNamespace(runtime_id="runtime")
+    live_control = SimpleNamespace(runtime_id="runtime", codex_session_id="thread")
 
     @contextmanager
     def lock(_database: Path, _session_id: int):
@@ -493,7 +493,9 @@ def test_alias_transition_holds_the_lock_and_steers_the_observed_active_turn(
             prompt: str,
             *,
             revalidate: Callable[[], None],
+            dispatch_id: str | None = None,
         ) -> object:
+            assert dispatch_id is None
             revalidate()
             self.steered.append((observed, turn_id, prompt))
             return object()

@@ -1,37 +1,33 @@
-"""Tmux-only lifecycle for the dedicated agent observer pane."""
+"""Observer presentation adapter beneath the shared interaction pipeline."""
 
 from __future__ import annotations
 
 import json
-import os
-import re
-import shlex
 import sys
 import uuid
+from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
-from typing import Final
+from threading import RLock
 
-from .process_environment import (
-    exact_environment_exec_command,
-    validated_user_environment_entries,
+from .interaction_pipeline import (
+    DeliveryStatus,
+    InteractionOperation,
+    InteractionRequest,
+    InteractionResult,
+    InteractionTarget,
+    SessionInteractionPipeline,
 )
-from .tmux_executor import SyncTmuxExecutor, SyncTmuxRunner, TmuxCommandResult
-from .tmux_session_capability import (
-    TmuxRuntimeCapability,
-    capability_identity_if_shell_condition,
-    capability_pane_read_arguments,
-    combine_tmux_if_shell_conditions,
-    primary_pane_capability_if_shell_condition,
-    primary_pane_capability_read_arguments,
-)
+from .observer_contract import OBSERVER_TRANSPORT_METADATA_MAX_BYTES
+from .pane_control import TmuxPaneController
+from .tmux_executor import SyncTmuxRunner
+from .tmux_session_capability import TmuxRuntimeCapability
 
-OBSERVER_PRIMARY_PANE_OPTION: Final = "@rodex_agent_observer_pane_id"
-OBSERVER_OWNER_PANE_OPTION: Final = "@rodex_agent_observer_for"
-_PANE_ID_PATTERN: Final = re.compile(r"%[0-9]+")
+OBSERVER_TARGET = "agent-observer"
 
 
 class ObserverPaneController:
-    """Locate or create one validated observer pane through bounded tmux calls."""
+    """Submit observer lifecycle and content through the same API as the main chat."""
 
     def __init__(
         self,
@@ -41,53 +37,55 @@ class ObserverPaneController:
         *,
         runner: SyncTmuxRunner,
         python_executable: str = sys.executable,
+        pipeline: SessionInteractionPipeline | None = None,
+        state_sender: Callable[[dict[str, object]], None] | None = None,
+        message_sender: Callable[[str, str | None], None] | None = None,
+        snapshot_publisher: Callable[[], None] | None = None,
     ) -> None:
-        self.validate_primary_pane_target(primary_pane_target)
-        self._capability = capability
-        self._primary_pane_target = primary_pane_target
-        self._python_executable = python_executable
-        self._observer_pane_target: str | None = None
-        self._tmux_executor = SyncTmuxExecutor(
+        self._pane = TmuxPaneController(
             tmux_binary,
-            capability.tmux_server_socket_path,
+            capability,
+            primary_pane_target,
             runner=runner,
+            python_executable=python_executable,
+            primary_pane_option="@rodex_agent_observer_pane_id",
+            owner_pane_option="@rodex_agent_observer_for",
         )
+        self._python_executable = python_executable
+        self.pipeline = pipeline if pipeline is not None else SessionInteractionPipeline()
+        self._state_sender = state_sender
+        self._message_sender = message_sender
+        self._snapshot_publisher = snapshot_publisher
+        self._open_lock = RLock()
+        self._open_request: InteractionRequest | None = None
+        self._target = InteractionTarget(
+            OBSERVER_TARGET,
+            str(capability.runtime_id),
+            frozenset(
+                {
+                    InteractionOperation.MESSAGE,
+                    InteractionOperation.DISPLAY_STATE,
+                    InteractionOperation.OPEN,
+                    InteractionOperation.LOCATE,
+                    InteractionOperation.FOCUS,
+                    InteractionOperation.RESIZE,
+                    InteractionOperation.CLOSE,
+                }
+            ),
+            lambda: self._pane.locate() is not None,
+            self._deliver,
+            open=self._reopen,
+            binding_identity=lambda: self._pane.known_pane_id,
+        )
+        self.pipeline.register(self._target)
 
     @staticmethod
     def validate_primary_pane_target(primary_pane_target: str) -> None:
-        if _PANE_ID_PATTERN.fullmatch(primary_pane_target) is None:
-            raise ValueError("primary pane target must be an exact tmux pane ID")
+        TmuxPaneController.validate_primary_pane_target(primary_pane_target)
 
     def locate(self) -> str | None:
-        candidate = self._observer_pane_target
-        if candidate is None:
-            shown = self._tmux_executor.run(
-                (
-                    "show-options",
-                    "-p",
-                    "-v",
-                    "-t",
-                    self._primary_pane_target,
-                    OBSERVER_PRIMARY_PANE_OPTION,
-                )
-            )
-            if shown.returncode != 0:
-                return None
-            candidate = shown.stdout.strip()
-        if _PANE_ID_PATTERN.fullmatch(candidate) is None:
-            return None
-        identity = self._tmux_executor.run(
-            capability_pane_read_arguments(
-                self._capability,
-                candidate,
-                f"#{{pane_id}}|#{{{OBSERVER_OWNER_PANE_OPTION}}}|#{{pane_dead}}",
-            )
-        )
-        if identity.returncode != 0 or identity.stdout.strip() != f"{candidate}|{self._primary_pane_target}|0":
-            self._observer_pane_target = None
-            return None
-        self._observer_pane_target = candidate
-        return candidate
+        result = self.pipeline.execute(InteractionRequest(OBSERVER_TARGET, InteractionOperation.LOCATE, "observer"))
+        return result.value if result.accepted and isinstance(result.value, str) else None
 
     def create(
         self,
@@ -99,16 +97,7 @@ class ObserverPaneController:
         protocol_event_socket_path: Path,
         initial_event: dict[str, object],
     ) -> str | None:
-        cwd = self._tmux_executor.run(
-            primary_pane_capability_read_arguments(
-                self._capability,
-                "#{pane_id}|#{pane_current_path}",
-            )
-        )
-        cwd_fields = cwd.stdout.rstrip("\n").split("|", maxsplit=1)
-        if cwd.returncode != 0 or len(cwd_fields) != 2 or cwd_fields[0] != self._primary_pane_target or not cwd_fields[1]:
-            return None
-        observer_command = [
+        command = (
             self._python_executable,
             "-m",
             "rodex.agent_observer",
@@ -123,117 +112,72 @@ class ObserverPaneController:
             "--protocol-event-socket",
             str(protocol_event_socket_path),
             "--initial-event",
-            json.dumps(
-                initial_event,
-                ensure_ascii=False,
-                separators=(",", ":"),
-                sort_keys=True,
-            ),
-        ]
-        try:
-            environment_names = tuple(name for name, _value in validated_user_environment_entries(os.environ))
-            command = exact_environment_exec_command(
-                self._python_executable,
-                environment_names,
-                observer_command,
-            )
-        except ValueError:
-            return None
-        split = self._mutate(
-            (
-                "split-window",
-                "-v",
-                "-b",
-                "-d",
-                "-p",
-                "33",
-                "-t",
-                self._primary_pane_target,
-                "-c",
-                cwd_fields[1],
-                "-P",
-                "-F",
-                "#{pane_id}",
-                "-e",
-                f"PWD={cwd_fields[1]}",
-                *command,
-            )
+            json.dumps(initial_event, ensure_ascii=False, separators=(",", ":"), sort_keys=True),
         )
-        pane_target = split.stdout.strip()
-        if split.returncode != 0 or _PANE_ID_PATTERN.fullmatch(pane_target) is None:
-            return None
-        registration_steps = (
-            (
-                "set-option",
-                "-p",
-                "-t",
-                self._primary_pane_target,
-                OBSERVER_PRIMARY_PANE_OPTION,
-                pane_target,
-            ),
-            (
-                "set-option",
-                "-p",
-                "-t",
-                pane_target,
-                OBSERVER_OWNER_PANE_OPTION,
-                self._primary_pane_target,
-            ),
-            ("select-pane", "-d", "-t", pane_target),
-            ("select-pane", "-t", self._primary_pane_target),
-        )
-        for step in registration_steps:
-            if self._mutate(step).returncode != 0:
-                self._discard_failed_candidate(pane_target)
-                return None
-        self._observer_pane_target = pane_target
-        return pane_target
+        request = InteractionRequest(OBSERVER_TARGET, InteractionOperation.OPEN, "observer", payload=json.dumps(command))
+        result = self.pipeline.execute(request)
+        return result.value if result.accepted and isinstance(result.value, str) else None
 
-    def _discard_failed_candidate(self, pane_target: str) -> None:
-        """Best-effort rollback of one exact pane that never became an observer."""
-        self._mutate(
-            (
-                "if-shell",
-                "-t",
-                self._primary_pane_target,
-                "-F",
-                f"#{{==:#{{{OBSERVER_PRIMARY_PANE_OPTION}}},{pane_target}}}",
-                shlex.join(
-                    (
-                        "set-option",
-                        "-pu",
-                        "-t",
-                        self._primary_pane_target,
-                        OBSERVER_PRIMARY_PANE_OPTION,
-                    )
-                ),
-            )
-        )
-        candidate_condition = combine_tmux_if_shell_conditions(
-            capability_identity_if_shell_condition(self._capability),
-            f"#{{==:#{{pane_id}},{pane_target}}}",
-        )
-        self._tmux_executor.run(
-            (
-                "if-shell",
-                "-t",
-                pane_target,
-                "-F",
-                candidate_condition,
-                shlex.join(("kill-pane", "-t", pane_target)),
-                shlex.join(("run-shell", "false")),
+    def send_state(self, snapshot: dict[str, object]) -> InteractionResult:
+        return self.pipeline.execute(
+            InteractionRequest(
+                OBSERVER_TARGET,
+                InteractionOperation.DISPLAY_STATE,
+                "observer-reducer",
+                payload=json.dumps(snapshot),
             )
         )
 
-    def _mutate(self, arguments: tuple[str, ...]) -> TmuxCommandResult:
-        return self._tmux_executor.run(
-            (
-                "if-shell",
-                "-t",
-                self._primary_pane_target,
-                "-F",
-                primary_pane_capability_if_shell_condition(self._capability),
-                shlex.join(arguments),
-                shlex.join(("run-shell", "false")),
-            )
-        )
+    def _reopen(self) -> InteractionResult:
+        if self._open_request is None:
+            return InteractionResult(DeliveryStatus.REJECTED, "observer has no registered launch context")
+        return self.pipeline.execute(replace(self._open_request, source="observer-reopen", request_id=uuid.uuid4().hex))
+
+    def _deliver(self, request: InteractionRequest) -> InteractionResult:
+        operation = request.operation
+        if operation == InteractionOperation.OPEN:
+            reopening = request.payload is None or request.source == "observer-reopen"
+            with self._open_lock:
+                pane = self._pane.locate()
+                if pane is None:
+                    launch = request if request.payload is not None else self._open_request
+                    if launch is None or not isinstance(launch.payload, str):
+                        return InteractionResult(DeliveryStatus.REJECTED, "observer has no registered launch context")
+                    pane = self._pane.create(tuple(json.loads(launch.payload)))
+                    if pane is not None:
+                        command = json.loads(launch.payload)
+                        if "--initial-event" in command:
+                            command[command.index("--initial-event") + 1] = "{}"
+                        self._open_request = replace(launch, payload=json.dumps(command))
+            if pane is not None and reopening and self._snapshot_publisher is not None:
+                self._snapshot_publisher()
+            return InteractionResult(DeliveryStatus.COMPLETED if pane else DeliveryStatus.FAILED, value=pane)
+        if operation == InteractionOperation.LOCATE:
+            pane = self._pane.locate()
+            return InteractionResult(DeliveryStatus.COMPLETED if pane else DeliveryStatus.REJECTED, value=pane)
+        if operation == InteractionOperation.MESSAGE:
+            if self._message_sender is None:
+                return InteractionResult(DeliveryStatus.REJECTED, "observer message transport is unavailable")
+            assert request.text is not None
+            self._message_sender(request.text, request.expected_binding)
+            return InteractionResult(DeliveryStatus.DELIVERED, "accepted by observer transport, rendering unconfirmed")
+        if operation == InteractionOperation.DISPLAY_STATE:
+            if self._state_sender is None or not isinstance(request.payload, str):
+                return InteractionResult(DeliveryStatus.REJECTED, "observer state transport is unavailable")
+            address = {"pane_id": request.expected_binding}
+            if len(json.dumps(address).encode()) > OBSERVER_TRANSPORT_METADATA_MAX_BYTES:
+                return InteractionResult(DeliveryStatus.REJECTED, "observer pane address exceeds its wire budget")
+            self._state_sender(json.loads(request.payload) | address)
+            return InteractionResult(DeliveryStatus.QUEUED, "newest-only observer snapshot queued")
+        if operation == InteractionOperation.FOCUS:
+            assert request.expected_binding is not None
+            completed = self._pane.focus(request.expected_binding)
+        elif operation == InteractionOperation.RESIZE:
+            assert request.size_percent is not None and request.expected_binding is not None
+            completed = self._pane.resize(request.expected_binding, request.size_percent)
+        elif operation == InteractionOperation.CLOSE:
+            assert request.expected_binding is not None
+            completed = self._pane.close(request.expected_binding)
+        else:
+            return InteractionResult(DeliveryStatus.REJECTED, "unsupported observer operation")
+        return InteractionResult(DeliveryStatus.COMPLETED if completed else DeliveryStatus.FAILED)

@@ -12,7 +12,7 @@ pass through unchanged.
 > described here is complete for its current scope, but interfaces may still change
 > before a stable release.
 
-Current release: **Rodex 0.6.0a5**, SQL generation **19**, shared tmux protocol **v2**.
+Current release: **Rodex 0.7.0a1**, SQL generation **19**, shared tmux protocol **v2**.
 This ALPHA supports only its current storage and runtime contracts. It creates
 `rodex-v19.sqlite3` and `tmux-shared-v2.sock`; earlier generations are outside this
 installation's session catalog. There are no database migrations or old-runtime adapters.
@@ -29,6 +29,13 @@ intervene directly; another shell or agent can discover the same verified runtim
 observe readable terminal output or structured protocol events, and control one exact
 turn without typing into the TUI.
 Both sides retain the same Rodex, runtime, Codex, and workspace context.
+
+Session interactions share one target-addressed pipeline: display a message, explicitly
+start a model turn, control a pane, or process live protocol input/output. Main and observer
+presentations use the same message contract, with their rendering mechanisms in adapters.
+The current observer aggregates agents and deliberately has no single model-thread binding.
+See the [interaction contract and production-path inventory](docs/INTERACTION_PATHS.md)
+for supported operations, hooks, delivery outcomes and enforced routing boundaries.
 
 ## What Rodex does
 

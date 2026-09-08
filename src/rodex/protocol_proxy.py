@@ -10,6 +10,7 @@ import queue
 import stat
 import subprocess
 import time
+import uuid
 from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass
@@ -23,6 +24,17 @@ from websockets.sync.server import ServerConnection, unix_serve
 
 from .analytics_source_reader import AnalyticsSourceReadError, open_rollout_descriptor
 from .app_server_contract import CODEX_APP_SERVER
+from .interaction_pipeline import (
+    DeliveryStatus,
+    InteractionOperation,
+    InteractionRejected,
+    InteractionRequest,
+    InteractionResult,
+    InteractionTarget,
+    SessionInteractionPipeline,
+)
+from .interaction_transport import SESSION_INTERACTION_CONNECTION_PATH, serve_session_interaction
+from .pane_control import TmuxPaneController
 from .status_bar import (
     CONTEXT_COMPACTION_FRAME_INTERVAL_SECONDS,
     RODEX_CONTEXT_STATUS_OPTION,
@@ -60,8 +72,6 @@ _ROLLOUT_CONTEXT_BOUNDARY_BYTES: Final = 4 * 1024
 _EVENT_STREAM_CLOSED: Final = object()
 EVENT_STREAM_READY_METHOD: Final = "rodex/event-stream/ready"
 CONTROL_CONNECTION_PATH: Final = "/rodex-control"
-TUI_NOTICE_CONNECTION_PATH: Final = "/rodex-tui-notice"
-TUI_NOTICE_METHOD: Final = "rodex/tui-notice"
 ANALYTICS_EVENT_STREAM_PATH: Final = "/rodex-analytics"
 AGENT_OBSERVER_EVENT_STREAM_PATH: Final = "/rodex-agent-observer"
 ANALYTICS_WAKE_EVENT_METHODS: Final = frozenset(
@@ -96,43 +106,6 @@ class _RolloutFollowCheckpoint:
 
 class RodexProtocolProxyError(RuntimeError):
     """The local Codex protocol proxy could not start or stop cleanly."""
-
-
-def publish_tui_notice(
-    proxy_socket_path: Path,
-    message: str,
-    *,
-    connector: Callable[..., Any] = unix_connect,
-) -> bool:
-    """Ask Rodex's proxy to show one TUI-owned warning without an App Server turn."""
-    if not message.strip():
-        return False
-    request_id = 0
-    request = json.dumps(
-        {
-            "method": TUI_NOTICE_METHOD,
-            "id": request_id,
-            "params": {"message": message},
-        },
-        separators=(",", ":"),
-    )
-    try:
-        with connector(
-            str(proxy_socket_path),
-            uri=f"ws://localhost{TUI_NOTICE_CONNECTION_PATH}",
-            compression=None,
-            open_timeout=1,
-            close_timeout=1,
-            max_size=None,
-        ) as connection:
-            connection.send(request)
-            response = _json_object(connection.recv(timeout=1))
-    except (ConnectionClosed, OSError, TimeoutError):
-        return False
-    if response is None or response.get("id") != request_id:
-        return False
-    result = response.get("result")
-    return isinstance(result, dict) and result.get("delivered") is True
 
 
 class CodexProtocolEventTap:
@@ -816,22 +789,50 @@ class CodexProtocolProxy:
         tool_call_counter: ToolCallCounter,
         on_primary_server_message: ProtocolEventCallback | None = None,
         on_primary_disconnect: DisconnectCallback | None = None,
+        *,
+        interaction_pipeline: SessionInteractionPipeline | None = None,
+        runtime_identity: str | None = None,
+        primary_pane: TmuxPaneController | None = None,
+        model_message_sender: Callable[[InteractionRequest], InteractionResult] | None = None,
     ) -> None:
         self._proxy_socket_path = proxy_socket_path
         self._app_server_socket_path = app_server_socket_path
         self._tool_call_counter = tool_call_counter
         self._on_primary_server_message = on_primary_server_message
         self._on_primary_disconnect = on_primary_disconnect
+        self.interactions = interaction_pipeline if interaction_pipeline is not None else SessionInteractionPipeline()
+        self._runtime_identity = runtime_identity or uuid.uuid4().hex
+        self._primary_pane = primary_pane
+        self._model_message_sender = model_message_sender
         self._primary_lifecycle_lock = Lock()
         self._connection_lock = Lock()
         self._primary_send_lock = Lock()
         self._primary_connection_claimed = False
         self._primary_tui_connection: Any | None = None
         self._primary_thread_id: str | None = None
+        self._primary_binding: str | None = None
         self._primary_connection_released = Event()
         self._primary_connection_released.set()
         self._server: Any | None = None
         self._server_thread: Thread | None = None
+        self.interactions.register(
+            InteractionTarget(
+                "main",
+                self._runtime_identity,
+                frozenset(
+                    {
+                        InteractionOperation.MESSAGE,
+                        InteractionOperation.LOCATE,
+                        InteractionOperation.FOCUS,
+                        InteractionOperation.RESIZE,
+                    }
+                ),
+                self._primary_available,
+                self._deliver_main_interaction,
+                model_thread_id=lambda: self._primary_thread_id if self._model_message_sender is not None else None,
+                binding_identity=lambda: self._primary_binding,
+            )
+        )
 
     def start(self) -> None:
         """Bind the proxy socket and begin accepting WebSocket connections."""
@@ -884,8 +885,8 @@ class CodexProtocolProxy:
             raise RodexProtocolProxyError("primary Codex protocol connection did not close before retry")
 
     def _handle_connection(self, tui_connection: Any) -> None:
-        if _connection_path(tui_connection) == TUI_NOTICE_CONNECTION_PATH:
-            self._handle_tui_notice_connection(tui_connection)
+        if _connection_path(tui_connection) == SESSION_INTERACTION_CONNECTION_PATH:
+            serve_session_interaction(tui_connection, self.interactions)
             return
         is_primary_connection = _connection_path(
             tui_connection
@@ -899,28 +900,71 @@ class CodexProtocolProxy:
                 close_timeout=1,
                 max_size=None,
             ) as app_server_connection:
+                connection_live = Event()
+                connection_live.set()
+                connection_id = uuid.uuid4().hex
+
+                def deliver_input(request: InteractionRequest) -> InteractionResult:
+                    app_server_connection.send(request.payload)
+                    return InteractionResult(DeliveryStatus.DELIVERED)
+
+                def deliver_output(request: InteractionRequest) -> InteractionResult:
+                    message = request.payload
+                    assert isinstance(message, (str, bytes))
+                    if is_primary_connection:
+                        if not self._send_primary_tui_message(message, expected_connection=tui_connection):
+                            return InteractionResult(DeliveryStatus.FAILED, "primary connection is unavailable")
+                        event = _json_object(message)
+                        self._observe_primary_thread(event)
+                        self._tool_call_counter.observe_protocol_event(event)
+                        if self._on_primary_server_message is not None:
+                            self._on_primary_server_message(message, event)
+                    else:
+                        tui_connection.send(message)
+                    return InteractionResult(DeliveryStatus.DELIVERED)
+
+                input_target = InteractionTarget(
+                    f"protocol:{connection_id}:input",
+                    self._runtime_identity,
+                    frozenset({InteractionOperation.PROTOCOL_INPUT}),
+                    connection_live.is_set,
+                    deliver_input,
+                )
+                output_target = InteractionTarget(
+                    f"protocol:{connection_id}:output",
+                    self._runtime_identity,
+                    frozenset({InteractionOperation.PROTOCOL_OUTPUT}),
+                    connection_live.is_set,
+                    deliver_output,
+                )
+                self.interactions.register(input_target)
+                self.interactions.register(output_target)
                 tui_to_server = Thread(
                     target=_forward_messages,
-                    args=(tui_connection, app_server_connection),
+                    args=(tui_connection, app_server_connection, self.interactions, input_target.name),
                     name="rodex-codex-protocol-client-forwarder",
                     daemon=True,
                 )
                 tui_to_server.start()
                 try:
                     for message in app_server_connection:
-                        event = _json_object(message) if is_primary_connection else None
-                        if is_primary_connection:
-                            if not self._send_primary_tui_message(message):
-                                break
-                            self._observe_primary_thread(event)
-                            self._tool_call_counter.observe_protocol_event(event)
-                            if self._on_primary_server_message is not None:
-                                self._on_primary_server_message(message, event)
-                        else:
-                            tui_connection.send(message)
+                        result = self.interactions.execute(
+                            InteractionRequest(
+                                output_target.name,
+                                InteractionOperation.PROTOCOL_OUTPUT,
+                                "app-server",
+                                payload=message,
+                            )
+                        )
+                        if not result.accepted:
+                            tui_connection.close(code=1011, reason="Rodex rejected protocol output")
+                            break
                 except (ConnectionClosed, OSError):
                     pass
                 finally:
+                    connection_live.clear()
+                    self.interactions.unregister(input_target)
+                    self.interactions.unregister(output_target)
                     if is_primary_connection:
                         self._release_primary_connection(tui_connection)
                     tui_connection.close()
@@ -932,27 +976,42 @@ class CodexProtocolProxy:
             if is_primary_connection:
                 self._release_primary_connection(tui_connection)
 
-    def _handle_tui_notice_connection(self, connection: Any) -> None:
-        request_id: object = None
-        delivered = False
-        try:
-            request = _json_object(connection.recv(timeout=1))
-            if request is not None:
-                request_id = request.get("id")
-                params = request.get("params")
-                message = params.get("message") if isinstance(params, dict) else None
-                if request.get("method") == TUI_NOTICE_METHOD and isinstance(message, str) and message.strip():
-                    delivered = self._send_primary_tui_message(self._warning_notification(message))
-            connection.send(
-                json.dumps(
-                    {"id": request_id, "result": {"delivered": delivered}},
-                    separators=(",", ":"),
-                )
+    def _primary_available(self) -> bool:
+        with self._connection_lock:
+            return self._primary_tui_connection is not None
+
+    def validate_primary_model_binding(self, request: InteractionRequest) -> None:
+        """Recheck the selected connection/thread at the exact model RPC boundary."""
+        with self._connection_lock:
+            if self._primary_binding != request.expected_binding or self._primary_thread_id != request.expected_thread_id:
+                raise InteractionRejected("main conversation changed before model dispatch")
+
+    def _deliver_main_interaction(self, request: InteractionRequest) -> InteractionResult:
+        if request.operation == InteractionOperation.MESSAGE:
+            if request.start_model_turn:
+                if self._model_message_sender is None:
+                    return InteractionResult(DeliveryStatus.REJECTED, "main model input is unavailable")
+                return self._model_message_sender(request)
+            assert request.text is not None
+            delivered = self._send_primary_tui_message(
+                self._warning_notification(request.text),
+                expected_binding=request.expected_binding,
             )
-        except (ConnectionClosed, OSError, TimeoutError):
-            return
-        finally:
-            connection.close()
+            return InteractionResult(
+                DeliveryStatus.DELIVERED if delivered else DeliveryStatus.FAILED,
+                "native TUI transport acceptance; rendering unconfirmed",
+            )
+        if self._primary_pane is None:
+            return InteractionResult(DeliveryStatus.REJECTED, "main pane control is unavailable")
+        if request.operation == InteractionOperation.LOCATE:
+            pane = self._primary_pane.locate()
+            return InteractionResult(DeliveryStatus.COMPLETED if pane else DeliveryStatus.REJECTED, value=pane)
+        if request.operation == InteractionOperation.FOCUS:
+            completed = self._primary_pane.focus(self._primary_pane.known_pane_id)
+        else:
+            assert request.size_percent is not None
+            completed = self._primary_pane.resize(self._primary_pane.known_pane_id, request.size_percent)
+        return InteractionResult(DeliveryStatus.COMPLETED if completed else DeliveryStatus.FAILED)
 
     def _warning_notification(self, message: str) -> str:
         with self._connection_lock:
@@ -965,10 +1024,20 @@ class CodexProtocolProxy:
             separators=(",", ":"),
         )
 
-    def _send_primary_tui_message(self, message: str | bytes) -> bool:
+    def _send_primary_tui_message(
+        self,
+        message: str | bytes,
+        *,
+        expected_connection: Any | None = None,
+        expected_binding: str | None = None,
+    ) -> bool:
         with self._primary_send_lock:
             with self._connection_lock:
                 connection = self._primary_tui_connection
+                if expected_binding is not None and self._primary_binding != expected_binding:
+                    return False
+                if expected_connection is not None and connection is not expected_connection:
+                    return False
             if connection is None:
                 return False
             try:
@@ -993,6 +1062,7 @@ class CodexProtocolProxy:
             self._primary_connection_claimed = True
             self._primary_tui_connection = tui_connection
             self._primary_thread_id = None
+            self._primary_binding = uuid.uuid4().hex
             self._primary_connection_released.clear()
             return True
 
@@ -1004,6 +1074,7 @@ class CodexProtocolProxy:
                     self._primary_connection_claimed = False
                     self._primary_tui_connection = None
                     self._primary_thread_id = None
+                    self._primary_binding = None
                     released = True
             if released and self._on_primary_disconnect is not None:
                 with suppress(Exception):
@@ -1012,10 +1083,20 @@ class CodexProtocolProxy:
                 self._primary_connection_released.set()
 
 
-def _forward_messages(source: Any, destination: Any) -> None:
+def _forward_messages(source: Any, destination: Any, pipeline: SessionInteractionPipeline, target: str) -> None:
     try:
         for message in source:
-            destination.send(message)
+            result = pipeline.execute(
+                InteractionRequest(
+                    target,
+                    InteractionOperation.PROTOCOL_INPUT,
+                    "codex-client",
+                    payload=message,
+                )
+            )
+            if not result.accepted:
+                source.close(code=1011, reason="Rodex rejected protocol input")
+                break
     except (ConnectionClosed, OSError):
         pass
     finally:

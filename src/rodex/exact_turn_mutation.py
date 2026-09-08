@@ -6,6 +6,7 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
+from typing import cast
 
 from rodex_registry import (
     RodexSessionNames,
@@ -24,6 +25,14 @@ from .control import (
     RodexControlError,
 )
 from .errors import ExactRuntimeIdentityRequiredError, RodexLaunchError
+from .interaction_pipeline import (
+    DeliveryStatus,
+    InteractionOperation,
+    InteractionRequest,
+    InteractionResult,
+    InteractionTarget,
+    SessionInteractionPipeline,
+)
 from .live_runtime import (
     rename_tmux_identity,
     require_durable_runtime_instance,
@@ -62,10 +71,13 @@ class ExactTurnMutationCoordinator:
         database_path: Path,
         launcher: RodexRuntimeLauncher,
         control_client: CodexControlClient,
+        *,
+        interaction_pipeline: SessionInteractionPipeline | None = None,
     ) -> None:
         self._database_path = database_path
         self._launcher = launcher
         self._control_client = control_client
+        self.interactions = interaction_pipeline if interaction_pipeline is not None else SessionInteractionPipeline()
 
     @contextmanager
     def _locked_selector(self, selector: str) -> Iterator[_LockedSessionSelection]:
@@ -88,16 +100,31 @@ class ExactTurnMutationCoordinator:
         prompt: str,
         *,
         dispatch_id: str | None,
+        expected_runtime_id: str | None = None,
+        expected_thread_id: str | None = None,
+        before_dispatch: Callable[[], None] | None = None,
     ) -> tuple[ExactTurnTarget, PromptDispatch]:
         with self._locked_selector(selector) as selection:
             target = self._resolve_target(selection)
-            dispatch = self._control_client._start_turn(
-                target.control,
-                prompt,
+            if expected_runtime_id is not None and str(target.control.runtime_id) != expected_runtime_id:
+                raise RodexControlError("model message runtime changed before dispatch")
+            if expected_thread_id is not None and str(target.control.codex_session_id) != expected_thread_id:
+                raise RodexControlError("model message thread changed before dispatch")
+            exact_revalidator = self._revalidator(target)
+
+            def revalidate() -> None:
+                exact_revalidator()
+                if before_dispatch is not None:
+                    before_dispatch()
+
+            dispatch = self._dispatch_turn_operation(
+                target,
+                InteractionOperation.MESSAGE,
+                prompt=prompt,
                 dispatch_id=dispatch_id,
-                revalidate=self._revalidator(target),
+                revalidate=revalidate,
             )
-            return target, dispatch
+            return target, cast(PromptDispatch, dispatch)
 
     def steer(
         self,
@@ -109,14 +136,15 @@ class ExactTurnMutationCoordinator:
     ) -> tuple[ExactTurnTarget, PromptDispatch]:
         with self._locked_selector(selector) as selection:
             target = self._resolve_target(selection)
-            dispatch = self._control_client._steer_turn(
-                target.control,
-                turn_id,
-                prompt,
+            dispatch = self._dispatch_turn_operation(
+                target,
+                InteractionOperation.STEER,
+                prompt=prompt,
+                turn_id=turn_id,
                 dispatch_id=dispatch_id,
                 revalidate=self._revalidator(target),
             )
-            return target, dispatch
+            return target, cast(PromptDispatch, dispatch)
 
     def interrupt(
         self,
@@ -125,12 +153,13 @@ class ExactTurnMutationCoordinator:
     ) -> tuple[ExactTurnTarget, CodexThreadState]:
         with self._locked_selector(selector) as selection:
             target = self._resolve_target(selection)
-            state = self._control_client._interrupt_turn(
-                target.control,
-                turn_id,
+            state = self._dispatch_turn_operation(
+                target,
+                InteractionOperation.INTERRUPT,
+                turn_id=turn_id,
                 revalidate=self._revalidator(target),
             )
-            return target, state
+            return target, cast(CodexThreadState, state)
 
     def mouse_mode(
         self,
@@ -266,19 +295,98 @@ class ExactTurnMutationCoordinator:
         state = self._control_client.inspect_live(target.control)
         revalidate()
         if state.status == "idle":
-            return self._control_client._start_turn(
-                target.control,
-                prompt,
-                revalidate=revalidate,
+            return cast(
+                PromptDispatch,
+                self._dispatch_turn_operation(
+                    target,
+                    InteractionOperation.MESSAGE,
+                    prompt=prompt,
+                    revalidate=revalidate,
+                    source="alias-announcement",
+                ),
             )
         if state.status == "active" and state.active_turn_id is not None:
-            return self._control_client._steer_turn(
-                target.control,
-                state.active_turn_id,
-                prompt,
-                revalidate=revalidate,
+            return cast(
+                PromptDispatch,
+                self._dispatch_turn_operation(
+                    target,
+                    InteractionOperation.STEER,
+                    prompt=prompt,
+                    turn_id=state.active_turn_id,
+                    revalidate=revalidate,
+                    source="alias-announcement",
+                ),
             )
         raise RodexLaunchError(f"Codex thread cannot accept Rodex information while {state.status}")
+
+    def _dispatch_turn_operation(
+        self,
+        target: ExactTurnTarget,
+        operation: InteractionOperation,
+        *,
+        revalidate: Callable[[], None],
+        prompt: str | None = None,
+        turn_id: str | None = None,
+        dispatch_id: str | None = None,
+        source: str = "exact-control",
+    ) -> PromptDispatch | CodexThreadState:
+        """One model-delivery adapter, called only while the existing transition lock is held."""
+        request = InteractionRequest(
+            target=f"model:{target.control.codex_session_id}",
+            operation=operation,
+            source=source,
+            text=prompt,
+            start_model_turn=operation == InteractionOperation.MESSAGE,
+            expected_turn_id=turn_id,
+            dispatch_id=dispatch_id,
+        )
+
+        def deliver(accepted: InteractionRequest) -> InteractionResult:
+            if accepted.operation == InteractionOperation.MESSAGE and accepted.start_model_turn:
+                assert accepted.text is not None
+                dispatched = self._control_client._start_turn(
+                    target.control,
+                    accepted.text,
+                    dispatch_id=accepted.dispatch_id,
+                    revalidate=revalidate,
+                )
+                return InteractionResult(DeliveryStatus.MODEL_TURN_STARTED, value=dispatched)
+            if accepted.operation == InteractionOperation.STEER:
+                assert accepted.expected_turn_id is not None and accepted.text is not None
+                dispatched = self._control_client._steer_turn(
+                    target.control,
+                    accepted.expected_turn_id,
+                    accepted.text,
+                    dispatch_id=accepted.dispatch_id,
+                    revalidate=revalidate,
+                )
+                return InteractionResult(DeliveryStatus.COMPLETED, value=dispatched)
+            if accepted.operation == InteractionOperation.INTERRUPT:
+                assert accepted.expected_turn_id is not None
+                state = self._control_client._interrupt_turn(
+                    target.control, accepted.expected_turn_id, revalidate=revalidate
+                )
+                return InteractionResult(DeliveryStatus.COMPLETED, value=state)
+            return InteractionResult(DeliveryStatus.REJECTED, "exact model adapter does not display messages")
+
+        binding = InteractionTarget(
+            request.target,
+            str(target.control.runtime_id),
+            frozenset({operation}),
+            # The target was resolved under the transition lock above; the control
+            # adapter revalidates immediately before its RPC, after transport waits.
+            lambda: True,
+            deliver,
+            model_thread_id=lambda: str(target.control.codex_session_id),
+        )
+        self.interactions.register(binding)
+        try:
+            result = self.interactions.execute(request)
+            if not result.accepted:
+                raise RodexControlError(result.detail)
+            return cast(PromptDispatch | CodexThreadState, result.value)
+        finally:
+            self.interactions.unregister(binding)
 
     def _resolve_target(self, selection: _LockedSessionSelection) -> ExactTurnTarget:
         session_id, runtime, control = resolve_live_control(

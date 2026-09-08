@@ -12,6 +12,7 @@ import sys
 import time
 import uuid
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 from threading import Event, Lock, Thread
 from typing import BinaryIO, cast
@@ -4146,12 +4147,14 @@ def test_runtime_path_keepalives_share_runtime_paths_independently(
     ],
 )
 @pytest.mark.parametrize("bootstrap_virtualenv", [True, False])
+@pytest.mark.parametrize("analytics_start_fails", [False, True])
 def test_session_host_skips_updater_and_connects_tui_through_protocol_proxy(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     codex_arguments: list[str],
     captures_stderr: bool,
     bootstrap_virtualenv: bool,
+    analytics_start_fails: bool,
 ) -> None:
     initialise_rodex_database(tmp_path / "rodex.sqlite3")
     app_socket = tmp_path / "app.sock"
@@ -4205,7 +4208,7 @@ def test_session_host_skips_updater_and_connects_tui_through_protocol_proxy(
             assert "Context: --" in rendered_status
 
     class FakeProxy:
-        def __init__(self, *args: object) -> None:
+        def __init__(self, *args: object, **kwargs: object) -> None:
             assert args[:2] == (proxy_socket, app_socket)
 
         def start(self) -> None:
@@ -4228,7 +4231,7 @@ def test_session_host_skips_updater_and_connects_tui_through_protocol_proxy(
             proxy_lifecycle.append("event-close")
 
     class FakeAgentObserver:
-        def __init__(self, *args: object) -> None:
+        def __init__(self, *args: object, **kwargs: object) -> None:
             assert args == (
                 "/usr/bin/tmux",
                 tmux_runtime_capability,
@@ -4238,6 +4241,10 @@ def test_session_host_skips_updater_and_connects_tui_through_protocol_proxy(
 
         def observe_protocol_event(self, _event: object) -> None:
             return None
+
+        def activate(self, **kwargs: object) -> None:
+            assert kwargs["rodex_sessions_id"] == 1
+            proxy_lifecycle.append("observer-activate")
 
         def close(self) -> None:
             proxy_lifecycle.append("observer-close")
@@ -4269,8 +4276,12 @@ def test_session_host_skips_updater_and_connects_tui_through_protocol_proxy(
             proxy_lifecycle.append("analytics-poll-failed")
             raise OSError("analytics unavailable")
 
+        def start(self) -> None:
+            proxy_lifecycle.append("analytics-start-failed")
+            raise OSError("analytics startup unavailable")
+
         def close(self) -> None:
-            raise AssertionError("failed analytics supervisor was released")
+            proxy_lifecycle.append("analytics-close")
 
     def start_process(command: list[str], **options: object) -> FakeProcess:
         process_environment = options.get("env")
@@ -4321,7 +4332,15 @@ def test_session_host_skips_updater_and_connects_tui_through_protocol_proxy(
     monkeypatch.setattr(
         runtime_module,
         "_registered_analytics_worker_config",
-        lambda *_args: None,
+        lambda pending, *_args: (
+            replace(
+                pending,
+                rodex_sessions_id=1,
+                codex_session_id=uuid.UUID("01a00654-f2bc-7a30-834a-a5f886a65f82"),
+            )
+            if analytics_start_fails
+            else None
+        ),
     )
     signal_changes: list[tuple[int, bool]] = []
 
@@ -4374,6 +4393,7 @@ def test_session_host_skips_updater_and_connects_tui_through_protocol_proxy(
         "start",
         "keepalive-start",
         "signal-install",
+        *(["observer-activate", "analytics-start-failed", "analytics-close"] if analytics_start_fails else []),
         "keepalive-close",
         "close",
         "observer-close",
@@ -4489,7 +4509,7 @@ def test_session_host_retries_exact_resume_during_active_writer_handoff(
             return None
 
     class FakeProxy:
-        def __init__(self, *args: object) -> None:
+        def __init__(self, *args: object, **kwargs: object) -> None:
             return None
 
         def start(self) -> None:
@@ -4646,7 +4666,7 @@ def test_session_host_terminates_the_tui_when_runtime_keepalive_fails(
             assert "Context: --" in rendered_status
 
     class FakeProxy:
-        def __init__(self, *args: object) -> None:
+        def __init__(self, *args: object, **kwargs: object) -> None:
             return None
 
         def start(self) -> None:

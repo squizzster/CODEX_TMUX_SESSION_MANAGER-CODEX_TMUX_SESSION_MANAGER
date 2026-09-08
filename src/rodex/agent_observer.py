@@ -19,7 +19,7 @@ from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from threading import Event, Lock, Thread
+from threading import Event, Lock, RLock, Thread
 from typing import Final
 
 from websockets.exceptions import ConnectionClosed
@@ -34,6 +34,7 @@ from rodex_registry import (
 )
 
 from .app_server_contract import CODEX_APP_SERVER
+from .interaction_pipeline import InteractionDeliveryIndeterminate, InteractionRejected, SessionInteractionPipeline
 from .observer_contract import (
     OBSERVER_CONTROL_SOCKET_PREFIX,
     OBSERVER_FRAME_LENGTH,
@@ -52,6 +53,7 @@ from .observer_projection import (
 )
 from .observer_state import ObserverStateReducer
 from .protocol_proxy import AGENT_OBSERVER_EVENT_STREAM_PATH
+from .terminal_presentation import render_observer_lines
 from .tmux_session_capability import TmuxRuntimeCapability
 
 OBSERVER_TRACE_PAGE_SIZE: Final = 500
@@ -114,6 +116,35 @@ def _try_send_observer_event_frame(path: Path, event: dict[str, object]) -> None
             raise BlockingIOError("observer control frame was not accepted atomically")
 
 
+def _send_observer_display_message(path: Path, event: dict[str, object]) -> None:
+    """Wait only for connection readiness, send once, then require exact-pane admission."""
+    frame = _observer_event_frame(event)
+    if len(frame) - _OBSERVER_FRAME_LENGTH.size > OBSERVER_MAX_FRAME_BYTES:
+        raise InteractionRejected("observer message exceeds the frame limit")
+    deadline = time.monotonic() + 3.0
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sender:
+        sender.settimeout(OBSERVER_SOCKET_OPERATION_TIMEOUT_SECONDS)
+        while True:
+            try:
+                sender.connect(str(path))
+                break
+            except (FileNotFoundError, ConnectionRefusedError):
+                if time.monotonic() >= deadline:
+                    raise
+                time.sleep(0.02)
+        try:
+            sender.sendall(frame)
+            admitted = sender.recv(1)
+        except OSError as error:
+            raise InteractionDeliveryIndeterminate(
+                "observer message admission is unconfirmed; do not retry blindly"
+            ) from error
+        if admitted == b"0":
+            raise InteractionRejected("observer pane changed before message admission")
+        if admitted != b"1":
+            raise InteractionDeliveryIndeterminate("observer message admission response is unavailable")
+
+
 class _ObserverEventDispatcher:
     """Transport the newest complete snapshot without reducing semantic state."""
 
@@ -140,7 +171,7 @@ class _ObserverEventDispatcher:
             raise ValueError("observer dispatcher accepts complete snapshots only")
         with self._lock:
             if self._closed:
-                return
+                raise OSError("observer snapshot dispatcher is closed")
             self._generation += 1
             generation = self._generation
             self._replace_pending_locked((generation, path, snapshot))
@@ -275,24 +306,29 @@ class AgentObserverCoordinator:
         cursor_reader: CursorReader = read_rodex_agent_trace_cursor,
         event_sender: EventSender | None = None,
         python_executable: str = sys.executable,
+        interaction_pipeline: SessionInteractionPipeline | None = None,
     ) -> None:
         self._protocol_event_socket_path = protocol_event_socket_path
+        self._event_dispatcher = _ObserverEventDispatcher() if event_sender is None else None
+        self._event_sender = self._event_dispatcher.send if self._event_dispatcher is not None else event_sender
         self._pane = ObserverPaneController(
             tmux_binary,
             capability,
             primary_pane_target,
             runner=runner,
             python_executable=python_executable,
+            pipeline=interaction_pipeline,
+            state_sender=self._deliver_observer_snapshot,
+            message_sender=self._deliver_observer_message,
+            snapshot_publisher=self._publish_current_observer_snapshot,
         )
         self._cursor_reader = cursor_reader
-        self._event_dispatcher = _ObserverEventDispatcher() if event_sender is None else None
-        self._event_sender = self._event_dispatcher.send if self._event_dispatcher is not None else event_sender
         self._observer_state = ObserverStateReducer.producer()
         self._database_path: Path | None = None
         self._rodex_sessions_id: int | None = None
         self._rodex_session_id: str | None = None
         self._root_thread_id: uuid.UUID | None = None
-        self._lifecycle_lock = Lock()
+        self._lifecycle_lock = RLock()
         self._closed = False
 
     def activate(
@@ -354,7 +390,7 @@ class AgentObserverCoordinator:
         agent_message = project_agent_message_event(event)
         if agent_message is not None:
             target_thread_id = agent_message["thread_id"]
-            if self._observer_state.tracks_target(str(target_thread_id)) and self._pane.locate() is not None:
+            if self._observer_state.tracks_target(str(target_thread_id)):
                 self._send_observer_event(agent_message)
             return
         parent_user_message = project_user_message_event(event)
@@ -539,14 +575,23 @@ class AgentObserverCoordinator:
         self._send_observer_snapshot(self._observer_state.observe(event))
 
     def _send_observer_snapshot(self, snapshot: dict[str, object]) -> None:
-        try:
-            assert self._event_sender is not None
-            self._event_sender(
-                observer_control_socket_path(self._protocol_event_socket_path),
-                snapshot,
-            )
-        except OSError:
-            return
+        with suppress(OSError):
+            self._pane.send_state(snapshot)
+
+    def _deliver_observer_message(self, text: str, pane_id: str | None) -> None:
+        _send_observer_display_message(
+            observer_control_socket_path(self._protocol_event_socket_path),
+            {"schema": OBSERVER_SCHEMA, "kind": "display_message", "text": text, "pane_id": pane_id},
+        )
+
+    def _publish_current_observer_snapshot(self) -> None:
+        """Capture and enqueue current state atomically, after the pane-open lock is released."""
+        with self._lifecycle_lock:
+            self._send_observer_snapshot(self._observer_state.snapshot())
+
+    def _deliver_observer_snapshot(self, snapshot: dict[str, object]) -> None:
+        assert self._event_sender is not None
+        self._event_sender(observer_control_socket_path(self._protocol_event_socket_path), snapshot)
 
 
 @dataclass(slots=True)
@@ -1545,6 +1590,7 @@ def _observer_control_receiver(
     stop: Event,
     *,
     monotonic: Callable[[], float] = time.monotonic,
+    expected_pane_id: str | None = None,
 ) -> None:
     while not stop.is_set():
         try:
@@ -1571,12 +1617,18 @@ def _observer_control_receiver(
                 )
             except (EOFError, OSError, TimeoutError):
                 continue
-        try:
-            event = json.loads(payload)
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            continue
-        if isinstance(event, dict) and event.get("schema") == OBSERVER_SCHEMA:
-            events.put(event)
+            try:
+                event = json.loads(payload)
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                continue
+            if isinstance(event, dict) and event.get("schema") == OBSERVER_SCHEMA:
+                matches_pane = expected_pane_id is None or event.get("pane_id") == expected_pane_id
+                accepted = event.get("kind") not in {"display_message", "observer_state_snapshot"} or matches_pane
+                if accepted:
+                    events.put(event)
+                if event.get("kind") == "display_message":
+                    with suppress(OSError):
+                        connection.sendall(b"1" if accepted else b"0")
 
 
 def _receive_exactly(
@@ -1657,10 +1709,7 @@ def _read_and_render_available_trace(
 
 
 def _print_lines(lines: tuple[str, ...] | list[str]) -> None:
-    if not lines:
-        return
-    sys.stdout.write("\n".join(lines) + "\n")
-    sys.stdout.flush()
+    render_observer_lines(lines)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -1701,6 +1750,7 @@ def main(arguments: list[str] | None = None) -> int:
     control_thread = Thread(
         target=_observer_control_receiver,
         args=(controls, events, stop),
+        kwargs={"expected_pane_id": os.environ.get("TMUX_PANE")},
         name="rodex-agent-observer-control",
         daemon=True,
     )
@@ -1762,7 +1812,11 @@ def main(arguments: list[str] | None = None) -> int:
             trace_publications: list[tuple[int, bool]] = []
             for event in semantic_events:
                 kind = event.get("kind")
-                if kind == "app_server_subagent_activity":
+                if kind == "display_message" and event.get("schema") == OBSERVER_SCHEMA:
+                    text = event.get("text")
+                    if isinstance(text, str):
+                        _print_lines([_plain_terminal_text(text)])
+                elif kind == "app_server_subagent_activity":
                     _print_lines(view.accept_app_server_event(event))
                 elif kind == "app_server_collaboration_invocation":
                     _print_lines(view.accept_collaboration_invocation_event(event))

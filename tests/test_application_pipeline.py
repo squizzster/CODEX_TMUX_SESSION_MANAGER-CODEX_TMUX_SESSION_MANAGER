@@ -18,14 +18,14 @@ from rodex.command_contract import (
     ClassifiedRodexCommand,
     CommandRoute,
 )
-from rodex.errors import RodexExecutableNotFoundError, RodexLaunchError
+from rodex.errors import RodexExecutableNotFoundError
 from rodex.managed_session_lifecycle import (
     OwnedSessionSelection,
     SelectorExecution,
     SessionSelection,
     UnregisteredCodexSessionSelection,
 )
-from rodex_registry import parse_codex_session_id
+from rodex_registry import CodexSessionId, parse_codex_session_id
 
 
 @pytest.mark.parametrize(
@@ -116,6 +116,7 @@ def _pipeline(
     selected_session: SessionSelection | None = None,
     selector_outcome: SelectorExecution = SelectorExecution.OPENED,
     available: dict[str, str | None] | None = None,
+    codex_session_persisted: bool = True,
 ) -> UnifiedRodexApplicationPipeline:
     executables = {"codex": "/bin/codex", "tmux": "/bin/tmux"} if available is None else available
 
@@ -126,6 +127,13 @@ def _pipeline(
     def delegate(binary: str, arguments: list[str] | tuple[str, ...]) -> int:
         trace.append(("codex", binary, tuple(arguments)))
         return 17
+
+    class ProbeLauncher(str):
+        """Retain the trace's launcher label while recording persistence lookup."""
+
+        def codex_session_is_persisted(self, codex_session_id: CodexSessionId) -> bool:
+            trace.append(("persistence_probe", codex_session_id))
+            return codex_session_persisted
 
     class FakeSessionLifecycle:
         def resolve_selector(self, selector: str, database_path: Path) -> SessionSelection | None:
@@ -140,7 +148,6 @@ def _pipeline(
             *,
             codex_available: bool,
             configured_codex: str,
-            allow_missing_history_recovery: bool,
         ) -> SelectorExecution:
             trace.append(
                 (
@@ -150,7 +157,6 @@ def _pipeline(
                     launcher,
                     codex_available,
                     configured_codex,
-                    allow_missing_history_recovery,
                 )
             )
             return selector_outcome
@@ -201,7 +207,7 @@ def _pipeline(
         database_path=tmp_path / "rodex.sqlite3",
         configured_codex="codex",
         configured_tmux="tmux",
-        launcher="launcher",  # type: ignore[arg-type]
+        launcher=ProbeLauncher("launcher"),  # type: ignore[arg-type]
         control_client="control",  # type: ignore[arg-type]
         codex_delegator=delegate,
         resolve_executable=resolve_executable,
@@ -297,7 +303,6 @@ def test_selector_resolves_before_runtime_and_never_probes_another_domain(
             "launcher",
             True,
             "codex",
-            True,
         ),
     ]
 
@@ -345,6 +350,8 @@ def test_unregistered_codex_uuid_can_become_a_managed_prompt_after_runtime_probe
 
     assert trace == [
         ("selector_resolver", selector, database),
+        ("resolve_executable", "codex"),
+        ("persistence_probe", parse_codex_session_id(selector)),
         ("resolve_executable", "tmux"),
         ("resolve_executable", "codex"),
         (
@@ -354,7 +361,6 @@ def test_unregistered_codex_uuid_can_become_a_managed_prompt_after_runtime_probe
             "launcher",
             True,
             "codex",
-            True,
         ),
         (
             "managed_codex",
@@ -367,30 +373,68 @@ def test_unregistered_codex_uuid_can_become_a_managed_prompt_after_runtime_probe
     ]
 
 
-def test_explicit_resume_uses_the_exact_id_and_existing_selector_owner(tmp_path: Path) -> None:
+@pytest.mark.parametrize("selector", ["01a081ed-0a6e-7a13-a3e9-062e70df918e", "automatic-beluga", "preferred_alias"])
+def test_explicit_resume_uses_the_existing_selector_owner(tmp_path: Path, selector: str) -> None:
     trace: list[object] = []
-    selector = "01a081ed-0a6e-7a13-a3e9-062e70df918e"
-    selection = UnregisteredCodexSessionSelection(selector, parse_codex_session_id(selector))
+    selection = OwnedSessionSelection(selector, 7)
 
     assert _pipeline(tmp_path, trace, selected_session=selection).execute(["resume", selector]) == 0
     assert trace == [
         ("selector_resolver", selector, tmp_path / "rodex.sqlite3"),
         ("resolve_executable", "tmux"),
         ("resolve_executable", "codex"),
-        ("selector", selection, tmp_path / "rodex.sqlite3", "launcher", True, "codex", False),
+        ("selector", selection, tmp_path / "rodex.sqlite3", "launcher", True, "codex"),
     ]
 
 
 @pytest.mark.parametrize("has_selection", [False, True])
-def test_explicit_resume_never_falls_back_to_an_initial_prompt(tmp_path: Path, has_selection: bool) -> None:
+@pytest.mark.parametrize("selector", ["01a081ed-0a6e-7a13-a3e9-062e70df918e", "unknown-session"])
+def test_unmatched_explicit_resume_falls_back_to_codex_with_original_arguments(
+    tmp_path: Path, has_selection: bool, selector: str
+) -> None:
     trace: list[object] = []
-    selector = "01a081ed-0a6e-7a13-a3e9-062e70df918e"
-    selection = UnregisteredCodexSessionSelection(selector, parse_codex_session_id(selector)) if has_selection else None
-    with pytest.raises(RodexLaunchError, match="not available to resume"):
+    selection = OwnedSessionSelection(selector, 7) if has_selection else None
+    assert (
         _pipeline(tmp_path, trace, selected_session=selection, selector_outcome=SelectorExecution.NOT_FOUND).execute(
             ["resume", selector]
         )
-    assert not any(event[0] in {"managed_codex", "codex", "launch"} for event in trace)
+        == 17
+    )
+    assert trace[-1] == ("codex", "/bin/codex", ("resume", selector))
+    assert not any(event[0] in {"managed_codex", "launch"} for event in trace)
+
+
+def test_unmatched_resume_name_does_not_require_tmux(tmp_path: Path) -> None:
+    trace: list[object] = []
+    assert _pipeline(tmp_path, trace, available={"codex": "/bin/codex"}).execute(["resume", "unknown-name"]) == 17
+    assert trace == [
+        ("selector_resolver", "unknown-name", tmp_path / "rodex.sqlite3"),
+        ("resolve_executable", "codex"),
+        ("codex", "/bin/codex", ("resume", "unknown-name")),
+    ]
+
+
+def test_unmatched_resume_uuid_does_not_require_tmux(tmp_path: Path) -> None:
+    trace: list[object] = []
+    selector = "01a081ed-0a6e-7a13-a3e9-062e70df918e"
+    codex_id = parse_codex_session_id(selector)
+    assert (
+        _pipeline(
+            tmp_path,
+            trace,
+            selected_session=UnregisteredCodexSessionSelection(selector, codex_id),
+            available={"codex": "/bin/codex"},
+            codex_session_persisted=False,
+        ).execute(["resume", selector])
+        == 17
+    )
+    assert trace == [
+        ("selector_resolver", selector, tmp_path / "rodex.sqlite3"),
+        ("resolve_executable", "codex"),
+        ("persistence_probe", codex_id),
+        ("resolve_executable", "codex"),
+        ("codex", "/bin/codex", ("resume", selector)),
+    ]
 
 
 def test_codex_passthrough_never_touches_database_or_tmux(tmp_path: Path) -> None:

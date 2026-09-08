@@ -14,6 +14,7 @@ from codex_cli_contract import (
     CodexCliInvocation,
     CodexCliRoute,
 )
+from rodex_registry import CodexSessionId
 
 from .agent_trace_commands import execute_agent_trace_command
 from .command_contract import (
@@ -30,6 +31,7 @@ from .machine_commands import execute_machine_command, print_machine_error
 from .managed_session_lifecycle import (
     SelectorExecution,
     SessionSelection,
+    UnregisteredCodexSessionSelection,
 )
 from .runtime import RodexRuntimeLauncher
 from .session_commands import execute_session_command
@@ -78,7 +80,6 @@ class SessionLifecycle(Protocol):
         *,
         codex_available: bool,
         configured_codex: str,
-        allow_missing_history_recovery: bool,
     ) -> SelectorExecution: ...
 
     def execute_launch(
@@ -217,12 +218,14 @@ class UnifiedRodexApplicationPipeline:
             execute_agent_trace_command(argv, self._database_path)
             return 0
         if invocation.route is CommandRoute.SELECTOR:
-            services = prepared.runtime
-            assert services is not None
             codex_invocation = invocation.codex_invocation
             assert codex_invocation is not None
-            explicit_resume = codex_invocation.route is CodexCliRoute.MANAGED_RESUME
+            explicit_resume = codex_invocation.route is CodexCliRoute.RESUME_SELECTOR
             selection = prepared.selected_session
+            if explicit_resume and selection is None:
+                return self._execute_codex(argv)
+            services = prepared.runtime
+            assert services is not None
             if selection is not None:
                 outcome = self._session_lifecycle.execute_selector(
                     selection,
@@ -230,13 +233,12 @@ class UnifiedRodexApplicationPipeline:
                     services.launcher,
                     codex_available=services.codex_binary is not None,
                     configured_codex=self._configured_codex,
-                    allow_missing_history_recovery=not explicit_resume,
                 )
                 if outcome is SelectorExecution.OPENED:
                     return 0
                 assert outcome is SelectorExecution.NOT_FOUND
             if explicit_resume:
-                raise RodexLaunchError(f"Codex session {codex_invocation.selector_candidate} is not available to resume")
+                return self._execute_codex(argv)
             return self._execute_managed_codex(invocation, services)
 
         services = prepared.runtime
@@ -283,6 +285,12 @@ class UnifiedRodexApplicationPipeline:
             selector = invocation.codex_invocation.selector_candidate
             assert selector is not None
             selection = self._session_lifecycle.resolve_selector(selector, self._database_path)
+            if isinstance(selection, UnregisteredCodexSessionSelection) and not self._codex_session_is_persisted(
+                selection.codex_session_id
+            ):
+                selection = None
+            if selection is None and invocation.codex_invocation.route is CodexCliRoute.RESUME_SELECTOR:
+                return PreparedRodexInvocation(invocation, None)
             return PreparedRodexInvocation(
                 invocation,
                 self._acquire_runtime(),
@@ -313,6 +321,14 @@ class UnifiedRodexApplicationPipeline:
             raise RodexLaunchError("usage: rodex _help")
         print(HELP_TEXT, end="")
         return 0
+
+    def _codex_session_is_persisted(self, codex_session_id: CodexSessionId) -> bool:
+        """Complete a standalone identity match before requiring managed tmux services."""
+        codex_binary = self._resolve_executable(self._configured_codex)
+        if codex_binary is None:
+            raise RodexExecutableNotFoundError(f"Codex executable was not found: {self._configured_codex}")
+        launcher = self._provided_launcher or self._runtime_launcher_factory(codex_binary, self._configured_tmux)
+        return launcher.codex_session_is_persisted(codex_session_id)
 
     def _execute_codex(self, arguments: list[str]) -> int:
         codex_binary = self._resolve_executable(self._configured_codex)

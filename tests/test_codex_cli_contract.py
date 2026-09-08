@@ -62,16 +62,21 @@ def test_every_current_codex_command_and_alias_is_direct(command: str) -> None:
     assert invocation.reason is CodexCliClassificationReason.SUBCOMMAND
 
 
-@pytest.mark.parametrize("uppercase", [False, True])
-def test_exact_codex_resume_is_a_managed_selector(uppercase: bool) -> None:
-    codex_id = "01a081ed-0a6e-7a13-a3e9-062e70df918e"
-    if uppercase:
-        codex_id = codex_id.upper()
-    invocation = classify("resume", codex_id)
+@pytest.mark.parametrize(
+    "selector",
+    [
+        "01a081ed-0a6e-7a13-a3e9-062e70df918e",
+        "01A081ED-0A6E-7A13-A3E9-062E70DF918E",
+        "automatic-beluga",
+        "preferred_alias",
+    ],
+)
+def test_exact_resume_is_a_selector_candidate(selector: str) -> None:
+    invocation = classify("resume", selector)
 
-    assert invocation.route is CodexCliRoute.MANAGED_RESUME
-    assert invocation.selector_candidate == codex_id
-    assert invocation.arguments == ("resume", codex_id)
+    assert invocation.route is CodexCliRoute.RESUME_SELECTOR
+    assert invocation.selector_candidate == selector
+    assert invocation.arguments == ("resume", selector)
 
 
 @pytest.mark.parametrize(
@@ -80,7 +85,8 @@ def test_exact_codex_resume_is_a_managed_selector(uppercase: bool) -> None:
         ("resume",),
         ("resume", "--last"),
         ("resume", "--help"),
-        ("resume", "a-native-codex-session-name"),
+        ("resume", ""),
+        ("resume", "--future-option"),
         ("resume", "01a081ed-0a6e-7a13-a3e9-062e70df918e", "another prompt"),
         ("resume", "01a081ed-0a6e-7a13-a3e9-062e70df918e", "--last"),
     ],

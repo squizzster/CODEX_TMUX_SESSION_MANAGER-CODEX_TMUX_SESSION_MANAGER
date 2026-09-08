@@ -180,10 +180,10 @@ The terminal adapter projects native output with `pyte`; local painting never en
 projection or the native editor. Partial redraws defer painting without releasing ownership;
 generated output is clipped and cannot wrap into scrollback. The placeholder draft is a
 single visible line, with control characters shown as spaces. Native output keeps rendering.
-Configuration, phase routing, inline rendering and adapter integration have Python tests;
-the live-startup suite was not run for this change, as requested.
-Existing live hosts retain their loaded code;
-this feature is available in newly started hosts, without restarting any current session.
+Configuration, phase routing, inline rendering and adapter integration have Python tests.
+The user has confirmed successful live operation; the automated live-startup suite was
+not rerun for this release. Existing live hosts retain their loaded code; this feature
+is available in newly started hosts, without restarting any current session.
 
 Every interactive create, resume, recovery, and reattach uses one concise lifecycle:
 

@@ -28,7 +28,7 @@ display-only convenience function using this transport, not a second delivery pa
 | `agent-observer` | Observer text | Rejected: multi-agent view has no single thread binding | Open/reuse, locate, focus, resize, close |
 | Registered model target | No independent display | Exact coordinator start, steer or interrupt | None |
 | Per-connection protocol target | Input/output frames | Native RPC intent preserved | None |
-| `terminal` | Native output bytes | Native keyboard bytes; no implicit model intent | None |
+| `terminal` | Native output and configured inline completion | Native keyboard bytes; no implicit model intent | None |
 | `input-interceptor:<name>` | Interactive draft, submitted command, release | Local handler; placeholder is display-only | None |
 
 Future agent-chat targets need an explicit thread and adapter; labels never imply one.
@@ -148,7 +148,8 @@ work. The record buffer contains metadata, not prompt bodies or another durable 
 | Runtime logs, update cache, analyzer memory files | File/diagnostic owners, not chat |
 | Keyboard framing and native PTY writes | `TerminalInputDecoder` / `TerminalInputInterceptor` → `TerminalSessionGateway`; tmux retains its owned lifecycle keys |
 | Native composer presentation at takeover/submission | Exact primary-pane fenced snapshot; prefix and end cursor must agree, no background screen polling |
-| Escape rendering and general native editor state | Codex/tmux; Rodex forwards output and does not mirror the complete editor |
+| Native editor state | Codex; Rodex observes a bounded candidate and verifies the native composer at handoff |
+| Inline completion rendering | `TerminalCompletionRenderer` → gateway output queue; native-only screen projection, no editor mutation or second writer |
 
 ## Enforced audit and evidence
 
@@ -167,3 +168,8 @@ it verifies startup/resume, real native slash menus, local takeover/menu/submiss
 ordinary editing afterwards, and no model turn from display-only delivery. Isolated PTYs
 test controlling-terminal identity, input/output hooks, final-output drain, resize, signals,
 spawn failure and terminal restoration. Tests never attach to or stop an existing user session.
+
+Release 0.9.0a1 has 165 passing Python tests covering interception, rendering, pipeline
+integration, current contracts and effect ownership, plus clean Ruff and package-build
+results. The user confirmed successful live operation. Neither tests nor application
+launches were repeated for the push; the automated live-startup suite was not rerun.

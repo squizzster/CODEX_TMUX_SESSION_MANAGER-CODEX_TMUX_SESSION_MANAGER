@@ -239,7 +239,59 @@ def test_installed_rodex_starts_reuses_and_adopts_sessions(
             time.sleep(0.02)
         pytest.fail(f"Test-owned Rodex host for {name} did not finish shutting down")
 
-    def exercise_client(command: list[str], *, expected_codex_id: str | None = None) -> tuple[str, str]:
+    def exercise_terminal_interception(client: RodexTerminalClient, name: str) -> None:
+        def await_surface(arguments: tuple[str, ...], expected: str, *, absent: bool = False) -> str:
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                surface = tmux(*arguments)
+                if surface.returncode == 0 and (expected in surface.stdout) != absent:
+                    return surface.stdout
+                client.poll()
+            pytest.fail(f"Expected {'absence of ' if absent else ''}{expected!r}: {surface.stdout!r} {surface.stderr}")
+
+        capture = ("capture-pane", "-p", "-t", f"={name}:")
+        status = ("show-options", "-v", "-t", f"={name}:", "status-format[0]")
+        os.write(client.terminal, b"/")
+        await_surface(capture, "/model")
+        os.write(client.terminal, b"r")
+        await_surface(capture, "/review")
+        await_surface(status, "Rodex local:", absent=True)
+        os.write(client.terminal, b"o")
+        await_surface(status, "Rodex local: /ro ")
+        native = await_surface(capture, "\u203a /r")
+        assert "\u203a /ro" not in native
+        os.write(client.terminal, b"dex")
+        await_surface(status, "Rodex local: /rodex ")
+        await_surface(capture, "Placeholder menu: no commands registered")
+        # Another attacher shares this one input owner. Arrival/departure animation
+        # must not conceal a currently owned draft or create a second interceptor.
+        with RodexTerminalClient([str(installed_shim), name], environment, project) as peer:
+            assert peer.wait_for_attach() == name
+            await_surface(("display-message", "-p", "-t", f"={name}:", "#{session_attached}"), "2")
+            await_surface(status, "Rodex local: /rodex ")
+            peer.detach()
+        await_surface(("display-message", "-p", "-t", f"={name}:", "#{session_attached}"), "1")
+        await_surface(status, "Rodex local: /rodex ")
+        os.write(client.terminal, b"\r")
+        await_surface(capture, "placeholder only")
+        await_surface(status, "Rodex local:", absent=True)
+        await_surface(capture, "\u203a /r", absent=True)
+        # Exercise an ordinary draft after local submission, but never submit it.
+        os.write(client.terminal, b"ordinary native draft")
+        await_surface(capture, "\u203a ordinary native draft")
+        os.write(client.terminal, b"\x15")
+        await_surface(capture, "\u203a ordinary native draft", absent=True)
+        os.write(client.terminal, b"/ro")
+        await_surface(status, "Rodex local: /ro ")
+        os.write(client.terminal, b"\x1b")
+        await_surface(status, "Rodex local:", absent=True)
+        await_surface(capture, "\u203a /r")
+        os.write(client.terminal, b"\x7f\x7f")
+        await_surface(capture, "\u203a /r", absent=True)
+
+    def exercise_client(
+        command: list[str], *, expected_codex_id: str | None = None, exercise_inputs: bool = False
+    ) -> tuple[str, str]:
         with RodexTerminalClient(command, environment, project) as client:
             name = client.wait_for_attach()
             deadline = time.monotonic() + 10
@@ -294,6 +346,8 @@ def test_installed_rodex_starts_reuses_and_adopts_sessions(
                 client.poll()
             else:
                 pytest.fail(f"Pipeline notice did not render in the real Codex TUI: {displayed.stdout}")
+            if exercise_inputs:
+                exercise_terminal_interception(client, name)
             after_notice = subprocess.run(
                 [str(installed_shim), "_inspect", name, "--json"],
                 env=environment,
@@ -318,7 +372,9 @@ def test_installed_rodex_starts_reuses_and_adopts_sessions(
         _require_startup_prerequisite(request, login.returncode == 0, "An authenticated Codex CLI is required")
         # The first host deliberately starts through python; the installed shim's
         # console entry point may use python3 after a routine uv sync.
-        first = exercise_client([str(Path(sys.prefix) / "bin/python"), str(project / ".venv/bin/rodex")])
+        first = exercise_client(
+            [str(Path(sys.prefix) / "bin/python"), str(project / ".venv/bin/rodex")], exercise_inputs=True
+        )
         assert exercise_client([str(installed_shim), first[0]]) == first
         assert exercise_client([str(installed_shim), "resume", first[0]]) == first
         assert exercise_client([str(installed_shim), "resume", inspected_codex_ids[first[0]]]) == first

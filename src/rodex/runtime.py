@@ -42,6 +42,8 @@ from .app_server_contract import (
     RODEX_SESSION_CATALOG_APP_SERVER_CLIENT,
 )
 from .control import CodexControlClient, LiveRodexControl
+from .input_interceptor_config import INPUT_INTERCEPTORS
+from .input_interceptor_presentation import InputInterceptorPresentation
 from .interaction_pipeline import DeliveryStatus, InteractionRequest, InteractionResult, SessionInteractionPipeline
 from .interaction_transport import publish_tui_notice
 from .pane_control import TmuxPaneController
@@ -64,6 +66,7 @@ from .protocol_proxy import (
     ToolCallCounter,
 )
 from .status_bar import context_status_segment
+from .terminal_gateway import TerminalSessionGateway
 from .tmux_executor import SyncTmuxExecutor, TmuxCommandResult
 from .tmux_session_capability import (
     RODEX_CODEX_SESSION_ID_OPTION,
@@ -2179,6 +2182,8 @@ def run_session_host(
     app_server_log_path.parent.mkdir(parents=True, exist_ok=True)
     app_server: subprocess.Popen[bytes] | None = None
     tui: subprocess.Popen[bytes] | None = None
+    terminal_gateway: TerminalSessionGateway | None = None
+    input_presentation: InputInterceptorPresentation | None = None
     protocol_proxy: CodexProtocolProxy | None = None
     protocol_event_tap: CodexProtocolEventTap | None = None
     context_status_observer: CodexContextStatusObserver | None = None
@@ -2194,8 +2199,13 @@ def run_session_host(
         if not shutting_down:
             raise SystemExit(128 + signum)
 
-    def leave_sigint_to_foreground_tui(_signum: int, _frame: object) -> None:
-        return None
+    def forward_sigint_to_native_terminal(signum: int, _frame: object) -> None:
+        if terminal_gateway is not None:
+            terminal_gateway.forward_signal(signum)
+
+    def resize_native_terminal(_signum: int, _frame: object) -> None:
+        if terminal_gateway is not None:
+            terminal_gateway.resize()
 
     previous_handlers = {signum: signal.signal(signum, stop_on_signal) for signum in (signal.SIGHUP, signal.SIGTERM)}
     try:
@@ -2267,6 +2277,13 @@ def run_session_host(
                     protocol_proxy,
                 )
 
+            primary_pane = TmuxPaneController(
+                tmux_binary,
+                tmux_runtime_capability,
+                tmux_pane_target,
+                runner=subprocess.run,
+                primary=True,
+            )
             protocol_proxy = CodexProtocolProxy(
                 protocol_proxy_socket_path,
                 app_server_socket_path,
@@ -2275,16 +2292,18 @@ def run_session_host(
                 primary_connection_lifecycle,
                 interaction_pipeline=interaction_pipeline,
                 runtime_identity=str(config.runtime_id),
-                primary_pane=TmuxPaneController(
-                    tmux_binary,
-                    tmux_runtime_capability,
-                    tmux_pane_target,
-                    runner=subprocess.run,
-                    primary=True,
-                ),
+                primary_pane=primary_pane,
                 model_message_sender=start_model_message,
             )
             protocol_proxy.start()
+            input_presentation = InputInterceptorPresentation(
+                interaction_pipeline,
+                INPUT_INTERCEPTORS,
+                tmux_binary,
+                tmux_runtime_capability,
+                primary_pane,
+            )
+            previous_handlers[signal.SIGWINCH] = signal.signal(signal.SIGWINCH, resize_native_terminal)
 
             runtime_path_keepalive = _RuntimePathKeepalive(
                 (
@@ -2334,14 +2353,25 @@ def run_session_host(
             inherited_sigint_handler: object | None = None
             while True:
                 attempt_log_offset = os.fstat(log.fileno()).st_size
+                if terminal_gateway is not None:
+                    terminal_gateway.close()
+                    terminal_gateway = None
                 if inherited_sigint_handler is not None:
                     signal.signal(signal.SIGINT, inherited_sigint_handler)
                 try:
-                    tui = subprocess.Popen(tui_command, **tui_options)
+                    terminal_gateway = TerminalSessionGateway(
+                        tui_command,
+                        **tui_options,
+                        pipeline=interaction_pipeline,
+                        runtime_identity=str(config.runtime_id),
+                        registrations=INPUT_INTERCEPTORS,
+                        confirm_native_prefix=input_presentation.confirm_native_prefix,
+                    )
+                    tui = terminal_gateway.process
                 finally:
                     replaced_handler = signal.signal(
                         signal.SIGINT,
-                        leave_sigint_to_foreground_tui,
+                        forward_sigint_to_native_terminal,
                     )
                     if inherited_sigint_handler is None:
                         inherited_sigint_handler = replaced_handler
@@ -2387,7 +2417,7 @@ def run_session_host(
                         raise failure
                     try:
                         registration_pending = pending_analytics_config is not None
-                        returncode = tui.wait(
+                        returncode = terminal_gateway.wait(
                             timeout=(_REGISTRATION_POLL_INTERVAL_SECONDS if registration_pending else None)
                         )
                     except subprocess.TimeoutExpired:
@@ -2434,6 +2464,12 @@ def run_session_host(
                     if tui is not None:
                         _stop_child_process(tui)
                 finally:
+                    if terminal_gateway is not None:
+                        with suppress(Exception):
+                            terminal_gateway.close()
+                    if input_presentation is not None:
+                        with suppress(Exception):
+                            input_presentation.close()
                     try:
                         if protocol_proxy is not None:
                             protocol_proxy.close()

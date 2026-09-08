@@ -12,7 +12,7 @@ pass through unchanged.
 > described here is complete for its current scope, but interfaces may still change
 > before a stable release.
 
-Current release: **Rodex 0.7.0a1**, SQL generation **19**, shared tmux protocol **v2**.
+Current release: **Rodex 0.8.0a1**, SQL generation **19**, shared tmux protocol **v2**.
 This ALPHA supports only its current storage and runtime contracts. It creates
 `rodex-v19.sqlite3` and `tmux-shared-v2.sock`; earlier generations are outside this
 installation's session catalog. There are no database migrations or old-runtime adapters.
@@ -31,7 +31,7 @@ turn without typing into the TUI.
 Both sides retain the same Rodex, runtime, Codex, and workspace context.
 
 Session interactions share one target-addressed pipeline: display a message, explicitly
-start a model turn, control a pane, or process live protocol input/output. Main and observer
+start a model turn, control a pane, or process live terminal/protocol input/output. Main and observer
 presentations use the same message contract, with their rendering mechanisms in adapters.
 The current observer aggregates agents and deliberately has no single model-thread binding.
 See the [interaction contract and production-path inventory](docs/INTERACTION_PATHS.md)
@@ -149,6 +149,25 @@ private session, `Ctrl-C` ends the exact managed session immediately. Custom pre
 and user-owned root `C-b` bindings are left unchanged. Rodex owns root `C-c` and `C-d`
 on its dedicated tmux server; a pre-existing conflicting binding causes explicit
 initialization failure instead of silently weakening the lifecycle contract.
+
+### Local input interceptor (placeholder)
+
+Managed sessions have one session-owned keyboard adapter before Codex, configured in
+`src/rodex/input_interceptor_config.py`. Each interceptor has exactly one `match_pattern`;
+Rodex uses `^/ro(?:d(?:ex?)?)?$`. `/` and `/r` reach the native TUI immediately. `/ro`
+activates local ownership after verifying the already-forwarded native `/r` at its end
+cursor. The status bar shows the local draft; `/rodex` displays a placeholder menu.
+There are no Rodex commands yet. Enter handles the owned draft locally, clears the
+native prefix only after successful delivery, and never starts a model turn.
+
+The pattern decides entry, not subsequent submission: once active, additional text
+belongs to that interceptor until release. Escape drops the held suffix, leaving native
+`/r`; backspacing to `/r` also releases. Tab completes `/rodex`. Native editing keys
+outside this small placeholder editor return the held text as bracketed paste before
+forwarding the key. Paste is framed atomically, not replayed as individual keypresses.
+An uncertain native editor position or unavailable local status leaves input native.
+Native output keeps rendering throughout. Existing live hosts retain their loaded code;
+this feature is available in newly started hosts, without restarting any current session.
 
 Every interactive create, resume, recovery, and reattach uses one concise lifecycle:
 

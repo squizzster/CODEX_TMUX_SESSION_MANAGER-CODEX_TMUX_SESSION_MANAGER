@@ -177,6 +177,39 @@ class TmuxPaneController:
     def focus(self, pane: str) -> bool:
         return self._mutate_target(pane, ("select-pane", "-t", pane)).returncode == 0
 
+    def capture_cursor_line(self) -> tuple[str, int] | None:
+        """Read one primary presentation snapshot at an explicit input handoff.
+
+        The cursor metadata brackets the capture in one fenced tmux command queue.
+        Copy mode, a changed cursor or a retired runtime cannot admit a handoff.
+        """
+        if not self._primary:
+            return None
+        pane = self._primary_pane_target
+        header = ("display-message", "-p", "-t", pane, "#{cursor_x}|#{cursor_y}|#{pane_in_mode}")
+        capture = ("capture-pane", "-p", "-t", pane)
+        result = self._tmux_executor.run(
+            (
+                "if-shell",
+                "-t",
+                pane,
+                "-F",
+                primary_pane_capability_if_shell_condition(self._capability),
+                " ; ".join(shlex.join(command) for command in (header, capture, header)),
+                shlex.join(("run-shell", "false")),
+            )
+        )
+        lines = result.stdout.splitlines()
+        if result.returncode != 0 or len(lines) < 3 or lines[0] != lines[-1]:
+            return None
+        try:
+            cursor_x, cursor_y, pane_in_mode = map(int, lines[0].split("|"))
+        except ValueError:
+            return None
+        if pane_in_mode or not 0 <= cursor_y < len(lines) - 2:
+            return None
+        return lines[cursor_y + 1], cursor_x
+
     def resize(self, pane: str, size_percent: int) -> bool:
         if type(size_percent) is not int or not 1 <= size_percent <= 99:
             raise ValueError("pane size must be an integer percentage from 1 to 99")

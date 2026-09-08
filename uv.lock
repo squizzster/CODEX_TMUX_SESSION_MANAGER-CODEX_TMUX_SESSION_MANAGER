@@ -9,7 +9,7 @@ source = { git = "https://github.com/squizzster/CODEX_PROTOCOL_LOG_ANALYZER-CODE
 
 [[package]]
 name = "codex-tmux-session-manager"
-version = "0.7.0a1"
+version = "0.8.0a1"
 source = { editable = "." }
 dependencies = [
     { name = "codex-protocol-log-analyzer" },

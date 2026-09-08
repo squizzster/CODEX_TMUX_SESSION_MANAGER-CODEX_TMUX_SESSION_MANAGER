@@ -66,6 +66,46 @@ from rodex_registry import (
 RUNTIME_ID = RodexRuntimeId.parse("0c01ee2ead7240e1")
 
 
+def _mock_terminal_gateway(monkeypatch: pytest.MonkeyPatch) -> list:
+    """Host composition tests inject the terminal boundary; real PTYs have their own suite."""
+    gateways = []
+
+    class FakeGateway:
+        def __init__(self, command, *, pipeline, runtime_identity, registrations, confirm_native_prefix, **options):
+            assert pipeline is not None and runtime_identity == str(RUNTIME_ID)
+            assert registrations == runtime_module.INPUT_INTERCEPTORS
+            assert callable(confirm_native_prefix)
+            self.process = runtime_module.subprocess.Popen(command, **options)
+            self.closed = False
+            gateways.append(self)
+
+        def wait(self, timeout=None):
+            return self.process.wait(timeout=timeout)
+
+        def close(self):
+            self.closed = True
+
+        def resize(self):
+            return None
+
+        def forward_signal(self, _signum):
+            return None
+
+    class FakePresentation:
+        def __init__(self, pipeline, registrations, *_args):
+            assert pipeline is not None and registrations == runtime_module.INPUT_INTERCEPTORS
+
+        def confirm_native_prefix(self, _prefix):
+            return False
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(runtime_module, "TerminalSessionGateway", FakeGateway)
+    monkeypatch.setattr(runtime_module, "InputInterceptorPresentation", FakePresentation)
+    return gateways
+
+
 def _registered_capability(
     socket_path: Path,
     *,
@@ -1774,6 +1814,7 @@ raise SystemExit(
 """
     environment = os.environ.copy()
     environment["TMUX_PANE"] = "%1"
+    outer_master, outer_slave = pty.openpty()
     process = subprocess.Popen(
         [
             sys.executable,
@@ -1788,10 +1829,12 @@ raise SystemExit(
         ],
         cwd=Path(__file__).parents[1],
         env=environment,
-        stdout=subprocess.PIPE,
+        stdin=outer_slave,
+        stdout=outer_slave,
         stderr=subprocess.PIPE,
         text=True,
     )
+    os.close(outer_slave)
     try:
         deadline = time.monotonic() + 8
         while not ready.exists() and process.poll() is None:
@@ -1814,6 +1857,7 @@ raise SystemExit(
         except subprocess.TimeoutExpired:
             process.kill()
             _stdout, stderr = process.communicate(timeout=3)
+        os.close(outer_master)
     assert stderr == ""
 
 
@@ -4156,6 +4200,7 @@ def test_session_host_skips_updater_and_connects_tui_through_protocol_proxy(
     bootstrap_virtualenv: bool,
     analytics_start_fails: bool,
 ) -> None:
+    gateways = _mock_terminal_gateway(monkeypatch)
     initialise_rodex_database(tmp_path / "rodex.sqlite3")
     app_socket = tmp_path / "app.sock"
     proxy_socket = tmp_path / "proxy.sock"
@@ -4378,12 +4423,15 @@ def test_session_host_skips_updater_and_connects_tui_through_protocol_proxy(
     )
 
     assert status_updates == [0]
+    assert len(gateways) == 1 and gateways[0].closed
     assert signal_changes == [
         (runtime_module.signal.SIGHUP, True),
         (runtime_module.signal.SIGTERM, True),
+        (runtime_module.signal.SIGWINCH, True),
         (runtime_module.signal.SIGINT, True),
         (runtime_module.signal.SIGHUP, False),
         (runtime_module.signal.SIGTERM, False),
+        (runtime_module.signal.SIGWINCH, False),
         (runtime_module.signal.SIGINT, False),
     ]
     assert proxy_lifecycle == [
@@ -4391,6 +4439,7 @@ def test_session_host_skips_updater_and_connects_tui_through_protocol_proxy(
         "signal-install",
         "event-start",
         "start",
+        "signal-install",
         "keepalive-start",
         "signal-install",
         *(["observer-activate", "analytics-start-failed", "analytics-close"] if analytics_start_fails else []),
@@ -4398,6 +4447,7 @@ def test_session_host_skips_updater_and_connects_tui_through_protocol_proxy(
         "close",
         "observer-close",
         "event-close",
+        "signal-restore",
         "signal-restore",
         "signal-restore",
         "signal-restore",
@@ -4449,6 +4499,7 @@ def test_session_host_retries_exact_resume_during_active_writer_handoff(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    gateways = _mock_terminal_gateway(monkeypatch)
     requested_codex_session_id = uuid.UUID("01a00654-f2bc-7a30-834a-a5f886a65f82")
     app_socket = tmp_path / "app.sock"
     tui_launches = 0
@@ -4590,6 +4641,7 @@ def test_session_host_retries_exact_resume_during_active_writer_handoff(
     )
 
     assert tui_launches == 2
+    assert len(gateways) == 2 and all(gateway.closed for gateway in gateways)
     assert primary_release_waits == [runtime_module.CODEX_PRIMARY_CONNECTION_RELEASE_TIMEOUT_SECONDS]
     assert retry_waits == [runtime_module.CODEX_ACTIVE_WRITER_RETRY_INTERVAL_SECONDS]
 
@@ -4621,6 +4673,7 @@ def test_active_writer_handoff_retry_requires_exact_thread_and_open_window() -> 
 def test_session_host_terminates_the_tui_when_runtime_keepalive_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    gateways = _mock_terminal_gateway(monkeypatch)
     lifecycle: list[str] = []
     keepalives: list[FailingKeepalive] = []
 
@@ -4768,4 +4821,5 @@ def test_session_host_terminates_the_tui_when_runtime_keepalive_fails(
         "event-close",
         "app-terminate",
     ]
+    assert len(gateways) == 1 and gateways[0].closed
     assert "runtime keepalive lost proxy.sock" in (tmp_path / "app.log").read_text(encoding="utf-8")

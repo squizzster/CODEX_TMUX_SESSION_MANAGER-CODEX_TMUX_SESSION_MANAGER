@@ -29,6 +29,7 @@ from rodex.interaction_transport import (
     SESSION_INTERACTION_CONNECTION_PATH,
     SESSION_INTERACTION_METHOD,
     publish_session_interaction,
+    serve_session_interaction,
 )
 from rodex.observer_pane import ObserverPaneController
 from rodex.protocol_proxy import CONTROL_CONNECTION_PATH, CodexProtocolProxy, ToolCallCounter
@@ -41,6 +42,42 @@ from rodex.tmux_session_capability import (
     TmuxRuntimeCapability,
 )
 from rodex_registry.identity import RodexRuntimeId
+
+
+@pytest.mark.parametrize(
+    "operation",
+    [
+        InteractionOperation.TERMINAL_INPUT,
+        InteractionOperation.TERMINAL_OUTPUT,
+        InteractionOperation.INTERACTIVE_INPUT,
+        InteractionOperation.SUBMITTED_COMMAND,
+        InteractionOperation.INPUT_RELEASE,
+    ],
+)
+def test_external_interaction_endpoint_cannot_bypass_terminal_input_ownership(operation):
+    class Connection:
+        response = None
+
+        def recv(self, **_options):
+            return json.dumps(
+                {
+                    "id": 1,
+                    "method": SESSION_INTERACTION_METHOD,
+                    "params": {"target": "input-interceptor:rodex", "operation": operation.value, "text": "/rodex"},
+                }
+            )
+
+        def send(self, data):
+            self.response = json.loads(data)
+
+        def close(self):
+            return None
+
+    pipeline = SessionInteractionPipeline()
+    connection = Connection()
+    serve_session_interaction(connection, pipeline)
+    assert connection.response["result"]["status"] == "rejected"
+    assert pipeline.records == ()  # Rejected at the endpoint, never admitted to an internal owner.
 
 
 @pytest.mark.parametrize("connection_path", ["/", CONTROL_CONNECTION_PATH])

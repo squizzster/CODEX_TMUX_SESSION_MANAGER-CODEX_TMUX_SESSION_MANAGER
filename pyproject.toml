@@ -1,6 +1,6 @@
 [project]
 name = "codex-tmux-session-manager"
-version = "0.8.0a1"
+version = "0.9.0a1"
 description = "Durable Codex sessions bridging native tmux use and exact local automation"
 readme = "README.md"
 authors = [
@@ -14,6 +14,8 @@ classifiers = [
 dependencies = [
     "codex-protocol-log-analyzer @ git+https://github.com/squizzster/CODEX_PROTOCOL_LOG_ANALYZER-CODEX_PROTOCOL_LOG_ANALYZER.git",
     "coolname>=5.0.0",
+    "pyte>=0.8.2,<0.9",
+    "wcwidth>=0.2.13",
     "websockets>=17.0.1",
 ]
 

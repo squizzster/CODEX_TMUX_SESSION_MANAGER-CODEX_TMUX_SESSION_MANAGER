@@ -1,6 +1,6 @@
 # Interaction contract and production-path inventory
 
-Rodex 0.8.0a1, ALPHA. SQL generation 19 and shared tmux protocol v2 are unchanged.
+Rodex 0.9.0a1, ALPHA. SQL generation 19 and shared tmux protocol v2 are unchanged.
 There is no old interaction endpoint or fallback adapter. Existing processes retain
 the code they already loaded; this change does not restart existing sessions.
 
@@ -28,7 +28,7 @@ display-only convenience function using this transport, not a second delivery pa
 | `agent-observer` | Observer text | Rejected: multi-agent view has no single thread binding | Open/reuse, locate, focus, resize, close |
 | Registered model target | No independent display | Exact coordinator start, steer or interrupt | None |
 | Per-connection protocol target | Input/output frames | Native RPC intent preserved | None |
-| `terminal` | Native output bytes | Native keyboard bytes; no implicit model intent | None |
+| `terminal` | Native output and configured inline completion | Native keyboard bytes; no implicit model intent | None |
 | `input-interceptor:<name>` | Interactive draft, submitted command, release | Local handler; placeholder is display-only | None |
 
 Future agent-chat targets need an explicit thread and adapter; labels never imply one.
@@ -94,11 +94,12 @@ work. The record buffer contains metadata, not prompt bodies or another durable 
 | Existing name/alias/UUID, with or without `resume` | Same selector/open/resume/adoption pipeline |
 | Unmatched explicit resume, delegated native syntax | `cli._exec_codex`; native replacement, outside managed interaction |
 | Native typing and terminal replies | TERMINAL_INPUT → decoder/interceptor → native child PTY → TUI → protocol-input pipeline |
-| Configured match | One `match_pattern` → verified native prefix → INTERACTIVE_INPUT target; subsequent Enter → SUBMITTED_COMMAND, no second matcher |
-| Local release | INPUT_RELEASE → restore own status claim; cancellation leaves native prefix; unsupported editing restores held suffix before key |
-| Local placeholder/menu | MESSAGE(false) → main display adapter; status draft → existing status-claim pipeline |
+| Configured live match | Interception `live.reg_exp_intercept` → verified native prefix → INTERACTIVE_INPUT → terminal DISPLAY_STATE; configured completion/helper text |
+| Configured Enter match | Interception `on_enter.reg_exp_intercept` → SUBMITTED_COMMAND, including pasted input without live takeover; unmatched Enter stays native |
+| Local release | INPUT_RELEASE → clear terminal DISPLAY_STATE; cancellation leaves native prefix; unsupported editing restores held suffix before key |
+| Local placeholder reply | Configured command list → MESSAGE(false) → main display adapter; no command execution yet |
 | Initial prompts and native TUI protocol operations | Native TUI → protocol-input pipeline → App Server |
-| Native terminal output | TERMINAL_OUTPUT → bounded display queue → outer tmux PTY; unchanged without content hooks |
+| Native terminal output | TERMINAL_OUTPUT → native-only projection + inline compositor → bounded display queue → outer PTY; native bytes retain their order/content |
 | App Server primary/control-client output | Protocol-output pipeline → destination; same accepted frame → projections |
 | `_start`, `_steer`, `_interrupt` | Exact selector lock → interaction operation → exact-control adapter → proxy |
 | `_alias` | Serialized SQL/tmux rename → explicit start/steer announcement |
@@ -147,7 +148,8 @@ work. The record buffer contains metadata, not prompt bodies or another durable 
 | Runtime logs, update cache, analyzer memory files | File/diagnostic owners, not chat |
 | Keyboard framing and native PTY writes | `TerminalInputDecoder` / `TerminalInputInterceptor` → `TerminalSessionGateway`; tmux retains its owned lifecycle keys |
 | Native composer presentation at takeover/submission | Exact primary-pane fenced snapshot; prefix and end cursor must agree, no background screen polling |
-| Escape rendering and general native editor state | Codex/tmux; Rodex forwards output and does not mirror the complete editor |
+| Native editor state | Codex; Rodex observes a bounded candidate and verifies the native composer at handoff |
+| Inline completion rendering | `TerminalCompletionRenderer` → gateway output queue; native-only screen projection, no editor mutation or second writer |
 
 ## Enforced audit and evidence
 
@@ -166,3 +168,8 @@ it verifies startup/resume, real native slash menus, local takeover/menu/submiss
 ordinary editing afterwards, and no model turn from display-only delivery. Isolated PTYs
 test controlling-terminal identity, input/output hooks, final-output drain, resize, signals,
 spawn failure and terminal restoration. Tests never attach to or stop an existing user session.
+
+Release 0.9.0a1 has 165 passing Python tests covering interception, rendering, pipeline
+integration, current contracts and effect ownership, plus clean Ruff and package-build
+results. The user confirmed successful live operation. Neither tests nor application
+launches were repeated for the push; the automated live-startup suite was not rerun.

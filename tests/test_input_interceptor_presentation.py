@@ -1,11 +1,18 @@
-"""Input ownership needs a visible status claim and an exact native handoff snapshot."""
+"""Configuration drives live display and submitted handling through the shared pipeline."""
 
 import subprocess
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
-from rodex.input_interceptor_config import INPUT_INTERCEPTORS
+from rodex.input_interceptor_config import (
+    INPUT_INTERCEPTORS,
+    InputInterceptorRegistration,
+    InterceptionCommand,
+    InterceptionRule,
+    LiveInterceptionRule,
+)
 from rodex.input_interceptor_presentation import InputInterceptorPresentation
 from rodex.interaction_pipeline import (
     DeliveryStatus,
@@ -16,8 +23,8 @@ from rodex.interaction_pipeline import (
     SessionInteractionPipeline,
 )
 from rodex.pane_control import TmuxPaneController
+from rodex.terminal_completion import TerminalCompletionState
 from rodex.tmux_session_capability import TmuxRuntimeCapability
-from rodex.tmux_status import StatusPriority
 from rodex_registry import RodexRuntimeId
 
 
@@ -39,21 +46,7 @@ class FakePane:
         return self.snapshot
 
 
-class FakeStatus:
-    def __init__(self):
-        self.presentations = []
-        self.restored = []
-        self.available = True
-
-    def publish_transient(self, **options):
-        self.presentations.append(options)
-        return self.available
-
-    def restore_if_token_matches(self, token):
-        self.restored.append(token)
-
-
-def setup_presentation():
+def setup_presentation(registrations=INPUT_INTERCEPTORS, *, display_available=True):
     pipeline = SessionInteractionPipeline()
     messages = []
     pipeline.register(
@@ -66,54 +59,83 @@ def setup_presentation():
         )
     )
     pane = FakePane()
-    presentation = InputInterceptorPresentation(pipeline, INPUT_INTERCEPTORS, "tmux", capability(), pane)
-    presentation._status = FakeStatus()
+    presentation = InputInterceptorPresentation(pipeline, registrations, capability(), pane)
+    pipeline.register(
+        InteractionTarget(
+            "terminal",
+            "runtime",
+            frozenset({InteractionOperation.DISPLAY_STATE}),
+            exists=lambda: display_available,
+            deliver=lambda request: messages.append(request) or InteractionResult(DeliveryStatus.DELIVERED),
+        )
+    )
     return pipeline, presentation, pane, messages
 
 
-def test_placeholder_menu_and_submission_are_display_only_and_release_restores_own_token():
+@pytest.mark.parametrize("text", ["/ro", "/rod", "/rode", "/rodex"])
+def test_every_live_regex_match_displays_the_same_configured_completion(text):
+    pipeline, _presentation, _pane, messages = setup_presentation()
+    entry = INPUT_INTERCEPTORS[0]
+    assert pipeline.execute(
+        InteractionRequest(entry.target, InteractionOperation.INTERACTIVE_INPUT, "test", text=text, payload="/r")
+    ).accepted
+    assert len(messages) == 1 and messages[0].operation == InteractionOperation.DISPLAY_STATE
+    state = TerminalCompletionState.deserialize(messages[0].payload)
+    assert state == TerminalCompletionState(text, "/r", "/rodex", "issue a rodex command")
+    assert not messages[0].start_model_turn
+
+
+def test_placeholder_submission_is_display_only_and_release_clears_terminal_state():
     pipeline, presentation, _pane, messages = setup_presentation()
     entry = INPUT_INTERCEPTORS[0]
-    for text in ("/ro", "/rod", "/rode"):
-        assert pipeline.execute(
-            InteractionRequest(entry.target, InteractionOperation.INTERACTIVE_INPUT, "test", text=text)
-        ).accepted
-    assert messages == []
-    for _ in range(2):
-        pipeline.execute(InteractionRequest(entry.target, InteractionOperation.INTERACTIVE_INPUT, "test", text="/rodex"))
-    assert len(messages) == 1 and "Placeholder menu" in messages[0].text
     assert pipeline.execute(
         InteractionRequest(entry.target, InteractionOperation.SUBMITTED_COMMAND, "test", text="/rodex hi")
     ).accepted
-    assert len(messages) == 2 and "placeholder only" in messages[1].text
+    assert len(messages) == 1 and "placeholder only" in messages[0].text
     assert all(not message.start_model_turn for message in messages)
     pipeline.execute(InteractionRequest(entry.target, InteractionOperation.INPUT_RELEASE, "test", text="/rodex hi"))
-    assert presentation._status.restored == [presentation._token]
+    assert messages[-1].operation == InteractionOperation.DISPLAY_STATE and messages[-1].payload is None
     presentation.close()
     assert entry.target not in pipeline._targets
 
 
-def test_unavailable_status_rejects_takeover_and_user_text_stays_literal():
-    pipeline, presentation, _pane, messages = setup_presentation()
+def test_unavailable_display_rejects_takeover():
+    pipeline, _presentation, _pane, messages = setup_presentation(display_available=False)
     entry = INPUT_INTERCEPTORS[0]
-    presentation._status.available = False
     result = pipeline.execute(
         InteractionRequest(
             entry.target,
             InteractionOperation.INTERACTIVE_INPUT,
             "test",
             text="/rodex #(echo should-not-execute)\n#{pane_id}",
+            payload="/r",
         )
     )
     assert result.status == DeliveryStatus.REJECTED
-    rendered = presentation._status.presentations[-1]["presentation"].status_format
-    assert "##(echo should-not-execute)" in rendered and "##{pane_id}" in rendered
-    assert "\n" not in rendered
     assert messages == []
 
 
-def test_owned_local_input_is_visible_above_animation_but_not_exit_warnings():
-    assert StatusPriority.SHARING_ANIMATION < StatusPriority.LOCAL_INPUT < StatusPriority.SAFETY_WARNING
+def test_another_configuration_drives_matching_helper_completion_and_command_list():
+    entry = InputInterceptorRegistration(
+        "example",
+        "!hello",
+        LiveInterceptionRule(r"^!h(?:ello)?$", helper_text="custom helper text"),
+        InterceptionRule(r"^!hello (.*?)$"),
+        (InterceptionCommand("future", "a future command"),),
+    )
+    pipeline, _presentation, _pane, messages = setup_presentation((entry,))
+    request = InteractionRequest(entry.target, InteractionOperation.INTERACTIVE_INPUT, "test", text="!h", payload="!")
+    assert pipeline.execute(request).accepted
+    assert TerminalCompletionState.deserialize(messages[-1].payload).helper_text == "custom helper text"
+    assert TerminalCompletionState.deserialize(messages[-1].payload).completion_text == "!hello"
+    assert pipeline.execute(replace(request, text="!help")).accepted
+    assert TerminalCompletionState.deserialize(messages[-1].payload).completion_text == ""
+    assert not pipeline.execute(replace(request, operation=InteractionOperation.SUBMITTED_COMMAND)).accepted
+    assert pipeline.execute(
+        replace(request, operation=InteractionOperation.SUBMITTED_COMMAND, text="!hello future")
+    ).accepted
+    assert "future — a future command" in messages[-1].text
+    assert all(not message.start_model_turn for message in messages)
 
 
 @pytest.mark.parametrize(
@@ -131,6 +153,16 @@ def test_native_handoff_requires_exact_prefix_and_end_cursor(snapshot, expected)
     _pipeline, presentation, pane, _messages = setup_presentation()
     pane.snapshot = snapshot
     assert presentation.confirm_native_prefix("/r") is expected
+
+
+@pytest.mark.parametrize(
+    "prefix,snapshot",
+    [("", ("\u203a", 2)), ("/rodex ", ("\u203a /rodex", 9)), ("/rodex 世界", ("\u203a /rodex 世界", 13))],
+)
+def test_handoff_accounts_for_captured_trailing_spaces_and_terminal_cell_width(prefix, snapshot):
+    _pipeline, presentation, pane, _messages = setup_presentation()
+    pane.snapshot = snapshot
+    assert presentation.confirm_native_prefix(prefix)
 
 
 @pytest.mark.parametrize(

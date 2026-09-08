@@ -2299,7 +2299,6 @@ def run_session_host(
             input_presentation = InputInterceptorPresentation(
                 interaction_pipeline,
                 INPUT_INTERCEPTORS,
-                tmux_binary,
                 tmux_runtime_capability,
                 primary_pane,
             )

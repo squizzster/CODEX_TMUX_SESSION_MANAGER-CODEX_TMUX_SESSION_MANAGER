@@ -250,31 +250,32 @@ def test_installed_rodex_starts_reuses_and_adopts_sessions(
             pytest.fail(f"Expected {'absence of ' if absent else ''}{expected!r}: {surface.stdout!r} {surface.stderr}")
 
         capture = ("capture-pane", "-p", "-t", f"={name}:")
-        status = ("show-options", "-v", "-t", f"={name}:", "status-format[0]")
         os.write(client.terminal, b"/")
         await_surface(capture, "/model")
         os.write(client.terminal, b"r")
         await_surface(capture, "/review")
-        await_surface(status, "Rodex local:", absent=True)
         os.write(client.terminal, b"o")
-        await_surface(status, "Rodex local: /ro ")
-        native = await_surface(capture, "\u203a /r")
-        assert "\u203a /ro" not in native
-        os.write(client.terminal, b"dex")
-        await_surface(status, "Rodex local: /rodex ")
-        await_surface(capture, "Placeholder menu: no commands registered")
+        await_surface(capture, "\u203a /ro")
+        await_surface(capture, "/rodex   issue a rodex command")
+        await_surface(capture, "/review", absent=True)
+        draft = "/ro"
+        for character in "dex":
+            os.write(client.terminal, character.encode())
+            draft += character
+            await_surface(capture, f"\u203a {draft}")
+            await_surface(capture, "/rodex   issue a rodex command")
         # Another attacher shares this one input owner. Arrival/departure animation
         # must not conceal a currently owned draft or create a second interceptor.
         with RodexTerminalClient([str(installed_shim), name], environment, project) as peer:
             assert peer.wait_for_attach() == name
             await_surface(("display-message", "-p", "-t", f"={name}:", "#{session_attached}"), "2")
-            await_surface(status, "Rodex local: /rodex ")
+            await_surface(capture, "\u203a /rodex")
             peer.detach()
         await_surface(("display-message", "-p", "-t", f"={name}:", "#{session_attached}"), "1")
-        await_surface(status, "Rodex local: /rodex ")
-        os.write(client.terminal, b"\r")
+        await_surface(capture, "\u203a /rodex")
+        os.write(client.terminal, b" example\r")
         await_surface(capture, "placeholder only")
-        await_surface(status, "Rodex local:", absent=True)
+        await_surface(capture, "/rodex   issue a rodex command", absent=True)
         await_surface(capture, "\u203a /r", absent=True)
         # Exercise an ordinary draft after local submission, but never submit it.
         os.write(client.terminal, b"ordinary native draft")
@@ -282,9 +283,9 @@ def test_installed_rodex_starts_reuses_and_adopts_sessions(
         os.write(client.terminal, b"\x15")
         await_surface(capture, "\u203a ordinary native draft", absent=True)
         os.write(client.terminal, b"/ro")
-        await_surface(status, "Rodex local: /ro ")
+        await_surface(capture, "\u203a /ro")
         os.write(client.terminal, b"\x1b")
-        await_surface(status, "Rodex local:", absent=True)
+        await_surface(capture, "/rodex   issue a rodex command", absent=True)
         await_surface(capture, "\u203a /r")
         os.write(client.terminal, b"\x7f\x7f")
         await_surface(capture, "\u203a /r", absent=True)

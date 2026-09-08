@@ -1,9 +1,8 @@
-"""Placeholder command presentation using the existing message and status pipelines."""
+"""Configured live completion and submitted placeholders through one interaction pipeline."""
 
 from __future__ import annotations
 
-import shlex
-import uuid
+from wcwidth import wcswidth
 
 from .input_interceptor_config import InputInterceptorRegistration
 from .interaction_pipeline import (
@@ -15,13 +14,8 @@ from .interaction_pipeline import (
     SessionInteractionPipeline,
 )
 from .pane_control import TmuxPaneController
-from .tmux_executor import SyncTmuxExecutor
-from .tmux_session_capability import (
-    TmuxRuntimeCapability,
-    primary_pane_capability_if_shell_condition,
-    tmux_format_literal,
-)
-from .tmux_status import StatusPriority, TmuxStatusPipeline, TmuxStatusPresentation
+from .terminal_completion import TerminalCompletionState
+from .tmux_session_capability import TmuxRuntimeCapability
 
 
 class InputInterceptorPresentation:
@@ -31,17 +25,11 @@ class InputInterceptorPresentation:
         self,
         pipeline: SessionInteractionPipeline,
         registrations: tuple[InputInterceptorRegistration, ...],
-        tmux_binary: str,
         capability: TmuxRuntimeCapability,
         pane: TmuxPaneController,
     ) -> None:
         self._pipeline = pipeline
         self._pane = pane
-        self._capability = capability
-        self._executor = SyncTmuxExecutor(tmux_binary, capability.tmux_server_socket_path)
-        self._status = TmuxStatusPipeline(self._bound_tmux, pane.known_pane_id)
-        self._token = uuid.uuid4().hex
-        self._menu_shown = False
         self._registrations = {entry.target: entry for entry in registrations}
         self._targets = tuple(
             InteractionTarget(
@@ -68,64 +56,54 @@ class InputInterceptorPresentation:
         if snapshot is None:
             return False
         line, cursor_x = snapshot
-        return line.lstrip() == f"\u203a {prefix}" and cursor_x == len(line)
-
-    def _bound_tmux(self, *arguments: str):
-        return self._executor.run(
-            (
-                "if-shell",
-                "-t",
-                self._pane.known_pane_id,
-                "-F",
-                primary_pane_capability_if_shell_condition(self._capability),
-                shlex.join(arguments),
-                shlex.join(("run-shell", "false")),
-            )
-        )
+        indentation = line[: len(line) - len(line.lstrip())]
+        expected_line = f"{indentation}\u203a {prefix}"
+        return line.rstrip() == expected_line.rstrip() and cursor_x == wcswidth(expected_line)
 
     def _deliver(self, request: InteractionRequest) -> InteractionResult:
         entry = self._registrations[request.target]
         if request.operation == InteractionOperation.INPUT_RELEASE:
-            self._status.restore_if_token_matches(self._token)
-            self._menu_shown = False
+            return self._display(entry.target, None)
         elif request.operation == InteractionOperation.SUBMITTED_COMMAND:
+            assert request.text is not None
+            if not entry.on_enter.matches(request.text):
+                return InteractionResult(DeliveryStatus.REJECTED, "submitted input does not match its configured rule")
+            commands = "\n".join(f"  {command.name} — {command.helper_text}" for command in entry.command_list)
             return self._pipeline.send_message(
                 target="main",
-                text=f"{entry.command}: placeholder only — no commands are registered yet.",
+                text=(
+                    f"{entry.completion_text}: placeholder only — no command execution is registered.\n{commands}"
+                    if commands
+                    else f"{entry.completion_text}: placeholder only — no commands are registered yet."
+                ),
                 source=entry.target,
                 start_model_turn=False,
             )
         else:
             assert request.text is not None
-            # User text must stay literal even in tmux's formatting language.
-            visible_draft = "".join(character if character.isprintable() else " " for character in request.text)
-            draft = tmux_format_literal(" ".join(visible_draft.split()))
-            shown = self._status.publish_transient(
-                publisher="input-interceptor",
-                token=self._token,
-                priority=StatusPriority.LOCAL_INPUT,
-                presentation=TmuxStatusPresentation(
-                    status_format=f"#[bold] Rodex local: {draft} #[default] | Enter: local command · Esc: return"
+            if not isinstance(request.payload, str):
+                return InteractionResult(DeliveryStatus.REJECTED, "interactive input requires its native prefix")
+            matched = entry.live.matches(request.text)
+            return self._display(
+                entry.target,
+                TerminalCompletionState(
+                    draft=request.text,
+                    native_prefix=request.payload,
+                    completion_text=entry.completion_text if matched else "",
+                    helper_text=entry.live.helper_text if matched else "",
                 ),
             )
-            if not shown:
-                return InteractionResult(DeliveryStatus.REJECTED, "local input presentation is unavailable")
-            if request.text == entry.command and not self._menu_shown:
-                result = self._pipeline.send_message(
-                    target="main",
-                    source=entry.target,
-                    start_model_turn=False,
-                    text=(
-                        f"{entry.command} — {entry.description}\nPlaceholder menu: no commands registered. "
-                        "Enter handles input locally; Escape returns to Codex."
-                    ),
-                )
-                self._menu_shown = result.accepted
-        return InteractionResult(DeliveryStatus.DELIVERED)
+
+    def _display(self, source: str, state: TerminalCompletionState | None) -> InteractionResult:
+        return self._pipeline.execute(
+            InteractionRequest(
+                "terminal", InteractionOperation.DISPLAY_STATE, source, payload=state.serialize() if state else None
+            )
+        )
 
     def close(self) -> None:
         try:
-            self._status.restore_if_token_matches(self._token)
+            self._display("input-interceptor", None)
         finally:
             for target in self._targets:
                 self._pipeline.unregister(target)

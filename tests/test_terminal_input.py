@@ -1,10 +1,16 @@
 """Configured admission and lossless terminal framing, independent of native rendering."""
 
+import re
 from dataclasses import replace
 
 import pytest
 
-from rodex.input_interceptor_config import INPUT_INTERCEPTORS, InputInterceptorRegistration
+from rodex.input_interceptor_config import (
+    INPUT_INTERCEPTORS,
+    InputInterceptorRegistration,
+    InterceptionRule,
+    LiveInterceptionRule,
+)
 from rodex.interaction_pipeline import (
     DeliveryStatus,
     InteractionOperation,
@@ -18,12 +24,34 @@ from rodex.terminal_input import PASTE_END, PASTE_START, TerminalInputDecoder, T
 
 @pytest.mark.parametrize("text", ["/ro", "/rod", "/rode", "/rodex"])
 def test_single_configured_pattern_accepts_exact_candidates(text):
-    assert INPUT_INTERCEPTORS[0].matches(text)
+    assert INPUT_INTERCEPTORS[0].live.matches(text)
 
 
 @pytest.mark.parametrize("text", ["", "/", "/r", "/robot", "/rodexx", "/rodex ", "/rodex hi", "/ro\n", "x/ro"])
 def test_single_configured_pattern_rejects_nonmatches(text):
-    assert not INPUT_INTERCEPTORS[0].matches(text)
+    assert not INPUT_INTERCEPTORS[0].live.matches(text)
+
+
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        ("/rodex ", True),
+        ("/rodex example", True),
+        ("/rode example", False),
+        ("/rodex", False),
+        ("/ro", False),
+        ("before\n/rodex example", False),
+        ("/rodex example\nother input", False),
+    ],
+)
+def test_enter_expression_is_independent_and_matches_complete_input(text, expected):
+    assert INPUT_INTERCEPTORS[0].on_enter.matches(text) is expected
+
+
+@pytest.mark.parametrize("pattern", [r"/hello", r"^$", r"^($"])
+def test_invalid_configured_expressions_fail_at_registration(pattern):
+    with pytest.raises((ValueError, re.error)):
+        InterceptionRule(pattern)
 
 
 class InputHarness:
@@ -86,7 +114,7 @@ def test_slash_and_r_are_immediate_native_input_then_o_enters_local_owner():
 
 
 @pytest.mark.parametrize("chunk_size", [1, 2, 3, 4, 7, 100])
-def test_one_admission_pattern_owns_editing_and_enter_without_a_submission_matcher(chunk_size):
+def test_live_and_enter_use_their_own_configured_rules_across_input_reads(chunk_size):
     harness = InputHarness()
     data = b"/rodex example argument\r\n"
     for offset in range(0, len(data), chunk_size):
@@ -98,12 +126,12 @@ def test_one_admission_pattern_owns_editing_and_enter_without_a_submission_match
     assert not harness.interceptor.active
 
 
-def test_match_only_admits_not_repeatedly_reclassifies_an_owned_draft():
+def test_nonmatching_enter_returns_the_held_draft_and_user_enter_to_native():
     harness = InputHarness()
     harness.feed(b"/robot\r")
     submitted = [event.text for event in harness.events if event.operation == InteractionOperation.SUBMITTED_COMMAND]
-    assert submitted == ["/robot"]  # /ro matched earlier in the live stream.
-    assert harness.forwarded == b"/r\x7f\x7f"
+    assert submitted == []
+    assert harness.forwarded == b"/r" + PASTE_START + b"obot" + PASTE_END + b"\r"
 
 
 def test_rejected_submission_preserves_local_draft_and_native_prefix_for_retry():
@@ -121,7 +149,12 @@ def test_rejected_submission_preserves_local_draft_and_native_prefix_for_retry()
 
 
 def test_registry_can_add_an_interceptor_without_transport_changes():
-    registration = InputInterceptorRegistration("another", r"^/xy(?:z)?$", "/xyz", "another placeholder")
+    registration = InputInterceptorRegistration(
+        "another",
+        "/xyz",
+        LiveInterceptionRule(r"^/xy(?:z)?$", helper_text="another placeholder"),
+        InterceptionRule(r"^/xyz (.*?)$"),
+    )
     harness = InputHarness(registrations=(*INPUT_INTERCEPTORS, registration))
     harness.feed(b"/xyz anything\r")
     assert harness.events[-2].target == registration.target
@@ -129,8 +162,42 @@ def test_registry_can_add_an_interceptor_without_transport_changes():
     assert harness.forwarded == b"/x\x7f\x7f"
 
 
+def test_enter_intercepts_an_atomic_paste_that_never_matched_the_live_expression():
+    harness = InputHarness()
+    draft = b"/rodex example"
+    harness.feed(PASTE_START + draft + PASTE_END)
+    assert not harness.interceptor.active and harness.events == []
+    harness.feed(b"\r\n")
+    assert [event.text for event in harness.events] == [draft.decode()]
+    assert harness.events[0].operation == InteractionOperation.SUBMITTED_COMMAND
+    assert harness.forwarded == PASTE_START + draft + PASTE_END + b"\x7f" * len(draft)
+
+
+def test_an_ambiguous_phase_does_not_choose_a_command_by_registration_order():
+    duplicate = replace(INPUT_INTERCEPTORS[0], name="another")
+    harness = InputHarness(registrations=(*INPUT_INTERCEPTORS, duplicate))
+    harness.feed(b"/rodex example\r")
+    assert harness.forwarded == b"/rodex example\r"
+    assert harness.events == []
+
+
+def test_changing_only_enter_configuration_changes_submission_behavior():
+    registration = replace(INPUT_INTERCEPTORS[0], on_enter=InterceptionRule(r"^/rode$"))
+    harness = InputHarness(registrations=(registration,))
+    harness.feed(b"/rode\r")
+    assert [event.text for event in harness.events if event.operation == InteractionOperation.SUBMITTED_COMMAND] == [
+        "/rode"
+    ]
+    assert harness.forwarded == b"/r\x7f\x7f"
+
+
 def test_transport_does_not_assume_registered_patterns_are_slash_commands():
-    registration = InputInterceptorRegistration("example", r"^!h(?:i)?$", "!hi", "another placeholder")
+    registration = InputInterceptorRegistration(
+        "example",
+        "!hi",
+        LiveInterceptionRule(r"^!h(?:i)?$", helper_text="another placeholder"),
+        InterceptionRule(r"^!hi (.*?)$"),
+    )
     harness = InputHarness(registrations=(registration,))
     harness.feed(b"!hi anything\r")
     assert harness.events[-2].target == registration.target
@@ -250,12 +317,12 @@ def test_encoded_keyboard_presses_reach_the_same_match_and_submit_owner(encoding
         return (f"\x1b[{ord(character)}u" if encoding == "csi-u" else f"\x1b[27;1;{ord(character)}~").encode()
 
     harness = InputHarness()
-    for character in "/rodex\r":
+    for character in "/rodex example\r":
         for byte in encode(character):
             harness.feed(bytes([byte]))
     assert harness.forwarded == encode("/") + encode("r") + b"\x7f\x7f"
     submitted = [event.text for event in harness.events if event.operation == InteractionOperation.SUBMITTED_COMMAND]
-    assert submitted == ["/rodex"]
+    assert submitted == ["/rodex example"]
 
 
 def test_encoded_key_release_is_not_a_second_character_or_submission():

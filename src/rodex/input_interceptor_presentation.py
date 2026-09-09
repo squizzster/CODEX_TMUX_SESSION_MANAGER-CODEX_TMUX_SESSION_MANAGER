@@ -5,6 +5,7 @@ from __future__ import annotations
 from wcwidth import wcswidth
 
 from .input_interceptor_config import InputInterceptorRegistration
+from .input_menu import INPUT_MENU_TARGET, InputMenuView
 from .interaction_pipeline import (
     DeliveryStatus,
     InteractionOperation,
@@ -14,7 +15,6 @@ from .interaction_pipeline import (
     SessionInteractionPipeline,
 )
 from .pane_control import TmuxPaneController
-from .terminal_completion import TerminalCompletionState
 from .tmux_session_capability import TmuxRuntimeCapability
 
 
@@ -31,21 +31,24 @@ class InputInterceptorPresentation:
         self._pipeline = pipeline
         self._pane = pane
         self._registrations = {entry.target: entry for entry in registrations}
-        self._targets = tuple(
+        self._targets = (
             InteractionTarget(
-                entry.target,
+                INPUT_MENU_TARGET,
                 str(capability.runtime_id),
-                frozenset(
-                    {
-                        InteractionOperation.INTERACTIVE_INPUT,
-                        InteractionOperation.SUBMITTED_COMMAND,
-                        InteractionOperation.INPUT_RELEASE,
-                    }
-                ),
+                frozenset({InteractionOperation.INTERACTIVE_INPUT, InteractionOperation.INPUT_RELEASE}),
                 exists=lambda: True,
                 deliver=self._deliver,
-            )
-            for entry in registrations
+            ),
+            *(
+                InteractionTarget(
+                    entry.target,
+                    str(capability.runtime_id),
+                    frozenset({InteractionOperation.SUBMITTED_COMMAND, InteractionOperation.INPUT_CONFIGURATION_ERROR}),
+                    exists=lambda: True,
+                    deliver=self._deliver,
+                )
+                for entry in registrations
+            ),
         )
         for target in self._targets:
             self._pipeline.register(target)
@@ -61,49 +64,52 @@ class InputInterceptorPresentation:
         return line.rstrip() == expected_line.rstrip() and cursor_x == wcswidth(expected_line)
 
     def _deliver(self, request: InteractionRequest) -> InteractionResult:
-        entry = self._registrations[request.target]
         if request.operation == InteractionOperation.INPUT_RELEASE:
-            return self._display(entry.target, None)
-        elif request.operation == InteractionOperation.SUBMITTED_COMMAND:
+            return self._display(None)
+        elif request.operation in {
+            InteractionOperation.SUBMITTED_COMMAND,
+            InteractionOperation.INPUT_CONFIGURATION_ERROR,
+        }:
+            entry = self._registrations[request.target]
             assert request.text is not None
-            if not entry.on_enter.matches(request.text):
-                return InteractionResult(DeliveryStatus.REJECTED, "submitted input does not match its configured rule")
-            commands = "\n".join(f"  {command.name} — {command.helper_text}" for command in entry.command_list)
+            if request.operation == InteractionOperation.INPUT_CONFIGURATION_ERROR:
+                if entry.argument_menu.options:
+                    return InteractionResult(DeliveryStatus.REJECTED, "command has selectable argument options")
+                text = f"{entry.completion_text}: bad config — no argument options are configured."
+            else:
+                if not entry.on_enter.matches(request.text):
+                    return InteractionResult(
+                        DeliveryStatus.REJECTED, "submitted input does not match its configured rule"
+                    )
+                text = f"{request.text}: placeholder only — no action performed."
             return self._pipeline.send_message(
                 target="main",
-                text=(
-                    f"{entry.completion_text}: placeholder only — no command execution is registered.\n{commands}"
-                    if commands
-                    else f"{entry.completion_text}: placeholder only — no commands are registered yet."
-                ),
+                text=text,
                 source=entry.target,
                 start_model_turn=False,
             )
         else:
             assert request.text is not None
             if not isinstance(request.payload, str):
-                return InteractionResult(DeliveryStatus.REJECTED, "interactive input requires its native prefix")
-            matched = entry.live.matches(request.text)
-            return self._display(
-                entry.target,
-                TerminalCompletionState(
-                    draft=request.text,
-                    native_prefix=request.payload,
-                    completion_text=entry.completion_text if matched else "",
-                    helper_text=entry.live.helper_text if matched else "",
-                ),
-            )
+                return InteractionResult(DeliveryStatus.REJECTED, "interactive input requires its menu view")
+            view = InputMenuView.deserialize(request.payload)
+            if request.text != view.draft:
+                return InteractionResult(DeliveryStatus.REJECTED, "menu draft and presentation must agree")
+            return self._display(view)
 
-    def _display(self, source: str, state: TerminalCompletionState | None) -> InteractionResult:
+    def _display(self, state: InputMenuView | None) -> InteractionResult:
         return self._pipeline.execute(
             InteractionRequest(
-                "terminal", InteractionOperation.DISPLAY_STATE, source, payload=state.serialize() if state else None
+                "terminal",
+                InteractionOperation.DISPLAY_STATE,
+                INPUT_MENU_TARGET,
+                payload=state.serialize() if state else None,
             )
         )
 
     def close(self) -> None:
         try:
-            self._display("input-interceptor", None)
+            self._display(None)
         finally:
             for target in self._targets:
                 self._pipeline.unregister(target)

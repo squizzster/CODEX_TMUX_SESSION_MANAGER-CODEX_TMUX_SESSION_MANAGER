@@ -51,6 +51,7 @@ from rodex_registry.identity import RodexRuntimeId
         InteractionOperation.TERMINAL_OUTPUT,
         InteractionOperation.INTERACTIVE_INPUT,
         InteractionOperation.SUBMITTED_COMMAND,
+        InteractionOperation.INPUT_CONFIGURATION_ERROR,
         InteractionOperation.INPUT_RELEASE,
     ],
 )

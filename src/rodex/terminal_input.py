@@ -9,9 +9,11 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable
+from copy import copy
 from dataclasses import dataclass
 
 from .input_interceptor_config import InputInterceptorRegistration
+from .input_menu import INPUT_MENU_TARGET, InputInterceptionMenu, InputMenuStage
 from .interaction_pipeline import InteractionOperation, InteractionRequest, SessionInteractionPipeline
 
 PASTE_START = b"\x1b[200~"
@@ -93,6 +95,12 @@ class TerminalInputDecoder:
             if pending[0] == 27:
                 if len(pending) == 1:
                     break
+                if pending[1] == 27:
+                    # Two ordinary Escape presses, or Escape followed by an
+                    # arrow frame, must not collapse into one unknown key.
+                    events.append(TerminalInputEvent("control", pending[:1]))
+                    del self._pending[:1]
+                    continue
                 if PASTE_START.startswith(pending):
                     break
                 amount = 2
@@ -172,14 +180,13 @@ class TerminalInputInterceptor:
         self._forward = forward
         self._confirm_native_prefix = confirm_native_prefix
         self._candidate = ""
-        self._active: InputInterceptorRegistration | None = None
-        self._draft = ""
+        self._menu: InputInterceptionMenu | None = None
         self._forwarded_prefix = ""
         self._discard_paired_lf = False
 
     @property
     def active(self) -> bool:
-        return self._active is not None
+        return self._menu is not None
 
     def accept(self, event: TerminalInputEvent) -> None:
         if event.kind == "terminal_reply":
@@ -189,17 +196,15 @@ class TerminalInputInterceptor:
             self._discard_paired_lf = False
             if event.key == b"\n":
                 return
-        if self._active is not None:
+        if self._menu is not None:
             self._accept_local(event)
             return
         if event.kind in {"text", "paste"}:
             candidate = self._candidate + event.text
-            matches = [entry for entry in self._registrations if entry.live.matches(candidate)]
-            # An ambiguous registry cannot own input. Leave native input intact.
-            if len(matches) == 1 and self._confirm_native_prefix(self._candidate):
-                self._active = matches[0]
+            menu = InputInterceptionMenu(self._registrations, candidate)
+            if menu.matching_commands and self._confirm_native_prefix(self._candidate):
+                self._menu = menu
                 self._forwarded_prefix = self._candidate
-                self._draft = candidate
                 if self._publish(InteractionOperation.INTERACTIVE_INPUT):
                     return
                 self.release()
@@ -216,28 +221,54 @@ class TerminalInputInterceptor:
         self._forward(event.raw)
 
     def _accept_local(self, event: TerminalInputEvent) -> None:
-        assert self._active is not None
+        assert self._menu is not None
+        if event.kind == "navigation":
+            self._transition_menu(lambda menu: menu.move_selection(-1 if event.text == "up" else 1))
+            return
+        if self._menu.stage == InputMenuStage.ARGUMENTS:
+            if event.kind == "control" and event.key == b"\x1b":
+                self._transition_menu(lambda menu: menu.back_to_commands())
+            elif event.kind == "control" and event.key == b"\x03":
+                self.release()
+            elif event.kind == "control" and event.key in {b"\r", b"\n"}:
+                self._discard_paired_lf = event.key == b"\r"
+                entry, option = self._menu.selected_command, self._menu.selected_option
+                if entry is not None and option is not None:
+                    self._submit(entry.option_submission(option), self._forwarded_prefix, selected_registration=entry)
+            # A picker is not the native editor: other editing/paste keys do not
+            # leak into the retained native prefix or implicitly submit anything.
+            return
         if event.kind in {"text", "paste"}:
-            if len((self._draft + event.text).encode()) > MAX_LOCAL_DRAFT_BYTES:
+            if len((self._menu.draft + event.text).encode()) > MAX_LOCAL_DRAFT_BYTES:
                 self._return_to_native(event)
                 return
-            self._draft += event.text
+            self._menu.update_draft(self._menu.draft + event.text)
         elif event.kind == "control":
             if event.key in {b"\x1b", b"\x03"}:
                 self.release()
                 return
             if event.key in {b"\x7f", b"\x08"}:
-                self._draft = self._draft[:-1]
+                self._menu.update_draft(self._menu.draft[:-1])
             elif event.key == b"\t":
-                if self._active.live.matches(self._draft):
-                    self._draft = self._active.completion_text
+                if (entry := self._menu.selected_command) is not None:
+                    self._transition_menu(lambda menu: menu.update_draft(entry.completion_text))
+                return
             elif event.key in {b"\r", b"\n"}:
                 self._discard_paired_lf = event.key == b"\r"
-                matches = [entry for entry in self._registrations if entry.on_enter.matches(self._draft)]
-                if len(matches) != 1:
+                if (entry := self._menu.selected_command) is not None:
+                    if entry.argument_menu.options:
+                        self._transition_menu(lambda menu: menu.open_arguments())
+                    else:
+                        self._complete_local_request(
+                            entry,
+                            InteractionOperation.INPUT_CONFIGURATION_ERROR,
+                            entry.completion_text,
+                            self._forwarded_prefix,
+                        )
+                elif len([entry for entry in self._registrations if entry.on_enter.matches(self._menu.draft)]) != 1:
                     self._return_to_native(event)
                 else:
-                    self._submit(self._draft, self._forwarded_prefix)
+                    self._submit(self._menu.draft, self._forwarded_prefix)
                 return
             else:
                 self._return_to_native(event)
@@ -245,21 +276,36 @@ class TerminalInputInterceptor:
         else:
             self._return_to_native(event)
             return
-        if self._draft == self._forwarded_prefix:
+        if self._menu.draft == self._forwarded_prefix:
             self.release()
         else:
             if not self._publish(InteractionOperation.INTERACTIVE_INPUT):
                 self._return_to_native(TerminalInputEvent("opaque", b""))
 
-    def _submit(self, draft: str, forwarded_prefix: str) -> bool:
-        matches = [entry for entry in self._registrations if entry.on_enter.matches(draft)]
-        if len(matches) != 1 or not self._confirm_native_prefix(forwarded_prefix):
+    def _transition_menu(self, transition: Callable[[InputInterceptionMenu], object]) -> None:
+        """A rejected view must not silently move the option that Enter will confirm."""
+        assert self._menu is not None
+        candidate = copy(self._menu)
+        transition(candidate)
+        if self._publish(InteractionOperation.INTERACTIVE_INPUT, menu=candidate):
+            self._menu = candidate
+
+    def _submit(
+        self, draft: str, forwarded_prefix: str, *, selected_registration: InputInterceptorRegistration | None = None
+    ) -> bool:
+        registrations = (selected_registration,) if selected_registration is not None else self._registrations
+        matches = [entry for entry in registrations if entry.on_enter.matches(draft)]
+        if len(matches) != 1:
             return False
-        result = self._pipeline.execute(
-            InteractionRequest(
-                matches[0].target, InteractionOperation.SUBMITTED_COMMAND, "terminal-interceptor", text=draft
-            )
-        )
+        return self._complete_local_request(matches[0], InteractionOperation.SUBMITTED_COMMAND, draft, forwarded_prefix)
+
+    def _complete_local_request(
+        self, entry: InputInterceptorRegistration, operation: InteractionOperation, text: str, forwarded_prefix: str
+    ) -> bool:
+        """Visible local outcomes release input only after delivery and a verified native handoff."""
+        if not self._confirm_native_prefix(forwarded_prefix):
+            return False
+        result = self._pipeline.execute(InteractionRequest(entry.target, operation, "terminal-interceptor", text=text))
         if not result.accepted:
             return False
         # Remove only verified native text, after accepted local handling. Never
@@ -271,32 +317,41 @@ class TerminalInputInterceptor:
 
     def _return_to_native(self, event: TerminalInputEvent) -> None:
         """Unsupported native editing releases a lossless, non-submitting draft."""
-        held_suffix = self._draft[len(self._forwarded_prefix) :].encode()
+        assert self._menu is not None
+        held_suffix = self._menu.draft[len(self._forwarded_prefix) :].encode()
         self._forward(PASTE_START + held_suffix + PASTE_END)
         self.release()
         self._candidate = ""
         self._forward(event.raw)
 
-    def _publish(self, operation: InteractionOperation) -> bool:
-        assert self._active is not None
+    def _publish(self, operation: InteractionOperation, *, menu: InputInterceptionMenu | None = None) -> bool:
+        menu = menu if menu is not None else self._menu
+        assert menu is not None
         result = self._pipeline.execute(
             InteractionRequest(
-                self._active.target, operation, "terminal-interceptor", text=self._draft, payload=self._forwarded_prefix
+                INPUT_MENU_TARGET,
+                operation,
+                "terminal-interceptor",
+                text=menu.draft,
+                payload=menu.view(self._forwarded_prefix).serialize(),
             )
         )
         return result.accepted
 
     def release(self) -> None:
-        if self._active is not None:
+        if self._menu is not None:
             self._publish(InteractionOperation.INPUT_RELEASE)
             self._candidate = self._forwarded_prefix
-        self._active = None
-        self._draft = ""
+        self._menu = None
         self._forwarded_prefix = ""
 
 
 def _decode_escape_sequence(raw: bytes) -> TerminalInputEvent:
     """Normalize CSI-u/modifyOtherKeys identities; pass unknown native encodings intact."""
+    if raw in {b"\x1b[A", b"\x1bOA", b"\x1b[1A", b"\x1b[1;1A"}:
+        return TerminalInputEvent("navigation", raw, "up")
+    if raw in {b"\x1b[B", b"\x1bOB", b"\x1b[1B", b"\x1b[1;1B"}:
+        return TerminalInputEvent("navigation", raw, "down")
     if raw in {b"\x1b[I", b"\x1b[O"} or (
         raw.startswith(b"\x1b[") and (raw[-1:] in {b"R", b"c", b"n", b"t"} or raw.endswith(b"$y"))
     ):
@@ -315,6 +370,8 @@ def _decode_escape_sequence(raw: bytes) -> TerminalInputEvent:
             codepoint = int(fields[2])
         else:
             return TerminalInputEvent("escape_sequence", raw)
+        if modifiers == 0 and codepoint in {57352, 57353}:
+            return TerminalInputEvent("navigation", raw, "up" if codepoint == 57352 else "down")
         if modifiers not in {0, 1, 4, 5} or not 0 <= codepoint < 0xE000 or 0xD800 <= codepoint <= 0xDFFF:
             return TerminalInputEvent("escape_sequence", raw)
         if modifiers and (codepoint < 32 or codepoint == 127):

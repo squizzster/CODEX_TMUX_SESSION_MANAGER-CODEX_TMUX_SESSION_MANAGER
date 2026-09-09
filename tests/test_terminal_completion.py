@@ -5,14 +5,16 @@ from dataclasses import replace
 import pyte
 import pytest
 
-from rodex.terminal_completion import TerminalCompletionRenderer, TerminalCompletionState
+from rodex.input_interceptor_config import INPUT_INTERCEPTORS
+from rodex.input_menu import ARGUMENT_MENU_FOOTER, InputInterceptionMenu, InputMenuRow, InputMenuView
+from rodex.terminal_completion import TerminalCompletionRenderer
 
 NATIVE_MENU = (
     b"\x1b[2J\x1b[1;1HNative conversation"
     + "\x1b[5;1H\u203a /r".encode()
     + b"\x1b[7;1H  /review  review changes\x1b[8;1H  /resume  resume a chat\x1b[5;5H"
 )
-STATE = TerminalCompletionState("/ro", "/r", "/rodex", "issue a rodex command")
+STATE = InputMenuView("/ro", "/r", (InputMenuRow("/rodex", "issue a rodex command"),), 0)
 
 
 class DisplayHarness:
@@ -55,10 +57,10 @@ def test_completion_is_inline_beneath_visible_draft_and_restores_native_exactly(
 def test_nonmatching_owned_draft_has_no_configured_suggestion_and_no_command_name_assumptions():
     harness = DisplayHarness()
     harness.native(NATIVE_MENU.replace(b"/r", b"!h"))
-    state = TerminalCompletionState("!hello", "!h", "!hello", "custom helper")
+    state = InputMenuView("!hello", "!h", (InputMenuRow("!hello", "custom helper"),), 0)
     assert harness.display(state)
     assert harness.visible.display[6].strip() == "!hello   custom helper"
-    assert harness.display(replace(state, draft="!help", completion_text="", helper_text=""))
+    assert harness.display(replace(state, draft="!help", rows=(), selected_index=None))
     assert harness.visible.display[6].strip() == "no matches"
 
 
@@ -196,3 +198,30 @@ def test_empty_native_prefix_supports_atomic_pasted_live_matches():
     harness.native("\x1b[5;1H\u203a \x1b[5;3H".encode())
     assert harness.display(replace(STATE, native_prefix=""))
     assert harness.visible.display[4].rstrip() == "\u203a /ro"
+
+
+def test_argument_picker_height_shrink_restores_all_moved_native_cells_before_redraw():
+    harness = DisplayHarness(rows=16)
+    harness.native(NATIVE_MENU.replace(b"5;", b"9;").replace(b"7;", b"11;").replace(b"8;", b"12;"))
+    menu = InputInterceptionMenu(INPUT_INTERCEPTORS, "/rod")
+    menu.open_arguments()
+    assert harness.display(menu.view("/r"))
+    harness.visible.resize(lines=8)
+    harness._output.feed(harness.renderer.resize(80, 8))
+    assert harness.visible.display == harness.renderer.native.screen.display
+    assert not any("Press enter" in line for line in harness.visible.display)
+
+
+@pytest.mark.parametrize("rows", [3, 4, 6, 8])
+def test_small_argument_viewport_keeps_selected_option_and_fixed_footer_visible(rows):
+    harness = DisplayHarness(rows=rows)
+    harness.native("\x1b[2;1H\u203a /r".encode())
+    menu = InputInterceptionMenu(INPUT_INTERCEPTORS, "/rod")
+    menu.open_arguments()
+    menu.move_selection(-1)
+    assert harness.display(menu.view("/r"))
+    assert any("\u203a 3. dusk" in line for line in harness.visible.display)
+    assert harness.visible.display[-1].rstrip() == ARGUMENT_MENU_FOOTER
+    assert not harness.visible.history.top
+    assert harness.display(None)
+    assert harness.visible.display == harness.renderer.native.screen.display

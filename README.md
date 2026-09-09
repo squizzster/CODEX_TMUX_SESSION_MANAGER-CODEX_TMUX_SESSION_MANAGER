@@ -12,7 +12,7 @@ pass through unchanged.
 > described here is complete for its current scope, but interfaces may still change
 > before a stable release.
 
-Current release: **Rodex 0.9.0a1**, SQL generation **19**, shared tmux protocol **v2**.
+Current release: **Rodex 0.10.1a1**, SQL generation **19**, shared tmux protocol **v2**.
 This ALPHA supports only its current storage and runtime contracts. It creates
 `rodex-v19.sqlite3` and `tmux-shared-v2.sock`; earlier generations are outside this
 installation's session catalog. There are no database migrations or old-runtime adapters.
@@ -154,26 +154,39 @@ initialization failure instead of silently weakening the lifecycle contract.
 
 Managed sessions have one session-owned keyboard adapter before Codex, configured in
 `src/rodex/input_interceptor_config.py`. Each interception owns its completion text,
-`live` rule (expression and helper text), `on_enter` rule, and `command_list`.
+`live` rule (expression and helper text), `on_enter` rule, and `argument_menu`
+(heading, subheading and named options with helper text).
 The shared pipeline uses those configurations without command-name branches:
 
-- Live: `^/ro(?:d(?:ex?)?)?$`, completion `/rodex`, helper `issue a rodex command`.
-- Enter: `^/rodex (.*?)$` with multiline enabled. Rules match the **whole input**;
+- `/rodex`: live expression `^/ro(?:d(?:ex?)?)?$`; options `light`, `dark`, `dusk`.
+- `/rodx`: live expression `^/ro(?:dx?)?$`; dummy command with no options yet.
+- Submitted text: `^/rodex (.*?)$` or `^/rodx (.*?)$`, respectively, with multiline enabled.
+  Rules match the **whole input**;
   a matching line inside another message does not intercept that message.
-- Command list: empty; no executable Rodex commands are registered yet.
 
 Unmatched live input reaches Codex immediately. A live match verifies the native prefix
-and displays the held draft with its configured completion underneath. Every matching
-draft gets the same configured helper, not just the full completion text. Tab selects
-that text. Enter applies its own expression, including to an atomically pasted command
-that never activated live completion. A match displays the placeholder response locally
-and clears only the verified native prefix after successful delivery; no model turn starts.
-An unmatched Enter returns the held suffix and the user's Enter to Codex. In particular,
-bare `/rodex` does not match the configured Enter expression; `/rodex example` does.
+and displays **all** matching commands underneath, with their configured helper text.
+Up/Down wraps through the list; the selected row is cyan and bold, even with one match.
+Filtering preserves the selected command where it still matches. Tab completes that
+command's text. Enter on a selected command opens its configured argument picker if
+it has options. A command without options displays `<command>: bad config — no argument
+options are configured.` and returns directly to normal typing, with no empty picker.
 
-Escape drops the held suffix, leaving the native prefix; backspacing to that prefix
-also releases. Native editing keys
-outside this small placeholder editor return the held text as bracketed paste before
+The picker displays its configured headings and numbered options. Up/Down wraps through
+the options; Enter confirms the selected option through the same submitted-command pipeline.
+The fixed footer is `Press enter to confirm or esc to go back`. Escape returns to the
+prior command list and selection with one press. Other editor/paste keys are ignored
+inside the picker. `/rodx` currently exercises the missing-options configuration error.
+
+Confirmation only displays a dummy response such as `/rodex dark: placeholder only —
+no action performed.` It does not change a theme or start a model turn. The native prefix
+is cleared only after successful delivery. Typed arguments such as `/rodex dark`, including
+atomic pasted commands, use the configured `on_enter` expression directly. If neither a
+menu choice nor a submitted expression matches, Enter returns the input to Codex.
+
+Escape from the command list drops the held suffix, leaving the native prefix;
+backspacing to that prefix also releases. Native editing keys outside the command menu's
+small placeholder editor return the held text as bracketed paste before
 forwarding the key. Paste is framed atomically, not replayed as individual keypresses.
 An uncertain native editor position or unavailable initial presentation leaves input native.
 The terminal adapter projects native output with `pyte`; local painting never enters that
@@ -181,9 +194,17 @@ projection or the native editor. Partial redraws defer painting without releasin
 generated output is clipped and cannot wrap into scrollback. The placeholder draft is a
 single visible line, with control characters shown as spaces. Native output keeps rendering.
 Configuration, phase routing, inline rendering and adapter integration have Python tests.
-The user has confirmed successful live operation; the automated live-startup suite was
-not rerun for this release. Existing live hosts retain their loaded code; this feature
-is available in newly started hosts, without restarting any current session.
+The user has confirmed the live appearance, Up/Down, Enter selection and the missing-options
+fix. The release passed 261 focused Python tests, Ruff lint/format checks and a package build;
+the automated live-startup suite was not rerun. Existing live hosts retain their loaded code;
+the changes apply to newly started hosts without restarting any current session.
+
+Escape can feel slower than Up/Down because a lone Escape byte also starts terminal key
+sequences. The inspected tmux 3.2a server had `escape-time 500` (milliseconds); Rodex then
+waits another 35 ms to frame a lone Escape, with a 20 ms relay polling interval. Together
+these explain the observed roughly 0.6-second response. Complete arrow sequences do not
+need that ambiguity wait. Rodex does not override tmux's `escape-time` in this release;
+one Escape still performs one back/cancel action after decoding, without a second press.
 
 Every interactive create, resume, recovery, and reattach uses one concise lifecycle:
 

@@ -7,30 +7,11 @@ never enters the native projection, editor, or scrollback.
 
 from __future__ import annotations
 
-import json
-from dataclasses import asdict, dataclass
-
 import pyte
 from pyte import graphics, modes
 from wcwidth import wcswidth, wcwidth
 
-
-@dataclass(frozen=True)
-class TerminalCompletionState:
-    draft: str
-    native_prefix: str
-    completion_text: str
-    helper_text: str
-
-    def serialize(self) -> str:
-        return json.dumps(asdict(self), ensure_ascii=False)
-
-    @classmethod
-    def deserialize(cls, payload: str) -> TerminalCompletionState:
-        fields = json.loads(payload)
-        if not isinstance(fields, dict) or not all(isinstance(value, str) for value in fields.values()):
-            raise ValueError("completion state requires text fields")
-        return cls(**fields)
+from .input_menu import ARGUMENT_MENU_FOOTER, InputMenuStage, InputMenuView
 
 
 class NativeTerminalProjection:
@@ -106,7 +87,7 @@ class TerminalCompletionRenderer:
 
     def __init__(self, columns: int = 80, rows: int = 24) -> None:
         self.native = NativeTerminalProjection(columns, rows)
-        self._state: TerminalCompletionState | None = None
+        self._state: InputMenuView | None = None
         self._painted_from_row: int | None = None
         self._suspended = False
 
@@ -115,7 +96,7 @@ class TerminalCompletionRenderer:
         self.native.feed(data)
         return restored + data + self._paint()
 
-    def display(self, state: TerminalCompletionState | None) -> tuple[bool, bytes]:
+    def display(self, state: InputMenuView | None) -> tuple[bool, bytes]:
         if state is not None and self._state is None and self._anchor(state) is None:
             return False, b""
         restored = self._restore()
@@ -131,18 +112,20 @@ class TerminalCompletionRenderer:
         return self._paint()
 
     def resize(self, columns: int, rows: int) -> bytes:
+        if self._painted_from_row is not None and rows != self.native.screen.lines:
+            self._painted_from_row = 0  # Height changes can move every painted row upward.
         self.native.screen.resize(lines=rows, columns=columns)
         restored = self._restore()  # SIGWINCH arrives after the outer viewport changed.
         return restored  # Retain ownership; the native resize redraw re-anchors the draft.
 
-    def _anchor(self, state: TerminalCompletionState) -> tuple[int, str] | None:
+    def _anchor(self, state: InputMenuView) -> tuple[int, str] | None:
         screen = self.native.screen
         if not self.native.paintable:
             return None
         line = screen.display[screen.cursor.y][: screen.cursor.x]
         if line.lstrip() != f"\u203a {state.native_prefix}" or screen.cursor.x != wcswidth(line):
             return None
-        if screen.cursor.y + 2 >= screen.lines:
+        if screen.lines < 3:
             return None
         return screen.cursor.y, line[: len(line) - len(state.native_prefix)] if state.native_prefix else line
 
@@ -151,18 +134,22 @@ class TerminalCompletionRenderer:
             return b""
         row, prompt = anchor
         screen = self.native.screen
+        fixed_rows = 2 if self._state.stage == InputMenuStage.COMMANDS else 5
+        row = min(row, max(0, screen.lines - fixed_rows - max(1, len(self._state.rows))))
         self._painted_from_row = row
         draft = _clip_cells(prompt + self._state.draft, screen.columns - 1)
-        suggestion = (
-            f"  {self._state.completion_text}   {self._state.helper_text}"
-            if self._state.completion_text
-            else "  no matches"
-        )
+        lines = _menu_lines(self._state, draft, screen.lines - row)
         output = bytearray(b"\x1b[0m")
+        cursor = (row, wcswidth(draft)) if self._state.stage == InputMenuStage.COMMANDS else (row, 0)
         for current_row in range(row, screen.lines):
-            text = draft if current_row == row else suggestion if current_row == row + 2 else ""
-            output.extend(_position(current_row, 0) + b"\x1b[2K" + _clip_cells(text, screen.columns - 1).encode())
-        output.extend(_position(row, wcswidth(draft)))
+            text, selected = lines[current_row - row] if current_row - row < len(lines) else ("", False)
+            style = b"\x1b[1;36m" if selected else b"\x1b[0m"
+            output.extend(
+                _position(current_row, 0) + b"\x1b[0m\x1b[2K" + style + _clip_cells(text, screen.columns - 1).encode()
+            )
+            if selected and self._state.stage == InputMenuStage.ARGUMENTS:
+                cursor = (current_row, 0)
+        output.extend(b"\x1b[0m" + _position(*cursor))
         return self._without_wrapping(bytes(output))
 
     def _restore(self) -> bytes:
@@ -195,6 +182,29 @@ class TerminalCompletionRenderer:
 
 def _position(row: int, column: int) -> bytes:
     return f"\x1b[{row + 1};{column + 1}H".encode()
+
+
+def _menu_lines(state: InputMenuView, draft: str, available_rows: int) -> list[tuple[str, bool]]:
+    """Fit the selected row and fixed picker footer before admitting optional spacing."""
+    if state.stage == InputMenuStage.COMMANDS:
+        heading, footer = [draft, ""], []
+    elif available_rows >= 6:
+        heading, footer = [state.heading, state.subheading, ""], ["", ARGUMENT_MENU_FOOTER]
+    else:
+        heading, footer = [state.heading], [ARGUMENT_MENU_FOOTER]
+    lines = [(line, False) for line in heading]
+    visible_count = max(1, available_rows - len(heading) - len(footer))
+    first_index = max(0, (state.selected_index or 0) - visible_count + 1)
+    label_width = max((wcswidth(row.label) for row in state.rows), default=0)
+    for index in range(first_index, min(len(state.rows), first_index + visible_count)):
+        row = state.rows[index]
+        selected = index == state.selected_index
+        label = row.label + " " * (label_width - wcswidth(row.label))
+        prefix = f"{'\u203a' if selected else ' '} {index + 1}. " if state.stage == InputMenuStage.ARGUMENTS else "  "
+        lines.append((f"{prefix}{label}   {row.helper_text}", selected))
+    if not state.rows:
+        lines.append(("  no matches", False))
+    return lines + [(line, False) for line in footer]
 
 
 def _clip_cells(text: str, columns: int) -> str:

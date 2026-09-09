@@ -15,6 +15,7 @@ from contextlib import contextmanager, suppress
 import pytest
 
 from rodex.input_interceptor_config import INPUT_INTERCEPTORS
+from rodex.input_menu import INPUT_MENU_TARGET, InputMenuStage, InputMenuView
 from rodex.interaction_pipeline import (
     DeliveryStatus,
     InteractionOperation,
@@ -118,6 +119,15 @@ def test_local_input_and_submission_share_pipeline_but_never_send_native_enter()
     pipeline = SessionInteractionPipeline()
     pipeline.register(
         InteractionTarget(
+            INPUT_MENU_TARGET,
+            "runtime",
+            frozenset({InteractionOperation.INTERACTIVE_INPUT, InteractionOperation.INPUT_RELEASE}),
+            exists=lambda: True,
+            deliver=lambda request: delivered.append(request) or InteractionResult(DeliveryStatus.DELIVERED),
+        )
+    )
+    pipeline.register(
+        InteractionTarget(
             INPUT_INTERCEPTORS[0].target,
             "runtime",
             frozenset(
@@ -142,6 +152,52 @@ def test_local_input_and_submission_share_pipeline_but_never_send_native_enter()
                 request.text for request in delivered if request.operation == InteractionOperation.SUBMITTED_COMMAND
             ] == ["/rodex argument"]
             assert all(not request.start_model_turn for request in delivered)
+        finally:
+            gateway.close()
+
+
+def test_one_escape_goes_back_without_another_key_or_native_output():
+    delivered = []
+    pipeline = SessionInteractionPipeline()
+    pipeline.register(
+        InteractionTarget(
+            INPUT_MENU_TARGET,
+            "runtime",
+            frozenset({InteractionOperation.INTERACTIVE_INPUT, InteractionOperation.INPUT_RELEASE}),
+            exists=lambda: True,
+            deliver=lambda request: delivered.append(request) or InteractionResult(DeliveryStatus.DELIVERED),
+        )
+    )
+    with outer_terminal() as (master, slave):
+        gateway = start_gateway(slave, pipeline, INPUT_INTERCEPTORS)
+
+        def send_and_wait_for_menu_event(data):
+            previous_count = len(delivered)
+            os.write(master, data)
+            deadline = time.monotonic() + 2
+            while len(delivered) == previous_count and time.monotonic() < deadline:
+                with suppress(subprocess.TimeoutExpired):
+                    gateway.wait(timeout=0.04)
+            assert len(delivered) > previous_count
+            return delivered[-1]
+
+        try:
+            read_until(gateway, master, b"READY")
+            send_and_wait_for_menu_event(b"/rod")
+            request = send_and_wait_for_menu_event(b"\r")
+            assert InputMenuView.deserialize(request.payload).stage == InputMenuStage.ARGUMENTS
+            # No follow-up byte is sent to flush a pending Escape: the real relay
+            # must expire it and return to the command menu on its own.
+            request = send_and_wait_for_menu_event(b"\x1b")
+            view = InputMenuView.deserialize(request.payload)
+            assert view.stage == InputMenuStage.COMMANDS and view.draft == "/rod"
+            request = send_and_wait_for_menu_event(b"\x1b")
+            assert request.operation == InteractionOperation.INPUT_RELEASE
+            assert not gateway._interceptor.active
+            # Escape intentionally leaves the native /r prefix. Use text which
+            # does not form a fresh configured /ro match with that prefix.
+            os.write(master, b"hello")
+            read_until(gateway, master, b"hello")
         finally:
             gateway.close()
 

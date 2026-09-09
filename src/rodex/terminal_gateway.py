@@ -22,6 +22,7 @@ from contextlib import suppress
 from typing import BinaryIO
 
 from .input_interceptor_config import InputInterceptorRegistration
+from .input_menu import InputMenuView
 from .interaction_pipeline import (
     DeliveryStatus,
     InteractionOperation,
@@ -30,7 +31,7 @@ from .interaction_pipeline import (
     InteractionTarget,
     SessionInteractionPipeline,
 )
-from .terminal_completion import TerminalCompletionRenderer, TerminalCompletionState
+from .terminal_completion import TerminalCompletionRenderer
 from .terminal_input import TerminalInputDecoder, TerminalInputInterceptor
 
 QUEUE_LIMIT_BYTES = 1024 * 1024
@@ -155,7 +156,7 @@ class TerminalSessionGateway:
         if request.operation == InteractionOperation.DISPLAY_STATE:
             if request.payload is not None and not isinstance(request.payload, str):
                 return InteractionResult(DeliveryStatus.REJECTED, "completion display requires serialized text state")
-            state = TerminalCompletionState.deserialize(request.payload) if request.payload is not None else None
+            state = InputMenuView.deserialize(request.payload) if request.payload is not None else None
             accepted, rendered = self._completion.display(state)
             self._display_queue.extend(rendered)
             return InteractionResult(DeliveryStatus.DELIVERED if accepted else DeliveryStatus.REJECTED)

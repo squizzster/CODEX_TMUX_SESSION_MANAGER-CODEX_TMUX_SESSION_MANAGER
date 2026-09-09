@@ -45,8 +45,9 @@ becomes a distinct candidate for the transient App Server persistence check.
    Codex syntax validates the `codex` and `tmux` executables.
 2. tmux starts a small supervisor directly; Rodex never types with `send-keys`.
 3. The supervisor starts one private Codex app-server and the Rodex WebSocket proxy on
-   short Unix sockets, then connects the inline Codex TUI through it with
-   `--no-alt-screen` and Codex's interactive startup updater disabled.
+   short Unix sockets, then starts the inline Codex TUI through the session-owned PTY
+   gateway, connected to the proxy with `--no-alt-screen` and Codex's interactive
+   startup updater disabled.
 4. Rodex asks that private app-server for its one loaded Codex session ID.
 5. Under the unregistered immutable Rodex session-ID transition lock, one SQLite
    transaction creates the Rodex/runtime identities, canonical root-thread membership,
@@ -159,7 +160,8 @@ reads the complete registered roster, and submits each changed attachment count 
 that session's full capability. Rodex changes only its owned global hook slots and never
 removes session-local hooks. The shared root `C-c` guard is installed and re-read exactly;
 a pre-existing non-Rodex binding or ownership change fails initialization rather than
-silently disabling the guard. There is no general input interception or `pipe-pane`.
+silently disabling the guard. These tmux lifecycle bindings are separate from the
+session-owned PTY input pipeline; there is no tmux Enter binding or `pipe-pane` adapter.
 
 All of these checks happen at the operation boundary. Rodex does not monitor tmux or the
 filesystem as an IDS and uses no inotify watcher or real-time surveillance loop. tmux has
@@ -167,6 +169,24 @@ no conditional bind-if-absent primitive, so a same-uid external key change can r
 last absence check and be overwritten by Rodex's bind. Readback detects a competing
 change that wins afterward, but cannot prove absence at the bind instant; coordinate
 same-uid tmux configuration while Rodex initializes.
+
+## Keyboard and local command menus
+
+Keyboard input crosses tmux, then the host's `TerminalSessionGateway` and
+`TerminalInputInterceptor`, before reaching the native Codex editor. One configuration
+per command supplies independent live/Enter expressions, completion/helper text and
+argument headings/options. `InputInterceptionMenu` owns matching and selection;
+`InputInterceptorPresentation` publishes its immutable view through the shared
+interaction pipeline. The gateway renders it without changing the native projection.
+
+All live matches appear together, with cyclic Up/Down selection. Enter opens a populated
+argument picker; one Escape returns to the command list, and Escape there releases input.
+Selecting a command with no options reports bad configuration through the main display
+adapter and returns directly to typing. Configured option confirmations and typed commands
+use the same submitted-command handler; today's dummy replies never start a model turn.
+Rodex leaves tmux's Escape ambiguity timeout unchanged, so a lone Escape may respond
+later than complete arrow sequences. See the [menu behavior](../README.md#local-input-interceptor-placeholder)
+and [interaction contract](INTERACTION_PATHS.md#escape-timing) for configuration and timing.
 
 ## Scrollback ownership
 

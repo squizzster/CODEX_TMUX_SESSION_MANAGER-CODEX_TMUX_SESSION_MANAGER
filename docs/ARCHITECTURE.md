@@ -121,7 +121,7 @@ App Server event → stateless projection → producer reducer → newest snapsh
 tmux pane ← presentation view ← consumer reducer ← length-framed private socket
 ```
 
-The producer reducer owns events, tombstones, targets, pruning, epoch, and revision. It
+The producer reducer owns agent work/counts, events, tombstones, targets, epochs and revisions. It
 publishes bounded snapshots through a newest-only dispatcher. The consumer applies each
 revision once and replaces presentation state at epoch/overflow boundaries, so tombstones
 cannot resurrect. The interaction pipeline admits pane work; `TmuxPaneController` owns mechanics.

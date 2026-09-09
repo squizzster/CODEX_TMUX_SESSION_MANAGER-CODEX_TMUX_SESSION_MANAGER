@@ -17,6 +17,12 @@ ObserverStateKey = tuple[str, str, str]
 
 
 @dataclass(frozen=True, slots=True)
+class ActiveAgentWork:
+    turn_id: str | None = None
+    request_id: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class ObserverStateDelta:
     epoch: int
     revision: int
@@ -40,7 +46,10 @@ class ObserverStateReducer:
         self._removed_targets: dict[str, None] = {}
         self._dropped_event_count = 0
         self._known_activity_item_ids: set[str] = set()
-        self._tracked_target_thread_ids: set[str] = set()
+        self._known_agent_thread_ids: set[str] = set()
+        self._known_agent_paths: dict[str, str] = {}
+        self._active_agent_work: dict[str, ActiveAgentWork] = {}
+        self._started_agent_request_keys: set[tuple[str, str]] = set()
         self._latest_parent_user_message: dict[str, object] | None = None
         self._collaboration_invocations: dict[str, dict[str, object]] = {}
         self._subagent_activities: dict[str, dict[str, object]] = {}
@@ -65,7 +74,61 @@ class ObserverStateReducer:
     @property
     def tracked_target_thread_ids(self) -> frozenset[str]:
         self._require_mode("producer")
-        return frozenset(self._tracked_target_thread_ids)
+        return frozenset(self._active_agent_work)
+
+    @property
+    def running_agent_count(self) -> int:
+        self._require_mode("producer")
+        return len(self._active_agent_work)
+
+    def knows_agent(self, target_thread_id: str) -> bool:
+        self._require_mode("producer")
+        return target_thread_id in self._known_agent_thread_ids
+
+    def start_agent_work(
+        self, target_thread_id: str, turn_id: str | None = None, *, request_id: str | None = None
+    ) -> None:
+        """One running entry per agent; repeated start evidence cannot increment twice."""
+        self._require_mode("producer")
+        if request_id is not None:
+            request_key = (target_thread_id, request_id)
+            if request_key in self._started_agent_request_keys:
+                return
+            self._started_agent_request_keys.add(request_key)
+        self._known_agent_thread_ids.add(target_thread_id)
+        previous = self._active_agent_work.get(target_thread_id, ActiveAgentWork())
+        continues_turn = turn_id is None or previous.turn_id in {None, turn_id}
+        self._active_agent_work[target_thread_id] = ActiveAgentWork(
+            turn_id if turn_id is not None else previous.turn_id,
+            request_id if request_id is not None else previous.request_id if continues_turn else None,
+        )
+
+    def finish_agent_work(
+        self, target_thread_id: str, turn_id: str | None = None, *, request_id: str | None = None
+    ) -> bool:
+        """Remove one running agent, never a newer turn or an already finished entry."""
+        self._require_mode("producer")
+        active = self._active_agent_work.get(target_thread_id)
+        if active is None:
+            return False
+        if turn_id is not None and active.turn_id is not None and turn_id != active.turn_id:
+            return False
+        if request_id is not None and request_id != active.request_id:
+            return False
+        del self._active_agent_work[target_thread_id]
+        return True
+
+    def agent_work_started_event(self, target_thread_id: str, root_thread_id: str) -> dict[str, object]:
+        """Carry current agent identity into a reopened view without replaying an old spawn or prompt."""
+        self._require_mode("producer")
+        return {
+            "schema": OBSERVER_SCHEMA,
+            "kind": "agent_work_started",
+            "thread_id": root_thread_id,
+            "target_thread_id": target_thread_id,
+            "agent_path": self._known_agent_paths[target_thread_id],
+            "turn_id": self._active_agent_work[target_thread_id].turn_id,
+        }
 
     @property
     def latest_parent_user_message(self) -> dict[str, object] | None:
@@ -83,19 +146,20 @@ class ObserverStateReducer:
 
     def tracks_target(self, target_thread_id: str) -> bool:
         self._require_mode("producer")
-        return target_thread_id in self._tracked_target_thread_ids
+        return target_thread_id in self._active_agent_work
 
     def remember_activity(
         self,
         item_id: str,
-        target_thread_id: str,
         event: dict[str, object],
         *,
         new_spawn: bool,
     ) -> None:
         self._require_mode("producer")
         self._subagent_activities[item_id] = event
-        self._tracked_target_thread_ids.add(target_thread_id)
+        item = event["item"]
+        assert isinstance(item, dict)
+        self._known_agent_paths[str(item["agent_thread_id"])] = str(item["agent_path"])
         if new_spawn:
             self._known_activity_item_ids.add(item_id)
 
@@ -127,17 +191,13 @@ class ObserverStateReducer:
         self._require_mode("producer")
         self._sent_root_request_context_ids.add(item_id)
 
-    def complete_activity(self, item_id: str, target_thread_id: str) -> None:
+    def complete_activity(self, item_id: str) -> None:
+        """Retire item correlation only; tool completion does not finish agent work."""
         self._require_mode("producer")
         self._known_activity_item_ids.discard(item_id)
         self._subagent_activities.pop(item_id, None)
         self._collaboration_invocations.pop(item_id, None)
         self._sent_root_request_context_ids.discard(item_id)
-        if not any(
-            observer_event_target_thread_id(activity) == target_thread_id
-            for activity in self._subagent_activities.values()
-        ):
-            self._tracked_target_thread_ids.discard(target_thread_id)
 
     def prune_protocol_target(self, target_thread_id: str) -> dict[str, object]:
         self._require_mode("producer")
@@ -146,7 +206,7 @@ class ObserverStateReducer:
             for item_id, activity in self._subagent_activities.items()
             if observer_event_target_thread_id(activity) == target_thread_id
         }
-        self._tracked_target_thread_ids.discard(target_thread_id)
+        self.finish_agent_work(target_thread_id)
         self._known_activity_item_ids.difference_update(item_ids)
         self._sent_root_request_context_ids.difference_update(item_ids)
         for item_id in item_ids:
@@ -320,7 +380,10 @@ class ObserverStateReducer:
 
     def _clear_protocol_state(self) -> None:
         self._known_activity_item_ids.clear()
-        self._tracked_target_thread_ids.clear()
+        self._known_agent_thread_ids.clear()
+        self._known_agent_paths.clear()
+        self._active_agent_work.clear()
+        self._started_agent_request_keys.clear()
         self._latest_parent_user_message = None
         self._collaboration_invocations.clear()
         self._subagent_activities.clear()

@@ -1,6 +1,6 @@
 # Interaction contract and production-path inventory
 
-Rodex 0.10.1a1, ALPHA. SQL generation 19 and shared tmux protocol v2 are unchanged.
+Rodex 0.11.0a1, ALPHA. SQL generation 19 and shared tmux protocol v2 are unchanged.
 There is no old interaction endpoint or fallback adapter. Existing processes retain
 the code they already loaded; this change does not restart existing sessions.
 
@@ -121,7 +121,9 @@ work. The record buffer contains metadata, not prompt bodies or another durable 
 | Origin | Owner/effect |
 |---|---|
 | Committed registration | Independently activate observer and attempt analytics startup |
-| Exact agent spawn | Projection → reducer → OPEN → pane adapter → tmux split/registration/input-disable/focus |
+| Agent work starts | Exact spawn, successful follow-up or known-child active/turn-start event → reducer running-agent ledger → OPEN → pane adapter |
+| Agent work finishes | Matching child turn/request completion or inactive status → reducer removes one agent → last agent closes observer via CLOSE; main chat remains intact |
+| Reopened agent work | Current target/path/turn fact → observer snapshot → view tracking; no original spawn or prompt replay |
 | Later agent activity/prose | Projection → reducer → DISPLAY_STATE → dispatcher → pane-bound control frame |
 | Observer message | MESSAGE → readiness-bounded send → receiver admission → terminal presentation |
 | Observer bootstrap | Initial projected event via OPEN → view → terminal presentation |
@@ -129,7 +131,7 @@ work. The record buffer contains metadata, not prompt bodies or another durable 
 | Analytics trace publication | Committed SQL receipt → nonblocking observer wake → indexed trace/evidence reads → presentation |
 | Startup/overflow SQL catch-up | Durable projection → view → same terminal presentation |
 | Analytics initial/event/retry wake | Scheduler → authenticated reader/analyzer → registry transaction: checkpoint, lineage, trace, statistics, health |
-| Primary disconnect | Reset all lifecycle participants; reducer advances epoch; retire connection targets |
+| Primary disconnect | Reset all lifecycle participants; reducer clears work/identity and advances epoch; close observer; retire connection targets |
 | Session creation | Managed lifecycle/runtime → server claim, inert session, prepared environment, exact host respawn |
 | Registration/rename/rollback | Registry transition and runtime markers; one namespaced rename owner |
 | Attach | Registered capability → interactive tmux attach |
@@ -195,3 +197,15 @@ The user confirmed live appearance, Up/Down, Enter selection and the missing-opt
 correction. The automated live-startup suite was not rerun, and the push reused this
 completed verification without rerunning tests. SQL generation 19 and tmux protocol v2
 require no changes for these menu operations.
+
+The 0.11.0a1 observer lifecycle uses a separate reducer-owned running-agent ledger, not
+the presentation event/tombstone count. Starts are idempotent per request; turn/request
+identity prevents an older completion from clearing newer work. Known agent identities
+survive idle periods for reopening and are cleared with the connection epoch. Current
+work facts restore target/turn tracking and the current trace cursor in a fresh pane
+without replaying old prompts or historical trace requests.
+Only relevant lifecycle/activity events reconcile pane visibility; unrelated streaming
+deltas do not query tmux. The focused observer/interaction checks include a real isolated
+tmux close/reopen test, with no live-user sessions or Codex model launches. Verification
+passed 164 observer/interaction checks plus 203 input/menu/gateway and mocked host checks,
+Ruff lint/format checks and the source-distribution/wheel build.

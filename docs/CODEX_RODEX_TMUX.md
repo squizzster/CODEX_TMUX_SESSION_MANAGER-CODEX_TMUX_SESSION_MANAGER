@@ -305,8 +305,9 @@ earlier events from acquiring a later follow-up's human request. A `send_message
 interaction creates no pending target turn, cannot acquire a later turn, and receives no
 terminal recap. Natural-width progress blocks never depend on moving the terminal cursor
 across wrapped rows. Completion repeats the invocation semantics and exact root-request
-context so a short pane still leaves a useful handoff in tmux history. The pane survives
-agent completion for reuse and exits when the runtime event stream closes. Parent
+context while the pane is open; closing it removes that pane's tmux history, not the durable
+trace. The pane stays open while any agent is working, closes when the running count reaches zero,
+and reopens for later work. It also exits when the runtime event stream closes. Parent
 messages from another root or turn, developer and system
 instructions, command text, tool payloads, output bodies, and hidden reasoning remain
 outside the display contract.

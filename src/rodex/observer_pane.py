@@ -128,6 +128,11 @@ class ObserverPaneController:
             )
         )
 
+    def close(self) -> InteractionResult:
+        return self.pipeline.execute(
+            InteractionRequest(OBSERVER_TARGET, InteractionOperation.CLOSE, "observer-lifecycle")
+        )
+
     def _reopen(self) -> InteractionResult:
         if self._open_request is None:
             return InteractionResult(DeliveryStatus.REJECTED, "observer has no registered launch context")

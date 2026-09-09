@@ -12,7 +12,7 @@ pass through unchanged.
 > described here is complete for its current scope, but interfaces may still change
 > before a stable release.
 
-Current release: **Rodex 0.10.1a1**, SQL generation **19**, shared tmux protocol **v2**.
+Current release: **Rodex 0.11.0a1**, SQL generation **19**, shared tmux protocol **v2**.
 This ALPHA supports only its current storage and runtime contracts. It creates
 `rodex-v19.sqlite3` and `tmux-shared-v2.sock`; earlier generations are outside this
 installation's session catalog. There are no database migrations or old-runtime adapters.
@@ -195,7 +195,7 @@ generated output is clipped and cannot wrap into scrollback. The placeholder dra
 single visible line, with control characters shown as spaces. Native output keeps rendering.
 Configuration, phase routing, inline rendering and adapter integration have Python tests.
 The user has confirmed the live appearance, Up/Down, Enter selection and the missing-options
-fix. The release passed 261 focused Python tests, Ruff lint/format checks and a package build;
+fix. The input-menu release passed 261 focused Python tests, Ruff lint/format checks and a package build;
 the automated live-startup suite was not rerun. Existing live hosts retain their loaded code;
 the changes apply to newly started hosts without restarting any current session.
 
@@ -250,11 +250,23 @@ protocol event. Replacement and truncation still re-enter the authenticated base
 ### Live agent observer pane
 
 After runtime registration, an exact App Server
-`item/started → subAgentActivity(kind=started)` event creates a top pane at one-third of
+`subAgentActivity(kind=started)` event creates a top pane at one-third of
 the window. The existing Codex pane remains active in the lower two-thirds. The top pane
 directly runs Rodex's dedicated observer process, has tmux input disabled, and cannot
-execute shell commands. It remains after an agent turn finishes and is reused by later
-agent activity; it exits with the Rodex runtime so it cannot keep a session alive.
+execute shell commands. The producer tracks distinct running agents: starting work adds
+one, finishing removes one, and duplicate evidence cannot change the count twice. The pane
+stays open while any tracked agent is working and automatically closes when the count
+reaches zero. Later spawn/follow-up work or a known child's new turn reopens it through
+the same pane pipeline, leaving the main chat intact. Disconnect clears the work ledger
+and closes the observer; runtime exit also ends the observer process.
+
+Only typed work-lifecycle events drive this count. Tool-call completion, agent prose and
+parent-turn completion are not agent-work completion. Known turn/request identities
+prevent an older completion from removing newer work; ordinary streaming deltas trigger
+no pane lookup. Reopening publishes the current target/turn identity, not an old prompt.
+Lifecycle coverage includes overlapping agents, duplicate/stale events, known-agent
+reactivation and real isolated tmux close/reopen with the main pane preserved. This does
+not restart existing live hosts; they retain the observer behavior they already loaded.
 
 The App Server's exact agent UUID and path determine what is followed. Its current
 `collabAgentToolCall` item names `spawnAgent`, `followupTask`, or `sendMessage` and may

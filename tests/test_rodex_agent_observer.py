@@ -27,8 +27,6 @@ from rodex.agent_observer import (
 )
 from rodex.interaction_pipeline import (
     DeliveryStatus,
-    InteractionOperation,
-    InteractionRequest,
     SessionInteractionPipeline,
 )
 from rodex.observer_contract import OBSERVER_PROJECTED_TEXT_MAX_CHARS
@@ -502,13 +500,16 @@ def test_exact_spawn_creates_a_disabled_top_third_without_changing_focus(
     assert "subAgentActivity" in joined_split
     assert "/root/live-review" in joined_split
     assert "prompt" not in joined_split
-    assert [shlex.split(command[-2]) for command in calls[-4:]] == [
+    mutations = [
+        shlex.split(command[-2]) for command in calls if command[3] == "if-shell" and "display-message" not in command[-2]
+    ]
+    assert mutations[-4:] == [
         ["set-option", "-p", "-t", "%7", "@rodex_agent_observer_pane_id", "%9"],
         ["set-option", "-p", "-t", "%9", "@rodex_agent_observer_for", "%7"],
         ["select-pane", "-d", "-t", "%9"],
         ["select-pane", "-t", "%7"],
     ]
-    assert sent == []
+    assert _observer_snapshot_events(sent[-1][1])[0]["item"]["id"] == "call-spawn-1"
 
 
 @pytest.mark.parametrize("failed_registration_step", range(4))
@@ -2570,8 +2571,14 @@ def test_real_tmux_observer_renders_request_and_exits_with_its_runtime(
         time.sleep(0.05)
         assert "\nls\n" not in _capture_tmux_pane(tmux, tmux_socket, observer[0])
 
+        controller.observe_protocol_event(
+            {"method": "turn/completed", "params": {"threadId": str(CHILD_THREAD_ID), "turn": {"id": child_turn_id}}}
+        )
+        assert _wait_for_tmux_panes(tmux, tmux_socket, 1)[0][0] == primary
+        controller.observe_protocol_event(_spawn_event(item_id="next-agent-work"))
+        assert len(_wait_for_tmux_panes(tmux, tmux_socket, 2)) == 2
         controller.reset_after_disconnect()
-        assert pipeline.execute(InteractionRequest("agent-observer", InteractionOperation.CLOSE, "test")).accepted
+        assert _wait_for_tmux_panes(tmux, tmux_socket, 1)[0][0] == primary
         reopened = pipeline.send_message(target="agent-observer", text="Fresh observer state", open_if_missing=True)
         assert reopened.status == DeliveryStatus.DELIVERED
         panes = _wait_for_tmux_panes(tmux, tmux_socket, 2)

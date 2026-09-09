@@ -1,6 +1,6 @@
 # Interaction contract and production-path inventory
 
-Rodex 0.11.0a1, ALPHA. SQL generation 19 and shared tmux protocol v2 are unchanged.
+Rodex 0.12.0a1, ALPHA. SQL generation 19 and shared tmux protocol v2 are unchanged.
 There is no old interaction endpoint or fallback adapter. Existing processes retain
 the code they already loaded; this change does not restart existing sessions.
 
@@ -30,7 +30,8 @@ display-only convenience function using this transport, not a second delivery pa
 | Per-connection protocol target | Input/output frames | Native RPC intent preserved | None |
 | `terminal` | Native output and configured inline completion | Native keyboard bytes; no implicit model intent | None |
 | `input-interceptor-menu` | Shared command/argument view and release | Selection only; never starts a turn | None |
-| `input-interceptor:<name>` | Dummy response or configuration error | Local handler; display-only | None |
+| `input-interceptor:<name>` | Configured action, placeholder or configuration error | Local handler; no implicit model turn | None |
+| `presentation-policy` | Select configured native/semantic main viewport | Never changes model/protocol input | None |
 
 Future agent-chat targets need an explicit thread and adapter; labels never imply one.
 Primary open/close are session lifecycle operations, not pane-control operations.
@@ -97,14 +98,17 @@ work. The record buffer contains metadata, not prompt bodies or another durable 
 | Native typing and terminal replies | TERMINAL_INPUT → decoder/interceptor → native child PTY → TUI → protocol-input pipeline |
 | Configured live matches | Every `live.reg_exp_intercept` match → verified native prefix → shared menu INTERACTIVE_INPUT → terminal DISPLAY_STATE |
 | Command/option navigation | One `InputInterceptionMenu` owns filtering, wrapping selection, Enter/open and Escape/back; immutable view → same display pipeline |
-| Option confirmation | Explicit selected command + configured option → SUBMITTED_COMMAND → display-only dummy response; no theme or model mutation |
+| Option confirmation | Explicit selected command + configured option → SUBMITTED_COMMAND → its configured target/operation/payload; options without actions remain placeholders |
 | Selected command without options | INPUT_CONFIGURATION_ERROR → main MESSAGE(false); report bad config, clear verified native prefix, release keyboard; no empty picker or command submission |
 | Configured Enter match | Interception `on_enter.reg_exp_intercept` → SUBMITTED_COMMAND, including pasted input without live takeover; unmatched Enter stays native |
 | Local release | INPUT_RELEASE → clear terminal DISPLAY_STATE; cancellation leaves native prefix; unsupported editing restores held suffix before key |
-| Local placeholder reply | Configured command/option text → MESSAGE(false) → main display adapter; no command execution yet |
+| Presentation selection | Configured `light`/`dark` action → SELECT_PRESENTATION_POLICY; never starts a turn or changes App Server delivery/logging |
+| Local placeholder reply | Configured actionless command/option text → MESSAGE(false) → main display adapter |
 | Initial prompts and native TUI protocol operations | Native TUI → protocol-input pipeline → App Server |
-| Native terminal output | TERMINAL_OUTPUT → native-only projection + inline compositor → bounded display queue → outer PTY; native bytes retain their order/content |
-| App Server primary/control-client output | Protocol-output pipeline → destination; same accepted frame → projections |
+| Native terminal output | TERMINAL_OUTPUT → continuously updated native projection → selected native/semantic surface + inline compositor → bounded display queue → outer PTY |
+| App Server primary output | Protocol-output pipeline → TUI unchanged, then typed presentation/context/observer/event projections; display filtering never rejects execution |
+| Primary TUI requests | Protocol-input pipeline → request correlation → App Server unchanged; correlated `thread/read` responses hydrate bounded typed presentation text |
+| App Server control-client output | Protocol-output pipeline → its exact destination; never enters the primary presentation projection |
 | `_start`, `_steer`, `_interrupt` | Exact selector lock → interaction operation → exact-control adapter → proxy |
 | `_alias` | Serialized SQL/tmux rename → explicit start/steer announcement |
 | Attach/update notice | Registered capability → bounded update producer → display-only interaction |
@@ -155,7 +159,8 @@ work. The record buffer contains metadata, not prompt bodies or another durable 
 | Keyboard framing and native PTY writes | `TerminalInputDecoder` / `TerminalInputInterceptor` → `TerminalSessionGateway`; tmux retains its owned lifecycle keys |
 | Native composer presentation at takeover/submission | Exact primary-pane fenced snapshot; prefix and end cursor must agree, no background screen polling |
 | Native editor state | Codex; Rodex observes a bounded candidate and verifies the native composer at handoff |
-| Inline completion rendering | `TerminalCompletionRenderer` → gateway output queue; native-only screen projection, no editor mutation or second writer |
+| Main terminal surface | `TerminalSurfaceRenderer` → gateway output queue; one native projection plus configured semantic views, no editor mutation or second writer |
+| Presentation classification | `SessionPresentationPipeline`; bounded App Server method/kind/thread/turn/item/type/phase/status fields and item-text accumulation |
 
 ### Escape timing
 
@@ -186,19 +191,18 @@ ordinary editing afterwards, and no model turn from display-only delivery. Isola
 test controlling-terminal identity, input/output hooks, final-output drain, resize, signals,
 spawn failure and terminal restoration. Tests never attach to or stop an existing user session.
 
-Release 0.10.1a1 has focused Python coverage of both menu levels, regex filtering, cyclic
-selection, configured headings/options, fixed footer, CRLF, rapid Escape, rejected delivery,
-missing-option errors and immediate keyboard release. An isolated Python-child PTY checks
-single-Escape back/release without a follow-up key or child output. Tests also cover
-height/width changes, native-byte preservation and no implicit model turn. Tests exercise
-the real Python input/presentation/gateway adapters without launching Codex or a live Rodex
-session. The release passed 261 focused tests, Ruff lint/format checks and a package build.
-The user confirmed live appearance, Up/Down, Enter selection and the missing-options
-correction. The automated live-startup suite was not rerun, and the push reused this
-completed verification without rerunning tests. SQL generation 19 and tmux protocol v2
-require no changes for these menu operations.
+Current checks cover both menu levels, regex filtering, cyclic selection, configured
+actions/headings/options, fixed footer, rapid Escape, rejected delivery, missing-option
+errors and immediate keyboard release. Terminal transcripts verify semantic filtering,
+streaming typed text, hidden native activity, configured future item types, menu operation
+inside semantic mode, native restoration, modal-control fallback and frame coalescing
+without truncating in-flight terminal tokens. Protocol tests verify exact request/response
+identity, root-thread scoping, history hydration, delta/item correlation and disconnect reset.
+The isolated installed-command gate starts Rodex, selects light through the real menu,
+restores dark through submitted input, resumes/reattaches, and stops only its own tmux
+fixtures without inspecting process state through `/proc/PID/stat`.
 
-The 0.11.0a1 observer lifecycle uses a separate reducer-owned running-agent ledger, not
+The observer lifecycle uses a separate reducer-owned running-agent ledger, not
 the presentation event/tombstone count. Starts are idempotent per request; turn/request
 identity prevents an older completion from clearing newer work. Known agent identities
 survive idle periods for reopening and are cleared with the connection epoch. Current

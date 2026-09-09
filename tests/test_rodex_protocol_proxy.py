@@ -348,6 +348,7 @@ def test_proxy_forwards_both_directions_and_counts_server_tool_items(
     upstream_thread.start()
     counts: list[int] = []
     observed_events: list[str | bytes] = []
+    observed_client_events: list[dict[str, object] | None] = []
     decode_calls = 0
     original_decode = proxy_module._json_object
 
@@ -362,6 +363,7 @@ def test_proxy_forwards_both_directions_and_counts_server_tool_items(
         app_socket,
         ToolCallCounter(counts.append),
         lambda message, _event: observed_events.append(message),
+        on_primary_client_message=lambda _message, event: observed_client_events.append(event),
     )
     try:
         proxy.start()
@@ -377,7 +379,8 @@ def test_proxy_forwards_both_directions_and_counts_server_tool_items(
     assert received_by_server == [client_message]
     assert counts == [1]
     assert observed_events == [server_message]
-    assert decode_calls == 1
+    assert observed_client_events == [json.loads(client_message)]
+    assert decode_calls == 2
     assert not proxy_socket.exists()
 
 

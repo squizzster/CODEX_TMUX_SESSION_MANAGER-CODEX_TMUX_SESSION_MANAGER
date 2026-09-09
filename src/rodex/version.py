@@ -1,3 +1,3 @@
 """One runtime-visible Rodex release identity."""
 
-RODEX_VERSION = "0.11.0a1"
+RODEX_VERSION = "0.12.0a1"

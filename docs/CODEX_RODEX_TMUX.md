@@ -183,10 +183,20 @@ All live matches appear together, with cyclic Up/Down selection. Enter opens a p
 argument picker; one Escape returns to the command list, and Escape there releases input.
 Selecting a command with no options reports bad configuration through the main display
 adapter and returns directly to typing. Configured option confirmations and typed commands
-use the same submitted-command handler; today's dummy replies never start a model turn.
+use the same submitted-command handler and each option may declare a typed interaction
+target, operation and payload. Actionless options remain placeholders. `light` selects
+the configured root-commentary viewport and `dark` restores the native Codex screen;
+neither changes model execution or starts a turn.
 Rodex leaves tmux's Escape ambiguity timeout unchanged, so a lone Escape may respond
-later than complete arrow sequences. See the [menu behavior](../README.md#local-input-interceptor-placeholder)
+later than complete arrow sequences. See the [menu behavior](../README.md#local-input-interceptor-and-presentation-policies)
 and [interaction contract](INTERACTION_PATHS.md#escape-timing) for configuration and timing.
+
+The proxy forwards every accepted App Server frame to Codex before projecting bounded
+method, kind, thread, turn, item, type, phase, status and text fields for presentation.
+Item deltas inherit identity from their exact started item; primary request IDs correlate
+`thread/read` history. The terminal surface always advances a hidden native projection.
+Semantic policies render only their selected typed item text with the native composer;
+complete frames queue behind in-flight terminal tokens and coalesce to newest state.
 
 ## Scrollback ownership
 

@@ -81,6 +81,20 @@ class InputInterceptorPresentation:
                     return InteractionResult(
                         DeliveryStatus.REJECTED, "submitted input does not match its configured rule"
                     )
+                selected_option = next(
+                    (option for option in entry.argument_menu.options if entry.option_submission(option) == request.text),
+                    None,
+                )
+                if selected_option is not None and selected_option.action is not None:
+                    action = selected_option.action
+                    return self._pipeline.execute(
+                        InteractionRequest(
+                            action.target,
+                            action.operation,
+                            entry.target,
+                            payload=action.payload,
+                        )
+                    )
                 text = f"{request.text}: placeholder only — no action performed."
             return self._pipeline.send_message(
                 target="main",

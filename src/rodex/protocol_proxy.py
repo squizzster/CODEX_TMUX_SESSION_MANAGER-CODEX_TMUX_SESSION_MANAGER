@@ -790,6 +790,7 @@ class CodexProtocolProxy:
         on_primary_server_message: ProtocolEventCallback | None = None,
         on_primary_disconnect: DisconnectCallback | None = None,
         *,
+        on_primary_client_message: ProtocolEventCallback | None = None,
         interaction_pipeline: SessionInteractionPipeline | None = None,
         runtime_identity: str | None = None,
         primary_pane: TmuxPaneController | None = None,
@@ -799,6 +800,7 @@ class CodexProtocolProxy:
         self._app_server_socket_path = app_server_socket_path
         self._tool_call_counter = tool_call_counter
         self._on_primary_server_message = on_primary_server_message
+        self._on_primary_client_message = on_primary_client_message
         self._on_primary_disconnect = on_primary_disconnect
         self.interactions = interaction_pipeline if interaction_pipeline is not None else SessionInteractionPipeline()
         self._runtime_identity = runtime_identity or uuid.uuid4().hex
@@ -905,6 +907,10 @@ class CodexProtocolProxy:
                 connection_id = uuid.uuid4().hex
 
                 def deliver_input(request: InteractionRequest) -> InteractionResult:
+                    message = request.payload
+                    assert isinstance(message, (str, bytes))
+                    if is_primary_connection and self._on_primary_client_message is not None:
+                        self._on_primary_client_message(message, _json_object(message))
                     app_server_connection.send(request.payload)
                     return InteractionResult(DeliveryStatus.DELIVERED)
 

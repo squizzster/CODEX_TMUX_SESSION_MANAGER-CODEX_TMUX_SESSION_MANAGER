@@ -23,7 +23,9 @@ from rodex.interaction_pipeline import (
     InteractionTarget,
     SessionInteractionPipeline,
 )
+from rodex.presentation_policy import PresentationSnapshot, PresentationSurface
 from rodex.terminal_gateway import TerminalSessionGateway
+from rodex.terminal_surface import TerminalSurfaceRenderer
 
 ECHO_CHILD = """
 import fcntl, os, signal, struct, sys, termios, tty
@@ -85,6 +87,31 @@ def start_gateway(slave, pipeline, registrations=()):
         input_fd=slave,
         output_fd=slave,
     )
+
+
+def test_new_complete_surface_waits_for_inflight_terminal_bytes_and_coalesces(monkeypatch):
+    gateway = TerminalSessionGateway.__new__(TerminalSessionGateway)
+    gateway._output_fd = 19
+    gateway._display_queue = bytearray(b"\x1b]unfinished-native-control-string")
+    gateway._pending_surface_frame = None
+    gateway._surface_renderer = TerminalSurfaceRenderer(80, 12)
+    gateway._surface_renderer.native_output(b"\x1b[9;1H\xe2\x80\xba prompt\x1b[9;9H")
+    first = gateway._surface_renderer.present(
+        PresentationSnapshot(1, "first", PresentationSurface.SEMANTIC, "FIRST", (), ())
+    )
+    second = gateway._surface_renderer.present(
+        PresentationSnapshot(2, "second", PresentationSurface.SEMANTIC, "SECOND", (), ())
+    )
+
+    gateway._queue_rendered_surface(first, complete_frame=True)
+    gateway._queue_rendered_surface(second)
+    assert gateway._display_queue == b"\x1b]unfinished-native-control-string"
+    assert gateway._pending_surface_frame == second
+
+    monkeypatch.setattr(os, "write", lambda file_descriptor, data: len(data) if file_descriptor == 19 else 0)
+    gateway._flush(19, gateway._display_queue)
+    assert gateway._display_queue == second
+    assert gateway._pending_surface_frame is None
 
 
 def test_real_child_terminal_pass_through_resize_signal_exit_and_outer_restoration():

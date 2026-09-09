@@ -31,8 +31,9 @@ from .interaction_pipeline import (
     InteractionTarget,
     SessionInteractionPipeline,
 )
-from .terminal_completion import TerminalCompletionRenderer
+from .presentation_policy import PresentationSnapshot, PresentationSurface
 from .terminal_input import TerminalInputDecoder, TerminalInputInterceptor
+from .terminal_surface import TerminalSurfaceRenderer
 
 QUEUE_LIMIT_BYTES = 1024 * 1024
 READ_CHUNK_BYTES = 16384
@@ -52,6 +53,7 @@ class TerminalSessionGateway:
         runtime_identity: str,
         registrations: tuple[InputInterceptorRegistration, ...],
         confirm_native_prefix: Callable[[str], bool],
+        presentation_snapshot: Callable[[], PresentationSnapshot] | None = None,
         stderr: BinaryIO | None = None,
         input_fd: int = 0,
         output_fd: int = 1,
@@ -66,11 +68,14 @@ class TerminalSessionGateway:
         self._resize_pending = True
         self._native_queue = bytearray()
         self._display_queue = bytearray()
+        self._pending_surface_frame: bytes | None = None
         self._saved_flags: dict[int, int] = {}
         self._saved_attributes: list | None = None
         self.process: subprocess.Popen[bytes] | None = None
         self._decoder = TerminalInputDecoder()
-        self._completion = TerminalCompletionRenderer()
+        self._surface_renderer = TerminalSurfaceRenderer()
+        self._presentation_snapshot = presentation_snapshot
+        self._presentation_revision: int | None = None
         self._confirm_presentation = confirm_native_prefix
         self._interceptor = TerminalInputInterceptor(
             registrations, pipeline, self._native_queue.extend, self._confirm_prefix
@@ -124,7 +129,7 @@ class TerminalSessionGateway:
             self._resize_pending = False
             dimensions = fcntl.ioctl(self._input_fd, termios.TIOCGWINSZ, bytes(8))
             rows, columns, _, _ = struct.unpack("HHHH", dimensions)
-            self._display_queue.extend(self._completion.resize(max(columns, 1), max(rows, 1)))
+            self._queue_rendered_surface(self._surface_renderer.resize(max(columns, 1), max(rows, 1)))
             fcntl.ioctl(self._master, termios.TIOCSWINSZ, dimensions)
 
     def forward_signal(self, signum: int) -> None:
@@ -146,7 +151,9 @@ class TerminalSessionGateway:
             if returncode is not None:
                 if exit_deadline is None:
                     exit_deadline = now + EXIT_DRAIN_TIMEOUT_SECONDS
-                if (self._native_eof and not self._display_queue) or now >= exit_deadline:
+                if (
+                    self._native_eof and not self._display_queue and self._pending_surface_frame is None
+                ) or now >= exit_deadline:
                     return returncode
             if deadline is not None and now >= deadline:
                 raise subprocess.TimeoutExpired(self.process.args, timeout)
@@ -157,15 +164,15 @@ class TerminalSessionGateway:
             if request.payload is not None and not isinstance(request.payload, str):
                 return InteractionResult(DeliveryStatus.REJECTED, "completion display requires serialized text state")
             state = InputMenuView.deserialize(request.payload) if request.payload is not None else None
-            accepted, rendered = self._completion.display(state)
-            self._display_queue.extend(rendered)
+            accepted, rendered = self._surface_renderer.display(state)
+            self._queue_rendered_surface(rendered)
             return InteractionResult(DeliveryStatus.DELIVERED if accepted else DeliveryStatus.REJECTED)
         assert isinstance(request.payload, bytes)
         if request.operation == InteractionOperation.TERMINAL_INPUT:
             for event in self._decoder.feed(request.payload):
                 self._interceptor.accept(event)
         else:
-            self._display_queue.extend(self._completion.native_output(request.payload))
+            self._queue_rendered_surface(self._surface_renderer.native_output(request.payload))
         return InteractionResult(DeliveryStatus.DELIVERED)
 
     def _dispatch(self, operation: InteractionOperation, data: bytes) -> None:
@@ -177,7 +184,7 @@ class TerminalSessionGateway:
         # This bounded handoff check is event-driven, never background scraping.
         # Continue draining rendering but admit no more keyboard input while the
         # already-forwarded prefix reaches the native editor.
-        self._display_queue.extend(self._completion.suspend())
+        self._queue_rendered_surface(self._surface_renderer.suspend())
         try:
             deadline = time.monotonic() + HANDOFF_TIMEOUT_SECONDS
             while time.monotonic() < deadline and not self._native_eof:
@@ -186,9 +193,10 @@ class TerminalSessionGateway:
                     return True
             return False
         finally:
-            self._display_queue.extend(self._completion.resume())
+            self._queue_rendered_surface(self._surface_renderer.resume())
 
     def _relay_once(self, *, allow_input: bool) -> None:
+        self._sync_presentation()
         self._apply_resize()
         reads: list[int] = []
         writes: list[int] = []
@@ -228,6 +236,33 @@ class TerminalSessionGateway:
             for event in self._decoder.expire_incomplete(time.monotonic()):
                 self._interceptor.accept(event)
 
+    def _sync_presentation(self) -> None:
+        if self._presentation_snapshot is None:
+            return
+        snapshot = self._presentation_snapshot()
+        if snapshot.revision == self._presentation_revision:
+            return
+        surface_changed = snapshot.surface != self._surface_renderer.presentation_surface
+        rendered = self._surface_renderer.present(snapshot)
+        self._queue_rendered_surface(rendered, complete_frame=surface_changed)
+        self._presentation_revision = snapshot.revision
+
+    def _queue_rendered_surface(self, rendered: bytes, *, complete_frame: bool = False) -> None:
+        """Coalesce complete frames without truncating an in-flight terminal token."""
+        if not rendered:
+            return
+        if complete_frame or self._surface_renderer.presentation_surface == PresentationSurface.SEMANTIC:
+            if self._display_queue:
+                self._pending_surface_frame = rendered
+                return
+            self._pending_surface_frame = None
+            self._display_queue.extend(rendered)
+            return
+        if self._pending_surface_frame is not None:
+            self._pending_surface_frame = self._surface_renderer.redraw()
+            return
+        self._display_queue.extend(rendered)
+
     def _flush(self, fd: int, queue: bytearray) -> None:
         try:
             written = os.write(fd, queue[:READ_CHUNK_BYTES])
@@ -240,6 +275,9 @@ class TerminalSessionGateway:
             queue.clear()
             return
         del queue[:written]
+        if fd == self._output_fd and not queue and self._pending_surface_frame is not None:
+            queue.extend(self._pending_surface_frame)
+            self._pending_surface_frame = None
 
     def close(self) -> None:
         """Idempotent resource cleanup, including constructor and writer-retry failures."""

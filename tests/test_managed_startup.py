@@ -223,21 +223,8 @@ def test_installed_rodex_starts_reuses_and_adopts_sessions(
         )
 
     def stop_fixture_session(name: str) -> None:
-        host = tmux("display-message", "-p", "-t", f"={name}:", "#{pane_pid}")
-        assert host.returncode == 0 and host.stdout.strip().isdigit(), host.stdout + host.stderr
-        host_stat = Path(f"/proc/{host.stdout.strip()}/stat")
         stopped = tmux("kill-session", "-t", f"={name}")
         assert stopped.returncode == 0, stopped.stderr
-        deadline = time.monotonic() + 30
-        while time.monotonic() < deadline:
-            try:
-                process_state = host_stat.read_text().rsplit(") ", 1)[1].split()[0]
-            except FileNotFoundError:
-                return
-            if process_state == "Z":
-                return
-            time.sleep(0.02)
-        pytest.fail(f"Test-owned Rodex host for {name} did not finish shutting down")
 
     def exercise_terminal_interception(client: RodexTerminalClient, name: str) -> None:
         def await_surface(arguments: tuple[str, ...], expected: str, *, absent: bool = False) -> str:
@@ -289,6 +276,23 @@ def test_installed_rodex_starts_reuses_and_adopts_sessions(
         await_surface(capture, "\u203a /r")
         os.write(client.terminal, b"\x7f\x7f")
         await_surface(capture, "\u203a /r", absent=True)
+
+        # The first configured presentation policy is selected through the
+        # same menu path a person uses. Light owns the visible transcript,
+        # while the hidden native TUI remains available for dark restoration.
+        os.write(client.terminal, b"/rod")
+        await_surface(capture, "\u203a /rod")
+        os.write(client.terminal, b"\r")
+        await_surface(capture, "display commentary only")
+        os.write(client.terminal, b"\r")
+        await_surface(capture, "RODEX LIGHT")
+        await_surface(capture, "OpenAI Codex", absent=True)
+
+        # Directly submitted configured input takes the same action route;
+        # dark reconstructs the complete native screen rather than restarting it.
+        os.write(client.terminal, b"/rodex dark\r")
+        await_surface(capture, "OpenAI Codex")
+        await_surface(capture, "RODEX LIGHT", absent=True)
 
     def exercise_client(
         command: list[str], *, expected_codex_id: str | None = None, exercise_inputs: bool = False

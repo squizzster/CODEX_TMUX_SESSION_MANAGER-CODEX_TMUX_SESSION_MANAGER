@@ -64,7 +64,11 @@ def test_argument_titles_rows_selection_and_escape_are_configured_menu_state():
     assert view.stage == InputMenuStage.ARGUMENTS
     assert (view.heading, view.subheading) == (config.heading, config.subheading)
     assert [row.label for row in view.rows] == ["light", "dark", "dusk"]
-    assert [row.helper_text for row in view.rows] == ["Light test argument", "Dark one", "Dusky one"]
+    assert [row.helper_text for row in view.rows] == [
+        "display commentary only",
+        "display the normal Codex interface",
+        "Dusky one",
+    ]
     assert menu.selected_option.name == "light"
     menu.move_selection(-1)
     assert menu.selected_option.name == "dusk"

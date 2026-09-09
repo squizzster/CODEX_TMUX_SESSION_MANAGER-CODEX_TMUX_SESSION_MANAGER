@@ -35,7 +35,7 @@ identity requires a transient App Server check.
 | `rodex.session_read_pipeline` / `session_tail` | Verified reads and incremental terminal history. |
 | `rodex.process_environment` / `environment_exec` | Exact caller-owned environment at child exec. |
 | `rodex.runtime` / `process_contracts` / `session_host` | Discovery, launch, attach, supervision and cleanup. |
-| `rodex.terminal_gateway` / `terminal_exec` / `terminal_completion` | PTY, byte pipelines, native projection, inline display and restoration. |
+| `rodex.terminal_gateway` / `terminal_exec` / `terminal_surface` / `presentation_policy` | PTY, native projection, typed display policies and restoration. |
 | `rodex.input_menu` / `terminal_input` / `input_interceptor_config` / `input_interceptor_presentation` | Matching, menu selection and submission. |
 | `rodex.tmux_session_capability` | Server/runtime/session authority and exact read/mutation fences. |
 | `rodex.tmux_shared_ctrl_c` | Exact private exit or same-client confirmed shared exit. |
@@ -90,10 +90,10 @@ arbitrates status; animation admission owns capability/generation/lease/token/re
 
 Interactive routes print `Rodex attach [name].` before tmux and `Rodex exited [name].`
 after return. Tmux's exit line is erased first. One host-owned PTY adapts all TUI I/O;
-attachers never create separate input owners. Each interception config owns live/Enter
-expressions, helper text and argument menus; choices stay local, unmatched input stays native.
-Native prefix/cursor confirmation is bounded at handoff, never polled in the background.
-Unknown editor state stays native. Inline display uses terminal DISPLAY_STATE; replies use MESSAGE(false).
+attachers never create input owners. Interception config owns live/Enter expressions,
+menus and typed actions; unmatched input stays native. Prefix/cursor confirmation occurs
+only at handoff. DISPLAY_STATE draws menus; light selects root commentary structurally
+while preserving the hidden native TUI, and dark redraws that projection in place.
 
 ## Identity and lifecycle
 

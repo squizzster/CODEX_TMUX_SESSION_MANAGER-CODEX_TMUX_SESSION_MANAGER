@@ -71,10 +71,21 @@ def _mock_terminal_gateway(monkeypatch: pytest.MonkeyPatch) -> list:
     gateways = []
 
     class FakeGateway:
-        def __init__(self, command, *, pipeline, runtime_identity, registrations, confirm_native_prefix, **options):
+        def __init__(
+            self,
+            command,
+            *,
+            pipeline,
+            runtime_identity,
+            registrations,
+            confirm_native_prefix,
+            presentation_snapshot,
+            **options,
+        ):
             assert pipeline is not None and runtime_identity == str(RUNTIME_ID)
             assert registrations == runtime_module.INPUT_INTERCEPTORS
             assert callable(confirm_native_prefix)
+            assert callable(presentation_snapshot)
             self.process = runtime_module.subprocess.Popen(command, **options)
             self.closed = False
             gateways.append(self)

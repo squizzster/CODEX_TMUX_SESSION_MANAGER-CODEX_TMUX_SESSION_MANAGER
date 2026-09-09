@@ -56,8 +56,9 @@ detach, then run `rodex NAME` to reopen that same live runtime. Help and roster 
 alone do not prove startup. From the project root, the automated release gate is
 `uv run pytest -m live_startup --require-live-startup`; it tests real startup, rendered
 TUI, detach, reopen, and shared-server reuse with isolated SQL/tmux state, submits no
-model prompts, and stops its test runtimes. It requires an authenticated Codex CLI and
-tmux; missing prerequisites fail the required gate.
+model prompts, selects the configured light viewport, restores dark, and stops its test
+runtimes through tmux. It requires an authenticated Codex CLI and tmux; missing
+prerequisites fail the required gate.
 
 Rodex may report that a newer Codex release exists, but it never installs one. Run
 `codex update` outside Rodex when you choose to update Codex.

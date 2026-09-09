@@ -109,6 +109,36 @@ def test_placeholder_submission_is_display_only_and_release_clears_terminal_stat
     assert entry.target not in pipeline._targets
 
 
+@pytest.mark.parametrize("option_name", ["light", "dark"])
+def test_configured_options_dispatch_their_declared_interaction_without_command_branches(option_name):
+    pipeline, _presentation, _pane, messages = setup_presentation()
+    actions = []
+    pipeline.register(
+        InteractionTarget(
+            "presentation-policy",
+            "runtime",
+            frozenset({InteractionOperation.SELECT_PRESENTATION_POLICY}),
+            exists=lambda: True,
+            deliver=lambda request: actions.append(request) or InteractionResult(DeliveryStatus.COMPLETED),
+        )
+    )
+    entry = INPUT_INTERCEPTORS[0]
+    result = pipeline.execute(
+        InteractionRequest(
+            entry.target,
+            InteractionOperation.SUBMITTED_COMMAND,
+            "test",
+            text=f"/rodex {option_name}",
+        )
+    )
+    assert result.accepted and messages == []
+    assert len(actions) == 1
+    assert actions[0].target == "presentation-policy"
+    assert actions[0].operation == InteractionOperation.SELECT_PRESENTATION_POLICY
+    assert actions[0].payload == option_name
+    assert actions[0].source == entry.target
+
+
 @pytest.mark.parametrize("entry", INPUT_INTERCEPTORS)
 def test_configuration_error_is_display_only_and_only_valid_for_missing_options(entry):
     pipeline, _presentation, _pane, messages = setup_presentation()

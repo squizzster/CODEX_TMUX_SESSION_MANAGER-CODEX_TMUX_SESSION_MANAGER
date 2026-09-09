@@ -27,6 +27,7 @@ class InteractionOperation(StrEnum):
     SUBMITTED_COMMAND = "submitted_command"
     INPUT_CONFIGURATION_ERROR = "input_configuration_error"
     INPUT_RELEASE = "input_release"
+    SELECT_PRESENTATION_POLICY = "select_presentation_policy"
     OPEN = "open"
     LOCATE = "locate"
     FOCUS = "focus"
@@ -290,6 +291,8 @@ class SessionInteractionPipeline:
             InteractionOperation.INPUT_RELEASE,
         } and not isinstance(request.text, str):
             raise InteractionRejected("interceptor operations require a text draft")
+        if request.operation == InteractionOperation.SELECT_PRESENTATION_POLICY and not isinstance(request.payload, str):
+            raise InteractionRejected("presentation policy selection requires a string payload")
 
     @staticmethod
     def _validate_transform(original: InteractionRequest, transformed: InteractionRequest) -> None:

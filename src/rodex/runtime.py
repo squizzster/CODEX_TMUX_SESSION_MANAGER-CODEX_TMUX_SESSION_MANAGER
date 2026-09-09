@@ -47,6 +47,7 @@ from .input_interceptor_presentation import InputInterceptorPresentation
 from .interaction_pipeline import DeliveryStatus, InteractionRequest, InteractionResult, SessionInteractionPipeline
 from .interaction_transport import publish_tui_notice
 from .pane_control import TmuxPaneController
+from .presentation_policy import PresentationPolicyInteractionAdapter, SessionPresentationPipeline
 from .primary_connection_lifecycle import PrimaryConnectionLifecycleCoordinator
 from .process_contracts import AnalyticsWorkerConfig, SessionHostConfig
 from .process_environment import (
@@ -2191,6 +2192,12 @@ def run_session_host(
     analytics_supervisor: AnalyticsSubprocessSupervisor | None = None
     agent_observer_controller: AgentObserverCoordinator | None = None
     interaction_pipeline = SessionInteractionPipeline()
+    presentation_pipeline = SessionPresentationPipeline()
+    presentation_policy_interaction = PresentationPolicyInteractionAdapter(
+        interaction_pipeline,
+        presentation_pipeline,
+        str(config.runtime_id),
+    )
     registered_interaction_context: AnalyticsWorkerConfig | None = None
     registration_deadline = time.monotonic() + RODEX_REGISTRATION_TIMEOUT_SECONDS
     shutting_down = False
@@ -2258,13 +2265,20 @@ def run_session_host(
                 message: str | bytes,
                 event: dict[str, Any] | None,
             ) -> None:
+                presentation_pipeline.observe_protocol_output(event)
                 live_context_observer.observe_protocol_event(event)
                 if agent_observer_controller is not None:
                     with suppress(Exception):
                         agent_observer_controller.observe_protocol_event(event)
                 live_event_tap.publish_protocol_event(message, event)
 
-            lifecycle_participants = [live_context_observer, live_event_tap]
+            def observe_primary_client_message(
+                _message: str | bytes,
+                request: dict[str, Any] | None,
+            ) -> None:
+                presentation_pipeline.observe_protocol_input(request)
+
+            lifecycle_participants = [presentation_pipeline, live_context_observer, live_event_tap]
             if agent_observer_controller is not None:
                 lifecycle_participants.append(agent_observer_controller)
             primary_connection_lifecycle = PrimaryConnectionLifecycleCoordinator(lifecycle_participants)
@@ -2290,6 +2304,7 @@ def run_session_host(
                 ToolCallCounter(tool_call_status.update),
                 publish_primary_server_message,
                 primary_connection_lifecycle,
+                on_primary_client_message=observe_primary_client_message,
                 interaction_pipeline=interaction_pipeline,
                 runtime_identity=str(config.runtime_id),
                 primary_pane=primary_pane,
@@ -2365,6 +2380,7 @@ def run_session_host(
                         runtime_identity=str(config.runtime_id),
                         registrations=INPUT_INTERCEPTORS,
                         confirm_native_prefix=input_presentation.confirm_native_prefix,
+                        presentation_snapshot=presentation_pipeline.snapshot,
                     )
                     tui = terminal_gateway.process
                 finally:
@@ -2386,10 +2402,11 @@ def run_session_host(
                         if activated_analytics is not None:
                             pending_analytics_config = None
                             registered_interaction_context = activated_analytics
+                            assert activated_analytics.codex_session_id is not None
+                            presentation_pipeline.bind_root_thread(str(activated_analytics.codex_session_id))
                             if agent_observer_controller is not None:
                                 with suppress(Exception):
                                     assert activated_analytics.rodex_sessions_id is not None
-                                    assert activated_analytics.codex_session_id is not None
                                     agent_observer_controller.activate(
                                         database_path=activated_analytics.rodex_database_path,
                                         rodex_sessions_id=activated_analytics.rodex_sessions_id,
@@ -2469,6 +2486,8 @@ def run_session_host(
                     if input_presentation is not None:
                         with suppress(Exception):
                             input_presentation.close()
+                    with suppress(Exception):
+                        presentation_policy_interaction.close()
                     try:
                         if protocol_proxy is not None:
                             protocol_proxy.close()

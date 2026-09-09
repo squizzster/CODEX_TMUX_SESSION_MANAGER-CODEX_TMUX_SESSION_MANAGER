@@ -5,6 +5,22 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+from .interaction_pipeline import InteractionOperation
+from .presentation_policy import PRESENTATION_POLICY_TARGET
+
+
+@dataclass(frozen=True)
+class ConfiguredInterceptionAction:
+    """One input option's complete route through the shared interaction pipeline."""
+
+    target: str
+    operation: InteractionOperation
+    payload: str
+
+    def __post_init__(self) -> None:
+        if not self.target or not self.payload:
+            raise ValueError("a configured interception action requires a target and payload")
+
 
 @dataclass(frozen=True)
 class InterceptionRule:
@@ -32,6 +48,7 @@ class LiveInterceptionRule(InterceptionRule):
 class InterceptionOption:
     name: str
     helper_text: str
+    action: ConfiguredInterceptionAction | None = None
 
     def __post_init__(self) -> None:
         if not self.name or any(character.isspace() for character in self.name):
@@ -88,8 +105,24 @@ INPUT_INTERCEPTORS = (
             heading="This line here should be in the config, select argument:",
             subheading="This 2nd line should also be configurable for the rodex...",
             options=(
-                InterceptionOption("light", "Light test argument"),
-                InterceptionOption("dark", "Dark one"),
+                InterceptionOption(
+                    "light",
+                    "display commentary only",
+                    ConfiguredInterceptionAction(
+                        PRESENTATION_POLICY_TARGET,
+                        InteractionOperation.SELECT_PRESENTATION_POLICY,
+                        "light",
+                    ),
+                ),
+                InterceptionOption(
+                    "dark",
+                    "display the normal Codex interface",
+                    ConfiguredInterceptionAction(
+                        PRESENTATION_POLICY_TARGET,
+                        InteractionOperation.SELECT_PRESENTATION_POLICY,
+                        "dark",
+                    ),
+                ),
                 InterceptionOption("dusk", "Dusky one"),
             ),
         ),

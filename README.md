@@ -12,7 +12,7 @@ pass through unchanged.
 > described here is complete for its current scope, but interfaces may still change
 > before a stable release.
 
-Current release: **Rodex 0.11.0a1**, SQL generation **19**, shared tmux protocol **v2**.
+Current release: **Rodex 0.12.0a1**, SQL generation **19**, shared tmux protocol **v2**.
 This ALPHA supports only its current storage and runtime contracts. It creates
 `rodex-v19.sqlite3` and `tmux-shared-v2.sock`; earlier generations are outside this
 installation's session catalog. There are no database migrations or old-runtime adapters.
@@ -31,8 +31,9 @@ turn without typing into the TUI.
 Both sides retain the same Rodex, runtime, Codex, and workspace context.
 
 Session interactions share one target-addressed pipeline: display a message, explicitly
-start a model turn, control a pane, or process live terminal/protocol input/output. Main and observer
-presentations use the same message contract, with their rendering mechanisms in adapters.
+start a model turn, control a pane, select a presentation policy, or process live
+terminal/protocol input/output. Main and observer presentations use the same message
+contract, with their rendering mechanisms in adapters.
 The current observer aggregates agents and deliberately has no single model-thread binding.
 See the [interaction contract and production-path inventory](docs/INTERACTION_PATHS.md)
 for supported operations, hooks, delivery outcomes and enforced routing boundaries.
@@ -59,6 +60,8 @@ for supported operations, hooks, delivery outcomes and enforced routing boundari
   private/shared state in the tmux bar.
 - Preserves 50,000 lines of conversation scrollback with keyboard copy-mode access.
 - Animates shared arrival and final departure for five seconds without blocking the TUI.
+- Switches the main viewport between the complete native Codex interface and configured
+  structural event projections without stopping, restarting, or starving the native TUI.
 - Sends work to, waits for, or reads a running session from another shell.
 - Streams settled, readable terminal output without replaying terminal clear-screen or
   transient composer redraws.
@@ -150,7 +153,7 @@ and user-owned root `C-b` bindings are left unchanged. Rodex owns root `C-c` and
 on its dedicated tmux server; a pre-existing conflicting binding causes explicit
 initialization failure instead of silently weakening the lifecycle contract.
 
-### Local input interceptor (placeholder)
+### Local input interceptor and presentation policies
 
 Managed sessions have one session-owned keyboard adapter before Codex, configured in
 `src/rodex/input_interceptor_config.py`. Each interception owns its completion text,
@@ -178,26 +181,30 @@ The fixed footer is `Press enter to confirm or esc to go back`. Escape returns t
 prior command list and selection with one press. Other editor/paste keys are ignored
 inside the picker. `/rodx` currently exercises the missing-options configuration error.
 
-Confirmation only displays a dummy response such as `/rodex dark: placeholder only —
-no action performed.` It does not change a theme or start a model turn. The native prefix
-is cleared only after successful delivery. Typed arguments such as `/rodex dark`, including
-atomic pasted commands, use the configured `on_enter` expression directly. If neither a
-menu choice nor a submitted expression matches, Enter returns the input to Codex.
+Each option may declare a typed target, operation, and payload. `light` selects a
+commentary-only semantic viewport; `dark` restores the complete continuously maintained
+native Codex screen; `dusk` remains a placeholder. Neither presentation choice starts a
+model turn or changes what Codex executes, logs, or emits. App Server items are classified
+by method, item type, phase, status, and exact thread/item identity—not by terminal words.
+The policy config alone supplies its selectors and heading. Typed arguments such as
+`/rodex dark`, including atomic pasted commands, use the same configured action route as
+menu selection. The native prefix is cleared only after successful delivery. If neither
+a menu choice nor a submitted expression matches, Enter returns the input to Codex.
 
 Escape from the command list drops the held suffix, leaving the native prefix;
 backspacing to that prefix also releases. Native editing keys outside the command menu's
 small placeholder editor return the held text as bracketed paste before
 forwarding the key. Paste is framed atomically, not replayed as individual keypresses.
 An uncertain native editor position or unavailable initial presentation leaves input native.
-The terminal adapter projects native output with `pyte`; local painting never enters that
-projection or the native editor. Partial redraws defer painting without releasing ownership;
-generated output is clipped and cannot wrap into scrollback. The placeholder draft is a
-single visible line, with control characters shown as spaces. Native output keeps rendering.
-Configuration, phase routing, inline rendering and adapter integration have Python tests.
-The user has confirmed the live appearance, Up/Down, Enter selection and the missing-options
-fix. The input-menu release passed 261 focused Python tests, Ruff lint/format checks and a package build;
-the automated live-startup suite was not rerun. Existing live hosts retain their loaded code;
-the changes apply to newly started hosts without restarting any current session.
+The terminal adapter always projects native output with `pyte`; local painting never enters
+that projection or the native editor. In light mode the native projection keeps processing
+every frame while the ordinary composer view contains only admitted typed item text plus
+the native composer/control region. An unrecognized modal control remains fully native so
+an approval or other interaction cannot become unusable. Complete generated frames coalesce
+behind any in-flight terminal token, so a policy transition cannot truncate an
+escape/control sequence. Dark redraws the latest native projection in place. Generated
+output is clipped and cannot wrap into scrollback. Existing live hosts retain their loaded
+code; these changes apply to newly started hosts without restarting any current session.
 
 Escape can feel slower than Up/Down because a lone Escape byte also starts terminal key
 sequences. The inspected tmux 3.2a server had `escape-time 500` (milliseconds); Rodex then

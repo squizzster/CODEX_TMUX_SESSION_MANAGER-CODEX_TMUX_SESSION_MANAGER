@@ -68,7 +68,44 @@ def invocation(*, tool="followupTask", item_id="followup-1", status="completed")
 
 @pytest.fixture
 def harness(tmp_path):
-    panes = SimpleNamespace(observer=None, next_id=9, mutations=[], calls=[], trace_cursor=None)
+    panes = SimpleNamespace(observer=None, next_id=9, mutations=[], calls=[], trace_cursor=None, receipt="")
+
+    def execute(action):
+        if ";" in action:
+            result = ""
+            while ";" in action:
+                index = action.index(";")
+                result += execute(action[:index])
+                action = action[index + 1 :]
+            return result + execute(action)
+        if action[0] == "if-shell":
+            claim = action[4] == "#{==:#{@rodex_agent_observer_pane_id_creation},}"
+            return execute(shlex.split(action[6] if claim and panes.receipt else action[5]))
+        if action[0] == "display-message":
+            if action[-1] == "1":
+                return "1"
+            if "pane_current_path" in action[-1]:
+                return "%7|/workspace"
+            if "_creation}" in action[-1]:
+                return (
+                    str(int(panes.receipt.startswith("registered:"))) if action[-1].startswith("#{?") else panes.receipt
+                )
+            return f"{panes.observer}|%7|0" if panes.observer else ""
+        if action[0] == "list-panes":
+            return "\n".join(pane for pane in ("%7", panes.observer) if pane)
+        panes.mutations.append(action)
+        if action[0] == "split-window":
+            assert panes.observer is None
+            panes.observer = f"%{panes.next_id}"
+            panes.next_id += 1
+            return panes.observer
+        if action[0] == "kill-pane":
+            assert action == ["kill-pane", "-t", panes.observer]
+            assert panes.observer != "%7"
+            panes.observer = None
+        if action[0] == "set-option" and "@rodex_agent_observer_pane_id_creation" in action:
+            panes.receipt = "" if "-pu" in action else action[-1]
+        return ""
 
     def run(command, **_options):
         panes.calls.append(command)
@@ -77,23 +114,7 @@ def harness(tmp_path):
             output = panes.observer or ""
         else:
             assert command[3] == "if-shell"
-            action = shlex.split(command[-2])
-            if action[0] == "display-message":
-                if "pane_current_path" in action[-1]:
-                    output = "%7|/workspace"
-                elif panes.observer:
-                    output = f"{panes.observer}|%7|0"
-            else:
-                panes.mutations.append(action)
-                if action[0] == "split-window":
-                    assert panes.observer is None
-                    panes.observer = f"%{panes.next_id}"
-                    panes.next_id += 1
-                    output = panes.observer
-                elif action[0] == "kill-pane":
-                    assert action == ["kill-pane", "-t", panes.observer]
-                    assert panes.observer != "%7"
-                    panes.observer = None
+            output = execute(shlex.split(command[-2]))
         return subprocess.CompletedProcess(command, 0, output, "")
 
     pipeline = SessionInteractionPipeline()
@@ -385,3 +406,103 @@ def test_closing_a_pane_discards_queued_snapshots_without_closing_the_dispatcher
     assert dispatcher._events.empty() and dispatcher._generation == 1
     assert not dispatcher._closed
     dispatcher.close()
+
+
+class ManualRetry:
+    def __init__(self, delay, callback):
+        self.delay = delay
+        self.callback = callback
+        self.cancelled = False
+
+    def start(self):
+        pass
+
+    def cancel(self):
+        self.cancelled = True
+
+
+@pytest.fixture
+def close_retries(monkeypatch):
+    retries = []
+
+    def timer(delay, callback):
+        retry = ManualRetry(delay, callback)
+        retries.append(retry)
+        return retry
+
+    monkeypatch.setattr(observer_module, "Timer", timer)
+    return retries
+
+
+def reject_closes(harness):
+    executor = harness.controller._pane._pane._tmux_executor
+    original = executor._runner
+    rejected = []
+
+    def runner(command, **options):
+        if "kill-pane" in command[-2]:
+            rejected.append(command)
+            return subprocess.CompletedProcess(command, 1, "", "injected close failure")
+        if "list-panes" in command[-2]:
+            return subprocess.CompletedProcess(command, 0, f"%7\n{harness.panes.observer}\n", "")
+        return original(command, **options)
+
+    executor._runner = runner
+    return rejected, lambda: setattr(executor, "_runner", original)
+
+
+def test_failed_close_converges_without_new_work(harness, close_retries):
+    harness.send(activity())
+    rejected, restore = reject_closes(harness)
+    harness.send(turn())
+    assert len(rejected) == 1
+    assert harness.controller._pending_pane_close
+    assert harness.panes.observer is not None
+    assert len(close_retries) == 1
+    restore()
+    close_retries[0].callback()
+    assert harness.panes.observer is None
+    assert not harness.controller._pending_pane_close
+
+
+def test_late_close_retry_cannot_kill_revived_work(harness, close_retries):
+    harness.send(activity())
+    retiring_pane = harness.panes.observer
+    _rejected, restore = reject_closes(harness)
+    harness.send(turn())
+    pending = close_retries[0]
+    restore()
+    harness.send(turn(method="turn/started", turn_id="revived"))
+    assert pending.cancelled
+    assert harness.panes.observer != retiring_pane
+    before = len(harness.panes.mutations)
+    pending.callback()
+    assert len(harness.panes.mutations) == before
+    assert harness.state.running_agent_count == 1
+    assert harness.panes.observer is not None
+
+
+def test_failed_close_retry_budget_is_bounded(harness, close_retries):
+    harness.send(activity())
+    rejected, restore = reject_closes(harness)
+    harness.send(turn())
+    for index in range(3):
+        assert len(close_retries) == index + 1
+        close_retries[index].callback()
+    assert len(close_retries) == 3
+    assert len(rejected) == 4
+    assert harness.controller._pending_pane_close
+    restore()
+    harness.send(turn())
+    assert harness.panes.observer is None
+    assert not harness.controller._pending_pane_close
+
+
+def test_host_close_cancels_queued_pane_retry(harness, close_retries):
+    harness.send(activity())
+    rejected, _restore = reject_closes(harness)
+    harness.send(turn())
+    harness.controller.close()
+    assert close_retries[0].cancelled
+    close_retries[0].callback()
+    assert len(rejected) == 1

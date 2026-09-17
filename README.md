@@ -12,9 +12,9 @@ pass through unchanged.
 > described here is complete for its current scope, but interfaces may still change
 > before a stable release.
 
-Current release: **Rodex 0.12.0a1**, SQL generation **19**, shared tmux protocol **v2**.
+Current release: **Rodex 0.13.0a1**, SQL generation **20**, isolated tmux protocol **v3**.
 This ALPHA supports only its current storage and runtime contracts. It creates
-`rodex-v19.sqlite3` and `tmux-shared-v2.sock`; earlier generations are outside this
+`rodex-v20.sqlite3` and one `tmux-v3-<runtime-id>.sock` per runtime; earlier generations are outside this
 installation's session catalog. There are no database migrations or old-runtime adapters.
 
 ## Why Rodex
@@ -41,7 +41,7 @@ for supported operations, hooks, delivery outcomes and enforced routing boundari
 ## What Rodex does
 
 - Opens the ordinary interactive Codex TUI as one capability-isolated session on a
-  shared, versioned per-user tmux server.
+  dedicated, versioned tmux server for that runtime.
 - Accepts the current native `codex [OPTIONS] [PROMPT]` shape and forwards its arguments
   unchanged into that managed TUI.
 - Keeps Rodex and Codex session identities distinct and linked.
@@ -86,18 +86,18 @@ for supported operations, hooks, delivery outcomes and enforced routing boundari
 - Serializes concurrent opens of one ended name and tolerates the bounded Codex-writer
   shutdown handoff without creating duplicate runtimes.
 
-The shared Unix socket is transport, not authority. The owning host carries socket,
-server incarnation, immutable tmux `$session_id`, primary `%pane_id`, and Rodex runtime.
-The launcher mints registered external authority by adding the Rodex session, registry,
-SQL row, Codex UUID, and registered state after a uniqueness-checked roster read; async
-actors carry that full capability. Each terminal action repeats the applicable tuple at
-its exact target; primary-pane actions additionally require the immutable pane ID. Client
-hooks only wake the roster coordinator. Under one stable per-user XDG/runtime context,
-Rodex uses one canonical database and one shared tmux server. The database keeps every
-successful new session's display name unique, and that display name is also the complete
-live tmux name. The database ID remains an internal capability fence. Checks are
-synchronous at operation boundaries—Rodex is not an IDS and uses no inotify or real-time
-filesystem or tmux monitoring.
+Session isolation is a required invariant. Each runtime owns a separate tmux server,
+its immutable server incarnation, session and primary pane. Discovery proves primary
+membership before returning control authority. Destruction also requires the sole
+session and ownership of every affected pane. A creation attempt retains its own server
+nonce through cleanup; it cannot acquire authority over an incumbent after failure.
+
+Protocol and interaction connections verify the runtime ID and server incarnation on
+the connection they actually use. Endpoint lifetimes have exclusive ownership and
+cleanup checks the retained socket inode. Resume compares the expected previous durable
+incarnation transactionally; wall-clock order does not select the winner. Names remain
+human selectors, while exact capabilities authorize operations. See the
+[isolation contract and validation record](docs/RUNTIME_ISOLATION.md).
 
 One declarative Codex 0.151.0 CLI contract owns this boundary. Exact underscore Rodex
 commands stay local. Native interactive options and an optional prompt create and attach
@@ -109,8 +109,9 @@ with Codex while preserving arguments, terminal streams, signals, and exit statu
 
 ## Requirements
 
-- Linux is required; Rodex's fail-closed SQLite path uses `/proc/self/fd`,
-  `O_NOFOLLOW`, and `flock`. Other POSIX systems and Windows are not supported.
+- Linux is required; runtime process admission uses `/proc` and `pidfd`, and the
+  SQLite path uses `/proc/self/fd`, `O_NOFOLLOW`, and `flock`. Other POSIX systems
+  and Windows are not supported.
 - Python 3.12 or newer with SQLite 3.53.1 or newer.
 - [`uv`](https://docs.astral.sh/uv/) 0.12.1 or newer.
 - `tmux` 3.2a or newer available on `PATH` for managed launches, underscore commands,
@@ -127,10 +128,10 @@ uv sync
 ```
 
 Rodex uses its project `.venv` only to run Rodex itself. Managed and delegated Codex
-processes do not inherit that bootstrap virtual environment, including through an older
-shared tmux server. A different virtual environment already active for the caller's own
-project is preserved. New managed sessions replace shared-server environment state with
-the launching caller's prepared session state before Codex starts; tmux-owned terminal
+processes do not inherit that bootstrap virtual environment, including from another
+runtime. A different virtual environment already active for the caller's own
+project is preserved. New managed sessions use the launching caller's prepared
+environment before Codex starts; tmux-owned terminal
 metadata and the internal Python host's documented locale normalization remain native.
 
 Start with an initial prompt exactly as you would with Codex:
@@ -145,10 +146,10 @@ At the `›` prompt, use Codex normally. `Ctrl-D` detaches only the current Rode
 tmux running. With the default prefix, `Ctrl-b` shows `CTRL-B MODE` while tmux waits for
 the command key, without delaying it, so fast sequences still work. Enter copy mode with
 `Ctrl-b [`, navigate with the keyboard, and leave it with `q`. Rodex inherits your tmux
-mouse preference instead of overriding it. In a shared session, one `Ctrl-C` warns that
-another press may end the session for everyone and offers both detach routes; the same
-client must press it again within two seconds to end the exact managed session. In a
-private session, `Ctrl-C` ends the exact managed session immediately. Custom prefixes
+mouse preference instead of overriding it. In a shared session, `Ctrl-C` detaches only
+the invoking client and leaves the session running. In a private session, `Ctrl-C`
+ends the exact managed session under its full ownership and topology guard. Attachment
+state is evaluated when tmux dispatches the key on its originating client. Custom prefixes
 and user-owned root `C-b` bindings are left unchanged. Rodex owns root `C-c` and `C-d`
 on its dedicated tmux server; a pre-existing conflicting binding causes explicit
 initialization failure instead of silently weakening the lifecycle contract.
@@ -505,8 +506,8 @@ diagnostics. Current command names are reserved from Rodex aliases.
 ## Local data
 
 The durable database resolved for the current Linux user is
-`$XDG_STATE_HOME/rodex/rodex-v19.sqlite3`, or
-`~/.local/state/rodex/rodex-v19.sqlite3` when `XDG_STATE_HOME` is unset. Rodex does not
+`$XDG_STATE_HOME/rodex/rodex-v20.sqlite3`, or
+`~/.local/state/rodex/rodex-v20.sqlite3` when `XDG_STATE_HOME` is unset. Rodex does not
 support an application-specific database-path override. A successful new-session
 transaction permanently reserves its generated cool name in this database against both
 generated names and user-defined aliases, so a later session using the same database
@@ -526,7 +527,7 @@ enforces its domain uniqueness. Codex session IDs remain Codex-owned 128-bit val
 Each is stored once in the canonical `codex_threads` table across two `BIGINT` columns;
 memberships, current-root selection, activities, and lineage use integer foreign keys.
 
-The registry uses schema generation 19. An internal generation marker admits an
+The registry uses schema generation 20. An internal generation marker admits an
 already-current database cheaply inside each operation's transaction. Explicit
 first-use bootstrap creates a missing private registry atomically; nonempty unmarked,
 incomplete, and wrong-generation databases fail closed. The explicit integrity audit is
@@ -535,10 +536,10 @@ a read-only canonical allowlist check and is not part of ordinary mutation hot p
 Short-lived Unix sockets and app-server logs use `$XDG_RUNTIME_DIR/rodex`, normally
 `/run/user/<uid>/rodex`. When `XDG_RUNTIME_DIR` is unset or that socket path would be
 too long, Rodex uses the private fallback `/tmp/rodex-<uid>`. Set `RODEX_RUNTIME_DIR`
-to override it. Managed tmux sessions share `tmux-shared-v2.sock` within that private
-root; selecting a different runtime root therefore selects a different shared tmux
-server without changing the database selected above. Each app-server, proxy, event
-stream, observer, and log remains runtime-specific.
+to override it. Each runtime gets its own `tmux-v3-<runtime-id>.sock`, app-server,
+proxy, event stream, observer and log within that private root. Selecting a runtime
+root does not change the database selected above. Runtime IDs never authorize cleanup
+on their own; the originating server incarnation remains part of that authority.
 
 The registry is held in a private current-user directory and must remain a regular
 current-user file at mode `0600`; runtime roots are mode `0700`, and live sockets and
@@ -650,6 +651,7 @@ SQL.
 
 - [Installation](INSTALL.md)
 - [Architecture](docs/ARCHITECTURE.md)
+- [Runtime isolation and acceptance evidence](docs/RUNTIME_ISOLATION.md)
 - [Codex, Rodex, and tmux boundaries](docs/CODEX_RODEX_TMUX.md)
 - [Security model](docs/SECURITY.md)
 - [Code concepts](docs/CODE_CONCEPTS.md)
@@ -672,7 +674,7 @@ scrollback retention and following, inherited mouse configuration, rename, ident
 markers, and status configuration.
 
 The live-startup gate runs real Codex through the installed shim on isolated SQL, tmux,
-and Codex history. It verifies the rendered TUI, live thread, detach, shared-server reuse,
+and Codex history. It verifies the rendered TUI, live thread, detach, isolated-runtime reuse,
 and standalone-thread adoption. For a generated name, alias, and Codex UUID, both bare
 and explicit resume must reuse a live runtime or restart a stopped runtime with the same
 saved Codex identity. It submits no model prompts

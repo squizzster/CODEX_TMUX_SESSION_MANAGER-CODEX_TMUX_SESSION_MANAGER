@@ -15,6 +15,7 @@ import rodex.protocol_proxy as protocol_proxy_module
 from rodex.protocol_proxy import CodexContextStatusObserver
 from rodex_registry import (
     RodexRuntimeId,
+    RodexRuntimeRegistrationRejectedError,
     create_a_rodex_session,
     lookup_rodex_runtime_instance,
     lookup_rodex_session_log,
@@ -527,17 +528,22 @@ def test_round2_stale_resume_cannot_regress_log_or_runtime_start_timestamp(
         "round2-session",
         database,
         runtime_id=newest_runtime_id,
+        codex_session_id=session.codex_session_id,
+        expected_previous_runtime_id=None,
         accessed_at_utc=datetime(2032, 1, 1, 12, tzinfo=UTC),
     )
 
-    record_a_rodex_session_runtime_resume(
-        session.rodex_sessions_id,
-        "/tmp/rodex/round2.sock",
-        "round2-session",
-        database,
-        runtime_id=stale_runtime_id,
-        accessed_at_utc=datetime(2032, 1, 1, 11, tzinfo=UTC),
-    )
+    with pytest.raises(RodexRuntimeRegistrationRejectedError, match="expected previous incarnation"):
+        record_a_rodex_session_runtime_resume(
+            session.rodex_sessions_id,
+            "/tmp/rodex/round2.sock",
+            "round2-session",
+            database,
+            runtime_id=stale_runtime_id,
+            codex_session_id=session.codex_session_id,
+            expected_previous_runtime_id=None,
+            accessed_at_utc=datetime(2032, 1, 1, 11, tzinfo=UTC),
+        )
 
     log = lookup_rodex_session_log(session.rodex_sessions_id, database)
     runtime = lookup_rodex_runtime_instance(session.rodex_sessions_id, database)

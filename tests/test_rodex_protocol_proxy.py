@@ -7,6 +7,7 @@ from pathlib import Path
 from threading import Event, Thread
 
 import pytest
+from runtime_peer_fixtures import TEST_PEER, LiveTestProcess, peer_response
 from websockets.sync.client import unix_connect
 from websockets.sync.server import unix_serve
 
@@ -364,11 +365,15 @@ def test_proxy_forwards_both_directions_and_counts_server_tool_items(
         ToolCallCounter(counts.append),
         lambda message, _event: observed_events.append(message),
         on_primary_client_message=lambda _message, event: observed_client_events.append(event),
+        peer_identity=TEST_PEER,
+        app_server_process=LiveTestProcess(),
     )
     try:
         proxy.start()
         assert proxy_socket.stat().st_mode & 0o777 == 0o600
-        with unix_connect(str(proxy_socket), uri="ws://localhost/rpc", compression=None) as tui:
+        with unix_connect(
+            str(proxy_socket), uri="ws://localhost/rpc", compression=None, additional_headers=TEST_PEER.headers()
+        ) as tui:
             tui.send(client_message)
             assert tui.recv() == server_message
     finally:
@@ -412,15 +417,19 @@ def test_proxy_delivers_rodex_notice_to_tui_without_forwarding_it_upstream(
         app_socket,
         ToolCallCounter(lambda _count: None),
         lambda message, _event: observed_events.append(message),
+        peer_identity=TEST_PEER,
+        app_server_process=LiveTestProcess(),
     )
     client_message = json.dumps({"method": "initialize", "id": 1, "params": {}})
     try:
         proxy.start()
-        with unix_connect(str(proxy_socket), uri="ws://localhost/rpc", compression=None) as tui:
+        with unix_connect(
+            str(proxy_socket), uri="ws://localhost/rpc", compression=None, additional_headers=TEST_PEER.headers()
+        ) as tui:
             tui.send(client_message)
             assert tui.recv(timeout=1) == thread_started
 
-            assert publish_tui_notice(proxy_socket, "Rodex: Codex update available")
+            assert publish_tui_notice(proxy_socket, "Rodex: Codex update available", peer_identity=TEST_PEER)
             assert json.loads(tui.recv(timeout=1)) == {
                 "method": "warning",
                 "params": {
@@ -448,10 +457,12 @@ def test_tui_notice_reports_undelivered_without_a_primary_tui(tmp_path: Path) ->
         proxy_socket,
         app_socket,
         ToolCallCounter(lambda _count: None),
+        peer_identity=TEST_PEER,
+        app_server_process=LiveTestProcess(),
     )
     try:
         proxy.start()
-        assert not publish_tui_notice(proxy_socket, "Rodex: notice")
+        assert not publish_tui_notice(proxy_socket, "Rodex: notice", peer_identity=TEST_PEER)
     finally:
         proxy.close()
         upstream.shutdown(close_connections=True)
@@ -462,6 +473,8 @@ def test_tui_notice_client_uses_the_rodex_only_proxy_path(tmp_path: Path) -> Non
     calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
 
     class Connection:
+        response = peer_response()
+
         def __enter__(self) -> Connection:
             return self
 
@@ -493,11 +506,7 @@ def test_tui_notice_client_uses_the_rodex_only_proxy_path(tmp_path: Path) -> Non
         calls.append((args, kwargs))
         return Connection()
 
-    assert publish_tui_notice(
-        tmp_path / "proxy.sock",
-        "Rodex: notice",
-        connector=connector,
-    )
+    assert publish_tui_notice(tmp_path / "proxy.sock", "Rodex: notice", connector=connector, peer_identity=TEST_PEER)
     assert calls[0][0] == (str(tmp_path / "proxy.sock"),)
     assert calls[0][1]["uri"] == f"ws://localhost{SESSION_INTERACTION_CONNECTION_PATH}"
 
@@ -523,10 +532,14 @@ def test_proxy_hands_primary_event_ownership_to_a_reconnecting_tui(tmp_path: Pat
         app_socket,
         ToolCallCounter(lambda _count: None),
         lambda message, _event: observed_events.append(message),
+        peer_identity=TEST_PEER,
+        app_server_process=LiveTestProcess(),
     )
     try:
         proxy.start()
-        with unix_connect(str(proxy_socket), uri="ws://localhost/rpc", compression=None) as first_tui:
+        with unix_connect(
+            str(proxy_socket), uri="ws://localhost/rpc", compression=None, additional_headers=TEST_PEER.headers()
+        ) as first_tui:
             first_tui.send(json.dumps({"method": "first"}))
             first_tui.recv(timeout=1)
         proxy.wait_for_primary_connection_release(1)
@@ -535,10 +548,13 @@ def test_proxy_hands_primary_event_ownership_to_a_reconnecting_tui(tmp_path: Pat
             str(proxy_socket),
             uri=f"ws://localhost{CONTROL_CONNECTION_PATH}",
             compression=None,
+            additional_headers=TEST_PEER.headers(),
         ) as machine_control:
             machine_control.send(json.dumps({"method": "control"}))
             machine_control.recv(timeout=1)
-            with unix_connect(str(proxy_socket), uri="ws://localhost/rpc", compression=None) as retry_tui:
+            with unix_connect(
+                str(proxy_socket), uri="ws://localhost/rpc", compression=None, additional_headers=TEST_PEER.headers()
+            ) as retry_tui:
                 retry_tui.send(json.dumps({"method": "retry"}))
                 retry_tui.recv(timeout=1)
             proxy.wait_for_primary_connection_release(1)
@@ -555,13 +571,15 @@ def test_proxy_hands_primary_event_ownership_to_a_reconnecting_tui(tmp_path: Pat
 
 def test_event_tap_streams_runtime_events_and_removes_its_socket(tmp_path: Path) -> None:
     event_socket = tmp_path / "events.sock"
-    tap = CodexProtocolEventTap(event_socket)
+    tap = CodexProtocolEventTap(event_socket, peer_identity=TEST_PEER)
     message = item_started("collabAgentToolCall", "collab-1")
 
     try:
         tap.start()
         assert event_socket.stat().st_mode & 0o777 == 0o600
-        with unix_connect(str(event_socket), uri="ws://localhost/events", compression=None) as subscriber:
+        with unix_connect(
+            str(event_socket), uri="ws://localhost/events", compression=None, additional_headers=TEST_PEER.headers()
+        ) as subscriber:
             assert subscriber.recv(timeout=1) == EVENT_STREAM_READY_MESSAGE
             tap.publish(message)
             assert subscriber.recv(timeout=1) == message
@@ -575,7 +593,7 @@ def test_event_tap_sends_only_semantic_wake_events_to_internal_workers(
     tmp_path: Path,
 ) -> None:
     event_socket = tmp_path / "events.sock"
-    tap = CodexProtocolEventTap(event_socket)
+    tap = CodexProtocolEventTap(event_socket, peer_identity=TEST_PEER)
     thread_started = json.dumps({"method": "thread/started", "params": {"thread": {"id": "thread-1"}}})
     token_delta = json.dumps({"method": "item/agentMessage/delta", "params": {"delta": "noise"}})
     turn_completed = json.dumps({"method": "turn/completed", "params": {"threadId": "thread-1"}})
@@ -588,13 +606,17 @@ def test_event_tap_sends_only_semantic_wake_events_to_internal_workers(
                 str(event_socket),
                 uri=f"ws://localhost{ANALYTICS_EVENT_STREAM_PATH}",
                 compression=None,
+                additional_headers=TEST_PEER.headers(),
             ) as analytics,
             unix_connect(
                 str(event_socket),
                 uri=f"ws://localhost{AGENT_OBSERVER_EVENT_STREAM_PATH}",
                 compression=None,
+                additional_headers=TEST_PEER.headers(),
             ) as observer,
-            unix_connect(str(event_socket), uri="ws://localhost/events", compression=None) as external,
+            unix_connect(
+                str(event_socket), uri="ws://localhost/events", compression=None, additional_headers=TEST_PEER.headers()
+            ) as external,
         ):
             assert analytics.recv(timeout=1) == EVENT_STREAM_READY_MESSAGE
             assert observer.recv(timeout=1) == EVENT_STREAM_READY_MESSAGE
@@ -627,7 +649,7 @@ def test_event_tap_sends_only_semantic_wake_events_to_internal_workers(
 
 def test_event_tap_ready_signal_reports_the_current_active_turn(tmp_path: Path) -> None:
     event_socket = tmp_path / "events.sock"
-    tap = CodexProtocolEventTap(event_socket)
+    tap = CodexProtocolEventTap(event_socket, peer_identity=TEST_PEER)
     started = json.dumps(
         {
             "method": "turn/started",
@@ -662,7 +684,9 @@ def test_event_tap_ready_signal_reports_the_current_active_turn(tmp_path: Path) 
         tap.start()
         tap.publish(thread_started)
         tap.publish(started)
-        with unix_connect(str(event_socket), uri="ws://localhost/events", compression=None) as subscriber:
+        with unix_connect(
+            str(event_socket), uri="ws://localhost/events", compression=None, additional_headers=TEST_PEER.headers()
+        ) as subscriber:
             assert json.loads(subscriber.recv(timeout=1)) == {
                 "method": "rodex/event-stream/ready",
                 "params": {
@@ -671,7 +695,9 @@ def test_event_tap_ready_signal_reports_the_current_active_turn(tmp_path: Path) 
                 },
             }
         tap.publish(completed)
-        with unix_connect(str(event_socket), uri="ws://localhost/events", compression=None) as subscriber:
+        with unix_connect(
+            str(event_socket), uri="ws://localhost/events", compression=None, additional_headers=TEST_PEER.headers()
+        ) as subscriber:
             assert json.loads(subscriber.recv(timeout=1)) == {
                 "method": "rodex/event-stream/ready",
                 "params": {

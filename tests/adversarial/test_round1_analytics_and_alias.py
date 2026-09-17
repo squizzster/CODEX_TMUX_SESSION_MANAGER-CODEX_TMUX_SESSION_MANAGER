@@ -90,6 +90,7 @@ def _analytics_fixture(tmp_path: Path) -> tuple[AnalyticsWorkerConfig, Path]:
     assert registry_id is not None
     return (
         AnalyticsWorkerConfig(
+            tmux_server_id="0123456789abcdef0123456789abcdef",
             rodex_database_path=database,
             codex_sessions_root=sessions_root,
             rodex_session_id=RODEX_SESSION_ID,

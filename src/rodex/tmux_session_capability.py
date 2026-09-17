@@ -1,4 +1,4 @@
-"""Explicit authority for one session on Rodex's shared tmux server."""
+"""Explicit authority for one runtime on its isolated tmux server."""
 
 from __future__ import annotations
 
@@ -30,10 +30,17 @@ RODEX_SESSION_ID_OPTION: Final = "@rodex_session_id"
 RODEX_REGISTRATION_PENDING: Final = "pending"
 RODEX_REGISTRATION_REGISTERED: Final = "registered"
 RODEX_SHARED_TMUX_PROTOCOL_OPTION: Final = "@rodex_shared_tmux_protocol"
-RODEX_SHARED_TMUX_PROTOCOL_GENERATION: Final = 2
-RODEX_SHARED_TMUX_PROTOCOL: Final = f"rodex-shared-tmux-v{RODEX_SHARED_TMUX_PROTOCOL_GENERATION}"
+RODEX_SHARED_TMUX_PROTOCOL_GENERATION: Final = 3
+RODEX_SHARED_TMUX_PROTOCOL: Final = f"rodex-isolated-tmux-v{RODEX_SHARED_TMUX_PROTOCOL_GENERATION}"
 RODEX_SHARED_TMUX_SERVER_ID_OPTION: Final = "@rodex_shared_tmux_server_id"
-RODEX_SHARED_TMUX_SOCKET_NAME: Final = f"tmux-shared-v{RODEX_SHARED_TMUX_PROTOCOL_GENERATION}.sock"
+RODEX_SERVER_RUNTIME_ID_OPTION: Final = "@rodex_server_runtime_id"
+RODEX_PANE_RUNTIME_ID_OPTION: Final = "@rodex_pane_runtime_id"
+RODEX_TMUX_SOCKET_PATTERN: Final = f"tmux-v{RODEX_SHARED_TMUX_PROTOCOL_GENERATION}-*.sock"
+
+
+def runtime_tmux_socket_name(runtime_id: RodexRuntimeId) -> str:
+    return f"tmux-v{RODEX_SHARED_TMUX_PROTOCOL_GENERATION}-{parse_rodex_runtime_id(runtime_id)}.sock"
+
 
 _TMUX_SESSION_ID_PATTERN: Final = re.compile(r"\$[0-9]+")
 _TMUX_PANE_ID_PATTERN: Final = re.compile(r"%[0-9]+")
@@ -183,6 +190,7 @@ def capability_identity_if_shell_condition(
     """Fence any pane in one exact session/runtime for direct ``if-shell -F``."""
     return combine_tmux_if_shell_conditions(
         server_identity_if_shell_condition(capability.tmux_server_id),
+        _literal_comparison(f"#{{{RODEX_SERVER_RUNTIME_ID_OPTION}}}", str(capability.runtime_id)),
         _literal_comparison("#{session_id}", capability.tmux_session_id),
         _literal_comparison(
             f"#{{{RODEX_PRIMARY_PANE_ID_OPTION}}}",
@@ -231,6 +239,7 @@ def primary_pane_capability_if_shell_condition(
     return combine_tmux_if_shell_conditions(
         capability_identity_if_shell_condition(capability),
         _literal_comparison("#{pane_id}", capability.tmux_primary_pane_id),
+        _literal_comparison(f"#{{{RODEX_PANE_RUNTIME_ID_OPTION}}}", str(capability.runtime_id)),
     )
 
 
@@ -241,6 +250,25 @@ def registered_primary_pane_if_shell_condition(
     return combine_tmux_if_shell_conditions(
         registered_capability_if_shell_condition(capability),
         _literal_comparison("#{pane_id}", capability.tmux_primary_pane_id),
+        _literal_comparison(f"#{{{RODEX_PANE_RUNTIME_ID_OPTION}}}", str(capability.runtime_id)),
+    )
+
+
+def runtime_destruction_if_shell_condition(
+    capability: TmuxRuntimeCapability | TmuxSessionCapability,
+) -> str:
+    """Destruction authority includes every pane and the complete session topology."""
+    primary = (
+        registered_primary_pane_if_shell_condition(capability)
+        if isinstance(capability, TmuxSessionCapability)
+        else primary_pane_capability_if_shell_condition(capability)
+    )
+    owns_pane = _literal_comparison(f"#{{{RODEX_PANE_RUNTIME_ID_OPTION}}}", str(capability.runtime_id))
+    foreign_panes = f"#{{W:#{{P:#{{?{owns_pane},,x}}}}}}"
+    return combine_tmux_if_shell_conditions(
+        primary,
+        _literal_comparison("#{S:#{session_id}}", capability.tmux_session_id),
+        _literal_comparison(foreign_panes, ""),
     )
 
 

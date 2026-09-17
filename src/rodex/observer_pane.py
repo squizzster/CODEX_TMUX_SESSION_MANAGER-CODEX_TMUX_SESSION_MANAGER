@@ -52,12 +52,14 @@ class ObserverPaneController:
             owner_pane_option="@rodex_agent_observer_for",
         )
         self._python_executable = python_executable
+        self._capability = capability
         self.pipeline = pipeline if pipeline is not None else SessionInteractionPipeline()
         self._state_sender = state_sender
         self._message_sender = message_sender
         self._snapshot_publisher = snapshot_publisher
         self._open_lock = RLock()
         self._open_request: InteractionRequest | None = None
+        self._closing_pane_target: str | None = None
         self._target = InteractionTarget(
             OBSERVER_TARGET,
             str(capability.runtime_id),
@@ -111,6 +113,10 @@ class ObserverPaneController:
             str(root_thread_id),
             "--protocol-event-socket",
             str(protocol_event_socket_path),
+            "--runtime-id",
+            str(self._capability.runtime_id),
+            "--tmux-server-id",
+            self._capability.tmux_server_id,
             "--initial-event",
             json.dumps(initial_event, ensure_ascii=False, separators=(",", ":"), sort_keys=True),
         )
@@ -129,9 +135,31 @@ class ObserverPaneController:
         )
 
     def close(self) -> InteractionResult:
-        return self.pipeline.execute(
-            InteractionRequest(OBSERVER_TARGET, InteractionOperation.CLOSE, "observer-lifecycle")
+        if self._closing_pane_target is None:
+            self._closing_pane_target = self._pane.known_pane_id
+            if self._closing_pane_target is None:
+                retired, self._closing_pane_target = self._pane.reconcile_retirement()
+                if retired:
+                    return InteractionResult(DeliveryStatus.COMPLETED, "observer creation generation retired")
+        result = self.pipeline.execute(
+            InteractionRequest(
+                OBSERVER_TARGET,
+                InteractionOperation.CLOSE,
+                "observer-lifecycle",
+                expected_binding=self._closing_pane_target,
+            )
         )
+        if result.accepted:
+            self._closing_pane_target = None
+        return result
+
+    def closure_confirmed(self) -> bool:
+        """Reconcile an unacknowledged close without retargeting another pane."""
+        pane = self._closing_pane_target
+        confirmed = pane is not None and self._pane.confirm_absent(pane)
+        if confirmed:
+            self._closing_pane_target = None
+        return confirmed
 
     def _reopen(self) -> InteractionResult:
         if self._open_request is None:
@@ -148,15 +176,22 @@ class ObserverPaneController:
                     launch = request if request.payload is not None else self._open_request
                     if launch is None or not isinstance(launch.payload, str):
                         return InteractionResult(DeliveryStatus.REJECTED, "observer has no registered launch context")
-                    pane = self._pane.create(tuple(json.loads(launch.payload)))
-                    if pane is not None:
-                        command = json.loads(launch.payload)
-                        if "--initial-event" in command:
-                            command[command.index("--initial-event") + 1] = "{}"
-                        self._open_request = replace(launch, payload=json.dumps(command))
+                    command = json.loads(launch.payload)
+                    retry_command = list(command)
+                    if "--initial-event" in retry_command:
+                        retry_command[retry_command.index("--initial-event") + 1] = "{}"
+                    self._open_request = replace(launch, payload=json.dumps(retry_command))
+                    pane = self._pane.create(tuple(command))
             if pane is not None and reopening and self._snapshot_publisher is not None:
                 self._snapshot_publisher()
-            return InteractionResult(DeliveryStatus.COMPLETED if pane else DeliveryStatus.FAILED, value=pane)
+            status = (
+                DeliveryStatus.COMPLETED
+                if pane
+                else DeliveryStatus.INDETERMINATE
+                if self._pane.creation_pending
+                else DeliveryStatus.FAILED
+            )
+            return InteractionResult(status, value=pane)
         if operation == InteractionOperation.LOCATE:
             pane = self._pane.locate()
             return InteractionResult(DeliveryStatus.COMPLETED if pane else DeliveryStatus.REJECTED, value=pane)
@@ -169,7 +204,11 @@ class ObserverPaneController:
         if operation == InteractionOperation.DISPLAY_STATE:
             if self._state_sender is None or not isinstance(request.payload, str):
                 return InteractionResult(DeliveryStatus.REJECTED, "observer state transport is unavailable")
-            address = {"pane_id": request.expected_binding}
+            address = {
+                "pane_id": request.expected_binding,
+                "runtime_id": str(self._capability.runtime_id),
+                "tmux_server_id": self._capability.tmux_server_id,
+            }
             if len(json.dumps(address).encode()) > OBSERVER_TRANSPORT_METADATA_MAX_BYTES:
                 return InteractionResult(DeliveryStatus.REJECTED, "observer pane address exceeds its wire budget")
             self._state_sender(json.loads(request.payload) | address)

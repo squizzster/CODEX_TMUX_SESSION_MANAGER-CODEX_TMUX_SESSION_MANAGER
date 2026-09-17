@@ -21,6 +21,7 @@ from .protocol_proxy import (
     ANALYTICS_WAKE_EVENT_METHODS,
     EVENT_STREAM_READY_METHOD,
 )
+from .runtime_peer import RuntimePeerIdentity, verified_runtime_connection
 
 ANALYTICS_QUIET_SECONDS: Final = 0.5
 ANALYTICS_MAX_BATCH_SECONDS: Final = 5.0
@@ -309,8 +310,11 @@ class AnalyticsProtocolEventSubscriber:
         self,
         event_socket_path: Path,
         scheduler: AnalyticsEventScheduler,
+        *,
+        peer_identity: RuntimePeerIdentity,
     ) -> None:
         self._event_socket_path = event_socket_path
+        self._peer_identity = peer_identity
         self._scheduler = scheduler
         self._stop = Event()
         self._connection: Any | None = None
@@ -349,8 +353,10 @@ class AnalyticsProtocolEventSubscriber:
     def _run(self) -> None:
         unexpected_close = True
         try:
-            with unix_connect(
-                str(self._event_socket_path),
+            with verified_runtime_connection(
+                unix_connect,
+                self._event_socket_path,
+                peer_identity=self._peer_identity,
                 uri=f"ws://localhost{ANALYTICS_EVENT_STREAM_PATH}",
                 compression=None,
                 max_size=None,

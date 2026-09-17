@@ -1,6 +1,6 @@
 # SQL schema methodology
 
-This document describes the current v19 SQLite boundary and the standards applied to
+This document describes the current v20 SQLite boundary and the standards applied to
 future schema decisions. These authoritative standards may be modified only by an agent
 suggestion followed by user agreement.
 
@@ -101,20 +101,22 @@ suggestion followed by user agreement.
   that marker in one cheap WAL-aware read transaction. Every ordinary mutation rechecks
   the generation inside its one writer transaction; only empty marker-less private
   storage receives the cold schema bootstrap in that same transaction. A nonempty
-  marker-less database or a different generation fails closed before v19 domain DDL.
+  marker-less database or a different generation fails closed before v20 domain DDL.
 - `synchronous=NORMAL` preserves SQLite consistency, but an operating-system crash or
   power loss can lose recently committed transactions that have not reached durable
   storage; this is not a `FULL` synchronous durability promise.
 - UTC timestamps use fixed microsecond ISO-8601 `TEXT`, such as
   `2026-08-15T12:34:56.123456Z`.
-- Access and runtime-start updates compare those canonical timestamps in the writer
+- Access updates compare those canonical timestamps in the writer
   transaction, so a delayed older writer cannot regress the durable high-water mark.
   Durable text must already use canonical UTC microsecond form. A value up to 24 hours
   ahead of an incoming observation is retained as plausible reordering; a larger lead is
   treated as a poisoned high-water mark and healed to the incoming canonical timestamp.
 - Runtime resume persists one incarnation tuple: runtime ID/start, tmux endpoint, and
-  current Codex root are either all accepted or all rejected against the current runtime
-  start. A stale incarnation cannot partially replace any member of that tuple.
+  current Codex root are either all accepted or all rejected against the expected previous
+  runtime ID in one transaction. Identical complete-tuple retries are idempotent.
+  Timestamps describe the transition; they do not select its winner. A stale incarnation
+  cannot partially replace any member of that tuple.
 - Unsigned identity up to 64 bits is stored losslessly in one signed `BIGINT` through
   an explicit two's-complement codec. Wider identity is stored losslessly in ordered
   signed `BIGINT` fields with one composite unique index.
@@ -139,18 +141,18 @@ suggestion followed by user agreement.
 - Rodex does not implicitly reset, rewrite, or repair incompatible schema generations.
   Additive, verified schema extensions preserve current-generation contents.
 
-## Current v19 execution, request, statistics, and agent-trace projection
+## Current v20 execution, request, statistics, and agent-trace projection
 
 - `rodex_registries` contains the database instance's one durable 64-bit ID row. Live tmux
   identity includes it so another registry cannot adopt the same session/Codex pair.
 - `rodex_sessions` contains one signed-BIGINT Rodex session ID and
   permanent/optional display-name links. The public Rodex
   session ID is always serialized as a 16-character lowercase hex string, never a JSON
-  number. The current ALPHA v19 generation is stored in `rodex-v19.sqlite3`.
+  number. The current ALPHA v20 generation is stored in `rodex-v20.sqlite3`.
   `rodex_schema_generations` marks the exact generation inside the database; Rodex
   rejects nonempty unmarked databases and wrong generations before creating any domain
-  table. Files for every other generation remain outside the current v19 database path
-  and are never opened, read, migrated, or rewritten by v19 bootstrap.
+  table. Files for every other generation remain outside the current v20 database path
+  and are never opened, read, migrated, or rewritten by v20 bootstrap.
 - `rodex_runtime_instances` contains one signed-`BIGINT` random 64-bit `runtime_id` and
   its start time for a Rodex session. Unique indexes fence both session cardinality and
   runtime ID reuse. Allocation uses the same ten-candidate indexed-selection pipeline

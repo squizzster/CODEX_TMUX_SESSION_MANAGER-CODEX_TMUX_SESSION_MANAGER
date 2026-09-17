@@ -9,17 +9,18 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
+from threading import local
 
 from rodex_registry import (
     CodexSessionId,
     RodexRegistryId,
+    RodexRuntimeRegistrationRejectedError,
     RodexSessionId,
-    lookup_codex_session_id_from_a_rodex_sessions_id,
     lookup_owned_rodex_sessions_id_from_a_cool_name,
     lookup_rodex_registry_id,
     lookup_rodex_runtime_instance,
+    lookup_rodex_runtime_registration,
     lookup_rodex_session_id_from_a_rodex_sessions_id,
-    lookup_rodex_tmux_session,
     record_a_rodex_session_runtime_resume,
 )
 
@@ -33,6 +34,8 @@ from .runtime import (
     RodexRuntimeLauncher,
 )
 
+_transition_lock_ownership = local()
+
 
 @contextmanager
 def session_transition_lock(
@@ -42,6 +45,16 @@ def session_transition_lock(
     """Serialize one durable session's publication, liveness, and replacement."""
     if not isinstance(session_identity, RodexSessionId):
         raise TypeError("session transition identity must be a RodexSessionId")
+    database_path = database_path.expanduser().resolve()
+    owner_process_id = os.getpid()
+    ownership_key = (owner_process_id, database_path, session_identity)
+    held_locks = getattr(_transition_lock_ownership, "held_locks", None)
+    if held_locks is None:
+        held_locks = set()
+        _transition_lock_ownership.held_locks = held_locks
+    if ownership_key in held_locks:
+        yield
+        return
     lock_path = database_path.parent / f".{database_path.name}.session-{session_identity}.lock"
     flags = os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW
     descriptor = os.open(lock_path, flags, 0o600)
@@ -51,9 +64,14 @@ def session_transition_lock(
             raise RodexLaunchError(f"session transition lock is not a private regular file: {lock_path}")
         os.fchmod(descriptor, 0o600)
         fcntl.flock(descriptor, fcntl.LOCK_EX)
-        yield
+        held_locks.add(ownership_key)
+        try:
+            yield
+        finally:
+            held_locks.remove(ownership_key)
     finally:
-        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        if os.getpid() == owner_process_id:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
         os.close(descriptor)
 
 
@@ -65,18 +83,34 @@ def resolve_live_control(
     session_id = lookup_owned_rodex_sessions_id_from_a_cool_name(session_name, database_path)
     if session_id is None:
         raise RodexLaunchError(f"unknown Rodex session: {session_name}")
-    tmux_link = lookup_rodex_tmux_session(session_id, database_path)
-    if tmux_link is None:
-        raise RodexLaunchError(f"Rodex session has no tmux endpoint: {session_name}")
-    runtime = LiveTmuxSession(Path(tmux_link.tmux_server_socket_path), tmux_link.tmux_session_name)
-    if not launcher.session_exists(runtime):
-        raise RodexLaunchError(f"Rodex session is not running: {session_name}")
-    expected_codex_session_id = lookup_codex_session_id_from_a_rodex_sessions_id(session_id, database_path)
-    if expected_codex_session_id is None:
-        raise RodexLaunchError(f"Rodex session has no Codex identity: {session_name}")
     expected_rodex_session_id = lookup_rodex_session_id_from_a_rodex_sessions_id(session_id, database_path)
     if expected_rodex_session_id is None:
         raise RodexLaunchError(f"Rodex session has no Rodex identity: {session_name}")
+    with session_transition_lock(database_path, expected_rodex_session_id):
+        if lookup_owned_rodex_sessions_id_from_a_cool_name(session_name, database_path) != session_id:
+            raise RodexLaunchError(f"Rodex selector changed while resolving its runtime: {session_name}")
+        return _resolve_live_control_locked(session_name, database_path, launcher, session_id, expected_rodex_session_id)
+
+
+def _resolve_live_control_locked(
+    session_name: str,
+    database_path: Path,
+    launcher: RodexRuntimeLauncher,
+    session_id: int,
+    expected_rodex_session_id: RodexSessionId,
+) -> tuple[int, LiveTmuxSession, LiveRodexControl]:
+    registration = lookup_rodex_runtime_registration(session_id, database_path)
+    if registration is None:
+        raise RodexLaunchError(f"Rodex session has no tmux endpoint: {session_name}")
+    tmux_link = registration.tmux_session
+    runtime = LiveTmuxSession(
+        Path(tmux_link.tmux_server_socket_path), tmux_link.tmux_session_name, runtime_id=registration.runtime_id
+    )
+    if not launcher.session_exists(runtime):
+        raise RodexLaunchError(f"Rodex session is not running: {session_name}")
+    expected_codex_session_id = registration.codex_session_id
+    if expected_codex_session_id is None:
+        raise RodexLaunchError(f"Rodex session has no Codex identity: {session_name}")
     expected_registry_id = lookup_rodex_registry_id(database_path)
     control = verify_live_runtime_identity(
         launcher,
@@ -109,6 +143,37 @@ def verify_live_runtime_identity(
     expected_registry_id: RodexRegistryId,
     expected_codex_session_id: CodexSessionId,
 ) -> LiveRodexControl:
+    """Complete and validate registration under the owning session transition."""
+    with session_transition_lock(database_path, expected_rodex_session_id):
+        return _verify_live_runtime_identity_locked(
+            launcher,
+            runtime,
+            session_id=session_id,
+            database_path=database_path,
+            expected_rodex_session_id=expected_rodex_session_id,
+            expected_registry_id=expected_registry_id,
+            expected_codex_session_id=expected_codex_session_id,
+        )
+
+
+def _verify_live_runtime_identity_locked(
+    launcher: RodexRuntimeLauncher,
+    runtime: LiveTmuxSession,
+    *,
+    session_id: int,
+    database_path: Path,
+    expected_rodex_session_id: RodexSessionId,
+    expected_registry_id: RodexRegistryId,
+    expected_codex_session_id: CodexSessionId,
+) -> LiveRodexControl:
+    registration = lookup_rodex_runtime_registration(session_id, database_path)
+    if (
+        registration is None
+        or Path(registration.tmux_session.tmux_server_socket_path) != runtime.tmux_server_socket_path
+        or registration.tmux_session.tmux_session_name != runtime.tmux_session_name
+        or registration.codex_session_id != expected_codex_session_id
+    ):
+        raise RodexRuntimeRegistrationRejectedError("live discovery no longer matches its durable runtime endpoint")
     control = launcher.discover_runtime_control(runtime)
     if (
         control.registration_state == RODEX_REGISTRATION_PENDING
@@ -118,13 +183,17 @@ def verify_live_runtime_identity(
     ):
         if control.runtime_id is None:
             raise RodexLaunchError("pending live runtime did not advertise its exact runtime identity")
+        if control.runtime_id != registration.runtime_id:
+            raise RodexRuntimeRegistrationRejectedError("a pending reader cannot replace the durable runtime incarnation")
         identified_runtime = replace(runtime, runtime_id=control.runtime_id)
         record_a_rodex_session_runtime_resume(
             session_id,
             identified_runtime.tmux_server_socket_path,
             identified_runtime.tmux_session_name,
             database_path,
+            codex_session_id=expected_codex_session_id,
             runtime_id=control.runtime_id,
+            expected_previous_runtime_id=registration.runtime_id,
         )
         launcher.confirm_runtime_registration(
             identified_runtime,

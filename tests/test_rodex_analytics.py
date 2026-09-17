@@ -248,6 +248,7 @@ def _subagent_rollout(
 
 def _config(tmp_path: Path) -> AnalyticsWorkerConfig:
     return AnalyticsWorkerConfig(
+        tmux_server_id="0123456789abcdef0123456789abcdef",
         rodex_database_path=tmp_path / "rodex.sqlite3",
         codex_sessions_root=tmp_path / "sessions",
         rodex_session_id=RODEX_SESSION_ID,
@@ -613,7 +614,7 @@ def test_worker_runs_one_startup_reconciliation_then_uses_the_event_scheduler(
 
     scheduler = RecordingScheduler()
 
-    def subscriber_factory(path: Path, supplied_scheduler: object) -> RecordingSubscriber:
+    def subscriber_factory(path: Path, supplied_scheduler: object, *, peer_identity: object) -> RecordingSubscriber:
         assert path == config.protocol_event_socket_path
         assert supplied_scheduler is scheduler
         return RecordingSubscriber()
@@ -715,7 +716,9 @@ def test_worker_notifies_the_observer_only_after_durable_trace_publication(
     worker = AnalyticsRolloutWorker(
         config,
         adapter_factory=FakeAnalyticsAdapter,
-        trace_publication_notifier=lambda path, sequence, caught_up: notifications.append((path, sequence, caught_up)),
+        trace_publication_notifier=lambda path, sequence, caught_up, **_identity: notifications.append(
+            (path, sequence, caught_up)
+        ),
     )
 
     assert worker.poll_once() == "up_to_date"
@@ -1593,6 +1596,7 @@ def test_worker_does_not_adopt_a_replacement_codex_identity(
         config.rodex_database_path,
         codex_session_id=REPLACEMENT_CODEX_SESSION_ID,
         runtime_id=REPLACEMENT_RUNTIME_ID,
+        expected_previous_runtime_id=config.runtime_id,
     )
     with original_rollout.open("a", encoding="utf-8") as output:
         output.write('{"type":"event_msg","payload":{"changed":true}}\n')
@@ -1675,6 +1679,8 @@ def test_registry_fence_rejects_a_stale_runtime_for_every_analytics_operation(
         "replacement-runtime",
         config.rodex_database_path,
         runtime_id=REPLACEMENT_RUNTIME_ID,
+        codex_session_id=CODEX_SESSION_ID,
+        expected_previous_runtime_id=config.runtime_id,
     )
 
     with pytest.raises(RodexSessionStatisticsConflictError, match="identity changed"):
@@ -1981,6 +1987,7 @@ def test_stale_worker_cannot_publish_snapshot_or_health_after_replacement(
         config.rodex_database_path,
         codex_session_id=REPLACEMENT_CODEX_SESSION_ID,
         runtime_id=REPLACEMENT_RUNTIME_ID,
+        expected_previous_runtime_id=config.runtime_id,
     )
 
     state = AnalyticsRolloutWorker(config, adapter_factory=lambda: adapter).poll_once()
@@ -2180,7 +2187,7 @@ def test_real_worker_publishes_exact_turn_projection_into_rodex_sql(
 
     exact = read_rodex_session_turn_statistics(1, TURN_TEST_ID, config.rodex_database_path)
     assert exact.statistics is not None
-    assert exact.statistics.statistics_projection_schema_version == "rodex-statistics-v7"
+    assert exact.statistics.statistics_projection_schema_version == "rodex-statistics-v8"
     assert exact.worker is not None
     assert exact.worker.worker_state == "up_to_date"
     assert exact.turn is not None

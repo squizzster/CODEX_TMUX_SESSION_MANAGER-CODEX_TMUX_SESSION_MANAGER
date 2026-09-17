@@ -19,7 +19,7 @@ from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from threading import Event, Lock, RLock, Thread
+from threading import Event, Lock, RLock, Thread, Timer
 from typing import Final
 
 from websockets.exceptions import ConnectionClosed
@@ -53,6 +53,8 @@ from .observer_projection import (
 )
 from .observer_state import ObserverStateReducer
 from .protocol_proxy import AGENT_OBSERVER_EVENT_STREAM_PATH
+from .runtime_endpoint import ExclusiveUnixEndpoint
+from .runtime_peer import RuntimePeerIdentity, RuntimePeerIdentityError, verified_runtime_connection
 from .terminal_presentation import render_observer_lines
 from .tmux_session_capability import TmuxRuntimeCapability
 
@@ -74,6 +76,7 @@ OBSERVER_SEND_RETRY_INITIAL_SECONDS: Final = 0.01
 OBSERVER_SEND_RETRY_MAX_SECONDS: Final = 0.25
 OBSERVER_SEND_PARKED_RETRY_SECONDS: Final = 1.0
 OBSERVER_SOCKET_OPERATION_TIMEOUT_SECONDS: Final = 0.25
+OBSERVER_PANE_CLOSE_RETRY_DELAYS: Final = (0.1, 0.25, 0.5)
 
 
 def observer_control_socket_path(protocol_event_socket_path: Path) -> Path:
@@ -277,6 +280,8 @@ def notify_agent_observer_trace_publication(
     protocol_event_socket_path: Path,
     trace_publication_sequence: int,
     caught_up: bool,
+    *,
+    peer_identity: RuntimePeerIdentity,
 ) -> None:
     """Best-effort wake after SQLite has committed a trace publication."""
     if (
@@ -292,6 +297,8 @@ def notify_agent_observer_trace_publication(
         "kind": "trace_published",
         "trace_publication_sequence": trace_publication_sequence,
         "caught_up": caught_up,
+        "runtime_id": str(peer_identity.runtime_id),
+        "tmux_server_id": peer_identity.tmux_server_id,
     }
     with suppress(OSError):
         _try_send_observer_event_frame(
@@ -317,6 +324,7 @@ class AgentObserverCoordinator:
         interaction_pipeline: SessionInteractionPipeline | None = None,
     ) -> None:
         self._protocol_event_socket_path = protocol_event_socket_path
+        self._peer_identity = RuntimePeerIdentity(capability.runtime_id, capability.tmux_server_id)
         self._event_dispatcher = _ObserverEventDispatcher() if event_sender is None else None
         self._event_sender = self._event_dispatcher.send if self._event_dispatcher is not None else event_sender
         self._pane = ObserverPaneController(
@@ -338,6 +346,10 @@ class AgentObserverCoordinator:
         self._root_thread_id: uuid.UUID | None = None
         self._lifecycle_lock = RLock()
         self._closed = False
+        self._pending_pane_close = False
+        self._pane_close_attempts = 0
+        self._pane_close_generation = 0
+        self._pane_close_retry: Timer | None = None
 
     def activate(
         self,
@@ -552,26 +564,64 @@ class AgentObserverCoordinator:
 
     def _reconcile_observer_pane(self, previously_running: int, initial_event: dict[str, object] | None = None) -> None:
         """The work reducer alone decides automatic visibility; pane mechanics stay in the pipeline."""
-        if self._observer_state.running_agent_count == previously_running and initial_event is None:
+        if (
+            self._observer_state.running_agent_count == previously_running
+            and initial_event is None
+            and not self._pending_pane_close
+        ):
             return
-        if self._observer_state.running_agent_count:
-            if self._pane.locate() is None:
-                assert self._database_path is not None and self._rodex_sessions_id is not None
-                assert self._rodex_session_id is not None and self._root_thread_id is not None
-                pane = self._pane.create(
-                    database_path=self._database_path,
-                    rodex_sessions_id=self._rodex_sessions_id,
-                    rodex_session_id=self._rodex_session_id,
-                    root_thread_id=self._root_thread_id,
-                    protocol_event_socket_path=self._protocol_event_socket_path,
-                    initial_event=initial_event or {},
-                )
-                if pane is not None:
-                    self._send_observer_snapshot(self._observer_state.snapshot())
-        elif previously_running:
-            self._pane.close()
-            if self._event_dispatcher is not None:
-                self._event_dispatcher.discard_pending()
+        if self._pending_pane_close or (previously_running and not self._observer_state.running_agent_count):
+            # An indeterminate old close may still execute after work restarts.
+            # Finish retiring that exact pane before admitting a new generation.
+            self._pending_pane_close = True
+            self._pane_close_attempts += 1
+            result = self._pane.close()
+            if result.accepted or self._pane.closure_confirmed():
+                self._cancel_pane_close()
+                if self._event_dispatcher is not None:
+                    self._event_dispatcher.discard_pending()
+            else:
+                self._schedule_pane_close_retry()
+                return
+        if self._observer_state.running_agent_count and self._pane.locate() is None:
+            assert self._database_path is not None and self._rodex_sessions_id is not None
+            assert self._rodex_session_id is not None and self._root_thread_id is not None
+            pane = self._pane.create(
+                database_path=self._database_path,
+                rodex_sessions_id=self._rodex_sessions_id,
+                rodex_session_id=self._rodex_session_id,
+                root_thread_id=self._root_thread_id,
+                protocol_event_socket_path=self._protocol_event_socket_path,
+                initial_event=initial_event or {},
+            )
+            if pane is not None:
+                self._send_observer_snapshot(self._observer_state.snapshot())
+
+    def _cancel_pane_close(self) -> None:
+        self._pending_pane_close = False
+        self._pane_close_attempts = 0
+        self._pane_close_generation += 1
+        retry, self._pane_close_retry = self._pane_close_retry, None
+        if retry is not None:
+            retry.cancel()
+
+    def _schedule_pane_close_retry(self) -> None:
+        if self._pane_close_retry is not None or self._pane_close_attempts > len(OBSERVER_PANE_CLOSE_RETRY_DELAYS):
+            return
+        generation = self._pane_close_generation
+
+        def retry() -> None:
+            with self._lifecycle_lock:
+                if self._closed or generation != self._pane_close_generation:
+                    return
+                self._pane_close_retry = None
+                if self._pending_pane_close:
+                    self._reconcile_observer_pane(self._observer_state.running_agent_count)
+
+        timer = Timer(OBSERVER_PANE_CLOSE_RETRY_DELAYS[self._pane_close_attempts - 1], retry)
+        timer.daemon = True
+        self._pane_close_retry = timer
+        timer.start()
 
     def reset_after_disconnect(self) -> None:
         """Prune all primary-connection correlation state after its producer exits."""
@@ -588,6 +638,7 @@ class AgentObserverCoordinator:
             if self._closed:
                 return
             self._closed = True
+            self._cancel_pane_close()
             if self._event_dispatcher is not None:
                 self._event_dispatcher.close()
             self._observer_state.discard_producer_state()
@@ -623,7 +674,14 @@ class AgentObserverCoordinator:
     def _deliver_observer_message(self, text: str, pane_id: str | None) -> None:
         _send_observer_display_message(
             observer_control_socket_path(self._protocol_event_socket_path),
-            {"schema": OBSERVER_SCHEMA, "kind": "display_message", "text": text, "pane_id": pane_id},
+            {
+                "schema": OBSERVER_SCHEMA,
+                "kind": "display_message",
+                "text": text,
+                "pane_id": pane_id,
+                "runtime_id": str(self._peer_identity.runtime_id),
+                "tmux_server_id": self._peer_identity.tmux_server_id,
+            },
         )
 
     def _publish_current_observer_snapshot(self) -> None:
@@ -1651,6 +1709,7 @@ def _observer_control_receiver(
     events: queue.Queue[dict[str, object]],
     stop: Event,
     *,
+    peer_identity: RuntimePeerIdentity,
     monotonic: Callable[[], float] = time.monotonic,
     expected_pane_id: str | None = None,
 ) -> None:
@@ -1685,7 +1744,13 @@ def _observer_control_receiver(
                 continue
             if isinstance(event, dict) and event.get("schema") == OBSERVER_SCHEMA:
                 matches_pane = expected_pane_id is None or event.get("pane_id") == expected_pane_id
-                accepted = event.get("kind") not in {"display_message", "observer_state_snapshot"} or matches_pane
+                matches_runtime = (
+                    event.get("runtime_id") == str(peer_identity.runtime_id)
+                    and event.get("tmux_server_id") == peer_identity.tmux_server_id
+                )
+                accepted = matches_runtime and (
+                    event.get("kind") not in {"display_message", "observer_state_snapshot"} or matches_pane
+                )
                 if accepted:
                     events.put(event)
                 if event.get("kind") == "display_message":
@@ -1718,18 +1783,24 @@ def _receive_exactly(
 def _observer_runtime_liveness(
     protocol_event_socket_path: Path,
     events: queue.Queue[dict[str, object]],
+    *,
+    peer_identity: RuntimePeerIdentity,
 ) -> None:
     """Keep the pane tied to its runtime; live content arrives on the control socket."""
     try:
-        with unix_connect(
-            str(protocol_event_socket_path),
+        with verified_runtime_connection(
+            unix_connect,
+            protocol_event_socket_path,
+            peer_identity=peer_identity,
             uri=f"ws://localhost{AGENT_OBSERVER_EVENT_STREAM_PATH}",
             compression=None,
             max_size=None,
+            open_timeout=1,
+            close_timeout=1,
         ) as connection:
             while True:
                 connection.recv()
-    except (ConnectionClosed, OSError):
+    except (ConnectionClosed, OSError, RuntimePeerIdentityError):
         pass
     finally:
         events.put({"schema": OBSERVER_SCHEMA, "kind": "runtime_closed"})
@@ -1781,12 +1852,18 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--rodex-session-id", required=True)
     parser.add_argument("--root-thread-id", required=True, type=uuid.UUID)
     parser.add_argument("--protocol-event-socket", required=True, type=Path)
+    parser.add_argument("--runtime-id", required=True)
+    parser.add_argument("--tmux-server-id", required=True)
     parser.add_argument("--initial-event", required=True)
     return parser
 
 
 def main(arguments: list[str] | None = None) -> int:
     namespace = _parser().parse_args(arguments)
+    try:
+        peer_identity = RuntimePeerIdentity(namespace.runtime_id, namespace.tmux_server_id)
+    except ValueError as error:
+        _parser().error(str(error))
     if namespace.rodex_sessions_id < 1:
         _parser().error("--rodex-sessions-id must be positive")
     if _RODEX_SESSION_ID_PATTERN.fullmatch(namespace.rodex_session_id) is None:
@@ -1802,30 +1879,28 @@ def main(arguments: list[str] | None = None) -> int:
         initial_event=initial_event,
     )
     control_path = observer_control_socket_path(namespace.protocol_event_socket)
-    control_path.unlink(missing_ok=True)
-    controls = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    controls.bind(str(control_path))
-    control_path.chmod(0o600)
-    controls.listen()
+    endpoint = ExclusiveUnixEndpoint(control_path)
+    controls = endpoint.open()
     events: queue.Queue[dict[str, object]] = queue.Queue()
     stop = Event()
     control_thread = Thread(
         target=_observer_control_receiver,
         args=(controls, events, stop),
-        kwargs={"expected_pane_id": os.environ.get("TMUX_PANE")},
+        kwargs={"expected_pane_id": os.environ.get("TMUX_PANE"), "peer_identity": peer_identity},
         name="rodex-agent-observer-control",
         daemon=True,
     )
     liveness_thread = Thread(
         target=_observer_runtime_liveness,
         args=(namespace.protocol_event_socket, events),
+        kwargs={"peer_identity": peer_identity},
         name="rodex-agent-observer-liveness",
         daemon=True,
     )
-    control_thread.start()
-    liveness_thread.start()
     last_transport_overflow_count = 0
     try:
+        control_thread.start()
+        liveness_thread.start()
         _print_lines([*view.header_lines(), "", *view.initial_lines])
         _read_and_render_available_trace(
             view,
@@ -1919,8 +1994,7 @@ def main(arguments: list[str] | None = None) -> int:
             )
     finally:
         stop.set()
-        controls.close()
-        control_path.unlink(missing_ok=True)
+        endpoint.close()
 
 
 if __name__ == "__main__":

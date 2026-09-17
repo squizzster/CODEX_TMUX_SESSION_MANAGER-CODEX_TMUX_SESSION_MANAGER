@@ -16,6 +16,10 @@ from rodex.analytics_scheduler import (
     _is_relevant_protocol_event,
 )
 from rodex.protocol_proxy import CodexProtocolEventTap
+from rodex.runtime_peer import RuntimePeerIdentity
+from rodex_registry import RodexRuntimeId
+
+PEER = RuntimePeerIdentity(RodexRuntimeId(1), "0123456789abcdef0123456789abcdef")
 
 THREAD_ID = "01a00654-f2bc-7a30-834a-a5f886a65f82"
 SECOND_THREAD_ID = "01a00654-f2bc-7a30-834a-a5f886a65f83"
@@ -316,7 +320,7 @@ def test_subscriber_start_delivers_ready_snapshot_before_return(
     thread_id = "01a00654-f2bc-7a30-834a-a5f886a65f82"
     observed: list[dict[str, object]] = []
     scheduler = AnalyticsEventScheduler(event_observer=observed.append)
-    tap = CodexProtocolEventTap(event_socket)
+    tap = CodexProtocolEventTap(event_socket, peer_identity=PEER)
     tap.start()
     tap.publish(
         json.dumps(
@@ -326,7 +330,7 @@ def test_subscriber_start_delivers_ready_snapshot_before_return(
             }
         )
     )
-    subscriber = AnalyticsProtocolEventSubscriber(event_socket, scheduler)
+    subscriber = AnalyticsProtocolEventSubscriber(event_socket, scheduler, peer_identity=PEER)
     try:
         subscriber.start()
 
@@ -349,9 +353,9 @@ def test_subscriber_start_reports_ready_snapshot_observer_failure(
         raise RuntimeError("observer failed")
 
     scheduler = AnalyticsEventScheduler(event_observer=fail_observer)
-    tap = CodexProtocolEventTap(event_socket)
+    tap = CodexProtocolEventTap(event_socket, peer_identity=PEER)
     tap.start()
-    subscriber = AnalyticsProtocolEventSubscriber(event_socket, scheduler)
+    subscriber = AnalyticsProtocolEventSubscriber(event_socket, scheduler, peer_identity=PEER)
     try:
         with pytest.raises(AnalyticsEventStreamClosed, match="failed during startup"):
             subscriber.start()

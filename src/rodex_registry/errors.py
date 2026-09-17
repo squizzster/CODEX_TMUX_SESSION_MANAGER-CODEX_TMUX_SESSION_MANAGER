@@ -13,6 +13,10 @@ class RodexRuntimeIdCollisionError(RodexSessionError):
     """All permitted 64-bit runtime ID candidates were occupied."""
 
 
+class RodexRuntimeRegistrationRejectedError(RodexSessionError):
+    """Runtime adoption lost its expected incarnation or contradicts that runtime."""
+
+
 class RodexSessionStatisticsConflictError(RodexSessionError):
     """A statistics publication conflicts with its durable registry state."""
 

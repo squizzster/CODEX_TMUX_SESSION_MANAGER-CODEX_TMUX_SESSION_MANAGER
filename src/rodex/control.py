@@ -26,6 +26,7 @@ from rodex_registry.identity import (
 from .app_server_contract import CODEX_APP_SERVER, RODEX_CONTROL_APP_SERVER_CLIENT
 from .interaction_pipeline import InteractionDeliveryIndeterminate
 from .protocol_proxy import CONTROL_CONNECTION_PATH, EVENT_STREAM_READY_METHOD
+from .runtime_peer import RuntimePeerIdentity, verified_runtime_connection
 from .tmux_session_capability import TmuxSessionCapability
 
 Connector = Callable[..., Any]
@@ -87,6 +88,19 @@ class LiveRodexControl:
     registration_state: str | None = None
     runtime_id: RodexRuntimeId | None = None
     tmux_capability: TmuxSessionCapability | None = None
+
+    @property
+    def peer_identity(self) -> RuntimePeerIdentity:
+        """Require full transport incarnation before any connection can open."""
+        capability = self.tmux_capability
+        if (
+            capability is None
+            or self.runtime_id is None
+            or capability.runtime_id != self.runtime_id
+            or capability.codex_session_id != self.codex_session_id
+        ):
+            raise RodexControlError("control transport requires an exact runtime and tmux server identity")
+        return RuntimePeerIdentity(self.runtime_id, capability.tmux_server_id)
 
 
 @dataclass(frozen=True, slots=True)
@@ -175,15 +189,18 @@ class CodexControlClient:
     def inspect(self, control: LiveRodexControl) -> CodexThreadState:
         """Return the verified thread's current runtime state."""
         deadline = self._control_rpc_deadline()
-        with self._open_protocol(
-            control.protocol_proxy_socket_path,
-            open_timeout=self._control_rpc_remaining(deadline, cap=2),
-        ) as websocket:
-            thread = self._verify_and_read_thread(
-                websocket,
-                control.codex_session_id,
-                deadline=deadline,
-            )
+        try:
+            with self._open_protocol(
+                control,
+                open_timeout=self._control_rpc_remaining(deadline, cap=2),
+            ) as websocket:
+                thread = self._verify_and_read_thread(
+                    websocket,
+                    control.codex_session_id,
+                    deadline=deadline,
+                )
+        except (ConnectionClosed, InvalidHandshake, OSError) as error:
+            raise RodexControlError(f"Codex control connection ended: {error}") from error
         return _thread_state(thread)
 
     def inspect_live(self, control: LiveRodexControl) -> CodexThreadState:
@@ -191,7 +208,7 @@ class CodexControlClient:
         deadline = self._control_rpc_deadline()
         try:
             with self._open_events(
-                control.protocol_event_socket_path,
+                control,
                 open_timeout=self._control_rpc_remaining(deadline, cap=2),
             ) as events:
                 ready = _expect_event_stream_ready(
@@ -199,7 +216,7 @@ class CodexControlClient:
                     timeout_seconds=self._control_rpc_remaining(deadline, cap=2),
                 )
                 with self._open_protocol(
-                    control.protocol_proxy_socket_path,
+                    control,
                     open_timeout=self._control_rpc_remaining(deadline, cap=2),
                 ) as websocket:
                     thread = self._verify_and_read_thread(
@@ -219,7 +236,7 @@ class CodexControlClient:
         deadline = self._control_rpc_deadline()
         try:
             with self._open_protocol(
-                control.protocol_proxy_socket_path,
+                control,
                 open_timeout=self._control_rpc_remaining(deadline, cap=2),
             ) as websocket:
                 return self._initialize_protocol(
@@ -244,7 +261,7 @@ class CodexControlClient:
         deadline = self._control_rpc_deadline()
         try:
             with self._open_events(
-                control.protocol_event_socket_path,
+                control,
                 open_timeout=self._control_rpc_remaining(deadline, cap=2),
             ) as events:
                 _expect_event_stream_ready(
@@ -252,7 +269,7 @@ class CodexControlClient:
                     timeout_seconds=self._control_rpc_remaining(deadline, cap=2),
                 )
                 with self._open_protocol(
-                    control.protocol_proxy_socket_path,
+                    control,
                     open_timeout=self._control_rpc_remaining(deadline, cap=2),
                 ) as websocket:
                     thread = self._verify_and_read_thread(
@@ -311,7 +328,7 @@ class CodexControlClient:
         deadline = self._control_rpc_deadline()
         try:
             with self._open_events(
-                control.protocol_event_socket_path,
+                control,
                 open_timeout=self._control_rpc_remaining(deadline, cap=2),
             ) as events:
                 _expect_event_stream_ready(
@@ -319,7 +336,7 @@ class CodexControlClient:
                     timeout_seconds=self._control_rpc_remaining(deadline, cap=2),
                 )
                 with self._open_protocol(
-                    control.protocol_proxy_socket_path,
+                    control,
                     open_timeout=self._control_rpc_remaining(deadline, cap=2),
                 ) as websocket:
                     thread = self._verify_and_read_thread(
@@ -377,7 +394,7 @@ class CodexControlClient:
         deadline = self._control_rpc_deadline()
         try:
             with self._open_events(
-                control.protocol_event_socket_path,
+                control,
                 open_timeout=self._control_rpc_remaining(deadline, cap=2),
             ) as events:
                 _expect_event_stream_ready(
@@ -385,7 +402,7 @@ class CodexControlClient:
                     timeout_seconds=self._control_rpc_remaining(deadline, cap=2),
                 )
                 with self._open_protocol(
-                    control.protocol_proxy_socket_path,
+                    control,
                     open_timeout=self._control_rpc_remaining(deadline, cap=2),
                 ) as websocket:
                     thread = self._verify_and_read_thread(
@@ -430,7 +447,7 @@ class CodexControlClient:
         deadline = self._control_rpc_deadline()
         try:
             with self._open_protocol(
-                control.protocol_proxy_socket_path,
+                control,
                 open_timeout=self._control_rpc_remaining(deadline, cap=2),
             ) as websocket:
                 thread = self._verify_and_read_thread(
@@ -457,7 +474,7 @@ class CodexControlClient:
         deadline = self._control_rpc_deadline()
         try:
             with self._open_protocol(
-                control.protocol_proxy_socket_path,
+                control,
                 open_timeout=self._control_rpc_remaining(deadline, cap=2),
             ) as websocket:
                 thread = self._verify_and_read_thread(
@@ -503,7 +520,7 @@ class CodexControlClient:
         deadline = None if timeout_seconds is None else self._monotonic() + timeout_seconds
         try:
             with self._open_events(
-                control.protocol_event_socket_path,
+                control,
                 open_timeout=_wait_remaining(deadline, self._monotonic, turn_id, 2),
             ) as events:
                 ready = _expect_event_stream_ready(
@@ -512,7 +529,7 @@ class CodexControlClient:
                     preserve_timeout=True,
                 )
                 with self._open_protocol(
-                    control.protocol_proxy_socket_path,
+                    control,
                     open_timeout=_wait_remaining(deadline, self._monotonic, turn_id, 2),
                 ) as websocket:
                     thread = self._verify_and_read_thread(
@@ -552,7 +569,7 @@ class CodexControlClient:
                     if not isinstance(completed, dict) or completed.get("id") != turn_id:
                         continue
                     with self._open_protocol(
-                        control.protocol_proxy_socket_path,
+                        control,
                         open_timeout=_wait_remaining(deadline, self._monotonic, turn_id, 2),
                     ) as websocket:
                         terminal_thread = self._verify_and_read_thread(
@@ -587,7 +604,7 @@ class CodexControlClient:
     ) -> None:
         """Return once the current turn completes, or immediately when idle."""
         try:
-            with self._open_events(control.protocol_event_socket_path) as events:
+            with self._open_events(control) as events:
                 _expect_event_stream_ready(events)
                 state = self.inspect(control)
                 revalidate()
@@ -624,7 +641,7 @@ class CodexControlClient:
     ) -> None:
         """Stream future bounded semantic events for the verified thread."""
         try:
-            with self._open_events(control.protocol_event_socket_path) as events:
+            with self._open_events(control) as events:
                 _expect_event_stream_ready(events)
                 self.inspect(control)
                 revalidate()
@@ -638,9 +655,11 @@ class CodexControlClient:
         except (ConnectionClosed, InvalidHandshake, OSError) as error:
             raise RodexControlError(f"Codex event stream ended: {error}") from error
 
-    def _open_protocol(self, socket_path: Path, *, open_timeout: float = 2) -> Any:
-        return self._connect(
-            str(socket_path),
+    def _open_protocol(self, control: LiveRodexControl, *, open_timeout: float = 2) -> Any:
+        return verified_runtime_connection(
+            self._connect,
+            control.protocol_proxy_socket_path,
+            peer_identity=control.peer_identity,
             uri=f"ws://localhost{CONTROL_CONNECTION_PATH}",
             compression=None,
             open_timeout=open_timeout,
@@ -648,9 +667,11 @@ class CodexControlClient:
             max_size=None,
         )
 
-    def _open_events(self, socket_path: Path, *, open_timeout: float = 2) -> Any:
-        return self._connect(
-            str(socket_path),
+    def _open_events(self, control: LiveRodexControl, *, open_timeout: float = 2) -> Any:
+        return verified_runtime_connection(
+            self._connect,
+            control.protocol_event_socket_path,
+            peer_identity=control.peer_identity,
             uri="ws://localhost/events",
             compression=None,
             open_timeout=open_timeout,

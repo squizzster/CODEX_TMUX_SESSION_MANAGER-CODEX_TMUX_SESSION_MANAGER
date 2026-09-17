@@ -18,6 +18,8 @@ from rodex_registry.identity import (
     parse_rodex_runtime_id,
 )
 
+from .tmux_session_capability import parse_tmux_server_id
+
 
 def _absolute_path(path: Path) -> Path:
     return Path(os.path.abspath(path.expanduser()))
@@ -32,11 +34,13 @@ class AnalyticsWorkerConfig:
     rodex_session_id: RodexSessionId
     rodex_registry_id: RodexRegistryId
     runtime_id: RodexRuntimeId
+    tmux_server_id: str
     protocol_event_socket_path: Path
     rodex_sessions_id: int | None = None
     codex_session_id: CodexSessionId | None = None
 
     def __post_init__(self) -> None:
+        parse_tmux_server_id(self.tmux_server_id)
         object.__setattr__(
             self,
             "rodex_database_path",
@@ -85,6 +89,7 @@ class AnalyticsWorkerConfig:
             rodex_session_id=self.rodex_session_id,
             rodex_registry_id=self.rodex_registry_id,
             runtime_id=self.runtime_id,
+            tmux_server_id=self.tmux_server_id,
             protocol_event_socket_path=self.protocol_event_socket_path,
             rodex_sessions_id=rodex_sessions_id,
             codex_session_id=parse_codex_session_id(codex_session_id),
@@ -103,6 +108,7 @@ class AnalyticsWorkerConfig:
     ) -> None:
         parser.add_argument("--rodex-database", required=True, type=Path)
         parser.add_argument("--codex-sessions-root", required=True, type=Path)
+        parser.add_argument("--tmux-server-id", required=True, type=parse_tmux_server_id)
         parser.add_argument(
             "--rodex-session-id",
             required=True,
@@ -136,6 +142,7 @@ class AnalyticsWorkerConfig:
             rodex_session_id=namespace.rodex_session_id,
             rodex_registry_id=namespace.rodex_registry_id,
             runtime_id=namespace.rodex_runtime_id,
+            tmux_server_id=namespace.tmux_server_id,
             protocol_event_socket_path=namespace.protocol_event_socket,
             rodex_sessions_id=namespace.rodex_sessions_id,
             codex_session_id=namespace.codex_session_id,
@@ -156,6 +163,8 @@ class AnalyticsWorkerConfig:
             str(self.rodex_session_id),
             "--rodex-registry-id",
             str(self.rodex_registry_id),
+            "--tmux-server-id",
+            self.tmux_server_id,
         ]
         if include_runtime_id:
             arguments.extend(("--rodex-runtime-id", str(self.runtime_id)))
@@ -214,6 +223,10 @@ class SessionHostConfig:
     runtime_id: RodexRuntimeId
     analytics: AnalyticsWorkerConfig
     codex_arguments: tuple[str, ...] = ()
+
+    @property
+    def tmux_server_id(self) -> str:
+        return self.analytics.tmux_server_id
 
     def __post_init__(self) -> None:
         if not self.codex_binary or not self.tmux_binary:

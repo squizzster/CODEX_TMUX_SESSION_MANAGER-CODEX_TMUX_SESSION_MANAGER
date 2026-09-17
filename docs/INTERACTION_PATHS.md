@@ -1,8 +1,7 @@
 # Interaction contract and production-path inventory
 
-Rodex 0.12.0a1, ALPHA. SQL generation 19 and shared tmux protocol v2 are unchanged.
-There is no old interaction endpoint or fallback adapter. Existing processes retain
-the code they already loaded; this change does not restart existing sessions.
+Rodex 0.13.0a1, ALPHA. SQL generation 20, isolated tmux protocol v3, runtime peer
+contract v3 and observer schema v3 form the current boundary. Old contracts are rejected.
 
 ## Authoritative contract
 
@@ -17,7 +16,7 @@ pipeline.send_message(target="agent-observer", text="Visible information", start
 pipeline.send_message(target="main", text="Please investigate", start_model_turn=True)
 ```
 
-`publish_session_interaction(socket_path, InteractionRequest(...))` submits the same
+`publish_session_interaction(socket_path, InteractionRequest(...), peer_identity=...)` submits the same
 operations over the private `/rodex-interaction` endpoint. It cannot submit raw protocol
 frames, raw terminal bytes, interceptor events, observer snapshots, launch commands or hooks. `publish_tui_notice` is an explicit
 display-only convenience function using this transport, not a second delivery path.
@@ -85,7 +84,6 @@ work. The record buffer contains metadata, not prompt bodies or another durable 
 | `python -m rodex.environment_exec` | Prepared environment → process exec |
 | `python -I -m rodex.terminal_exec` | Fresh session → controlling child PTY → unchanged native TUI argv/environment |
 | `python -m rodex.tmux_sharing_coordinator` | Server identity → roster reconciliation |
-| `python -m rodex.tmux_shared_ctrl_c` | Capability → private/shared exit policy |
 | `python -m rodex.status_animation_admission` | Admitted animation, watchdog, watchdog gate |
 
 ## User and automation routes
@@ -141,7 +139,7 @@ work. The record buffer contains metadata, not prompt bodies or another durable 
 | Attach | Registered capability → interactive tmux attach |
 | Startup rollback/stop | Managed lifecycle/runtime → exact session kill |
 | Ctrl-D | Owned root binding → detach current client only |
-| Ctrl-C | Private/shared confirmation policy → exact session termination |
+| Ctrl-C | Native originating-client admission → private guarded termination or shared detach |
 | Resize, external SIGINT | Host → gateway → child terminal dimensions/foreground process group |
 | Natural exit, signals, keepalive failure | Host closes owned children/gateway/proxy/observer/analytics/status/event tap and paths; gateway restores terminal attributes/FD flags |
 

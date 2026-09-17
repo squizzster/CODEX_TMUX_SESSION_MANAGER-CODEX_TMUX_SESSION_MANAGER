@@ -12,6 +12,7 @@ import pytest
 import rodex_sql.transactions as transactions_module
 from rodex_registry import (
     RodexRuntimeId,
+    RodexRuntimeRegistrationRejectedError,
     RodexSessionError,
     audit_rodex_database_integrity,
     create_a_rodex_session,
@@ -149,18 +150,21 @@ def test_round2_stale_resume_rejects_the_whole_incarnation_tuple(tmp_path: Path)
         database,
         codex_session_id=current_codex_id,
         runtime_id=current_runtime_id,
+        expected_previous_runtime_id=None,
         accessed_at_utc=datetime(2032, 1, 1, 12, tzinfo=UTC),
     )
 
-    record_a_rodex_session_runtime_resume(
-        session.rodex_sessions_id,
-        "/tmp/rodex/stale.sock",
-        "stale",
-        database,
-        codex_session_id=stale_codex_id,
-        runtime_id=RodexRuntimeId.generate(),
-        accessed_at_utc=datetime(2032, 1, 1, 11, tzinfo=UTC),
-    )
+    with pytest.raises(RodexRuntimeRegistrationRejectedError, match="expected previous incarnation"):
+        record_a_rodex_session_runtime_resume(
+            session.rodex_sessions_id,
+            "/tmp/rodex/stale.sock",
+            "stale",
+            database,
+            codex_session_id=stale_codex_id,
+            runtime_id=RodexRuntimeId.generate(),
+            expected_previous_runtime_id=None,
+            accessed_at_utc=datetime(2032, 1, 1, 11, tzinfo=UTC),
+        )
 
     runtime = lookup_rodex_runtime_instance(session.rodex_sessions_id, database)
     tmux = lookup_rodex_tmux_session(session.rodex_sessions_id, database)
@@ -175,7 +179,7 @@ def test_round2_stale_resume_rejects_the_whole_incarnation_tuple(tmp_path: Path)
     assert lookup_codex_session_id_from_a_rodex_sessions_id(session.rodex_sessions_id, database) == current_codex_id
 
 
-def test_round2_concurrent_resume_keeps_one_newest_incarnation_tuple(
+def test_round2_concurrent_resume_accepts_exactly_one_complete_incarnation_tuple(
     tmp_path: Path,
 ) -> None:
     database = tmp_path / "rodex.sqlite3"
@@ -187,6 +191,8 @@ def test_round2_concurrent_resume_keeps_one_newest_incarnation_tuple(
     )
     newer_runtime_id = RodexRuntimeId.generate()
     newer_codex_id = uuid.uuid4()
+    older_runtime_id = RodexRuntimeId.generate()
+    older_codex_id = uuid.uuid4()
     barrier = Barrier(2)
 
     def resume(
@@ -195,17 +201,22 @@ def test_round2_concurrent_resume_keeps_one_newest_incarnation_tuple(
         codex_id: uuid.UUID,
         runtime_id: RodexRuntimeId,
         hour: int,
-    ) -> None:
+    ) -> bool:
         barrier.wait()
-        record_a_rodex_session_runtime_resume(
-            session.rodex_sessions_id,
-            endpoint,
-            name,
-            database,
-            codex_session_id=codex_id,
-            runtime_id=runtime_id,
-            accessed_at_utc=datetime(2032, 1, 1, hour, tzinfo=UTC),
-        )
+        try:
+            record_a_rodex_session_runtime_resume(
+                session.rodex_sessions_id,
+                endpoint,
+                name,
+                database,
+                codex_session_id=codex_id,
+                runtime_id=runtime_id,
+                expected_previous_runtime_id=None,
+                accessed_at_utc=datetime(2032, 1, 1, hour, tzinfo=UTC),
+            )
+        except RodexRuntimeRegistrationRejectedError:
+            return False
+        return True
 
     with ThreadPoolExecutor(max_workers=2) as workers:
         futures = (
@@ -221,24 +232,29 @@ def test_round2_concurrent_resume_keeps_one_newest_incarnation_tuple(
                 resume,
                 "/tmp/rodex/older.sock",
                 "older",
-                uuid.uuid4(),
-                RodexRuntimeId.generate(),
+                older_codex_id,
+                older_runtime_id,
                 11,
             ),
         )
-        for future in futures:
-            future.result()
+        outcomes = tuple(future.result() for future in futures)
+    assert sum(outcomes) == 1
 
     runtime = lookup_rodex_runtime_instance(session.rodex_sessions_id, database)
     tmux = lookup_rodex_tmux_session(session.rodex_sessions_id, database)
     assert runtime is not None
     assert tmux is not None
-    assert runtime.runtime_id == newer_runtime_id
-    assert (tmux.tmux_server_socket_path, tmux.tmux_session_name) == (
-        "/tmp/rodex/newer.sock",
-        "newer",
+    expected = (
+        (newer_runtime_id, "/tmp/rodex/newer.sock", "newer", newer_codex_id)
+        if outcomes[0]
+        else (older_runtime_id, "/tmp/rodex/older.sock", "older", older_codex_id)
     )
-    assert lookup_codex_session_id_from_a_rodex_sessions_id(session.rodex_sessions_id, database) == newer_codex_id
+    assert (
+        runtime.runtime_id,
+        tmux.tmux_server_socket_path,
+        tmux.tmux_session_name,
+        lookup_codex_session_id_from_a_rodex_sessions_id(session.rodex_sessions_id, database),
+    ) == expected
 
 
 def test_round2_resume_heals_a_poisoned_future_incarnation_as_one_tuple(
@@ -272,6 +288,7 @@ def test_round2_resume_heals_a_poisoned_future_incarnation_as_one_tuple(
         database,
         codex_session_id=replacement_codex_id,
         runtime_id=replacement_runtime_id,
+        expected_previous_runtime_id=lookup_rodex_runtime_instance(session.rodex_sessions_id, database).runtime_id,
         accessed_at_utc=datetime(2030, 1, 2, tzinfo=UTC),
     )
 
@@ -313,6 +330,8 @@ def test_round2_resume_rejects_a_noncanonical_runtime_start(tmp_path: Path) -> N
             "rejected",
             database,
             runtime_id=RodexRuntimeId.generate(),
+            codex_session_id=session.codex_session_id,
+            expected_previous_runtime_id=lookup_rodex_runtime_instance(session.rodex_sessions_id, database).runtime_id,
             accessed_at_utc=datetime(2030, 1, 2, tzinfo=UTC),
         )
 

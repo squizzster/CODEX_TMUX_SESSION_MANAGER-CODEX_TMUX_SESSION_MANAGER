@@ -24,10 +24,10 @@ from rodex_registry import (
     lookup_owned_rodex_sessions_id_from_a_codex_session_id,
     lookup_owned_rodex_sessions_id_from_a_cool_name,
     lookup_rodex_registry_id,
+    lookup_rodex_runtime_registration,
     lookup_rodex_session_id_from_a_rodex_sessions_id,
     lookup_rodex_session_names,
     lookup_rodex_sessions_id_from_a_cool_name,
-    lookup_rodex_tmux_session,
     open_a_user_defined_cool_name_assignment,
     parse_codex_session_id,
     record_a_rodex_session_access,
@@ -325,6 +325,8 @@ def _open_selected_session(
     if rodex_session_id is None:
         raise RodexLaunchError(f"Rodex session disappeared: {selection.supplied_selector}")
     with session_transition_lock(database_path, rodex_session_id):
+        if _lookup_owned_rodex_session_selector(selection.supplied_selector, database_path) != session_id:
+            raise RodexLaunchError("Rodex session selector changed while waiting for its transition lock")
         prepared = _prepare_selected_session(
             session_id,
             selection.supplied_selector,
@@ -357,14 +359,17 @@ def _prepare_selected_session(
     if names is None:
         raise RodexLaunchError(f"Rodex session disappeared: {session_selector}")
     display_name = names.display_name
-    tmux_link = lookup_rodex_tmux_session(session_id, database_path)
-    if tmux_link is None:
+    registration = lookup_rodex_runtime_registration(session_id, database_path)
+    if registration is None:
         raise RodexLaunchError(f"Rodex session has no tmux endpoint: {session_selector}")
+    tmux_link = registration.tmux_session
+    expected_runtime_id = registration.runtime_id
     recorded_tmux = LiveTmuxSession(
         tmux_server_socket_path=Path(tmux_link.tmux_server_socket_path),
         tmux_session_name=tmux_link.tmux_session_name,
+        runtime_id=expected_runtime_id,
     )
-    codex_session_id = lookup_codex_session_id_from_a_rodex_sessions_id(session_id, database_path)
+    codex_session_id = registration.codex_session_id
     if codex_session_id is None:
         raise RodexLaunchError(f"Rodex session has no Codex identity: {session_selector}")
     rodex_session_id = lookup_rodex_session_id_from_a_rodex_sessions_id(session_id, database_path)
@@ -413,7 +418,9 @@ def _prepare_selected_session(
             relocated.tmux_server_socket_path,
             relocated.tmux_session_name,
             database_path,
+            codex_session_id=codex_session_id,
             runtime_id=relocated_control.runtime_id,
+            expected_previous_runtime_id=expected_runtime_id,
         )
         if relocated_control.registration_state == RODEX_REGISTRATION_PENDING:
             launcher.confirm_runtime_registration(
@@ -491,8 +498,9 @@ def _prepare_selected_session(
             active_tmux.tmux_server_socket_path,
             active_tmux.tmux_session_name,
             database_path,
-            codex_session_id=(observed_codex_session_id if replaced_unsaved_codex_identity else None),
+            codex_session_id=observed_codex_session_id,
             runtime_id=resumed_runtime.runtime_id,
+            expected_previous_runtime_id=expected_runtime_id,
         )
         launcher.confirm_runtime_registration(
             active_tmux,
@@ -612,8 +620,10 @@ def _lookup_owned_rodex_session_selector(session_selector: str, database_path: P
 
 def _parse_canonical_codex_session_selector(value: str) -> CodexSessionId | None:
     """Accept the hyphenated, case-insensitive UUID spelling used by Codex."""
+    if not isinstance(value, str):
+        return None
     try:
-        parsed = parse_codex_session_id(value)
+        parsed = parse_codex_session_id(value.lower())
     except (TypeError, ValueError):
         return None
     return parsed if str(parsed) == value.lower() else None

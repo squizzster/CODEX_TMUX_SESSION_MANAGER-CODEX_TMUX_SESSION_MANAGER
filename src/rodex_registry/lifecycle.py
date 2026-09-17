@@ -31,6 +31,7 @@ from rodex_sql import (
 
 from .errors import (
     RodexRuntimeIdCollisionError,
+    RodexRuntimeRegistrationRejectedError,
     RodexSessionError,
     RodexSessionIdCollisionError,
 )
@@ -114,6 +115,15 @@ class RodexTmuxSession:
     rodex_sessions_id: int
     tmux_server_socket_path: str
     tmux_session_name: str
+
+
+@dataclass(frozen=True, slots=True)
+class RodexRuntimeRegistration:
+    """One coherent durable observation used to admit a runtime transition."""
+
+    tmux_session: RodexTmuxSession
+    runtime_id: RodexRuntimeId | None
+    codex_session_id: CodexSessionId | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -497,11 +507,17 @@ def record_a_rodex_session_runtime_resume(
     tmux_session_name: str,
     database_path: str | os.PathLike[str] | None = None,
     *,
-    codex_session_id: CodexSessionId | str | None = None,
+    codex_session_id: CodexSessionId | str,
     runtime_id: RodexRuntimeId | str,
+    expected_previous_runtime_id: RodexRuntimeId | str | None,
     accessed_at_utc: datetime | None = None,
 ) -> RodexTmuxSession:
-    """Atomically accept one complete runtime incarnation or keep the newer tuple."""
+    """Adopt one exact candidate only against its observed durable incarnation.
+
+    Repeating an already accepted complete tuple is mutation-free. A different
+    candidate must compare-and-set the expected previous runtime; wall-clock
+    timestamps describe the accepted transition and never choose its winner.
+    """
     _validate_session_id(session_id)
     tmux_link = _normalise_tmux_link(
         tmux_server_socket_path,
@@ -510,10 +526,11 @@ def record_a_rodex_session_runtime_resume(
     if tmux_link is None:  # Both arguments are required by this public contract.
         raise ValueError("a resumed session requires a tmux endpoint")
     socket_path, session_name = tmux_link
-    codex_session_id_halves = (
-        None if codex_session_id is None else split_codex_session_id_into_signed_bigints(codex_session_id)
-    )
+    parsed_codex_session_id = parse_codex_session_id(codex_session_id)
     parsed_runtime_id = parse_rodex_runtime_id(runtime_id)
+    expected_runtime_id = (
+        None if expected_previous_runtime_id is None else parse_rodex_runtime_id(expected_previous_runtime_id)
+    )
     timestamp = _normalise_utc_datetime(accessed_at_utc)
     path = _database_path_for_mutation(database_path)
     with open_rodex_transaction(path) as connection:
@@ -541,29 +558,34 @@ def record_a_rodex_session_runtime_resume(
             (session_id,),
         ).fetchone()
         if runtime_row is not None:
-            current_started_at = _parse_canonical_durable_timestamp(str(runtime_row[1]), field_name="started_at_utc")
-            candidate_started_at = _parse_canonical_durable_timestamp(timestamp, field_name="started_at_utc")
-            poisoned_future = current_started_at > candidate_started_at + _DURABLE_TIMESTAMP_MAX_FORWARD_SKEW
-            ambiguous_tie = (
-                candidate_started_at == current_started_at and int(runtime_row[0]) != parsed_runtime_id.as_signed_bigint()
-            )
-            if (candidate_started_at < current_started_at or ambiguous_tie) and not poisoned_future:
-                return RodexTmuxSession(
-                    id=int(tmux_row[0]),
-                    rodex_sessions_id=int(tmux_row[1]),
-                    tmux_server_socket_path=str(tmux_row[2]),
-                    tmux_session_name=str(tmux_row[3]),
+            _parse_canonical_durable_timestamp(str(runtime_row[1]), field_name="started_at_utc")
+        current_runtime_id = None if runtime_row is None else RodexRuntimeId.from_signed_bigint(runtime_row[0])
+        if current_runtime_id == parsed_runtime_id:
+            if (
+                str(tmux_row[2]) != socket_path
+                or str(tmux_row[3]) != session_name
+                or _select_current_codex_session_id(connection, session_id) != parsed_codex_session_id
+            ):
+                raise RodexRuntimeRegistrationRejectedError(
+                    f"runtime {parsed_runtime_id} is already registered with a different identity or endpoint"
                 )
-        if codex_session_id_halves is not None:
-            parsed_codex_session_id = parse_codex_session_id(codex_session_id)
-            if connection.execute(f"SELECT 1 FROM {RODEX_SESSIONS_TABLE} WHERE id = ?", (session_id,)).fetchone() is None:
-                raise RodexSessionError(f"Rodex session does not exist: {session_id}")
-            register_codex_root_thread_in_transaction(
-                connection,
-                session_id,
-                parsed_codex_session_id,
-                timestamp,
+            return RodexTmuxSession(
+                id=int(tmux_row[0]),
+                rodex_sessions_id=int(tmux_row[1]),
+                tmux_server_socket_path=str(tmux_row[2]),
+                tmux_session_name=str(tmux_row[3]),
             )
+        if current_runtime_id != expected_runtime_id:
+            raise RodexRuntimeRegistrationRejectedError(
+                "runtime registration lost its expected previous incarnation: "
+                f"expected {expected_runtime_id}, observed {current_runtime_id}"
+            )
+        register_codex_root_thread_in_transaction(
+            connection,
+            session_id,
+            parsed_codex_session_id,
+            timestamp,
+        )
         tmux_cursor = connection.execute(
             f"UPDATE {RODEX_TMUX_SESSIONS_TABLE} "
             "SET tmux_server_socket_path = ?, tmux_session_name = ? "
@@ -621,6 +643,39 @@ def lookup_rodex_runtime_instance(
     )
 
 
+def lookup_rodex_runtime_registration(
+    session_id: int,
+    database_path: str | os.PathLike[str] | None = None,
+) -> RodexRuntimeRegistration | None:
+    """Read endpoint, incarnation and current Codex identity in one snapshot."""
+    _validate_session_id(session_id)
+    path = normalise_rodex_database_path(database_path)
+    with open_rodex_read_transaction(path) as connection:
+        row = connection.execute(
+            "SELECT tmux.id, tmux.rodex_sessions_id, tmux.tmux_server_socket_path, "
+            "tmux.tmux_session_name, runtime.runtime_id_signed_bigint, "
+            "identity.codex_thread_public_id_signed_bigint_1, "
+            "identity.codex_thread_public_id_signed_bigint_2 "
+            f"FROM {RODEX_TMUX_SESSIONS_TABLE} AS tmux "
+            f"LEFT JOIN {RODEX_RUNTIME_INSTANCES_TABLE} AS runtime "
+            "ON runtime.rodex_sessions_id = tmux.rodex_sessions_id "
+            f"LEFT JOIN {RODEX_SESSIONS_CURRENT_CODEX_THREADS_TABLE} AS current "
+            "ON current.rodex_sessions_id = tmux.rodex_sessions_id "
+            f"LEFT JOIN {RODEX_SESSIONS_CODEX_THREADS_TABLE} AS membership "
+            "ON membership.id = current.rodex_sessions_codex_threads_id "
+            f"LEFT JOIN {CODEX_THREADS_TABLE} AS identity ON identity.id = membership.codex_threads_id "
+            "WHERE tmux.rodex_sessions_id = ?",
+            (session_id,),
+        ).fetchone()
+    if row is None:
+        return None
+    return RodexRuntimeRegistration(
+        tmux_session=RodexTmuxSession(int(row[0]), int(row[1]), str(row[2]), str(row[3])),
+        runtime_id=None if row[4] is None else RodexRuntimeId.from_signed_bigint(row[4]),
+        codex_session_id=None if row[5] is None else join_signed_bigints_into_a_codex_session_id(row[5], row[6]),
+    )
+
+
 def _record_rodex_runtime_instance(
     connection: sqlite3.Connection,
     session_id: int,
@@ -657,17 +712,21 @@ def lookup_codex_session_id_from_a_rodex_sessions_id(
     _validate_session_id(session_id)
     path = normalise_rodex_database_path(database_path)
     with open_rodex_read_transaction(path) as connection:
-        row = connection.execute(
-            "SELECT identities.codex_thread_public_id_signed_bigint_1, "
-            "identities.codex_thread_public_id_signed_bigint_2 "
-            f"FROM {RODEX_SESSIONS_CURRENT_CODEX_THREADS_TABLE} AS current "
-            f"JOIN {RODEX_SESSIONS_CODEX_THREADS_TABLE} AS memberships "
-            "ON memberships.id = current.rodex_sessions_codex_threads_id "
-            f"JOIN {CODEX_THREADS_TABLE} AS identities "
-            "ON identities.id = memberships.codex_threads_id "
-            "WHERE current.rodex_sessions_id = ?",
-            (session_id,),
-        ).fetchone()
+        return _select_current_codex_session_id(connection, session_id)
+
+
+def _select_current_codex_session_id(connection: sqlite3.Connection, session_id: int) -> CodexSessionId | None:
+    row = connection.execute(
+        "SELECT identities.codex_thread_public_id_signed_bigint_1, "
+        "identities.codex_thread_public_id_signed_bigint_2 "
+        f"FROM {RODEX_SESSIONS_CURRENT_CODEX_THREADS_TABLE} AS current "
+        f"JOIN {RODEX_SESSIONS_CODEX_THREADS_TABLE} AS memberships "
+        "ON memberships.id = current.rodex_sessions_codex_threads_id "
+        f"JOIN {CODEX_THREADS_TABLE} AS identities "
+        "ON identities.id = memberships.codex_threads_id "
+        "WHERE current.rodex_sessions_id = ?",
+        (session_id,),
+    ).fetchone()
     if row is None:
         return None
     return join_signed_bigints_into_a_codex_session_id(row[0], row[1])

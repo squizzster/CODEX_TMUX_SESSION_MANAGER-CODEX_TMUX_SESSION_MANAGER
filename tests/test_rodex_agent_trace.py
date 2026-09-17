@@ -1909,6 +1909,7 @@ def test_include_bodies_resolves_an_authenticated_historical_root(
         database,
         codex_session_id=REPLACEMENT_THREAD_ID,
         runtime_id=RodexRuntimeId.generate(),
+        expected_previous_runtime_id=None,
     )
 
     execute_agent_trace_command(["_trace", session.cool_name, "--include-bodies", "--json"], database)

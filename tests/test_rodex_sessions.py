@@ -593,7 +593,7 @@ def test_default_database_path_uses_xdg_state_home(tmp_path: Path, monkeypatch: 
     state_home = tmp_path / "state"
     monkeypatch.setenv("XDG_STATE_HOME", str(state_home))
 
-    assert default_rodex_database_path() == state_home / "rodex" / "rodex-v19.sqlite3"
+    assert default_rodex_database_path() == state_home / "rodex" / "rodex-v20.sqlite3"
 
 
 def test_default_database_path_uses_home_state_directory_without_xdg_override(
@@ -603,7 +603,7 @@ def test_default_database_path_uses_home_state_directory_without_xdg_override(
     home = tmp_path / "home"
     monkeypatch.setattr(Path, "home", lambda: home)
 
-    assert default_rodex_database_path() == (home / ".local" / "state" / "rodex" / "rodex-v19.sqlite3")
+    assert default_rodex_database_path() == (home / ".local" / "state" / "rodex" / "rodex-v20.sqlite3")
 
 
 @pytest.mark.evolutionary_regression
@@ -623,7 +623,7 @@ def test_current_generation_bootstrap_does_not_read_an_earlier_database(
 
     current_database = initialise_rodex_database()
 
-    assert current_database == registry_directory / "rodex-v19.sqlite3"
+    assert current_database == registry_directory / "rodex-v20.sqlite3"
     assert current_database.is_file()
     assert previous_database.read_bytes() == previous_contents
 
@@ -674,4 +674,4 @@ def test_default_database_path_ignores_removed_database_override(tmp_path: Path,
     monkeypatch.setenv("RODEX_DATABASE_PATH", str(configured))
     monkeypatch.setenv("XDG_STATE_HOME", str(state_home))
 
-    assert default_rodex_database_path() == state_home / "rodex" / "rodex-v19.sqlite3"
+    assert default_rodex_database_path() == state_home / "rodex" / "rodex-v20.sqlite3"

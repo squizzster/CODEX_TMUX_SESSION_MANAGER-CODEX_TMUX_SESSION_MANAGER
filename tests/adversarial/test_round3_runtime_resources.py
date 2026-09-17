@@ -11,6 +11,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
+from runtime_peer_fixtures import TEST_PEER
 
 import rodex.exact_turn_mutation as mutation_module
 import rodex.live_runtime as live_runtime_module
@@ -263,7 +264,7 @@ def test_round3_blocked_renderer_and_protocol_churn_stay_bounded() -> None:
             )
         )
         await asyncio.sleep(0)
-        tap = CodexProtocolEventTap(Path("/isolated/round3/events.sock"))
+        tap = CodexProtocolEventTap(Path("/isolated/round3/events.sock"), peer_identity=TEST_PEER)
         counter = ToolCallCounter(lambda _count: None)
         for index in range(128):
             thread_id = f"burst-thread-{index}"
@@ -373,7 +374,7 @@ def test_round3_runtime_identity_state_is_bounded_after_terminal_events(
 ) -> None:
     """Terminal runtime state is pruned; the durable source catalog remains complete."""
     event_count = 128
-    tap = CodexProtocolEventTap(tmp_path / "unused-events.sock")
+    tap = CodexProtocolEventTap(tmp_path / "unused-events.sock", peer_identity=TEST_PEER)
     catalog = AnalyticsSourceCatalog(tmp_path / "sessions")
     counter = ToolCallCounter(lambda _count: None)
 
@@ -428,7 +429,7 @@ def test_round3_runtime_identity_state_is_bounded_after_terminal_events(
 def test_round3_primary_disconnect_prunes_connection_scoped_event_state(
     tmp_path: Path,
 ) -> None:
-    tap = CodexProtocolEventTap(tmp_path / "unused-events.sock")
+    tap = CodexProtocolEventTap(tmp_path / "unused-events.sock", peer_identity=TEST_PEER)
     tap.publish_protocol_event(
         "{}",
         {
@@ -501,7 +502,7 @@ def test_round3_observer_controller_prunes_completed_activity_lifetimes(
 
 def test_round3_observer_view_releases_a_flushed_terminal_turn() -> None:
     initial = {
-        "schema": "rodex-agent-observer-v2",
+        "schema": "rodex-agent-observer-v3",
         "kind": "app_server_subagent_activity",
         "method": "item/started",
         "thread_id": str(ROOT_THREAD_ID),
@@ -517,7 +518,7 @@ def test_round3_observer_view_releases_a_flushed_terminal_turn() -> None:
     view.accept_trace_snapshot(
         RodexAgentTraceSnapshot(
             trace_publication_sequence=1,
-            trace_schema_version="rodex-agent-trace-v2",
+            trace_schema_version="rodex-agent-trace-v3",
             calculated_at_utc="2026-08-29T00:00:01Z",
             coverage_state="complete",
             durable_event_count=2,

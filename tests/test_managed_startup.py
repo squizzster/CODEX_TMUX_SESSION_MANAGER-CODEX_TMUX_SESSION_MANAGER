@@ -1,4 +1,4 @@
-"""Primary workflow gate: real CLI, Codex, tmux, attachment, and shared-server reuse.
+"""Primary workflow gate: real CLI, Codex, isolated runtimes, attachment and resume.
 
 No model prompts are submitted. SQL, tmux, and Codex history are isolated; copied
 login/configuration files bring up the ordinary TUI and are removed after the test.
@@ -19,7 +19,8 @@ import subprocess
 import sys
 import termios
 import time
-from contextlib import suppress
+from collections.abc import Iterator
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -29,7 +30,9 @@ from websockets.sync.client import unix_connect
 from rodex.app_server_contract import CODEX_APP_SERVER, AppServerClientInfo
 from rodex.interaction_pipeline import DeliveryStatus, InteractionOperation, InteractionRequest
 from rodex.interaction_transport import publish_session_interaction
-from rodex.tmux_session_capability import RODEX_SHARED_TMUX_SOCKET_NAME
+from rodex.runtime_peer import RuntimePeerIdentity
+from rodex.tmux_session_capability import RODEX_TMUX_SOCKET_PATTERN
+from rodex_registry import RodexRuntimeId
 
 
 @dataclass
@@ -116,6 +119,15 @@ def test_terminal_client_reports_exec_failure_without_reentering_pytest(tmp_path
 
 def _create_standalone_codex_thread(codex: str, socket_path: Path, environment: dict[str, str], workspace: Path) -> str:
     """Create a real saved Codex thread without Rodex registration or a model turn."""
+    with _retained_standalone_codex_thread(codex, socket_path, environment, workspace) as (_process, thread_id):
+        return thread_id
+
+
+@contextmanager
+def _retained_standalone_codex_thread(
+    codex: str, socket_path: Path, environment: dict[str, str], workspace: Path
+) -> Iterator[tuple[subprocess.Popen[bytes], str]]:
+    """Retain one exact fixture writer until the caller releases its process."""
     process = subprocess.Popen(
         CODEX_APP_SERVER.command(codex, socket_path),
         env=environment,
@@ -173,14 +185,15 @@ def _create_standalone_codex_thread(codex: str, socket_path: Path, environment: 
                     },
                 )
             )
-            return started["thread"]["id"]
+            yield process, started["thread"]["id"]
     finally:
-        process.terminate()
-        try:
-            process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait(timeout=5)
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
 
 
 @pytest.mark.live_startup
@@ -211,15 +224,41 @@ def test_installed_rodex_starts_reuses_and_adopts_sessions(
     }
     environment.pop("TMUX", None)
     environment.pop("TMUX_PANE", None)
-    socket_path = isolated / "r" / RODEX_SHARED_TMUX_SOCKET_NAME
+    runtime_root = isolated / "r"
     inspected_codex_ids: dict[str, str] = {}
 
     def tmux(*arguments: str) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(
-            [tmux_binary, "-S", str(socket_path), *arguments],
-            capture_output=True,
-            text=True,
-            timeout=10,
+        results = []
+        for socket_path in runtime_root.glob(RODEX_TMUX_SOCKET_PATTERN):
+            if "-t" in arguments:
+                target = arguments[arguments.index("-t") + 1]
+                assert target.startswith("="), "fixture targets require an exact session name"
+                expected_name = target[1:].partition(":")[0]
+                inventory = subprocess.run(
+                    [tmux_binary, "-N", "-S", str(socket_path), "list-sessions", "-F", "#{session_name}"],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+                # display-message can succeed with fallback context for a missing
+                # target. Select the fixture server from its actual inventory.
+                if inventory.returncode != 0 or expected_name not in inventory.stdout.splitlines():
+                    continue
+            result = subprocess.run(
+                [tmux_binary, "-N", "-S", str(socket_path), *arguments],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if result.returncode == 0:
+                results.append(result)
+        if "-t" in arguments:
+            assert len(results) <= 1, "a target resolved on multiple isolated servers"
+        return subprocess.CompletedProcess(
+            arguments,
+            0 if results else 1,
+            "".join(result.stdout for result in results),
+            "".join(result.stderr for result in results),
         )
 
     def stop_fixture_session(name: str) -> None:
@@ -316,7 +355,7 @@ def test_installed_rodex_starts_reuses_and_adopts_sessions(
             )
             assert inspected.returncode == 0, inspected.stdout + inspected.stderr
             envelope = json.loads(inspected.stdout)
-            assert envelope["schema_version"] == 3
+            assert envelope["schema_version"] == 4
             assert envelope["ok"] is True
             assert envelope["data"]["thread"]["status"] == "idle"
             assert envelope["data"]["thread"]["cwd"] == str(project)
@@ -338,9 +377,12 @@ def test_installed_rodex_starts_reuses_and_adopts_sessions(
             endpoint = tmux("display-message", "-p", "-t", f"={name}:", "#{@rodex_protocol_proxy_socket_path}")
             assert endpoint.returncode == 0 and endpoint.stdout.strip()
             notice = f"Rodex pipeline display check {runtime_id}"
+            server_id = tmux("display-message", "-p", "-t", f"={name}:", "#{@rodex_shared_tmux_server_id}")
+            assert server_id.returncode == 0
             delivery = publish_session_interaction(
                 Path(endpoint.stdout.strip()),
                 InteractionRequest("main", InteractionOperation.MESSAGE, "startup-test", text=notice),
+                peer_identity=RuntimePeerIdentity(RodexRuntimeId.parse(runtime_id), server_id.stdout.strip()),
             )
             assert delivery.status == DeliveryStatus.DELIVERED, delivery
             deadline = time.monotonic() + 5
@@ -426,7 +468,7 @@ def test_installed_rodex_starts_reuses_and_adopts_sessions(
                 current_runtime_id = resumed[1]
         assert len(tmux("list-sessions").stdout.splitlines()) == 3
     finally:
-        # This fresh per-test socket can contain only the runtimes created above.
+        # These fresh per-test sockets contain only the runtimes created above.
         try:
             tmux("kill-server")
         finally:

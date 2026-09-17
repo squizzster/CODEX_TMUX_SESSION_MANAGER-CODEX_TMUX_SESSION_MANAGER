@@ -22,6 +22,7 @@ from .analytics_registry import RodexAnalyticsPublication, RodexAnalyticsRegistr
 from .errors import (
     RodexAnalyticsPublicationRetryableError,
     RodexRuntimeIdCollisionError,
+    RodexRuntimeRegistrationRejectedError,
     RodexSessionError,
     RodexSessionIdCollisionError,
     RodexSessionStatisticsConflictError,
@@ -65,6 +66,7 @@ from .identity import (
 )
 from .lifecycle import (
     RodexRuntimeInstance,
+    RodexRuntimeRegistration,
     RodexSession,
     RodexSessionLog,
     RodexSessionNames,
@@ -84,6 +86,7 @@ from .lifecycle import (
     lookup_owned_rodex_sessions_id_from_a_codex_session_id,
     lookup_owned_rodex_sessions_id_from_a_cool_name,
     lookup_rodex_runtime_instance,
+    lookup_rodex_runtime_registration,
     lookup_rodex_session_id_from_a_rodex_sessions_id,
     lookup_rodex_session_log,
     lookup_rodex_session_names,
@@ -161,6 +164,8 @@ __all__ = [
     "RodexRuntimeId",
     "RodexRuntimeIdCollisionError",
     "RodexRuntimeInstance",
+    "RodexRuntimeRegistration",
+    "RodexRuntimeRegistrationRejectedError",
     "RodexSession",
     "RodexSessionAnalyticsWorker",
     "RodexSessionCodexRolloutSource",
@@ -217,6 +222,7 @@ __all__ = [
     "lookup_owned_rodex_sessions_id_from_a_cool_name",
     "lookup_rodex_registry_id",
     "lookup_rodex_runtime_instance",
+    "lookup_rodex_runtime_registration",
     "lookup_rodex_session_id_from_a_rodex_sessions_id",
     "lookup_rodex_session_log",
     "lookup_rodex_session_names",

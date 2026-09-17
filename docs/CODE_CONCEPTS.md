@@ -44,7 +44,7 @@ boundary; domain policy has one canonical owner underneath it.
   live. Live operations verify the server incarnation, immutable `$session_id`, primary
   `%pane_id`, control endpoint, durable runtime, Codex thread, and registered identity
   required by their contract.
-- The shared tmux socket is transport only. The owning host uses
+- Each runtime owns an isolated tmux server. The owning host uses
   `TmuxRuntimeCapability`; the launcher mints `TmuxSessionCapability` after a
   uniqueness-checked roster read and async actors carry it. Every terminal action
   rechecks its tuple at the exact target; primary actions also require the immutable pane.
@@ -67,7 +67,7 @@ boundary; domain policy has one canonical owner underneath it.
   that changed while waiting fails closed.
 - Start, steer, and interrupt resolve one durable runtime incarnation and revalidate the
   selector, tmux capability, control metadata, and runtime ID immediately before transport
-  can send its first mutation frame. Transport independently verifies the expected Codex
+  can send its first mutation frame. Transport verifies runtime/server identity on its opened connection, then the expected Codex
   thread in the same bounded chain.
 - `CodexControlClient` owns bounded App Server transport only. Its mutation methods are
   package-private and require the coordinator's revalidation fence; there is no

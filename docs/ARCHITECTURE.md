@@ -71,10 +71,9 @@ context grant no authority. Predicates run only in direct `if-shell -F`; an owne
 proves capability there, then runs `display-message` for payload alone. Mixing predicate
 and payload contexts corrupts literal tmux identifiers such as `%4`.
 
-Global indexed attach/detach/session-change hooks only wake `tmux_sharing_coordinator`. It verifies the
-server, reads one roster and submits changed counts under full capability, avoiding
-tmux 3.2's lost source-session context after destruction. Rodex fences its own indexed
-hooks/options and never clears session hooks. Root key conflicts fail initialization. The
+Indexed attach/detach/session-change hooks only wake `tmux_sharing_coordinator`. It verifies
+the server, reads one roster and submits changed counts under full capability. Rodex fences
+its indexed hooks/options and never clears session hooks. Root key conflicts fail initialization. The
 `C-c` command owns the exit action: it capability-fences and kills the exact private
 session immediately, or detaches only the invoking client when shared. Root
 `C-d` directly runs tmux `detach-client`, whose current-client command context is the
@@ -83,8 +82,8 @@ any session exists plus global and exact-session `destroy-unattached off`, and
 reconciliation reapplies the server/session settings. Other keys enter the session-owned
 terminal pipeline; no tmux Enter binding, synthetic tmux keys or pane piping is used.
 
-Discovery compares the session snapshot with a guarded read of its actual primary pane. Every tmux process
-crosses `tmux_executor`: captured calls have deadlines; async cancellation reaps its child.
+Discovery compares the session snapshot with a guarded primary-pane read. Every tmux process
+crosses `tmux_executor`; calls have deadlines and cancellation reaps the child.
 The staged-pane pipeline prepares the exact caller environment before host startup;
 ambient globals and Rodex bootstrap fields are not authority. `TmuxStatusPipeline`
 arbitrates status; animation admission owns capability/generation/lease/token/recovery fences.
@@ -122,7 +121,7 @@ App Server event → stateless projection → producer reducer → newest snapsh
 tmux pane ← presentation view ← consumer reducer ← length-framed private socket
 ```
 
-The producer reducer owns agent work/counts, events, tombstones, targets, epochs and revisions. It
+The producer owns work/counts, events, tombstones, targets, epochs and revisions. It
 publishes bounded snapshots through a newest-only dispatcher. The consumer applies each
 revision once and replaces presentation state at epoch/overflow boundaries, so tombstones
 cannot resurrect. The interaction pipeline admits pane work; `TmuxPaneController` owns mechanics.

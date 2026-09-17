@@ -186,7 +186,7 @@ target, operation and payload. Actionless options remain placeholders. `light` s
 the configured root-commentary viewport and `dark` restores the native Codex screen;
 neither changes model execution or starts a turn.
 Rodex leaves tmux's Escape ambiguity timeout unchanged, so a lone Escape may respond
-later than complete arrow sequences. See the [menu behavior](../README.md#local-input-interceptor-and-presentation-policies)
+later than complete arrow sequences. See the [menu behavior](../README.md#managed-presentation)
 and [interaction contract](INTERACTION_PATHS.md#escape-timing) for configuration and timing.
 
 The proxy forwards every accepted App Server frame to Codex before projecting bounded

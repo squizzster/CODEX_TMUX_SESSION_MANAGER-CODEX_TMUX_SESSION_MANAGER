@@ -65,7 +65,7 @@ Rodex may report that a newer Codex release exists, but it never installs one. R
 
 Rodex keeps its durable registry under `$XDG_STATE_HOME/rodex`, using
 `~/.local/state/rodex` when `XDG_STATE_HOME` is unset. See
-[Local data](README.md#local-data) for the database and runtime paths and their
+[Local state](README.md#local-state) for the database and runtime paths and their
 environment-variable overrides.
 
 ## A checkout at another path

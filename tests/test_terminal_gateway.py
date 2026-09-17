@@ -197,8 +197,43 @@ def test_idle_gateway_blocks_once_until_supervisor_deadline(monkeypatch):
 
             assert len(select_calls) == 1
             assert select_calls[0] == pytest.approx(0.12, abs=0.02)
-            assert size_probes == [slave]
+            assert size_probes == []
         finally:
+            gateway.close()
+
+
+def test_supervisor_control_event_wakes_an_indefinite_idle_gateway(monkeypatch):
+    pipeline = SessionInteractionPipeline()
+    with outer_terminal() as (master, slave):
+        gateway = start_gateway(slave, pipeline)
+        publisher = None
+        try:
+            read_until(gateway, master, b"READY")
+            relay_blocked = threading.Event()
+            select_calls = []
+            real_select = select.select
+
+            def observed_select(reads, writes, errors, timeout):
+                select_calls.append(timeout)
+                relay_blocked.set()
+                return real_select(reads, writes, errors, timeout)
+
+            monkeypatch.setattr("rodex.terminal_gateway.select.select", observed_select)
+
+            def wake_supervisor():
+                assert relay_blocked.wait(1)
+                gateway.request_supervisor_check()
+
+            publisher = threading.Thread(target=wake_supervisor)
+            publisher.start()
+            assert gateway.wait() is None
+            publisher.join(timeout=1)
+
+            assert not publisher.is_alive()
+            assert select_calls == [None]
+        finally:
+            if publisher is not None:
+                publisher.join(timeout=1)
             gateway.close()
 
 

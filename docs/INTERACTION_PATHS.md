@@ -136,12 +136,12 @@ work. The record buffer contains metadata, not prompt bodies or another durable 
 | Analytics initial/event/retry wake | Scheduler → authenticated reader/analyzer → registry transaction: checkpoint, lineage, trace, statistics, health |
 | Primary disconnect | Reset all lifecycle participants; reducer clears work/identity and advances epoch; close observer; retire connection targets |
 | Session creation | Managed lifecycle/runtime → server claim, daemon reservation, exact bridge/TTY admission |
-| Registration/rename/rollback | Registry transition and runtime markers; one namespaced rename owner |
+| Registration/rename/rollback | Registry transition and runtime markers → acknowledged daemon supervisor wake; one namespaced rename owner |
 | Attach | Registered capability → interactive tmux attach |
 | Startup rollback/stop | Managed lifecycle/runtime → exact session kill |
 | Ctrl-D | Owned root binding → detach current client only |
 | Ctrl-C | Native originating-client admission → private guarded termination or shared detach |
-| Resize, external SIGINT | Daemon runtime → gateway → child terminal dimensions/foreground process group |
+| Resize, external SIGINT | tmux resize/layout hook → daemon resize wake → gateway → child terminal dimensions; daemon runtime → foreground process group |
 | Natural exit, signals, keepalive failure | Daemon runtime closes its children/gateway/proxy/observer/status/event tap and paths; the shared coordinator retires its analytics state |
 
 ## Deliberate domain boundaries
@@ -154,9 +154,9 @@ work. The record buffer contains metadata, not prompt bodies or another durable 
 | Every tmux subprocess | `SyncTmuxExecutor` / `AsyncTmuxExecutor` |
 | Transient catalog/startup App Server probes | Runtime's read-only initialize/thread-read/loaded-list adapters |
 | SQL connection/publication | `rodex_sql` transactions and registry publication pipeline |
-| Runtime logs, update cache, analyzer memory files | File/diagnostic owners, not chat |
+| Runtime logs, update cache, analyzer memory files | Blocking child-diagnostic relay/file owners, not chat; new startup diagnostics wake the runtime supervisor after persistence |
 | Keyboard framing and native PTY writes | `TerminalInputDecoder` / `TerminalInputInterceptor` → `TerminalSessionGateway`; tmux retains its owned lifecycle keys |
-| Terminal readiness and lifecycle | `TerminalSessionGateway` blocks on outer/child PTYs, a wake-only pipe and the exact child `pidfd`; presentation revisions, resize requests and incomplete-input deadlines wake the same relay |
+| Terminal readiness and lifecycle | `TerminalSessionGateway` blocks on outer/child PTYs, a wake-only pipe and the exact child `pidfd`; explicit registration/stop control events, diagnostic output, presentation revisions, tmux resize hooks and incomplete-input deadlines wake the relay without an idle supervisor timer |
 | Native composer presentation at takeover/submission | Exact primary-pane fenced snapshot; prefix and end cursor must agree, no background screen polling |
 | Native editor state | Codex; Rodex observes a bounded candidate and verifies the native composer at handoff |
 | Main terminal surface | `TerminalSurfaceRenderer` → gateway output queue; one native projection plus configured semantic views, no editor mutation or second writer |

@@ -16,7 +16,7 @@ from collections.abc import Callable, Mapping, Sequence
 from contextlib import ExitStack, suppress
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
-from threading import Event, Thread
+from threading import Event, Lock, Thread
 from typing import Any, BinaryIO, Final
 
 from websockets.exceptions import ConnectionClosed, InvalidHandshake
@@ -40,7 +40,11 @@ from .app_server_contract import (
     RODEX_SESSION_CATALOG_APP_SERVER_CLIENT,
 )
 from .control import CodexControlClient, LiveRodexControl
-from .daemon_client import RodexDaemonClient
+from .daemon_client import (
+    RODEX_RUNTIME_WAKE_REGISTRATION,
+    RodexDaemonClient,
+    RodexDaemonError,
+)
 from .input_interceptor_config import INPUT_INTERCEPTORS
 from .input_interceptor_presentation import InputInterceptorPresentation
 from .interaction_pipeline import DeliveryStatus, InteractionRequest, InteractionResult, SessionInteractionPipeline
@@ -121,13 +125,23 @@ RODEX_TMUX_HISTORY_LIMIT_LINES: Final = 50_000
 RODEX_TMUX_SCROLLBACK_STATE_LINES: Final = 256
 RODEX_TMUX_COMMAND_TIMEOUT_SECONDS: Final = 5.0
 RODEX_TMUX_RENAME_TIMEOUT_SECONDS: Final = 5.0
-_REGISTRATION_POLL_INTERVAL_SECONDS: Final = 1.0
 _POLL_INTERVAL_SECONDS: Final = 0.05
 RODEX_TMUX_REQUIRED_CLIENT_FEATURES: Final = "RGB"
 RODEX_SHARED_TMUX_COORDINATOR_COMMAND_OPTION: Final = "@rodex_shared_tmux_coordinator_command"
 RODEX_SHARED_TMUX_CTRL_C_COMMAND_OPTION: Final = "@rodex_shared_tmux_ctrl_c_command"
 RODEX_SHARED_TMUX_CTRL_D_COMMAND_OPTION: Final = "@rodex_shared_tmux_ctrl_d_command"
 RODEX_SHARED_TMUX_HOOK_INDEX: Final = 731
+RODEX_SHARED_TMUX_COORDINATION_HOOKS: Final = (
+    "client-attached",
+    "client-detached",
+    "client-session-changed",
+    "client-resized",
+    "after-kill-pane",
+    "after-resize-pane",
+    "after-resize-window",
+    "after-select-layout",
+    "after-split-window",
+)
 Runner = Callable[..., subprocess.CompletedProcess[str]]
 Connector = Callable[..., Any]
 ProcessSpawner = Callable[..., subprocess.Popen[bytes]]
@@ -140,6 +154,98 @@ class RodexRuntimeError(RuntimeError):
 
 class RodexCodexSessionNotFoundError(RodexRuntimeError):
     """Codex explicitly reported that an exact requested identity is not saved."""
+
+
+class _RuntimeDiagnosticRelay:
+    """Persist child diagnostics and turn new output into a supervisor event."""
+
+    def __init__(self, sink: BinaryIO) -> None:
+        self._sink = sink
+        self._sink_fd = os.dup(sink.fileno())
+        self._read_fd, self._write_fd = os.pipe2(os.O_CLOEXEC)
+        self._lock = Lock()
+        self._callback: Callable[[], None] | None = None
+        self._activity_revision = 0
+        self._consumed_revision = 0
+        self._failure: RodexRuntimeError | None = None
+        self._closed = False
+        self._thread = Thread(target=self._run, name="rodex-runtime-diagnostics", daemon=True)
+
+    @property
+    def closed(self) -> bool:
+        return self._closed
+
+    @property
+    def failure(self) -> RodexRuntimeError | None:
+        with self._lock:
+            return self._failure
+
+    def fileno(self) -> int:
+        """Expose only the pipe writer to child-process descriptor duplication."""
+        return self._write_fd
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def bind_supervisor_wake(self, callback: Callable[[], None] | None) -> None:
+        with self._lock:
+            self._callback = callback
+            pending = callback is not None and self._activity_revision != self._consumed_revision
+            if pending:
+                self._consumed_revision = self._activity_revision
+        if pending and callback is not None:
+            callback()
+
+    def write(self, data: bytes) -> int:
+        """Keep dependency-injected process doubles faithful to the OS pipe path."""
+        written = self._sink.write(data)
+        self._sink.flush()
+        self._notify_activity()
+        return len(data) if written is None else written
+
+    def flush(self) -> None:
+        self._sink.flush()
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        with suppress(OSError):
+            os.close(self._write_fd)
+        self._write_fd = -1
+        self._thread.join(timeout=5)
+        if self._thread.is_alive():
+            raise RodexRuntimeError("runtime diagnostic relay did not stop")
+
+    def _run(self) -> None:
+        try:
+            while data := os.read(self._read_fd, 65536):
+                remaining = memoryview(data)
+                while remaining:
+                    written = os.write(self._sink_fd, remaining)
+                    remaining = remaining[written:]
+                self._notify_activity()
+        except OSError as error:
+            failure = RodexRuntimeError(f"runtime diagnostic relay failed: {error}")
+            with self._lock:
+                self._failure = failure
+            self._notify_activity()
+        finally:
+            with suppress(OSError):
+                os.close(self._read_fd)
+            with suppress(OSError):
+                os.close(self._sink_fd)
+            self._read_fd = self._sink_fd = -1
+
+    def _notify_activity(self) -> None:
+        with self._lock:
+            self._activity_revision += 1
+            callback = self._callback
+            if callback is not None:
+                self._consumed_revision = self._activity_revision
+        if callback is not None:
+            with suppress(Exception):
+                callback()
 
 
 class _RuntimePathKeepalive:
@@ -781,6 +887,7 @@ class RodexRuntimeLauncher:
                 or capability.internal_session_id != rodex_sessions_id
             ):
                 raise RodexRuntimeError("registered runtime identity disagrees with durable identity")
+            self._notify_daemon_runtime(runtime, RODEX_RUNTIME_WAKE_REGISTRATION)
             return
         if control.registration_state != RODEX_REGISTRATION_PENDING:
             raise RodexRuntimeError("runtime registration state is invalid")
@@ -831,6 +938,15 @@ class RodexRuntimeLauncher:
             or confirmed.codex_session_id != expected_codex_session_id
         ):
             raise RodexRuntimeError("runtime registration CAS did not commit exactly")
+        self._notify_daemon_runtime(runtime, RODEX_RUNTIME_WAKE_REGISTRATION)
+
+    def _notify_daemon_runtime(self, runtime: LiveTmuxSession, cause: str) -> None:
+        assert runtime.runtime_id is not None
+        client = self._daemon_client_factory(runtime.tmux_server_socket_path.parent, self._python_executable)
+        try:
+            client.notify_runtime(str(runtime.runtime_id), cause)
+        except (OSError, TimeoutError, RodexDaemonError) as error:
+            raise RodexRuntimeError("shared daemon did not acknowledge the runtime state transition") from error
 
     def discover_runtime_control(self, runtime: LiveTmuxSession) -> LiveRodexControl:
         """Read one coherent server/session/control capability snapshot."""
@@ -1347,8 +1463,8 @@ class RodexRuntimeLauncher:
             capability,
             *shlex.split(snapshot_action),
         )
-        for event in ("attached", "detached", "session-changed"):
-            hook_name = f"client-{event}[{RODEX_SHARED_TMUX_HOOK_INDEX}]"
+        for event in RODEX_SHARED_TMUX_COORDINATION_HOOKS:
+            hook_name = f"{event}[{RODEX_SHARED_TMUX_HOOK_INDEX}]"
             self._server_capability_tmux(
                 runtime,
                 capability.tmux_server_id,
@@ -2310,6 +2426,9 @@ def run_runtime_service(
     on_analytics_event: Callable[[Mapping[str, Any]], None] = lambda _event: None,
     on_process_started: Callable[[str, subprocess.Popen[bytes]], None] = lambda _kind, _process: None,
     on_process_stopped: Callable[[str, subprocess.Popen[bytes]], None] = lambda _kind, _process: None,
+    on_terminal_gateway_ready: Callable[[Callable[[], None], Callable[[], None]], None] = (
+        lambda _supervisor_wake, _terminal_resize: None
+    ),
 ) -> int:
     """Own one daemon-managed runtime and always release its transferred pane TTY."""
     try:
@@ -2323,6 +2442,7 @@ def run_runtime_service(
             on_analytics_event=on_analytics_event,
             on_process_started=on_process_started,
             on_process_stopped=on_process_stopped,
+            on_terminal_gateway_ready=on_terminal_gateway_ready,
         )
     finally:
         with suppress(OSError):
@@ -2340,6 +2460,7 @@ def _run_runtime_service(
     on_analytics_event: Callable[[Mapping[str, Any]], None],
     on_process_started: Callable[[str, subprocess.Popen[bytes]], None],
     on_process_stopped: Callable[[str, subprocess.Popen[bytes]], None],
+    on_terminal_gateway_ready: Callable[[Callable[[], None], Callable[[], None]], None],
 ) -> int:
     """Own one daemon-managed app-server, proxy, analytics task, and Codex TUI."""
     user_environment = config.environment
@@ -2375,6 +2496,7 @@ def _run_runtime_service(
     protocol_event_tap: CodexProtocolEventTap | None = None
     context_status_observer: CodexContextStatusObserver | None = None
     runtime_path_keepalive: _RuntimePathKeepalive | None = None
+    diagnostic_relay: _RuntimeDiagnosticRelay | None = None
     agent_observer_controller: AgentObserverCoordinator | None = None
     interaction_pipeline = SessionInteractionPipeline()
     presentation_pipeline = SessionPresentationPipeline()
@@ -2388,6 +2510,8 @@ def _run_runtime_service(
     try:
         app_endpoint.acquire()
         with _open_private_runtime_log(app_server_log_path) as log:
+            diagnostic_relay = _RuntimeDiagnosticRelay(log)
+            diagnostic_relay.start()
             app_server = subprocess.Popen(
                 (
                     sys.executable,
@@ -2400,7 +2524,7 @@ def _run_runtime_service(
                     *CODEX_APP_SERVER.command(codex_binary, app_server_socket_path),
                 ),
                 stdin=subprocess.DEVNULL,
-                stdout=log,
+                stdout=diagnostic_relay,
                 stderr=subprocess.STDOUT,
                 env=user_environment,
                 # Own shutdown independently of pane hangups, including bounded
@@ -2542,7 +2666,7 @@ def _run_runtime_service(
             if requested_codex_session_id is not None:
                 # Startup happens before attach, so preserve exact-resume failures where
                 # the outer launcher can report them instead of losing the dead pane.
-                tui_options["stderr"] = log
+                tui_options["stderr"] = diagnostic_relay
             active_writer_deadline = (
                 None
                 if requested_codex_session_id is None
@@ -2551,6 +2675,7 @@ def _run_runtime_service(
             while True:
                 attempt_log_offset = os.fstat(log.fileno()).st_size
                 if terminal_gateway is not None:
+                    diagnostic_relay.bind_supervisor_wake(None)
                     terminal_gateway.close()
                     terminal_gateway = None
                 terminal_gateway = TerminalSessionGateway(
@@ -2568,6 +2693,8 @@ def _run_runtime_service(
                     on_process_stopped=lambda process: on_process_stopped("native-tui", process),
                 )
                 tui = terminal_gateway.process
+                diagnostic_relay.bind_supervisor_wake(terminal_gateway.request_supervisor_check)
+                on_terminal_gateway_ready(terminal_gateway.request_supervisor_check, terminal_gateway.resize)
                 on_started()
                 while True:
                     if pending_analytics_config is not None:
@@ -2605,13 +2732,21 @@ def _run_runtime_service(
                     if failure is not None:
                         _record_runtime_path_keepalive_failure(log, failure)
                         raise failure
+                    diagnostic_failure = diagnostic_relay.failure
+                    if diagnostic_failure is not None:
+                        raise diagnostic_failure
                     try:
                         registration_pending = pending_analytics_config is not None
                         if stop.is_set():
                             returncode = 0
                             break
-                        returncode = terminal_gateway.wait(timeout=_REGISTRATION_POLL_INTERVAL_SECONDS)
+                        registration_timeout = (
+                            max(0.0, registration_deadline - time.monotonic()) if registration_pending else None
+                        )
+                        returncode = terminal_gateway.wait(timeout=registration_timeout)
                     except subprocess.TimeoutExpired:
+                        continue
+                    if returncode is None:
                         if (
                             registration_pending
                             and requested_codex_session_id is not None
@@ -2620,8 +2755,8 @@ def _run_runtime_service(
                             )
                         ):
                             # Codex can leave its TUI alive after rejecting resume.
-                            # Retire only this unregistered attempt; the existing
-                            # deadline below decides whether another may start.
+                            # Its stderr pipe is a real relay event, so retire this
+                            # unregistered attempt without a supervisory timer.
                             assert tui is not None
                             _stop_child_process(tui)
                             returncode = 1
@@ -2691,7 +2826,11 @@ def _run_runtime_service(
                                         if app_server_announced:
                                             on_process_stopped("app-server", app_server)
                                 finally:
-                                    app_endpoint.close()
+                                    try:
+                                        if diagnostic_relay is not None:
+                                            diagnostic_relay.close()
+                                    finally:
+                                        app_endpoint.close()
 
 
 def _record_runtime_path_keepalive_failure(log: BinaryIO, error: RodexRuntimeError) -> None:

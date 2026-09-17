@@ -85,16 +85,19 @@ def test_unchanged_survivor_produces_no_mutation_after_source_destruction(
     tmp_path: Path,
 ) -> None:
     runner = _SharingRunner(f"{_registered_row()}\n")
+    notified: list[str] = []
 
     result = reconcile_sharing_state(
         "tmux",
         tmp_path / "tmux.sock",
         SERVER_ID,
         runner=runner,
+        runtime_notifier=notified.append,
     )
 
     assert result == 0
     assert runner.mutations == []
+    assert notified == ["0123456789abcdef"]
 
 
 def test_changed_count_is_admitted_only_through_the_exact_full_capability(

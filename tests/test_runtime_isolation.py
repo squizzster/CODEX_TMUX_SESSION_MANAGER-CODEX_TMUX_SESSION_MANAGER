@@ -29,7 +29,16 @@ def isolated_runtimes():
         def runner(command, **options):
             return subprocess.run([command[0], "-f", "/dev/null", *command[1:]], **options)
 
-        launcher = RodexRuntimeLauncher("unused", binary, runner=runner)
+        class RuntimeWakeClient:
+            def notify_runtime(self, _runtime_id: str, _cause: str) -> bool:
+                return True
+
+        launcher = RodexRuntimeLauncher(
+            "unused",
+            binary,
+            runner=runner,
+            daemon_client_factory=lambda *_args: RuntimeWakeClient(),  # type: ignore[arg-type]
+        )
 
         def tmux(runtime, *arguments, check=True):
             return subprocess.run(

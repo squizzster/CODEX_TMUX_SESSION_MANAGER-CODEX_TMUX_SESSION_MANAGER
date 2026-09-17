@@ -121,15 +121,23 @@ def _mock_terminal_gateway(monkeypatch: pytest.MonkeyPatch) -> list:
             assert callable(presentation.subscribe)
             self.process = runtime_module.subprocess.Popen(command, **options)
             self.closed = False
+            self.wait_timeouts = []
             gateways.append(self)
 
         def wait(self, timeout=None):
-            return self.process.wait(timeout=timeout)
+            self.wait_timeouts.append(timeout)
+            try:
+                return self.process.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                return None
 
         def close(self):
             self.closed = True
 
         def resize(self):
+            return None
+
+        def request_supervisor_check(self):
             return None
 
         def forward_signal(self, _signum):
@@ -439,6 +447,7 @@ class RecordingDaemonClient:
         self.reservations: list[tuple[str, RuntimeServiceConfig]] = []
         self.ready: list[tuple[str, str, float]] = []
         self.stopped: list[tuple[str, str]] = []
+        self.notifications: list[tuple[str, str]] = []
 
     def reserve(self, operation_id: str, config: RuntimeServiceConfig) -> None:
         self.reservations.append((operation_id, config))
@@ -448,6 +457,10 @@ class RecordingDaemonClient:
 
     def stop(self, operation_id: str, runtime_id: str) -> None:
         self.stopped.append((operation_id, runtime_id))
+
+    def notify_runtime(self, runtime_id: str, cause: str) -> bool:
+        self.notifications.append((runtime_id, cause))
+        return True
 
 
 class RecordingDaemonFactory:
@@ -1761,12 +1774,15 @@ def test_rename_and_session_ui_initialisation_use_the_real_tmux_session_name(
     local_hook_removals = [command for command in status_commands if "set-hook -u -t" in command[-1]]
     assert local_hook_removals == []
     hook_commands = [
-        command for command in status_actions if command[:2] == ["set-option", "-go"] and command[2].startswith("client-")
+        command
+        for command in status_actions
+        if command[:2] == ["set-option", "-go"]
+        and command[2].removesuffix(f"[{runtime_module.RODEX_SHARED_TMUX_HOOK_INDEX}]")
+        in runtime_module.RODEX_SHARED_TMUX_COORDINATION_HOOKS
     ]
     assert [command[2] for command in hook_commands] == [
-        "client-attached[731]",
-        "client-detached[731]",
-        "client-session-changed[731]",
+        f"{hook_name}[{runtime_module.RODEX_SHARED_TMUX_HOOK_INDEX}]"
+        for hook_name in runtime_module.RODEX_SHARED_TMUX_COORDINATION_HOOKS
     ]
     assert all("rodex.tmux_sharing_coordinator" in command[-1] for command in hook_commands)
     assert all("rodex.status_animation_admission" not in command[-1] for command in hook_commands)
@@ -2682,7 +2698,11 @@ def test_real_tmux_creation_refuses_an_unmarked_nonempty_server_without_mutation
 
     tmux("new-session", "-d", "-s", "foreign-owner", "sleep 30")
     tmux("set-option", "-g", "history-limit", "1234")
-    launcher = RodexRuntimeLauncher("codex", tmux_binary)
+    launcher = RodexRuntimeLauncher(
+        "codex",
+        tmux_binary,
+        daemon_client_factory=RecordingDaemonFactory(),  # type: ignore[arg-type]
+    )
     runtime = LiveTmuxSession(
         socket_path,
         "rodex-attempt",
@@ -3127,7 +3147,11 @@ def test_real_tmux_session_preserves_scrollback_with_mouse_disabled(
         encoding="utf-8",
     )
     output_script.chmod(0o755)
-    launcher = RodexRuntimeLauncher("codex", tmux_binary)
+    launcher = RodexRuntimeLauncher(
+        "codex",
+        tmux_binary,
+        daemon_client_factory=RecordingDaemonFactory(),  # type: ignore[arg-type]
+    )
 
     _stage_test_tmux_command(
         launcher,
@@ -3200,7 +3224,11 @@ def test_real_tmux_mouse_identity_survives_rename_and_old_name_reuse(
         tmp_path / f"events-{RUNTIME_ID}.sock",
         runtime_id=RUNTIME_ID,
     )
-    launcher = RodexRuntimeLauncher("codex", tmux_binary)
+    launcher = RodexRuntimeLauncher(
+        "codex",
+        tmux_binary,
+        daemon_client_factory=RecordingDaemonFactory(),  # type: ignore[arg-type]
+    )
 
     def tmux(*arguments: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
@@ -3306,7 +3334,11 @@ def test_real_tmux_survives_rename_and_status_configuration(tmp_path: Path) -> N
         tmp_path / f"events-{RUNTIME_ID}.sock",
         runtime_id=RUNTIME_ID,
     )
-    launcher = RodexRuntimeLauncher("codex", tmux_binary)
+    launcher = RodexRuntimeLauncher(
+        "codex",
+        tmux_binary,
+        daemon_client_factory=RecordingDaemonFactory(),  # type: ignore[arg-type]
+    )
     codex_session_id = uuid.UUID("01a00654-f2bc-7a30-834a-a5f886a65f82")
     control_clients: list[subprocess.Popen[str]] = []
 
@@ -3853,12 +3885,33 @@ def test_private_runtime_log_repairs_mode_and_rejects_symlinks(
         runtime_module._open_private_runtime_log(log_path)
 
 
+def test_runtime_diagnostic_relay_persists_output_before_waking_supervisor(tmp_path: Path) -> None:
+    log_path = tmp_path / "app.log"
+    wake = Event()
+    with runtime_module._open_private_runtime_log(log_path) as log:
+        relay = runtime_module._RuntimeDiagnosticRelay(log)
+        relay.start()
+        relay.bind_supervisor_wake(wake.set)
+        os.write(relay.fileno(), b"writer-conflict\n")
+        assert wake.wait(1)
+        relay.close()
+
+    assert log_path.read_bytes() == b"writer-conflict\n"
+    assert relay.failure is None
+
+
 def test_runtime_control_publishes_pending_then_registered_identity(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     runner = RuntimeRunner(tmp_path)
-    launcher = RodexRuntimeLauncher("codex", "tmux", runner=runner)
+    daemon_factory = RecordingDaemonFactory()
+    launcher = RodexRuntimeLauncher(
+        "codex",
+        "tmux",
+        runner=runner,
+        daemon_client_factory=daemon_factory,  # type: ignore[arg-type]
+    )
     runtime = LiveRodexRuntime(
         tmp_path / "tmux.sock",
         "rodex-token",
@@ -3914,6 +3967,8 @@ def test_runtime_control_publishes_pending_then_registered_identity(
         expected_registry_id=registry_id,
         expected_codex_session_id=codex_session_id,
     )
+
+    assert daemon_factory.clients[-1].notifications == [(str(RUNTIME_ID), runtime_module.RODEX_RUNTIME_WAKE_REGISTRATION)]
 
     options = [command[3:] for command in runner.calls]
     published = next(
@@ -4570,6 +4625,8 @@ def test_runtime_service_skips_updater_and_connects_tui_through_protocol_proxy(
 
     assert status_updates == [0]
     assert len(gateways) == 1 and gateways[0].closed
+    assert len(gateways[0].wait_timeouts) == 1
+    assert gateways[0].wait_timeouts[0] > 50
     assert proxy_lifecycle == [
         "event-start",
         "start",

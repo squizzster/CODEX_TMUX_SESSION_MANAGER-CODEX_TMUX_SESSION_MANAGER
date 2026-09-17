@@ -7,9 +7,11 @@ import array
 import json
 import os
 import re
+import select
 import signal
 import socket
 import struct
+from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -20,6 +22,8 @@ from .analytics import SharedAnalyticsCoordinator
 from .daemon_client import (
     DAEMON_MESSAGE_LIMIT_BYTES,
     RODEX_DAEMON_PROTOCOL,
+    RODEX_RUNTIME_WAKE_REGISTRATION,
+    RODEX_RUNTIME_WAKE_TERMINAL_RESIZE,
     daemon_socket_path,
     encode_daemon_message,
 )
@@ -51,6 +55,8 @@ class _ManagedRuntime:
     terminal_environment: dict[str, str] | None = None
     thread: Thread | None = None
     error: str | None = None
+    supervisor_wake: Callable[[], None] | None = None
+    terminal_resize: Callable[[], None] | None = None
 
 
 class DaemonRuntimeManager:
@@ -142,6 +148,25 @@ class DaemonRuntimeManager:
         context = self._exact_context(operation_id, runtime_id)
         self._stop_context(context)
 
+    def wake_runtime(self, runtime_id: str, cause: str) -> None:
+        """Deliver a same-user hint; the runtime revalidates authoritative state."""
+        with self._lock:
+            context = self._runtimes.get(runtime_id)
+        if context is None:
+            raise RodexDaemonServerError("runtime identity is not reserved")
+        with context.lock:
+            callback = (
+                context.supervisor_wake
+                if cause == RODEX_RUNTIME_WAKE_REGISTRATION
+                else context.terminal_resize
+                if cause == RODEX_RUNTIME_WAKE_TERMINAL_RESIZE
+                else None
+            )
+        if cause not in {RODEX_RUNTIME_WAKE_REGISTRATION, RODEX_RUNTIME_WAKE_TERMINAL_RESIZE}:
+            raise RodexDaemonServerError("runtime wake cause is invalid")
+        if callback is not None:
+            callback()
+
     def close(self) -> None:
         with self._lock:
             self._closing = True
@@ -179,6 +204,11 @@ class DaemonRuntimeManager:
                     context.operation_id,
                     process,
                 ),
+                on_terminal_gateway_ready=lambda supervisor_wake, terminal_resize: self._bind_runtime_controls(
+                    context,
+                    supervisor_wake,
+                    terminal_resize,
+                ),
             )
         except BaseException as error:
             with context.lock:
@@ -188,6 +218,8 @@ class DaemonRuntimeManager:
             self._analytics.retire(str(context.config.runtime_id))
             context.done.set()
             with context.lock:
+                context.supervisor_wake = None
+                context.terminal_resize = None
                 bridge, context.bridge_connection = context.bridge_connection, None
             if bridge is not None:
                 bridge.close()
@@ -197,6 +229,9 @@ class DaemonRuntimeManager:
         with context.lock:
             thread = context.thread
             bridge = context.bridge_connection
+            supervisor_wake = context.supervisor_wake
+        if supervisor_wake is not None:
+            supervisor_wake()
         if thread is not None:
             thread.join(timeout=10)
         if bridge is not None:
@@ -210,6 +245,19 @@ class DaemonRuntimeManager:
         if terminal_fd is not None and (thread is None or thread.is_alive()):
             with suppress(OSError):
                 os.close(terminal_fd)
+
+    @staticmethod
+    def _bind_runtime_controls(
+        context: _ManagedRuntime,
+        supervisor_wake: Callable[[], None],
+        terminal_resize: Callable[[], None],
+    ) -> None:
+        with context.lock:
+            context.supervisor_wake = supervisor_wake
+            context.terminal_resize = terminal_resize
+            stopped = context.stop.is_set()
+        if stopped:
+            supervisor_wake()
 
     def _exact_context(self, operation_id: str, runtime_id: str) -> _ManagedRuntime:
         _require_operation_id(operation_id)
@@ -241,24 +289,37 @@ class RodexDaemonServer:
         self._endpoint = ExclusiveUnixEndpoint(daemon_socket_path(runtime_root))
         self._manager: DaemonRuntimeManager | None = None
         self._stop = Event()
+        self._wake_fd = os.eventfd(0, os.EFD_CLOEXEC | os.EFD_NONBLOCK)
         self._workers: set[Thread] = set()
         self._workers_lock = Lock()
 
     def stop(self) -> None:
         self._stop.set()
+        with suppress(OSError):
+            os.eventfd_write(self._wake_fd, 1)
 
     def run(self) -> int:
-        listener = self._endpoint.open()
-        listener.settimeout(0.25)
+        try:
+            listener = self._endpoint.open()
+        except BaseException:
+            with suppress(OSError):
+                os.close(self._wake_fd)
+            self._wake_fd = -1
+            raise
         try:
             # The single daemon endpoint is the root ownership claim. Reconcile
             # multi-runtime process receipts only after that claim is exclusive.
             self._manager = DaemonRuntimeManager(self._runtime_root)
             while not self._stop.is_set():
-                try:
-                    connection, _address = listener.accept()
-                except TimeoutError:
+                readable, _writable, _exceptional = select.select((listener, self._wake_fd), (), ())
+                if self._wake_fd in readable:
+                    with suppress(BlockingIOError, OSError):
+                        os.eventfd_read(self._wake_fd)
+                    if self._stop.is_set():
+                        break
+                if listener not in readable:
                     continue
+                connection, _address = listener.accept()
                 worker = Thread(target=self._handle_connection, args=(connection,), daemon=True)
                 with self._workers_lock:
                     self._workers.add(worker)
@@ -271,6 +332,9 @@ class RodexDaemonServer:
                 workers = tuple(self._workers)
             for worker in workers:
                 worker.join(timeout=2)
+            with suppress(OSError):
+                os.close(self._wake_fd)
+            self._wake_fd = -1
         return 0
 
     def _handle_connection(self, connection: socket.socket) -> None:
@@ -311,6 +375,9 @@ class RodexDaemonServer:
             elif operation == "stop":
                 _require_fields(request, {"protocol", "operation", "operation_id", "runtime_id"})
                 manager.stop_runtime(_text(request, "operation_id"), _text(request, "runtime_id"))
+            elif operation == "wake_runtime":
+                _require_fields(request, {"protocol", "operation", "runtime_id", "cause"})
+                manager.wake_runtime(_text(request, "runtime_id"), _text(request, "cause"))
             elif operation == "bind_terminal":
                 _require_fields(
                     request,

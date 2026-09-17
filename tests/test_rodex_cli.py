@@ -48,6 +48,7 @@ from rodex.tmux_session_capability import TmuxSessionCapability
 from rodex_registry import (
     RodexRegistryId,
     RodexRuntimeId,
+    RodexRuntimeRegistrationRejectedError,
     RodexSessionError,
     RodexSessionId,
     RodexSessionsUserIdentity,
@@ -740,7 +741,7 @@ def test_pending_runtime_with_exact_durable_identity_is_recovered(
     database = tmp_path / "rodex.sqlite3"
     monkeypatch.setattr("cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga")
     monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
-    create_controlled_session(database, tmp_path)
+    create_exact_controlled_session(database, tmp_path)
     rodex_session_id = lookup_rodex_session_id_from_a_rodex_sessions_id(1, database)
     assert rodex_session_id is not None
     launcher = StubLauncher(tmp_path)
@@ -1052,7 +1053,7 @@ def test_running_reports_an_unregistered_live_tmux_session(
     socket_path.touch()
     launcher = StubLauncher(tmp_path)
     launcher.session_names = ("orphan-name",)
-    monkeypatch.setattr("rodex.session_commands.default_tmux_server_socket_path", lambda: socket_path)
+    monkeypatch.setattr("rodex.session_commands.current_tmux_server_socket_paths", lambda: (socket_path,))
     monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
 
     assert run(["_running"], database_path=tmp_path / "rodex.sqlite3", launcher=launcher) == 0  # type: ignore[arg-type]
@@ -1061,6 +1062,47 @@ def test_running_reports_an_unregistered_live_tmux_session(
     assert output == (
         f"Rodex running: 0.\nRodex unregistered: 1.\nRodex unregistered [orphan-name]: tmux socket {socket_path}.\n"
     )
+
+
+@pytest.mark.parametrize("failure_stage", ["registration", "liveness", "inventory"])
+def test_running_reports_one_broken_runtime_without_losing_other_servers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], failure_stage: str
+) -> None:
+    database = tmp_path / "rodex.sqlite3"
+    monkeypatch.setattr("cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga")
+    create_exact_controlled_session(database, tmp_path)
+    primary_socket = tmp_path / "tmux.sock"
+    other_socket = tmp_path / "other.sock"
+    primary_socket.touch()
+    other_socket.touch()
+    launcher = StubLauncher(tmp_path)
+    monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
+    monkeypatch.setattr("rodex.session_commands.current_tmux_server_socket_paths", lambda: (primary_socket, other_socket))
+
+    def verify(*_args: object, **_kwargs: object) -> None:
+        if failure_stage == "registration":
+            raise RodexRuntimeRegistrationRejectedError("incumbent changed")
+
+    def exists(_runtime: LiveTmuxSession) -> bool:
+        if failure_stage == "liveness":
+            raise RodexRuntimeError("liveness unavailable")
+        return True
+
+    def names(socket_path: Path) -> tuple[str, ...]:
+        if socket_path == primary_socket:
+            if failure_stage == "inventory":
+                raise RodexRuntimeError("inventory unavailable")
+            return ("automatic-beluga",)
+        return ("other-runtime",)
+
+    monkeypatch.setattr(session_commands_module, "verify_live_runtime_identity", verify)
+    monkeypatch.setattr(launcher, "session_exists", exists)
+    monkeypatch.setattr(launcher, "list_session_names", names)
+
+    assert run(["_running"], database_path=database, launcher=launcher) == 0  # type: ignore[arg-type]
+    output = capsys.readouterr().out
+    assert "Rodex unverified: 1." in output
+    assert "Rodex unregistered [other-runtime]" in output
 
 
 def test_help_exposes_only_the_current_exact_control_commands(
@@ -1143,7 +1185,7 @@ def test_machine_start_reads_stdin_and_emits_the_versioned_identity_envelope(
     assert control.started == [(launcher.control, "run focused tests\n")]
     assert control.started_dispatch_ids == ["controller:dispatch:42"]
     payload = json.loads(capsys.readouterr().out)
-    assert payload["schema_version"] == 3
+    assert payload["schema_version"] == 4
     assert payload["operation"] == "turn.start"
     assert payload["ok"] is True
     assert payload["runtime"] == {
@@ -1628,7 +1670,7 @@ def test_machine_inspect_emits_only_the_current_runtime_and_app_server_contract(
 
     assert status == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["schema_version"] == 3
+    assert payload["schema_version"] == 4
     assert payload["operation"] == "thread.inspect"
     assert payload["ok"] is True
     assert payload["runtime"] == {
@@ -2953,7 +2995,7 @@ def test_live_cool_name_argument_renames_configures_and_reattaches_without_start
     )
 
     assert launcher.started == []
-    assert launcher.existing_checks == [LiveTmuxSession(tmp_path / "tmux.sock", "rodex-token")]
+    assert launcher.existing_checks == [LiveTmuxSession(tmp_path / "tmux.sock", "rodex-token", runtime_id=RUNTIME_ID)]
     assert len(launcher.renamed) == 1
     assert launcher.renamed[0][0].tmux_session_name == "rodex-token"
     tmux_session_name = "automatic-beluga"
@@ -3713,7 +3755,7 @@ def test_alias_replacement_without_force_is_reported_on_stderr(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     state_home = tmp_path / "state"
-    database = state_home / "rodex" / "rodex-v19.sqlite3"
+    database = state_home / "rodex" / "rodex-v20.sqlite3"
     monkeypatch.setattr(
         "cool_name.functions.coolname.generate_slug",
         lambda _word_count: "black-sawfly",
@@ -3764,7 +3806,7 @@ def test_empty_alias_is_a_concise_stderr_error(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     state_home = tmp_path / "state"
-    database = state_home / "rodex" / "rodex-v19.sqlite3"
+    database = state_home / "rodex" / "rodex-v20.sqlite3"
     monkeypatch.setattr("cool_name.functions.coolname.generate_slug", lambda _word_count: "safe-name")
     monkeypatch.setattr("rodex_registry.lifecycle.current_rodex_sessions_user_identity", lambda: DNA)
     monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
@@ -3845,6 +3887,8 @@ def test_running_commands_show_only_the_current_users_live_sessions(
         "black-sawfly",
         database,
         runtime_id=RUNTIME_ID,
+        codex_session_id=CODEX_SESSION_ID,
+        expected_previous_runtime_id=None,
     )
     monkeypatch.setattr(
         "cool_name.functions.coolname.generate_slug",

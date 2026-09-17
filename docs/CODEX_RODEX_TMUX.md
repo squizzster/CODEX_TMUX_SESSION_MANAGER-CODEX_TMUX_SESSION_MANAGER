@@ -66,7 +66,7 @@ state: Rodex removes it, its prompt and uv recursion marker, and every matching 
 entry from `PATH`. A different caller-owned virtualenv is preserved. Direct Codex
 process replacement and transient App Server checks use this same prepared environment.
 
-Runtime creation treats the shared tmux server as transport, never environment authority.
+Runtime creation installs the caller environment into its own dedicated tmux server.
 It first creates a direct-argv inert pane with `new-session -E`, publishes its immutable
 runtime/pane capability, then reads the current global environment under the server
 fence. A byte-escaped tmux program sent on stdin installs every prepared caller value in
@@ -119,14 +119,12 @@ rename, and attach all use that boundary. Domain
 components may assemble tmux arguments or atomic `if-shell` command sequences, but they
 never construct or execute the tmux process prefix themselves.
 
-## Shared tmux authority
+## Runtime tmux authority
 
-All managed sessions intentionally multiplex through the per-user versioned
-`tmux-shared-v2.sock`. This is analogous to many clients sharing one Unix socket: the
-socket selects a server but grants no session authority. Rodex records server-scope
-protocol and random incarnation markers. Only creation may claim a completely unmarked
-server, and only while it has no session; an unmarked nonempty server or protocol mismatch
-is left untouched.
+Each managed runtime owns a separate server at `tmux-v3-<runtime-id>.sock`. Protocol,
+server incarnation and runtime markers bind that server to one creation attempt. Only
+an entirely unmarked, empty server may be claimed. Failure cleanup retains the original
+attempt's nonce and cannot obtain an incumbent's authority by rediscovery.
 
 `TmuxRuntimeCapability` binds the owning host to its socket, server incarnation, immutable
 tmux `$session_id`, primary `%pane_id`, and Rodex runtime. `TmuxSessionCapability` adds
@@ -142,13 +140,13 @@ are addresses only. Expected identity values use tmux literal format operands, s
 are never rendered as display output because tmux assigns different literal semantics
 to the two format contexts.
 
-Under one stable per-user XDG/runtime context, Rodex uses one canonical database and one
-shared tmux server. Display-name uniqueness covers every session recorded in that
+Under one stable per-user XDG/runtime context, Rodex uses one canonical database and a separate
+tmux server for each runtime. Display-name uniqueness covers every session recorded in that
 database, and the live tmux name is exactly the Rodex display name. A successful
 new-session transaction reserves its generated name against permanent names and aliases,
 so a later session using the same database cannot receive it. A different
 `XDG_STATE_HOME` is a separate database/name boundary; a different `RODEX_RUNTIME_DIR`
-is a separate shared-server boundary. Rename and attach keep using `$session_id`, so
+selects a separate root for runtime endpoints. Rename and attach keep using `$session_id`, so
 later name reuse cannot redirect an operation. The database ID remains an internal
 capability field that detects stale or replaced canonical storage; it never alters the
 name.
@@ -183,10 +181,20 @@ All live matches appear together, with cyclic Up/Down selection. Enter opens a p
 argument picker; one Escape returns to the command list, and Escape there releases input.
 Selecting a command with no options reports bad configuration through the main display
 adapter and returns directly to typing. Configured option confirmations and typed commands
-use the same submitted-command handler; today's dummy replies never start a model turn.
+use the same submitted-command handler and each option may declare a typed interaction
+target, operation and payload. Actionless options remain placeholders. `light` selects
+the configured root-commentary viewport and `dark` restores the native Codex screen;
+neither changes model execution or starts a turn.
 Rodex leaves tmux's Escape ambiguity timeout unchanged, so a lone Escape may respond
-later than complete arrow sequences. See the [menu behavior](../README.md#local-input-interceptor-placeholder)
+later than complete arrow sequences. See the [menu behavior](../README.md#managed-presentation)
 and [interaction contract](INTERACTION_PATHS.md#escape-timing) for configuration and timing.
+
+The proxy forwards every accepted App Server frame to Codex before projecting bounded
+method, kind, thread, turn, item, type, phase, status and text fields for presentation.
+Item deltas inherit identity from their exact started item; primary request IDs correlate
+`thread/read` history. The terminal surface always advances a hidden native projection.
+Semantic policies render only their selected typed item text with the native composer;
+complete frames queue behind in-flight terminal tokens and coalesce to newest state.
 
 ## Scrollback ownership
 
@@ -305,8 +313,9 @@ earlier events from acquiring a later follow-up's human request. A `send_message
 interaction creates no pending target turn, cannot acquire a later turn, and receives no
 terminal recap. Natural-width progress blocks never depend on moving the terminal cursor
 across wrapped rows. Completion repeats the invocation semantics and exact root-request
-context so a short pane still leaves a useful handoff in tmux history. The pane survives
-agent completion for reuse and exits when the runtime event stream closes. Parent
+context while the pane is open; closing it removes that pane's tmux history, not the durable
+trace. The pane stays open while any agent is working, closes when the running count reaches zero,
+and reopens for later work. It also exits when the runtime event stream closes. Parent
 messages from another root or turn, developer and system
 instructions, command text, tool payloads, output bodies, and hidden reasoning remain
 outside the display contract.
@@ -429,14 +438,11 @@ Codex, tmux, or analyzer processes.
   following command key. It uses tmux's per-client prefix state without intercepting
   input; a fast `Ctrl-b d` therefore still detaches normally. A custom prefix or
   user-owned root `C-b` binding is not replaced.
-- In a shared session, one `Ctrl-C` is held as an accidental-exit guard and points to
-  `Ctrl-D` or `Ctrl-b d` as the detach-only routes. The same client must press `Ctrl-C`
-  again within two seconds to end the exact managed tmux session for every attached
-  client. A private
-  session ends immediately on `Ctrl-C`. Rodex owns this lifecycle transition rather than
-  delegating it to the current TUI's interpretation of an input byte. A foreign
-  root `C-c` or `C-d` binding causes explicit initialization failure because silent
-  fallback would remove this safety property.
+- Shared `Ctrl-C` detaches only the invoking client. Private `Ctrl-C` ends the exact
+  managed runtime when the complete ownership/topology guard passes. Both are native
+  tmux command chains admitted against the originating client at key dispatch. No
+  asynchronous helper, double-tap timer or shared confirmation state participates.
+  A foreign root `C-c` or `C-d` binding causes explicit initialization failure.
 - A second attached client triggers a five-second shared-arrival animation. Returning
   to one client triggers its private-session counterpart. The global hook only wakes a
   coordinator; it does not infer the detached session. The coordinator inventories the
@@ -456,8 +462,8 @@ Codex, tmux, or analyzer processes.
 - The runtime uses `$XDG_RUNTIME_DIR/rodex` when suitable—normally
   `/run/user/<uid>/rodex`—otherwise `/tmp/rodex-<uid>`. Unix sockets stay there because
   long project paths can exceed Linux socket limits. `RODEX_RUNTIME_DIR` explicitly
-  selects another runtime root and therefore another shared tmux server.
-- While a session host is alive, it refreshes the runtime root, shared tmux socket, and
+  selects another root for independently owned runtime servers.
+- While a session host is alive, it refreshes the runtime root, its tmux socket, and
   its private sockets and log hourly. A refresh failure ends that runtime rather than
   leaving a detached session that cannot be addressed. Normal cleanup eligibility
   resumes when the live hosts exit.

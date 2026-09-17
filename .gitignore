@@ -9,6 +9,7 @@ wheels/
 # Virtual environments
 .venv
 /.tmp.*
+/.tmp_*
 .coverage
 .pytest_cache/
 /.rodex/

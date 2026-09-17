@@ -8,7 +8,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Final
 
-from websockets.exceptions import ConnectionClosed
+from websockets.exceptions import ConnectionClosed, InvalidHandshake
 from websockets.sync.client import unix_connect
 
 from .interaction_pipeline import (
@@ -19,6 +19,7 @@ from .interaction_pipeline import (
     InteractionResult,
     SessionInteractionPipeline,
 )
+from .runtime_peer import RuntimePeerIdentity, verified_runtime_connection
 
 SESSION_INTERACTION_CONNECTION_PATH: Final = "/rodex-interaction"
 SESSION_INTERACTION_METHOD: Final = "rodex/interaction"
@@ -28,12 +29,14 @@ def publish_tui_notice(
     proxy_socket_path: Path,
     message: str,
     *,
+    peer_identity: RuntimePeerIdentity,
     connector: Callable[..., Any] = unix_connect,
 ) -> bool:
     """Ask Rodex's proxy to show one TUI-owned warning without an App Server turn."""
     return publish_session_interaction(
         proxy_socket_path,
         InteractionRequest("main", InteractionOperation.MESSAGE, "update-notice", text=message),
+        peer_identity=peer_identity,
         connector=connector,
     ).accepted
 
@@ -42,6 +45,7 @@ def publish_session_interaction(
     proxy_socket_path: Path,
     operation: InteractionRequest,
     *,
+    peer_identity: RuntimePeerIdentity,
     connector: Callable[..., Any] = unix_connect,
 ) -> InteractionResult:
     """Submit one explicit operation; a lost response is not permission to retry."""
@@ -68,8 +72,10 @@ def publish_session_interaction(
         separators=(",", ":"),
     )
     try:
-        with connector(
-            str(proxy_socket_path),
+        with verified_runtime_connection(
+            connector,
+            proxy_socket_path,
+            peer_identity=peer_identity,
             uri=f"ws://localhost{SESSION_INTERACTION_CONNECTION_PATH}",
             compression=None,
             open_timeout=1,
@@ -85,6 +91,8 @@ def publish_session_interaction(
             )
             timeout = 1 if is_main_notice else 10
             response = _interaction_json_object(connection.recv(timeout=timeout))
+    except InvalidHandshake as error:
+        return InteractionResult(DeliveryStatus.REJECTED, str(error), {"dispatch_id": dispatch_id})
     except (ConnectionClosed, OSError, TimeoutError):
         return InteractionResult(
             DeliveryStatus.INDETERMINATE,

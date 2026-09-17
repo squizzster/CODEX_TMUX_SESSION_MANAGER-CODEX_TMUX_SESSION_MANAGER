@@ -19,7 +19,7 @@ from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from threading import Event, Lock, RLock, Thread
+from threading import Event, Lock, RLock, Thread, Timer
 from typing import Final
 
 from websockets.exceptions import ConnectionClosed
@@ -53,6 +53,8 @@ from .observer_projection import (
 )
 from .observer_state import ObserverStateReducer
 from .protocol_proxy import AGENT_OBSERVER_EVENT_STREAM_PATH
+from .runtime_endpoint import ExclusiveUnixEndpoint
+from .runtime_peer import RuntimePeerIdentity, RuntimePeerIdentityError, verified_runtime_connection
 from .terminal_presentation import render_observer_lines
 from .tmux_session_capability import TmuxRuntimeCapability
 
@@ -74,6 +76,7 @@ OBSERVER_SEND_RETRY_INITIAL_SECONDS: Final = 0.01
 OBSERVER_SEND_RETRY_MAX_SECONDS: Final = 0.25
 OBSERVER_SEND_PARKED_RETRY_SECONDS: Final = 1.0
 OBSERVER_SOCKET_OPERATION_TIMEOUT_SECONDS: Final = 0.25
+OBSERVER_PANE_CLOSE_RETRY_DELAYS: Final = (0.1, 0.25, 0.5)
 
 
 def observer_control_socket_path(protocol_event_socket_path: Path) -> Path:
@@ -197,6 +200,14 @@ class _ObserverEventDispatcher:
         if thread is not None:
             thread.join(timeout=OBSERVER_SOCKET_OPERATION_TIMEOUT_SECONDS + 1)
 
+    def discard_pending(self) -> None:
+        """Retire snapshots for an auto-closed pane without stopping future delivery."""
+        with self._lock:
+            self._generation += 1
+            with suppress(queue.Empty):
+                self._events.get_nowait()
+            self._updated.set()
+
     def _run(self) -> None:
         while True:
             item = self._events.get()
@@ -269,6 +280,8 @@ def notify_agent_observer_trace_publication(
     protocol_event_socket_path: Path,
     trace_publication_sequence: int,
     caught_up: bool,
+    *,
+    peer_identity: RuntimePeerIdentity,
 ) -> None:
     """Best-effort wake after SQLite has committed a trace publication."""
     if (
@@ -284,6 +297,8 @@ def notify_agent_observer_trace_publication(
         "kind": "trace_published",
         "trace_publication_sequence": trace_publication_sequence,
         "caught_up": caught_up,
+        "runtime_id": str(peer_identity.runtime_id),
+        "tmux_server_id": peer_identity.tmux_server_id,
     }
     with suppress(OSError):
         _try_send_observer_event_frame(
@@ -309,6 +324,7 @@ class AgentObserverCoordinator:
         interaction_pipeline: SessionInteractionPipeline | None = None,
     ) -> None:
         self._protocol_event_socket_path = protocol_event_socket_path
+        self._peer_identity = RuntimePeerIdentity(capability.runtime_id, capability.tmux_server_id)
         self._event_dispatcher = _ObserverEventDispatcher() if event_sender is None else None
         self._event_sender = self._event_dispatcher.send if self._event_dispatcher is not None else event_sender
         self._pane = ObserverPaneController(
@@ -330,6 +346,10 @@ class AgentObserverCoordinator:
         self._root_thread_id: uuid.UUID | None = None
         self._lifecycle_lock = RLock()
         self._closed = False
+        self._pending_pane_close = False
+        self._pane_close_attempts = 0
+        self._pane_close_generation = 0
+        self._pane_close_retry: Timer | None = None
 
     def activate(
         self,
@@ -370,19 +390,21 @@ class AgentObserverCoordinator:
         self._root_thread_id = uuid.UUID(str(root_thread_id))
 
     def observe_protocol_event(self, event: Mapping[str, object] | None) -> None:
-        """Create, reuse, or update the observer from one typed App Server item."""
+        """Reduce one event, then reconcile the pane with the running-agent count."""
         with self._lifecycle_lock:
             if self._closed:
                 return
-            self._observe_protocol_event_locked(event)
+            previously_running = self._observer_state.running_agent_count
+            initial_event = self._observe_protocol_event_locked(event)
+            self._reconcile_observer_pane(previously_running, initial_event)
 
     def _observe_protocol_event_locked(
         self,
         event: Mapping[str, object] | None,
-    ) -> None:
+    ) -> dict[str, object] | None:
         if self._closed:
             return
-        self._prune_protocol_terminal_state(event)
+        self._observe_protocol_work_lifecycle(event)
         collaboration_invocation = project_collaboration_invocation_event(event)
         if collaboration_invocation is not None:
             self._observe_collaboration_invocation(collaboration_invocation)
@@ -412,10 +434,10 @@ class AgentObserverCoordinator:
         collaboration_invocation = self._observer_state.collaboration_invocation(item_id)
         if collaboration_invocation is not None:
             projected["collaboration_invocation"] = collaboration_invocation["item"]
-        is_new_spawn = projected["method"] == "item/started" and item["activity_kind"] == "started"
+        is_new_spawn = item["activity_kind"] == "started"
         is_known = self._observer_state.is_known_activity(item_id)
-        target_is_tracked = self._observer_state.tracks_target(target_thread_id)
-        if not is_new_spawn and not is_known and not target_is_tracked:
+        target_is_known = self._observer_state.knows_agent(target_thread_id)
+        if not is_new_spawn and not is_known and not target_is_known:
             return
         if is_new_spawn:
             assert self._rodex_sessions_id is not None
@@ -423,43 +445,27 @@ class AgentObserverCoordinator:
             projected["after_event_id"] = None if cursor is None else str(cursor)
         self._observer_state.remember_activity(
             item_id,
-            target_thread_id,
             projected,
             new_spawn=is_new_spawn,
         )
         tool_name = _projected_invocation_tool_name(collaboration_invocation)
+        completed_work = False
+        if item["activity_kind"] in {"completed", "failed", "aborted", "shutdown"}:
+            completed_work = self._observer_state.finish_agent_work(target_thread_id, request_id=item_id)
+        elif is_new_spawn:
+            self._observer_state.start_agent_work(target_thread_id, request_id=item_id)
         has_root_request_context = tool_name in _TURN_REQUEST_KINDS or tool_name == ("collaboration.send_message")
         request_event = self._root_request_context_event(projected) if has_root_request_context else None
         if request_event is not None:
             projected["root_request_context_follows"] = True
-        pane_target = self._pane.locate()
-        if pane_target is None:
-            if not is_new_spawn:
-                self._prune_completed_activity(projected)
-                return
-            assert self._rodex_sessions_id is not None
-            assert self._rodex_session_id is not None
-            assert self._root_thread_id is not None
-            pane_target = self._pane.create(
-                database_path=self._database_path,
-                rodex_sessions_id=self._rodex_sessions_id,
-                rodex_session_id=self._rodex_session_id,
-                root_thread_id=self._root_thread_id,
-                protocol_event_socket_path=self._protocol_event_socket_path,
-                initial_event=projected,
-            )
-            if pane_target is not None:
-                self._observer_state.observe(projected)
-                if request_event is not None:
-                    self._observer_state.mark_root_request_context_sent(item_id)
-                    self._send_observer_event(request_event)
-            self._prune_completed_activity(projected)
-            return
         self._send_observer_event(projected)
         if request_event is not None:
             self._observer_state.mark_root_request_context_sent(item_id)
             self._send_observer_event(request_event)
         self._prune_completed_activity(projected)
+        if completed_work:
+            self._prune_target_thread(target_thread_id)
+        return projected
 
     def _observe_collaboration_invocation(
         self,
@@ -478,15 +484,18 @@ class AgentObserverCoordinator:
         if activity is not None:
             activity["collaboration_invocation"] = item
         receiver_ids = item.get("receiver_thread_ids")
+        if item.get("tool_name") == "collaboration.followup_task" and item.get("status") == "completed":
+            for target in receiver_ids if isinstance(receiver_ids, list) else ():
+                if isinstance(target, str) and self._observer_state.knows_agent(target):
+                    self._observer_state.start_agent_work(target, request_id=item_id)
+                    if self._observer_state.tracks_target(target):
+                        self._publish_agent_work_started(target)
         targets_tracked = isinstance(receiver_ids, list) and any(
             isinstance(target, str) and self._observer_state.tracks_target(target) for target in receiver_ids
         )
         if activity is None and not targets_tracked:
             if invocation.get("method") == "item/completed":
                 self._observer_state.forget_collaboration_invocation(item_id)
-            return
-        pane_target = self._pane.locate()
-        if pane_target is None:
             return
         request_event = None
         if activity is not None and not self._observer_state.root_request_context_was_sent(item_id):
@@ -505,10 +514,9 @@ class AgentObserverCoordinator:
         if not isinstance(item, Mapping):
             return
         item_id = str(item.get("id", ""))
-        target_thread_id = str(item.get("agent_thread_id", ""))
-        self._observer_state.complete_activity(item_id, target_thread_id)
+        self._observer_state.complete_activity(item_id)
 
-    def _prune_protocol_terminal_state(
+    def _observe_protocol_work_lifecycle(
         self,
         event: Mapping[str, object] | None,
     ) -> None:
@@ -523,29 +531,114 @@ class AgentObserverCoordinator:
             return
         if method == CODEX_APP_SERVER.turn_completed_method and thread_id == str(self._root_thread_id):
             self._observer_state.remember_parent_user_message(None)
+        if not self._observer_state.knows_agent(thread_id):
+            return
+        turn = params.get("turn")
+        turn_id = turn.get("id") if isinstance(turn, Mapping) else None
+        if not isinstance(turn_id, str) or not turn_id:
+            turn_id = None
+        if method == CODEX_APP_SERVER.turn_started_method:
+            if turn_id is not None:
+                self._observer_state.start_agent_work(thread_id, turn_id)
+                self._publish_agent_work_started(thread_id)
+            return
         inactive = method == CODEX_APP_SERVER.turn_completed_method
         if method == CODEX_APP_SERVER.thread_status_changed_method:
             status = params.get("status")
-            inactive = isinstance(status, Mapping) and status.get("type") != "active"
-        if inactive and self._observer_state.tracks_target(thread_id):
+            if isinstance(status, Mapping) and status.get("type") == "active":
+                self._observer_state.start_agent_work(thread_id)
+                self._publish_agent_work_started(thread_id)
+            inactive = isinstance(status, Mapping) and status.get("type") in {"idle", "notLoaded", "systemError"}
+        if inactive and self._observer_state.finish_agent_work(thread_id, turn_id):
             self._prune_target_thread(thread_id)
 
     def _prune_target_thread(self, target_thread_id: str) -> None:
         self._send_observer_snapshot(self._observer_state.prune_protocol_target(target_thread_id))
+
+    def _publish_agent_work_started(self, target_thread_id: str) -> None:
+        assert self._rodex_sessions_id is not None and self._database_path is not None
+        event = self._observer_state.agent_work_started_event(target_thread_id, str(self._root_thread_id))
+        cursor = self._cursor_reader(self._rodex_sessions_id, self._database_path)
+        event["after_event_id"] = None if cursor is None else str(cursor)
+        self._send_observer_event(event)
+
+    def _reconcile_observer_pane(self, previously_running: int, initial_event: dict[str, object] | None = None) -> None:
+        """The work reducer alone decides automatic visibility; pane mechanics stay in the pipeline."""
+        if (
+            self._observer_state.running_agent_count == previously_running
+            and initial_event is None
+            and not self._pending_pane_close
+        ):
+            return
+        if self._pending_pane_close or (previously_running and not self._observer_state.running_agent_count):
+            # An indeterminate old close may still execute after work restarts.
+            # Finish retiring that exact pane before admitting a new generation.
+            self._pending_pane_close = True
+            self._pane_close_attempts += 1
+            result = self._pane.close()
+            if result.accepted or self._pane.closure_confirmed():
+                self._cancel_pane_close()
+                if self._event_dispatcher is not None:
+                    self._event_dispatcher.discard_pending()
+            else:
+                self._schedule_pane_close_retry()
+                return
+        if self._observer_state.running_agent_count and self._pane.locate() is None:
+            assert self._database_path is not None and self._rodex_sessions_id is not None
+            assert self._rodex_session_id is not None and self._root_thread_id is not None
+            pane = self._pane.create(
+                database_path=self._database_path,
+                rodex_sessions_id=self._rodex_sessions_id,
+                rodex_session_id=self._rodex_session_id,
+                root_thread_id=self._root_thread_id,
+                protocol_event_socket_path=self._protocol_event_socket_path,
+                initial_event=initial_event or {},
+            )
+            if pane is not None:
+                self._send_observer_snapshot(self._observer_state.snapshot())
+
+    def _cancel_pane_close(self) -> None:
+        self._pending_pane_close = False
+        self._pane_close_attempts = 0
+        self._pane_close_generation += 1
+        retry, self._pane_close_retry = self._pane_close_retry, None
+        if retry is not None:
+            retry.cancel()
+
+    def _schedule_pane_close_retry(self) -> None:
+        if self._pane_close_retry is not None or self._pane_close_attempts > len(OBSERVER_PANE_CLOSE_RETRY_DELAYS):
+            return
+        generation = self._pane_close_generation
+
+        def retry() -> None:
+            with self._lifecycle_lock:
+                if self._closed or generation != self._pane_close_generation:
+                    return
+                self._pane_close_retry = None
+                if self._pending_pane_close:
+                    self._reconcile_observer_pane(self._observer_state.running_agent_count)
+
+        timer = Timer(OBSERVER_PANE_CLOSE_RETRY_DELAYS[self._pane_close_attempts - 1], retry)
+        timer.daemon = True
+        self._pane_close_retry = timer
+        timer.start()
 
     def reset_after_disconnect(self) -> None:
         """Prune all primary-connection correlation state after its producer exits."""
         with self._lifecycle_lock:
             if self._closed:
                 return
+            previously_running = self._observer_state.running_agent_count
             self._send_observer_snapshot(self._observer_state.reset_epoch())
+            self._reconcile_observer_pane(previously_running)
 
     def close(self) -> None:
-        """Release only in-process state; tmux owns the persistent presentation pane."""
+        """Release host state; the runtime shutdown owns its remaining presentation process."""
         with self._lifecycle_lock:
             if self._closed:
                 return
             self._closed = True
+            self._cancel_pane_close()
             if self._event_dispatcher is not None:
                 self._event_dispatcher.close()
             self._observer_state.discard_producer_state()
@@ -581,7 +674,14 @@ class AgentObserverCoordinator:
     def _deliver_observer_message(self, text: str, pane_id: str | None) -> None:
         _send_observer_display_message(
             observer_control_socket_path(self._protocol_event_socket_path),
-            {"schema": OBSERVER_SCHEMA, "kind": "display_message", "text": text, "pane_id": pane_id},
+            {
+                "schema": OBSERVER_SCHEMA,
+                "kind": "display_message",
+                "text": text,
+                "pane_id": pane_id,
+                "runtime_id": str(self._peer_identity.runtime_id),
+                "tmux_server_id": self._peer_identity.tmux_server_id,
+            },
         )
 
     def _publish_current_observer_snapshot(self) -> None:
@@ -691,7 +791,27 @@ class AgentObserverView:
             self._observer_transport_epoch = delta.epoch
         for target_thread_id in delta.removed_target_thread_ids:
             self._prune_terminal_target(target_thread_id)
+        for event in delta.upserted_events:
+            if event.get("kind") == "agent_work_started":
+                self._accept_agent_work_started(event)
         return (*delta.tombstone_events, *delta.upserted_events)
+
+    def _accept_agent_work_started(self, event: Mapping[str, object]) -> None:
+        """Restore current target/turn tracking without manufacturing a collaboration invocation."""
+        if event.get("schema") != OBSERVER_SCHEMA or event.get("thread_id") != self._root_thread_id:
+            return
+        target, path, turn_id = event.get("target_thread_id"), event.get("agent_path"), event.get("turn_id")
+        if not isinstance(target, str) or not isinstance(path, str):
+            return
+        cursor = event.get("after_event_id")
+        if not self.monitoring and isinstance(cursor, str):
+            self._after_event_id = uuid.UUID(cursor)
+        self._target_states[target] = "active"
+        self._target_paths[target] = path
+        self._terminal_drain_complete = False
+        self._terminal_cleanup_targets.discard(target)
+        if isinstance(turn_id, str) and turn_id:
+            self._bind_turn(target, turn_id)
 
     def _reset_connection_epoch_presentation(self) -> None:
         """Discard only presentation facts derived from the old primary connection."""
@@ -1589,6 +1709,7 @@ def _observer_control_receiver(
     events: queue.Queue[dict[str, object]],
     stop: Event,
     *,
+    peer_identity: RuntimePeerIdentity,
     monotonic: Callable[[], float] = time.monotonic,
     expected_pane_id: str | None = None,
 ) -> None:
@@ -1623,7 +1744,13 @@ def _observer_control_receiver(
                 continue
             if isinstance(event, dict) and event.get("schema") == OBSERVER_SCHEMA:
                 matches_pane = expected_pane_id is None or event.get("pane_id") == expected_pane_id
-                accepted = event.get("kind") not in {"display_message", "observer_state_snapshot"} or matches_pane
+                matches_runtime = (
+                    event.get("runtime_id") == str(peer_identity.runtime_id)
+                    and event.get("tmux_server_id") == peer_identity.tmux_server_id
+                )
+                accepted = matches_runtime and (
+                    event.get("kind") not in {"display_message", "observer_state_snapshot"} or matches_pane
+                )
                 if accepted:
                     events.put(event)
                 if event.get("kind") == "display_message":
@@ -1656,18 +1783,24 @@ def _receive_exactly(
 def _observer_runtime_liveness(
     protocol_event_socket_path: Path,
     events: queue.Queue[dict[str, object]],
+    *,
+    peer_identity: RuntimePeerIdentity,
 ) -> None:
     """Keep the pane tied to its runtime; live content arrives on the control socket."""
     try:
-        with unix_connect(
-            str(protocol_event_socket_path),
+        with verified_runtime_connection(
+            unix_connect,
+            protocol_event_socket_path,
+            peer_identity=peer_identity,
             uri=f"ws://localhost{AGENT_OBSERVER_EVENT_STREAM_PATH}",
             compression=None,
             max_size=None,
+            open_timeout=1,
+            close_timeout=1,
         ) as connection:
             while True:
                 connection.recv()
-    except (ConnectionClosed, OSError):
+    except (ConnectionClosed, OSError, RuntimePeerIdentityError):
         pass
     finally:
         events.put({"schema": OBSERVER_SCHEMA, "kind": "runtime_closed"})
@@ -1719,12 +1852,18 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--rodex-session-id", required=True)
     parser.add_argument("--root-thread-id", required=True, type=uuid.UUID)
     parser.add_argument("--protocol-event-socket", required=True, type=Path)
+    parser.add_argument("--runtime-id", required=True)
+    parser.add_argument("--tmux-server-id", required=True)
     parser.add_argument("--initial-event", required=True)
     return parser
 
 
 def main(arguments: list[str] | None = None) -> int:
     namespace = _parser().parse_args(arguments)
+    try:
+        peer_identity = RuntimePeerIdentity(namespace.runtime_id, namespace.tmux_server_id)
+    except ValueError as error:
+        _parser().error(str(error))
     if namespace.rodex_sessions_id < 1:
         _parser().error("--rodex-sessions-id must be positive")
     if _RODEX_SESSION_ID_PATTERN.fullmatch(namespace.rodex_session_id) is None:
@@ -1740,30 +1879,28 @@ def main(arguments: list[str] | None = None) -> int:
         initial_event=initial_event,
     )
     control_path = observer_control_socket_path(namespace.protocol_event_socket)
-    control_path.unlink(missing_ok=True)
-    controls = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    controls.bind(str(control_path))
-    control_path.chmod(0o600)
-    controls.listen()
+    endpoint = ExclusiveUnixEndpoint(control_path)
+    controls = endpoint.open()
     events: queue.Queue[dict[str, object]] = queue.Queue()
     stop = Event()
     control_thread = Thread(
         target=_observer_control_receiver,
         args=(controls, events, stop),
-        kwargs={"expected_pane_id": os.environ.get("TMUX_PANE")},
+        kwargs={"expected_pane_id": os.environ.get("TMUX_PANE"), "peer_identity": peer_identity},
         name="rodex-agent-observer-control",
         daemon=True,
     )
     liveness_thread = Thread(
         target=_observer_runtime_liveness,
         args=(namespace.protocol_event_socket, events),
+        kwargs={"peer_identity": peer_identity},
         name="rodex-agent-observer-liveness",
         daemon=True,
     )
-    control_thread.start()
-    liveness_thread.start()
     last_transport_overflow_count = 0
     try:
+        control_thread.start()
+        liveness_thread.start()
         _print_lines([*view.header_lines(), "", *view.initial_lines])
         _read_and_render_available_trace(
             view,
@@ -1857,8 +1994,7 @@ def main(arguments: list[str] | None = None) -> int:
             )
     finally:
         stop.set()
-        controls.close()
-        control_path.unlink(missing_ok=True)
+        endpoint.close()
 
 
 if __name__ == "__main__":

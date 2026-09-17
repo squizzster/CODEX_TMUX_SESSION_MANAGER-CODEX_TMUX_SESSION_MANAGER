@@ -15,6 +15,7 @@ from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 from threading import Event, Lock, Thread
+from types import SimpleNamespace
 from typing import BinaryIO, cast
 
 import pytest
@@ -40,6 +41,7 @@ from rodex.runtime import (
     TmuxScrollbackState,
     run_session_host,
 )
+from rodex.runtime_peer import RuntimePeerIdentity
 from rodex.status_animation import FRAME_INTERVAL_SECONDS, status_frames
 from rodex.tmux_session_capability import (
     RODEX_SHARED_TMUX_PROTOCOL,
@@ -64,6 +66,13 @@ from rodex_registry import (
 )
 
 RUNTIME_ID = RodexRuntimeId.parse("0c01ee2ead7240e1")
+PEER_IDENTITY = RuntimePeerIdentity(RUNTIME_ID, "0123456789abcdef0123456789abcdef")
+
+
+def _create_socket_path(path: Path) -> None:
+    """Composition fixtures expose a real socket inode without an App Server."""
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
+        listener.bind(str(path))
 
 
 def _mock_terminal_gateway(monkeypatch: pytest.MonkeyPatch) -> list:
@@ -71,10 +80,21 @@ def _mock_terminal_gateway(monkeypatch: pytest.MonkeyPatch) -> list:
     gateways = []
 
     class FakeGateway:
-        def __init__(self, command, *, pipeline, runtime_identity, registrations, confirm_native_prefix, **options):
+        def __init__(
+            self,
+            command,
+            *,
+            pipeline,
+            runtime_identity,
+            registrations,
+            confirm_native_prefix,
+            presentation_snapshot,
+            **options,
+        ):
             assert pipeline is not None and runtime_identity == str(RUNTIME_ID)
             assert registrations == runtime_module.INPUT_INTERCEPTORS
             assert callable(confirm_native_prefix)
+            assert callable(presentation_snapshot)
             self.process = runtime_module.subprocess.Popen(command, **options)
             self.closed = False
             gateways.append(self)
@@ -211,7 +231,7 @@ def _register_real_tmux_session(
         "set-option",
         "-s",
         "@rodex_shared_tmux_protocol",
-        "rodex-shared-tmux-v2",
+        "rodex-isolated-tmux-v3",
     )
     tmux(
         "set-option",
@@ -229,6 +249,8 @@ def _register_real_tmux_session(
         ("@rodex_codex_session_id", str(capability.codex_session_id)),
     ):
         tmux("set-option", "-t", f"={session_name}:", option, value)
+    tmux("set-option", "-s", "@rodex_server_runtime_id", str(capability.runtime_id))
+    tmux("set-option", "-p", "-t", pane_id, "@rodex_pane_runtime_id", str(capability.runtime_id))
     return LiveTmuxSession(
         socket_path,
         session_name,
@@ -239,6 +261,7 @@ def _register_real_tmux_session(
 class FakeWebSocket:
     def __init__(self, loaded: list[str], *, version: str = "0.151.0") -> None:
         self.sent: list[dict[str, object]] = []
+        self.response = SimpleNamespace(headers=PEER_IDENTITY.headers())
         self.responses = iter(
             [
                 {
@@ -280,6 +303,7 @@ class RecordingConnector:
 class CatalogWebSocket:
     def __init__(self, read_response: dict[str, object]) -> None:
         self.sent: list[dict[str, object]] = []
+        self.socket, self._peer_socket = socket.socketpair()
         self.responses = iter(
             [
                 {
@@ -294,7 +318,8 @@ class CatalogWebSocket:
         return self
 
     def __exit__(self, *args: object) -> None:
-        return None
+        self.socket.close()
+        self._peer_socket.close()
 
     def send(self, message: str) -> None:
         self.sent.append(json.loads(message))
@@ -307,6 +332,7 @@ class CatalogWebSocket:
 class CatalogProcess:
     def __init__(self) -> None:
         self.returncode: int | None = None
+        self.pid = os.getpid()
         self.terminated = False
 
     def poll(self) -> int | None:
@@ -334,7 +360,7 @@ class CatalogProcessSpawner:
         self.calls.append((command, options))
         socket_argument = command[-1]
         assert socket_argument.startswith("unix://")
-        Path(socket_argument.removeprefix("unix://")).touch()
+        _create_socket_path(Path(socket_argument.removeprefix("unix://")))
         return self.process
 
 
@@ -348,7 +374,8 @@ class RuntimeRunner:
         self.calls.append(command)
         self.options.append(options)
         if any("new-session" in argument for argument in command):
-            (self.runtime_root / "app-0123456789abcdef.sock").touch()
+            (self.runtime_root / f"app-{RUNTIME_ID}.sock").touch()
+            (self.runtime_root / f"proxy-{RUNTIME_ID}.sock").touch()
         if (
             command[3:4] == ["display-message"]
             and "@rodex_primary_pane_id" in command[-1]
@@ -389,7 +416,7 @@ def test_observer_uses_distinct_codex_identity_fields_and_no_compression(
     connector = RecordingConnector([codex_session_id])
     launcher = RodexRuntimeLauncher("codex", "tmux", connector=connector)
 
-    assert launcher._list_loaded_codex_threads(tmp_path / "app.sock") == [codex_session_id]
+    assert launcher._list_loaded_codex_threads(tmp_path / "proxy.sock", PEER_IDENTITY) == [codex_session_id]
 
     _, options = connector.calls[0]
     assert options["compression"] is None
@@ -417,7 +444,7 @@ def test_runtime_discovery_rejects_a_noncharacterized_app_server(
     launcher = RodexRuntimeLauncher("codex", "tmux", connector=connector)
 
     with pytest.raises(RodexAppServerVersionError, match=r"live server is 0\.150\.1"):
-        launcher._list_loaded_codex_threads(tmp_path / "app.sock")
+        launcher._list_loaded_codex_threads(tmp_path / "proxy.sock", PEER_IDENTITY)
 
     assert [message["method"] for message in connector.websocket.sent] == ["initialize"]
 
@@ -538,7 +565,7 @@ def test_start_directly_hosts_codex_in_tmux_and_returns_its_session_id(
     )
 
     assert observed_codex_session_id == uuid.UUID(codex_session_id)
-    assert live.tmux_session_name == "rodex-0123456789abcdef"
+    assert live.tmux_session_name == f"rodex-{RUNTIME_ID}"
     new_session_index = next(
         index for index, command in enumerate(runner.calls) if any("new-session" in argument for argument in command)
     )
@@ -546,7 +573,7 @@ def test_start_directly_hosts_codex_in_tmux_and_returns_its_session_id(
     assert new_session[:3] == [
         "/usr/bin/tmux",
         "-S",
-        str(tmp_path / "tmux-shared-v2.sock"),
+        str(tmp_path / "tmux-v3-0c01ee2ead7240e1.sock"),
     ]
     assert new_session[3:7] == ["start-server", ";", "if-shell", "-F"]
     claim = shlex.split(new_session[8])
@@ -560,6 +587,11 @@ def test_start_directly_hosts_codex_in_tmux_and_returns_its_session_id(
         "-s",
         RODEX_SHARED_TMUX_SERVER_ID_OPTION,
         "0123456789abcdef0123456789abcdef",
+        ";",
+        "set-option",
+        "-s",
+        "@rodex_server_runtime_id",
+        str(RUNTIME_ID),
     ]
     assert new_session[9] == "run-shell true"
     assert new_session[11:13] == ["if-shell", "-F"]
@@ -586,7 +618,7 @@ def test_start_directly_hosts_codex_in_tmux_and_returns_its_session_id(
         "-d",
         "-E",
         "-s",
-        "rodex-0123456789abcdef",
+        f"rodex-{RUNTIME_ID}",
         "-c",
         str(tmp_path),
     ]
@@ -595,7 +627,7 @@ def test_start_directly_hosts_codex_in_tmux_and_returns_its_session_id(
     assert creation[25:30] == [
         "set-option",
         "-t",
-        "=rodex-0123456789abcdef:",
+        f"=rodex-{RUNTIME_ID}:",
         "destroy-unattached",
         "off",
     ]
@@ -603,7 +635,7 @@ def test_start_directly_hosts_codex_in_tmux_and_returns_its_session_id(
         "set-option",
         "-p",
         "-t",
-        "=rodex-0123456789abcdef:",
+        f"=rodex-{RUNTIME_ID}:",
         "remain-on-exit",
         "on",
     ]
@@ -636,7 +668,7 @@ def test_start_directly_hosts_codex_in_tmux_and_returns_its_session_id(
         "rodex.session_host",
     ]
     joined_host_command = shlex.join(real_host_command)
-    assert f"--protocol-event-socket {tmp_path / 'events-0123456789abcdef.sock'}" in joined_host_command
+    assert f"--protocol-event-socket {tmp_path / f'events-{RUNTIME_ID}.sock'}" in joined_host_command
     assert "--model example" in joined_host_command
     assert f"--rodex-runtime-id {RUNTIME_ID}" in joined_host_command
     assert f"--rodex-database {tmp_path / 'rodex.sqlite3'}" in joined_host_command
@@ -658,11 +690,11 @@ def test_start_directly_hosts_codex_in_tmux_and_returns_its_session_id(
     for option, value in (
         (
             "@rodex_protocol_proxy_socket_path",
-            str(tmp_path / "proxy-0123456789abcdef.sock"),
+            str(tmp_path / f"proxy-{RUNTIME_ID}.sock"),
         ),
         (
             "@rodex_protocol_event_socket_path",
-            str(tmp_path / "events-0123456789abcdef.sock"),
+            str(tmp_path / f"events-{RUNTIME_ID}.sock"),
         ),
         ("@rodex_codex_session_id", codex_session_id),
         ("@rodex_runtime_id", str(RUNTIME_ID)),
@@ -843,7 +875,7 @@ def test_exact_resume_fails_when_codex_reports_that_session_id_is_not_saved(
     def exited_resume_runner(command: list[str], **_options: object) -> subprocess.CompletedProcess[str]:
         calls.append(command)
         if any("new-session" in argument for argument in command):
-            (tmp_path / "app-0123456789abcdef.log").write_text(
+            (tmp_path / f"app-{RUNTIME_ID}.log").write_text(
                 f"ERROR: No saved session found with ID {codex_session_id}. "
                 "Run `codex resume` without an ID to choose from existing sessions.\n"
             )
@@ -864,7 +896,7 @@ def test_exact_resume_fails_when_codex_reports_that_session_id_is_not_saved(
     monkeypatch.setattr(
         launcher,
         "_resolve_bootstrap_tmux_capability",
-        lambda _runtime: _registered_capability(tmp_path / "tmux-shared-v2.sock").runtime_capability,
+        lambda _runtime: _registered_capability(tmp_path / "tmux-v3-0c01ee2ead7240e1.sock").runtime_capability,
     )
 
     with pytest.raises(RodexCodexSessionNotFoundError) as raised:
@@ -944,7 +976,7 @@ def test_attach_uses_live_stdio_and_escapes_an_existing_tmux_client(
         "tmux",
         runner=runner,
         attach_notice=lambda: attach_events.append("notice") or "Codex update available",
-        tui_notice_publisher=lambda path, message: published_notices.append((path, message)) or True,
+        tui_notice_publisher=lambda path, message, **_identity: published_notices.append((path, message)) or True,
         environment={
             "PATH": "/project-xyz/.venv/bin:/usr/bin",
             "TERM": "xterm-256color",
@@ -957,8 +989,8 @@ def test_attach_uses_live_stdio_and_escapes_an_existing_tmux_client(
         "rodex-one",
         tmp_path / "app.sock",
         tmp_path / "app.log",
-        tmp_path / "proxy.sock",
-        tmp_path / "events.sock",
+        tmp_path / f"proxy-{RUNTIME_ID}.sock",
+        tmp_path / f"events-{RUNTIME_ID}.sock",
         runtime_id=RUNTIME_ID,
     )
     monkeypatch.setattr(
@@ -970,7 +1002,7 @@ def test_attach_uses_live_stdio_and_escapes_an_existing_tmux_client(
     launcher.attach(live)
 
     assert attach_events == ["notice"]
-    assert published_notices == [(tmp_path / "proxy.sock", "Codex update available")]
+    assert published_notices == [(tmp_path / f"proxy-{RUNTIME_ID}.sock", "Codex update available")]
     assert runner.calls[-1][3:8] == [
         "-T",
         RODEX_TMUX_REQUIRED_CLIENT_FEATURES,
@@ -1255,8 +1287,8 @@ def test_tui_notice_delivery_failure_never_blocks_tmux_attachment(
         "rodex-one",
         tmp_path / "app.sock",
         tmp_path / "app.log",
-        tmp_path / "proxy.sock",
-        tmp_path / "events.sock",
+        tmp_path / f"proxy-{RUNTIME_ID}.sock",
+        tmp_path / f"events-{RUNTIME_ID}.sock",
         runtime_id=RUNTIME_ID,
     )
     monkeypatch.setattr(
@@ -1639,6 +1671,7 @@ def test_rename_and_session_ui_initialisation_use_the_real_tmux_session_name(
     assert [command[2] for command in hook_commands] == [
         "client-attached[731]",
         "client-detached[731]",
+        "client-session-changed[731]",
     ]
     assert all("rodex.tmux_sharing_coordinator" in command[-1] for command in hook_commands)
     assert all("rodex.status_animation_admission" not in command[-1] for command in hook_commands)
@@ -1656,22 +1689,10 @@ def test_rename_and_session_ui_initialisation_use_the_real_tmux_session_name(
     assert ctrl_c_owner_claim[2] == "@rodex_shared_tmux_ctrl_c_command"
     shared_ctrl_c_binding = next(command for command in status_actions if command[:3] == ["bind-key", "-n", "C-c"])
     assert shared_ctrl_c_binding[:3] == ["bind-key", "-n", "C-c"]
-    assert shared_ctrl_c_binding[3].startswith("run-shell -b ")
-    assert "/venv/bin/python -m rodex.tmux_shared_ctrl_c" in shared_ctrl_c_binding[3]
-    for option, tmux_format in (
-        ("--tmux-session-id", "#{q:session_id}"),
-        ("--tmux-primary-pane-id", "#{q:@rodex_primary_pane_id}"),
-        ("--expected-runtime-id", "#{q:@rodex_runtime_id}"),
-        ("--expected-rodex-session-id", "#{q:@rodex_session_id}"),
-        ("--expected-registry-id", "#{q:@rodex_registry_id}"),
-        ("--expected-internal-session-id", "#{q:@rodex_sessions_id}"),
-        ("--expected-codex-session-id", "#{q:@rodex_codex_session_id}"),
-        ("--pane-id", "#{q:pane_id}"),
-        ("--client-name", "#{q:client_name}"),
-    ):
-        assert option in shared_ctrl_c_binding[3]
-        assert tmux_format in shared_ctrl_c_binding[3]
-    assert "--attached-count" not in shared_ctrl_c_binding[3]
+    assert shared_ctrl_c_binding[3].startswith("if-shell -F ")
+    assert "detach-client" in shared_ctrl_c_binding[3]
+    assert "run-shell" not in shared_ctrl_c_binding[3]
+    assert str(RUNTIME_ID) in shared_ctrl_c_binding[3]
     ctrl_d_owner_claim = next(
         command for command in status_actions if command[:3] == ["set-option", "-so", "@rodex_shared_tmux_ctrl_d_command"]
     )
@@ -1756,7 +1777,7 @@ def test_fresh_session_host_process_survives_initialization(
     tmux_socket = tmp_path / "tmux.sock"
     tmux_socket.touch()
     ready = tmp_path / "analytics-started"
-    event_socket = tmp_path / "events.sock"
+    event_socket = tmp_path / f"events-{RUNTIME_ID}.sock"
     child_source = """
 import sys
 import uuid
@@ -1769,6 +1790,7 @@ from rodex_registry import RodexRegistryId, RodexRuntimeId, RodexSessionId
 
 database, fake_codex, fake_tmux, tmux_socket, ready, event_socket = map(Path, sys.argv[1:])
 activated = AnalyticsWorkerConfig(
+    tmux_server_id="0123456789abcdef0123456789abcdef",
     rodex_database_path=database,
     codex_sessions_root=database.parent / "sessions",
     rodex_session_id=RodexSessionId(1),
@@ -2634,6 +2656,8 @@ def test_real_tmux_session_replaces_stale_rodex_environment_with_caller_state(
             [tmux_binary, "-S", str(socket_path), "set-option", "-s", option_name, value],
             check=True,
         )
+    stale_socket_path = socket_path
+    socket_path = tmp_path / "owned.sock"
     caller_environment = {
         "HOME": str(tmp_path),
         "PATH": "/usr/bin",
@@ -2770,39 +2794,23 @@ def test_real_tmux_session_replaces_stale_rodex_environment_with_caller_state(
         assert primary_observed["PWD"] == str(tmp_path)
         assert later_observed["PWD"] == str(tmp_path)
         session_virtual_environment = subprocess.run(
-            [
-                tmux_binary,
-                "-S",
-                str(socket_path),
-                "show-environment",
-                "-t",
-                "=caller-environment",
-                "VIRTUAL_ENV",
-            ],
-            check=True,
+            [tmux_binary, "-S", str(socket_path), "show-environment", "-t", "=caller-environment", "VIRTUAL_ENV"],
+            check=False,
             text=True,
             capture_output=True,
-        ).stdout.strip()
-        assert session_virtual_environment == (
-            f"VIRTUAL_ENV={expected_virtual_environment}" if user_virtualenv_is_active else "-VIRTUAL_ENV"
         )
-        assert (
-            subprocess.run(
-                [
-                    tmux_binary,
-                    "-S",
-                    str(socket_path),
-                    "show-environment",
-                    "-t",
-                    "=caller-environment",
-                    "STALE_ONLY",
-                ],
-                check=True,
-                text=True,
-                capture_output=True,
-            ).stdout.strip()
-            == "-STALE_ONLY"
+        if user_virtualenv_is_active:
+            assert session_virtual_environment.returncode == 0
+            assert session_virtual_environment.stdout.strip() == f"VIRTUAL_ENV={expected_virtual_environment}"
+        else:
+            assert session_virtual_environment.returncode == 1
+        stale = subprocess.run(
+            [tmux_binary, "-S", str(socket_path), "show-environment", "-t", "=caller-environment", "STALE_ONLY"],
+            check=False,
+            text=True,
+            capture_output=True,
         )
+        assert stale.returncode == 1
         assert (
             subprocess.run(
                 [
@@ -2881,6 +2889,7 @@ def test_real_tmux_session_replaces_stale_rodex_environment_with_caller_state(
             != 0
         )
     finally:
+        subprocess.run([tmux_binary, "-S", str(stale_socket_path), "kill-server"], check=False, capture_output=True)
         subprocess.run(
             [tmux_binary, "-S", str(socket_path), "kill-server"],
             check=False,
@@ -2895,7 +2904,6 @@ def test_real_concurrent_first_sessions_keep_distinct_caller_environments(
     tmux_binary = shutil.which("tmux")
     if tmux_binary is None:
         pytest.skip("tmux is not installed")
-    socket_path = tmp_path / "tmux.sock"
     start_gate = Event()
     failures: list[BaseException] = []
     probes = {
@@ -2923,7 +2931,7 @@ def test_real_concurrent_first_sessions_keep_distinct_caller_environments(
                 environment=caller_environment,
             )._start_tmux_session(
                 LiveTmuxSession(
-                    socket_path,
+                    tmp_path / f"{session_name}.sock",
                     session_name,
                     runtime_id=runtime_id,
                 ),
@@ -2989,14 +2997,14 @@ def test_real_concurrent_first_sessions_keep_distinct_caller_environments(
             "TMUX_PANE": second["TMUX_PANE"],
         }
         assert second["TMUX_PANE"].startswith("%")
-        assert first["TMUX_PANE"] != second["TMUX_PANE"]
+        assert first["TMUX_PANE"] == second["TMUX_PANE"]
     finally:
-        subprocess.run(
-            [tmux_binary, "-S", str(socket_path), "kill-server"],
-            check=False,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
+        for name in probes:
+            subprocess.run(
+                [tmux_binary, "-S", str(tmp_path / f"{name}.sock"), "kill-server"],
+                check=False,
+                capture_output=True,
+            )
 
 
 def test_real_tmux_session_preserves_scrollback_with_mouse_disabled(
@@ -3010,6 +3018,7 @@ def test_real_tmux_session_preserves_scrollback_with_mouse_disabled(
         socket_path,
         "rodex-scrollback",
         runtime_id=RUNTIME_ID,
+        creation_server_id="0123456789abcdef0123456789abcdef",
     )
     output_script = tmp_path / "emit-scrollback.sh"
     output_script.write_text(
@@ -3085,8 +3094,8 @@ def test_real_tmux_mouse_identity_survives_rename_and_old_name_reuse(
         "alpha",
         tmp_path / "app.sock",
         tmp_path / "app.log",
-        tmp_path / "proxy.sock",
-        tmp_path / "events.sock",
+        tmp_path / f"proxy-{RUNTIME_ID}.sock",
+        tmp_path / f"events-{RUNTIME_ID}.sock",
         runtime_id=RUNTIME_ID,
     )
     launcher = RodexRuntimeLauncher("codex", tmux_binary)
@@ -3130,6 +3139,24 @@ def test_real_tmux_mouse_identity_survives_rename_and_old_name_reuse(
         codex_session_id = uuid.UUID("01a00654-f2bc-7a30-834a-a5f886a65f82")
         rodex_session_id = RodexSessionId.parse("1111111111111111")
         registry_id = RodexRegistryId.parse("2222222222222222")
+        subprocess.run(
+            [tmux_binary, "-S", str(socket_path), "set-option", "-s", "@rodex_server_runtime_id", str(RUNTIME_ID)],
+            check=True,
+        )
+        subprocess.run(
+            [
+                tmux_binary,
+                "-S",
+                str(socket_path),
+                "set-option",
+                "-p",
+                "-t",
+                primary_pane_id,
+                "@rodex_pane_runtime_id",
+                str(RUNTIME_ID),
+            ],
+            check=True,
+        )
         launcher.publish_runtime_control(
             original,
             codex_session_id,
@@ -3173,8 +3200,8 @@ def test_real_tmux_survives_rename_and_status_configuration(tmp_path: Path) -> N
         "rodex-integration-token",
         tmp_path / "app.sock",
         tmp_path / "app.log",
-        tmp_path / "proxy.sock",
-        tmp_path / "events.sock",
+        tmp_path / f"proxy-{RUNTIME_ID}.sock",
+        tmp_path / f"events-{RUNTIME_ID}.sock",
         runtime_id=RUNTIME_ID,
     )
     launcher = RodexRuntimeLauncher("codex", tmux_binary)
@@ -3387,6 +3414,24 @@ def test_real_tmux_survives_rename_and_status_configuration(tmp_path: Path) -> N
         )
         rodex_session_id = RodexSessionId.parse("1111111111111111")
         registry_id = RodexRegistryId.parse("2222222222222222")
+        subprocess.run(
+            [tmux_binary, "-S", str(socket_path), "set-option", "-s", "@rodex_server_runtime_id", str(RUNTIME_ID)],
+            check=True,
+        )
+        subprocess.run(
+            [
+                tmux_binary,
+                "-S",
+                str(socket_path),
+                "set-option",
+                "-p",
+                "-t",
+                primary_pane_id,
+                "@rodex_pane_runtime_id",
+                str(RUNTIME_ID),
+            ],
+            check=True,
+        )
         launcher.publish_runtime_control(
             original,
             codex_session_id,
@@ -3452,10 +3497,11 @@ def test_real_tmux_survives_rename_and_status_configuration(tmp_path: Path) -> N
             text=True,
             capture_output=True,
         )
-        assert "rodex.tmux_shared_ctrl_c" in ctrl_c_binding.stdout
+        assert "detach-client" in ctrl_c_binding.stdout
+        assert "run-shell -b" not in ctrl_c_binding.stdout
         discovered = launcher.discover_runtime_control(renamed)
-        assert discovered.protocol_proxy_socket_path == tmp_path / "proxy.sock"
-        assert discovered.protocol_event_socket_path == tmp_path / "events.sock"
+        assert discovered.protocol_proxy_socket_path == tmp_path / f"proxy-{RUNTIME_ID}.sock"
+        assert discovered.protocol_event_socket_path == tmp_path / f"events-{RUNTIME_ID}.sock"
         assert discovered.codex_session_id == codex_session_id
         shown_status = subprocess.run(
             [
@@ -3655,12 +3701,13 @@ def test_runtime_path_keepalive_rejects_path_substitution(tmp_path: Path) -> Non
     runtime_path.touch()
     keepalive = runtime_module._RuntimePathKeepalive((runtime_path,))
     keepalive.start()
-    keepalive.close()
-    runtime_path.unlink()
-    runtime_path.touch()
-
-    with pytest.raises(RodexRuntimeError, match="identity changed"):
-        keepalive._refresh()
+    try:
+        runtime_path.unlink()
+        runtime_path.touch()
+        with pytest.raises(RodexRuntimeError, match="identity changed"):
+            keepalive._refresh()
+    finally:
+        keepalive.close()
 
 
 def test_runtime_root_rejects_a_precreated_symlink(tmp_path: Path) -> None:
@@ -3709,8 +3756,8 @@ def test_runtime_control_publishes_pending_then_registered_identity(
         "rodex-token",
         tmp_path / "app.sock",
         tmp_path / "app.log",
-        tmp_path / "proxy.sock",
-        tmp_path / "events.sock",
+        tmp_path / f"proxy-{RUNTIME_ID}.sock",
+        tmp_path / f"events-{RUNTIME_ID}.sock",
         runtime_id=RUNTIME_ID,
     )
     codex_session_id = uuid.uuid4()
@@ -3727,8 +3774,8 @@ def test_runtime_control_publishes_pending_then_registered_identity(
         launcher,
         "discover_runtime_control",
         lambda _runtime: LiveRodexControl(
-            tmp_path / "proxy.sock",
-            tmp_path / "events.sock",
+            tmp_path / f"proxy-{RUNTIME_ID}.sock",
+            tmp_path / f"events-{RUNTIME_ID}.sock",
             codex_session_id,
             rodex_session_id,
             registry_id,
@@ -3814,8 +3861,8 @@ def test_runtime_discovery_reads_the_complete_current_identity_tuple(
             capability.tmux_server_id,
             capability.tmux_session_id,
             capability.tmux_primary_pane_id,
-            str(tmp_path / "proxy.sock"),
-            str(tmp_path / "events.sock"),
+            str(tmp_path / f"proxy-{RUNTIME_ID}.sock"),
+            str(tmp_path / f"events-{RUNTIME_ID}.sock"),
             str(capability.codex_session_id),
             str(capability.rodex_session_id),
             str(capability.registry_id),
@@ -3836,8 +3883,8 @@ def test_runtime_discovery_reads_the_complete_current_identity_tuple(
     control = launcher.discover_runtime_control(LiveTmuxSession(tmp_path / "tmux.sock", "automatic-beluga"))
 
     assert control == LiveRodexControl(
-        tmp_path / "proxy.sock",
-        tmp_path / "events.sock",
+        tmp_path / f"proxy-{RUNTIME_ID}.sock",
+        tmp_path / f"events-{RUNTIME_ID}.sock",
         uuid.UUID("01a00654-f2bc-7a30-834a-a5f886a65f82"),
         RodexSessionId.parse("0123456789abcdef"),
         RodexRegistryId.parse("06179a3581264d53"),
@@ -3845,7 +3892,9 @@ def test_runtime_discovery_reads_the_complete_current_identity_tuple(
         RUNTIME_ID,
         capability,
     )
-    assert len(calls) == 1
+    assert len(calls) == 2
+    assert calls[1][3:7] == ["if-shell", "-t", "%9", "-F"]
+    assert calls[1][-1] == "run-shell false"
     assert calls[0][3:8] == [
         "display-message",
         "-p",
@@ -3957,8 +4006,8 @@ def test_runtime_discovery_rejects_a_noncanonical_runtime_id(
             "0123456789abcdef0123456789abcdef",
             "$7",
             "%9",
-            str(tmp_path / "proxy.sock"),
-            str(tmp_path / "events.sock"),
+            str(tmp_path / f"proxy-{RUNTIME_ID}.sock"),
+            str(tmp_path / f"events-{RUNTIME_ID}.sock"),
             "01a00654-f2bc-7a30-834a-a5f886a65f82",
             "1111111111111111",
             "2222222222222222",
@@ -3991,8 +4040,8 @@ def test_runtime_discovery_rejects_a_noncanonical_session_id_marker(
             "0123456789abcdef0123456789abcdef",
             "$7",
             "%9",
-            str(tmp_path / "proxy.sock"),
-            str(tmp_path / "events.sock"),
+            str(tmp_path / f"proxy-{RUNTIME_ID}.sock"),
+            str(tmp_path / f"events-{RUNTIME_ID}.sock"),
             "01a00654-f2bc-7a30-834a-a5f886a65f82",
             invalid_session_id,
             "06179a3581264d53",
@@ -4046,8 +4095,9 @@ def test_registered_analytics_config_binds_the_committed_identity_once(
     codex_session_id = uuid.UUID("01a00654-f2bc-7a30-834a-a5f886a65f82")
     rodex_session_id = RodexSessionId.parse("0123456789abcdef")
     registry_id = RodexRegistryId.parse("06179a3581264d53")
-    event_socket = tmp_path / "events.sock"
+    event_socket = tmp_path / f"events-{RUNTIME_ID}.sock"
     pending = AnalyticsWorkerConfig(
+        tmux_server_id="0123456789abcdef0123456789abcdef",
         rodex_database_path=tmp_path / "rodex.sqlite3",
         codex_sessions_root=tmp_path / "sessions",
         rodex_session_id=rodex_session_id,
@@ -4107,9 +4157,9 @@ def test_runtime_path_keepalive_reports_a_periodic_refresh_failure(
 
     def fail_after_the_initial_refresh(path: Path, times: object, *, follow_symlinks: bool) -> None:
         nonlocal refresh_calls
-        assert path == runtime_path
+        assert Path(path).resolve() == runtime_path
         assert times is None
-        assert follow_symlinks is False
+        assert follow_symlinks is True
         refresh_calls += 1
         if refresh_calls > 1:
             raise FileNotFoundError(2, "missing live runtime path", path)
@@ -4149,6 +4199,7 @@ def test_runtime_path_keepalives_share_runtime_paths_independently(
 
     def record_refresh(path: Path, times: object, *, follow_symlinks: bool) -> None:
         nonlocal private_b_target
+        path = Path(path).resolve()
         real_utime(path, times, follow_symlinks=follow_symlinks)
         with refresh_counts_lock:
             refresh_counts[path] = refresh_counts.get(path, 0) + 1
@@ -4203,8 +4254,8 @@ def test_session_host_skips_updater_and_connects_tui_through_protocol_proxy(
     gateways = _mock_terminal_gateway(monkeypatch)
     initialise_rodex_database(tmp_path / "rodex.sqlite3")
     app_socket = tmp_path / "app.sock"
-    proxy_socket = tmp_path / "proxy.sock"
-    event_socket = tmp_path / "events.sock"
+    proxy_socket = tmp_path / f"proxy-{RUNTIME_ID}.sock"
+    event_socket = tmp_path / f"events-{RUNTIME_ID}.sock"
     tmux_socket = tmp_path / "tmux.sock"
     tui_commands: list[list[str]] = []
     tui_options: list[dict[str, object]] = []
@@ -4263,7 +4314,7 @@ def test_session_host_skips_updater_and_connects_tui_through_protocol_proxy(
             proxy_lifecycle.append("close")
 
     class FakeEventTap:
-        def __init__(self, path: Path) -> None:
+        def __init__(self, path: Path, *, peer_identity: RuntimePeerIdentity) -> None:
             assert path == event_socket
 
         def start(self) -> None:
@@ -4357,7 +4408,7 @@ def test_session_host_skips_updater_and_connects_tui_through_protocol_proxy(
     monkeypatch.setattr(
         runtime_module,
         "_wait_for_app_server_socket",
-        lambda *_args: app_socket.touch(),
+        lambda *_args: _create_socket_path(app_socket),
     )
     monkeypatch.setattr(runtime_module, "TmuxToolCallStatus", FakeStatus)
     monkeypatch.setattr(runtime_module, "TmuxContextStatus", FakeContextStatus)
@@ -4409,6 +4460,7 @@ def test_session_host_skips_updater_and_connects_tui_through_protocol_proxy(
                 runtime_id=RUNTIME_ID,
                 codex_arguments=tuple(codex_arguments),
                 analytics=AnalyticsWorkerConfig(
+                    tmux_server_id="0123456789abcdef0123456789abcdef",
                     rodex_database_path=tmp_path / "rodex.sqlite3",
                     codex_sessions_root=tmp_path / "sessions",
                     rodex_session_id=RodexSessionId(1),
@@ -4490,7 +4542,7 @@ def test_session_host_skips_updater_and_connects_tui_through_protocol_proxy(
         captured_stderr = tui_options[0].get("stderr")
         assert captured_stderr is not None
         assert cast(BinaryIO, captured_stderr).closed
-        assert not (tmp_path / "app.log").exists()
+        assert (tmp_path / "app.log").read_text() == ""
     else:
         assert set(tui_options[0]) == {"env"}
 
@@ -4547,7 +4599,7 @@ def test_session_host_retries_exact_resume_during_active_writer_handoff(
             assert "Context: --" in rendered_status
 
     class FakeEventTap:
-        def __init__(self, _path: Path) -> None:
+        def __init__(self, _path: Path, *, peer_identity: RuntimePeerIdentity) -> None:
             return None
 
         def start(self) -> None:
@@ -4588,7 +4640,7 @@ def test_session_host_retries_exact_resume_during_active_writer_handoff(
     monkeypatch.setattr(
         runtime_module,
         "_wait_for_app_server_socket",
-        lambda *_args: app_socket.touch(),
+        lambda *_args: _create_socket_path(app_socket),
     )
     monkeypatch.setattr(runtime_module, "TmuxToolCallStatus", FakeStatus)
     monkeypatch.setattr(runtime_module, "TmuxContextStatus", FakeContextStatus)
@@ -4621,19 +4673,20 @@ def test_session_host_retries_exact_resume_during_active_writer_handoff(
                 codex_binary="/usr/bin/codex",
                 app_server_socket_path=app_socket,
                 app_server_log_path=tmp_path / "app.log",
-                protocol_proxy_socket_path=tmp_path / "proxy.sock",
-                protocol_event_socket_path=tmp_path / "events.sock",
+                protocol_proxy_socket_path=tmp_path / f"proxy-{RUNTIME_ID}.sock",
+                protocol_event_socket_path=tmp_path / f"events-{RUNTIME_ID}.sock",
                 tmux_binary="/usr/bin/tmux",
                 tmux_server_socket_path=tmp_path / "tmux.sock",
                 runtime_id=RUNTIME_ID,
                 codex_arguments=("resume", str(requested_codex_session_id)),
                 analytics=AnalyticsWorkerConfig(
+                    tmux_server_id="0123456789abcdef0123456789abcdef",
                     rodex_database_path=tmp_path / "rodex.sqlite3",
                     codex_sessions_root=tmp_path / "sessions",
                     rodex_session_id=RodexSessionId(1),
                     rodex_registry_id=RodexRegistryId(1),
                     runtime_id=RUNTIME_ID,
-                    protocol_event_socket_path=tmp_path / "events.sock",
+                    protocol_event_socket_path=tmp_path / f"events-{RUNTIME_ID}.sock",
                 ),
             )
         )
@@ -4729,7 +4782,7 @@ def test_session_host_terminates_the_tui_when_runtime_keepalive_fails(
             lifecycle.append("proxy-close")
 
     class FakeEventTap:
-        def __init__(self, path: Path) -> None:
+        def __init__(self, path: Path, *, peer_identity: RuntimePeerIdentity) -> None:
             return None
 
         def start(self) -> None:
@@ -4771,7 +4824,7 @@ def test_session_host_terminates_the_tui_when_runtime_keepalive_fails(
     monkeypatch.setattr(
         runtime_module,
         "_wait_for_app_server_socket",
-        lambda *_args: (tmp_path / "app.sock").touch(),
+        lambda *_args: _create_socket_path(tmp_path / "app.sock"),
     )
     monkeypatch.setattr(runtime_module, "TmuxToolCallStatus", FakeStatus)
     monkeypatch.setattr(runtime_module, "TmuxContextStatus", FakeContextStatus)
@@ -4798,18 +4851,19 @@ def test_session_host_terminates_the_tui_when_runtime_keepalive_fails(
                 codex_binary="/usr/bin/codex",
                 app_server_socket_path=tmp_path / "app.sock",
                 app_server_log_path=tmp_path / "app.log",
-                protocol_proxy_socket_path=tmp_path / "proxy.sock",
-                protocol_event_socket_path=tmp_path / "events.sock",
+                protocol_proxy_socket_path=tmp_path / f"proxy-{RUNTIME_ID}.sock",
+                protocol_event_socket_path=tmp_path / f"events-{RUNTIME_ID}.sock",
                 tmux_binary="/usr/bin/tmux",
                 tmux_server_socket_path=tmp_path / "tmux.sock",
                 runtime_id=RUNTIME_ID,
                 analytics=AnalyticsWorkerConfig(
+                    tmux_server_id="0123456789abcdef0123456789abcdef",
                     rodex_database_path=tmp_path / "rodex.sqlite3",
                     codex_sessions_root=tmp_path / "sessions",
                     rodex_session_id=RodexSessionId(1),
                     rodex_registry_id=RodexRegistryId(1),
                     runtime_id=RUNTIME_ID,
-                    protocol_event_socket_path=tmp_path / "events.sock",
+                    protocol_event_socket_path=tmp_path / f"events-{RUNTIME_ID}.sock",
                 ),
             )
         )

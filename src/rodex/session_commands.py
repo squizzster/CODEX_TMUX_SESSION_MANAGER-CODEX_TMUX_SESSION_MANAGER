@@ -10,6 +10,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from rodex_registry import (
+    RodexRuntimeRegistrationRejectedError,
     RodexSessionError,
     list_rodex_session_runtimes_for_a_user,
     lookup_owned_rodex_sessions_id_from_a_cool_name,
@@ -45,7 +46,7 @@ from .runtime import (
     LiveTmuxSession,
     RodexRuntimeError,
     RodexRuntimeLauncher,
-    default_tmux_server_socket_path,
+    current_tmux_server_socket_paths,
 )
 from .session_read_pipeline import LiveSessionReadPipeline
 from .session_tail import follow_session_tail, parse_session_tail_request
@@ -328,14 +329,13 @@ def _print_running_sessions(
     running = []
     identity_failures: list[tuple[str, str]] = []
     registered_endpoints: set[tuple[Path, str]] = set()
-    sockets = {default_tmux_server_socket_path()}
+    failed_sockets: set[Path] = set()
+    sockets = set(current_tmux_server_socket_paths())
     for runtime in persisted:
         socket_path = Path(runtime.tmux_server_socket_path)
         sockets.add(socket_path)
         registered_endpoints.add((socket_path, runtime.tmux_session_name))
         live = LiveTmuxSession(socket_path, runtime.tmux_session_name)
-        if not launcher.session_exists(live):
-            continue
         expected_rodex_session_id = lookup_rodex_session_id_from_a_rodex_sessions_id(
             runtime.rodex_sessions_id, database_path
         )
@@ -344,6 +344,8 @@ def _print_running_sessions(
             continue
         assert registry_id is not None
         try:
+            if not launcher.session_exists(live):
+                continue
             verify_live_runtime_identity(
                 launcher,
                 live,
@@ -353,8 +355,9 @@ def _print_running_sessions(
                 expected_registry_id=registry_id,
                 expected_codex_session_id=runtime.codex_session_id,
             )
-        except (RodexLaunchError, RodexRuntimeError) as error:
+        except (RodexLaunchError, RodexRuntimeError, RodexRuntimeRegistrationRejectedError) as error:
             identity_failures.append((runtime.display_name, str(error)))
+            failed_sockets.add(socket_path)
             continue
         running.append(runtime)
 
@@ -362,7 +365,13 @@ def _print_running_sessions(
     for socket_path in sorted(sockets, key=str):
         if not socket_path.exists():
             continue
-        for name in launcher.list_session_names(socket_path):
+        try:
+            names = launcher.list_session_names(socket_path)
+        except RodexRuntimeError as error:
+            if socket_path not in failed_sockets:
+                identity_failures.append((str(socket_path), str(error)))
+            continue
+        for name in names:
             endpoint = (socket_path, name)
             if endpoint not in registered_endpoints:
                 unregistered.append(endpoint)

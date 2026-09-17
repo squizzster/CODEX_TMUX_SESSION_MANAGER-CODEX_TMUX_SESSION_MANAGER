@@ -27,6 +27,7 @@ from rodex_registry import (
     create_a_rodex_session,
     generate_an_unregistered_rodex_session_id_candidate,
     list_rodex_session_codex_threads,
+    lookup_rodex_runtime_instance,
     parse_session_statistics_snapshot,
     publish_rodex_session_statistics,
     read_rodex_analytics_checkpoint,
@@ -243,7 +244,7 @@ def _publish(
         database,
         expected_current_codex_session_id=expected_codex_session_id,
         based_on_statistics_publication_sequence=based_on,
-        statistics_projection_schema_version="rodex-statistics-v7",
+        statistics_projection_schema_version="rodex-statistics-v8",
         calculated_at_utc="2026-08-16T12:00:00Z",
         coverage_state="complete",
         statistics_projection=replace(
@@ -557,7 +558,7 @@ def test_source_id_groups_subagent_lifecycle_and_resource_totals(tmp_path: Path)
         database,
         expected_current_codex_session_id=CODEX_SESSION_ID,
         based_on_statistics_publication_sequence=None,
-        statistics_projection_schema_version="rodex-statistics-v7",
+        statistics_projection_schema_version="rodex-statistics-v8",
         calculated_at_utc="2026-08-16T12:02:00Z",
         coverage_state="complete",
         statistics_projection=projection,
@@ -632,7 +633,7 @@ def test_source_id_groups_subagent_lifecycle_and_resource_totals(tmp_path: Path)
             database,
             expected_current_codex_session_id=CODEX_SESSION_ID,
             based_on_statistics_publication_sequence=1,
-            statistics_projection_schema_version="rodex-statistics-v7",
+            statistics_projection_schema_version="rodex-statistics-v8",
             calculated_at_utc="2026-08-16T12:03:00Z",
             coverage_state="complete",
             statistics_projection=replace(_projection((_turn("root"),)), analyzer_source_count=1),
@@ -674,7 +675,7 @@ def test_exact_spawning_turn_is_derived_from_model_tools_and_spawn_relation(
         database,
         expected_current_codex_session_id=CODEX_SESSION_ID,
         based_on_statistics_publication_sequence=None,
-        statistics_projection_schema_version="rodex-statistics-v7",
+        statistics_projection_schema_version="rodex-statistics-v8",
         calculated_at_utc="2026-08-16T12:02:00Z",
         coverage_state="complete",
         statistics_projection=projection,
@@ -906,6 +907,7 @@ def test_recovery_model_and_effort_counts_use_only_the_current_thread_tree(tmp_p
         database,
         codex_session_id=REPLACEMENT_CODEX_SESSION_ID,
         runtime_id=RodexRuntimeId.generate(),
+        expected_previous_runtime_id=lookup_rodex_runtime_instance(1, database).runtime_id,
     )
     current_projection = _projection(current_turns)
     current_projection = replace(
@@ -984,6 +986,7 @@ def test_unanalyzed_source_is_an_atomic_conflict(tmp_path: Path) -> None:
         database,
         codex_session_id=REPLACEMENT_CODEX_SESSION_ID,
         runtime_id=RodexRuntimeId.generate(),
+        expected_previous_runtime_id=None,
     )
     with pytest.raises(RodexSessionStatisticsConflictError, match="outside"):
         _publish(
@@ -1080,6 +1083,7 @@ def test_stale_codex_session_id_and_publication_sequence_fences_preserve_rows(
         database,
         codex_session_id=REPLACEMENT_CODEX_SESSION_ID,
         runtime_id=RodexRuntimeId.generate(),
+        expected_previous_runtime_id=None,
     )
     with pytest.raises(RodexSessionStatisticsConflictError, match="Codex session ID"):
         _publish(database, tmp_path, based_on=first.statistics_publication_sequence)
@@ -1251,6 +1255,7 @@ def test_historical_source_cannot_move_to_another_lineage(tmp_path: Path) -> Non
         database,
         codex_session_id=REPLACEMENT_CODEX_SESSION_ID,
         runtime_id=RodexRuntimeId.generate(),
+        expected_previous_runtime_id=None,
     )
     with pytest.raises(RodexSessionError, match="already belongs"):
         create_a_rodex_session(database, codex_session_id=CODEX_SESSION_ID)

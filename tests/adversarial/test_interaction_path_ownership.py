@@ -191,7 +191,6 @@ def test_all_subprocess_entrypoints_are_classified():
         "rodex/environment_exec.py",
         "rodex/terminal_exec.py",
         "rodex/tmux_sharing_coordinator.py",
-        "rodex/tmux_shared_ctrl_c.py",
         "rodex/status_animation_admission.py",
     }
 

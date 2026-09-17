@@ -8,6 +8,7 @@ from pathlib import Path
 from threading import Event, Thread, get_ident
 
 import pytest
+from runtime_peer_fixtures import TEST_PEER, LiveTestProcess
 
 from rodex import protocol_proxy as protocol_proxy_module
 from rodex.protocol_proxy import (
@@ -133,6 +134,8 @@ def test_round1_primary_disconnect_immediately_resets_compaction(
         tmp_path / "app.sock",
         ToolCallCounter(lambda _count: None),
         on_primary_disconnect=reset_compaction,
+        peer_identity=TEST_PEER,
+        app_server_process=LiveTestProcess(),
     )
     connection = object()
     assert proxy._claim_primary_connection(connection)
@@ -170,6 +173,8 @@ def test_round1_primary_disconnect_replaces_thread_and_rollout_follower(
         tmp_path / "app.sock",
         ToolCallCounter(lambda _count: None),
         on_primary_disconnect=observer.reset_after_disconnect,
+        peer_identity=TEST_PEER,
+        app_server_process=LiveTestProcess(),
     )
     old_connection = object()
     new_connection = object()
@@ -502,6 +507,8 @@ def test_round1_primary_reset_finishes_before_replacement_admission(
         tmp_path / "app.sock",
         ToolCallCounter(lambda _count: None),
         on_primary_disconnect=reset_connection_state,
+        peer_identity=TEST_PEER,
+        app_server_process=LiveTestProcess(),
     )
     old_connection = object()
     new_connection = object()

@@ -30,6 +30,8 @@ def _session_host_arguments(rodex_session_id: str) -> list[str]:
         "/usr/bin/tmux",
         "--tmux-server-socket",
         "/tmp/tmux.sock",
+        "--tmux-server-id",
+        "0123456789abcdef0123456789abcdef",
         "--rodex-database",
         "/tmp/rodex.sqlite3",
         "--codex-sessions-root",
@@ -54,6 +56,7 @@ def test_session_host_preserves_a_leading_zero_session_id_as_a_domain_value() ->
 
 def test_analytics_worker_command_preserves_the_exact_string_wire_form() -> None:
     config = AnalyticsWorkerConfig(
+        tmux_server_id="0123456789abcdef0123456789abcdef",
         rodex_database_path=Path("/tmp/rodex.sqlite3"),
         codex_sessions_root=Path("/tmp/sessions"),
         rodex_session_id=LEADING_ZERO_SESSION_ID,
@@ -71,6 +74,7 @@ def test_analytics_worker_command_preserves_the_exact_string_wire_form() -> None
 
 def test_process_configs_own_round_trippable_wire_contracts() -> None:
     analytics = AnalyticsWorkerConfig(
+        tmux_server_id="0123456789abcdef0123456789abcdef",
         rodex_database_path=Path("/tmp/rodex database.sqlite3"),
         codex_sessions_root=Path("/tmp/codex sessions"),
         rodex_session_id=LEADING_ZERO_SESSION_ID,

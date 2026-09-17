@@ -55,16 +55,17 @@ Confirm that the Codex TUI renders and note the attached Rodex name. Press `Ctrl
 detach, then run `rodex NAME` to reopen that same live runtime. Help and roster output
 alone do not prove startup. From the project root, the automated release gate is
 `uv run pytest -m live_startup --require-live-startup`; it tests real startup, rendered
-TUI, detach, reopen, and shared-server reuse with isolated SQL/tmux state, submits no
-model prompts, and stops its test runtimes. It requires an authenticated Codex CLI and
-tmux; missing prerequisites fail the required gate.
+TUI, detach, reopen, and isolated-runtime reuse with isolated SQL/tmux state, submits no
+model prompts, selects the configured light viewport, restores dark, and stops its test
+runtimes through tmux. It requires an authenticated Codex CLI and tmux; missing
+prerequisites fail the required gate.
 
 Rodex may report that a newer Codex release exists, but it never installs one. Run
 `codex update` outside Rodex when you choose to update Codex.
 
 Rodex keeps its durable registry under `$XDG_STATE_HOME/rodex`, using
 `~/.local/state/rodex` when `XDG_STATE_HOME` is unset. See
-[Local data](README.md#local-data) for the database and runtime paths and their
+[Local state](README.md#local-state) for the database and runtime paths and their
 environment-variable overrides.
 
 ## A checkout at another path
@@ -88,7 +89,7 @@ cannot follow a moved checkout, database, or protected parent.
 
 ## Storage location and release boundaries
 
-The [current release](README.md) owns SQL generation 19 and shared tmux protocol v2.
+The [current release](README.md) owns SQL generation 20 and isolated tmux protocol v3.
 Earlier databases and servers are not discovered or migrated. A new SQL generation
 starts a separate Rodex name catalog; patch releases within that generation retain it.
 Existing Codex transcripts remain in the separately configured Codex session directory.

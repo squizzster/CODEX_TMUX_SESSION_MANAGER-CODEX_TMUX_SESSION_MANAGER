@@ -27,14 +27,13 @@ from rodex.agent_observer import (
 )
 from rodex.interaction_pipeline import (
     DeliveryStatus,
-    InteractionOperation,
-    InteractionRequest,
     SessionInteractionPipeline,
 )
 from rodex.observer_contract import OBSERVER_PROJECTED_TEXT_MAX_CHARS
 from rodex.observer_pane import ObserverPaneController
 from rodex.protocol_proxy import CodexProtocolEventTap
-from rodex.tmux_session_capability import TmuxRuntimeCapability
+from rodex.runtime_peer import RuntimePeerIdentity
+from rodex.tmux_session_capability import RODEX_SHARED_TMUX_PROTOCOL, TmuxRuntimeCapability
 from rodex_registry import (
     RodexAgentObserverTurnEvidence,
     RodexAgentTraceEvent,
@@ -58,6 +57,7 @@ CHILD_THREAD_ID = uuid.UUID("01a00654-f2bc-7a30-834a-a5f886a65f83")
 OTHER_THREAD_ID = uuid.UUID("01a00654-f2bc-7a30-834a-a5f886a65f84")
 TRACE_CURSOR = uuid.UUID("10000000-0000-4000-8000-000000000001")
 RUNTIME_ID = RodexRuntimeId.parse("0123456789abcdef")
+PEER_IDENTITY = RuntimePeerIdentity(RUNTIME_ID, "0123456789abcdef0123456789abcdef")
 
 
 def _runtime_capability(socket_path: Path) -> TmuxRuntimeCapability:
@@ -74,15 +74,36 @@ def _observer_capability_read_output(
     command: list[str],
     *,
     current_path: str = "/workspace",
+    registration_complete: bool = True,
 ) -> str | None:
     """Model the direct if-shell ownership gate before its display payload."""
-    if command[3] != "if-shell" or "display-message" not in command[-2]:
+    if command[3] != "if-shell" or shlex.split(command[-2])[0] != "display-message":
         return None
+    if shlex.split(command[-2])[-1] == "1":
+        return str(int(registration_complete))
+    if "_creation}" in command[-2]:
+        return str(int(registration_complete)) if "#{?" in command[-2] else ""
     if "#{pane_current_path}" in command[-2]:
         return f"%7|{current_path}\n"
     if "@rodex_agent_observer_for" in command[-2]:
         return "%9|%7|0\n"
     raise AssertionError(f"unexpected capability read: {command}")
+
+
+def _tmux_command_actions(command: str) -> list[list[str]]:
+    arguments = shlex.split(command)
+    if arguments[0] == "if-shell":
+        return _tmux_command_actions(arguments[arguments.index("-F") + 2])
+    if ";" in arguments:
+        actions, current = [], []
+        for argument in [*arguments, ";"]:
+            if argument == ";":
+                actions.extend(_tmux_command_actions(shlex.join(current)))
+                current = []
+            else:
+                current.append(argument)
+        return actions
+    return [arguments]
 
 
 def _receive_control_event(listener: socket.socket) -> dict[str, object]:
@@ -295,7 +316,7 @@ def test_observed_subagent_activity_projection_is_exact_and_content_free() -> No
     projected = project_subagent_activity_event(event)
 
     assert projected == {
-        "schema": "rodex-agent-observer-v2",
+        "schema": "rodex-agent-observer-v3",
         "kind": "app_server_subagent_activity",
         "method": "item/started",
         "thread_id": str(ROOT_THREAD_ID),
@@ -332,7 +353,7 @@ def test_current_codex_collaboration_invocation_projection_is_exact() -> None:
     )
 
     assert projected == {
-        "schema": "rodex-agent-observer-v2",
+        "schema": "rodex-agent-observer-v3",
         "kind": "app_server_collaboration_invocation",
         "method": "item/started",
         "thread_id": str(ROOT_THREAD_ID),
@@ -382,7 +403,7 @@ def test_agent_message_projection_accepts_only_completed_agent_authored_text() -
     projected = project_agent_message_event(_agent_message_event())
 
     assert projected == {
-        "schema": "rodex-agent-observer-v2",
+        "schema": "rodex-agent-observer-v3",
         "kind": "app_server_agent_message",
         "thread_id": str(CHILD_THREAD_ID),
         "turn_id": "turn-child",
@@ -406,7 +427,7 @@ def test_user_message_projection_preserves_exact_text_blocks_and_provenance() ->
     )
 
     assert project_user_message_event(event) == {
-        "schema": "rodex-agent-observer-v2",
+        "schema": "rodex-agent-observer-v3",
         "kind": "app_server_user_message",
         "thread_id": str(ROOT_THREAD_ID),
         "turn_id": "turn-1",
@@ -468,7 +489,13 @@ def test_exact_spawn_creates_a_disabled_top_third_without_changing_focus(
 
     controller.observe_protocol_event(_spawn_event())
 
-    split = shlex.split(next(command[-2] for command in calls if "split-window" in command[-2]))
+    split = next(
+        action
+        for command in calls
+        if "split-window" in command[-2]
+        for action in _tmux_command_actions(command[-2])
+        if action[0] == "split-window"
+    )
     assert split[1:11] == [
         "-v",
         "-b",
@@ -502,13 +529,23 @@ def test_exact_spawn_creates_a_disabled_top_third_without_changing_focus(
     assert "subAgentActivity" in joined_split
     assert "/root/live-review" in joined_split
     assert "prompt" not in joined_split
-    assert [shlex.split(command[-2]) for command in calls[-4:]] == [
-        ["set-option", "-p", "-t", "%7", "@rodex_agent_observer_pane_id", "%9"],
+    mutations = [
+        action
+        for command in calls
+        if command[3] == "if-shell"
+        for action in _tmux_command_actions(command[-2])
+        if action[0] != "display-message"
+    ]
+    assert mutations[-6:-2] == [
+        ["set-option", "-p", "-t", "%9", "@rodex_pane_runtime_id", str(RUNTIME_ID)],
         ["set-option", "-p", "-t", "%9", "@rodex_agent_observer_for", "%7"],
         ["select-pane", "-d", "-t", "%9"],
-        ["select-pane", "-t", "%7"],
+        ["set-option", "-p", "-t", "%7", "@rodex_agent_observer_pane_id", "%9"],
     ]
-    assert sent == []
+    assert mutations[-2][-1].startswith("registered:")
+    assert mutations[-1] == ["select-pane", "-t", "%7"]
+    assert "--operation-id=" in joined_split
+    assert _observer_snapshot_events(sent[-1][1])[0]["item"]["id"] == "call-spawn-1"
 
 
 @pytest.mark.parametrize("failed_registration_step", range(4))
@@ -526,13 +563,12 @@ def test_observer_creation_rolls_back_every_partial_registration_failure(
         operation = command[3]
         if operation == "show-options":
             return subprocess.CompletedProcess(command, 0, "", "")
-        read_output = _observer_capability_read_output(command)
+        read_output = _observer_capability_read_output(command, registration_complete=False)
         if read_output is not None:
             return subprocess.CompletedProcess(command, 0, read_output, "")
         if operation != "if-shell":
             raise AssertionError(f"unexpected tmux command: {command}")
-        action = shlex.split(command[-2])
-        if action[0] == "split-window":
+        if "split-window" in command[-2]:
             return subprocess.CompletedProcess(command, 0, "%9\n", "")
         if not failure_injected:
             if registration_step == failed_registration_step:
@@ -560,7 +596,7 @@ def test_observer_creation_rolls_back_every_partial_registration_failure(
 
     assert created is None
     assert failure_injected
-    actions = [shlex.split(command[-2]) for command in calls if command[3] == "if-shell"]
+    actions = [action for command in calls if command[3] == "if-shell" for action in _tmux_command_actions(command[-2])]
     assert ["kill-pane", "-t", "%9"] in actions
 
 
@@ -647,7 +683,13 @@ def test_same_turn_parent_request_is_sent_exactly_without_entering_process_args(
     controller.observe_protocol_event(_collaboration_invocation_event())
     controller.observe_protocol_event(_spawn_event())
 
-    split = shlex.split(next(command[-2] for command in calls if "split-window" in command[-2]))
+    split = next(
+        action
+        for command in calls
+        if "split-window" in command[-2]
+        for action in _tmux_command_actions(command[-2])
+        if action[0] == "split-window"
+    )
     assert request not in split[-1]
     assert "root_request_context_follows" in split[-1]
     assert len(sent) == 1
@@ -657,7 +699,7 @@ def test_same_turn_parent_request_is_sent_exactly_without_entering_process_args(
         event for event in _observer_snapshot_events(snapshot) if event["kind"] == "root_request_context"
     )
     assert root_request_context == {
-        "schema": "rodex-agent-observer-v2",
+        "schema": "rodex-agent-observer-v3",
         "kind": "root_request_context",
         "thread_id": str(ROOT_THREAD_ID),
         "turn_id": "turn-1",
@@ -974,7 +1016,7 @@ def test_observer_view_renders_exact_parent_request_after_tracked_spawn() -> Non
     initial["root_request_context_follows"] = True
     view = AgentObserverView(root_thread_id=ROOT_THREAD_ID, initial_event=initial)
     request_event = {
-        "schema": "rodex-agent-observer-v2",
+        "schema": "rodex-agent-observer-v3",
         "kind": "root_request_context",
         "thread_id": str(ROOT_THREAD_ID),
         "turn_id": "turn-1",
@@ -1012,7 +1054,7 @@ def test_parent_request_can_arrive_after_durable_turn_binding_without_being_lost
     view.accept_trace_snapshot(
         RodexAgentTraceSnapshot(
             1,
-            "rodex-agent-trace-v2",
+            "rodex-agent-trace-v3",
             "2026-08-27T00:00:01Z",
             "complete",
             1,
@@ -1032,7 +1074,7 @@ def test_parent_request_can_arrive_after_durable_turn_binding_without_being_lost
 
     lines = view.accept_root_request_context_event(
         {
-            "schema": "rodex-agent-observer-v2",
+            "schema": "rodex-agent-observer-v3",
             "kind": "root_request_context",
             "thread_id": str(ROOT_THREAD_ID),
             "turn_id": "turn-1",
@@ -1062,7 +1104,7 @@ def test_observer_view_rejects_cross_root_activity_and_parent_request() -> None:
     assert (
         view.accept_root_request_context_event(
             {
-                "schema": "rodex-agent-observer-v2",
+                "schema": "rodex-agent-observer-v3",
                 "kind": "root_request_context",
                 "thread_id": str(OTHER_THREAD_ID),
                 "turn_id": "turn-1",
@@ -1090,7 +1132,7 @@ def test_observer_view_renders_only_exact_target_trace_metadata() -> None:
     terminal_event_id = uuid.UUID("10000000-0000-4000-8000-000000000009")
     snapshot = RodexAgentTraceSnapshot(
         trace_publication_sequence=8,
-        trace_schema_version="rodex-agent-trace-v2",
+        trace_schema_version="rodex-agent-trace-v3",
         calculated_at_utc="2026-08-27T00:00:02Z",
         coverage_state="complete",
         durable_event_count=8,
@@ -1278,7 +1320,7 @@ def test_send_message_continues_the_current_turn_without_queuing_another() -> No
     view.accept_trace_snapshot(
         RodexAgentTraceSnapshot(
             1,
-            "rodex-agent-trace-v2",
+            "rodex-agent-trace-v3",
             "2026-08-27T23:54:00Z",
             "complete",
             1,
@@ -1329,7 +1371,7 @@ def test_send_message_continues_the_current_turn_without_queuing_another() -> No
     lines = view.accept_trace_snapshot(
         RodexAgentTraceSnapshot(
             2,
-            "rodex-agent-trace-v2",
+            "rodex-agent-trace-v3",
             "2026-08-27T23:54:16Z",
             "complete",
             3,
@@ -1401,7 +1443,7 @@ def test_observer_view_starts_a_new_same_agent_turn_for_followup_request() -> No
     view.accept_trace_snapshot(
         RodexAgentTraceSnapshot(
             1,
-            "rodex-agent-trace-v2",
+            "rodex-agent-trace-v3",
             "2026-08-27T00:00:00Z",
             "complete",
             1,
@@ -1439,7 +1481,7 @@ def test_observer_view_starts_a_new_same_agent_turn_for_followup_request() -> No
     ]
     assert view.accept_root_request_context_event(
         {
-            "schema": "rodex-agent-observer-v2",
+            "schema": "rodex-agent-observer-v3",
             "kind": "root_request_context",
             "thread_id": str(ROOT_THREAD_ID),
             "turn_id": "turn-2",
@@ -1458,7 +1500,7 @@ def test_observer_view_starts_a_new_same_agent_turn_for_followup_request() -> No
     view.accept_trace_snapshot(
         RodexAgentTraceSnapshot(
             2,
-            "rodex-agent-trace-v2",
+            "rodex-agent-trace-v3",
             "2026-08-27T00:00:01Z",
             "complete",
             1,
@@ -1511,7 +1553,7 @@ def test_unseen_first_turn_stays_bound_to_first_request_after_followup_arrives()
     view = AgentObserverView(root_thread_id=ROOT_THREAD_ID, initial_event=initial)
     view.accept_root_request_context_event(
         {
-            "schema": "rodex-agent-observer-v2",
+            "schema": "rodex-agent-observer-v3",
             "kind": "root_request_context",
             "thread_id": str(ROOT_THREAD_ID),
             "turn_id": "turn-1",
@@ -1523,7 +1565,7 @@ def test_unseen_first_turn_stays_bound_to_first_request_after_followup_arrives()
     view.accept_app_server_event(followup)
     view.accept_root_request_context_event(
         {
-            "schema": "rodex-agent-observer-v2",
+            "schema": "rodex-agent-observer-v3",
             "kind": "root_request_context",
             "thread_id": str(ROOT_THREAD_ID),
             "turn_id": "turn-2",
@@ -1546,7 +1588,7 @@ def test_unseen_first_turn_stays_bound_to_first_request_after_followup_arrives()
     view.accept_trace_snapshot(
         RodexAgentTraceSnapshot(
             2,
-            "rodex-agent-trace-v2",
+            "rodex-agent-trace-v3",
             "2026-08-27T00:00:04Z",
             "complete",
             3,
@@ -1602,7 +1644,7 @@ def test_delayed_old_terminal_and_new_followup_keep_exact_turn_evidence_isolated
     view = AgentObserverView(root_thread_id=ROOT_THREAD_ID, initial_event=initial)
     view.accept_root_request_context_event(
         {
-            "schema": "rodex-agent-observer-v2",
+            "schema": "rodex-agent-observer-v3",
             "kind": "root_request_context",
             "thread_id": str(ROOT_THREAD_ID),
             "turn_id": "turn-1",
@@ -1614,7 +1656,7 @@ def test_delayed_old_terminal_and_new_followup_keep_exact_turn_evidence_isolated
     view.accept_trace_snapshot(
         RodexAgentTraceSnapshot(
             1,
-            "rodex-agent-trace-v2",
+            "rodex-agent-trace-v3",
             "2026-08-27T00:00:01Z",
             "complete",
             1,
@@ -1652,7 +1694,7 @@ def test_delayed_old_terminal_and_new_followup_keep_exact_turn_evidence_isolated
     view.accept_app_server_event(followup)
     view.accept_root_request_context_event(
         {
-            "schema": "rodex-agent-observer-v2",
+            "schema": "rodex-agent-observer-v3",
             "kind": "root_request_context",
             "thread_id": str(ROOT_THREAD_ID),
             "turn_id": "turn-2",
@@ -1674,7 +1716,7 @@ def test_delayed_old_terminal_and_new_followup_keep_exact_turn_evidence_isolated
     view.accept_trace_snapshot(
         RodexAgentTraceSnapshot(
             2,
-            "rodex-agent-trace-v2",
+            "rodex-agent-trace-v3",
             "2026-08-27T00:00:04Z",
             "complete",
             4,
@@ -1728,7 +1770,7 @@ def test_unavailable_followup_never_recaps_the_previous_turn_request() -> None:
     view = AgentObserverView(root_thread_id=ROOT_THREAD_ID, initial_event=initial)
     view.accept_root_request_context_event(
         {
-            "schema": "rodex-agent-observer-v2",
+            "schema": "rodex-agent-observer-v3",
             "kind": "root_request_context",
             "thread_id": str(ROOT_THREAD_ID),
             "turn_id": "turn-1",
@@ -1740,7 +1782,7 @@ def test_unavailable_followup_never_recaps_the_previous_turn_request() -> None:
     view.accept_trace_snapshot(
         RodexAgentTraceSnapshot(
             1,
-            "rodex-agent-trace-v2",
+            "rodex-agent-trace-v3",
             "2026-08-27T00:00:01Z",
             "complete",
             2,
@@ -1779,7 +1821,7 @@ def test_unavailable_followup_never_recaps_the_previous_turn_request() -> None:
     view.accept_trace_snapshot(
         RodexAgentTraceSnapshot(
             2,
-            "rodex-agent-trace-v2",
+            "rodex-agent-trace-v3",
             "2026-08-27T00:00:03Z",
             "complete",
             3,
@@ -1823,7 +1865,7 @@ def test_observer_view_renders_exact_clean_lineage_work_and_terminal_recap() -> 
     view = AgentObserverView(root_thread_id=ROOT_THREAD_ID, initial_event=initial)
     view.accept_root_request_context_event(
         {
-            "schema": "rodex-agent-observer-v2",
+            "schema": "rodex-agent-observer-v3",
             "kind": "root_request_context",
             "thread_id": str(ROOT_THREAD_ID),
             "turn_id": "turn-1",
@@ -1835,7 +1877,7 @@ def test_observer_view_renders_exact_clean_lineage_work_and_terminal_recap() -> 
     view.accept_trace_snapshot(
         RodexAgentTraceSnapshot(
             2,
-            "rodex-agent-trace-v2",
+            "rodex-agent-trace-v3",
             "2026-08-27T00:00:03Z",
             "complete",
             3,
@@ -1902,7 +1944,7 @@ def test_observer_view_renders_inherited_agent_without_calling_it_same_agent() -
     view.accept_trace_snapshot(
         RodexAgentTraceSnapshot(
             2,
-            "rodex-agent-trace-v2",
+            "rodex-agent-trace-v3",
             "2026-08-27T00:00:01Z",
             "complete",
             1,
@@ -2056,7 +2098,7 @@ def test_interleaved_agents_never_rewrite_another_agents_work_line() -> None:
     view.accept_trace_snapshot(
         RodexAgentTraceSnapshot(
             2,
-            "rodex-agent-trace-v2",
+            "rodex-agent-trace-v3",
             "2026-08-27T00:00:02Z",
             "complete",
             3,
@@ -2143,7 +2185,7 @@ def test_transport_overflow_recovers_65_unknown_same_root_targets_from_trace() -
     )
     snapshot = RodexAgentTraceSnapshot(
         trace_publication_sequence=1,
-        trace_schema_version="rodex-agent-trace-v2",
+        trace_schema_version="rodex-agent-trace-v3",
         calculated_at_utc="2026-08-29T00:00:00Z",
         coverage_state="complete",
         durable_event_count=len(durable_events),
@@ -2174,7 +2216,7 @@ def test_app_item_completion_cannot_suppress_the_final_durable_trace_read() -> N
     view.accept_trace_snapshot(
         RodexAgentTraceSnapshot(
             trace_publication_sequence=8,
-            trace_schema_version="rodex-agent-trace-v2",
+            trace_schema_version="rodex-agent-trace-v3",
             calculated_at_utc="2026-08-27T00:00:02Z",
             coverage_state="complete",
             durable_event_count=1,
@@ -2209,16 +2251,18 @@ def test_trace_publication_notification_uses_a_nonblocking_framed_stream(
     receiver.listen()
     receiver.settimeout(1)
     try:
-        notify_agent_observer_trace_publication(event_socket, 17, True)
+        notify_agent_observer_trace_publication(event_socket, 17, True, peer_identity=PEER_IDENTITY)
         payload = _receive_control_event(receiver)
     finally:
         receiver.close()
 
     assert payload == {
-        "schema": "rodex-agent-observer-v2",
+        "schema": "rodex-agent-observer-v3",
         "kind": "trace_published",
         "trace_publication_sequence": 17,
         "caught_up": True,
+        "runtime_id": str(PEER_IDENTITY.runtime_id),
+        "tmux_server_id": PEER_IDENTITY.tmux_server_id,
     }
 
 
@@ -2236,8 +2280,8 @@ def test_two_runtime_observer_notifications_are_socket_isolated(tmp_path: Path) 
     first_receiver.settimeout(1)
     second_receiver.settimeout(1)
     try:
-        notify_agent_observer_trace_publication(first_event_socket, 11, False)
-        notify_agent_observer_trace_publication(second_event_socket, 22, True)
+        notify_agent_observer_trace_publication(first_event_socket, 11, False, peer_identity=PEER_IDENTITY)
+        notify_agent_observer_trace_publication(second_event_socket, 22, True, peer_identity=PEER_IDENTITY)
         first_payload = _receive_control_event(first_receiver)
         second_payload = _receive_control_event(second_receiver)
     finally:
@@ -2274,7 +2318,7 @@ def test_real_tmux_observer_renders_request_and_exits_with_its_runtime(
             "VALUES (1, ?, ?)",
             (child_identity_id, "2026-08-27T00:00:00Z"),
         )
-    tap = CodexProtocolEventTap(event_socket)
+    tap = CodexProtocolEventTap(event_socket, peer_identity=PEER_IDENTITY)
     pipeline = SessionInteractionPipeline()
     controller: AgentObserverCoordinator | None = None
     tap.start()
@@ -2360,12 +2404,24 @@ def test_real_tmux_observer_renders_request_and_exits_with_its_runtime(
                 "set-option",
                 "-s",
                 "@rodex_shared_tmux_protocol",
-                "rodex-shared-tmux-v2",
+                RODEX_SHARED_TMUX_PROTOCOL,
                 ";",
                 "set-option",
                 "-s",
                 "@rodex_shared_tmux_server_id",
                 server_id,
+                ";",
+                "set-option",
+                "-s",
+                "@rodex_server_runtime_id",
+                str(RUNTIME_ID),
+                ";",
+                "set-option",
+                "-p",
+                "-t",
+                primary,
+                "@rodex_pane_runtime_id",
+                str(RUNTIME_ID),
                 ";",
                 "set-option",
                 "-t",
@@ -2543,6 +2599,7 @@ def test_real_tmux_observer_renders_request_and_exits_with_its_runtime(
             event_socket,
             receipt.trace_publication_sequence,
             True,
+            peer_identity=PEER_IDENTITY,
         )
         captured = _wait_for_captured_text(
             tmux,
@@ -2570,8 +2627,14 @@ def test_real_tmux_observer_renders_request_and_exits_with_its_runtime(
         time.sleep(0.05)
         assert "\nls\n" not in _capture_tmux_pane(tmux, tmux_socket, observer[0])
 
+        controller.observe_protocol_event(
+            {"method": "turn/completed", "params": {"threadId": str(CHILD_THREAD_ID), "turn": {"id": child_turn_id}}}
+        )
+        assert _wait_for_tmux_panes(tmux, tmux_socket, 1)[0][0] == primary
+        controller.observe_protocol_event(_spawn_event(item_id="next-agent-work"))
+        assert len(_wait_for_tmux_panes(tmux, tmux_socket, 2)) == 2
         controller.reset_after_disconnect()
-        assert pipeline.execute(InteractionRequest("agent-observer", InteractionOperation.CLOSE, "test")).accepted
+        assert _wait_for_tmux_panes(tmux, tmux_socket, 1)[0][0] == primary
         reopened = pipeline.send_message(target="agent-observer", text="Fresh observer state", open_if_missing=True)
         assert reopened.status == DeliveryStatus.DELIVERED
         panes = _wait_for_tmux_panes(tmux, tmux_socket, 2)

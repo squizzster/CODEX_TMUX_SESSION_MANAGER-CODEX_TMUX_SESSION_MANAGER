@@ -268,6 +268,7 @@ def test_resume_cannot_promote_a_subagent_and_rolls_back_runtime_changes(
             database,
             codex_session_id=child_thread_id,
             runtime_id=RodexRuntimeId.generate(),
+            expected_previous_runtime_id=None,
         )
 
     tmux_link = lookup_rodex_tmux_session(session.rodex_sessions_id, database)
@@ -373,6 +374,8 @@ def test_create_and_resume_persist_the_exact_current_runtime_id(
         "automatic-beluga",
         database,
         runtime_id=second_runtime,
+        codex_session_id=CODEX_SESSION_ID,
+        expected_previous_runtime_id=first_runtime,
         accessed_at_utc=datetime(2030, 8, 15, 18, 30, tzinfo=UTC),
     )
 
@@ -585,6 +588,8 @@ def test_runtime_resume_replaces_endpoint_and_access_time_in_one_transaction(
         "automatic-beluga",
         database,
         runtime_id=RodexRuntimeId.generate(),
+        codex_session_id=CODEX_SESSION_ID,
+        expected_previous_runtime_id=None,
         accessed_at_utc=datetime(2030, 8, 15, 18, 30, tzinfo=UTC),
     )
 
@@ -613,6 +618,7 @@ def test_runtime_recovery_atomically_relinks_the_codex_session_id_and_endpoint(
         database,
         codex_session_id=REPLACEMENT_CODEX_SESSION_ID,
         runtime_id=RodexRuntimeId.generate(),
+        expected_previous_runtime_id=None,
     )
 
     assert updated.tmux_server_socket_path == "/tmp/rodex/new.sock"
@@ -652,6 +658,7 @@ def test_runtime_resume_rolls_back_endpoint_when_access_log_update_fails(
             database,
             codex_session_id=REPLACEMENT_CODEX_SESSION_ID,
             runtime_id=RodexRuntimeId.generate(),
+            expected_previous_runtime_id=None,
         )
 
     assert lookup_codex_session_id_from_a_rodex_sessions_id(session.rodex_sessions_id, database) == CODEX_SESSION_ID

@@ -22,9 +22,9 @@ from rodex.interaction_pipeline import (
     InteractionTarget,
     SessionInteractionPipeline,
 )
-from rodex.terminal_completion import TerminalCompletionRenderer
 from rodex.terminal_gateway import TerminalSessionGateway
 from rodex.terminal_input import TerminalInputDecoder, TerminalInputInterceptor
+from rodex.terminal_surface import TerminalSurfaceRenderer
 from rodex.tmux_session_capability import TmuxRuntimeCapability
 from rodex_registry import RodexRuntimeId
 
@@ -35,7 +35,8 @@ def make_pipeline(registrations=INPUT_INTERCEPTORS, prefix="/r"):
     main_messages = []
     gateway = TerminalSessionGateway.__new__(TerminalSessionGateway)
     gateway._display_queue = bytearray()
-    gateway._completion = TerminalCompletionRenderer(100, 16)
+    gateway._pending_surface_frame = None
+    gateway._surface_renderer = TerminalSurfaceRenderer(100, 16)
     gateway._decoder = TerminalInputDecoder()
     gateway._interceptor = TerminalInputInterceptor(registrations, pipeline, native_input.extend, lambda _prefix: True)
     pipeline.register(
@@ -109,7 +110,7 @@ def make_pipeline(registrations=INPUT_INTERCEPTORS, prefix="/r"):
         ),
     ],
 )
-def test_keyboard_to_configured_inline_completion_and_enter_to_main_are_one_pipeline(entry, draft, prefix):
+def test_keyboard_to_configured_inline_surface_renderer_and_enter_to_main_are_one_pipeline(entry, draft, prefix):
     harness = make_pipeline((entry,), prefix)
     dispatch, screen = harness.dispatch, harness.screen
     native_input, main_messages = harness.native_input, harness.messages
@@ -156,8 +157,8 @@ def test_shared_command_menu_highlights_selected_row_then_confirms_configured_op
     config = INPUT_INTERCEPTORS[0].argument_menu
     assert screen.display[4].rstrip() == config.heading
     assert screen.display[5].rstrip() == config.subheading
-    assert screen.display[7].rstrip() == "\u203a 1. light   Light test argument"
-    assert screen.display[8].rstrip() == "  2. dark    Dark one"
+    assert screen.display[7].rstrip() == "\u203a 1. light   display commentary only"
+    assert screen.display[8].rstrip() == "  2. dark    display the normal Codex interface"
     assert screen.display[9].rstrip() == "  3. dusk    Dusky one"
     assert screen.display[11].rstrip() == ARGUMENT_MENU_FOOTER
     assert harness.messages == [] and harness.native_input == b"/r"
@@ -172,7 +173,7 @@ def test_shared_command_menu_highlights_selected_row_then_confirms_configured_op
     assert harness.native_input == b"/r\x7f\x7f"
     assert not any(record.start_model_turn for record in harness.pipeline.records)
     assert not any("Press enter" in line for line in screen.display)
-    assert screen.display == harness.gateway._completion.native.screen.display
+    assert screen.display == harness.gateway._surface_renderer.native.screen.display
 
 
 def test_filtering_to_one_command_keeps_it_highlighted_and_escape_restores_the_command_menu():
@@ -213,7 +214,7 @@ def test_no_option_command_reports_bad_config_without_a_picker_and_releases_keyb
     ]
     cleared_prefix = prefix.encode() + b"\x7f" * len(prefix)
     assert harness.native_input == cleared_prefix
-    assert harness.screen.display == harness.gateway._completion.native.screen.display
+    assert harness.screen.display == harness.gateway._surface_renderer.native.screen.display
     assert not any(line.rstrip() == ARGUMENT_MENU_FOOTER for line in harness.screen.display)
     harness.send(b"ordinary typing")
     assert harness.native_input == cleared_prefix + b"ordinary typing"

@@ -67,10 +67,11 @@ from .analytics_source_reader import (
     resolve_rollout_path,
 )
 from .process_contracts import AnalyticsWorkerConfig
+from .runtime_peer import RuntimePeerIdentity
 
 ANALYTICS_RESTART_DELAY_SECONDS = 2.0
 ANALYTICS_HEALTH_RETRY_DELAY_SECONDS = 1.0
-STATISTICS_PROJECTION_SCHEMA_VERSION = "rodex-statistics-v7"
+STATISTICS_PROJECTION_SCHEMA_VERSION = "rodex-statistics-v8"
 
 
 @dataclass(frozen=True, slots=True)
@@ -291,7 +292,7 @@ class AnalyticsRolloutWorker:
         adapter_factory: AnalyticsBoundaryFactory = (StatefulCodexProtocolAnalyticsAdapter),
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
         monotonic: Callable[[], float] = time.monotonic,
-        trace_publication_notifier: Callable[[Path, int, bool], None] = (notify_agent_observer_trace_publication),
+        trace_publication_notifier: Callable[..., None] = notify_agent_observer_trace_publication,
     ) -> None:
         if not config.is_activated:
             raise ValueError("analytics worker requires committed runtime identity")
@@ -759,15 +760,14 @@ class AnalyticsRolloutWorker:
         stop: Event,
         *,
         scheduler: AnalyticsEventScheduler | None = None,
-        subscriber_factory: Callable[
-            [Path, AnalyticsEventScheduler], AnalyticsProtocolEventSubscriber
-        ] = AnalyticsProtocolEventSubscriber,
+        subscriber_factory: Callable[..., AnalyticsProtocolEventSubscriber] = AnalyticsProtocolEventSubscriber,
     ) -> None:
         active_scheduler = scheduler or AnalyticsEventScheduler(event_observer=self.observe_protocol_event)
         self._schedule_followup = active_scheduler.offer_dirty
         subscriber = subscriber_factory(
             self._config.protocol_event_socket_path,
             active_scheduler,
+            peer_identity=RuntimePeerIdentity(self._config.runtime_id, self._config.tmux_server_id),
         )
 
         def stop_scheduler() -> None:
@@ -967,6 +967,7 @@ class AnalyticsRolloutWorker:
                 self._config.protocol_event_socket_path,
                 receipt.trace_publication_sequence,
                 outcome == "up_to_date",
+                peer_identity=RuntimePeerIdentity(self._config.runtime_id, self._config.tmux_server_id),
             )
         return outcome
 

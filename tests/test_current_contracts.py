@@ -8,22 +8,31 @@ from pathlib import Path
 
 import pytest
 
-from rodex.agent_trace import _canonical_record_turn_id, normalize_rollout_trace
+from rodex.agent_trace import AGENT_TRACE_SCHEMA_VERSION, _canonical_record_turn_id, normalize_rollout_trace
+from rodex.analytics import STATISTICS_PROJECTION_SCHEMA_VERSION
 from rodex.control import RodexControlError, _started_turn_id, _steered_turn_id
+from rodex.machine_commands import MACHINE_ENVELOPE_SCHEMA_VERSION
+from rodex.observer_contract import OBSERVER_SCHEMA
 from rodex.protocol_proxy import _context_percent, _rollout_context_percent, _started_thread_id
-from rodex.tmux_session_capability import RODEX_SHARED_TMUX_PROTOCOL, RODEX_SHARED_TMUX_SOCKET_NAME
+from rodex.runtime_peer import RuntimePeerIdentity
+from rodex.tmux_session_capability import RODEX_SHARED_TMUX_PROTOCOL, runtime_tmux_socket_name
 from rodex.version import RODEX_VERSION
-from rodex_registry import parse_codex_thread_id
+from rodex_registry import RodexRuntimeId, parse_codex_thread_id
 from rodex_sql import RODEX_DATABASE_FILENAME, RODEX_DATABASE_SCHEMA_GENERATION
 
 
 def test_current_release_declares_matching_package_and_process_versions() -> None:
     project = tomllib.loads((Path(__file__).parents[1] / "pyproject.toml").read_text())
-    assert project["project"]["version"] == RODEX_VERSION == "0.10.1a1"
-    assert RODEX_DATABASE_SCHEMA_GENERATION == 19
-    assert RODEX_DATABASE_FILENAME == "rodex-v19.sqlite3"
-    assert RODEX_SHARED_TMUX_PROTOCOL == "rodex-shared-tmux-v2"
-    assert RODEX_SHARED_TMUX_SOCKET_NAME == "tmux-shared-v2.sock"
+    assert project["project"]["version"] == RODEX_VERSION == "0.13.0a1"
+    assert RODEX_DATABASE_SCHEMA_GENERATION == 20
+    assert RODEX_DATABASE_FILENAME == "rodex-v20.sqlite3"
+    assert RODEX_SHARED_TMUX_PROTOCOL == "rodex-isolated-tmux-v3"
+    assert runtime_tmux_socket_name(RodexRuntimeId(1)) == "tmux-v3-0000000000000001.sock"
+    assert RuntimePeerIdentity(RodexRuntimeId(1), "a" * 32).headers()["X-Rodex-Peer-Contract"] == "rodex-runtime-peer-v3"
+    assert MACHINE_ENVELOPE_SCHEMA_VERSION == 4
+    assert AGENT_TRACE_SCHEMA_VERSION == "rodex-agent-trace-v3"
+    assert STATISTICS_PROJECTION_SCHEMA_VERSION == "rodex-statistics-v8"
+    assert OBSERVER_SCHEMA == "rodex-agent-observer-v3"
 
 
 @pytest.mark.parametrize("turn_id", [None, "", " ", 1])

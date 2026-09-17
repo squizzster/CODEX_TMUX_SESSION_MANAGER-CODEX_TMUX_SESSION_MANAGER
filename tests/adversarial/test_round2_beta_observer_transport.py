@@ -18,6 +18,7 @@ from rodex.observer_contract import (
     OBSERVER_SNAPSHOT_EVENT_LIMIT,
 )
 from rodex.observer_state import ObserverStateReducer
+from rodex.runtime_peer import RuntimePeerIdentity
 
 MAX_PENDING_OBSERVER_EVENTS = 64
 MAX_SEND_ATTEMPTS_PER_SNAPSHOT = 8
@@ -458,7 +459,9 @@ def test_round2_observer_receiver_rejects_oversize_frame_before_reading_payload(
     listener = _OneConnectionListener(connection)
     events: queue.Queue[dict[str, object]] = queue.Queue()
 
-    observer_module._observer_control_receiver(listener, events, Event())  # type: ignore[arg-type]
+    observer_module._observer_control_receiver(  # type: ignore[arg-type]
+        listener, events, Event(), peer_identity=RuntimePeerIdentity("1234567890abcdef", "a" * 32)
+    )
 
     assert events.empty(), "oversize observer frame reached the application queue"
     assert connection.bytes_read == observer_module._OBSERVER_FRAME_LENGTH.size, (
@@ -473,7 +476,9 @@ def test_round2_observer_receiver_accepts_exact_frame_limit_before_json_validati
     listener = _OneConnectionListener(connection)
     events: queue.Queue[dict[str, object]] = queue.Queue()
 
-    observer_module._observer_control_receiver(listener, events, Event())  # type: ignore[arg-type]
+    observer_module._observer_control_receiver(  # type: ignore[arg-type]
+        listener, events, Event(), peer_identity=RuntimePeerIdentity("1234567890abcdef", "a" * 32)
+    )
 
     assert events.empty()
     assert connection.bytes_read == len(frame)

@@ -5,6 +5,7 @@ from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
+from runtime_peer_fixtures import TEST_PEER, peer_response
 
 from rodex.control import PromptDispatch, RodexControlError, RodexDispatchIndeterminateError
 from rodex.exact_turn_mutation import ExactTurnMutationCoordinator
@@ -292,7 +293,7 @@ def test_observer_snapshot_reserves_transport_identity_space():
     for number in range(32):
         snapshot = producer.observe(
             {
-                "schema": "rodex-agent-observer-v2",
+                "schema": "rodex-agent-observer-v3",
                 "kind": "app_server_agent_message",
                 "thread_id": "thread",
                 "turn_id": "turn",
@@ -314,6 +315,8 @@ def test_every_indeterminate_transport_result_preserves_generated_dispatch_ident
     sent = []
 
     class Connection:
+        response = peer_response()
+
         def __enter__(self):
             return self
 
@@ -330,6 +333,7 @@ def test_every_indeterminate_transport_result_preserves_generated_dispatch_ident
         Path("/unused.sock"),
         InteractionRequest("main", InteractionOperation.MESSAGE, "test", text="hello", start_model_turn=True),
         connector=lambda *_args, **_kwargs: Connection(),
+        peer_identity=TEST_PEER,
     )
     assert result.status == DeliveryStatus.INDETERMINATE
     assert result.value["dispatch_id"] == sent[0]["params"]["dispatch_id"]

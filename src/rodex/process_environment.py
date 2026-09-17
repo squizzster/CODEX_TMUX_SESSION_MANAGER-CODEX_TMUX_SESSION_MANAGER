@@ -94,6 +94,8 @@ def exact_environment_exec_command(
     python_executable: str,
     environment_names: Sequence[str],
     command: Sequence[str],
+    *,
+    operation_id: str | None = None,
 ) -> tuple[str, ...]:
     """Build a value-free argv that drops ambient names before the real process."""
     if (
@@ -111,6 +113,10 @@ def exact_environment_exec_command(
             raise ValueError("exact environment execution received an invalid name")
         names.add(name)
     arguments = [python_executable, "-I", "-m", "rodex.environment_exec"]
+    if operation_id is not None:
+        if len(operation_id) != 32 or any(character not in "0123456789abcdef" for character in operation_id):
+            raise ValueError("process operation ID must be 32 lowercase hexadecimal characters")
+        arguments.append(f"--operation-id={operation_id}")
     for name in sorted(names):
         arguments.append(f"--environment-name={name}")
     return (*arguments, "--", *command)

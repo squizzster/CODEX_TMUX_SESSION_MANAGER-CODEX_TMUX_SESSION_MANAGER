@@ -7,6 +7,7 @@ import os
 import secrets
 import shlex
 import signal
+import socket
 import stat as stat_module
 import subprocess
 import sys
@@ -47,6 +48,7 @@ from .input_interceptor_presentation import InputInterceptorPresentation
 from .interaction_pipeline import DeliveryStatus, InteractionRequest, InteractionResult, SessionInteractionPipeline
 from .interaction_transport import publish_tui_notice
 from .pane_control import TmuxPaneController
+from .presentation_policy import PresentationPolicyInteractionAdapter, SessionPresentationPipeline
 from .primary_connection_lifecycle import PrimaryConnectionLifecycleCoordinator
 from .process_contracts import AnalyticsWorkerConfig, SessionHostConfig
 from .process_environment import (
@@ -58,6 +60,7 @@ from .process_environment import (
     validated_user_environment_entries,
 )
 from .protocol_proxy import (
+    CONTROL_CONNECTION_PATH,
     CodexContextStatusObserver,
     CodexProtocolEventTap,
     CodexProtocolProxy,
@@ -65,12 +68,15 @@ from .protocol_proxy import (
     TmuxToolCallStatus,
     ToolCallCounter,
 )
+from .runtime_endpoint import ExclusiveUnixEndpoint
+from .runtime_peer import RuntimePeerIdentity, require_unix_peer_process, verified_runtime_connection
 from .status_bar import context_status_segment
 from .terminal_gateway import TerminalSessionGateway
 from .tmux_executor import SyncTmuxExecutor, TmuxCommandResult
 from .tmux_session_capability import (
     RODEX_CODEX_SESSION_ID_OPTION,
     RODEX_INTERNAL_SESSION_ID_OPTION,
+    RODEX_PANE_RUNTIME_ID_OPTION,
     RODEX_PRIMARY_PANE_ID_OPTION,
     RODEX_PROTOCOL_EVENT_SOCKET_OPTION,
     RODEX_PROTOCOL_PROXY_SOCKET_OPTION,
@@ -79,21 +85,25 @@ from .tmux_session_capability import (
     RODEX_REGISTRATION_STATE_OPTION,
     RODEX_REGISTRY_ID_OPTION,
     RODEX_RUNTIME_ID_OPTION,
+    RODEX_SERVER_RUNTIME_ID_OPTION,
     RODEX_SESSION_ID_OPTION,
     RODEX_SHARED_TMUX_PROTOCOL,
     RODEX_SHARED_TMUX_PROTOCOL_OPTION,
     RODEX_SHARED_TMUX_SERVER_ID_OPTION,
-    RODEX_SHARED_TMUX_SOCKET_NAME,
+    RODEX_TMUX_SOCKET_PATTERN,
     TmuxRuntimeCapability,
     TmuxSessionCapability,
     combine_tmux_if_shell_conditions,
     parse_tmux_server_id,
     parse_tmux_session_capability,
     primary_pane_capability_if_shell_condition,
+    primary_pane_capability_read_arguments,
     registered_primary_pane_if_shell_condition,
+    runtime_destruction_if_shell_condition,
+    runtime_tmux_socket_name,
     server_identity_if_shell_condition,
-    tmux_format_literal,
 )
+from .tmux_shared_ctrl_c import shared_ctrl_c_binding_command
 from .tmux_sharing_coordinator import (
     RODEX_SHARING_ATTACHED_COUNT_OPTION,
     sharing_coordinator_hook_command,
@@ -103,7 +113,7 @@ from .tmux_status import (
 )
 
 SUN_PATH_MAX_BYTES: Final = 107
-DEFAULT_STARTUP_TIMEOUT_SECONDS: Final = 15.0
+DEFAULT_STARTUP_TIMEOUT_SECONDS: Final = 30.0
 CODEX_ACTIVE_WRITER_HANDOFF_TIMEOUT_SECONDS: Final = 10.0
 CODEX_ACTIVE_WRITER_RETRY_INTERVAL_SECONDS: Final = 0.25
 CODEX_PRIMARY_CONNECTION_RELEASE_TIMEOUT_SECONDS: Final = 2.5
@@ -123,7 +133,7 @@ RODEX_SHARED_TMUX_HOOK_INDEX: Final = 731
 Runner = Callable[..., subprocess.CompletedProcess[str]]
 Connector = Callable[..., Any]
 ProcessSpawner = Callable[..., subprocess.Popen[bytes]]
-TuiNoticePublisher = Callable[[Path, str], bool]
+TuiNoticePublisher = Callable[..., bool]
 
 
 class RodexRuntimeError(RuntimeError):
@@ -154,6 +164,7 @@ class _RuntimePathKeepalive:
         self._failure: RodexRuntimeError | None = None
         self._failure_reported = Event()
         self._identities: dict[Path, tuple[int, int, int, int]] = {}
+        self._descriptors: dict[Path, int] = {}
         self.failure_callback: Callable[[RodexRuntimeError], None] | None = None
 
     @property
@@ -165,8 +176,18 @@ class _RuntimePathKeepalive:
         """Refresh synchronously, then protect the paths until closed."""
         if self._thread is not None:
             raise RodexRuntimeError("runtime path keepalive is already running")
-        self._identities = {path: _runtime_path_identity(path) for path in self._paths}
-        self._refresh()
+        try:
+            for path in self._paths:
+                descriptor = os.open(path, os.O_PATH | os.O_NOFOLLOW | os.O_CLOEXEC)
+                self._descriptors[path] = descriptor
+                state = os.fstat(descriptor)
+                if stat_module.S_ISLNK(state.st_mode):
+                    raise RodexRuntimeError(f"live runtime path is a symlink: {path}")
+                self._identities[path] = (state.st_dev, state.st_ino, state.st_mode & 0o170000, state.st_uid)
+            self._refresh()
+        except (OSError, RodexRuntimeError) as error:
+            self._close_descriptors()
+            raise RodexRuntimeError(f"could not retain runtime path: {error}") from error
         self._thread = Thread(
             target=self._run,
             name="rodex-runtime-path-keepalive",
@@ -179,11 +200,18 @@ class _RuntimePathKeepalive:
         thread = self._thread
         self._stop.set()
         if thread is None:
+            self._close_descriptors()
             return
         thread.join(timeout=5)
         if thread.is_alive():
             raise RodexRuntimeError("runtime path keepalive did not stop")
         self._thread = None
+        self._close_descriptors()
+
+    def _close_descriptors(self) -> None:
+        for descriptor in self._descriptors.values():
+            os.close(descriptor)
+        self._descriptors.clear()
 
     def wait_for_failure(self, timeout: float) -> RodexRuntimeError | None:
         """Wait briefly for a periodic failure and return the stable result."""
@@ -209,7 +237,10 @@ class _RuntimePathKeepalive:
                 expected = self._identities[path]
                 if _runtime_path_identity(path) != expected:
                     raise RodexRuntimeError(f"live runtime path identity changed: {path}")
-                os.utime(path, None, follow_symlinks=False)
+                descriptor = self._descriptors.get(path)
+                if descriptor is None:
+                    raise RodexRuntimeError("runtime path keepalive is closed")
+                os.utime(f"/proc/self/fd/{descriptor}", None, follow_symlinks=True)
                 if _runtime_path_identity(path) != expected:
                     raise RodexRuntimeError(f"live runtime path identity changed while refreshing: {path}")
             except RodexRuntimeError:
@@ -234,8 +265,11 @@ class LiveTmuxSession:
     tmux_session_name: str
     runtime_id: RodexRuntimeId | None = field(default=None, kw_only=True)
     tmux_capability: TmuxSessionCapability | None = field(default=None, kw_only=True)
+    creation_server_id: str | None = field(default=None, kw_only=True)
 
     def __post_init__(self) -> None:
+        if self.creation_server_id is not None:
+            parse_tmux_server_id(self.creation_server_id)
         capability = self.tmux_capability
         if capability is None:
             return
@@ -243,6 +277,8 @@ class LiveTmuxSession:
             raise ValueError("tmux capability belongs to a different server socket")
         if self.runtime_id != capability.runtime_id:
             raise ValueError("tmux capability belongs to a different runtime incarnation")
+        if self.creation_server_id is not None and self.creation_server_id != capability.tmux_server_id:
+            raise ValueError("tmux capability belongs to a different creation attempt")
 
 
 @dataclass(frozen=True, slots=True)
@@ -323,6 +359,26 @@ def _exact_tmux_pane_target(session_name: str) -> str:
     return f"={session_name}:"
 
 
+def _tmux_endpoint_has_no_listener(socket_path: Path) -> bool:
+    """Distinguish a missing/refused owned Unix listener from unknown liveness.
+
+    This proves that no server is addressable at the recorded endpoint. It does
+    not assert that an externally unlinked server process has exited.
+    """
+    try:
+        state = socket_path.lstat()
+        if not stat_module.S_ISSOCK(state.st_mode) or state.st_uid != os.getuid():
+            raise RodexRuntimeError("tmux endpoint is not a current-user socket")
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as probe:
+            probe.settimeout(0.25)
+            probe.connect(str(socket_path))
+    except (FileNotFoundError, ConnectionRefusedError):
+        return True
+    except OSError as error:
+        raise RodexRuntimeError("could not determine whether the tmux endpoint has a listener") from error
+    return False
+
+
 def _tmux_socket_path_from_environment(tmux_value: str | None) -> Path:
     if not tmux_value:
         raise RodexRuntimeError("rodex _context must run inside the tmux pane it is identifying")
@@ -339,44 +395,6 @@ def _tmux_pane_id_from_environment(tmux_pane_value: str | None) -> str:
     if not tmux_pane_value or not tmux_pane_value.startswith("%") or not tmux_pane_value[1:].isdigit():
         raise RodexRuntimeError("the inherited TMUX_PANE identity is invalid")
     return tmux_pane_value
-
-
-def _shared_ctrl_c_binding_command(
-    python_executable: str,
-    tmux_binary: str,
-    runtime: LiveTmuxSession,
-    tmux_server_id: str,
-) -> str:
-    guard_command = shlex.join(
-        (
-            tmux_format_literal(python_executable),
-            "-m",
-            "rodex.tmux_shared_ctrl_c",
-            "--tmux-binary",
-            tmux_format_literal(tmux_binary),
-            "--tmux-server-socket",
-            tmux_format_literal(str(runtime.tmux_server_socket_path)),
-            "--expected-server-id",
-            tmux_server_id,
-        )
-    )
-    guard_command += _quoted_tmux_format_arguments(
-        ("--tmux-session-id", "session_id"),
-        ("--tmux-primary-pane-id", RODEX_PRIMARY_PANE_ID_OPTION),
-        ("--expected-runtime-id", RODEX_RUNTIME_ID_OPTION),
-        ("--expected-rodex-session-id", RODEX_SESSION_ID_OPTION),
-        ("--expected-registry-id", RODEX_REGISTRY_ID_OPTION),
-        ("--expected-internal-session-id", RODEX_INTERNAL_SESSION_ID_OPTION),
-        ("--expected-codex-session-id", RODEX_CODEX_SESSION_ID_OPTION),
-        ("--pane-id", "pane_id"),
-        ("--client-name", "client_name"),
-    )
-    return f"run-shell -b {shlex.quote(guard_command)}"
-
-
-def _quoted_tmux_format_arguments(*arguments: tuple[str, str]) -> str:
-    """Append shell-safe values that tmux expands only when a key is invoked."""
-    return "".join(f" {shlex.quote(option)} #{{q:{format_name}}}" for option, format_name in arguments)
 
 
 def _shell_commands_are_equivalent(left: str, right: str) -> bool:
@@ -520,8 +538,10 @@ class RodexRuntimeLauncher:
         log_path = runtime_root / f"catalog-{token}.log"
         _require_short_unix_socket_path(socket_path)
         with ExitStack() as cleanup:
+            endpoint = ExclusiveUnixEndpoint(socket_path)
+            endpoint.acquire()
+            cleanup.callback(endpoint.close)
             cleanup.callback(log_path.unlink, missing_ok=True)
-            cleanup.callback(socket_path.unlink, missing_ok=True)
             log = _open_private_runtime_log(log_path)
             cleanup.callback(log.close)
             process = self._spawn_process(
@@ -530,15 +550,18 @@ class RodexRuntimeLauncher:
                 stdout=log,
                 stderr=log,
                 env=self._user_process_environment,
+                start_new_session=True,
             )
-            cleanup.callback(_stop_child_process, process)
+            cleanup.callback(_stop_child_process, process, owns_process_group=True)
             _wait_for_app_server_socket(process, socket_path)
-            return self._read_persisted_codex_session(socket_path, codex_session_id)
+            endpoint.retain_bound_path()
+            return self._read_persisted_codex_session(socket_path, codex_session_id, process)
 
     def _read_persisted_codex_session(
         self,
         socket_path: Path,
         codex_session_id: CodexSessionId,
+        process: subprocess.Popen[bytes],
     ) -> bool:
         with self._connect(
             str(socket_path),
@@ -548,6 +571,7 @@ class RodexRuntimeLauncher:
             close_timeout=1,
             max_size=None,
         ) as websocket:
+            require_unix_peer_process(websocket, process)
             websocket.send(json.dumps(CODEX_APP_SERVER.initialize_request(0, RODEX_SESSION_CATALOG_APP_SERVER_CLIENT)))
             initialized = _receive_response(websocket, 0)
             CODEX_APP_SERVER.require_minimum_version(initialized)
@@ -605,15 +629,16 @@ class RodexRuntimeLauncher:
             raise RodexRuntimeError(f"workspace is not a directory: {resolved_workspace}")
 
         runtime_root = default_runtime_root()
-        token = secrets.token_hex(8)
+        token = str(runtime_id)
         runtime = LiveRodexRuntime(
-            tmux_server_socket_path=default_tmux_server_socket_path(),
+            tmux_server_socket_path=runtime_root / runtime_tmux_socket_name(runtime_id),
             tmux_session_name=f"rodex-{token}",
             app_server_socket_path=runtime_root / f"app-{token}.sock",
             app_server_log_path=runtime_root / f"app-{token}.log",
             protocol_proxy_socket_path=runtime_root / f"proxy-{token}.sock",
             protocol_event_socket_path=runtime_root / f"events-{token}.sock",
             runtime_id=runtime_id,
+            creation_server_id=secrets.token_hex(16),
         )
         _require_short_unix_socket_path(runtime.tmux_server_socket_path)
         _require_short_unix_socket_path(runtime.app_server_socket_path)
@@ -627,6 +652,7 @@ class RodexRuntimeLauncher:
             rodex_session_id=rodex_session_id,
             rodex_registry_id=rodex_registry_id,
             runtime_id=runtime_id,
+            tmux_server_id=runtime.creation_server_id,
             protocol_event_socket_path=runtime.protocol_event_socket_path,
         )
         host_config = SessionHostConfig(
@@ -722,12 +748,22 @@ class RodexRuntimeLauncher:
         control = self.discover_runtime_control(runtime)
         if (
             control.runtime_id != runtime.runtime_id
-            or control.registration_state != RODEX_REGISTRATION_PENDING
             or control.rodex_session_id != expected_rodex_session_id
             or control.rodex_registry_id != expected_registry_id
             or control.codex_session_id != expected_codex_session_id
         ):
             raise RodexRuntimeError("runtime registration pending identity disagrees with durable identity")
+        if control.registration_state == RODEX_REGISTRATION_REGISTERED:
+            capability = control.tmux_capability
+            if (
+                capability is None
+                or capability.runtime_capability != bootstrap_capability
+                or capability.internal_session_id != rodex_sessions_id
+            ):
+                raise RodexRuntimeError("registered runtime identity disagrees with durable identity")
+            return
+        if control.registration_state != RODEX_REGISTRATION_PENDING:
+            raise RodexRuntimeError("runtime registration state is invalid")
         condition = combine_tmux_if_shell_conditions(
             primary_pane_capability_if_shell_condition(bootstrap_capability),
             (f"#{{==:#{{{RODEX_REGISTRATION_STATE_OPTION}}},{RODEX_REGISTRATION_PENDING}}}"),
@@ -829,6 +865,8 @@ class RodexRuntimeLauncher:
             server_id = parse_tmux_server_id(server_id_text)
         except ValueError as error:
             raise RodexRuntimeError("live tmux server identity is invalid") from error
+        if runtime.creation_server_id is not None and server_id != runtime.creation_server_id:
+            raise RodexRuntimeError("live tmux server disagrees with the original creation receipt")
         if (
             not observed_tmux_session_id.startswith("$")
             or not observed_tmux_session_id[1:].isdigit()
@@ -857,6 +895,40 @@ class RodexRuntimeLauncher:
             raise RodexRuntimeError("live tmux session advertised an invalid runtime ID") from error
         if runtime.runtime_id is not None and runtime.runtime_id != runtime_id:
             raise RodexRuntimeError("live tmux runtime incarnation changed during discovery")
+        endpoint_root = runtime.tmux_server_socket_path.parent
+        if (
+            proxy_path != endpoint_root / f"proxy-{runtime_id}.sock"
+            or event_path != endpoint_root / f"events-{runtime_id}.sock"
+        ):
+            raise RodexRuntimeError("live tmux protocol endpoints do not belong to its runtime incarnation")
+        try:
+            primary = TmuxRuntimeCapability(
+                runtime.tmux_server_socket_path,
+                server_id,
+                observed_tmux_session_id,
+                tmux_primary_pane_id,
+                runtime_id,
+            )
+        except (TypeError, ValueError) as error:
+            raise RodexRuntimeError("live tmux primary capability is malformed") from error
+        guarded = self._tmux(
+            runtime,
+            *primary_pane_capability_read_arguments(primary, record_format),
+            check=False,
+        )
+        guarded_fields = guarded.stdout.rstrip("\n").split("\t")
+        if guarded.returncode != 0 or len(guarded_fields) != 12:
+            raise RodexRuntimeError("live tmux primary pane ownership could not be verified")
+        completed_registration = (
+            registration_state_text == RODEX_REGISTRATION_PENDING
+            and guarded_fields[10] == RODEX_REGISTRATION_REGISTERED
+            and fields[:9] == guarded_fields[:9]
+            and fields[11] == guarded_fields[11]
+            and internal_session_id_text == ""
+        )
+        if guarded_fields != fields and not completed_registration:
+            raise RodexRuntimeError("live tmux control identity changed during primary validation")
+        internal_session_id_text, registration_state_text = guarded_fields[9:11]
         registration_state = registration_state_text
         if registration_state not in {
             RODEX_REGISTRATION_PENDING,
@@ -951,6 +1023,7 @@ class RodexRuntimeLauncher:
             or fields[0] != RODEX_SHARED_TMUX_PROTOCOL
             or fields[2] != runtime.tmux_session_name
             or fields[5] != str(runtime.runtime_id)
+            or (runtime.creation_server_id is not None and fields[1] != runtime.creation_server_id)
         ):
             raise RodexRuntimeError("startup tmux capability could not be verified")
         try:
@@ -1124,6 +1197,8 @@ class RodexRuntimeLauncher:
             raise RodexRuntimeError("registered tmux server identity is invalid") from error
         if expected_capability is not None and expected_capability.tmux_server_id != server_id:
             raise RodexRuntimeError("registered tmux server incarnation changed")
+        if runtime.creation_server_id is not None and runtime.creation_server_id != server_id:
+            raise RodexRuntimeError("registered tmux server disagrees with the original creation receipt")
         matches = tuple(
             capability
             for capability in self._list_registered_tmux_capabilities(
@@ -1252,7 +1327,7 @@ class RodexRuntimeLauncher:
             capability,
             *shlex.split(snapshot_action),
         )
-        for event in ("attached", "detached"):
+        for event in ("attached", "detached", "session-changed"):
             hook_name = f"client-{event}[{RODEX_SHARED_TMUX_HOOK_INDEX}]"
             self._server_capability_tmux(
                 runtime,
@@ -1342,7 +1417,7 @@ class RodexRuntimeLauncher:
         except ValueError as error:
             raise RodexRuntimeError("caller process environment is invalid") from error
         caller_environment_names = frozenset(name for name, _value in environment_entries)
-        candidate_server_id = secrets.token_hex(16)
+        candidate_server_id = runtime.creation_server_id or secrets.token_hex(16)
         new_session_arguments = [
             "new-session",
             "-d",
@@ -1377,6 +1452,13 @@ class RodexRuntimeLauncher:
                 str(runtime.runtime_id),
                 ";",
                 "set-option",
+                "-p",
+                "-t",
+                _exact_tmux_pane_target(runtime.tmux_session_name),
+                RODEX_PANE_RUNTIME_ID_OPTION,
+                str(runtime.runtime_id),
+                ";",
+                "set-option",
                 "-F",
                 "-t",
                 _exact_tmux_pane_target(runtime.tmux_session_name),
@@ -1406,12 +1488,15 @@ class RodexRuntimeLauncher:
         )
         server_matches_current_protocol = combine_tmux_if_shell_conditions(
             (f"#{{==:#{{{RODEX_SHARED_TMUX_PROTOCOL_OPTION}}},{RODEX_SHARED_TMUX_PROTOCOL}}}"),
-            (f"#{{m/r:^{'[0-9a-f]' * 32}$,#{{{RODEX_SHARED_TMUX_SERVER_ID_OPTION}}}}}"),
+            (f"#{{==:#{{{RODEX_SHARED_TMUX_SERVER_ID_OPTION}}},{candidate_server_id}}}"),
+            (f"#{{==:#{{{RODEX_SERVER_RUNTIME_ID_OPTION}}},{runtime.runtime_id}}}"),
+            "#{==:#{S:#{session_id}},}",
         )
         server_is_unclaimed = combine_tmux_if_shell_conditions(
             f"#{{==:#{{{RODEX_SHARED_TMUX_PROTOCOL_OPTION}}},}}",
             f"#{{==:#{{{RODEX_SHARED_TMUX_SERVER_ID_OPTION}}},}}",
-            "#{==:#{session_id},}",
+            f"#{{==:#{{{RODEX_SERVER_RUNTIME_ID_OPTION}}},}}",
+            "#{==:#{S:#{session_id}},}",
         )
         claim_action = _tmux_command_queue(
             (
@@ -1424,6 +1509,11 @@ class RodexRuntimeLauncher:
                 "-s",
                 RODEX_SHARED_TMUX_SERVER_ID_OPTION,
                 candidate_server_id,
+                ";",
+                "set-option",
+                "-s",
+                RODEX_SERVER_RUNTIME_ID_OPTION,
+                str(runtime.runtime_id),
             )
         )
         self._tmux(
@@ -1564,7 +1654,11 @@ class RodexRuntimeLauncher:
                 notice = self._attach_notice()
         if notice and isinstance(runtime, LiveRodexRuntime):
             with suppress(Exception):
-                self._publish_tui_notice(runtime.protocol_proxy_socket_path, notice)
+                self._publish_tui_notice(
+                    runtime.protocol_proxy_socket_path,
+                    notice,
+                    peer_identity=RuntimePeerIdentity(capability.runtime_id, capability.tmux_server_id),
+                )
         environment = self._user_process_environment.copy()
         environment.pop("TMUX", None)
         attach_action = shlex.join(("attach-session", "-E", "-t", capability.session_target))
@@ -1585,7 +1679,13 @@ class RodexRuntimeLauncher:
         _erase_native_tmux_exit_message()
 
     def _stable_tmux_session_target(self, runtime: LiveTmuxSession) -> str:
-        """Resolve a managed runtime to tmux's immutable server-local session ID."""
+        target = self._lookup_tmux_session_target(runtime)
+        if target is None:
+            raise RodexRuntimeError(f"Rodex runtime {runtime.runtime_id} was not found")
+        return target
+
+    def _lookup_tmux_session_target(self, runtime: LiveTmuxSession) -> str | None:
+        """Distinguish absent runtime/listener from failed or ambiguous discovery."""
         if runtime.runtime_id is None:
             return _exact_tmux_session_target(runtime.tmux_session_name)
         result = self._tmux(
@@ -1596,31 +1696,25 @@ class RodexRuntimeLauncher:
             check=False,
         )
         if result.returncode != 0:
-            raise RodexRuntimeError("Rodex runtime ended before stable tmux resolution")
+            if _tmux_endpoint_has_no_listener(runtime.tmux_server_socket_path):
+                return None
+            raise RodexRuntimeError("could not determine the tmux runtime inventory")
         expected_runtime_id = str(runtime.runtime_id)
         matches: list[str] = []
         for line in result.stdout.splitlines():
             tmux_session_id, separator, runtime_id = line.partition("\t")
-            if (
-                separator
-                and runtime_id == expected_runtime_id
-                and tmux_session_id.startswith("$")
-                and tmux_session_id[1:].isdigit()
-            ):
+            if not separator or not tmux_session_id.startswith("$") or not tmux_session_id[1:].isdigit():
+                raise RodexRuntimeError("tmux runtime inventory is malformed")
+            if runtime_id == expected_runtime_id:
                 matches.append(tmux_session_id)
-        if len(matches) != 1:
-            detail = "not found" if not matches else "advertised by multiple tmux sessions"
-            raise RodexRuntimeError(f"Rodex runtime {expected_runtime_id} was {detail}")
-        return matches[0]
+        if len(matches) > 1:
+            raise RodexRuntimeError(f"Rodex runtime {expected_runtime_id} was advertised by multiple tmux sessions")
+        return matches[0] if matches else None
 
     def session_exists(self, runtime: LiveTmuxSession) -> bool:
         """Return whether the exact recorded tmux session is still running."""
         if runtime.runtime_id is not None:
-            try:
-                self._stable_tmux_session_target(runtime)
-            except RodexRuntimeError:
-                return False
-            return True
+            return self._lookup_tmux_session_target(runtime) is not None
         return self._bootstrap_session_exists(runtime)
 
     def _bootstrap_session_exists(self, runtime: LiveTmuxSession) -> bool:
@@ -1850,12 +1944,14 @@ class RodexRuntimeLauncher:
             capability = self._resolve_registered_tmux_capability(runtime)
             tmux_session_id = capability.session_target
             pane_target = capability.pane_target
-            condition = registered_primary_pane_if_shell_condition(capability)
+            condition = runtime_destruction_if_shell_condition(capability)
         else:
+            if runtime.creation_server_id is None:
+                raise RodexRuntimeError("tmux stop requires registered authority or its original creation receipt")
             bootstrap_capability = self._resolve_bootstrap_tmux_capability(runtime)
             tmux_session_id = bootstrap_capability.session_target
             pane_target = bootstrap_capability.pane_target
-            condition = primary_pane_capability_if_shell_condition(bootstrap_capability)
+            condition = runtime_destruction_if_shell_condition(bootstrap_capability)
         self._tmux(
             runtime,
             "if-shell",
@@ -1902,9 +1998,14 @@ class RodexRuntimeLauncher:
                     )
                 suffix = f": {detail}" if detail else ""
                 raise RodexRuntimeError(f"Codex exited before its session was ready{suffix}")
-            if runtime.app_server_socket_path.exists():
+            if runtime.protocol_proxy_socket_path.exists():
                 try:
-                    loaded = self._list_loaded_codex_threads(runtime.app_server_socket_path)
+                    if runtime.runtime_id is None or runtime.creation_server_id is None:
+                        raise RodexRuntimeError("startup protocol discovery requires its original creation receipt")
+                    loaded = self._list_loaded_codex_threads(
+                        runtime.protocol_proxy_socket_path,
+                        RuntimePeerIdentity(runtime.runtime_id, runtime.creation_server_id),
+                    )
                 except (ConnectionClosed, InvalidHandshake, OSError, TimeoutError) as error:
                     last_error = error
                 else:
@@ -1925,10 +2026,12 @@ class RodexRuntimeLauncher:
         suffix = f": {detail}" if detail else ""
         raise RodexRuntimeError(f"timed out waiting for the Codex session{suffix}")
 
-    def _list_loaded_codex_threads(self, socket_path: Path) -> list[str]:
-        with self._connect(
-            str(socket_path),
-            uri=f"ws://localhost{CODEX_APP_SERVER.rpc_connection_path}",
+    def _list_loaded_codex_threads(self, socket_path: Path, peer_identity: RuntimePeerIdentity) -> list[str]:
+        with verified_runtime_connection(
+            self._connect,
+            socket_path,
+            peer_identity=peer_identity,
+            uri=f"ws://localhost{CONTROL_CONNECTION_PATH}",
             compression=None,
             open_timeout=1,
             close_timeout=1,
@@ -1981,12 +2084,7 @@ class RodexRuntimeLauncher:
         runtime: LiveTmuxSession,
         capability: TmuxSessionCapability,
     ) -> None:
-        command = _shared_ctrl_c_binding_command(
-            self._python_executable,
-            self._tmux_binary,
-            runtime,
-            capability.tmux_server_id,
-        )
+        command = shared_ctrl_c_binding_command(capability)
         self._install_owned_root_key_binding(
             runtime,
             capability,
@@ -2106,9 +2204,9 @@ def default_runtime_root_path() -> Path:
     return Path("/tmp") / f"rodex-{os.getuid()}"
 
 
-def default_tmux_server_socket_path() -> Path:
-    """Resolve the default shared tmux socket without mutating runtime state."""
-    return default_runtime_root_path() / RODEX_SHARED_TMUX_SOCKET_NAME
+def current_tmux_server_socket_paths() -> tuple[Path, ...]:
+    """Inventory current isolated-runtime sockets without admitting old contracts."""
+    return tuple(sorted(path for path in default_runtime_root_path().glob(RODEX_TMUX_SOCKET_PATTERN) if path.is_socket()))
 
 
 def default_runtime_root() -> Path:
@@ -2176,10 +2274,16 @@ def run_session_host(
     tmux_server_socket_path = config.tmux_server_socket_path
     codex_arguments = config.codex_arguments
     pending_analytics_config: AnalyticsWorkerConfig | None = config.analytics
-    app_server_socket_path.unlink(missing_ok=True)
-    protocol_proxy_socket_path.unlink(missing_ok=True)
-    protocol_event_socket_path.unlink(missing_ok=True)
-    app_server_log_path.parent.mkdir(parents=True, exist_ok=True)
+    tmux_pane_target = os.environ.get("TMUX_PANE", "")
+    tmux_runtime_capability = _resolve_session_host_tmux_capability(
+        tmux_binary,
+        tmux_server_socket_path,
+        tmux_pane_target,
+        config.runtime_id,
+        config.tmux_server_id,
+    )
+    peer_identity = RuntimePeerIdentity(config.runtime_id, config.tmux_server_id)
+    app_endpoint = ExclusiveUnixEndpoint(app_server_socket_path)
     app_server: subprocess.Popen[bytes] | None = None
     tui: subprocess.Popen[bytes] | None = None
     terminal_gateway: TerminalSessionGateway | None = None
@@ -2191,6 +2295,12 @@ def run_session_host(
     analytics_supervisor: AnalyticsSubprocessSupervisor | None = None
     agent_observer_controller: AgentObserverCoordinator | None = None
     interaction_pipeline = SessionInteractionPipeline()
+    presentation_pipeline = SessionPresentationPipeline()
+    presentation_policy_interaction = PresentationPolicyInteractionAdapter(
+        interaction_pipeline,
+        presentation_pipeline,
+        str(config.runtime_id),
+    )
     registered_interaction_context: AnalyticsWorkerConfig | None = None
     registration_deadline = time.monotonic() + RODEX_REGISTRATION_TIMEOUT_SECONDS
     shutting_down = False
@@ -2209,6 +2319,7 @@ def run_session_host(
 
     previous_handlers = {signum: signal.signal(signum, stop_on_signal) for signum in (signal.SIGHUP, signal.SIGTERM)}
     try:
+        app_endpoint.acquire()
         with _open_private_runtime_log(app_server_log_path) as log:
             app_server = subprocess.Popen(
                 CODEX_APP_SERVER.command(codex_binary, app_server_socket_path),
@@ -2216,16 +2327,13 @@ def run_session_host(
                 stdout=log,
                 stderr=subprocess.STDOUT,
                 env=user_environment,
+                # Own shutdown independently of pane hangups, including bounded
+                # escalation to the wrapper's native App Server child.
+                start_new_session=True,
             )
             _wait_for_app_server_socket(app_server, app_server_socket_path)
+            app_endpoint.retain_bound_path()
             app_server_socket_path.chmod(0o600)
-            tmux_pane_target = os.environ.get("TMUX_PANE", "")
-            tmux_runtime_capability = _resolve_session_host_tmux_capability(
-                tmux_binary,
-                tmux_server_socket_path,
-                tmux_pane_target,
-                config.runtime_id,
-            )
             agent_observer_controller = AgentObserverCoordinator(
                 tmux_binary,
                 tmux_runtime_capability,
@@ -2250,7 +2358,7 @@ def run_session_host(
                 codex_sessions_root=config.analytics.codex_sessions_root,
             )
             context_status_observer = live_context_observer
-            live_event_tap = CodexProtocolEventTap(protocol_event_socket_path)
+            live_event_tap = CodexProtocolEventTap(protocol_event_socket_path, peer_identity=peer_identity)
             protocol_event_tap = live_event_tap
             live_event_tap.start()
 
@@ -2258,13 +2366,20 @@ def run_session_host(
                 message: str | bytes,
                 event: dict[str, Any] | None,
             ) -> None:
+                presentation_pipeline.observe_protocol_output(event)
                 live_context_observer.observe_protocol_event(event)
                 if agent_observer_controller is not None:
                     with suppress(Exception):
                         agent_observer_controller.observe_protocol_event(event)
                 live_event_tap.publish_protocol_event(message, event)
 
-            lifecycle_participants = [live_context_observer, live_event_tap]
+            def observe_primary_client_message(
+                _message: str | bytes,
+                request: dict[str, Any] | None,
+            ) -> None:
+                presentation_pipeline.observe_protocol_input(request)
+
+            lifecycle_participants = [presentation_pipeline, live_context_observer, live_event_tap]
             if agent_observer_controller is not None:
                 lifecycle_participants.append(agent_observer_controller)
             primary_connection_lifecycle = PrimaryConnectionLifecycleCoordinator(lifecycle_participants)
@@ -2290,8 +2405,10 @@ def run_session_host(
                 ToolCallCounter(tool_call_status.update),
                 publish_primary_server_message,
                 primary_connection_lifecycle,
+                app_server_process=app_server,
+                on_primary_client_message=observe_primary_client_message,
                 interaction_pipeline=interaction_pipeline,
-                runtime_identity=str(config.runtime_id),
+                peer_identity=peer_identity,
                 primary_pane=primary_pane,
                 model_message_sender=start_model_message,
             )
@@ -2365,6 +2482,7 @@ def run_session_host(
                         runtime_identity=str(config.runtime_id),
                         registrations=INPUT_INTERCEPTORS,
                         confirm_native_prefix=input_presentation.confirm_native_prefix,
+                        presentation_snapshot=presentation_pipeline.snapshot,
                     )
                     tui = terminal_gateway.process
                 finally:
@@ -2386,10 +2504,11 @@ def run_session_host(
                         if activated_analytics is not None:
                             pending_analytics_config = None
                             registered_interaction_context = activated_analytics
+                            assert activated_analytics.codex_session_id is not None
+                            presentation_pipeline.bind_root_thread(str(activated_analytics.codex_session_id))
                             if agent_observer_controller is not None:
                                 with suppress(Exception):
                                     assert activated_analytics.rodex_sessions_id is not None
-                                    assert activated_analytics.codex_session_id is not None
                                     agent_observer_controller.activate(
                                         database_path=activated_analytics.rodex_database_path,
                                         rodex_sessions_id=activated_analytics.rodex_sessions_id,
@@ -2420,6 +2539,20 @@ def run_session_host(
                             timeout=(_REGISTRATION_POLL_INTERVAL_SECONDS if registration_pending else None)
                         )
                     except subprocess.TimeoutExpired:
+                        if (
+                            registration_pending
+                            and requested_codex_session_id is not None
+                            and _codex_reports_active_writer(
+                                _read_runtime_log_since(log, attempt_log_offset), requested_codex_session_id
+                            )
+                        ):
+                            # Codex can leave its TUI alive after rejecting resume.
+                            # Retire only this unregistered attempt; the existing
+                            # deadline below decides whether another may start.
+                            assert tui is not None
+                            _stop_child_process(tui)
+                            returncode = 1
+                            break
                         continue
                     break
                 if (
@@ -2469,6 +2602,8 @@ def run_session_host(
                     if input_presentation is not None:
                         with suppress(Exception):
                             input_presentation.close()
+                    with suppress(Exception):
+                        presentation_policy_interaction.close()
                     try:
                         if protocol_proxy is not None:
                             protocol_proxy.close()
@@ -2486,12 +2621,8 @@ def run_session_host(
                                         protocol_event_tap.close()
                                 finally:
                                     if app_server is not None:
-                                        _stop_child_process(app_server)
-                                    app_server_socket_path.unlink(missing_ok=True)
-                                    protocol_proxy_socket_path.unlink(missing_ok=True)
-                                    protocol_event_socket_path.unlink(missing_ok=True)
-                                    if app_server_log_path.exists() and app_server_log_path.stat().st_size == 0:
-                                        app_server_log_path.unlink()
+                                        _stop_child_process(app_server, owns_process_group=True)
+                                    app_endpoint.close()
         finally:
             for signum, handler in previous_handlers.items():
                 signal.signal(signum, handler)
@@ -2508,6 +2639,7 @@ def _resolve_session_host_tmux_capability(
     tmux_server_socket_path: Path,
     tmux_pane_target: str,
     expected_runtime_id: RodexRuntimeId,
+    expected_server_id: str,
 ) -> TmuxRuntimeCapability:
     """Bind a session host to the server/session/runtime incarnation that spawned it."""
     if not tmux_pane_target:
@@ -2537,6 +2669,7 @@ def _resolve_session_host_tmux_capability(
         result.returncode != 0
         or len(fields) != 6
         or fields[0] != RODEX_SHARED_TMUX_PROTOCOL
+        or fields[1] != expected_server_id
         or fields[3] != tmux_pane_target
         or fields[4] != tmux_pane_target
         or fields[5] != str(expected_runtime_id)
@@ -2625,15 +2758,21 @@ def _registered_analytics_worker_config(
     )
 
 
-def _stop_child_process(process: subprocess.Popen[bytes]) -> None:
-    """Stop one exact child process, escalating only when it does not exit."""
+def _stop_child_process(process: subprocess.Popen[bytes], *, owns_process_group: bool = False) -> None:
+    """Stop the retained child, escalating within its creation-owned group only."""
     if process.poll() is not None:
         return
     process.terminate()
     try:
         process.wait(timeout=3)
     except subprocess.TimeoutExpired:
-        process.kill()
+        if owns_process_group:
+            # Only callers that created a new process session may use this.
+            # The timed-out child has not been reaped, so its group ID cannot
+            # be recycled before escalation reaches its native descendants.
+            os.killpg(process.pid, signal.SIGKILL)
+        else:
+            process.kill()
         process.wait(timeout=3)
 
 
@@ -2717,7 +2856,9 @@ def _require_short_unix_socket_path(path: Path) -> None:
 
 
 def _wait_for_app_server_socket(process: subprocess.Popen[bytes], socket_path: Path) -> None:
-    deadline = time.monotonic() + 5
+    # Native first-use database initialization can take longer than five seconds
+    # on disk. Use the managed-startup allowance instead of an earlier cutoff.
+    deadline = time.monotonic() + DEFAULT_STARTUP_TIMEOUT_SECONDS
     while time.monotonic() < deadline:
         returncode = process.poll()
         if returncode is not None:

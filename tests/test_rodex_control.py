@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from runtime_peer_fixtures import TEST_PEER, peer_response
 
 from rodex.app_server_contract import RodexAppServerVersionError
 from rodex.control import (
@@ -17,6 +18,8 @@ from rodex.control import (
     format_protocol_log_event,
 )
 from rodex.protocol_proxy import EVENT_STREAM_READY_MESSAGE
+from rodex.tmux_session_capability import TmuxSessionCapability
+from rodex_registry import RodexRegistryId, RodexSessionId
 
 CODEX_SESSION_ID = uuid.UUID("01a00654-f2bc-7a30-834a-a5f886a65f82")
 
@@ -30,6 +33,7 @@ class FakeWebSocket:
         self.responses = iter(json.dumps(response) for response in (responses or []))
         self.events = [json.dumps(event) for event in (events or [])]
         self.sent: list[dict[str, Any]] = []
+        self.response = peer_response()
 
     def __enter__(self) -> FakeWebSocket:
         return self
@@ -68,6 +72,18 @@ def control(tmp_path: Path) -> LiveRodexControl:
         tmp_path / "proxy.sock",
         tmp_path / "events.sock",
         CODEX_SESSION_ID,
+        runtime_id=TEST_PEER.runtime_id,
+        tmux_capability=TmuxSessionCapability(
+            tmp_path / "tmux.sock",
+            TEST_PEER.tmux_server_id,
+            "$0",
+            "%0",
+            TEST_PEER.runtime_id,
+            RodexSessionId.parse("1" * 16),
+            RodexRegistryId.parse("2" * 16),
+            1,
+            CODEX_SESSION_ID,
+        ),
     )
 
 

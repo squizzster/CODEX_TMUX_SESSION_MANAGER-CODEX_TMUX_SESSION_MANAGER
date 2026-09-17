@@ -11,6 +11,7 @@ from threading import Thread
 from types import SimpleNamespace
 
 import pytest
+from runtime_peer_fixtures import TEST_PEER, LiveTestProcess, peer_response
 from websockets.exceptions import ConnectionClosed
 from websockets.sync.client import unix_connect
 from websockets.sync.server import unix_serve
@@ -57,6 +58,8 @@ from rodex_registry.identity import RodexRuntimeId
 )
 def test_external_interaction_endpoint_cannot_bypass_terminal_input_ownership(operation):
     class Connection:
+        response = peer_response()
+
         response = None
 
         def recv(self, **_options):
@@ -119,10 +122,17 @@ def test_real_proxy_hooks_cover_both_directions_and_control_connections(tmp_path
         ToolCallCounter(lambda _: None),
         lambda message, event: projected.append((message, event)),
         interaction_pipeline=pipeline,
+        peer_identity=TEST_PEER,
+        app_server_process=LiveTestProcess(),
     )
     try:
         proxy.start()
-        with unix_connect(str(proxy_socket), uri=f"ws://localhost{connection_path}", close_timeout=1) as client:
+        with unix_connect(
+            str(proxy_socket),
+            uri=f"ws://localhost{connection_path}",
+            close_timeout=1,
+            additional_headers=TEST_PEER.headers(),
+        ) as client:
             client.send('{"id":1,"params":{"text":"input"}}')
             response = client.recv(timeout=2)
             assert json.loads(response)["result"]["text"] == "accepted-output"
@@ -164,10 +174,12 @@ def test_protocol_rejection_closes_connection_without_forwarding_the_request(tmp
         app_socket,
         ToolCallCounter(lambda _: None),
         interaction_pipeline=SessionInteractionPipeline(hooks=(reject,)),
+        peer_identity=TEST_PEER,
+        app_server_process=LiveTestProcess(),
     )
     try:
         proxy.start()
-        with unix_connect(str(proxy_socket), close_timeout=1) as client:
+        with unix_connect(str(proxy_socket), close_timeout=1, additional_headers=TEST_PEER.headers()) as client:
             client.send('{"id":1,"method":"turn/start"}')
             with pytest.raises(ConnectionClosed):
                 client.recv(timeout=2)
@@ -194,6 +206,8 @@ def test_one_remote_interface_routes_display_and_explicit_model_intent_without_d
                 value={"turn_id": "turn-1"},
             )
         ),
+        peer_identity=TEST_PEER,
+        app_server_process=LiveTestProcess(),
     )
 
     class Primary:
@@ -208,10 +222,12 @@ def test_one_remote_interface_routes_display_and_explicit_model_intent_without_d
         displayed_result = publish_session_interaction(
             tmp_path / "proxy.sock",
             InteractionRequest("main", InteractionOperation.MESSAGE, "test", text="display"),
+            peer_identity=TEST_PEER,
         )
         model_result = publish_session_interaction(
             tmp_path / "proxy.sock",
             InteractionRequest("main", InteractionOperation.MESSAGE, "test", text="input", start_model_turn=True),
+            peer_identity=TEST_PEER,
         )
         assert displayed_result.status == DeliveryStatus.DELIVERED
         assert model_result.status == DeliveryStatus.MODEL_TURN_STARTED
@@ -227,10 +243,13 @@ def test_one_remote_interface_routes_display_and_explicit_model_intent_without_d
                 text="stale",
                 expected_binding="old-connection",
             ),
+            peer_identity=TEST_PEER,
         )
         assert stale.status == DeliveryStatus.REJECTED
         with unix_connect(
-            str(tmp_path / "proxy.sock"), uri=f"ws://localhost{SESSION_INTERACTION_CONNECTION_PATH}"
+            str(tmp_path / "proxy.sock"),
+            uri=f"ws://localhost{SESSION_INTERACTION_CONNECTION_PATH}",
+            additional_headers=TEST_PEER.headers(),
         ) as client:
             client.send(
                 json.dumps(
@@ -283,6 +302,8 @@ def test_real_tmux_pane_operations_use_the_same_pipeline_and_exact_targets(tmp_p
         session_id, primary_id = identity.split("|")
         tmux_command("set-option", "-g", RODEX_SHARED_TMUX_PROTOCOL_OPTION, RODEX_SHARED_TMUX_PROTOCOL)
         tmux_command("set-option", "-g", RODEX_SHARED_TMUX_SERVER_ID_OPTION, server_id)
+        tmux_command("set-option", "-s", "@rodex_server_runtime_id", str(runtime_id))
+        tmux_command("set-option", "-p", "-t", primary_id, "@rodex_pane_runtime_id", str(runtime_id))
         tmux_command("set-option", "-t", session_id, RODEX_RUNTIME_ID_OPTION, str(runtime_id))
         tmux_command("set-option", "-t", session_id, RODEX_PRIMARY_PANE_ID_OPTION, primary_id)
         capability = TmuxRuntimeCapability(socket_path, server_id, session_id, primary_id, runtime_id)
@@ -477,6 +498,8 @@ def test_reopen_publishes_current_state_after_creation_not_a_preopen_snapshot(tm
 )
 def test_external_message_timeout_accommodates_observer_readiness(target, open_if_missing, timeout):
     class Connection:
+        response = peer_response()
+
         def __enter__(self):
             return self
 
@@ -494,5 +517,6 @@ def test_external_message_timeout_accommodates_observer_readiness(target, open_i
         Path("/unused.sock"),
         InteractionRequest(target, InteractionOperation.MESSAGE, "test", text="hello", open_if_missing=open_if_missing),
         connector=lambda *_args, **_kwargs: Connection(),
+        peer_identity=TEST_PEER,
     )
     assert result.accepted

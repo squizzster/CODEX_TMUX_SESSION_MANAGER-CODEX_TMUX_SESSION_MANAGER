@@ -2,36 +2,21 @@ from __future__ import annotations
 
 import json
 import socket as socket_module
-import subprocess
 import time
 import uuid
 from pathlib import Path
-from threading import Barrier, Event, Lock, Thread
+from threading import Event, Thread
+from types import SimpleNamespace
 
 import pytest
 
 import rodex.control as control_module
 from rodex.control import CodexControlClient, LiveRodexControl, RodexControlError
+from rodex.runtime_peer import RuntimePeerIdentity
 from rodex.tmux_session_capability import TmuxSessionCapability
-from rodex.tmux_shared_ctrl_c import handle_shared_ctrl_c
-from rodex_registry import RodexRegistryId, RodexRuntimeId, RodexSessionId
+from rodex_registry.identity import RodexRegistryId, RodexRuntimeId, RodexSessionId
 
 CODEX_SESSION_ID = uuid.UUID("01a00654-f2bc-7a30-834a-a5f886a65f82")
-CONFIRMATION_OPTION = "@rodex_shared_ctrl_c_confirmation"
-
-
-def _capability(socket_path: Path) -> TmuxSessionCapability:
-    return TmuxSessionCapability(
-        socket_path,
-        "0123456789abcdef0123456789abcdef",
-        "$7",
-        "%9",
-        RodexRuntimeId.parse("0123456789abcdef"),
-        RodexSessionId.parse("1111111111111111"),
-        RodexRegistryId.parse("2222222222222222"),
-        7,
-        CODEX_SESSION_ID,
-    )
 
 
 class _BlockingTransport:
@@ -149,8 +134,9 @@ def test_round1_blocked_initialized_notification_obeys_chain_deadline() -> None:
 
 
 class ChatteringReadSocket:
-    def __init__(self) -> None:
+    def __init__(self, peer_identity: RuntimePeerIdentity) -> None:
         self.recv_calls = 0
+        self.response = SimpleNamespace(headers=peer_identity.headers())
 
     def __enter__(self) -> ChatteringReadSocket:
         return self
@@ -171,7 +157,18 @@ class ChatteringReadSocket:
 
 
 def test_round1_read_control_rpc_has_an_absolute_deadline(tmp_path: Path) -> None:
-    socket = ChatteringReadSocket()
+    capability = TmuxSessionCapability(
+        tmp_path / "runtime.sock",
+        "0123456789abcdef0123456789abcdef",
+        "$7",
+        "%9",
+        RodexRuntimeId.parse("0123456789abcdef"),
+        RodexSessionId.parse("1111111111111111"),
+        RodexRegistryId.parse("2222222222222222"),
+        7,
+        CODEX_SESSION_ID,
+    )
+    socket = ChatteringReadSocket(RuntimePeerIdentity(capability.runtime_id, capability.tmux_server_id))
     clock = 0.0
 
     def monotonic() -> float:
@@ -187,6 +184,8 @@ def test_round1_read_control_rpc_has_an_absolute_deadline(tmp_path: Path) -> Non
         tmp_path / "proxy.sock",
         tmp_path / "events.sock",
         CODEX_SESSION_ID,
+        runtime_id=capability.runtime_id,
+        tmux_capability=capability,
     )
 
     with pytest.raises(RodexControlError, match=r"deadline|timed out"):
@@ -195,111 +194,5 @@ def test_round1_read_control_rpc_has_an_absolute_deadline(tmp_path: Path) -> Non
     assert socket.recv_calls < 32
 
 
-def test_round1_shared_ctrl_c_rechecks_current_attachment_count(tmp_path: Path) -> None:
-    commands: list[list[str]] = []
-
-    def runner(command: list[str], **_options: object) -> subprocess.CompletedProcess[str]:
-        commands.append(command)
-        arguments = command[3:]
-        if arguments[:1] == ["if-shell"] and "display-message" in arguments[-2] and "#{pane_id}" in arguments[-2]:
-            return subprocess.CompletedProcess(command, 0, stdout="%9\n", stderr="")
-        if "display-message" in arguments or any("session_attached" in argument for argument in arguments):
-            return subprocess.CompletedProcess(command, 0, stdout="2\n", stderr="")
-        if arguments[:2] == ["show-options", "-v"]:
-            return subprocess.CompletedProcess(command, 1, stdout="", stderr="")
-        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
-
-    handle_shared_ctrl_c(
-        "tmux",
-        _capability(tmp_path / "tmux.sock"),
-        "%9",
-        "client-one",
-        monotonic_nanoseconds=lambda: 10_000_000_000,
-        confirmation_token=lambda: "token-one",
-        expiry_scheduler=lambda _callback: None,
-        runner=runner,
-    )
-
-    assert any("session_attached" in " ".join(command) for command in commands)
-    assert not any("kill-session" in command for command in commands)
-
-
-def test_round1_shared_ctrl_c_confirmation_is_atomic_across_callers(
-    tmp_path: Path,
-) -> None:
-    initial_confirmation = json.dumps(
-        {
-            "armed_at_monotonic_ns": 10_000_000_000,
-            "client_name": "client-one",
-            "status_token": "warning-token",
-        },
-        separators=(",", ":"),
-    )
-    confirmation = initial_confirmation
-    readers = Barrier(2)
-    state_lock = Lock()
-    kill_count = 0
-    errors: list[BaseException] = []
-
-    def runner(command: list[str], **_options: object) -> subprocess.CompletedProcess[str]:
-        nonlocal confirmation, kill_count
-        arguments = command[3:]
-        joined = " ".join(arguments)
-        if arguments[:1] == ["if-shell"] and "display-message" in arguments[-2] and "#{pane_id}" in arguments[-2]:
-            return subprocess.CompletedProcess(command, 0, stdout="%9\n", stderr="")
-        if arguments[:1] == ["if-shell"] and "show-options" in joined:
-            if CONFIRMATION_OPTION not in joined:
-                return subprocess.CompletedProcess(command, 1, stdout="", stderr="")
-            with state_lock:
-                observed = confirmation
-            readers.wait(timeout=2)
-            return subprocess.CompletedProcess(command, 0, stdout=observed, stderr="")
-        if "display-message" in arguments or "session_attached" in joined:
-            return subprocess.CompletedProcess(command, 0, stdout="2\n", stderr="")
-        if arguments[:2] == ["show-options", "-v"]:
-            if arguments[-1] != CONFIRMATION_OPTION:
-                return subprocess.CompletedProcess(command, 1, stdout="", stderr="")
-            with state_lock:
-                observed = confirmation
-            readers.wait(timeout=2)
-            return subprocess.CompletedProcess(command, 0, stdout=observed, stderr="")
-        if arguments[:2] == ["set-option", "-u"]:
-            with state_lock:
-                confirmation = ""
-            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
-        if arguments[:1] == ["if-shell"] and "kill-session" in joined:
-            with state_lock:
-                if confirmation == initial_confirmation:
-                    confirmation = ""
-                    kill_count += 1
-            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
-        if arguments[:1] == ["kill-session"]:
-            with state_lock:
-                kill_count += 1
-            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
-        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
-
-    def confirm() -> None:
-        try:
-            handle_shared_ctrl_c(
-                "tmux",
-                _capability(tmp_path / "tmux.sock"),
-                "%9",
-                "client-one",
-                monotonic_nanoseconds=lambda: 11_000_000_000,
-                confirmation_token=lambda: "unused-token",
-                expiry_scheduler=lambda _callback: None,
-                runner=runner,
-            )
-        except BaseException as error:
-            errors.append(error)
-
-    callers = [Thread(target=confirm) for _ in range(2)]
-    for caller in callers:
-        caller.start()
-    for caller in callers:
-        caller.join(3)
-
-    assert all(not caller.is_alive() for caller in callers)
-    assert errors == []
-    assert kill_count == 1
+# Native Ctrl-C lifecycle and adversarial client schedules are exercised against
+# disposable real tmux servers in tests/test_tmux_shared_ctrl_c.py.

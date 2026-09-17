@@ -125,9 +125,9 @@ def test_fresh_detached_launcher_keeps_the_registered_session_host_alive() -> No
     integration_root = Path(tempfile.mkdtemp(prefix="rodex-launch-", dir="/tmp"))
     integration_root.chmod(0o700)
     state_home = integration_root / "state"
-    database = state_home / "rodex" / "rodex-v19.sqlite3"
+    database = state_home / "rodex" / "rodex-v20.sqlite3"
     runtime_root = integration_root / "runtime"
-    tmux_socket = runtime_root / "tmux-shared-v2.sock"
+    tmux_socket = runtime_root / "uncreated.sock"
     codex_home = integration_root / "codex-home"
     workspace = integration_root / "workspace"
     codex_home.mkdir(mode=0o700)
@@ -172,6 +172,9 @@ def test_fresh_detached_launcher_keeps_the_registered_session_host_alive() -> No
         session_name = launch_result["rodex_session_name"]
         assert isinstance(session_name, str) and session_name
         assert database.is_file()
+        runtime_sockets = list(runtime_root.glob("tmux-v3-*.sock"))
+        assert len(runtime_sockets) == 1
+        tmux_socket = runtime_sockets[0]
         listed = _tmux(
             tmux_binary,
             tmux_socket,

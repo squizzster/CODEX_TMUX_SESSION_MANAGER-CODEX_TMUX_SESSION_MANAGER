@@ -3,6 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 from threading import Event, Lock, Thread
 
+from runtime_peer_fixtures import TEST_PEER
+
 from rodex.protocol_proxy import CodexProtocolEventTap
 
 
@@ -50,7 +52,7 @@ class ClosingConnection:
 
 
 def test_round1_event_tap_rejects_registration_after_shutdown(tmp_path: Path) -> None:
-    tap = CodexProtocolEventTap(tmp_path / "events.sock", queue_size=1)
+    tap = CodexProtocolEventTap(tmp_path / "events.sock", queue_size=1, peer_identity=TEST_PEER)
     tap.close()
     connection = ClosingConnection()
     invoked = Event()
@@ -77,7 +79,7 @@ def test_round1_event_tap_rejects_registration_after_shutdown(tmp_path: Path) ->
 def test_round1_slow_event_subscriber_is_closed_and_reclaimed_on_overflow(
     tmp_path: Path,
 ) -> None:
-    tap = CodexProtocolEventTap(tmp_path / "events.sock", queue_size=1)
+    tap = CodexProtocolEventTap(tmp_path / "events.sock", queue_size=1, peer_identity=TEST_PEER)
     connection = ReadyThenBlockingConnection()
     done = Event()
 

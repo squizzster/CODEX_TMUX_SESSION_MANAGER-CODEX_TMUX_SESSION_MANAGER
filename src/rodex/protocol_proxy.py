@@ -18,7 +18,7 @@ from pathlib import Path
 from threading import Condition, Event, Lock, Thread
 from typing import Any, Final
 
-from websockets.exceptions import ConnectionClosed
+from websockets.exceptions import ConnectionClosed, InvalidHandshake
 from websockets.sync.client import unix_connect
 from websockets.sync.server import ServerConnection, unix_serve
 
@@ -35,6 +35,8 @@ from .interaction_pipeline import (
 )
 from .interaction_transport import SESSION_INTERACTION_CONNECTION_PATH, serve_session_interaction
 from .pane_control import TmuxPaneController
+from .runtime_endpoint import ExclusiveUnixEndpoint
+from .runtime_peer import CurrentProcessOwner, RuntimePeerIdentity, require_unix_peer_process, runtime_peer_server_hooks
 from .status_bar import (
     CONTEXT_COMPACTION_FRAME_INTERVAL_SECONDS,
     RODEX_CONTEXT_STATUS_OPTION,
@@ -111,10 +113,12 @@ class RodexProtocolProxyError(RuntimeError):
 class CodexProtocolEventTap:
     """Fan out primary TUI protocol events without blocking its live stream."""
 
-    def __init__(self, event_socket_path: Path, *, queue_size: int = 1024) -> None:
+    def __init__(self, event_socket_path: Path, *, peer_identity: RuntimePeerIdentity, queue_size: int = 1024) -> None:
         if queue_size < 1:
             raise ValueError("queue_size must be positive")
         self._event_socket_path = event_socket_path
+        self._peer_identity = peer_identity
+        self._endpoint = ExclusiveUnixEndpoint(event_socket_path)
         self._queue_size = queue_size
         self._subscribers: dict[queue.Queue[str | bytes | object], tuple[bool, Any]] = {}
         self._subscribers_lock = Lock()
@@ -131,16 +135,16 @@ class CodexProtocolEventTap:
                 raise RodexProtocolProxyError("Codex protocol event tap is closed")
             if self._server is not None:
                 raise RodexProtocolProxyError("Codex protocol event tap is already running")
-            self._event_socket_path.unlink(missing_ok=True)
             try:
                 server = unix_serve(
                     self._handle_subscriber,
-                    path=str(self._event_socket_path),
+                    sock=self._endpoint.open(),
                     compression=None,
                     max_size=None,
+                    **runtime_peer_server_hooks(self._peer_identity),
                 )
-                self._event_socket_path.chmod(0o600)
             except OSError as error:
+                self._endpoint.close()
                 raise RodexProtocolProxyError(f"could not bind Codex protocol event tap: {error}") from error
             server_thread = Thread(
                 target=server.serve_forever,
@@ -198,7 +202,7 @@ class CodexProtocolEventTap:
             server_thread.join(timeout=5)
             if server_thread.is_alive():
                 raise RodexProtocolProxyError("Codex protocol event tap did not stop")
-        self._event_socket_path.unlink(missing_ok=True)
+        self._endpoint.close()
 
     def reset_after_disconnect(self) -> None:
         """Forget identities scoped to the released primary connection."""
@@ -790,18 +794,25 @@ class CodexProtocolProxy:
         on_primary_server_message: ProtocolEventCallback | None = None,
         on_primary_disconnect: DisconnectCallback | None = None,
         *,
+        on_primary_client_message: ProtocolEventCallback | None = None,
         interaction_pipeline: SessionInteractionPipeline | None = None,
-        runtime_identity: str | None = None,
+        peer_identity: RuntimePeerIdentity,
+        app_server_process: Any,
         primary_pane: TmuxPaneController | None = None,
         model_message_sender: Callable[[InteractionRequest], InteractionResult] | None = None,
     ) -> None:
         self._proxy_socket_path = proxy_socket_path
         self._app_server_socket_path = app_server_socket_path
+        self._peer_identity = peer_identity
+        self._app_server_process = app_server_process
+        self._host_process = CurrentProcessOwner()
+        self._endpoint = ExclusiveUnixEndpoint(proxy_socket_path)
         self._tool_call_counter = tool_call_counter
         self._on_primary_server_message = on_primary_server_message
+        self._on_primary_client_message = on_primary_client_message
         self._on_primary_disconnect = on_primary_disconnect
         self.interactions = interaction_pipeline if interaction_pipeline is not None else SessionInteractionPipeline()
-        self._runtime_identity = runtime_identity or uuid.uuid4().hex
+        self._runtime_identity = f"{peer_identity.runtime_id}:{peer_identity.tmux_server_id}"
         self._primary_pane = primary_pane
         self._model_message_sender = model_message_sender
         self._primary_lifecycle_lock = Lock()
@@ -838,16 +849,20 @@ class CodexProtocolProxy:
         """Bind the proxy socket and begin accepting WebSocket connections."""
         if self._server is not None:
             raise RodexProtocolProxyError("Codex protocol proxy is already running")
-        self._proxy_socket_path.unlink(missing_ok=True)
         try:
             self._server = unix_serve(
                 self._handle_connection,
-                path=str(self._proxy_socket_path),
+                sock=self._endpoint.open(),
                 compression=None,
                 max_size=None,
+                **runtime_peer_server_hooks(
+                    self._peer_identity,
+                    native_paths=frozenset({"/", "/rpc"}),
+                    native_owner=self._host_process,
+                ),
             )
-            self._proxy_socket_path.chmod(0o600)
         except OSError as error:
+            self._endpoint.close()
             raise RodexProtocolProxyError(f"could not bind Codex protocol proxy: {error}") from error
         self._server_thread = Thread(
             target=self._server.serve_forever,
@@ -868,7 +883,7 @@ class CodexProtocolProxy:
             server_thread.join(timeout=5)
             if server_thread.is_alive():
                 raise RodexProtocolProxyError("Codex protocol proxy did not stop")
-        self._proxy_socket_path.unlink(missing_ok=True)
+        self._endpoint.close()
 
     def __enter__(self) -> CodexProtocolProxy:
         self.start()
@@ -900,11 +915,16 @@ class CodexProtocolProxy:
                 close_timeout=1,
                 max_size=None,
             ) as app_server_connection:
+                require_unix_peer_process(app_server_connection, self._app_server_process)
                 connection_live = Event()
                 connection_live.set()
                 connection_id = uuid.uuid4().hex
 
                 def deliver_input(request: InteractionRequest) -> InteractionResult:
+                    message = request.payload
+                    assert isinstance(message, (str, bytes))
+                    if is_primary_connection and self._on_primary_client_message is not None:
+                        self._on_primary_client_message(message, _json_object(message))
                     app_server_connection.send(request.payload)
                     return InteractionResult(DeliveryStatus.DELIVERED)
 
@@ -970,7 +990,7 @@ class CodexProtocolProxy:
                     tui_connection.close()
                     app_server_connection.close()
                     tui_to_server.join(timeout=2)
-        except (ConnectionClosed, OSError):
+        except (ConnectionClosed, InvalidHandshake, OSError):
             tui_connection.close()
         finally:
             if is_primary_connection:

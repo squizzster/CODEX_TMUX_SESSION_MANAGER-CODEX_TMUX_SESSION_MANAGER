@@ -149,6 +149,8 @@ def test_registered_primary_read_owns_condition_context_at_high_pane_ids(
             (RODEX_CODEX_SESSION_ID_OPTION, str(capability.codex_session_id)),
         ):
             tmux("set-option", "-t", "=managed:", option, value)
+        tmux("set-option", "-s", "@rodex_server_runtime_id", str(capability.runtime_id))
+        tmux("set-option", "-p", "-t", pane_id, "@rodex_pane_runtime_id", str(capability.runtime_id))
 
         admitted = tmux(
             *registered_primary_pane_read_arguments(

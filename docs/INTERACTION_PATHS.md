@@ -1,12 +1,13 @@
 # Interaction contract and production-path inventory
 
-Rodex 0.13.0a1, ALPHA. SQL generation 20, isolated tmux protocol v3, runtime peer
-contract v3 and observer schema v3 form the current boundary. Old contracts are rejected.
+Rodex 0.14.0a1, ALPHA. SQL generation 20, isolated tmux protocol v4, runtime peer
+contract v4, daemon protocol v1 and observer schema v3 form the current boundary.
+Old contracts are rejected.
 
 ## Authoritative contract
 
 `SessionInteractionPipeline` owns target resolution, validation, ordered content hooks,
-post-hook checks, delivery and bounded content-free outcome records. The host shares one
+post-hook checks, delivery and bounded content-free outcome records. Each daemon runtime shares one
 instance between terminal gateway, interceptors, proxy and observer. Exact-turn commands use the same contract inside
 their existing transition lock. The observer renderer uses it in its own process.
 
@@ -78,8 +79,8 @@ work. The record buffer contains metadata, not prompt bodies or another durable 
 | Entrypoint | Owner |
 |---|---|
 | Repository/installed shims and console script | Validate/exec → `rodex.main` → `cli.run` → application pipeline |
-| `python -m rodex.session_host` | Host contract → `run_session_host` |
-| `python -m rodex.analytics_worker` | Worker contract → analytics scheduler |
+| `python -I -m rodex.daemon` | One private daemon endpoint → runtime manager → singular analytics coordinator |
+| `python -m rodex.terminal_bridge` | Exact pane/TTY descriptor handoff → daemon runtime reservation |
 | `python -m rodex.agent_observer` | Receiver/liveness → consumer/view → terminal presentation |
 | `python -m rodex.environment_exec` | Prepared environment → process exec |
 | `python -I -m rodex.terminal_exec` | Fresh session → controlling child PTY → unchanged native TUI argv/environment |
@@ -90,7 +91,7 @@ work. The record buffer contains metadata, not prompt bodies or another durable 
 
 | Intent | Authoritative route/effect |
 |---|---|
-| No arguments, `_create`, `_detach`, native interactive options/prompt | Application → managed lifecycle → host/TUI → protocol-input pipeline |
+| No arguments, `_create`, `_detach`, native interactive options/prompt | Application → managed lifecycle → daemon runtime/TUI → protocol-input pipeline |
 | Existing name/alias/UUID, with or without `resume` | Same selector/open/resume/adoption pipeline |
 | Unmatched explicit resume, delegated native syntax | `cli._exec_codex`; native replacement, outside managed interaction |
 | Native typing and terminal replies | TERMINAL_INPUT → decoder/interceptor → native child PTY → TUI → protocol-input pipeline |
@@ -103,7 +104,7 @@ work. The record buffer contains metadata, not prompt bodies or another durable 
 | Presentation selection | Configured `light`/`dark` action → SELECT_PRESENTATION_POLICY; never starts a turn or changes App Server delivery/logging |
 | Local placeholder reply | Configured actionless command/option text → MESSAGE(false) → main display adapter |
 | Initial prompts and native TUI protocol operations | Native TUI → protocol-input pipeline → App Server |
-| Native terminal output | TERMINAL_OUTPUT → continuously updated native projection → selected native/semantic surface + inline compositor → bounded display queue → outer PTY |
+| Native terminal output | Readable child PTY → TERMINAL_OUTPUT → continuously updated native projection → selected native/semantic surface + inline compositor → bounded display queue → writable outer PTY |
 | App Server primary output | Protocol-output pipeline → TUI unchanged, then typed presentation/context/observer/event projections; display filtering never rejects execution |
 | Primary TUI requests | Protocol-input pipeline → request correlation → App Server unchanged; correlated `thread/read` responses hydrate bounded typed presentation text |
 | App Server control-client output | Protocol-output pipeline → its exact destination; never enters the primary presentation projection |
@@ -134,14 +135,14 @@ work. The record buffer contains metadata, not prompt bodies or another durable 
 | Startup/overflow SQL catch-up | Durable projection → view → same terminal presentation |
 | Analytics initial/event/retry wake | Scheduler → authenticated reader/analyzer → registry transaction: checkpoint, lineage, trace, statistics, health |
 | Primary disconnect | Reset all lifecycle participants; reducer clears work/identity and advances epoch; close observer; retire connection targets |
-| Session creation | Managed lifecycle/runtime → server claim, inert session, prepared environment, exact host respawn |
+| Session creation | Managed lifecycle/runtime → server claim, daemon reservation, exact bridge/TTY admission |
 | Registration/rename/rollback | Registry transition and runtime markers; one namespaced rename owner |
 | Attach | Registered capability → interactive tmux attach |
 | Startup rollback/stop | Managed lifecycle/runtime → exact session kill |
 | Ctrl-D | Owned root binding → detach current client only |
 | Ctrl-C | Native originating-client admission → private guarded termination or shared detach |
-| Resize, external SIGINT | Host → gateway → child terminal dimensions/foreground process group |
-| Natural exit, signals, keepalive failure | Host closes owned children/gateway/proxy/observer/analytics/status/event tap and paths; gateway restores terminal attributes/FD flags |
+| Resize, external SIGINT | Daemon runtime → gateway → child terminal dimensions/foreground process group |
+| Natural exit, signals, keepalive failure | Daemon runtime closes its children/gateway/proxy/observer/status/event tap and paths; the shared coordinator retires its analytics state |
 
 ## Deliberate domain boundaries
 
@@ -155,6 +156,7 @@ work. The record buffer contains metadata, not prompt bodies or another durable 
 | SQL connection/publication | `rodex_sql` transactions and registry publication pipeline |
 | Runtime logs, update cache, analyzer memory files | File/diagnostic owners, not chat |
 | Keyboard framing and native PTY writes | `TerminalInputDecoder` / `TerminalInputInterceptor` → `TerminalSessionGateway`; tmux retains its owned lifecycle keys |
+| Terminal readiness and lifecycle | `TerminalSessionGateway` blocks on outer/child PTYs, a wake-only pipe and the exact child `pidfd`; presentation revisions, resize requests and incomplete-input deadlines wake the same relay |
 | Native composer presentation at takeover/submission | Exact primary-pane fenced snapshot; prefix and end cursor must agree, no background screen polling |
 | Native editor state | Codex; Rodex observes a bounded candidate and verifies the native composer at handoff |
 | Main terminal surface | `TerminalSurfaceRenderer` → gateway output queue; one native projection plus configured semantic views, no editor mutation or second writer |
@@ -164,9 +166,10 @@ work. The record buffer contains metadata, not prompt bodies or another durable 
 
 A lone Escape must be distinguished from the start of an arrow or Alt-key sequence.
 The inspected tmux 3.2a server reported `escape-time 500`; Rodex leaves that server
-setting unchanged. `TerminalInputDecoder` adds a 35 ms lone-Escape wait, expired by the
-gateway's 20 ms relay loop even when no further keyboard or child-output bytes arrive.
-The combined waits explain the user's roughly 0.6-second Escape response; complete
+setting unchanged. `TerminalInputDecoder` adds a 35 ms lone-Escape wait and exposes its
+exact deadline to the gateway's blocking descriptor wait. No periodic relay poll is
+needed when no further keyboard or child-output bytes arrive. The combined waits can
+still include tmux's configured escape time; complete
 Up/Down frames are decoded immediately. This is input framing, not a menu transition
 delay. The valid argument picker goes back one level; the command list releases local
 input. Commands without options never enter a picker and need no Escape recovery.
@@ -186,8 +189,9 @@ bounded observer probes, real tmux operations, real observer startup/reopen/rend
 and runtime exit. The installed-command gate isolates tmux, SQLite and Codex history;
 it verifies startup/resume, real native slash menus, local takeover/menu/submission/release,
 ordinary editing afterwards, and no model turn from display-only delivery. Isolated PTYs
-test controlling-terminal identity, input/output hooks, final-output drain, resize, signals,
-spawn failure and terminal restoration. Tests never attach to or stop an existing user session.
+test controlling-terminal identity, event-driven idle waiting and presentation wakes,
+input/output hooks, final-output drain, resize, signals, spawn failure and terminal
+restoration. Tests never attach to or stop an existing user session.
 
 Current checks cover both menu levels, regex filtering, cyclic selection, configured
 actions/headings/options, fixed footer, rapid Escape, rejected delivery, missing-option
@@ -208,6 +212,6 @@ work facts restore target/turn tracking and the current trace cursor in a fresh 
 without replaying old prompts or historical trace requests.
 Only relevant lifecycle/activity events reconcile pane visibility; unrelated streaming
 deltas do not query tmux. The focused observer/interaction checks include a real isolated
-tmux close/reopen test, with no live-user sessions or Codex model launches. Verification
-passed 164 observer/interaction checks plus 203 input/menu/gateway and mocked host checks,
-Ruff lint/format checks and the source-distribution/wheel build.
+tmux close/reopen test, with no live-user sessions or Codex model launches. The release
+gate is the current Ruff, full coverage/live-startup, source-distribution and wheel
+workflow in the README.

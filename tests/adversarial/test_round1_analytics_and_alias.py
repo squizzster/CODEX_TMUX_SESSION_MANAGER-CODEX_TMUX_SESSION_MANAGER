@@ -15,7 +15,7 @@ from rodex.analytics import AnalyticsRolloutWorker
 from rodex.analytics_analyzer import AnalyticsAnalyzerSource, RodexAnalyticsError
 from rodex.analytics_scheduler import AnalyticsDirtyBatch
 from rodex.live_runtime import session_transition_lock
-from rodex.process_contracts import AnalyticsWorkerConfig
+from rodex.process_contracts import AnalyticsRuntimeConfig
 from rodex.session_commands import execute_session_command
 from rodex_registry import (
     RodexAnalyticsRegistry,
@@ -52,7 +52,7 @@ class PermanentlyFailingAdapter:
         raise AssertionError("a permanently failed batch cannot be accepted")
 
 
-def _analytics_fixture(tmp_path: Path) -> tuple[AnalyticsWorkerConfig, Path]:
+def _analytics_fixture(tmp_path: Path) -> tuple[AnalyticsRuntimeConfig, Path]:
     database = tmp_path / "rodex.sqlite3"
     sessions_root = tmp_path / "sessions"
     rollout = sessions_root / "2026" / "08" / "29" / f"rollout-round1-{CODEX_SESSION_ID}.jsonl"
@@ -89,7 +89,7 @@ def _analytics_fixture(tmp_path: Path) -> tuple[AnalyticsWorkerConfig, Path]:
     registry_id = lookup_rodex_registry_id(database)
     assert registry_id is not None
     return (
-        AnalyticsWorkerConfig(
+        AnalyticsRuntimeConfig(
             tmux_server_id="0123456789abcdef0123456789abcdef",
             rodex_database_path=database,
             codex_sessions_root=sessions_root,

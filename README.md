@@ -7,10 +7,10 @@ control one exact turn from another local process.
 | Field | Current value |
 | --- | --- |
 | Development mode | `ALPHA` — internal Linux pre-release; breaking changes are allowed |
-| Rodex release | `0.13.0a1` |
+| Rodex release | `0.14.0a1` |
 | SQLite catalog | generation `20`, `rodex-v20.sqlite3` |
-| tmux ownership | `rodex-isolated-tmux-v3` |
-| Runtime peer identity | `rodex-runtime-peer-v3` |
+| tmux ownership | `rodex-isolated-tmux-v4` |
+| Runtime peer identity | `rodex-runtime-peer-v4` |
 | Machine envelope | generation `4` |
 | Agent trace | `rodex-agent-trace-v3` |
 | Statistics | `rodex-statistics-v8` |
@@ -74,8 +74,9 @@ Rodex owns exact underscore-prefixed commands. Its characterized Codex grammar i
 
 Each runtime uses a separate tmux server and immutable server incarnation. Rodex
 verifies the session, primary pane, runtime, registry, and Codex identities before
-attach, read, control, or cleanup. Existing hosts retain their loaded code, so exit and
-resume each runtime after installing a new Rodex version.
+attach, read, control, or cleanup. One `rodexd` process owns all runtime services and the
+single serialized analytics pipeline beneath a runtime root. Existing daemons retain
+their loaded code, so stop their runtimes and daemon after installing a new Rodex version.
 
 ## Commands
 
@@ -130,7 +131,7 @@ blindly retried.
 | Command | Contract |
 | --- | --- |
 | `_stats SESSION [--turn ID] [--thread CODEX_THREAD_ID] [--json]` | Read the latest persistent statistics projection |
-| `_stats-status SESSION` | Read source coverage and analytics-worker health |
+| `_stats-status SESSION` | Read source coverage and that runtime's shared-coordinator health |
 | `_agents SESSION [--json]` | Read durable root/sub-agent lineage |
 | `_trace SESSION [--follow \| --include-bodies] [--limit N] [--json]` | Follow metadata or re-authenticate bodies in one snapshot |
 
@@ -165,7 +166,9 @@ App Server and authenticated trace identities, and closes when that work finishe
 | Runtime root | `$XDG_RUNTIME_DIR/rodex` |
 | Runtime fallback | `/tmp/rodex-<uid>` |
 | Optional runtime override | `RODEX_RUNTIME_DIR` |
-| Per-runtime tmux socket | `<runtime-root>/tmux-v3-<runtime-id>.sock` |
+| Shared daemon socket | `<runtime-root>/rodexd-v1.sock` |
+| Per-runtime tmux socket | `<runtime-root>/tmux-v4-<runtime-id>.sock` |
+| Per-runtime service sockets | `<runtime-root>/{app,proxy,events}-<runtime-id>.sock` |
 
 The catalog and runtime paths are private to the current Linux user. Rodex exposes no
 network listener. Its security boundary is the operating-system user account; processes

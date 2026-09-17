@@ -35,14 +35,16 @@ EFFECT_OWNERS = {
         "rodex/runtime.py:_erase_native_tmux_exit_message:.write",
     },
     "process ownership and native delegation": {
-        "rodex/analytics.py:_lower_process_priority:subprocess.run",
         "rodex/cli.py:_exec_codex:os.execve",
+        "rodex/daemon_client.py:RodexDaemonClient.ensure_running:self._spawn_process",
         "rodex/environment_exec.py:main:os.execvpe",
+        "rodex/process_guard.py:main:os.execvpe",
+        "rodex/runtime.py:_run_runtime_service:subprocess.Popen",
+        "rodex/terminal_bridge.py:main:os.execv",
         "rodex/terminal_exec.py:main:os.execvpe",
         "rodex/terminal_gateway.py:TerminalSessionGateway.__init__:subprocess.Popen",
-        "rodex/runtime.py:run_session_host:subprocess.Popen",
+        "rodex/terminal_gateway.py:TerminalSessionGateway.__init__:os.write",
         "rodex/tmux_executor.py:_run_async_command:asyncio.create_subprocess_exec",
-        "rodex/analytics.py:AnalyticsSubprocessSupervisor._start_next_process:self._popen",
         "rodex/codex_update_notice.py:CodexUpdateNotice._run_version_command:self._run",
         "rodex/runtime.py:RodexRuntimeLauncher.codex_session_is_persisted:self._spawn_process",
         "rodex/tmux_executor.py:AsyncTmuxExecutor.run:self._runner",
@@ -60,8 +62,11 @@ EFFECT_OWNERS = {
         "rodex/protocol_proxy.py:CodexProtocolProxy._send_primary_tui_message:.send",
         "rodex/interaction_transport.py:publish_session_interaction:.send",
         "rodex/interaction_transport.py:serve_session_interaction:.send",
+        "rodex/daemon.py:RodexDaemonServer._handle_connection:.sendall",
+        "rodex/daemon_client.py:RodexDaemonClient._request:.sendall",
         "rodex/terminal_presentation.py:_write_observer_terminal:.write",
         "rodex/terminal_gateway.py:TerminalSessionGateway._flush:os.write",
+        "rodex/terminal_gateway.py:TerminalSessionGateway._notify_relay:os.write",
         "rodex/agent_observer.py:AgentObserverCoordinator._deliver_observer_snapshot:self._event_sender",
         "rodex/observer_pane.py:ObserverPaneController._deliver:self._state_sender",
         "rodex/observer_pane.py:ObserverPaneController._deliver:self._message_sender",
@@ -76,6 +81,7 @@ EFFECT_OWNERS = {
         "rodex/analytics_analyzer.py:_load_analyzer_bytes:os.write",
         "rodex/codex_update_notice.py:CodexUpdateNotice._write_cached_version:.write",
         "rodex/runtime.py:_record_runtime_path_keepalive_failure:.write",
+        "rodex/process_receipts.py:RuntimeProcessReceipts.record:os.write",
     },
 }
 
@@ -185,11 +191,12 @@ def test_all_subprocess_entrypoints_are_classified():
             ):
                 entrypoints.add(path.relative_to(SOURCE_ROOT).as_posix())
     assert entrypoints == {
-        "rodex/session_host.py",
-        "rodex/analytics_worker.py",
         "rodex/agent_observer.py",
+        "rodex/daemon.py",
         "rodex/environment_exec.py",
+        "rodex/process_guard.py",
         "rodex/terminal_exec.py",
+        "rodex/terminal_bridge.py",
         "rodex/tmux_sharing_coordinator.py",
         "rodex/status_animation_admission.py",
     }

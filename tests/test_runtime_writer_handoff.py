@@ -3,12 +3,15 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import time
 import uuid
+from contextlib import suppress
 from dataclasses import replace
 from pathlib import Path
+from threading import Event
 
 import pytest
 from test_managed_startup import (
@@ -19,12 +22,33 @@ from test_managed_startup import (
 from test_rodex_runtime import RUNTIME_ID, _create_socket_path, _mock_terminal_gateway
 
 import rodex.runtime as runtime_module
-from rodex.process_contracts import AnalyticsWorkerConfig, SessionHostConfig
+from rodex.process_contracts import AnalyticsRuntimeConfig, RuntimeServiceConfig
 from rodex.tmux_session_capability import RODEX_TMUX_SOCKET_PATTERN, TmuxRuntimeCapability
 from rodex_registry import RodexRegistryId, RodexSessionId
 
 THREAD_ID = uuid.UUID("01a00654-f2bc-7a30-834a-a5f886a65f82")
 CONFLICT = f"thread-store conflict: thread {THREAD_ID} already has an active writer\n"
+
+
+def _stop_fixture_daemon(runtime_root: Path) -> None:
+    matching: list[int] = []
+    encoded_root = os.fsencode(runtime_root)
+    for process_path in Path("/proc").glob("[0-9]*"):
+        try:
+            command = (process_path / "cmdline").read_bytes().split(b"\0")
+        except OSError:
+            continue
+        if b"rodex.daemon" in command and encoded_root in command:
+            matching.append(int(process_path.name))
+    for pid in matching:
+        with suppress(ProcessLookupError):
+            os.kill(pid, signal.SIGTERM)
+    deadline = time.monotonic() + 5
+    while matching and time.monotonic() < deadline:
+        matching = [pid for pid in matching if Path(f"/proc/{pid}").exists()]
+        if matching:
+            time.sleep(0.02)
+    assert matching == []
 
 
 @pytest.mark.parametrize(
@@ -127,7 +151,7 @@ def test_host_retires_only_exact_unregistered_writer_conflicts_within_its_retry_
         def wait_for_primary_connection_release(self, _timeout):
             operations.append(("release", "proxy", 0))
 
-    analytics = AnalyticsWorkerConfig(
+    analytics = AnalyticsRuntimeConfig(
         tmux_server_id="a" * 32,
         rodex_database_path=tmp_path / "rodex.sqlite3",
         codex_sessions_root=tmp_path / "sessions",
@@ -149,12 +173,12 @@ def test_host_retires_only_exact_unregistered_writer_conflicts_within_its_retry_
         monkeypatch.setattr(runtime_module, name, Component)
     monkeypatch.setattr(
         runtime_module,
-        "_resolve_session_host_tmux_capability",
+        "_resolve_runtime_service_tmux_capability",
         lambda *_: TmuxRuntimeCapability(tmp_path / "tmux.sock", "a" * 32, "$7", "%9", RUNTIME_ID),
     )
     monkeypatch.setattr(
         runtime_module,
-        "_registered_analytics_worker_config",
+        "_registered_analytics_runtime_config",
         lambda *_: (
             replace(analytics, rodex_sessions_id=1, codex_session_id=THREAD_ID) if scenario == "registered" else None
         ),
@@ -165,8 +189,8 @@ def test_host_retires_only_exact_unregistered_writer_conflicts_within_its_retry_
     arguments = (
         ("resume", str(THREAD_ID), "--unrelated") if scenario == "nonexact_arguments" else ("resume", str(THREAD_ID))
     )
-    result = runtime_module.run_session_host(
-        SessionHostConfig(
+    result = runtime_module.run_runtime_service(
+        RuntimeServiceConfig(
             codex_binary="/usr/bin/codex",
             app_server_socket_path=app_socket,
             app_server_log_path=tmp_path / "app.log",
@@ -174,11 +198,15 @@ def test_host_retires_only_exact_unregistered_writer_conflicts_within_its_retry_
             protocol_event_socket_path=analytics.protocol_event_socket_path,
             tmux_binary="/usr/bin/tmux",
             tmux_server_socket_path=tmp_path / "tmux.sock",
+            tmux_pane_target="%9",
             runtime_id=RUNTIME_ID,
             codex_arguments=arguments,
             analytics=analytics,
+            user_environment=(("PATH", "/usr/bin"),),
         ),
-        analytics_supervisor_factory=Component,
+        terminal_fd=os.dup(0),
+        terminal_environment={"TERM": "xterm-256color", "TMUX": f"{tmp_path / 'tmux.sock'},1,0", "TMUX_PANE": "%9"},
+        stop=Event(),
     )
     assert result == expected_result
     assert len(gateways) == expected_launches
@@ -264,5 +292,6 @@ def test_real_managed_resume_retries_a_live_tui_after_an_exact_writer_conflict(
         # Only servers minted beneath this fresh fixture directory are eligible.
         for socket_path in runtime_root.glob(RODEX_TMUX_SOCKET_PATTERN):
             subprocess.run([tmux, "-N", "-S", str(socket_path), "kill-server"], capture_output=True, timeout=5)
+        _stop_fixture_daemon(runtime_root)
         for filename in ("auth.json", "config.toml"):
             (fixture_home / filename).unlink(missing_ok=True)

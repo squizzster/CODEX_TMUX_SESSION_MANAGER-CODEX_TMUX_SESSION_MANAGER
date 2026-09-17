@@ -4,141 +4,84 @@ from pathlib import Path
 
 import pytest
 
-from rodex.analytics import analytics_worker_main
-from rodex.process_contracts import AnalyticsWorkerConfig, SessionHostConfig
+from rodex.process_contracts import AnalyticsRuntimeConfig, RuntimeServiceConfig
 from rodex_registry import RodexRegistryId, RodexRuntimeId, RodexSessionId
 
 LEADING_ZERO_SESSION_ID = RodexSessionId.parse("0000000000000001")
 REGISTRY_ID = RodexRegistryId.parse("0000000000000001")
 RUNTIME_ID = RodexRuntimeId.parse("0000000000000001")
 CODEX_SESSION_ID = "01a00654-f2bc-7a30-834a-a5f886a65f82"
+SERVER_ID = "0123456789abcdef0123456789abcdef"
 
 
-def _session_host_arguments(rodex_session_id: str) -> list[str]:
-    return [
-        "--codex-binary",
-        "/usr/bin/codex",
-        "--app-server-socket",
-        "/tmp/app.sock",
-        "--app-server-log",
-        "/tmp/app.log",
-        "--protocol-proxy-socket",
-        "/tmp/proxy.sock",
-        "--protocol-event-socket",
-        "/tmp/events.sock",
-        "--tmux-binary",
-        "/usr/bin/tmux",
-        "--tmux-server-socket",
-        "/tmp/tmux.sock",
-        "--tmux-server-id",
-        "0123456789abcdef0123456789abcdef",
-        "--rodex-database",
-        "/tmp/rodex.sqlite3",
-        "--codex-sessions-root",
-        "/tmp/sessions",
-        "--rodex-session-id",
-        rodex_session_id,
-        "--rodex-registry-id",
-        str(REGISTRY_ID),
-        "--rodex-runtime-id",
-        str(RUNTIME_ID),
-        "--protocol-event-socket",
-        "/tmp/events.sock",
-    ]
+def _analytics(root: Path, *, rodex_session_id: RodexSessionId = LEADING_ZERO_SESSION_ID) -> AnalyticsRuntimeConfig:
+    return AnalyticsRuntimeConfig(
+        tmux_server_id=SERVER_ID,
+        rodex_database_path=root / "rodex database.sqlite3",
+        codex_sessions_root=root / "codex sessions",
+        rodex_session_id=rodex_session_id,
+        rodex_registry_id=REGISTRY_ID,
+        runtime_id=RUNTIME_ID,
+        protocol_event_socket_path=root / "events-0000000000000001.sock",
+        rodex_sessions_id=1,
+        codex_session_id=CODEX_SESSION_ID,
+    )
 
 
-def test_session_host_preserves_a_leading_zero_session_id_as_a_domain_value() -> None:
-    config = SessionHostConfig.parse(_session_host_arguments(str(LEADING_ZERO_SESSION_ID)))
+def _service(root: Path) -> RuntimeServiceConfig:
+    return RuntimeServiceConfig(
+        codex_binary="/opt/Codex CLI/codex",
+        app_server_socket_path=root / "app-0000000000000001.sock",
+        app_server_log_path=root / "app-0000000000000001.log",
+        protocol_proxy_socket_path=root / "proxy-0000000000000001.sock",
+        protocol_event_socket_path=root / "events-0000000000000001.sock",
+        tmux_binary="/opt/tmux bin/tmux",
+        tmux_server_socket_path=root / "tmux-v4-0000000000000001.sock",
+        tmux_pane_target="%7",
+        runtime_id=RUNTIME_ID,
+        codex_arguments=("resume", "thread with spaces"),
+        analytics=_analytics(root),
+        user_environment=(("EMPTY", ""), ("PATH", "/usr/bin")),
+    )
+
+
+def test_daemon_contract_preserves_a_leading_zero_session_id_as_a_domain_value(tmp_path: Path) -> None:
+    config = RuntimeServiceConfig.from_payload(_service(tmp_path).to_payload())
 
     assert config.analytics.rodex_session_id == LEADING_ZERO_SESSION_ID
     assert str(config.analytics.rodex_session_id) == "0000000000000001"
 
 
-def test_analytics_worker_command_preserves_the_exact_string_wire_form() -> None:
-    config = AnalyticsWorkerConfig(
-        tmux_server_id="0123456789abcdef0123456789abcdef",
-        rodex_database_path=Path("/tmp/rodex.sqlite3"),
-        codex_sessions_root=Path("/tmp/sessions"),
-        rodex_session_id=LEADING_ZERO_SESSION_ID,
-        rodex_registry_id=REGISTRY_ID,
-        runtime_id=RUNTIME_ID,
-        protocol_event_socket_path=Path("/tmp/events.sock"),
-        rodex_sessions_id=1,
-        codex_session_id=CODEX_SESSION_ID,
-    )
-    command = config.command("/venv/bin/python")
+def test_daemon_runtime_configs_own_round_trippable_private_payloads(tmp_path: Path) -> None:
+    service = _service(tmp_path)
 
-    assert command[-2:] == ["--codex-session-id", CODEX_SESSION_ID]
-    assert command[command.index("--rodex-session-id") + 1] == "0000000000000001"
-
-
-def test_process_configs_own_round_trippable_wire_contracts() -> None:
-    analytics = AnalyticsWorkerConfig(
-        tmux_server_id="0123456789abcdef0123456789abcdef",
-        rodex_database_path=Path("/tmp/rodex database.sqlite3"),
-        codex_sessions_root=Path("/tmp/codex sessions"),
-        rodex_session_id=LEADING_ZERO_SESSION_ID,
-        rodex_registry_id=REGISTRY_ID,
-        runtime_id=RUNTIME_ID,
-        protocol_event_socket_path=Path("/tmp/event socket.sock"),
-        rodex_sessions_id=1,
-        codex_session_id=CODEX_SESSION_ID,
-    )
-    host = SessionHostConfig(
-        codex_binary="/opt/Codex CLI/codex",
-        app_server_socket_path=Path("/tmp/app socket.sock"),
-        app_server_log_path=Path("/tmp/app log.log"),
-        protocol_proxy_socket_path=Path("/tmp/proxy socket.sock"),
-        protocol_event_socket_path=Path("/tmp/event socket.sock"),
-        tmux_binary="/opt/tmux bin/tmux",
-        tmux_server_socket_path=Path("/tmp/tmux socket.sock"),
-        runtime_id=RUNTIME_ID,
-        codex_arguments=("resume", "thread with spaces"),
-        analytics=analytics,
-    )
-
-    assert AnalyticsWorkerConfig.parse(analytics.to_argv()) == analytics
-    assert SessionHostConfig.parse(host.to_argv()) == host
+    assert AnalyticsRuntimeConfig.from_payload(service.analytics.to_payload()) == service.analytics
+    assert RuntimeServiceConfig.from_payload(service.to_payload()) == service
+    assert service.to_payload()["user_environment"] == [["EMPTY", ""], ["PATH", "/usr/bin"]]
 
 
 @pytest.mark.parametrize(
-    "missing_option", ["--rodex-database", "--codex-sessions-root", "--rodex-session-id", "--rodex-registry-id"]
+    "missing_field",
+    ["rodex_database_path", "codex_sessions_root", "rodex_session_id", "rodex_registry_id"],
 )
-def test_session_host_requires_complete_managed_identity(missing_option: str) -> None:
-    arguments = _session_host_arguments(str(LEADING_ZERO_SESSION_ID))
-    index = arguments.index(missing_option)
-    del arguments[index : index + 2]
-    with pytest.raises(SystemExit):
-        SessionHostConfig.parse(arguments)
+def test_analytics_runtime_payload_requires_complete_managed_identity(tmp_path: Path, missing_field: str) -> None:
+    payload = _analytics(tmp_path).to_payload()
+    del payload[missing_field]
+
+    with pytest.raises(ValueError, match="fields do not match"):
+        AnalyticsRuntimeConfig.from_payload(payload)
 
 
 @pytest.mark.parametrize(
     "invalid_session_id",
     ["000000000000001", "000000000000000A", "00000000-00000000"],
 )
-def test_process_entry_points_reject_noncanonical_session_ids_before_work_starts(
+def test_daemon_payload_rejects_noncanonical_session_ids_before_runtime_work(
+    tmp_path: Path,
     invalid_session_id: str,
 ) -> None:
-    with pytest.raises(SystemExit):
-        SessionHostConfig.parse(_session_host_arguments(invalid_session_id))
-    with pytest.raises(SystemExit):
-        analytics_worker_main(
-            [
-                "--rodex-database",
-                "/tmp/rodex.sqlite3",
-                "--codex-sessions-root",
-                "/tmp/sessions",
-                "--rodex-session-id",
-                invalid_session_id,
-                "--rodex-registry-id",
-                str(REGISTRY_ID),
-                "--rodex-runtime-id",
-                str(RUNTIME_ID),
-                "--protocol-event-socket",
-                "/tmp/events.sock",
-                "--rodex-sessions-id",
-                "1",
-                "--codex-session-id",
-                CODEX_SESSION_ID,
-            ]
-        )
+    payload = _analytics(tmp_path).to_payload()
+    payload["rodex_session_id"] = invalid_session_id
+
+    with pytest.raises(ValueError):
+        AnalyticsRuntimeConfig.from_payload(payload)

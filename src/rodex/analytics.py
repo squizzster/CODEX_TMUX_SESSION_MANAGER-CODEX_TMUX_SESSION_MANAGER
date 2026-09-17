@@ -2,17 +2,16 @@
 
 from __future__ import annotations
 
+import ctypes
+import gc
 import json
 import os
-import shutil
-import signal
-import subprocess
-import sys
 import time
-from collections import Counter
+from collections import Counter, deque
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import suppress
-from dataclasses import dataclass, replace
+from copy import deepcopy
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from threading import Event, Lock, Thread
@@ -52,9 +51,12 @@ from .analytics_analyzer import (
     StatefulCodexProtocolAnalyticsAdapter,
 )
 from .analytics_scheduler import (
+    ANALYTICS_MAX_BATCH_SECONDS,
+    ANALYTICS_MAX_RETRY_WINDOW_SECONDS,
+    ANALYTICS_QUIET_SECONDS,
+    ANALYTICS_RETRY_INITIAL_SECONDS,
     AnalyticsDirtyBatch,
-    AnalyticsEventScheduler,
-    AnalyticsProtocolEventSubscriber,
+    analytics_event_thread_id,
 )
 from .analytics_source_catalog import AnalyticsSourceCatalog
 from .analytics_source_reader import (
@@ -66,7 +68,7 @@ from .analytics_source_reader import (
     open_rollout_descriptor,
     resolve_rollout_path,
 )
-from .process_contracts import AnalyticsWorkerConfig
+from .process_contracts import AnalyticsRuntimeConfig
 from .runtime_peer import RuntimePeerIdentity
 
 ANALYTICS_RESTART_DELAY_SECONDS = 2.0
@@ -287,7 +289,7 @@ class AnalyticsRolloutWorker:
 
     def __init__(
         self,
-        config: AnalyticsWorkerConfig,
+        config: AnalyticsRuntimeConfig,
         *,
         adapter_factory: AnalyticsBoundaryFactory = (StatefulCodexProtocolAnalyticsAdapter),
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
@@ -320,7 +322,6 @@ class AnalyticsRolloutWorker:
         self._source_reader = AnalyticsSourceReader()
         self._trace_normalizer = StatefulAgentTraceNormalizer()
         self._verified_sources: dict[CodexThreadId, VerifiedRollout] = {}
-        self._schedule_followup: Callable[[CodexThreadId], None] | None = None
         self._last_health_transition: tuple[str, str | None] | None = None
         self._last_failure_health_fingerprint: _AnalyticsFailureFingerprint | None = None
         self._parked_failure: _AnalyticsFailureFingerprint | None = None
@@ -446,10 +447,6 @@ class AnalyticsRolloutWorker:
                 self._promote_verified_sources(stable_reads)
                 self._requires_full_reconcile = False
                 if any(source_growth):
-                    if self._schedule_followup is not None:
-                        for item, grew in zip(stable_reads, source_growth, strict=True):
-                            if grew:
-                                self._schedule_followup(item.observation.codex_thread_id)
                     return "pending_append"
                 if unresolved_thread_ids:
                     self._project_health("catching_up", "rollout_not_found", codex_session_id)
@@ -620,15 +617,8 @@ class AnalyticsRolloutWorker:
             self._requires_full_reconcile = False
             if trace_target_thread_ids:
                 self._pending_resolution_thread_ids.update(trace_target_thread_ids)
-                if self._schedule_followup is not None:
-                    for thread_id in trace_target_thread_ids:
-                        self._schedule_followup(thread_id)
                 return "pending_append"
             if append_arrived_during_analysis:
-                if self._schedule_followup is not None:
-                    for item, grew in zip(stable_reads, source_growth, strict=True):
-                        if grew:
-                            self._schedule_followup(item.observation.codex_thread_id)
                 return "pending_append"
             if unresolved_thread_ids:
                 self._project_health("catching_up", "rollout_not_found", codex_session_id)
@@ -754,38 +744,6 @@ class AnalyticsRolloutWorker:
             pending,
             retry_not_before_monotonic=(monotonic_now + ANALYTICS_HEALTH_RETRY_DELAY_SECONDS),
         )
-
-    def run_until_stopped(
-        self,
-        stop: Event,
-        *,
-        scheduler: AnalyticsEventScheduler | None = None,
-        subscriber_factory: Callable[..., AnalyticsProtocolEventSubscriber] = AnalyticsProtocolEventSubscriber,
-    ) -> None:
-        active_scheduler = scheduler or AnalyticsEventScheduler(event_observer=self.observe_protocol_event)
-        self._schedule_followup = active_scheduler.offer_dirty
-        subscriber = subscriber_factory(
-            self._config.protocol_event_socket_path,
-            active_scheduler,
-            peer_identity=RuntimePeerIdentity(self._config.runtime_id, self._config.tmux_server_id),
-        )
-
-        def stop_scheduler() -> None:
-            stop.wait()
-            active_scheduler.close()
-
-        stop_watcher = Thread(
-            target=stop_scheduler,
-            name="rodex-analytics-stop-watcher",
-            daemon=True,
-        )
-        subscriber.start()
-        stop_watcher.start()
-        try:
-            active_scheduler.run(self.poll_once)
-        finally:
-            self._schedule_followup = None
-            subscriber.close()
 
     def _read_registered_sources(
         self,
@@ -948,9 +906,6 @@ class AnalyticsRolloutWorker:
         followup_thread_ids.update(self._deferred_dirty_thread_ids)
         self._deferred_dirty_thread_ids.clear()
         self._pending_resolution_thread_ids.update(followup_thread_ids)
-        if followup_thread_ids and self._schedule_followup is not None:
-            for thread_id in followup_thread_ids:
-                self._schedule_followup(thread_id)
         if prepared.unresolved_thread_ids:
             self._project_health(
                 "catching_up",
@@ -1047,148 +1002,318 @@ class AnalyticsRolloutWorker:
         self._project_health("stopped", None, self._expected_codex_session_id)
 
 
-class AnalyticsSubprocessSupervisor:
-    """Own an optional worker through one blocking, bounded monitor thread."""
+_COORDINATED_EVENT_LIMIT = 4096
+_COORDINATED_RETRY_RESULTS = frozenset(
+    {"pending_append", "awaiting_append", "catching_up", "publication_retry", "clean_replay"}
+)
+
+
+@dataclass(slots=True)
+class _CoordinatedAnalyticsRuntime:
+    pending_config: AnalyticsRuntimeConfig
+    config: AnalyticsRuntimeConfig | None = None
+    worker: AnalyticsRolloutWorker | None = None
+    pending_events: deque[Mapping[str, Any]] = field(default_factory=deque)
+    pending_thread_ids: set[CodexThreadId] = field(default_factory=set)
+    first_dirty_at: float | None = None
+    last_dirty_at: float | None = None
+    full_reconcile: bool = False
+    next_retry_at: float | None = None
+    retry_deadline: float | None = None
+    retry_delay_seconds: float = ANALYTICS_RETRY_INITIAL_SECONDS
+    start_attempts: int = 0
+    disabled: bool = False
+    retiring: bool = False
+    last_dispatch: int = 0
+
+
+class SharedAnalyticsCoordinator:
+    """Serialize every runtime's statistics work through one daemon-owned thread."""
 
     def __init__(
         self,
-        config: AnalyticsWorkerConfig,
         *,
-        python_executable: str = sys.executable,
-        popen: Callable[..., subprocess.Popen[bytes]] = subprocess.Popen,
+        worker_factory: Callable[[AnalyticsRuntimeConfig], AnalyticsRolloutWorker] = AnalyticsRolloutWorker,
+        monotonic: Callable[[], float] = time.monotonic,
         restart_delay_seconds: float = ANALYTICS_RESTART_DELAY_SECONDS,
         max_start_attempts: int = 2,
     ) -> None:
-        if max_start_attempts < 1:
-            raise ValueError("analytics supervisor requires a start attempt")
-        if restart_delay_seconds < 0:
-            raise ValueError("analytics restart delay cannot be negative")
-        self._config = config
-        self._python_executable = python_executable
-        self._popen = popen
+        if restart_delay_seconds < 0 or max_start_attempts < 1:
+            raise ValueError("analytics coordinator retry policy is invalid")
+        self._worker_factory = worker_factory
+        self._monotonic = monotonic
         self._restart_delay_seconds = restart_delay_seconds
         self._max_start_attempts = max_start_attempts
-        self._start_attempts = 0
-        self._exhausted = False
-        self._started = False
+        self._runtimes: dict[str, _CoordinatedAnalyticsRuntime] = {}
+        self._lock = Lock()
+        self._wake = Event()
         self._stop = Event()
-        self._process_lock = Lock()
-        self._process: subprocess.Popen[bytes] | None = None
         self._thread: Thread | None = None
+        self._dispatch_sequence = 0
 
     def start(self) -> None:
-        """Start once; process exit and one backoff retry are event-driven."""
-        if self._started:
-            raise RuntimeError("analytics supervisor is already started")
-        self._started = True
-        self._start_next_process()
-        self._thread = Thread(
-            target=self._monitor,
-            name="rodex-analytics-supervisor",
-            daemon=True,
-        )
+        if self._thread is not None:
+            raise RuntimeError("analytics coordinator is already started")
+        self._thread = Thread(target=self._run, name="rodex-analytics-coordinator", daemon=True)
         self._thread.start()
 
-    def _start_next_process(self) -> None:
-        if self._stop.is_set() or self._exhausted:
-            return
-        self._start_attempts += 1
-        try:
-            process = self._popen(
-                self._config.command(self._python_executable),
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-        except (OSError, subprocess.SubprocessError):
-            retry_scheduled = self._start_attempts < self._max_start_attempts
-            _project_supervisor_health(
-                self._config,
-                "analytics_worker_start_failed",
-                retry_scheduled=retry_scheduled,
-                retry_delay_seconds=self._restart_delay_seconds,
-            )
-            if not retry_scheduled:
-                self._exhausted = True
-            return
-        with self._process_lock:
-            if self._stop.is_set():
-                stop_immediately = True
-            else:
-                self._process = process
-                stop_immediately = False
-        if stop_immediately:
-            _terminate_analytics_process(process)
+    def reserve(self, config: AnalyticsRuntimeConfig) -> None:
+        if config.is_activated:
+            raise ValueError("analytics reservation must precede SQL activation")
+        runtime_id = str(config.runtime_id)
+        with self._lock:
+            existing = self._runtimes.get(runtime_id)
+            if existing is not None:
+                if existing.pending_config == config and not existing.retiring:
+                    return
+                raise RuntimeError("analytics runtime identity is already reserved")
+            self._runtimes[runtime_id] = _CoordinatedAnalyticsRuntime(config)
 
-    def _monitor(self) -> None:
-        while not self._stop.is_set() and not self._exhausted:
-            with self._process_lock:
-                process = self._process
-            if process is not None:
-                try:
-                    process.wait()
-                except (OSError, subprocess.SubprocessError):
-                    self._exhausted = True
-                    return
-                with self._process_lock:
-                    if self._process is process:
-                        self._process = None
-                if self._stop.is_set():
-                    return
-                retry_scheduled = self._start_attempts < self._max_start_attempts
-                _project_supervisor_health(
-                    self._config,
-                    "analytics_worker_exited",
-                    retry_scheduled=retry_scheduled,
-                    retry_delay_seconds=self._restart_delay_seconds,
+    def activate(self, config: AnalyticsRuntimeConfig) -> None:
+        if not config.is_activated:
+            raise ValueError("analytics activation requires committed SQL identity")
+        runtime_id = str(config.runtime_id)
+        with self._lock:
+            entry = self._runtimes.get(runtime_id)
+            if entry is None or entry.retiring:
+                raise RuntimeError("analytics activation has no live reservation")
+            assert config.rodex_sessions_id is not None and config.codex_session_id is not None
+            if (
+                entry.pending_config.activate(
+                    rodex_sessions_id=config.rodex_sessions_id,
+                    codex_session_id=config.codex_session_id,
                 )
-                if not retry_scheduled:
-                    self._exhausted = True
-                    return
-            elif self._start_attempts >= self._max_start_attempts:
-                self._exhausted = True
-                return
-            if self._stop.wait(self._restart_delay_seconds):
-                return
-            self._start_next_process()
+                != config
+            ):
+                raise RuntimeError("analytics activation disagrees with its reservation")
+            if entry.config is not None and entry.config != config:
+                raise RuntimeError("analytics runtime was activated with another identity")
+            entry.config = config
+            entry.full_reconcile = True
+            entry.first_dirty_at = entry.last_dirty_at = self._monotonic()
+            entry.disabled = False
+        self._wake.set()
 
-    def wait(self, timeout: float | None = None) -> bool:
-        """Wait for bounded supervision to finish; return false on timeout."""
-        thread = self._thread
-        if thread is None:
-            return True
-        thread.join(timeout)
-        return not thread.is_alive()
+    def observe_protocol_event(self, runtime_id: str, event: Mapping[str, Any]) -> None:
+        thread_id = analytics_event_thread_id(event)
+        if thread_id is None:
+            return
+        with self._lock:
+            entry = self._runtimes.get(runtime_id)
+            if entry is None or entry.retiring:
+                return
+            now = self._monotonic()
+            if len(entry.pending_events) >= _COORDINATED_EVENT_LIMIT:
+                entry.pending_events.clear()
+                entry.full_reconcile = True
+            else:
+                entry.pending_events.append(deepcopy(event))
+            entry.pending_thread_ids.add(thread_id)
+            entry.first_dirty_at = now if entry.first_dirty_at is None else entry.first_dirty_at
+            entry.last_dirty_at = now
+        self._wake.set()
+
+    def retire(self, runtime_id: str) -> None:
+        with self._lock:
+            entry = self._runtimes.get(runtime_id)
+            if entry is not None:
+                entry.retiring = True
+        self._wake.set()
 
     def close(self) -> None:
         self._stop.set()
-        self._exhausted = True
-        with self._process_lock:
-            process = self._process
-        if process is not None:
-            _terminate_analytics_process(process)
+        self._wake.set()
         thread = self._thread
         if thread is not None:
-            thread.join(timeout=2)
-            if thread.is_alive() and process is not None:
-                with suppress(OSError, subprocess.SubprocessError):
-                    process.kill()
-                thread.join(timeout=2)
-        with self._process_lock:
-            self._process = None
+            thread.join(timeout=10)
         self._thread = None
 
+    def _run(self) -> None:
+        try:
+            while not self._stop.is_set():
+                selected, retired, timeout = self._select_work()
+                if retired:
+                    for worker in retired:
+                        with suppress(Exception):
+                            worker.mark_stopped()
+                    del worker
+                    del retired
+                    _release_retired_analytics_memory()
+                if selected is not None:
+                    self._reconcile(selected)
+                    continue
+                self._wake.wait(timeout)
+                self._wake.clear()
+        finally:
+            with self._lock:
+                workers = tuple(entry.worker for entry in self._runtimes.values() if entry.worker is not None)
+                self._runtimes.clear()
+            if workers:
+                for worker in workers:
+                    with suppress(Exception):
+                        worker.mark_stopped()
+                del worker
+                del workers
+                _release_retired_analytics_memory()
 
-def _terminate_analytics_process(process: subprocess.Popen[bytes]) -> None:
-    if process.poll() is not None:
-        return
-    try:
-        process.terminate()
-        process.wait(timeout=1)
-    except (OSError, subprocess.SubprocessError):
-        with suppress(OSError, subprocess.SubprocessError):
-            process.kill()
-            process.wait(timeout=1)
+    def _select_work(self) -> tuple[str | None, tuple[AnalyticsRolloutWorker, ...], float | None]:
+        now = self._monotonic()
+        retired: list[AnalyticsRolloutWorker] = []
+        due: list[tuple[int, str]] = []
+        deadlines: list[float] = []
+        with self._lock:
+            for runtime_id, entry in tuple(self._runtimes.items()):
+                if entry.retiring:
+                    if entry.worker is not None:
+                        retired.append(entry.worker)
+                    del self._runtimes[runtime_id]
+                    continue
+                if entry.config is None or entry.disabled:
+                    continue
+                deadline = self._entry_deadline(entry, now)
+                if deadline is None:
+                    continue
+                if deadline <= now:
+                    due.append((entry.last_dispatch, runtime_id))
+                else:
+                    deadlines.append(deadline)
+            selected = min(due)[1] if due else None
+            if selected is not None:
+                self._dispatch_sequence += 1
+                self._runtimes[selected].last_dispatch = self._dispatch_sequence
+        timeout = None if not deadlines else max(0.0, min(deadlines) - now)
+        return selected, tuple(retired), timeout
+
+    def _entry_deadline(self, entry: _CoordinatedAnalyticsRuntime, now: float) -> float | None:
+        if entry.worker is None:
+            return entry.next_retry_at if entry.next_retry_at is not None else now
+        if entry.next_retry_at is not None:
+            return entry.next_retry_at
+        if entry.full_reconcile and entry.first_dirty_at is not None:
+            return entry.first_dirty_at
+        if entry.first_dirty_at is None or entry.last_dirty_at is None:
+            return None
+        return min(
+            entry.last_dirty_at + ANALYTICS_QUIET_SECONDS,
+            entry.first_dirty_at + ANALYTICS_MAX_BATCH_SECONDS,
+        )
+
+    def _reconcile(self, runtime_id: str) -> None:
+        with self._lock:
+            entry = self._runtimes.get(runtime_id)
+            if entry is None or entry.retiring or entry.config is None:
+                return
+            config = entry.config
+            worker = entry.worker
+        if worker is None:
+            try:
+                candidate = self._worker_factory(config)
+            except Exception:
+                self._record_start_failure(runtime_id, config)
+                return
+            with self._lock:
+                entry = self._runtimes.get(runtime_id)
+                if entry is None or entry.retiring or entry.config != config:
+                    return
+                entry.worker = worker = candidate
+                entry.next_retry_at = None
+        with self._lock:
+            entry = self._runtimes.get(runtime_id)
+            if entry is None or entry.retiring or entry.worker is not worker:
+                return
+            events = tuple(entry.pending_events)
+            thread_ids = frozenset(entry.pending_thread_ids)
+            full_reconcile = entry.full_reconcile
+            generation_started_at = entry.first_dirty_at or self._monotonic()
+            entry.pending_events.clear()
+            entry.pending_thread_ids.clear()
+            entry.first_dirty_at = entry.last_dirty_at = None
+            entry.full_reconcile = False
+            entry.next_retry_at = None
+        try:
+            for event in events:
+                worker.observe_protocol_event(event)
+            result = worker.poll_once(AnalyticsDirtyBatch(thread_ids, full_reconcile=full_reconcile))
+        except Exception:
+            self._record_worker_failure(runtime_id, config, worker)
+            return
+        self._schedule_result(runtime_id, worker, result, generation_started_at)
+
+    def _record_start_failure(self, runtime_id: str, config: AnalyticsRuntimeConfig) -> None:
+        with self._lock:
+            entry = self._runtimes.get(runtime_id)
+            if entry is None or entry.retiring or entry.config != config:
+                return
+            entry.start_attempts += 1
+            retry = entry.start_attempts < self._max_start_attempts
+            entry.next_retry_at = self._monotonic() + self._restart_delay_seconds if retry else None
+            entry.disabled = not retry
+        _project_supervisor_health(
+            config,
+            "analytics_runtime_start_failed",
+            retry_scheduled=retry,
+            retry_delay_seconds=self._restart_delay_seconds,
+        )
+
+    def _record_worker_failure(
+        self,
+        runtime_id: str,
+        config: AnalyticsRuntimeConfig,
+        worker: AnalyticsRolloutWorker,
+    ) -> None:
+        with self._lock:
+            entry = self._runtimes.get(runtime_id)
+            if entry is None or entry.worker is not worker:
+                return
+            entry.worker = None
+            entry.start_attempts += 1
+            retry = entry.start_attempts < self._max_start_attempts
+            entry.next_retry_at = self._monotonic() + self._restart_delay_seconds if retry else None
+            entry.disabled = not retry
+        _project_supervisor_health(
+            config,
+            "analytics_runtime_exited",
+            retry_scheduled=retry,
+            retry_delay_seconds=self._restart_delay_seconds,
+        )
+
+    def _schedule_result(
+        self,
+        runtime_id: str,
+        worker: AnalyticsRolloutWorker,
+        result: str,
+        generation_started_at: float,
+    ) -> None:
+        now = self._monotonic()
+        with self._lock:
+            entry = self._runtimes.get(runtime_id)
+            if entry is None or entry.worker is not worker:
+                return
+            entry.start_attempts = 0
+            if result not in _COORDINATED_RETRY_RESULTS:
+                entry.next_retry_at = entry.retry_deadline = None
+                entry.retry_delay_seconds = ANALYTICS_RETRY_INITIAL_SECONDS
+                return
+            if entry.retry_deadline is None:
+                entry.retry_deadline = max(now, generation_started_at) + ANALYTICS_MAX_RETRY_WINDOW_SECONDS
+                entry.retry_delay_seconds = ANALYTICS_RETRY_INITIAL_SECONDS
+            if now >= entry.retry_deadline:
+                entry.next_retry_at = entry.retry_deadline = None
+                return
+            entry.next_retry_at = min(now + entry.retry_delay_seconds, entry.retry_deadline)
+            entry.retry_delay_seconds *= 2
+        self._wake.set()
+
+
+def _release_retired_analytics_memory() -> None:
+    """Return retired analyzer high-water allocations in the long-lived daemon."""
+    gc.collect()
+    with suppress(AttributeError, OSError):
+        libc = ctypes.CDLL(None)
+        malloc_trim = libc.malloc_trim
+        malloc_trim.argtypes = [ctypes.c_size_t]
+        malloc_trim.restype = ctypes.c_int
+        malloc_trim(0)
 
 
 def default_codex_sessions_root() -> Path:
@@ -1220,22 +1345,6 @@ def locate_verified_rollout(
         return None
     catalog.remember_resolved_path(codex_session_id, verified[0].path)
     return verified[0]
-
-
-def analytics_worker_main(arguments: list[str] | None = None) -> int:
-    config = AnalyticsWorkerConfig.parse(arguments)
-    _lower_process_priority()
-    stop = Event()
-
-    def request_stop(_signum: int, _frame: object) -> None:
-        stop.set()
-
-    for signum in (signal.SIGTERM, signal.SIGHUP):
-        signal.signal(signum, request_stop)
-    worker = AnalyticsRolloutWorker(config)
-    worker.run_until_stopped(stop)
-    worker.mark_stopped()
-    return 0
 
 
 def _verify_root_rollout(
@@ -1874,20 +1983,6 @@ def _current_analytics_user_id() -> str:
     return f"posix:{identity.uid}:{identity.gid}:{identity.user_name}"
 
 
-def _lower_process_priority() -> None:
-    with suppress(OSError):
-        os.nice(19)
-    ionice = shutil.which("ionice")
-    if ionice is not None:
-        subprocess.run(
-            [ionice, "-c", "3", "-p", str(os.getpid())],
-            check=False,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-
-
 def _diagnostic_code(error: Exception) -> str:
     if isinstance(error, RodexSessionStatisticsConflictError):
         return "analytics_publication_conflict"
@@ -1899,7 +1994,7 @@ def _diagnostic_code(error: Exception) -> str:
 
 
 def _project_supervisor_health(
-    config: AnalyticsWorkerConfig,
+    config: AnalyticsRuntimeConfig,
     code: str,
     *,
     retry_scheduled: bool,

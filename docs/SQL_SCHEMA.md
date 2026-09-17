@@ -192,7 +192,7 @@ suggestion followed by user agreement.
   transition before writing.
 - `rodex_sessions_codex_rollout_sources` owns the immutable canonical rollout path
   observed for each thread. `rodex_sessions_analytics_worker_thread_checkpoints` owns
-  the analytics worker's accepted append-stream prefix byte count, observation mtime,
+  each runtime analyzer's accepted append-stream prefix byte count, observation mtime,
   SHA-256, and verification time for that rollout. Codex rollouts are a trusted
   append-only event stream: the resident hot path extends this digest from suffix bytes
   only, while cold startup, clean replay, and explicit body reads re-hash the durable
@@ -253,7 +253,8 @@ suggestion followed by user agreement.
   rejects a later eligible turn while an earlier one remains unclaimed. A follow-up on
   an existing agent therefore becomes another request row and another turn association
   without changing the agent's canonical thread or earlier history.
-- `rodex_sessions_analytics_workers` is independent one-to-one health. Its bounded
+- `rodex_sessions_analytics_workers` stores independent one-to-one runtime analytics
+  health within the shared coordinator. Its bounded
   diagnostic code cannot contain free-form errors or paths. Failure never fabricates or
   overwrites a statistics snapshot.
 - `rodex_sessions_agent_trace_publications` is an independent session-local CAS head.
@@ -336,7 +337,7 @@ suggestion followed by user agreement.
   not stable core turns. Trace events append idempotently under their own CAS head.
   Health-only failure publication does not mutate last-good statistics, checkpoints, or
   trace events.
-- The analytics worker enters SQL through its registry boundary. It caches stable lookup
+- Each coordinator-owned runtime analyzer enters SQL through its registry boundary. It caches stable lookup
   identities for its database lifetime, prepares a publication once, and reuses that
   immutable publication if SQLite asks it to retry; a retry never reruns analysis or
   source I/O inside the transaction. Cold startup warms resident analyzer and trace

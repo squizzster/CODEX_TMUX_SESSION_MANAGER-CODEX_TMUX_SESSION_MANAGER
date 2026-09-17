@@ -33,16 +33,14 @@ from rodex_registry.identity import (
 )
 
 from .agent_observer import AgentObserverCoordinator, observer_control_socket_path
-from .analytics import (
-    AnalyticsSubprocessSupervisor,
-    default_codex_sessions_root,
-)
+from .analytics import default_codex_sessions_root
 from .app_server_contract import (
     CODEX_APP_SERVER,
     RODEX_RUNTIME_APP_SERVER_CLIENT,
     RODEX_SESSION_CATALOG_APP_SERVER_CLIENT,
 )
 from .control import CodexControlClient, LiveRodexControl
+from .daemon_client import RodexDaemonClient
 from .input_interceptor_config import INPUT_INTERCEPTORS
 from .input_interceptor_presentation import InputInterceptorPresentation
 from .interaction_pipeline import DeliveryStatus, InteractionRequest, InteractionResult, SessionInteractionPipeline
@@ -50,7 +48,7 @@ from .interaction_transport import publish_tui_notice
 from .pane_control import TmuxPaneController
 from .presentation_policy import PresentationPolicyInteractionAdapter, SessionPresentationPipeline
 from .primary_connection_lifecycle import PrimaryConnectionLifecycleCoordinator
-from .process_contracts import AnalyticsWorkerConfig, SessionHostConfig
+from .process_contracts import AnalyticsRuntimeConfig, RuntimeServiceConfig
 from .process_environment import (
     TMUX_OWNED_CHILD_ENVIRONMENT_VARIABLES,
     canonical_native_executable,
@@ -69,7 +67,7 @@ from .protocol_proxy import (
     ToolCallCounter,
 )
 from .runtime_endpoint import ExclusiveUnixEndpoint
-from .runtime_peer import RuntimePeerIdentity, require_unix_peer_process, verified_runtime_connection
+from .runtime_peer import BoundProcessOwner, RuntimePeerIdentity, require_unix_peer_process, verified_runtime_connection
 from .status_bar import context_status_segment
 from .terminal_gateway import TerminalSessionGateway
 from .tmux_executor import SyncTmuxExecutor, TmuxCommandResult
@@ -514,6 +512,7 @@ class RodexRuntimeLauncher:
         attach_notice: Callable[[], str | None] | None = None,
         tui_notice_publisher: TuiNoticePublisher = publish_tui_notice,
         environment: Mapping[str, str] | None = None,
+        daemon_client_factory: Callable[[Path, str], RodexDaemonClient] = RodexDaemonClient,
     ) -> None:
         self._codex_binary = codex_binary
         self._tmux_binary = canonical_native_executable(tmux_binary)
@@ -529,6 +528,7 @@ class RodexRuntimeLauncher:
         self._attach_notice = attach_notice
         self._publish_tui_notice = tui_notice_publisher
         self._user_process_environment = user_process_environment(os.environ if environment is None else environment)
+        self._daemon_client_factory = daemon_client_factory
 
     def codex_session_is_persisted(self, codex_session_id: CodexSessionId) -> bool:
         """Ask a transient App Server whether an exact thread is resumable."""
@@ -646,33 +646,50 @@ class RodexRuntimeLauncher:
         _require_short_unix_socket_path(runtime.protocol_event_socket_path)
         _require_short_unix_socket_path(observer_control_socket_path(runtime.protocol_event_socket_path))
 
-        analytics_config = AnalyticsWorkerConfig(
-            rodex_database_path=rodex_database_path,
-            codex_sessions_root=default_codex_sessions_root(),
-            rodex_session_id=rodex_session_id,
-            rodex_registry_id=rodex_registry_id,
-            runtime_id=runtime_id,
-            tmux_server_id=runtime.creation_server_id,
-            protocol_event_socket_path=runtime.protocol_event_socket_path,
-        )
-        host_config = SessionHostConfig(
-            codex_binary=self._codex_binary,
-            app_server_socket_path=runtime.app_server_socket_path,
-            app_server_log_path=runtime.app_server_log_path,
-            protocol_proxy_socket_path=runtime.protocol_proxy_socket_path,
-            protocol_event_socket_path=runtime.protocol_event_socket_path,
-            tmux_binary=self._tmux_binary,
-            tmux_server_socket_path=runtime.tmux_server_socket_path,
-            runtime_id=runtime_id,
-            codex_arguments=tuple(codex_arguments),
-            analytics=analytics_config,
-        )
+        session_environment = self._user_process_environment.copy()
+        session_environment["PWD"] = str(resolved_workspace)
+        operation_id = secrets.token_hex(16)
+        daemon_client = self._daemon_client_factory(runtime_root, self._python_executable)
+        service_config: RuntimeServiceConfig | None = None
         try:
-            self._start_tmux_session(
+            capability, caller_environment_names = self._stage_tmux_session(
                 runtime,
                 resolved_workspace,
-                host_config.command(self._python_executable),
+                session_environment,
             )
+            analytics_config = AnalyticsRuntimeConfig(
+                rodex_database_path=rodex_database_path,
+                codex_sessions_root=default_codex_sessions_root(),
+                rodex_session_id=rodex_session_id,
+                rodex_registry_id=rodex_registry_id,
+                runtime_id=runtime_id,
+                tmux_server_id=runtime.creation_server_id,
+                protocol_event_socket_path=runtime.protocol_event_socket_path,
+            )
+            service_config = RuntimeServiceConfig(
+                codex_binary=self._codex_binary,
+                app_server_socket_path=runtime.app_server_socket_path,
+                app_server_log_path=runtime.app_server_log_path,
+                protocol_proxy_socket_path=runtime.protocol_proxy_socket_path,
+                protocol_event_socket_path=runtime.protocol_event_socket_path,
+                tmux_binary=self._tmux_binary,
+                tmux_server_socket_path=runtime.tmux_server_socket_path,
+                tmux_pane_target=capability.pane_target,
+                runtime_id=runtime_id,
+                codex_arguments=tuple(codex_arguments),
+                analytics=analytics_config,
+                user_environment=validated_user_environment_entries(session_environment),
+            )
+            daemon_client.reserve(operation_id, service_config)
+            self._start_terminal_bridge(
+                runtime,
+                capability,
+                operation_id,
+                daemon_client.socket_path,
+                caller_environment_names,
+                environment=session_environment,
+            )
+            daemon_client.await_ready(operation_id, str(runtime_id), timeout_seconds=self._startup_timeout_seconds)
             requested_codex_session_id = _requested_exact_codex_resume(codex_arguments)
             codex_session_id = self._wait_for_single_codex_session_id(
                 runtime,
@@ -690,6 +707,9 @@ class RodexRuntimeLauncher:
                 rodex_registry_id,
             )
         except BaseException as failure:
+            if service_config is not None:
+                with suppress(Exception):
+                    daemon_client.stop(operation_id, str(runtime_id))
             self._stop_startup_runtime(runtime, failure=failure)
             raise
         return runtime, codex_session_id
@@ -1394,24 +1414,15 @@ class RodexRuntimeLauncher:
             "off",
         )
 
-    def _start_tmux_session(
+    def _stage_tmux_session(
         self,
         runtime: LiveTmuxSession,
         workspace: Path,
-        host_command: Sequence[str],
-    ) -> None:
-        """Stage one inert pane, install caller state, then start the real host."""
+        session_environment: Mapping[str, str],
+    ) -> tuple[TmuxRuntimeCapability, frozenset[str]]:
+        """Stage one exact inert pane and install its caller-owned environment."""
         if runtime.runtime_id is None:
             raise RodexRuntimeError("tmux creation requires a runtime incarnation")
-        if (
-            not host_command
-            or not isinstance(host_command[0], str)
-            or not host_command[0]
-            or any(not isinstance(argument, str) for argument in host_command)
-        ):
-            raise ValueError("tmux host command must start with non-empty executable text")
-        session_environment = self._user_process_environment.copy()
-        session_environment["PWD"] = str(workspace)
         try:
             environment_entries = validated_user_environment_entries(session_environment)
         except ValueError as error:
@@ -1594,6 +1605,35 @@ class RodexRuntimeLauncher:
             environment=session_environment,
             input_text=f"{source}\n",
         )
+        return capability, caller_environment_names
+
+    def _start_terminal_bridge(
+        self,
+        runtime: LiveTmuxSession,
+        capability: TmuxRuntimeCapability,
+        operation_id: str,
+        daemon_path: Path,
+        caller_environment_names: frozenset[str],
+        *,
+        environment: Mapping[str, str],
+    ) -> None:
+        """Replace the staged pane with a one-shot exact TTY handoff to ``rodexd``."""
+        bridge_command = (
+            self._python_executable,
+            "-I",
+            "-m",
+            "rodex.terminal_bridge",
+            "--daemon-socket",
+            os.fspath(daemon_path),
+            "--operation-id",
+            operation_id,
+            "--runtime-id",
+            str(capability.runtime_id),
+            "--tmux-server-id",
+            capability.tmux_server_id,
+            "--tmux-pane",
+            capability.pane_target,
+        )
         respawn_action = _tmux_command_queue(
             (
                 "respawn-pane",
@@ -1603,7 +1643,8 @@ class RodexRuntimeLauncher:
                 *exact_environment_exec_command(
                     self._python_executable,
                     tuple(caller_environment_names),
-                    host_command,
+                    bridge_command,
+                    operation_id=operation_id,
                 ),
                 ";",
                 "set-option",
@@ -1614,7 +1655,7 @@ class RodexRuntimeLauncher:
                 "off",
             )
         )
-        self._tmux(
+        result = self._tmux(
             runtime,
             "if-shell",
             "-t",
@@ -1623,8 +1664,10 @@ class RodexRuntimeLauncher:
             primary_pane_capability_if_shell_condition(capability),
             respawn_action,
             shlex.join(("run-shell", "false")),
-            environment=session_environment,
+            environment=environment,
         )
+        if result.returncode != 0:
+            raise RodexRuntimeError("terminal bridge could not replace the staged primary pane")
 
     def _read_tmux_global_environment_names(
         self,
@@ -2216,8 +2259,8 @@ def default_runtime_root() -> Path:
 
 def _start_registered_main_model_message(
     request: InteractionRequest,
-    context: AnalyticsWorkerConfig | None,
-    config: SessionHostConfig,
+    context: AnalyticsRuntimeConfig | None,
+    config: RuntimeServiceConfig,
     protocol_proxy: CodexProtocolProxy | None,
 ) -> InteractionResult:
     # Composition occurs here to keep the runtime/control dependency acyclic.
@@ -2256,15 +2299,54 @@ def _start_registered_main_model_message(
     return InteractionResult(DeliveryStatus.MODEL_TURN_STARTED, value=asdict(dispatch))
 
 
-def run_session_host(
-    config: SessionHostConfig,
+def run_runtime_service(
+    config: RuntimeServiceConfig,
     *,
-    analytics_supervisor_factory: Callable[
-        [AnalyticsWorkerConfig], AnalyticsSubprocessSupervisor
-    ] = AnalyticsSubprocessSupervisor,
+    terminal_fd: int,
+    terminal_environment: Mapping[str, str],
+    stop: Event,
+    on_started: Callable[[], None] = lambda: None,
+    on_analytics_activated: Callable[[AnalyticsRuntimeConfig], None] = lambda _config: None,
+    on_analytics_event: Callable[[Mapping[str, Any]], None] = lambda _event: None,
+    on_process_started: Callable[[str, subprocess.Popen[bytes]], None] = lambda _kind, _process: None,
+    on_process_stopped: Callable[[str, subprocess.Popen[bytes]], None] = lambda _kind, _process: None,
 ) -> int:
-    """Supervise the app-server, protocol proxy, and foreground Codex TUI."""
-    user_environment = user_process_environment(os.environ)
+    """Own one daemon-managed runtime and always release its transferred pane TTY."""
+    try:
+        return _run_runtime_service(
+            config,
+            terminal_fd=terminal_fd,
+            terminal_environment=terminal_environment,
+            stop=stop,
+            on_started=on_started,
+            on_analytics_activated=on_analytics_activated,
+            on_analytics_event=on_analytics_event,
+            on_process_started=on_process_started,
+            on_process_stopped=on_process_stopped,
+        )
+    finally:
+        with suppress(OSError):
+            os.close(terminal_fd)
+
+
+def _run_runtime_service(
+    config: RuntimeServiceConfig,
+    *,
+    terminal_fd: int,
+    terminal_environment: Mapping[str, str],
+    stop: Event,
+    on_started: Callable[[], None],
+    on_analytics_activated: Callable[[AnalyticsRuntimeConfig], None],
+    on_analytics_event: Callable[[Mapping[str, Any]], None],
+    on_process_started: Callable[[str, subprocess.Popen[bytes]], None],
+    on_process_stopped: Callable[[str, subprocess.Popen[bytes]], None],
+) -> int:
+    """Own one daemon-managed app-server, proxy, analytics task, and Codex TUI."""
+    user_environment = config.environment
+    unexpected_terminal_names = set(terminal_environment) - TMUX_OWNED_CHILD_ENVIRONMENT_VARIABLES
+    if unexpected_terminal_names:
+        raise RodexRuntimeError("terminal bridge environment contains caller-owned names")
+    user_environment.update(terminal_environment)
     codex_binary = config.codex_binary
     app_server_socket_path = config.app_server_socket_path
     app_server_log_path = config.app_server_log_path
@@ -2273,9 +2355,9 @@ def run_session_host(
     tmux_binary = config.tmux_binary
     tmux_server_socket_path = config.tmux_server_socket_path
     codex_arguments = config.codex_arguments
-    pending_analytics_config: AnalyticsWorkerConfig | None = config.analytics
-    tmux_pane_target = os.environ.get("TMUX_PANE", "")
-    tmux_runtime_capability = _resolve_session_host_tmux_capability(
+    pending_analytics_config: AnalyticsRuntimeConfig | None = config.analytics
+    tmux_pane_target = config.tmux_pane_target
+    tmux_runtime_capability = _resolve_runtime_service_tmux_capability(
         tmux_binary,
         tmux_server_socket_path,
         tmux_pane_target,
@@ -2285,6 +2367,7 @@ def run_session_host(
     peer_identity = RuntimePeerIdentity(config.runtime_id, config.tmux_server_id)
     app_endpoint = ExclusiveUnixEndpoint(app_server_socket_path)
     app_server: subprocess.Popen[bytes] | None = None
+    app_server_announced = False
     tui: subprocess.Popen[bytes] | None = None
     terminal_gateway: TerminalSessionGateway | None = None
     input_presentation: InputInterceptorPresentation | None = None
@@ -2292,7 +2375,6 @@ def run_session_host(
     protocol_event_tap: CodexProtocolEventTap | None = None
     context_status_observer: CodexContextStatusObserver | None = None
     runtime_path_keepalive: _RuntimePathKeepalive | None = None
-    analytics_supervisor: AnalyticsSubprocessSupervisor | None = None
     agent_observer_controller: AgentObserverCoordinator | None = None
     interaction_pipeline = SessionInteractionPipeline()
     presentation_pipeline = SessionPresentationPipeline()
@@ -2301,28 +2383,22 @@ def run_session_host(
         presentation_pipeline,
         str(config.runtime_id),
     )
-    registered_interaction_context: AnalyticsWorkerConfig | None = None
+    registered_interaction_context: AnalyticsRuntimeConfig | None = None
     registration_deadline = time.monotonic() + RODEX_REGISTRATION_TIMEOUT_SECONDS
-    shutting_down = False
-
-    def stop_on_signal(signum: int, _frame: object) -> None:
-        if not shutting_down:
-            raise SystemExit(128 + signum)
-
-    def forward_sigint_to_native_terminal(signum: int, _frame: object) -> None:
-        if terminal_gateway is not None:
-            terminal_gateway.forward_signal(signum)
-
-    def resize_native_terminal(_signum: int, _frame: object) -> None:
-        if terminal_gateway is not None:
-            terminal_gateway.resize()
-
-    previous_handlers = {signum: signal.signal(signum, stop_on_signal) for signum in (signal.SIGHUP, signal.SIGTERM)}
     try:
         app_endpoint.acquire()
         with _open_private_runtime_log(app_server_log_path) as log:
             app_server = subprocess.Popen(
-                CODEX_APP_SERVER.command(codex_binary, app_server_socket_path),
+                (
+                    sys.executable,
+                    "-I",
+                    "-m",
+                    "rodex.process_guard",
+                    "--parent-pid",
+                    str(os.getpid()),
+                    "--",
+                    *CODEX_APP_SERVER.command(codex_binary, app_server_socket_path),
+                ),
                 stdin=subprocess.DEVNULL,
                 stdout=log,
                 stderr=subprocess.STDOUT,
@@ -2331,6 +2407,8 @@ def run_session_host(
                 # escalation to the wrapper's native App Server child.
                 start_new_session=True,
             )
+            on_process_started("app-server", app_server)
+            app_server_announced = True
             _wait_for_app_server_socket(app_server, app_server_socket_path)
             app_endpoint.retain_bound_path()
             app_server_socket_path.chmod(0o600)
@@ -2371,6 +2449,9 @@ def run_session_host(
                 if agent_observer_controller is not None:
                     with suppress(Exception):
                         agent_observer_controller.observe_protocol_event(event)
+                if event is not None:
+                    with suppress(Exception):
+                        on_analytics_event(event)
                 live_event_tap.publish_protocol_event(message, event)
 
             def observe_primary_client_message(
@@ -2399,6 +2480,7 @@ def run_session_host(
                 runner=subprocess.run,
                 primary=True,
             )
+            native_tui_process = BoundProcessOwner()
             protocol_proxy = CodexProtocolProxy(
                 protocol_proxy_socket_path,
                 app_server_socket_path,
@@ -2406,6 +2488,7 @@ def run_session_host(
                 publish_primary_server_message,
                 primary_connection_lifecycle,
                 app_server_process=app_server,
+                native_tui_process=native_tui_process,
                 on_primary_client_message=observe_primary_client_message,
                 interaction_pipeline=interaction_pipeline,
                 peer_identity=peer_identity,
@@ -2419,7 +2502,6 @@ def run_session_host(
                 tmux_runtime_capability,
                 primary_pane,
             )
-            previous_handlers[signal.SIGWINCH] = signal.signal(signal.SIGWINCH, resize_native_terminal)
 
             runtime_path_keepalive = _RuntimePathKeepalive(
                 (
@@ -2466,67 +2548,57 @@ def run_session_host(
                 if requested_codex_session_id is None
                 else time.monotonic() + CODEX_ACTIVE_WRITER_HANDOFF_TIMEOUT_SECONDS
             )
-            inherited_sigint_handler: object | None = None
             while True:
                 attempt_log_offset = os.fstat(log.fileno()).st_size
                 if terminal_gateway is not None:
                     terminal_gateway.close()
                     terminal_gateway = None
-                if inherited_sigint_handler is not None:
-                    signal.signal(signal.SIGINT, inherited_sigint_handler)
-                try:
-                    terminal_gateway = TerminalSessionGateway(
-                        tui_command,
-                        **tui_options,
-                        pipeline=interaction_pipeline,
-                        runtime_identity=str(config.runtime_id),
-                        registrations=INPUT_INTERCEPTORS,
-                        confirm_native_prefix=input_presentation.confirm_native_prefix,
-                        presentation_snapshot=presentation_pipeline.snapshot,
-                    )
-                    tui = terminal_gateway.process
-                finally:
-                    replaced_handler = signal.signal(
-                        signal.SIGINT,
-                        forward_sigint_to_native_terminal,
-                    )
-                    if inherited_sigint_handler is None:
-                        inherited_sigint_handler = replaced_handler
-                        previous_handlers[signal.SIGINT] = replaced_handler
+                terminal_gateway = TerminalSessionGateway(
+                    tui_command,
+                    **tui_options,
+                    pipeline=interaction_pipeline,
+                    runtime_identity=str(config.runtime_id),
+                    registrations=INPUT_INTERCEPTORS,
+                    confirm_native_prefix=input_presentation.confirm_native_prefix,
+                    presentation=presentation_pipeline,
+                    input_fd=terminal_fd,
+                    output_fd=terminal_fd,
+                    process_owner=native_tui_process,
+                    on_process_started=lambda process: on_process_started("native-tui", process),
+                    on_process_stopped=lambda process: on_process_stopped("native-tui", process),
+                )
+                tui = terminal_gateway.process
+                on_started()
                 while True:
                     if pending_analytics_config is not None:
-                        activated_analytics = _registered_analytics_worker_config(
+                        activated_analytics = _registered_analytics_runtime_config(
                             pending_analytics_config,
                             tmux_binary,
                             tmux_server_socket_path,
                             tmux_pane_target,
                         )
                         if activated_analytics is not None:
-                            pending_analytics_config = None
-                            registered_interaction_context = activated_analytics
-                            assert activated_analytics.codex_session_id is not None
-                            presentation_pipeline.bind_root_thread(str(activated_analytics.codex_session_id))
-                            if agent_observer_controller is not None:
-                                with suppress(Exception):
-                                    assert activated_analytics.rodex_sessions_id is not None
-                                    agent_observer_controller.activate(
-                                        database_path=activated_analytics.rodex_database_path,
-                                        rodex_sessions_id=activated_analytics.rodex_sessions_id,
-                                        rodex_session_id=str(activated_analytics.rodex_session_id),
-                                        root_thread_id=activated_analytics.codex_session_id,
-                                    )
-                            candidate_supervisor: AnalyticsSubprocessSupervisor | None = None
-                            try:
-                                candidate_supervisor = analytics_supervisor_factory(activated_analytics)
-                                candidate_supervisor.start()
-                                analytics_supervisor = candidate_supervisor
-                            except Exception:
-                                # Persistent statistics are strictly off the interactive
-                                # path; a failed sidecar must not break the Codex TUI.
-                                if candidate_supervisor is not None:
+                            if registered_interaction_context is None:
+                                registered_interaction_context = activated_analytics
+                                assert activated_analytics.codex_session_id is not None
+                                presentation_pipeline.bind_root_thread(str(activated_analytics.codex_session_id))
+                                if agent_observer_controller is not None:
                                     with suppress(Exception):
-                                        candidate_supervisor.close()
-                                analytics_supervisor = None
+                                        assert activated_analytics.rodex_sessions_id is not None
+                                        agent_observer_controller.activate(
+                                            database_path=activated_analytics.rodex_database_path,
+                                            rodex_sessions_id=activated_analytics.rodex_sessions_id,
+                                            rodex_session_id=str(activated_analytics.rodex_session_id),
+                                            root_thread_id=activated_analytics.codex_session_id,
+                                        )
+                            # Persistent statistics remain fail-open and must not
+                            # interrupt the daemon's interactive runtime pipeline.
+                            try:
+                                on_analytics_activated(activated_analytics)
+                            except Exception:
+                                pass
+                            else:
+                                pending_analytics_config = None
                         elif time.monotonic() >= registration_deadline:
                             raise RodexRuntimeError("runtime registration was not confirmed before its deadline")
                     failure = runtime_path_keepalive.failure
@@ -2535,9 +2607,10 @@ def run_session_host(
                         raise failure
                     try:
                         registration_pending = pending_analytics_config is not None
-                        returncode = terminal_gateway.wait(
-                            timeout=(_REGISTRATION_POLL_INTERVAL_SECONDS if registration_pending else None)
-                        )
+                        if stop.is_set():
+                            returncode = 0
+                            break
+                        returncode = terminal_gateway.wait(timeout=_REGISTRATION_POLL_INTERVAL_SECONDS)
                     except subprocess.TimeoutExpired:
                         if (
                             registration_pending
@@ -2580,52 +2653,45 @@ def run_session_host(
                 raise failure
             return returncode
     finally:
-        shutting_down = True
         try:
+            if runtime_path_keepalive is not None:
+                runtime_path_keepalive.close()
+        finally:
             try:
-                try:
-                    if analytics_supervisor is not None:
-                        analytics_supervisor.close()
-                except Exception:
-                    pass
-                finally:
-                    if runtime_path_keepalive is not None:
-                        runtime_path_keepalive.close()
+                if tui is not None:
+                    _stop_child_process(tui)
             finally:
-                try:
-                    if tui is not None:
-                        _stop_child_process(tui)
-                finally:
-                    if terminal_gateway is not None:
-                        with suppress(Exception):
-                            terminal_gateway.close()
-                    if input_presentation is not None:
-                        with suppress(Exception):
-                            input_presentation.close()
+                if terminal_gateway is not None:
                     with suppress(Exception):
-                        presentation_policy_interaction.close()
+                        terminal_gateway.close()
+                if input_presentation is not None:
+                    with suppress(Exception):
+                        input_presentation.close()
+                with suppress(Exception):
+                    presentation_policy_interaction.close()
+                try:
+                    if protocol_proxy is not None:
+                        protocol_proxy.close()
+                finally:
                     try:
-                        if protocol_proxy is not None:
-                            protocol_proxy.close()
+                        if agent_observer_controller is not None:
+                            agent_observer_controller.close()
                     finally:
                         try:
-                            if agent_observer_controller is not None:
-                                agent_observer_controller.close()
+                            if context_status_observer is not None:
+                                context_status_observer.close()
                         finally:
                             try:
-                                if context_status_observer is not None:
-                                    context_status_observer.close()
+                                if protocol_event_tap is not None:
+                                    protocol_event_tap.close()
                             finally:
                                 try:
-                                    if protocol_event_tap is not None:
-                                        protocol_event_tap.close()
-                                finally:
                                     if app_server is not None:
                                         _stop_child_process(app_server, owns_process_group=True)
+                                        if app_server_announced:
+                                            on_process_stopped("app-server", app_server)
+                                finally:
                                     app_endpoint.close()
-        finally:
-            for signum, handler in previous_handlers.items():
-                signal.signal(signum, handler)
 
 
 def _record_runtime_path_keepalive_failure(log: BinaryIO, error: RodexRuntimeError) -> None:
@@ -2634,16 +2700,16 @@ def _record_runtime_path_keepalive_failure(log: BinaryIO, error: RodexRuntimeErr
     log.flush()
 
 
-def _resolve_session_host_tmux_capability(
+def _resolve_runtime_service_tmux_capability(
     tmux_binary: str,
     tmux_server_socket_path: Path,
     tmux_pane_target: str,
     expected_runtime_id: RodexRuntimeId,
     expected_server_id: str,
 ) -> TmuxRuntimeCapability:
-    """Bind a session host to the server/session/runtime incarnation that spawned it."""
+    """Bind one daemon runtime to the exact tmux incarnation that spawned its bridge."""
     if not tmux_pane_target:
-        raise RodexRuntimeError("session host has no exact tmux pane identity")
+        raise RodexRuntimeError("runtime service has no exact tmux pane identity")
     result = SyncTmuxExecutor(
         tmux_binary,
         tmux_server_socket_path,
@@ -2674,7 +2740,7 @@ def _resolve_session_host_tmux_capability(
         or fields[4] != tmux_pane_target
         or fields[5] != str(expected_runtime_id)
     ):
-        raise RodexRuntimeError("session host tmux incarnation could not be verified")
+        raise RodexRuntimeError("runtime service tmux incarnation could not be verified")
     try:
         server_id = parse_tmux_server_id(fields[1])
         runtime_id = parse_rodex_runtime_id(fields[5])
@@ -2686,7 +2752,82 @@ def _resolve_session_host_tmux_capability(
             runtime_id,
         )
     except ValueError as error:
-        raise RodexRuntimeError("session host tmux capability is malformed") from error
+        raise RodexRuntimeError("runtime service tmux capability is malformed") from error
+
+
+def admit_runtime_terminal_fd(
+    config: RuntimeServiceConfig,
+    terminal_fd: int,
+    *,
+    peer_pid: int,
+) -> tuple[TmuxRuntimeCapability, dict[str, str]]:
+    """Bind one passed pane TTY to its exact tmux/runtime/process capability."""
+    capability = _resolve_runtime_service_tmux_capability(
+        config.tmux_binary,
+        config.tmux_server_socket_path,
+        config.tmux_pane_target,
+        config.runtime_id,
+        config.tmux_server_id,
+    )
+    observed = SyncTmuxExecutor(
+        config.tmux_binary,
+        config.tmux_server_socket_path,
+        runner=subprocess.run,
+    ).run(primary_pane_capability_read_arguments(capability, "#{pane_pid}\t#{pane_tty}"))
+    fields = observed.stdout.rstrip("\n").split("\t")
+    if observed.returncode != 0 or len(fields) != 2 or not fields[0].isdigit() or int(fields[0]) != peer_pid:
+        raise RodexRuntimeError("terminal bridge process does not own the exact primary pane")
+    terminal_path = Path(fields[1])
+    try:
+        descriptor_state = os.fstat(terminal_fd)
+        path_state = terminal_path.stat()
+        descriptor_path = Path(os.ttyname(terminal_fd))
+    except (OSError, ValueError) as error:
+        raise RodexRuntimeError("terminal bridge did not pass a live pane TTY") from error
+    if (
+        not stat_module.S_ISCHR(descriptor_state.st_mode)
+        or descriptor_state.st_uid != os.getuid()
+        or descriptor_path != terminal_path
+        or (descriptor_state.st_dev, descriptor_state.st_ino, descriptor_state.st_uid)
+        != (path_state.st_dev, path_state.st_ino, path_state.st_uid)
+    ):
+        raise RodexRuntimeError("terminal bridge TTY does not match the exact primary pane")
+    try:
+        inherited_environment = _read_process_environment(peer_pid)
+        pane_identity = _tmux_pane_id_from_environment(inherited_environment.get("TMUX_PANE"))
+        tmux_socket_path = _tmux_socket_path_from_environment(inherited_environment.get("TMUX"))
+    except (OSError, UnicodeError, RodexRuntimeError, ValueError) as error:
+        raise RodexRuntimeError("terminal bridge environment could not be verified") from error
+    if pane_identity != config.tmux_pane_target or tmux_socket_path != config.tmux_server_socket_path:
+        raise RodexRuntimeError("terminal bridge environment does not match the exact primary pane")
+    terminal_environment = {
+        name: inherited_environment[name]
+        for name in TMUX_OWNED_CHILD_ENVIRONMENT_VARIABLES
+        if name in inherited_environment
+    }
+    if not terminal_environment.get("TERM"):
+        raise RodexRuntimeError("terminal bridge environment has no terminal type")
+    return capability, terminal_environment
+
+
+def _read_process_environment(pid: int) -> dict[str, str]:
+    """Read one live bridge's exec-time environment without accepting duplicates."""
+    if type(pid) is not int or pid <= 0:
+        raise ValueError("process ID must be positive")
+    content = Path(f"/proc/{pid}/environ").read_bytes()
+    environment: dict[str, str] = {}
+    for entry in content.split(b"\0"):
+        if not entry:
+            continue
+        name_bytes, separator, value_bytes = entry.partition(b"=")
+        if not separator:
+            raise ValueError("process environment entry has no value")
+        name = os.fsdecode(name_bytes)
+        value = os.fsdecode(value_bytes)
+        if not name or name in environment:
+            raise ValueError("process environment contains an invalid or duplicate name")
+        environment[name] = value
+    return environment
 
 
 def _runtime_registration_is_confirmed(
@@ -2712,12 +2853,12 @@ def _runtime_registration_is_confirmed(
     return result.returncode == 0 and result.stdout.strip() == RODEX_REGISTRATION_REGISTERED
 
 
-def _registered_analytics_worker_config(
-    config: AnalyticsWorkerConfig,
+def _registered_analytics_runtime_config(
+    config: AnalyticsRuntimeConfig,
     tmux_binary: str,
     tmux_server_socket_path: Path,
     tmux_pane_target: str,
-) -> AnalyticsWorkerConfig | None:
+) -> AnalyticsRuntimeConfig | None:
     """Read and validate one post-commit analytics activation manifest."""
     if not tmux_pane_target:
         return None

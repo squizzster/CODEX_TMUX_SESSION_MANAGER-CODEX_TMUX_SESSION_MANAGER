@@ -21,12 +21,31 @@ from rodex.interaction_pipeline import (
     InteractionTarget,
     SessionInteractionPipeline,
 )
-from rodex.terminal_input import PASTE_END, PASTE_START, TerminalInputDecoder, TerminalInputInterceptor
+from rodex.terminal_input import (
+    ESCAPE_WAIT_SECONDS,
+    PASTE_END,
+    PASTE_START,
+    TerminalInputDecoder,
+    TerminalInputInterceptor,
+)
 
 
 @pytest.mark.parametrize("text", ["/ro", "/rod", "/rode", "/rodex"])
 def test_single_configured_pattern_accepts_exact_candidates(text):
     assert INPUT_INTERCEPTORS[0].live.matches(text)
+
+
+def test_decoder_exposes_only_real_incomplete_frame_deadlines():
+    decoder = TerminalInputDecoder()
+    assert decoder.incomplete_deadline() is None
+    assert decoder.feed(b"\x1b", now=3.0) == []
+    assert decoder.incomplete_deadline() == pytest.approx(3.0 + ESCAPE_WAIT_SECONDS)
+    assert decoder.expire_incomplete(3.0 + ESCAPE_WAIT_SECONDS - 0.001) == []
+    assert [event.raw for event in decoder.expire_incomplete(3.0 + ESCAPE_WAIT_SECONDS)] == [b"\x1b"]
+    assert decoder.incomplete_deadline() is None
+
+    assert decoder.feed(PASTE_START, now=4.0) == []
+    assert decoder.incomplete_deadline() is None
 
 
 @pytest.mark.parametrize("text", ["", "/", "/r", "/robot", "/rodexx", "/rodex ", "/rodex hi", "/ro\n", "x/ro"])

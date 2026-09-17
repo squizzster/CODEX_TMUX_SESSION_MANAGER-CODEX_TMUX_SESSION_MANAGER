@@ -3,12 +3,12 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
-import subprocess
+import time
 import uuid
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
-from threading import Event
+from threading import Event, Lock, get_ident
 from typing import NoReturn
 
 import pytest
@@ -17,7 +17,7 @@ from test_statistics_projection import _snapshot as analyzer_snapshot
 
 from rodex.analytics import (
     AnalyticsRolloutWorker,
-    AnalyticsSubprocessSupervisor,
+    SharedAnalyticsCoordinator,
     _derive_verified_collaboration_projection,
     locate_verified_rollout,
 )
@@ -28,7 +28,7 @@ from rodex.analytics_analyzer import (
     RodexAnalyticsError,
 )
 from rodex.analytics_scheduler import AnalyticsDirtyBatch
-from rodex.process_contracts import AnalyticsWorkerConfig
+from rodex.process_contracts import AnalyticsRuntimeConfig
 from rodex_registry import (
     RodexAnalyticsPublication,
     RodexAnalyticsRegistry,
@@ -114,41 +114,26 @@ class FakeAnalyticsAdapter:
         self.accepted_batches += 1
 
 
-class FakeWorkerProcess:
-    def __init__(self, *, timeout_on_wait: bool = False) -> None:
-        self.returncode: int | None = None
-        self.timeout_on_wait = timeout_on_wait
-        self.terminated = False
-        self.killed = False
-        self.wait_calls = 0
-        self.exited = Event()
+class FakeAnalyticsTask:
+    def __init__(self, *, result: str = "up_to_date") -> None:
+        self.result = result
+        self.started = Event()
+        self.stopped = False
+        self.events: list[object] = []
+        self.thread_ids: list[int] = []
+        self.batches: list[AnalyticsDirtyBatch] = []
 
-    def poll(self) -> int | None:
-        return self.returncode
+    def poll_once(self, batch: AnalyticsDirtyBatch) -> str:
+        self.thread_ids.append(get_ident())
+        self.batches.append(batch)
+        self.started.set()
+        return self.result
 
-    def terminate(self) -> None:
-        self.terminated = True
-        if not self.timeout_on_wait:
-            self.returncode = -15
-            self.exited.set()
+    def observe_protocol_event(self, event: object) -> None:
+        self.events.append(event)
 
-    def wait(self, timeout: float | None = None) -> int:
-        self.wait_calls += 1
-        if not self.exited.wait(timeout):
-            raise subprocess.TimeoutExpired("analytics-worker", timeout)
-        if self.timeout_on_wait and not self.killed:
-            raise subprocess.TimeoutExpired("analytics-worker", timeout)
-        assert self.returncode is not None
-        return self.returncode
-
-    def exit(self, returncode: int) -> None:
-        self.returncode = returncode
-        self.exited.set()
-
-    def kill(self) -> None:
-        self.killed = True
-        self.returncode = -9
-        self.exited.set()
+    def mark_stopped(self) -> None:
+        self.stopped = True
 
 
 def _rollout(root: Path, codex_session_id: uuid.UUID) -> Path:
@@ -246,8 +231,8 @@ def _subagent_rollout(
     return path
 
 
-def _config(tmp_path: Path) -> AnalyticsWorkerConfig:
-    return AnalyticsWorkerConfig(
+def _config(tmp_path: Path) -> AnalyticsRuntimeConfig:
+    return AnalyticsRuntimeConfig(
         tmux_server_id="0123456789abcdef0123456789abcdef",
         rodex_database_path=tmp_path / "rodex.sqlite3",
         codex_sessions_root=tmp_path / "sessions",
@@ -268,7 +253,7 @@ def _analyzer_source(content: bytes) -> AnalyticsAnalyzerSource:
     )
 
 
-def _create(config: AnalyticsWorkerConfig, codex_session_id: uuid.UUID = CODEX_SESSION_ID) -> None:
+def _create(config: AnalyticsRuntimeConfig, codex_session_id: uuid.UUID = CODEX_SESSION_ID) -> None:
     create_a_rodex_session(
         config.rodex_database_path,
         rodex_session_id=RODEX_SESSION_ID,
@@ -584,52 +569,6 @@ def test_worker_with_the_wrong_session_id_cannot_publish_for_an_existing_session
     assert state == "clean_replay"
     assert adapters == []
     assert read_rodex_session_statistics(1, config.rodex_database_path).statistics is None
-
-
-def test_worker_runs_one_startup_reconciliation_then_uses_the_event_scheduler(
-    tmp_path: Path,
-) -> None:
-    config = _config(tmp_path)
-    _create(config)
-    _rollout(config.codex_sessions_root, CODEX_SESSION_ID)
-    worker = AnalyticsRolloutWorker(config, adapter_factory=FakeAnalyticsAdapter)
-    lifecycle: list[str] = []
-
-    class RecordingScheduler:
-        def offer_dirty(self, _thread_id: uuid.UUID) -> None:
-            lifecycle.append("scheduler-dirty")
-
-        def run(self, reconcile: Callable[[AnalyticsDirtyBatch], object]) -> None:
-            lifecycle.append(f"reconcile:{reconcile(AnalyticsDirtyBatch(frozenset(), True))}")
-
-        def close(self) -> None:
-            lifecycle.append("scheduler-close")
-
-    class RecordingSubscriber:
-        def start(self) -> None:
-            lifecycle.append("subscriber-start")
-
-        def close(self) -> None:
-            lifecycle.append("subscriber-close")
-
-    scheduler = RecordingScheduler()
-
-    def subscriber_factory(path: Path, supplied_scheduler: object, *, peer_identity: object) -> RecordingSubscriber:
-        assert path == config.protocol_event_socket_path
-        assert supplied_scheduler is scheduler
-        return RecordingSubscriber()
-
-    worker.run_until_stopped(  # type: ignore[arg-type]
-        Event(),
-        scheduler=scheduler,
-        subscriber_factory=subscriber_factory,  # type: ignore[arg-type]
-    )
-
-    assert lifecycle == [
-        "subscriber-start",
-        "reconcile:up_to_date",
-        "subscriber-close",
-    ]
 
 
 def test_worker_backfills_verified_rollout_and_projects_only_aggregates(
@@ -2046,7 +1985,20 @@ def test_rollout_locator_rejects_a_matching_fifo_without_blocking(
     assert locate_verified_rollout(root, CODEX_SESSION_ID) is None
 
 
-def test_supervisor_start_failure_is_fail_open_and_health_only(
+def _wait_until(predicate: Callable[[], bool], timeout: float = 1.0) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return
+        time.sleep(0.005)
+    assert predicate()
+
+
+def _pending_config(config: AnalyticsRuntimeConfig) -> AnalyticsRuntimeConfig:
+    return replace(config, rodex_sessions_id=None, codex_session_id=None)
+
+
+def test_shared_coordinator_start_failure_is_fail_open_and_health_only(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2058,108 +2010,208 @@ def test_supervisor_start_failure_is_fail_open_and_health_only(
         lambda _registry: (_ for _ in ()).throw(AssertionError("supervisor health opened a read transaction")),
     )
 
-    def fail_start(*_args: object, **_kwargs: object) -> subprocess.Popen[bytes]:
-        raise OSError("cannot fork analytics")
+    def fail_start(_config: AnalyticsRuntimeConfig) -> FakeAnalyticsTask:
+        raise OSError("cannot create analytics task")
 
-    supervisor = AnalyticsSubprocessSupervisor(config, popen=fail_start)
-
-    supervisor.start()
-    supervisor.close()
+    coordinator = SharedAnalyticsCoordinator(worker_factory=fail_start, restart_delay_seconds=0)
+    coordinator.start()
+    coordinator.reserve(_pending_config(config))
+    coordinator.activate(config)
+    _wait_until(
+        lambda: (
+            (view := read_rodex_session_statistics(1, config.rodex_database_path)).worker is not None
+            and view.worker.next_retry_at_utc is None
+        )
+    )
+    coordinator.close()
 
     view = read_rodex_session_statistics(1, config.rodex_database_path)
     assert view.statistics is None
     assert view.worker is not None
     assert view.worker.worker_state == "degraded"
-    assert view.worker.diagnostic_code == "analytics_worker_start_failed"
+    assert view.worker.diagnostic_code == "analytics_runtime_start_failed"
 
 
-def test_supervisor_restarts_once_after_backoff_then_exhausts(
+def test_shared_coordinator_restarts_once_after_worker_failure_then_exhausts(
     tmp_path: Path,
 ) -> None:
     config = _config(tmp_path)
     _create(config)
-    first = FakeWorkerProcess()
-    second = FakeWorkerProcess()
+    first = FakeAnalyticsTask()
+    second = FakeAnalyticsTask()
     pending = [first, second]
-    commands: list[list[str]] = []
-    second_started = Event()
+    attempts = 0
 
-    def start(command: list[str], **_options: object) -> FakeWorkerProcess:
-        commands.append(command)
-        process = pending.pop(0)
-        if process is second:
-            second_started.set()
-        return process
+    def start(_config: AnalyticsRuntimeConfig) -> FakeAnalyticsTask:
+        nonlocal attempts
+        attempts += 1
+        task = pending.pop(0)
 
-    supervisor = AnalyticsSubprocessSupervisor(
-        config,
-        popen=start,  # type: ignore[arg-type]
+        def fail(_batch: AnalyticsDirtyBatch) -> str:
+            task.started.set()
+            raise OSError("analytics task exited")
+
+        task.poll_once = fail  # type: ignore[method-assign]
+        return task
+
+    coordinator = SharedAnalyticsCoordinator(
+        worker_factory=start,
         restart_delay_seconds=0.01,
     )
-    supervisor.start()
-    first.exit(7)
-    assert second_started.wait(1)
-    second.exit(7)
-    assert supervisor.wait(1)
+    coordinator.start()
+    coordinator.reserve(_pending_config(config))
+    coordinator.activate(config)
+    _wait_until(lambda: attempts == 2 and second.started.is_set())
 
-    assert len(commands) == 2
+    assert attempts == 2
+    assert first.started.is_set()
+    assert second.started.is_set()
 
-    supervisor.close()
+    coordinator.close()
 
-    assert not second.terminated
-    assert second.wait_calls == 1
     view = read_rodex_session_statistics(1, config.rodex_database_path)
     assert view.worker is not None
     assert view.worker.worker_state == "degraded"
-    assert view.worker.diagnostic_code == "analytics_worker_exited"
+    assert view.worker.diagnostic_code == "analytics_runtime_exited"
     assert view.worker.consecutive_failures == 2
     assert view.worker.next_retry_at_utc is None
 
 
-def test_supervisor_bounds_repeated_start_failure_to_two_attempts(
+def test_shared_coordinator_bounds_repeated_start_failure_to_two_attempts(
     tmp_path: Path,
 ) -> None:
     config = _config(tmp_path)
     _create(config)
     attempts = 0
 
-    def fail_start(*_args: object, **_kwargs: object) -> subprocess.Popen[bytes]:
+    def fail_start(_config: AnalyticsRuntimeConfig) -> FakeAnalyticsTask:
         nonlocal attempts
         attempts += 1
-        raise OSError("cannot fork analytics")
+        raise OSError("cannot create analytics task")
 
-    supervisor = AnalyticsSubprocessSupervisor(
-        config,
-        popen=fail_start,
+    coordinator = SharedAnalyticsCoordinator(
+        worker_factory=fail_start,
         restart_delay_seconds=0,
     )
-
-    supervisor.start()
-    assert supervisor.wait(1)
+    coordinator.start()
+    coordinator.reserve(_pending_config(config))
+    coordinator.activate(config)
+    _wait_until(lambda: attempts == 2)
 
     assert attempts == 2
     view = read_rodex_session_statistics(1, config.rodex_database_path)
     assert view.worker is not None
     assert view.worker.consecutive_failures == 2
     assert view.worker.next_retry_at_utc is None
+    coordinator.close()
 
 
-def test_supervisor_close_kills_and_reaps_a_worker_that_ignores_terminate(
+def test_shared_coordinator_retries_pending_append_without_a_second_scheduler(
     tmp_path: Path,
 ) -> None:
     config = _config(tmp_path)
-    process = FakeWorkerProcess(timeout_on_wait=True)
-    supervisor = AnalyticsSubprocessSupervisor(
-        config,
-        popen=lambda *_args, **_kwargs: process,  # type: ignore[arg-type]
+    task = FakeAnalyticsTask(result="pending_append")
+    coordinator = SharedAnalyticsCoordinator(worker_factory=lambda _config: task)
+    coordinator.start()
+    coordinator.reserve(_pending_config(config))
+    coordinator.activate(config)
+    _wait_until(lambda: len(task.batches) >= 2, timeout=2)
+    coordinator.close()
+
+    assert all(batch.full_reconcile is False for batch in task.batches[1:])
+    assert len(set(task.thread_ids)) == 1
+
+
+def test_shared_coordinator_coalesces_protocol_burst_for_one_runtime(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    task = FakeAnalyticsTask()
+    coordinator = SharedAnalyticsCoordinator(worker_factory=lambda _config: task)
+    coordinator.start()
+    coordinator.reserve(_pending_config(config))
+    coordinator.activate(config)
+    _wait_until(lambda: len(task.batches) == 1)
+    event = {"method": "turn/completed", "params": {"threadId": str(config.codex_session_id)}}
+    for _ in range(100):
+        coordinator.observe_protocol_event(str(config.runtime_id), event)
+    _wait_until(lambda: len(task.batches) == 2, timeout=2)
+    time.sleep(0.05)
+    coordinator.close()
+
+    assert len(task.batches) == 2
+    assert task.batches[1].thread_ids == frozenset({config.codex_session_id})
+    assert len(task.events) == 100
+
+
+def test_shared_coordinator_event_overflow_requests_one_full_reconcile(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    task = FakeAnalyticsTask()
+    coordinator = SharedAnalyticsCoordinator(worker_factory=lambda _config: task)
+    coordinator.start()
+    coordinator.reserve(_pending_config(config))
+    coordinator.activate(config)
+    _wait_until(lambda: len(task.batches) == 1)
+    event = {"method": "turn/completed", "params": {"threadId": str(config.codex_session_id)}}
+    for _ in range(4097):
+        coordinator.observe_protocol_event(str(config.runtime_id), event)
+    _wait_until(lambda: len(task.batches) == 2, timeout=2)
+    coordinator.close()
+
+    assert task.batches[1].full_reconcile is True
+
+
+def test_shared_coordinator_serializes_multiple_runtimes_on_one_thread(
+    tmp_path: Path,
+) -> None:
+    first_config = _config(tmp_path / "first")
+    second_config = replace(
+        _config(tmp_path / "second"),
+        runtime_id=RodexRuntimeId(2),
+        rodex_session_id=RodexSessionId(2),
     )
-    supervisor.start()
+    tasks = {
+        str(first_config.runtime_id): FakeAnalyticsTask(),
+        str(second_config.runtime_id): FakeAnalyticsTask(),
+    }
+    active = 0
+    maximum_active = 0
+    activity_lock = Lock()
 
-    supervisor.close()
+    def create(config: AnalyticsRuntimeConfig) -> FakeAnalyticsTask:
+        task = tasks[str(config.runtime_id)]
+        original_poll = task.poll_once
 
-    assert process.terminated
-    assert process.killed
-    assert process.wait_calls == 3
+        def observe_serial_execution(batch: AnalyticsDirtyBatch) -> str:
+            nonlocal active, maximum_active
+            with activity_lock:
+                active += 1
+                maximum_active = max(maximum_active, active)
+            time.sleep(0.02)
+            try:
+                return original_poll(batch)
+            finally:
+                with activity_lock:
+                    active -= 1
+
+        task.poll_once = observe_serial_execution  # type: ignore[method-assign]
+        return task
+
+    coordinator = SharedAnalyticsCoordinator(worker_factory=create)
+    coordinator.start()
+    for config in (first_config, second_config):
+        coordinator.reserve(_pending_config(config))
+        coordinator.activate(config)
+    _wait_until(lambda: all(task.started.is_set() for task in tasks.values()))
+    coordinator.retire(str(first_config.runtime_id))
+    coordinator.retire(str(second_config.runtime_id))
+    _wait_until(lambda: all(task.stopped for task in tasks.values()))
+    coordinator.close()
+
+    assert maximum_active == 1
+    assert len({thread_id for task in tasks.values() for thread_id in task.thread_ids}) == 1
 
 
 def test_real_adapter_uses_existing_in_memory_analyzer_api(tmp_path: Path) -> None:

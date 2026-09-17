@@ -95,6 +95,24 @@ def test_light_projects_only_exact_root_commentary_while_dark_remains_native():
     assert all(event.thread_id == ROOT for event in light.events)
 
 
+def test_revision_is_a_cheap_change_token_and_subscribers_receive_only_real_changes():
+    presentation = SessionPresentationPipeline()
+    wakes = []
+    unsubscribe = presentation.subscribe(lambda: wakes.append(presentation.revision))
+
+    assert presentation.revision == 0
+    presentation.bind_root_thread(ROOT)
+    presentation.bind_root_thread(ROOT)
+    presentation.observe_protocol_output(None)
+    assert presentation.revision == 1
+    assert wakes == [1]
+
+    unsubscribe()
+    presentation.select_policy("light")
+    assert presentation.revision == 2
+    assert wakes == [1]
+
+
 def test_streamed_commentary_is_visible_before_completion_and_completed_text_is_not_duplicated():
     presentation = SessionPresentationPipeline(initial_policy="light")
     presentation.bind_root_thread(ROOT)

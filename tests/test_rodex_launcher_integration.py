@@ -109,8 +109,8 @@ def _stop_isolated_codex_processes(codex_home: Path) -> None:
 
 
 @pytest.mark.evolutionary_regression
-def test_fresh_detached_launcher_keeps_the_registered_session_host_alive() -> None:
-    """Exercise the real CLI/tmux/session-host process boundary from empty storage."""
+def test_fresh_detached_launcher_uses_one_daemon_and_no_analytics_process() -> None:
+    """Exercise the real CLI/tmux/daemon process boundary from empty storage."""
     codex_binary = shutil.which("codex")
     tmux_binary = shutil.which("tmux")
     if codex_binary is None:
@@ -151,7 +151,7 @@ def test_fresh_detached_launcher_keeps_the_registered_session_host_alive() -> No
     environment.pop("TMUX_PANE", None)
 
     session_name: str | None = None
-    session_host_pid: int | None = None
+    daemon_pid: int | None = None
     interactive_client: subprocess.Popen[bytes] | None = None
     terminal_master: int | None = None
     terminal_slave: int | None = None
@@ -172,7 +172,7 @@ def test_fresh_detached_launcher_keeps_the_registered_session_host_alive() -> No
         session_name = launch_result["rodex_session_name"]
         assert isinstance(session_name, str) and session_name
         assert database.is_file()
-        runtime_sockets = list(runtime_root.glob("tmux-v3-*.sock"))
+        runtime_sockets = list(runtime_root.glob("tmux-v*-*.sock"))
         assert len(runtime_sockets) == 1
         tmux_socket = runtime_sockets[0]
         listed = _tmux(
@@ -218,25 +218,31 @@ def test_fresh_detached_launcher_keeps_the_registered_session_host_alive() -> No
                 return None
             return int(fields[1]) if fields[1].isdigit() else None
 
-        pane_pid = _wait_for("a registered live Rodex pane", registered_live_pane)
+        _wait_for("a registered live Rodex pane", registered_live_pane)
 
-        def live_session_host() -> int | None:
-            for pid, command in _descendant_commands(pane_pid).items():
-                if "rodex.session_host" in command:
+        def live_daemon() -> int | None:
+            for pid in _isolated_codex_process_ids(codex_home):
+                command = _process_command(pid)
+                if command is not None and "rodex.daemon" in command:
                     return pid
             return None
 
-        session_host_pid = _wait_for("the live session-host process", live_session_host)
+        daemon_pid = _wait_for("the shared Rodex daemon", live_daemon)
 
-        def analytics_started_after_registration() -> bool | None:
-            commands = _descendant_commands(session_host_pid)
-            return True if any("rodex.analytics_worker" in command for command in commands.values()) else None
+        def runtime_process_receipts() -> tuple[Path, ...] | None:
+            receipts = tuple(runtime_root.glob("rodexd-v1-process-*.json"))
+            return receipts if len(receipts) == 2 else None
 
-        _wait_for(
-            "analytics activation after registration",
-            analytics_started_after_registration,
-        )
-        os.kill(session_host_pid, 0)
+        receipts = _wait_for("the exact App Server and TUI process receipts", runtime_process_receipts)
+        receipt_payloads = [json.loads(path.read_text(encoding="utf-8")) for path in receipts]
+        assert {payload["kind"] for payload in receipt_payloads} == {"app-server", "native-tui"}
+        for payload in receipt_payloads:
+            assert _process_command(payload["pid"]) is not None
+        daemon_commands = _descendant_commands(daemon_pid)
+        assert not any("rodex.session_host" in command for command in daemon_commands.values())
+        assert not any("rodex.analytics_worker" in command for command in daemon_commands.values())
+        assert sum("rodex.daemon" in command for command in daemon_commands.values()) == 1
+        os.kill(daemon_pid, 0)
 
         running = subprocess.run(
             [os.fspath(PROJECT_ROOT / "rodex"), "_running"],
@@ -249,7 +255,7 @@ def test_fresh_detached_launcher_keeps_the_registered_session_host_alive() -> No
         assert running.returncode == 0, running.stderr
         assert running.stdout == (f"Rodex running: 1.\nRodex running [{session_name}].\n")
 
-        assert _process_command(session_host_pid) is not None
+        assert _process_command(daemon_pid) is not None
         terminal_master, terminal_slave = pty.openpty()
         interactive_client = subprocess.Popen(
             [
@@ -283,10 +289,12 @@ def test_fresh_detached_launcher_keeps_the_registered_session_host_alive() -> No
         _wait_for("the isolated interactive tmux client", one_attached_client)
         os.write(terminal_master, b"\x03")
 
-        def host_has_exited() -> bool | None:
-            return True if _process_command(session_host_pid) is None else None
+        def runtime_children_have_exited() -> bool | None:
+            receipts_gone = not tuple(runtime_root.glob("rodexd-v1-process-*.json"))
+            daemon_alive = _process_command(daemon_pid) is not None
+            return True if receipts_gone and daemon_alive else None
 
-        _wait_for("the exact session host to exit after Ctrl-C", host_has_exited)
+        _wait_for("the exact runtime children to exit while the daemon remains", runtime_children_have_exited)
         assert interactive_client.wait(timeout=5) == 0
         terminal_output = bytearray()
         os.set_blocking(terminal_master, False)
@@ -304,11 +312,11 @@ def test_fresh_detached_launcher_keeps_the_registered_session_host_alive() -> No
         assert f"Rodex attach [{session_name}].\r\n".encode() in terminal_output
         assert terminal_output.endswith(b"\x1b[1A\x1b[2K\r" + f"Rodex exited [{session_name}].\r\n".encode())
 
-        def descendants_have_exited() -> bool | None:
-            return True if _isolated_codex_process_ids(codex_home) == () else None
+        def only_daemon_remains() -> bool | None:
+            return True if _isolated_codex_process_ids(codex_home) == (daemon_pid,) else None
 
-        _wait_for("the isolated Codex descendants to exit after Ctrl-C", descendants_have_exited)
-        assert _isolated_codex_process_ids(codex_home) == ()
+        _wait_for("the isolated runtime descendants to exit after Ctrl-C", only_daemon_remains)
+        assert _isolated_codex_process_ids(codex_home) == (daemon_pid,)
         assert (
             _tmux(
                 tmux_binary,
@@ -342,10 +350,10 @@ def test_fresh_detached_launcher_keeps_the_registered_session_host_alive() -> No
                         check=False,
                     )
             _tmux(tmux_binary, tmux_socket, "kill-server", check=False)
-        remaining_host = None if session_host_pid is None else _process_command(session_host_pid)
-        if remaining_host is not None and "rodex.session_host" in remaining_host:
+        remaining_daemon = None if daemon_pid is None else _process_command(daemon_pid)
+        if remaining_daemon is not None and "rodex.daemon" in remaining_daemon:
             with suppress(ProcessLookupError):
-                os.kill(session_host_pid, signal.SIGTERM)
+                os.kill(daemon_pid, signal.SIGTERM)
         if interactive_client is not None and interactive_client.poll() is None:
             interactive_client.terminate()
             with suppress(subprocess.TimeoutExpired):

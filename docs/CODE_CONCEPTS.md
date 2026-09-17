@@ -16,8 +16,11 @@ boundary; domain policy has one canonical owner underneath it.
 
 ## Local input and menu ownership
 
-- One host-owned PTY gateway carries keyboard input and native output through the shared
+- One daemon-runtime PTY gateway carries keyboard input and native output through the shared
   interaction pipeline. Attaching another client does not create another input owner.
+- The gateway blocks on actual terminal readiness, the native child's `pidfd`, exact
+  incomplete-input deadlines and wake-only presentation/resize notifications. Idle
+  runtimes do not rebuild presentation state or execute a fixed-frequency relay loop.
 - Each interception config supplies live/Enter expressions, display text and argument
   options. No command-name branch belongs in the decoder, menu or renderer.
 - `InputInterceptionMenu` owns filtering and cyclic selection. Immutable views carry the
@@ -35,7 +38,7 @@ boundary; domain policy has one canonical owner underneath it.
 - Rodex registries, Rodex sessions, runtime incarnations, Codex threads, Codex turns,
   tmux server/session capabilities, operating-system users, and display names are separate identity
   domains.
-- Executable aliases normalize once at the runtime launcher before host and hook command
+- Executable aliases normalize once at the runtime launcher before daemon and hook command
   construction. Python identity retains its environment directory; a shared base Python
   executable does not make two virtual environments the same Rodex installation.
 - A permanent generated name is an immutable storage anchor. A user-defined alias, when
@@ -44,7 +47,7 @@ boundary; domain policy has one canonical owner underneath it.
   live. Live operations verify the server incarnation, immutable `$session_id`, primary
   `%pane_id`, control endpoint, durable runtime, Codex thread, and registered identity
   required by their contract.
-- Each runtime owns an isolated tmux server. The owning host uses
+- Each runtime owns an isolated tmux server. Its daemon runtime uses
   `TmuxRuntimeCapability`; the launcher mints `TmuxSessionCapability` after a
   uniqueness-checked roster read and async actors carry it. Every terminal action
   rechecks its tuple at the exact target; primary actions also require the immutable pane.

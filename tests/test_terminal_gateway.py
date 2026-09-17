@@ -9,6 +9,7 @@ import struct
 import subprocess
 import sys
 import termios
+import threading
 import time
 from contextlib import contextmanager, suppress
 
@@ -76,7 +77,7 @@ def read_until(gateway, master, expected):
     return bytes(output)
 
 
-def start_gateway(slave, pipeline, registrations=()):
+def start_gateway(slave, pipeline, registrations=(), presentation=None):
     return TerminalSessionGateway(
         [sys.executable, "-I", "-c", ECHO_CHILD],
         env=dict(os.environ),
@@ -84,9 +85,37 @@ def start_gateway(slave, pipeline, registrations=()):
         runtime_identity="test-owned-runtime",
         registrations=registrations,
         confirm_native_prefix=lambda _prefix: True,
+        presentation=presentation,
         input_fd=slave,
         output_fd=slave,
     )
+
+
+class MutablePresentationSource:
+    def __init__(self):
+        self.revision = 0
+        self.snapshot_calls = 0
+        self.revised_snapshot = threading.Event()
+        self._listeners = set()
+
+    def snapshot(self):
+        self.snapshot_calls += 1
+        if self.revision:
+            self.revised_snapshot.set()
+        return PresentationSnapshot(self.revision, "dark", PresentationSurface.NATIVE, "", (), ())
+
+    def subscribe(self, listener):
+        self._listeners.add(listener)
+
+        def unsubscribe():
+            self._listeners.discard(listener)
+
+        return unsubscribe
+
+    def advance(self):
+        self.revision += 1
+        for listener in tuple(self._listeners):
+            listener()
 
 
 def test_new_complete_surface_waits_for_inflight_terminal_bytes_and_coalesces(monkeypatch):
@@ -138,6 +167,82 @@ def test_real_child_terminal_pass_through_resize_signal_exit_and_outer_restorati
             }
         finally:
             gateway.close()
+            gateway.close()
+
+
+def test_idle_gateway_blocks_once_until_supervisor_deadline(monkeypatch):
+    pipeline = SessionInteractionPipeline()
+    with outer_terminal() as (master, slave):
+        gateway = start_gateway(slave, pipeline)
+        try:
+            read_until(gateway, master, b"READY")
+            select_calls = []
+            size_probes = []
+            real_select = select.select
+            real_ioctl = fcntl.ioctl
+
+            def counted_select(reads, writes, errors, timeout):
+                select_calls.append(timeout)
+                return real_select(reads, writes, errors, timeout)
+
+            def counted_ioctl(fd, request, argument=0, mutate_flag=True):
+                if request == termios.TIOCGWINSZ:
+                    size_probes.append(fd)
+                return real_ioctl(fd, request, argument, mutate_flag)
+
+            monkeypatch.setattr("rodex.terminal_gateway.select.select", counted_select)
+            monkeypatch.setattr("rodex.terminal_gateway.fcntl.ioctl", counted_ioctl)
+            with pytest.raises(subprocess.TimeoutExpired):
+                gateway.wait(timeout=0.12)
+
+            assert len(select_calls) == 1
+            assert select_calls[0] == pytest.approx(0.12, abs=0.02)
+            assert size_probes == [slave]
+        finally:
+            gateway.close()
+
+
+def test_presentation_change_wakes_blocked_gateway_without_polling(monkeypatch):
+    pipeline = SessionInteractionPipeline()
+    presentation = MutablePresentationSource()
+    with outer_terminal() as (master, slave):
+        gateway = start_gateway(slave, pipeline, presentation=presentation)
+        publisher_errors = []
+        publisher = None
+        try:
+            read_until(gateway, master, b"READY")
+            initial_snapshot_calls = presentation.snapshot_calls
+            relay_blocked = threading.Event()
+            real_select = select.select
+
+            def observed_select(reads, writes, errors, timeout):
+                relay_blocked.set()
+                return real_select(reads, writes, errors, timeout)
+
+            monkeypatch.setattr("rodex.terminal_gateway.select.select", observed_select)
+
+            def publish_and_exit():
+                try:
+                    if not relay_blocked.wait(1):
+                        raise AssertionError("gateway did not enter its blocking relay")
+                    presentation.advance()
+                    if not presentation.revised_snapshot.wait(0.2):
+                        raise AssertionError("presentation change did not wake the relay")
+                except BaseException as error:
+                    publisher_errors.append(error)
+                finally:
+                    os.write(master, b"\x04")
+
+            publisher = threading.Thread(target=publish_and_exit)
+            publisher.start()
+            assert gateway.wait(timeout=2) == 23
+            publisher.join(timeout=1)
+            assert not publisher.is_alive()
+            assert publisher_errors == []
+            assert presentation.snapshot_calls == initial_snapshot_calls + 1
+        finally:
+            if publisher is not None:
+                publisher.join(timeout=1)
             gateway.close()
 
 

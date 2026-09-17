@@ -7,10 +7,11 @@ socket path, client count, pane ID, or Codex thread is insufficient authority al
 
 | Boundary | Current generation |
 | --- | --- |
-| Rodex package and subprocess | `0.13.0a1` |
+| Rodex package and subprocess | `0.14.0a1` |
 | SQLite registry | `20` (`rodex-v20.sqlite3`) |
-| tmux ownership | `rodex-isolated-tmux-v3` |
-| WebSocket peer identity | `rodex-runtime-peer-v3` |
+| tmux ownership | `rodex-isolated-tmux-v4` |
+| WebSocket peer identity | `rodex-runtime-peer-v4` |
+| Shared daemon | `rodex-daemon-v1` |
 | Observer frames | `rodex-agent-observer-v3` |
 | Machine envelopes | `4` |
 | Agent trace | `rodex-agent-trace-v3` |
@@ -22,26 +23,29 @@ transcripts.
 ## Ownership pipeline
 
 1. The launcher allocates a runtime ID and server nonce, then claims only a completely
-   unmarked, empty tmux server at `tmux-v3-<runtime-id>.sock`. A separate server for each
+   unmarked, empty tmux server at `tmux-v4-<runtime-id>.sock`. A separate server for each
    runtime prevents native pane movement across runtime boundaries.
-2. The staged primary pane receives its runtime marker before the host starts. The host
-   verifies the original server nonce and pane identity before opening endpoints or its
-   App Server. Failure cleanup retains the original creation receipt and cannot acquire
-   an incumbent's destruction authority.
-3. Durable adoption compares the expected prior runtime ID in one SQLite transaction.
+2. A start lock converges concurrent clients on one `rodexd-v1.sock`. The daemon owns one
+   exact reservation per runtime and operation ID. It rejects conflicting reservations
+   before any runtime service starts.
+3. The staged primary pane receives its runtime marker and runs a one-shot bridge. The
+   daemon verifies same-uid peer credentials, the bridge PID, pane TTY descriptor, server
+   nonce, pane target and reservation before accepting the descriptor. Caller environment
+   cannot supply the tmux-owned identity fields.
+4. Durable adoption compares the expected prior runtime ID in one SQLite transaction.
    An exact complete-tuple retry is idempotent; wall-clock order never selects a winner.
    One reentrant session-transition lock serializes participating reads, resume, rename,
    publication, and registration.
-4. Discovery compares durable metadata with a guarded snapshot from the actual primary
+5. Discovery compares durable metadata with a guarded snapshot from the actual primary
    pane. Only exact pending-to-registered completion may occur concurrently. Every
    endpoint must use that runtime's canonical name.
-5. WebSocket admission and its response both prove the runtime ID and server nonce on
+6. WebSocket admission and its response both prove the runtime ID and server nonce on
    the connection in use. Unix peer credentials and pinned process identities restrict
-   native App Server and TUI admission to the owning host's live process tree.
-6. App Server, proxy, event, observer, and keepalive lifetimes retain exclusive locks,
+   native App Server and TUI admission to the daemon-owned exact child processes.
+7. App Server, proxy, event, observer, and keepalive lifetimes retain exclusive locks,
    bound socket inodes, or path descriptors. A contender cannot unlink an incumbent,
    and stale cleanup cannot remove a replacement endpoint.
-7. Destruction requires the exact primary, the sole session on its server, and the
+8. Destruction requires the exact primary, the sole session on its server, and the
    runtime marker on every affected pane. An extra session or unowned pane rejects it.
 
 ## Liveness classification
@@ -83,7 +87,11 @@ identity because separate tmux servers may both contain pane `%0`.
 
 ## App Server process lifecycle
 
-Managed and transient App Servers run in their own process sessions. Cleanup sends
+Managed and transient App Servers run in their own process sessions. The daemon writes
+private receipts containing runtime, operation, PID, process group, uid and Linux start
+time. App Server and native TUI wrappers arm a parent-death signal; daemon startup
+reconciles a surviving receipt only after all recorded process identity fields match.
+Cleanup sends
 ordinary termination, then after three seconds kills only the creation-owned process
 group and reaps its leader. This releases a stalled native Codex writer without targeting
 another runtime.
@@ -106,6 +114,7 @@ completed registrations cannot enter that path.
 | Installed Codex and isolated live lifecycle | `tests/test_managed_startup.py` |
 | Process-group shutdown and writer release | `tests/test_app_server_shutdown.py` |
 | Exact bounded resume retry | `tests/test_runtime_writer_handoff.py` |
+| Shared daemon, TTY transfer, crash receipts and singular analytics | `tests/test_rodex_daemon.py` |
 
 Run the complete release gate:
 

@@ -12,6 +12,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from http import HTTPStatus
 from pathlib import Path
+from threading import Lock
 from typing import Any, Final
 
 from websockets.exceptions import InvalidHandshake
@@ -21,7 +22,7 @@ from rodex_registry.identity import RodexRuntimeId, parse_rodex_runtime_id
 _CONTRACT_HEADER: Final = "X-Rodex-Peer-Contract"
 _RUNTIME_HEADER: Final = "X-Rodex-Runtime-Id"
 _SERVER_HEADER: Final = "X-Rodex-Tmux-Server-Id"
-_CONTRACT: Final = "rodex-runtime-peer-v3"
+_CONTRACT: Final = "rodex-runtime-peer-v4"
 _SERVER_ID = re.compile(r"[0-9a-f]{32}")
 
 
@@ -37,6 +38,35 @@ class CurrentProcessOwner:
 
     def poll(self) -> int | None:
         return None if os.getpid() == self.pid else 0
+
+
+class BoundProcessOwner:
+    """Authorize exactly one retained process tree after an explicit start barrier."""
+
+    def __init__(self) -> None:
+        self._process: Any | None = None
+        self._lock = Lock()
+
+    def bind(self, process: Any) -> None:
+        if not isinstance(getattr(process, "pid", None), int) or process.pid <= 0:
+            raise ValueError("bound process owner requires a live process identity")
+        with self._lock:
+            if self._process is not None and self._process.poll() is None:
+                raise RuntimeError("process owner is already bound to a live process")
+            if process.poll() is not None:
+                raise RuntimeError("process owner cannot bind an exited process")
+            self._process = process
+
+    @property
+    def pid(self) -> int:
+        with self._lock:
+            process = self._process
+            return 0 if process is None else process.pid
+
+    def poll(self) -> int | None:
+        with self._lock:
+            process = self._process
+            return 0 if process is None else process.poll()
 
 
 def require_unix_peer_process(connection: Any, process: Any) -> None:

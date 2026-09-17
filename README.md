@@ -75,8 +75,10 @@ Rodex owns exact underscore-prefixed commands. Its characterized Codex grammar i
 Each runtime uses a separate tmux server and immutable server incarnation. Rodex
 verifies the session, primary pane, runtime, registry, and Codex identities before
 attach, read, control, or cleanup. One `rodexd` process owns all runtime services and the
-single serialized analytics pipeline beneath a runtime root. Existing daemons retain
-their loaded code, so stop their runtimes and daemon after installing a new Rodex version.
+single serialized analytics pipeline beneath a runtime root. Linux process monitors show
+that daemon as `rodex_daemon` rather than a generic Python process. Existing daemons
+retain their loaded code, so stop their runtimes and daemon after installing a new Rodex
+version.
 
 ## Commands
 

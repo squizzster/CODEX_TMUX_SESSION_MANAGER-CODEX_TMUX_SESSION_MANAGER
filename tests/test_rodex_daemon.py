@@ -15,9 +15,10 @@ import pytest
 
 import rodex.daemon as daemon_module
 from rodex.analytics import SharedAnalyticsCoordinator
-from rodex.daemon import DaemonRuntimeManager, RodexDaemonServerError
+from rodex.daemon import RODEX_DAEMON_PROCESS_NAME, DaemonRuntimeManager, RodexDaemonServerError
 from rodex.daemon_client import RodexDaemonClient
 from rodex.process_contracts import AnalyticsRuntimeConfig, RuntimeServiceConfig
+from rodex.process_guard import set_current_linux_task_name
 from rodex.process_receipts import RuntimeProcessReceipts
 from rodex.tmux_session_capability import TmuxRuntimeCapability, runtime_tmux_socket_name
 from rodex_registry import RodexRegistryId, RodexRuntimeId, RodexSessionId
@@ -90,6 +91,12 @@ class RecordingReceipts:
 
     def release(self, *_args: object) -> None:
         return None
+
+
+@pytest.mark.parametrize("name", ["", "Rodex_Daemon", "rodex daemon", "rodex-daemon", "r" * 16])
+def test_linux_task_name_contract_rejects_ambiguous_or_truncated_names(name: str) -> None:
+    with pytest.raises(ValueError, match="Linux task name"):
+        set_current_linux_task_name(name)
 
 
 def test_server_claims_single_socket_before_constructing_multi_runtime_manager(
@@ -364,6 +371,7 @@ def test_concurrent_first_clients_converge_on_one_private_daemon_socket(tmp_path
         assert failures == []
         assert all(not thread.is_alive() for thread in threads)
         assert len(daemon_pids) == 1
+        assert Path(f"/proc/{daemon_pids[0]}/comm").read_text().strip() == RODEX_DAEMON_PROCESS_NAME
         assert clients[0].socket_path == clients[1].socket_path
         assert clients[0].socket_path.stat().st_mode & 0o777 == 0o600
     finally:

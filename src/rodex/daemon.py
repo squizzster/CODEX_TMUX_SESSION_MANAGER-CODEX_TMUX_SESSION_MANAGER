@@ -24,12 +24,14 @@ from .daemon_client import (
     encode_daemon_message,
 )
 from .process_contracts import RuntimeServiceConfig
+from .process_guard import set_current_linux_task_name
 from .process_receipts import RuntimeProcessReceipts
 from .runtime import admit_runtime_terminal_fd, run_runtime_service
 from .runtime_endpoint import ExclusiveUnixEndpoint
 from .tmux_session_capability import runtime_tmux_socket_name
 
 _OPERATION_ID: Final = re.compile(r"[0-9a-f]{32}")
+RODEX_DAEMON_PROCESS_NAME: Final = "rodex_daemon"
 
 
 class RodexDaemonServerError(RuntimeError):
@@ -422,7 +424,8 @@ def _error_response(detail: str) -> bytes:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(prog="python -m rodex.daemon")
+    set_current_linux_task_name(RODEX_DAEMON_PROCESS_NAME)
+    parser = argparse.ArgumentParser(prog=RODEX_DAEMON_PROCESS_NAME)
     parser.add_argument("--runtime-root", required=True, type=Path)
     arguments = parser.parse_args()
     runtime_root = arguments.runtime_root.expanduser().resolve()

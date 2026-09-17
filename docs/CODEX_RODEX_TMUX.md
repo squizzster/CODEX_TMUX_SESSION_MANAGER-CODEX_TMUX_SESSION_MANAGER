@@ -43,11 +43,12 @@ becomes a distinct candidate for the transient App Server persistence check.
 
 1. Bare `./rodex`, explicit `./rodex _create`, or characterized native interactive
    Codex syntax validates the `codex` and `tmux` executables.
-2. tmux starts a small supervisor directly; Rodex never types with `send-keys`.
-3. The supervisor starts one private Codex app-server and the Rodex WebSocket proxy on
-   short Unix sockets, then starts the inline Codex TUI through the session-owned PTY
-   gateway, connected to the proxy with `--no-alt-screen` and Codex's interactive
-   startup updater disabled.
+2. The launcher claims a dedicated tmux server, reserves the runtime through the one
+   private `rodexd-v1.sock`, and respawns its staged pane with a one-shot bridge. Rodex
+   never types with `send-keys`.
+3. The bridge passes its pane TTY descriptor to the daemon. After exact peer, pane,
+   server and runtime admission, the daemon starts that runtime's App Server, proxy and
+   inline Codex TUI. The TUI uses `--no-alt-screen`; its startup updater is disabled.
 4. Rodex asks that private app-server for its one loaded Codex session ID.
 5. Under the unregistered immutable Rodex session-ID transition lock, one SQLite
    transaction creates the Rodex/runtime identities, canonical root-thread membership,
@@ -71,13 +72,13 @@ It first creates a direct-argv inert pane with `new-session -E`, publishes its i
 runtime/pane capability, then reads the current global environment under the server
 fence. A byte-escaped tmux program sent on stdin installs every prepared caller value in
 that exact session, marks global-only names removed, freezes automatic session updates,
-and only then permits a separately checked `respawn-pane` to start the real host. General
-environment payload does not enter tmux or host process arguments; pane working
+and only then permits a separately checked `respawn-pane` to start the bridge. General
+environment payload does not enter tmux or bridge process arguments; pane working
 directories remain explicit `-c`/`-e PWD` control arguments. A small isolated exec boundary
 retains only the authorized names plus tmux-owned `SHELL`, `TERM*`, and `TMUX*` metadata;
 `PWD` is bound to the actual workspace. Observer panes use the same boundary with their
-actual pane directory and direct argv rather than `$SHELL -c`. The session host then
-passes the resulting environment explicitly to both App Server and TUI. CPython may
+actual pane directory and direct argv rather than `$SHELL -c`. The daemon runtime then
+passes the admitted environment explicitly to both App Server and TUI. CPython may
 perform its standard locale coercion while starting these internal Python boundaries.
 
 Immediately before attachment, Rodex compares `codex --version` with the cached result
@@ -121,12 +122,12 @@ never construct or execute the tmux process prefix themselves.
 
 ## Runtime tmux authority
 
-Each managed runtime owns a separate server at `tmux-v3-<runtime-id>.sock`. Protocol,
+Each managed runtime owns a separate server at `tmux-v4-<runtime-id>.sock`. Protocol,
 server incarnation and runtime markers bind that server to one creation attempt. Only
 an entirely unmarked, empty server may be claimed. Failure cleanup retains the original
 attempt's nonce and cannot obtain an incumbent's authority by rediscovery.
 
-`TmuxRuntimeCapability` binds the owning host to its socket, server incarnation, immutable
+`TmuxRuntimeCapability` binds the daemon runtime to its socket, server incarnation, immutable
 tmux `$session_id`, primary `%pane_id`, and Rodex runtime. `TmuxSessionCapability` adds
 registered Rodex session, registry, SQL-row, and Codex identities. Discovery retrieves a
 coherent server/session/control snapshot. The launcher mints external authority only
@@ -170,7 +171,7 @@ same-uid tmux configuration while Rodex initializes.
 
 ## Keyboard and local command menus
 
-Keyboard input crosses tmux, then the host's `TerminalSessionGateway` and
+Keyboard input crosses tmux, then the daemon runtime's `TerminalSessionGateway` and
 `TerminalInputInterceptor`, before reaching the native Codex editor. One configuration
 per command supplies independent live/Enter expressions, completion/helper text and
 argument headings/options. `InputInterceptionMenu` owns matching and selection;
@@ -246,7 +247,7 @@ the sockets and live identities. Tool counts cover one runtime.
 ## Live agent observer pane
 
 An exact primary-thread `item/started → subAgentActivity(kind=started)` event enters the
-dedicated live agent observer pipeline. The session host creates or reuses one marked
+dedicated live agent observer pipeline. The daemon runtime creates or reuses one marked
 top-third pane while preserving the lower Codex pane's focus. That pane directly runs
 `rodex.agent_observer`; tmux input is disabled, so it is a presentation surface rather
 than a shell. It consumes the App Server's exact agent identity, path, activity kind, and
@@ -268,7 +269,7 @@ plaintext is unavailable, the pane reports the encrypted payload as unavailable 
 never reconstructs it from the child's behaviour or reply.
 
 Separately, the primary App Server stream supplies the completed parent `userMessage`.
-The session host keeps only the latest exact root-turn message in memory and, when that
+The daemon runtime keeps only the latest exact root-turn message in memory and, when that
 same turn requests an agent, sends its unchanged text to the pane as
 `ROOT TURN REQUEST · exact user message`. This is explicitly root-turn provenance, not
 the collaboration payload. Without the exact same-turn message, the observer presents
@@ -301,7 +302,7 @@ event-tap, and observer participants and completes the transition even if one pa
 fails. The reducer alone advances the serialized observer epoch. This prevents one broken
 reset from preserving another participant's stale connection state.
 
-The analytics worker wakes the observer only after a durable publication commit, so
+The shared analytics coordinator wakes the observer only after a durable publication commit, so
 indexed cursor reads need no polling timer. The observer reads only active or
 terminal-pending exact agent turns in one bounded read-only transaction and retires each
 completed presentation afterward. Committed metrics summarize actions,
@@ -322,9 +323,11 @@ outside the display contract.
 
 ## Persistent analytics and agent trace
 
-Each session host supervises one low-priority analytics subprocess keyed by its Rodex
-session. A blocking scheduler coalesces protocol activity until 0.5 seconds of quiet or
-five seconds of continuous work. Cold lineage recovery follows exact event-named thread
+One daemon-owned coordinator serializes analytics for every runtime through one thread.
+Each runtime has isolated cursors, analyzer state, health, bounded events and retries;
+fair dispatch prevents one runtime from owning the pipeline. Scheduling coalesces protocol
+activity until 0.5 seconds of quiet or five seconds of continuous work. Cold lineage
+recovery follows exact event-named thread
 UUIDs first. When a spawn activity lacks a UUID, one startup-only recovery scan checks
 regular JSONL files in the root UUIDv7 three-day window, reads only first metadata lines,
 and accepts the authenticated parent closure. Cached resident sources then consume only
@@ -450,12 +453,12 @@ Codex, tmux, or analyzer processes.
   capability. tmux atomically increments a generation, keeps only the newest pending
   transition, admits one lease owner, and schedules one 15-second recovery gate.
   Token/generation conditions prevent an old owner from releasing its successor.
-- Exiting the Codex TUI ends its supervisor and private app-server; its cool name can
+- Exiting the Codex TUI ends its daemon runtime and private App Server; its cool name can
   transparently resume the saved Codex session later.
 - A completely empty Codex TUI may not have saved history. Its cool name recovers by
   starting empty again and replacing only the linked Codex session ID.
 - A failure before SQL registration stops the exact new tmux session and leaves no
-  partial database row. A host whose pending registration is never confirmed exits;
+  partial database row. A daemon runtime whose pending registration is never confirmed exits;
   one exact matching pending runtime can finish an interrupted confirmation on the
   next command, including when it was launched under a temporary tmux name.
 - Scrollback settings apply when a pane is created.
@@ -463,11 +466,11 @@ Codex, tmux, or analyzer processes.
   `/run/user/<uid>/rodex`—otherwise `/tmp/rodex-<uid>`. Unix sockets stay there because
   long project paths can exceed Linux socket limits. `RODEX_RUNTIME_DIR` explicitly
   selects another root for independently owned runtime servers.
-- While a session host is alive, it refreshes the runtime root, its tmux socket, and
+- While a daemon runtime is alive, it refreshes the runtime root, its tmux socket, and
   its private sockets and log hourly. A refresh failure ends that runtime rather than
   leaving a detached session that cannot be addressed. Normal cleanup eligibility
-  resumes when the live hosts exit.
-- The host has no database watcher, subscription, or polling loop. Canonical SQL
+  resumes when live runtimes exit.
+- The daemon has no database watcher, subscription, or polling loop. Canonical SQL
   transactions synchronously validate the private opened storage and its process-local
   identity baseline; a missing or replaced identity fails the operation at its next SQL
   boundary with restart guidance.

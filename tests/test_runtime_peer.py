@@ -22,6 +22,7 @@ from rodex.interaction_pipeline import DeliveryStatus, InteractionOperation, Int
 from rodex.interaction_transport import publish_session_interaction
 from rodex.protocol_proxy import CodexProtocolEventTap, CodexProtocolProxy, ToolCallCounter
 from rodex.runtime_peer import (
+    BoundProcessOwner,
     RuntimePeerIdentityError,
     require_unix_peer_process,
     verified_runtime_connection,
@@ -80,6 +81,7 @@ def test_wrong_proxy_identity_is_rejected_before_opening_upstream(tmp_path: Path
             ToolCallCounter(lambda _: None),
             peer_identity=TEST_PEER,
             app_server_process=LiveTestProcess(),
+            native_tui_process=LiveTestProcess(),
         ) as proxy,
     ):
         with (
@@ -152,6 +154,7 @@ def test_connected_different_runtime_receives_no_control_or_interaction_request(
         ToolCallCounter(lambda _: None),
         peer_identity=identity,
         app_server_process=LiveTestProcess(),
+        native_tui_process=LiveTestProcess(),
     ) as proxy:
         with pytest.raises(RodexControlError):
             CodexControlClient().inspect(_control(path))
@@ -254,6 +257,54 @@ def test_exited_retained_process_cannot_authorize_a_reused_pid() -> None:
         require_unix_peer_process(SimpleNamespace(socket=left), SimpleNamespace(pid=os.getpid(), poll=lambda: 0))
 
 
+def test_bound_process_owner_rejects_a_live_sibling_from_the_shared_daemon_tree(tmp_path: Path) -> None:
+    listener_path = tmp_path / "peer.sock"
+    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    listener.bind(str(listener_path))
+    listener.listen()
+    child_source = """
+import socket
+import sys
+import time
+connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+connection.connect(sys.argv[1])
+print('connected', flush=True)
+time.sleep(30)
+"""
+    owner_process = subprocess.Popen(
+        [sys.executable, "-c", child_source, str(listener_path)],
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    sibling_process: subprocess.Popen[str] | None = None
+    owner_connection: socket.socket | None = None
+    sibling_connection: socket.socket | None = None
+    try:
+        owner_connection, _ = listener.accept()
+        assert owner_process.stdout is not None and owner_process.stdout.readline().strip() == "connected"
+        owner = BoundProcessOwner()
+        owner.bind(owner_process)
+        require_unix_peer_process(SimpleNamespace(socket=owner_connection), owner)
+
+        sibling_process = subprocess.Popen(
+            [sys.executable, "-c", child_source, str(listener_path)],
+            stdout=subprocess.PIPE,
+            text=True,
+        )
+        sibling_connection, _ = listener.accept()
+        assert sibling_process.stdout is not None and sibling_process.stdout.readline().strip() == "connected"
+        with pytest.raises(RuntimePeerIdentityError, match="retained live App Server"):
+            require_unix_peer_process(SimpleNamespace(socket=sibling_connection), owner)
+    finally:
+        for connection in (owner_connection, sibling_connection, listener):
+            if connection is not None:
+                connection.close()
+        for process in (owner_process, sibling_process):
+            if process is not None and process.poll() is None:
+                process.terminate()
+                process.wait(timeout=3)
+
+
 def test_another_host_tree_cannot_use_native_path_but_exact_control_can_connect(tmp_path: Path) -> None:
     script = """
 import sys
@@ -273,7 +324,8 @@ thread = Thread(target=app.serve_forever, daemon=True)
 thread.start()
 try:
     with CodexProtocolProxy(root / 'proxy.sock', root / 'app.sock', ToolCallCounter(lambda _: None),
-            peer_identity=identity, app_server_process=CurrentProcessOwner()):
+            peer_identity=identity, app_server_process=CurrentProcessOwner(),
+            native_tui_process=CurrentProcessOwner()):
         print('ready', flush=True)
         sys.stdin.read(1)
 finally:
@@ -323,6 +375,7 @@ def test_native_client_from_own_host_descendant_uses_unmodified_codex_protocol(t
             ToolCallCounter(lambda _: None),
             peer_identity=TEST_PEER,
             app_server_process=LiveTestProcess(),
+            native_tui_process=LiveTestProcess(),
         ),
     ):
         script = """

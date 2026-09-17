@@ -36,7 +36,7 @@ from .interaction_pipeline import (
 from .interaction_transport import SESSION_INTERACTION_CONNECTION_PATH, serve_session_interaction
 from .pane_control import TmuxPaneController
 from .runtime_endpoint import ExclusiveUnixEndpoint
-from .runtime_peer import CurrentProcessOwner, RuntimePeerIdentity, require_unix_peer_process, runtime_peer_server_hooks
+from .runtime_peer import RuntimePeerIdentity, require_unix_peer_process, runtime_peer_server_hooks
 from .status_bar import (
     CONTEXT_COMPACTION_FRAME_INTERVAL_SECONDS,
     RODEX_CONTEXT_STATUS_OPTION,
@@ -798,6 +798,7 @@ class CodexProtocolProxy:
         interaction_pipeline: SessionInteractionPipeline | None = None,
         peer_identity: RuntimePeerIdentity,
         app_server_process: Any,
+        native_tui_process: Any,
         primary_pane: TmuxPaneController | None = None,
         model_message_sender: Callable[[InteractionRequest], InteractionResult] | None = None,
     ) -> None:
@@ -805,7 +806,7 @@ class CodexProtocolProxy:
         self._app_server_socket_path = app_server_socket_path
         self._peer_identity = peer_identity
         self._app_server_process = app_server_process
-        self._host_process = CurrentProcessOwner()
+        self._native_tui_process = native_tui_process
         self._endpoint = ExclusiveUnixEndpoint(proxy_socket_path)
         self._tool_call_counter = tool_call_counter
         self._on_primary_server_message = on_primary_server_message
@@ -858,7 +859,7 @@ class CodexProtocolProxy:
                 **runtime_peer_server_hooks(
                     self._peer_identity,
                     native_paths=frozenset({"/", "/rpc"}),
-                    native_owner=self._host_process,
+                    native_owner=self._native_tui_process,
                 ),
             )
         except OSError as error:

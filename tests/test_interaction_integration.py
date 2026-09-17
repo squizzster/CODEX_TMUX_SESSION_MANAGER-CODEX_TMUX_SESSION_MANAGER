@@ -124,6 +124,7 @@ def test_real_proxy_hooks_cover_both_directions_and_control_connections(tmp_path
         interaction_pipeline=pipeline,
         peer_identity=TEST_PEER,
         app_server_process=LiveTestProcess(),
+        native_tui_process=LiveTestProcess(),
     )
     try:
         proxy.start()
@@ -176,6 +177,7 @@ def test_protocol_rejection_closes_connection_without_forwarding_the_request(tmp
         interaction_pipeline=SessionInteractionPipeline(hooks=(reject,)),
         peer_identity=TEST_PEER,
         app_server_process=LiveTestProcess(),
+        native_tui_process=LiveTestProcess(),
     )
     try:
         proxy.start()
@@ -208,6 +210,7 @@ def test_one_remote_interface_routes_display_and_explicit_model_intent_without_d
         ),
         peer_identity=TEST_PEER,
         app_server_process=LiveTestProcess(),
+        native_tui_process=LiveTestProcess(),
     )
 
     class Primary:

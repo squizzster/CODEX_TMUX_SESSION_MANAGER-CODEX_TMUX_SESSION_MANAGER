@@ -32,6 +32,7 @@ from .interaction_pipeline import (
     SessionInteractionPipeline,
 )
 from .presentation_policy import PresentationSnapshot, PresentationSurface
+from .runtime_peer import BoundProcessOwner
 from .terminal_input import TerminalInputDecoder, TerminalInputInterceptor
 from .terminal_surface import TerminalSurfaceRenderer
 
@@ -57,6 +58,10 @@ class TerminalSessionGateway:
         stderr: BinaryIO | None = None,
         input_fd: int = 0,
         output_fd: int = 1,
+        process_owner: BoundProcessOwner | None = None,
+        on_process_started: Callable[[subprocess.Popen[bytes]], None] = lambda _process: None,
+        on_process_stopped: Callable[[subprocess.Popen[bytes]], None] = lambda _process: None,
+        close_outer_fds: bool = False,
     ) -> None:
         self._pipeline = pipeline
         self._input_fd = input_fd
@@ -66,6 +71,10 @@ class TerminalSessionGateway:
         self._closed = False
         self._native_eof = False
         self._resize_pending = True
+        self._last_dimensions: bytes | None = None
+        self._close_outer_fds = close_outer_fds
+        self._on_process_stopped = on_process_stopped
+        self._process_announced = False
         self._native_queue = bytearray()
         self._display_queue = bytearray()
         self._pending_surface_frame: bytes | None = None
@@ -105,14 +114,36 @@ class TerminalSessionGateway:
             for fd in (*self._saved_flags, self._master):
                 os.set_blocking(fd, False)
             self._pipeline.register(self._target)
-            self.process = subprocess.Popen(
-                [sys.executable, "-I", "-m", "rodex.terminal_exec", *command],
-                stdin=self._slave,
-                stdout=self._slave,
-                stderr=self._slave if stderr is None else stderr,
-                env=env,
-                start_new_session=True,
-            )
+            gate_read, gate_write = os.pipe2(os.O_CLOEXEC)
+            try:
+                self.process = subprocess.Popen(
+                    [
+                        sys.executable,
+                        "-I",
+                        "-m",
+                        "rodex.terminal_exec",
+                        "--parent-pid",
+                        str(os.getpid()),
+                        "--start-gate-fd",
+                        str(gate_read),
+                        "--",
+                        *command,
+                    ],
+                    stdin=self._slave,
+                    stdout=self._slave,
+                    stderr=self._slave if stderr is None else stderr,
+                    env=env,
+                    start_new_session=True,
+                    pass_fds=(gate_read,),
+                )
+                if process_owner is not None:
+                    process_owner.bind(self.process)
+                on_process_started(self.process)
+                self._process_announced = True
+                os.write(gate_write, b"1")
+            finally:
+                os.close(gate_read)
+                os.close(gate_write)
             os.close(self._slave)
             self._slave = -1
         except BaseException:
@@ -125,9 +156,12 @@ class TerminalSessionGateway:
 
     def _apply_resize(self) -> None:
         """Copy the actual pane dimensions; TIOCSWINSZ signals the child foreground group."""
-        if self._resize_pending and self._master >= 0:
-            self._resize_pending = False
+        if self._master >= 0:
             dimensions = fcntl.ioctl(self._input_fd, termios.TIOCGWINSZ, bytes(8))
+            if not self._resize_pending and dimensions == self._last_dimensions:
+                return
+            self._resize_pending = False
+            self._last_dimensions = dimensions
             rows, columns, _, _ = struct.unpack("HHHH", dimensions)
             self._queue_rendered_surface(self._surface_renderer.resize(max(columns, 1), max(rows, 1)))
             fcntl.ioctl(self._master, termios.TIOCSWINSZ, dimensions)
@@ -226,7 +260,7 @@ class TerminalSessionGateway:
                     self._native_eof = True
                     self._native_queue.clear()
                 else:
-                    raise EOFError("the session host terminal closed")
+                    raise EOFError("the managed runtime terminal closed")
             else:
                 operation = (
                     InteractionOperation.TERMINAL_OUTPUT if fd == self._master else InteractionOperation.TERMINAL_INPUT
@@ -292,8 +326,11 @@ class TerminalSessionGateway:
                 try:
                     self.process.wait(timeout=2)
                 except subprocess.TimeoutExpired:
-                    self.process.kill()
+                    os.killpg(self.process.pid, 9)
                     self.process.wait(timeout=2)
+            if self.process is not None and self._process_announced:
+                self._on_process_stopped(self.process)
+                self._process_announced = False
         finally:
             self._pipeline.unregister(self._target)
             if self._saved_attributes is not None:
@@ -304,6 +341,10 @@ class TerminalSessionGateway:
                     fcntl.fcntl(fd, fcntl.F_SETFL, flags)
             for fd in (self._master, self._slave):
                 if fd >= 0:
+                    with suppress(OSError):
+                        os.close(fd)
+            if self._close_outer_fds:
+                for fd in {self._input_fd, self._output_fd}:
                     with suppress(OSError):
                         os.close(fd)
             self._master = self._slave = -1

@@ -120,7 +120,7 @@ def test_exact_environment_command_carries_names_but_no_values() -> None:
     command = exact_environment_exec_command(
         "/opt/rodex/bin/python",
         tuple(name for name, _value in entries),
-        ("/opt/rodex/bin/python", "-m", "rodex.session_host"),
+        ("/opt/rodex/bin/python", "-m", "rodex.terminal_bridge"),
     )
 
     assert command[:4] == (
@@ -133,7 +133,7 @@ def test_exact_environment_command_carries_names_but_no_values() -> None:
         "--",
         "/opt/rodex/bin/python",
         "-m",
-        "rodex.session_host",
+        "rodex.terminal_bridge",
     )
     assert "do-not-put-this-in-argv" not in command
     assert "--environment-name=SECRET_VALUE" in command

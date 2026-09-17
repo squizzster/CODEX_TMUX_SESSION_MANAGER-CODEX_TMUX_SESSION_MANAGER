@@ -22,7 +22,7 @@ def isolated_runtimes():
     binary = shutil.which("tmux")
     if binary is None:
         pytest.fail("runtime isolation acceptance requires tmux")
-    with tempfile.TemporaryDirectory(prefix="rdx-v3-") as directory:
+    with tempfile.TemporaryDirectory(prefix="rdx-v4-") as directory:
         root = Path(directory)
         runtimes = []
 
@@ -52,7 +52,18 @@ def isolated_runtimes():
                 runtime_id=identity,
             )
             runtimes.append(runtime)
-            launcher._start_tmux_session(runtime, root, ("/bin/cat",))
+            environment = launcher._user_process_environment.copy()
+            environment["PWD"] = str(root)
+            capability, _environment_names = launcher._stage_tmux_session(runtime, root, environment)
+            launcher._tmux(
+                runtime,
+                "respawn-pane",
+                "-k",
+                "-t",
+                capability.pane_target,
+                "/bin/cat",
+                environment=environment,
+            )
             launcher.publish_runtime_control(runtime, uuid.UUID(int=number), RodexSessionId(number), RodexRegistryId(1))
             launcher.confirm_runtime_registration(
                 runtime,
@@ -102,7 +113,11 @@ def test_second_runtime_cannot_claim_an_existing_server(isolated_runtimes):
     first = create(1)
     intruder = LiveTmuxSession(first.tmux_server_socket_path, "intruder", runtime_id=RodexRuntimeId(2))
     with pytest.raises(RodexRuntimeError):
-        launcher._start_tmux_session(intruder, first.tmux_server_socket_path.parent, ("/bin/cat",))
+        launcher._stage_tmux_session(
+            intruder,
+            first.tmux_server_socket_path.parent,
+            {"PATH": "/usr/bin", "PWD": str(first.tmux_server_socket_path.parent)},
+        )
     assert tmux(first, "list-sessions", "-F", "#{session_name}").stdout.strip() == first.tmux_session_name
     assert launcher.discover_runtime_control(first).runtime_id == first.runtime_id
 

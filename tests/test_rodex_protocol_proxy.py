@@ -367,6 +367,7 @@ def test_proxy_forwards_both_directions_and_counts_server_tool_items(
         on_primary_client_message=lambda _message, event: observed_client_events.append(event),
         peer_identity=TEST_PEER,
         app_server_process=LiveTestProcess(),
+        native_tui_process=LiveTestProcess(),
     )
     try:
         proxy.start()
@@ -419,6 +420,7 @@ def test_proxy_delivers_rodex_notice_to_tui_without_forwarding_it_upstream(
         lambda message, _event: observed_events.append(message),
         peer_identity=TEST_PEER,
         app_server_process=LiveTestProcess(),
+        native_tui_process=LiveTestProcess(),
     )
     client_message = json.dumps({"method": "initialize", "id": 1, "params": {}})
     try:
@@ -459,6 +461,7 @@ def test_tui_notice_reports_undelivered_without_a_primary_tui(tmp_path: Path) ->
         ToolCallCounter(lambda _count: None),
         peer_identity=TEST_PEER,
         app_server_process=LiveTestProcess(),
+        native_tui_process=LiveTestProcess(),
     )
     try:
         proxy.start()
@@ -534,6 +537,7 @@ def test_proxy_hands_primary_event_ownership_to_a_reconnecting_tui(tmp_path: Pat
         lambda message, _event: observed_events.append(message),
         peer_identity=TEST_PEER,
         app_server_process=LiveTestProcess(),
+        native_tui_process=LiveTestProcess(),
     )
     try:
         proxy.start()

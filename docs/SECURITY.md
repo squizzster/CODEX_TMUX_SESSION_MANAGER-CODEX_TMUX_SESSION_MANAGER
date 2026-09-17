@@ -15,7 +15,11 @@ listener; control endpoints are Unix sockets below a private runtime root.
   if confirmation never arrives. An exact committed/pending pair is recoverable.
 - Runtime roots are real, current-user-owned directories at mode `0700`, below either a
   private parent or root-owned sticky storage. Sockets and logs are mode `0600`.
-- Codex/App Server, proxy, event, and control traffic uses Unix-domain WebSockets only;
+- `rodexd-v1.sock` is the single daemon control socket. It accepts bounded current-protocol
+  JSON only from the current uid; a start `flock` prevents duplicate daemon creation.
+  The pane bridge may pass exactly one TTY descriptor with `SCM_RIGHTS`, and the daemon
+  admits it only after the complete reservation, peer PID, pane and TTY checks succeed.
+- Codex/App Server, proxy, event, and runtime-control traffic uses Unix-domain sockets;
   Rodex opens no TCP listener.
 - The mode-`0600` proxy socket accepts a private Rodex update-notice endpoint. It sends
   the validated nonempty notice only to the current primary TUI as a native warning; it
@@ -67,7 +71,10 @@ listener; control endpoints are Unix sockets below a private runtime root.
   confirmation. Existing-session transitions hold it through identity checking and
   endpoint replacement, then release it before terminal attachment. The verified runtime
   incarnation resolves to tmux's immutable `$session_id` for that final attach.
-- Analytics reads only current-user-owned regular rollout files inside the configured
+- One daemon-owned analytics coordinator serializes all runtime analysis on one thread.
+  Per-runtime cursors, workers, health, retry state and event buffers never confer runtime
+  authority; daemon reservation and activation bind them to the exact runtime identity.
+  Analytics reads only current-user-owned regular rollout files inside the configured
   sessions root, using no-follow and nonblocking opens before authenticating the Codex
   thread ID and stable complete-record prefix. Startup-only lineage discovery is bounded
   to the root UUIDv7 three-day window and reads only candidate metadata lines.
@@ -76,7 +83,7 @@ listener; control endpoints are Unix sockets below a private runtime root.
   lines for `token_count` records only, retaining no rollout bodies. Idle checks inspect
   metadata before bounded fingerprints, back off to a two-second ceiling, and wake early
   on existing exact-thread protocol activity.
-- Each runtime owns a separate `tmux-v3-<runtime-id>.sock` server. Creation requires
+- Each runtime owns a separate `tmux-v4-<runtime-id>.sock` server. Creation requires
   all ownership fields absent and an empty complete session inventory. Its retained
   creation nonce fences cleanup after failed or indeterminate admission.
 - Primary discovery reads the actual pane through its ownership guard. Whole-runtime
@@ -88,7 +95,10 @@ listener; control endpoints are Unix sockets below a private runtime root.
 - App-server, proxy, event and observer endpoint lifetimes use an exclusive lock and
   retain the bound socket inode. A losing owner cannot unlink an incumbent's endpoint;
   old cleanup cannot unlink a replacement. Locks remain stable across restarts.
-- The owning host's authority is `(absolute socket, server incarnation, immutable
+- The daemon records each App Server and TUI process group with runtime, operation, PID,
+  start time and uid. Parent-death guards stop native children if the daemon dies; a new
+  daemon reconciles only an exactly matching receipt, preventing PID-reuse kills.
+- The owning daemon-runtime authority is `(absolute socket, server incarnation, immutable
   $session_id, primary %pane_id, runtime incarnation)`. External registered authority
   adds exact Rodex session, registry, SQL-row, Codex, and `registered` identities. The
   launcher mints it after a coherent snapshot and uniqueness-checked roster; async actors
@@ -96,7 +106,7 @@ listener; control endpoints are Unix sockets below a private runtime root.
   primary actions also require the immutable pane ID. Name, socket, runtime, process
   context, or hook event is insufficient.
 - Under one stable per-user XDG/runtime context, Rodex uses one private canonical
-  database and one tmux server per runtime. Database-enforced display-name uniqueness covers
+  database, one shared daemon and one tmux server per runtime. Database-enforced display-name uniqueness covers
   every session recorded in that database, and the complete live tmux name is the
   user-facing display name. A different `XDG_STATE_HOME` is a separate database/name
   boundary; a different `RODEX_RUNTIME_DIR` is a separate root for runtime endpoints. No
@@ -151,7 +161,7 @@ listener; control endpoints are Unix sockets below a private runtime root.
   immutable root-owned installation.
 - tmux global environment state is not trusted as caller state. New-session startup
   gates a disposable pane by its runtime capability, transports byte-escaped environment
-  values only over tmux stdin, installs global-name tombstones, and starts the real host
+  values only over tmux stdin, installs global-name tombstones, and starts the pane bridge
   only after that installation succeeds. Host and observer exec boundaries remove names
   outside the caller/tmux contract. General environment payload does not enter process
   arguments; pane working directories remain explicit tmux control arguments.

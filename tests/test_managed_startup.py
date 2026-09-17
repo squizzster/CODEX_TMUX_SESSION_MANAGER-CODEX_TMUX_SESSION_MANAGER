@@ -35,6 +35,27 @@ from rodex.tmux_session_capability import RODEX_TMUX_SOCKET_PATTERN
 from rodex_registry import RodexRuntimeId
 
 
+def _stop_fixture_daemon(runtime_root: Path) -> None:
+    matching: list[int] = []
+    encoded_root = os.fsencode(runtime_root)
+    for process_path in Path("/proc").glob("[0-9]*"):
+        try:
+            command = (process_path / "cmdline").read_bytes().split(b"\0")
+        except OSError:
+            continue
+        if b"rodex.daemon" in command and encoded_root in command:
+            matching.append(int(process_path.name))
+    for pid in matching:
+        with suppress(ProcessLookupError):
+            os.kill(pid, signal.SIGTERM)
+    deadline = time.monotonic() + 5
+    while matching and time.monotonic() < deadline:
+        matching = [pid for pid in matching if Path(f"/proc/{pid}").exists()]
+        if matching:
+            time.sleep(0.02)
+    assert matching == []
+
+
 @dataclass
 class RodexTerminalClient:
     """Own only the terminal client launched by this test, never an existing host."""
@@ -472,5 +493,6 @@ def test_installed_rodex_starts_reuses_and_adopts_sessions(
         try:
             tmux("kill-server")
         finally:
+            _stop_fixture_daemon(runtime_root)
             for filename in ("auth.json", "config.toml"):
                 (isolated_codex_home / filename).unlink(missing_ok=True)

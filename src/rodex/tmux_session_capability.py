@@ -30,7 +30,7 @@ RODEX_SESSION_ID_OPTION: Final = "@rodex_session_id"
 RODEX_REGISTRATION_PENDING: Final = "pending"
 RODEX_REGISTRATION_REGISTERED: Final = "registered"
 RODEX_SHARED_TMUX_PROTOCOL_OPTION: Final = "@rodex_shared_tmux_protocol"
-RODEX_SHARED_TMUX_PROTOCOL_GENERATION: Final = 3
+RODEX_SHARED_TMUX_PROTOCOL_GENERATION: Final = 4
 RODEX_SHARED_TMUX_PROTOCOL: Final = f"rodex-isolated-tmux-v{RODEX_SHARED_TMUX_PROTOCOL_GENERATION}"
 RODEX_SHARED_TMUX_SERVER_ID_OPTION: Final = "@rodex_shared_tmux_server_id"
 RODEX_SERVER_RUNTIME_ID_OPTION: Final = "@rodex_server_runtime_id"
@@ -49,7 +49,7 @@ _TMUX_SERVER_ID_PATTERN: Final = re.compile(r"[0-9a-f]{32}")
 
 @dataclass(frozen=True, slots=True)
 class TmuxRuntimeCapability:
-    """Authority for the session host's own pane throughout one runtime incarnation."""
+    """Authority for the daemon runtime's pane throughout one incarnation."""
 
     tmux_server_socket_path: Path
     tmux_server_id: str

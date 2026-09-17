@@ -31,7 +31,7 @@ from .interaction_pipeline import (
     InteractionTarget,
     SessionInteractionPipeline,
 )
-from .presentation_policy import PresentationSnapshot, PresentationSurface
+from .presentation_policy import PresentationSnapshotSource, PresentationSurface
 from .runtime_peer import BoundProcessOwner
 from .terminal_input import TerminalInputDecoder, TerminalInputInterceptor
 from .terminal_surface import TerminalSurfaceRenderer
@@ -54,7 +54,7 @@ class TerminalSessionGateway:
         runtime_identity: str,
         registrations: tuple[InputInterceptorRegistration, ...],
         confirm_native_prefix: Callable[[str], bool],
-        presentation_snapshot: Callable[[], PresentationSnapshot] | None = None,
+        presentation: PresentationSnapshotSource | None = None,
         stderr: BinaryIO | None = None,
         input_fd: int = 0,
         output_fd: int = 1,
@@ -68,6 +68,9 @@ class TerminalSessionGateway:
         self._output_fd = output_fd
         self._master = -1
         self._slave = -1
+        self._wake_read = -1
+        self._wake_write = -1
+        self._process_pidfd = -1
         self._closed = False
         self._native_eof = False
         self._resize_pending = True
@@ -83,8 +86,9 @@ class TerminalSessionGateway:
         self.process: subprocess.Popen[bytes] | None = None
         self._decoder = TerminalInputDecoder()
         self._surface_renderer = TerminalSurfaceRenderer()
-        self._presentation_snapshot = presentation_snapshot
+        self._presentation = presentation
         self._presentation_revision: int | None = None
+        self._unsubscribe_presentation: Callable[[], None] | None = None
         self._confirm_presentation = confirm_native_prefix
         self._interceptor = TerminalInputInterceptor(
             registrations, pipeline, self._native_queue.extend, self._confirm_prefix
@@ -113,6 +117,9 @@ class TerminalSessionGateway:
             tty.setraw(input_fd, termios.TCSANOW)
             for fd in (*self._saved_flags, self._master):
                 os.set_blocking(fd, False)
+            self._wake_read, self._wake_write = os.pipe2(os.O_CLOEXEC | os.O_NONBLOCK)
+            if self._presentation is not None:
+                self._unsubscribe_presentation = self._presentation.subscribe(self._notify_relay)
             self._pipeline.register(self._target)
             gate_read, gate_write = os.pipe2(os.O_CLOEXEC)
             try:
@@ -140,6 +147,7 @@ class TerminalSessionGateway:
                     process_owner.bind(self.process)
                 on_process_started(self.process)
                 self._process_announced = True
+                self._process_pidfd = os.pidfd_open(self.process.pid)
                 os.write(gate_write, b"1")
             finally:
                 os.close(gate_read)
@@ -153,6 +161,7 @@ class TerminalSessionGateway:
     def resize(self) -> None:
         """Signal handlers schedule resize; the relay loop alone mutates terminal state."""
         self._resize_pending = True
+        self._notify_relay()
 
     def _apply_resize(self) -> None:
         """Copy the actual pane dimensions; TIOCSWINSZ signals the child foreground group."""
@@ -179,8 +188,12 @@ class TerminalSessionGateway:
         assert self.process is not None
         deadline = None if timeout is None else time.monotonic() + timeout
         exit_deadline: float | None = None
+        self._sync_presentation()
+        # The transferred pane does not deliver SIGWINCH to the daemon's runtime
+        # thread. Probe once per supervisor wait, rather than on every I/O event.
+        self._apply_resize()
         while True:
-            returncode = self.process.poll()
+            returncode = self.process.returncode
             now = time.monotonic()
             if returncode is not None:
                 if exit_deadline is None:
@@ -191,7 +204,18 @@ class TerminalSessionGateway:
                     return returncode
             if deadline is not None and now >= deadline:
                 raise subprocess.TimeoutExpired(self.process.args, timeout)
-            self._relay_once(allow_input=returncode is None)
+            wake_deadlines = [value for value in (deadline, exit_deadline) if value is not None]
+            if returncode is None:
+                incomplete_deadline = self._decoder.incomplete_deadline()
+                if incomplete_deadline is not None:
+                    wake_deadlines.append(incomplete_deadline)
+            relay_timeout = None if not wake_deadlines else max(0.0, min(wake_deadlines) - now)
+            process_exited = self._relay_once(allow_input=returncode is None, timeout=relay_timeout)
+            if process_exited and self.process.returncode is None:
+                self.process.poll()
+            if self._resize_pending:
+                self._apply_resize()
+            self._sync_presentation()
 
     def _deliver(self, request: InteractionRequest) -> InteractionResult:
         if request.operation == InteractionOperation.DISPLAY_STATE:
@@ -200,6 +224,7 @@ class TerminalSessionGateway:
             state = InputMenuView.deserialize(request.payload) if request.payload is not None else None
             accepted, rendered = self._surface_renderer.display(state)
             self._queue_rendered_surface(rendered)
+            self._notify_relay()
             return InteractionResult(DeliveryStatus.DELIVERED if accepted else DeliveryStatus.REJECTED)
         assert isinstance(request.payload, bytes)
         if request.operation == InteractionOperation.TERMINAL_INPUT:
@@ -222,31 +247,45 @@ class TerminalSessionGateway:
         try:
             deadline = time.monotonic() + HANDOFF_TIMEOUT_SECONDS
             while time.monotonic() < deadline and not self._native_eof:
-                self._relay_once(allow_input=False)
+                remaining = max(0.0, deadline - time.monotonic())
+                process_exited = self._relay_once(allow_input=False, timeout=remaining)
+                if process_exited and self.process is not None and self.process.returncode is None:
+                    self.process.poll()
+                if self._resize_pending:
+                    self._apply_resize()
+                self._sync_presentation()
                 if not self._native_queue and not self._display_queue and self._confirm_presentation(prefix):
                     return True
             return False
         finally:
             self._queue_rendered_surface(self._surface_renderer.resume())
 
-    def _relay_once(self, *, allow_input: bool) -> None:
-        self._sync_presentation()
-        self._apply_resize()
+    def _relay_once(self, *, allow_input: bool, timeout: float | None) -> bool:
+        """Block for one real relay event and report exact native-child exit readiness."""
         reads: list[int] = []
         writes: list[int] = []
         if not self._native_eof and len(self._display_queue) < QUEUE_LIMIT_BYTES:
             reads.append(self._master)
         if allow_input and len(self._native_queue) < QUEUE_LIMIT_BYTES:
             reads.append(self._input_fd)
+        if self._wake_read >= 0:
+            reads.append(self._wake_read)
+        if self.process is not None and self.process.returncode is None and self._process_pidfd >= 0:
+            reads.append(self._process_pidfd)
         if self._display_queue:
             writes.append(self._output_fd)
         if self._native_queue and not self._native_eof:
             writes.append(self._master)
-        readable, writable, _ = select.select(reads, writes, [], 0.02)
+        readable, writable, _ = select.select(reads, writes, [], timeout)
+        process_exited = self._process_pidfd >= 0 and self._process_pidfd in readable
+        if self._wake_read >= 0 and self._wake_read in readable:
+            self._drain_relay_wake()
         for fd in writable:
             queue = self._native_queue if fd == self._master else self._display_queue
             self._flush(fd, queue)
         for fd in readable:
+            if fd in {self._wake_read, self._process_pidfd}:
+                continue
             try:
                 data = os.read(fd, READ_CHUNK_BYTES)
             except BlockingIOError:
@@ -269,13 +308,32 @@ class TerminalSessionGateway:
         if allow_input:
             for event in self._decoder.expire_incomplete(time.monotonic()):
                 self._interceptor.accept(event)
+        return process_exited
+
+    def _notify_relay(self) -> None:
+        """Wake a blocked relay; repeated hints safely coalesce in the non-blocking pipe."""
+        wake_write = getattr(self, "_wake_write", -1)
+        if wake_write < 0:
+            return
+        with suppress(BlockingIOError, OSError):
+            os.write(wake_write, b"1")
+
+    def _drain_relay_wake(self) -> None:
+        while True:
+            try:
+                if not os.read(self._wake_read, READ_CHUNK_BYTES):
+                    return
+            except BlockingIOError:
+                return
+            except OSError:
+                return
 
     def _sync_presentation(self) -> None:
-        if self._presentation_snapshot is None:
+        if self._presentation is None:
             return
-        snapshot = self._presentation_snapshot()
-        if snapshot.revision == self._presentation_revision:
+        if self._presentation.revision == self._presentation_revision:
             return
+        snapshot = self._presentation.snapshot()
         surface_changed = snapshot.surface != self._surface_renderer.presentation_surface
         rendered = self._surface_renderer.present(snapshot)
         self._queue_rendered_surface(rendered, complete_frame=surface_changed)
@@ -319,6 +377,9 @@ class TerminalSessionGateway:
             return
         self._closed = True
         try:
+            if self._unsubscribe_presentation is not None:
+                self._unsubscribe_presentation()
+                self._unsubscribe_presentation = None
             with suppress(Exception):
                 self._interceptor.release()
             if self.process is not None and self.process.poll() is None:
@@ -339,7 +400,7 @@ class TerminalSessionGateway:
             for fd, flags in self._saved_flags.items():
                 with suppress(OSError):
                     fcntl.fcntl(fd, fcntl.F_SETFL, flags)
-            for fd in (self._master, self._slave):
+            for fd in (self._master, self._slave, self._wake_read, self._wake_write, self._process_pidfd):
                 if fd >= 0:
                     with suppress(OSError):
                         os.close(fd)
@@ -347,4 +408,4 @@ class TerminalSessionGateway:
                 for fd in {self._input_fd, self._output_fd}:
                     with suppress(OSError):
                         os.close(fd)
-            self._master = self._slave = -1
+            self._master = self._slave = self._wake_read = self._wake_write = self._process_pidfd = -1

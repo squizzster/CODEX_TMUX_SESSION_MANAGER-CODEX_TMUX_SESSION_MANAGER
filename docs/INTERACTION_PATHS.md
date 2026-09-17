@@ -104,7 +104,7 @@ work. The record buffer contains metadata, not prompt bodies or another durable 
 | Presentation selection | Configured `light`/`dark` action → SELECT_PRESENTATION_POLICY; never starts a turn or changes App Server delivery/logging |
 | Local placeholder reply | Configured actionless command/option text → MESSAGE(false) → main display adapter |
 | Initial prompts and native TUI protocol operations | Native TUI → protocol-input pipeline → App Server |
-| Native terminal output | TERMINAL_OUTPUT → continuously updated native projection → selected native/semantic surface + inline compositor → bounded display queue → outer PTY |
+| Native terminal output | Readable child PTY → TERMINAL_OUTPUT → continuously updated native projection → selected native/semantic surface + inline compositor → bounded display queue → writable outer PTY |
 | App Server primary output | Protocol-output pipeline → TUI unchanged, then typed presentation/context/observer/event projections; display filtering never rejects execution |
 | Primary TUI requests | Protocol-input pipeline → request correlation → App Server unchanged; correlated `thread/read` responses hydrate bounded typed presentation text |
 | App Server control-client output | Protocol-output pipeline → its exact destination; never enters the primary presentation projection |
@@ -156,6 +156,7 @@ work. The record buffer contains metadata, not prompt bodies or another durable 
 | SQL connection/publication | `rodex_sql` transactions and registry publication pipeline |
 | Runtime logs, update cache, analyzer memory files | File/diagnostic owners, not chat |
 | Keyboard framing and native PTY writes | `TerminalInputDecoder` / `TerminalInputInterceptor` → `TerminalSessionGateway`; tmux retains its owned lifecycle keys |
+| Terminal readiness and lifecycle | `TerminalSessionGateway` blocks on outer/child PTYs, a wake-only pipe and the exact child `pidfd`; presentation revisions, resize requests and incomplete-input deadlines wake the same relay |
 | Native composer presentation at takeover/submission | Exact primary-pane fenced snapshot; prefix and end cursor must agree, no background screen polling |
 | Native editor state | Codex; Rodex observes a bounded candidate and verifies the native composer at handoff |
 | Main terminal surface | `TerminalSurfaceRenderer` → gateway output queue; one native projection plus configured semantic views, no editor mutation or second writer |
@@ -165,9 +166,10 @@ work. The record buffer contains metadata, not prompt bodies or another durable 
 
 A lone Escape must be distinguished from the start of an arrow or Alt-key sequence.
 The inspected tmux 3.2a server reported `escape-time 500`; Rodex leaves that server
-setting unchanged. `TerminalInputDecoder` adds a 35 ms lone-Escape wait, expired by the
-gateway's 20 ms relay loop even when no further keyboard or child-output bytes arrive.
-The combined waits explain the user's roughly 0.6-second Escape response; complete
+setting unchanged. `TerminalInputDecoder` adds a 35 ms lone-Escape wait and exposes its
+exact deadline to the gateway's blocking descriptor wait. No periodic relay poll is
+needed when no further keyboard or child-output bytes arrive. The combined waits can
+still include tmux's configured escape time; complete
 Up/Down frames are decoded immediately. This is input framing, not a menu transition
 delay. The valid argument picker goes back one level; the command list releases local
 input. Commands without options never enter a picker and need no Escape recovery.
@@ -187,8 +189,9 @@ bounded observer probes, real tmux operations, real observer startup/reopen/rend
 and runtime exit. The installed-command gate isolates tmux, SQLite and Codex history;
 it verifies startup/resume, real native slash menus, local takeover/menu/submission/release,
 ordinary editing afterwards, and no model turn from display-only delivery. Isolated PTYs
-test controlling-terminal identity, input/output hooks, final-output drain, resize, signals,
-spawn failure and terminal restoration. Tests never attach to or stop an existing user session.
+test controlling-terminal identity, event-driven idle waiting and presentation wakes,
+input/output hooks, final-output drain, resize, signals, spawn failure and terminal
+restoration. Tests never attach to or stop an existing user session.
 
 Current checks cover both menu levels, regex filtering, cyclic selection, configured
 actions/headings/options, fixed footer, rapid Escape, rejected delivery, missing-option

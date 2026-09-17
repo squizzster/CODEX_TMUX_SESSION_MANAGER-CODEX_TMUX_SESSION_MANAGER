@@ -2560,7 +2560,7 @@ def _run_runtime_service(
                     runtime_identity=str(config.runtime_id),
                     registrations=INPUT_INTERCEPTORS,
                     confirm_native_prefix=input_presentation.confirm_native_prefix,
-                    presentation_snapshot=presentation_pipeline.snapshot,
+                    presentation=presentation_pipeline,
                     input_fd=terminal_fd,
                     output_fd=terminal_fd,
                     process_owner=native_tui_process,

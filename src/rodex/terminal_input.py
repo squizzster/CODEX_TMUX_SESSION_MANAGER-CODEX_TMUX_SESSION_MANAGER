@@ -145,12 +145,8 @@ class TerminalInputDecoder:
         return events
 
     def expire_incomplete(self, now: float) -> list[TerminalInputEvent]:
-        if not self._pending or self._last_data_at is None:
-            return []
-        if self._streaming_paste or self._pending.startswith(PASTE_START):
-            return []
-        delay = ESCAPE_WAIT_SECONDS if self._pending == b"\x1b" else INCOMPLETE_FRAME_WAIT_SECONDS
-        if now - self._last_data_at < delay:
+        deadline = self.incomplete_deadline()
+        if deadline is None or now < deadline:
             return []
         raw = bytes(self._pending)
         kind = "control" if raw == b"\x1b" else "opaque"
@@ -161,6 +157,15 @@ class TerminalInputDecoder:
                 raw = raw[:-1]  # Preserve a possible split string terminator.
         del self._pending[: len(raw)]
         return [TerminalInputEvent(kind, raw)] if raw else []
+
+    def incomplete_deadline(self) -> float | None:
+        """Return the exact pending-frame deadline, or ``None`` when input may block."""
+        if not self._pending or self._last_data_at is None:
+            return None
+        if self._streaming_paste or self._pending.startswith(PASTE_START):
+            return None
+        delay = ESCAPE_WAIT_SECONDS if self._pending == b"\x1b" else INCOMPLETE_FRAME_WAIT_SECONDS
+        return self._last_data_at + delay
 
 
 class TerminalInputInterceptor:

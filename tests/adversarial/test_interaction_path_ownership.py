@@ -66,6 +66,7 @@ EFFECT_OWNERS = {
         "rodex/daemon_client.py:RodexDaemonClient._request:.sendall",
         "rodex/terminal_presentation.py:_write_observer_terminal:.write",
         "rodex/terminal_gateway.py:TerminalSessionGateway._flush:os.write",
+        "rodex/terminal_gateway.py:TerminalSessionGateway._notify_relay:os.write",
         "rodex/agent_observer.py:AgentObserverCoordinator._deliver_observer_snapshot:self._event_sender",
         "rodex/observer_pane.py:ObserverPaneController._deliver:self._state_sender",
         "rodex/observer_pane.py:ObserverPaneController._deliver:self._message_sender",

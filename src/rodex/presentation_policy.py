@@ -9,11 +9,12 @@ logging, lifecycle state, or protocol control flow.
 from __future__ import annotations
 
 from collections import OrderedDict, deque
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
+from contextlib import suppress
 from dataclasses import dataclass, field
 from enum import StrEnum
 from threading import RLock
-from typing import Final
+from typing import Final, Protocol
 
 from .app_server_contract import CODEX_APP_SERVER
 from .interaction_pipeline import (
@@ -154,6 +155,17 @@ class PresentationSnapshot:
     items: tuple[PresentationItemText, ...]
 
 
+class PresentationSnapshotSource(Protocol):
+    """Expose revisioned presentation state plus a wake-only change signal."""
+
+    @property
+    def revision(self) -> int: ...
+
+    def snapshot(self) -> PresentationSnapshot: ...
+
+    def subscribe(self, listener: Callable[[], None]) -> Callable[[], None]: ...
+
+
 @dataclass(slots=True)
 class _AccumulatedItemText:
     thread_id: str
@@ -207,10 +219,39 @@ class SessionPresentationPipeline:
         self._item_identities: OrderedDict[tuple[str, str], tuple[str, str | None]] = OrderedDict()
         self._request_methods: OrderedDict[ProtocolRequestIdentity, str] = OrderedDict()
         self._lock = RLock()
+        self._change_listeners: set[Callable[[], None]] = set()
 
     @property
     def policy_names(self) -> frozenset[str]:
         return frozenset(self._policies)
+
+    @property
+    def revision(self) -> int:
+        """Return the cheap change token without rebuilding the presentation view."""
+        with self._lock:
+            return self._revision
+
+    def subscribe(self, listener: Callable[[], None]) -> Callable[[], None]:
+        """Register one non-blocking wake callback and return its exact unsubscriber."""
+        if not callable(listener):
+            raise TypeError("presentation change listener must be callable")
+        with self._lock:
+            self._change_listeners.add(listener)
+
+        def unsubscribe() -> None:
+            with self._lock:
+                self._change_listeners.discard(listener)
+
+        return unsubscribe
+
+    def _advance_revision(self) -> None:
+        """Advance state and wake subscribers without making notification authoritative."""
+        self._revision += 1
+        for listener in tuple(self._change_listeners):
+            # Presentation state remains authoritative if a wake destination
+            # concurrently closes or otherwise cannot accept the hint.
+            with suppress(Exception):
+                listener()
 
     def bind_root_thread(self, thread_id: str) -> None:
         """Scope semantic output to the exact main conversation, never a child thread."""
@@ -220,7 +261,7 @@ class SessionPresentationPipeline:
             if self._root_thread_id == thread_id:
                 return
             self._root_thread_id = thread_id
-            self._revision += 1
+            self._advance_revision()
 
     def select_policy(self, policy_name: str) -> None:
         if policy_name not in self._policies:
@@ -229,7 +270,7 @@ class SessionPresentationPipeline:
             if self._selected_policy == policy_name:
                 return
             self._selected_policy = policy_name
-            self._revision += 1
+            self._advance_revision()
 
     def observe_protocol_input(self, request: Mapping[str, object] | None) -> None:
         """Correlate bounded primary-TUI requests with their later responses."""
@@ -259,7 +300,7 @@ class SessionPresentationPipeline:
             self._events.append(projected)
             self._remember_item_identity(projected)
             self._accumulate_item_text(projected)
-            self._revision += 1
+            self._advance_revision()
 
     def reset_after_disconnect(self) -> None:
         """Discard connection-scoped partial text while retaining completed item text."""
@@ -270,7 +311,7 @@ class SessionPresentationPipeline:
             self._item_identities.clear()
             self._request_methods.clear()
             if incomplete_keys:
-                self._revision += 1
+                self._advance_revision()
 
     def snapshot(self) -> PresentationSnapshot:
         with self._lock:
@@ -377,7 +418,7 @@ class SessionPresentationPipeline:
                 self._accumulate_item_text(projected)
                 changed = True
         if changed:
-            self._revision += 1
+            self._advance_revision()
 
     def _completed_item_text_already_matches(self, event: ProtocolPresentationEvent) -> bool:
         if event.thread_id is None or event.item_id is None:

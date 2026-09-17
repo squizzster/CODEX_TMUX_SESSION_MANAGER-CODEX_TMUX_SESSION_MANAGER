@@ -81,10 +81,12 @@ arbitrates status; animation admission owns capability/generation/lease/token/re
 
 Interactive routes print `Rodex attach [name].` before tmux and `Rodex exited [name].`
 after return. Tmux's exit line is erased first. One daemon-runtime PTY adapts all TUI I/O;
-attachers never create input owners. Interception config owns live/Enter expressions,
-menus and typed actions; unmatched input stays native. Prefix/cursor confirmation occurs
-only at handoff. DISPLAY_STATE draws menus; light selects root commentary structurally
-while preserving the hidden native TUI, and dark redraws that projection in place.
+attachers never create input owners. Its gateway blocks on terminal readiness, an exact
+child `pidfd`, input-frame deadlines and wake-only state notifications; idle sessions do
+not run a fixed relay poll. Interception config owns live/Enter expressions, menus and
+typed actions; unmatched input stays native. Prefix/cursor confirmation occurs only at
+handoff. DISPLAY_STATE draws menus; light selects root commentary structurally while
+preserving the hidden native TUI, and dark redraws that projection in place.
 
 ## Identity and lifecycle
 

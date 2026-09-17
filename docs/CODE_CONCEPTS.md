@@ -18,6 +18,9 @@ boundary; domain policy has one canonical owner underneath it.
 
 - One daemon-runtime PTY gateway carries keyboard input and native output through the shared
   interaction pipeline. Attaching another client does not create another input owner.
+- The gateway blocks on actual terminal readiness, the native child's `pidfd`, exact
+  incomplete-input deadlines and wake-only presentation/resize notifications. Idle
+  runtimes do not rebuild presentation state or execute a fixed-frequency relay loop.
 - Each interception config supplies live/Enter expressions, display text and argument
   options. No command-name branch belongs in the decoder, menu or renderer.
 - `InputInterceptionMenu` owns filtering and cyclic selection. Immutable views carry the

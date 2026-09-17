@@ -177,6 +177,9 @@ per command supplies independent live/Enter expressions, completion/helper text 
 argument headings/options. `InputInterceptionMenu` owns matching and selection;
 `InputInterceptorPresentation` publishes its immutable view through the shared
 interaction pipeline. The gateway renders it without changing the native projection.
+The gateway blocks on terminal readiness, the native child's `pidfd`, exact input-frame
+deadlines and wake-only presentation/resize notifications. A presentation revision is
+projected only after it changes; an idle runtime has no fixed-frequency relay loop.
 
 All live matches appear together, with cyclic Up/Down selection. Enter opens a populated
 argument picker; one Escape returns to the command list, and Escape there releases input.
@@ -431,7 +434,8 @@ Codex, tmux, or analyzer processes.
   `Rodex exited [display-name].` after the tmux client returns successfully. Internal
   Rodex/Codex identities and route-specific wording do not enter this human lifecycle.
   Tmux's mandatory client-exit line is erased in place before the completion message;
-  the TUI still owns terminal input and output directly without a Rodex PTY proxy.
+  the native TUI remains the sole editor and protocol owner while the daemon's one PTY
+  gateway transports its keyboard input and rendered output.
 - `Ctrl-D` directly invokes tmux `detach-client` for only the current client; it never
   reaches Codex as EOF or an undocumented disconnect command. `Ctrl-b d` remains the
   prefix-based detach route. Both leave Codex, its app-server, and tmux running. Rodex

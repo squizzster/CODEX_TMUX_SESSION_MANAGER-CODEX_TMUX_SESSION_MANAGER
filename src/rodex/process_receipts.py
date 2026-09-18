@@ -14,10 +14,10 @@ from typing import Any, Final
 
 from rodex_registry.identity import RodexRuntimeId, parse_rodex_runtime_id
 
-PROCESS_RECEIPT_PROTOCOL: Final = "rodex-process-receipt-v1"
+PROCESS_RECEIPT_PROTOCOL: Final = "rodex-process-receipt-v2"
 PROCESS_KINDS: Final = frozenset({"app-server", "native-tui"})
 _OPERATION_ID = re.compile(r"[0-9a-f]{32}")
-_RECEIPT_PATTERN = "rodexd-v1-process-*.json"
+_RECEIPT_PATTERN = "rodexd-v2-process-*.json"
 
 
 class ProcessReceiptError(RuntimeError):
@@ -117,7 +117,7 @@ class RuntimeProcessReceipts:
     def _path(self, kind: str, runtime_id: RodexRuntimeId) -> Path:
         if kind not in PROCESS_KINDS:
             raise ValueError("unknown daemon child process kind")
-        return self._runtime_root / f"rodexd-v1-process-{parse_rodex_runtime_id(runtime_id)}-{kind}.json"
+        return self._runtime_root / f"rodexd-v2-process-{parse_rodex_runtime_id(runtime_id)}-{kind}.json"
 
     def _read(self, path: Path) -> dict[str, Any]:
         try:

@@ -7,10 +7,10 @@ control one exact turn from another local process.
 | Field | Current value |
 | --- | --- |
 | Development mode | `ALPHA` — internal Linux pre-release; breaking changes are allowed |
-| Rodex release | `0.14.0a1` |
+| Rodex release | `0.14.0a2` |
 | SQLite catalog | generation `20`, `rodex-v20.sqlite3` |
 | tmux ownership | `rodex-isolated-tmux-v4` |
-| Runtime peer identity | `rodex-runtime-peer-v4` |
+| Runtime peer identity | `rodex-runtime-peer-v5` |
 | Machine envelope | generation `4` |
 | Agent trace | `rodex-agent-trace-v3` |
 | Statistics | `rodex-statistics-v8` |
@@ -81,16 +81,20 @@ Each runtime uses a separate tmux server and immutable server incarnation. Rodex
 verifies the session, primary pane, runtime, registry, and Codex identities before
 attach, read, control, or cleanup. One `rodexd` process owns all runtime services and the
 single serialized analytics pipeline beneath a runtime root. Linux process monitors show
-that daemon as a version-derived task name such as `rodexd_v0_14a1` rather than a generic
-Python process. Existing daemons retain their loaded code, so stop their runtimes and
-daemon after installing a new Rodex version.
+that daemon as a version-derived task name such as `rodexd_v0_14a2` rather than a generic
+Python process. Existing processes retain their loaded code. Daemon and runtime handshakes
+require the exact first-party implementation fingerprint, so changed code is rejected
+rather than silently mixed. Stop old runtimes and their daemon after installing or
+editing Rodex.
 
 When the registered main turn terminates with App Server
 `codexErrorInfo: "serverOverloaded"`, Rodex schedules `Continue...` through the same
 exact model-input pipeline after 30 seconds. Any terminal input cancels that pending
 continuation. Repeated overloads within five minutes double the delay through 60, 120,
 240, 480, and 960 seconds; later repeats remain at 960 seconds. A gap longer than five
-minutes resets the sequence to 30 seconds. This recovery is always active.
+minutes resets the sequence to 30 seconds. The terminal `systemError` state produced by
+that failure remains startable only when Codex reports direct input is accepted. This
+recovery is always active.
 
 ## Commands
 
@@ -180,7 +184,7 @@ App Server and authenticated trace identities, and closes when that work finishe
 | Runtime root | `$XDG_RUNTIME_DIR/rodex` |
 | Runtime fallback | `/tmp/rodex-<uid>` |
 | Optional runtime override | `RODEX_RUNTIME_DIR` |
-| Shared daemon socket | `<runtime-root>/rodexd-v1.sock` |
+| Shared daemon socket | `<runtime-root>/rodexd-v2.sock` |
 | Per-runtime tmux socket | `<runtime-root>/tmux-v4-<runtime-id>.sock` |
 | Per-runtime service sockets | `<runtime-root>/{app,proxy,events}-<runtime-id>.sock` |
 

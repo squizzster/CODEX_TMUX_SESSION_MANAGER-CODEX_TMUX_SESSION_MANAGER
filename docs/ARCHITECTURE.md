@@ -10,7 +10,7 @@ Rodex binds session/runtime IDs to a Codex thread tree and verified tmux endpoin
 ## Runtime shape
 
 ```text
-user → Rodex CLI → rodexd-v1.sock → one shared Python daemon
+user → Rodex CLI → rodexd-v2.sock → one shared Python daemon
          │                              ├── runtime A → tmux-A → TUI ↔ proxy ↔ app-server
          ├──► SQLite registry           ├── runtime B → tmux-B → TUI ↔ proxy ↔ app-server
          ├──► _cat / _tail              └── one analytics coordinator → trace/stats → SQLite

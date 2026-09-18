@@ -11,6 +11,7 @@ import pytest
 from rodex.agent_trace import AGENT_TRACE_SCHEMA_VERSION, _canonical_record_turn_id, normalize_rollout_trace
 from rodex.analytics import STATISTICS_PROJECTION_SCHEMA_VERSION
 from rodex.control import RodexControlError, _started_turn_id, _steered_turn_id
+from rodex.daemon_client import RODEX_DAEMON_PROTOCOL
 from rodex.machine_commands import MACHINE_ENVELOPE_SCHEMA_VERSION
 from rodex.observer_contract import OBSERVER_SCHEMA
 from rodex.protocol_proxy import _context_percent, _rollout_context_percent, _started_thread_id
@@ -23,12 +24,15 @@ from rodex_sql import RODEX_DATABASE_FILENAME, RODEX_DATABASE_SCHEMA_GENERATION
 
 def test_current_release_declares_matching_package_and_process_versions() -> None:
     project = tomllib.loads((Path(__file__).parents[1] / "pyproject.toml").read_text())
-    assert project["project"]["version"] == RODEX_VERSION == "0.14.0a1"
+    assert project["project"]["version"] == RODEX_VERSION == "0.14.0a2"
     assert RODEX_DATABASE_SCHEMA_GENERATION == 20
     assert RODEX_DATABASE_FILENAME == "rodex-v20.sqlite3"
     assert RODEX_SHARED_TMUX_PROTOCOL == "rodex-isolated-tmux-v4"
+    assert RODEX_DAEMON_PROTOCOL == "rodex-daemon-v2"
     assert runtime_tmux_socket_name(RodexRuntimeId(1)) == "tmux-v4-0000000000000001.sock"
-    assert RuntimePeerIdentity(RodexRuntimeId(1), "a" * 32).headers()["X-Rodex-Peer-Contract"] == "rodex-runtime-peer-v4"
+    peer_headers = RuntimePeerIdentity(RodexRuntimeId(1), "a" * 32).headers()
+    assert peer_headers["X-Rodex-Peer-Contract"] == "rodex-runtime-peer-v5"
+    assert peer_headers["X-Rodex-Implementation-Id"].startswith("0.14.0a2+sha256.")
     assert MACHINE_ENVELOPE_SCHEMA_VERSION == 4
     assert AGENT_TRACE_SCHEMA_VERSION == "rodex-agent-trace-v3"
     assert STATISTICS_PROJECTION_SCHEMA_VERSION == "rodex-statistics-v8"

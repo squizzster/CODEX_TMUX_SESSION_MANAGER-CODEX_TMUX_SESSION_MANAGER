@@ -7,11 +7,11 @@ socket path, client count, pane ID, or Codex thread is insufficient authority al
 
 | Boundary | Current generation |
 | --- | --- |
-| Rodex package and subprocess | `0.14.0a1` |
+| Rodex package and subprocess | `0.14.0a2` |
 | SQLite registry | `20` (`rodex-v20.sqlite3`) |
 | tmux ownership | `rodex-isolated-tmux-v4` |
-| WebSocket peer identity | `rodex-runtime-peer-v4` |
-| Shared daemon | `rodex-daemon-v1` |
+| WebSocket peer identity | `rodex-runtime-peer-v5` |
+| Shared daemon | `rodex-daemon-v2` |
 | Observer frames | `rodex-agent-observer-v3` |
 | Machine envelopes | `4` |
 | Agent trace | `rodex-agent-trace-v3` |
@@ -25,9 +25,11 @@ transcripts.
 1. The launcher allocates a runtime ID and server nonce, then claims only a completely
    unmarked, empty tmux server at `tmux-v4-<runtime-id>.sock`. A separate server for each
    runtime prevents native pane movement across runtime boundaries.
-2. A start lock converges concurrent clients on one `rodexd-v1.sock`. The daemon owns one
-   exact reservation per runtime and operation ID. It rejects conflicting reservations
-   before any runtime service starts.
+2. A start lock converges concurrent clients on one `rodexd-v2.sock`. Every request and
+   response carries the exact first-party implementation fingerprint loaded by each
+   process; a legacy daemon or changed checkout is rejected before reservation. The
+   daemon owns one exact reservation per runtime and operation ID. It rejects conflicting
+   reservations before any runtime service starts.
 3. The staged primary pane receives its runtime marker and runs a one-shot bridge. The
    daemon verifies same-uid peer credentials, the bridge PID, pane TTY descriptor, server
    nonce, pane target and reservation before accepting the descriptor. Caller environment
@@ -39,9 +41,10 @@ transcripts.
 5. Discovery compares durable metadata with a guarded snapshot from the actual primary
    pane. Only exact pending-to-registered completion may occur concurrently. Every
    endpoint must use that runtime's canonical name.
-6. WebSocket admission and its response both prove the runtime ID and server nonce on
-   the connection in use. Unix peer credentials and pinned process identities restrict
-   native App Server and TUI admission to the daemon-owned exact child processes.
+6. WebSocket admission and its response both prove the runtime ID, server nonce, and
+   exact loaded first-party implementation on the connection in use. Unix peer
+   credentials and pinned process identities restrict native App Server and TUI admission
+   to the daemon-owned exact child processes.
 7. App Server, proxy, event, observer, and keepalive lifetimes retain exclusive locks,
    bound socket inodes, or path descriptors. A contender cannot unlink an incumbent,
    and stale cleanup cannot remove a replacement endpoint.

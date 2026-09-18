@@ -19,10 +19,13 @@ from websockets.exceptions import InvalidHandshake
 
 from rodex_registry.identity import RodexRuntimeId, parse_rodex_runtime_id
 
+from .implementation_identity import RODEX_IMPLEMENTATION_ID
+
 _CONTRACT_HEADER: Final = "X-Rodex-Peer-Contract"
+_IMPLEMENTATION_HEADER: Final = "X-Rodex-Implementation-Id"
 _RUNTIME_HEADER: Final = "X-Rodex-Runtime-Id"
 _SERVER_HEADER: Final = "X-Rodex-Tmux-Server-Id"
-_CONTRACT: Final = "rodex-runtime-peer-v4"
+_CONTRACT: Final = "rodex-runtime-peer-v5"
 _SERVER_ID = re.compile(r"[0-9a-f]{32}")
 
 
@@ -139,6 +142,7 @@ class RuntimePeerIdentity:
     def headers(self) -> dict[str, str]:
         return {
             _CONTRACT_HEADER: _CONTRACT,
+            _IMPLEMENTATION_HEADER: RODEX_IMPLEMENTATION_ID,
             _RUNTIME_HEADER: str(self.runtime_id),
             _SERVER_HEADER: self.tmux_server_id,
         }

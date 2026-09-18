@@ -10,7 +10,13 @@ from pathlib import Path
 
 from rodex_registry.identity import parse_rodex_runtime_id
 
-from .daemon_client import RODEX_DAEMON_PROTOCOL, encode_daemon_message, receive_daemon_message
+from .daemon_client import (
+    RODEX_DAEMON_IMPLEMENTATION_FIELD,
+    RODEX_DAEMON_PROTOCOL,
+    encode_daemon_message,
+    receive_daemon_message,
+)
+from .implementation_identity import RODEX_IMPLEMENTATION_ID
 from .tmux_session_capability import parse_tmux_server_id
 
 
@@ -32,6 +38,7 @@ def main() -> None:
     request = encode_daemon_message(
         {
             "protocol": RODEX_DAEMON_PROTOCOL,
+            RODEX_DAEMON_IMPLEMENTATION_FIELD: RODEX_IMPLEMENTATION_ID,
             "operation": "bind_terminal",
             "operation_id": arguments.operation_id,
             "runtime_id": str(arguments.runtime_id),
@@ -49,7 +56,11 @@ def main() -> None:
         if sent != len(request):
             raise RuntimeError("terminal bridge request was only partially sent")
         response = receive_daemon_message(connection)
-        if response.get("protocol") != RODEX_DAEMON_PROTOCOL or response.get("ok") is not True:
+        if (
+            response.get("protocol") != RODEX_DAEMON_PROTOCOL
+            or response.get(RODEX_DAEMON_IMPLEMENTATION_FIELD) != RODEX_IMPLEMENTATION_ID
+            or response.get("ok") is not True
+        ):
             detail = response.get("error")
             raise RuntimeError(detail if isinstance(detail, str) and detail else "terminal bridge was rejected")
         descriptor = connection.detach()

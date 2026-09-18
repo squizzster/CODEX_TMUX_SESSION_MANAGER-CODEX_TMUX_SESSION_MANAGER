@@ -72,6 +72,11 @@ Rodex owns exact underscore-prefixed commands. Its characterized Codex grammar i
 | `Ctrl-D` | Detach the invoking client | Detach the invoking client |
 | `Ctrl-b d` | Native tmux detach | Native tmux detach |
 
+While attached, the invoking Rodex client uses the full display-name-derived process
+title, such as `rodex_cyan_mackerel`. After tmux returns it prints
+`Rodex detach [cyan-mackerel].` when the runtime remains live, or
+`Rodex exited [cyan-mackerel].` when the runtime ended.
+
 Each runtime uses a separate tmux server and immutable server incarnation. Rodex
 verifies the session, primary pane, runtime, registry, and Codex identities before
 attach, read, control, or cleanup. One `rodexd` process owns all runtime services and the

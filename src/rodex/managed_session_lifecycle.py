@@ -46,10 +46,12 @@ from .live_runtime import (
     session_transition_lock,
     verify_live_runtime_identity,
 )
+from .process_title import rodex_session_process_title
 from .runtime import (
     RODEX_REGISTRATION_PENDING,
     LiveRodexRuntime,
     LiveTmuxSession,
+    RodexAttachmentOutcome,
     RodexCodexSessionNotFoundError,
     RodexRuntimeError,
     RodexRuntimeLauncher,
@@ -537,9 +539,12 @@ def _attach_managed_session(
     display_name: str,
 ) -> None:
     """Present one stable human lifecycle around every managed attachment."""
-    print(rodex_session_message("attach", display_name), flush=True)
-    launcher.attach(runtime)
-    print(rodex_session_message("exited", display_name), flush=True)
+    with rodex_session_process_title(display_name):
+        print(rodex_session_message("attach", display_name), flush=True)
+        outcome = launcher.attach(runtime)
+        if not isinstance(outcome, RodexAttachmentOutcome):
+            raise RodexRuntimeError("tmux attachment returned an invalid lifecycle outcome")
+        print(rodex_session_message(outcome.value, display_name), flush=True)
 
 
 def _stop_failed_runtime(

@@ -34,6 +34,7 @@ from rodex.runtime import (
     CurrentTmuxPaneContext,
     LiveRodexRuntime,
     LiveTmuxSession,
+    RodexAttachmentOutcome,
     RodexCodexSessionNotFoundError,
     RodexRuntimeError,
     RodexRuntimeLauncher,
@@ -1107,22 +1108,22 @@ def test_attach_uses_live_stdio_and_escapes_an_existing_tmux_client(
         lambda _runtime: _registered_capability(tmp_path / "tmux.sock"),
     )
 
-    launcher.attach(live)
+    assert launcher.attach(live) is RodexAttachmentOutcome.EXITED
 
     assert attach_events == ["notice"]
     assert published_notices == [(tmp_path / f"proxy-{RUNTIME_ID}.sock", "Codex update available")]
-    assert runner.calls[-1][3:8] == [
+    assert runner.calls[-2][3:8] == [
         "-T",
         RODEX_TMUX_REQUIRED_CLIENT_FEATURES,
         "if-shell",
         "-t",
         "%9",
     ]
-    assert "attach-session" in runner.calls[-1][-2]
-    assert runner.calls[-1][-1] == "run-shell false"
-    assert "$7" in runner.calls[-1][-2]
-    assert "capture_output" not in runner.options[-1]
-    environment = runner.options[-1]["env"]
+    assert "attach-session" in runner.calls[-2][-2]
+    assert runner.calls[-2][-1] == "run-shell false"
+    assert "$7" in runner.calls[-2][-2]
+    assert "capture_output" not in runner.options[-2]
+    environment = runner.options[-2]["env"]
     assert isinstance(environment, dict)
     assert "TMUX" not in environment
     assert environment["VIRTUAL_ENV"] == "/project-xyz/.venv"
@@ -1300,8 +1301,9 @@ def test_attach_uses_stable_runtime_identity_when_alias_wins_before_tmux_attach(
     assert [command[3] for command in runner.calls] == [
         "if-shell",
         "-T",
+        "list-sessions",
     ]
-    assert "$9" in runner.calls[-1][-2]
+    assert "$9" in runner.calls[-2][-2]
 
 
 def test_mouse_uses_stable_runtime_identity_after_name_reuse(
@@ -1369,9 +1371,9 @@ def test_attach_notice_failure_never_blocks_tmux_attachment(
         )
     )
 
-    assert len(runner.calls) == 1
-    assert "attach-session" in runner.calls[-1][-2]
-    assert "$7" in runner.calls[-1][-2]
+    assert len(runner.calls) == 2
+    assert "attach-session" in runner.calls[-2][-2]
+    assert "$7" in runner.calls[-2][-2]
 
 
 def test_tui_notice_delivery_failure_never_blocks_tmux_attachment(
@@ -1407,9 +1409,9 @@ def test_tui_notice_delivery_failure_never_blocks_tmux_attachment(
 
     launcher.attach(runtime)
 
-    assert len(runner.calls) == 1
-    assert "attach-session" in runner.calls[-1][-2]
-    assert "$7" in runner.calls[-1][-2]
+    assert len(runner.calls) == 2
+    assert "attach-session" in runner.calls[-2][-2]
+    assert "$7" in runner.calls[-2][-2]
 
 
 def test_session_exists_checks_the_exact_recorded_tmux_endpoint(tmp_path: Path) -> None:

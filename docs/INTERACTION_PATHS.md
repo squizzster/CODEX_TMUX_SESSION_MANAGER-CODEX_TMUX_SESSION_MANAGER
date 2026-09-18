@@ -7,7 +7,7 @@ Old contracts are rejected.
 ## Authoritative contract
 
 `SessionInteractionPipeline` owns target resolution, validation, ordered content hooks,
-post-hook checks, delivery and bounded content-free outcome records. Each daemon runtime shares one
+post-hook checks, delivery, bounded content-free outcome records and exact outcome subscriptions. Each daemon runtime shares one
 instance between terminal gateway, interceptors, proxy and observer. Exact-turn commands use the same contract inside
 their existing transition lock. The observer renderer uses it in its own process.
 
@@ -70,7 +70,8 @@ connection rather than leaving an RPC silently waiting forever.
 | `failed` | Operation/delivery failed; the error remains visible |
 | `indeterminate` | Acceptance unknown; retain dispatch identity and reconcile before retrying |
 
-No automatic message/model resubmission occurs. Snapshot retries synchronize idempotent
+No automatic message/model resubmission occurs except the typed `serverOverloaded`
+terminal-turn recovery described below. Snapshot retries synchronize idempotent
 latest state, not a FIFO of every message. Outcome-observer failures cannot undo accepted
 work. The record buffer contains metadata, not prompt bodies or another durable chat log.
 
@@ -106,6 +107,7 @@ work. The record buffer contains metadata, not prompt bodies or another durable 
 | Initial prompts and native TUI protocol operations | Native TUI → protocol-input pipeline → App Server |
 | Native terminal output | Readable child PTY → TERMINAL_OUTPUT → continuously updated native projection → selected native/semantic surface + inline compositor → bounded display queue → writable outer PTY |
 | App Server primary output | Protocol-output pipeline → TUI unchanged, then typed presentation/context/observer/event projections; display filtering never rejects execution |
+| Main `turn/completed` failure with `codexErrorInfo: serverOverloaded` | Typed recovery controller → rolling 30–960 second delay → main MESSAGE(true) `Continue...`; terminal-input outcome cancels pending dispatch |
 | Primary TUI requests | Protocol-input pipeline → request correlation → App Server unchanged; correlated `thread/read` responses hydrate bounded typed presentation text |
 | App Server control-client output | Protocol-output pipeline → its exact destination; never enters the primary presentation projection |
 | `_start`, `_steer`, `_interrupt` | Exact selector lock → interaction operation → exact-control adapter → proxy |
@@ -135,6 +137,7 @@ work. The record buffer contains metadata, not prompt bodies or another durable 
 | Startup/overflow SQL catch-up | Durable projection → view → same terminal presentation |
 | Analytics initial/event/retry wake | Scheduler → authenticated reader/analyzer → registry transaction: checkpoint, lineage, trace, statistics, health |
 | Primary disconnect | Reset all lifecycle participants; reducer clears work/identity and advances epoch; close observer; retire connection targets |
+| Capacity-recovery timer | Runtime-owned cancellable deferred call; primary disconnect/runtime close cancels it while retaining the runtime's rolling overload count |
 | Session creation | Managed lifecycle/runtime → server claim, daemon reservation, exact bridge/TTY admission |
 | Registration/rename/rollback | Registry transition and runtime markers → acknowledged daemon supervisor wake; one namespaced rename owner |
 | Attach | Registered capability → interactive tmux attach |

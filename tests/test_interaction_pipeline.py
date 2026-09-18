@@ -104,6 +104,27 @@ def test_hooks_transform_in_order_before_delivery_and_outcome_observers_cannot_u
     assert not hasattr(seen[0], "text")
 
 
+def test_outcome_subscription_observes_shared_pipeline_until_exact_unsubscribe():
+    delivered = []
+    observed = []
+    pipeline = SessionInteractionPipeline()
+    pipeline.register(target_binding("main", delivered))
+    unsubscribe_first = pipeline.subscribe_outcomes(observed.append)
+    unsubscribe_second = pipeline.subscribe_outcomes(observed.append)
+
+    assert pipeline.send_message(target="main", text="first").accepted
+    unsubscribe_first()
+    unsubscribe_first()
+    assert pipeline.send_message(target="main", text="second").accepted
+    unsubscribe_second()
+
+    assert [record.request_id for record in observed] == [
+        pipeline.records[0].request_id,
+        pipeline.records[0].request_id,
+        pipeline.records[1].request_id,
+    ]
+
+
 @pytest.mark.parametrize(
     "changed",
     [

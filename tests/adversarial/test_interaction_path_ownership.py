@@ -81,6 +81,7 @@ EFFECT_OWNERS = {
         "rodex/analytics_analyzer.py:_load_analyzer_bytes:os.write",
         "rodex/codex_update_notice.py:CodexUpdateNotice._write_cached_version:.write",
         "rodex/runtime.py:_record_runtime_path_keepalive_failure:.write",
+        "rodex/runtime.py:_run_runtime_service:.write",
         "rodex/runtime.py:_RuntimeDiagnosticRelay._run:os.write",
         "rodex/runtime.py:_RuntimeDiagnosticRelay.write:.write",
         "rodex/process_receipts.py:RuntimeProcessReceipts.record:os.write",

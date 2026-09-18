@@ -73,6 +73,7 @@ from .protocol_proxy import (
 )
 from .runtime_endpoint import ExclusiveUnixEndpoint
 from .runtime_peer import BoundProcessOwner, RuntimePeerIdentity, require_unix_peer_process, verified_runtime_connection
+from .server_overloaded_recovery import ServerOverloadedRecoveryController
 from .status_bar import context_status_segment
 from .terminal_gateway import TerminalSessionGateway
 from .tmux_executor import SyncTmuxExecutor, TmuxCommandResult
@@ -2507,6 +2508,7 @@ def _run_runtime_service(
     runtime_path_keepalive: _RuntimePathKeepalive | None = None
     diagnostic_relay: _RuntimeDiagnosticRelay | None = None
     agent_observer_controller: AgentObserverCoordinator | None = None
+    server_overloaded_recovery: ServerOverloadedRecoveryController | None = None
     interaction_pipeline = SessionInteractionPipeline()
     presentation_pipeline = SessionPresentationPipeline()
     presentation_policy_interaction = PresentationPolicyInteractionAdapter(
@@ -2521,6 +2523,10 @@ def _run_runtime_service(
         with _open_private_runtime_log(app_server_log_path) as log:
             diagnostic_relay = _RuntimeDiagnosticRelay(log)
             diagnostic_relay.start()
+            server_overloaded_recovery = ServerOverloadedRecoveryController(
+                interaction_pipeline,
+                logger=lambda message: diagnostic_relay.write(f"{message}\n".encode()),
+            )
             app_server = subprocess.Popen(
                 (
                     sys.executable,
@@ -2579,6 +2585,9 @@ def _run_runtime_service(
             ) -> None:
                 presentation_pipeline.observe_protocol_output(event)
                 live_context_observer.observe_protocol_event(event)
+                if server_overloaded_recovery is not None:
+                    with suppress(Exception):
+                        server_overloaded_recovery.observe_protocol_event(event)
                 if agent_observer_controller is not None:
                     with suppress(Exception):
                         agent_observer_controller.observe_protocol_event(event)
@@ -2594,6 +2603,8 @@ def _run_runtime_service(
                 presentation_pipeline.observe_protocol_input(request)
 
             lifecycle_participants = [presentation_pipeline, live_context_observer, live_event_tap]
+            if server_overloaded_recovery is not None:
+                lifecycle_participants.append(server_overloaded_recovery)
             if agent_observer_controller is not None:
                 lifecycle_participants.append(agent_observer_controller)
             primary_connection_lifecycle = PrimaryConnectionLifecycleCoordinator(lifecycle_participants)
@@ -2717,7 +2728,10 @@ def _run_runtime_service(
                             if registered_interaction_context is None:
                                 registered_interaction_context = activated_analytics
                                 assert activated_analytics.codex_session_id is not None
-                                presentation_pipeline.bind_root_thread(str(activated_analytics.codex_session_id))
+                                root_thread_id = str(activated_analytics.codex_session_id)
+                                presentation_pipeline.bind_root_thread(root_thread_id)
+                                if server_overloaded_recovery is not None:
+                                    server_overloaded_recovery.bind_root_thread(root_thread_id)
                                 if agent_observer_controller is not None:
                                     with suppress(Exception):
                                         assert activated_analytics.rodex_sessions_id is not None
@@ -2813,6 +2827,9 @@ def _run_runtime_service(
                         input_presentation.close()
                 with suppress(Exception):
                     presentation_policy_interaction.close()
+                if server_overloaded_recovery is not None:
+                    with suppress(Exception):
+                        server_overloaded_recovery.close()
                 try:
                     if protocol_proxy is not None:
                         protocol_proxy.close()

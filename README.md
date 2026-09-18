@@ -85,6 +85,13 @@ that daemon as a version-derived task name such as `rodexd_v0_14a1` rather than 
 Python process. Existing daemons retain their loaded code, so stop their runtimes and
 daemon after installing a new Rodex version.
 
+When the registered main turn terminates with App Server
+`codexErrorInfo: "serverOverloaded"`, Rodex schedules `Continue...` through the same
+exact model-input pipeline after 30 seconds. Any terminal input cancels that pending
+continuation. Repeated overloads within five minutes double the delay through 60, 120,
+240, 480, and 960 seconds; later repeats remain at 960 seconds. A gap longer than five
+minutes resets the sequence to 30 seconds. This recovery is always active.
+
 ## Commands
 
 ### Session and terminal

@@ -19,6 +19,7 @@ import time
 import tty
 from collections.abc import Callable, Sequence
 from contextlib import suppress
+from threading import Lock
 from typing import BinaryIO
 
 from .input_interceptor_config import InputInterceptorRegistration
@@ -55,7 +56,7 @@ class TerminalSessionGateway:
         registrations: tuple[InputInterceptorRegistration, ...],
         confirm_native_prefix: Callable[[str], bool],
         presentation: PresentationSnapshotSource | None = None,
-        stderr: BinaryIO | None = None,
+        stderr: BinaryIO | int | None = None,
         input_fd: int = 0,
         output_fd: int = 1,
         process_owner: BoundProcessOwner | None = None,
@@ -89,6 +90,9 @@ class TerminalSessionGateway:
         self._presentation = presentation
         self._presentation_revision: int | None = None
         self._unsubscribe_presentation: Callable[[], None] | None = None
+        self._supervisor_lock = Lock()
+        self._supervisor_requests = 0
+        self._consumed_supervisor_requests = 0
         self._confirm_presentation = confirm_native_prefix
         self._interceptor = TerminalInputInterceptor(
             registrations, pipeline, self._native_queue.extend, self._confirm_prefix
@@ -163,6 +167,19 @@ class TerminalSessionGateway:
         self._resize_pending = True
         self._notify_relay()
 
+    def request_supervisor_check(self) -> None:
+        """Wake a blocked relay so its owner can revalidate external state."""
+        with self._supervisor_lock:
+            self._supervisor_requests += 1
+        self._notify_relay()
+
+    def _take_supervisor_check(self) -> bool:
+        with self._supervisor_lock:
+            if self._supervisor_requests == self._consumed_supervisor_requests:
+                return False
+            self._consumed_supervisor_requests = self._supervisor_requests
+            return True
+
     def _apply_resize(self) -> None:
         """Copy the actual pane dimensions; TIOCSWINSZ signals the child foreground group."""
         if self._master >= 0:
@@ -183,15 +200,14 @@ class TerminalSessionGateway:
                 # killpg(0, ...) would signal the host/App Server's own group.
                 os.killpg(foreground_group if foreground_group > 0 else self.process.pid, signum)
 
-    def wait(self, timeout: float | None = None) -> int:
-        """Relay until native exit or the supervisor's next registration check."""
+    def wait(self, timeout: float | None = None) -> int | None:
+        """Relay until native exit, an explicit supervisor event, or a deadline."""
         assert self.process is not None
         deadline = None if timeout is None else time.monotonic() + timeout
         exit_deadline: float | None = None
+        if self._take_supervisor_check():
+            return None
         self._sync_presentation()
-        # The transferred pane does not deliver SIGWINCH to the daemon's runtime
-        # thread. Probe once per supervisor wait, rather than on every I/O event.
-        self._apply_resize()
         while True:
             returncode = self.process.returncode
             now = time.monotonic()
@@ -210,12 +226,17 @@ class TerminalSessionGateway:
                 if incomplete_deadline is not None:
                     wake_deadlines.append(incomplete_deadline)
             relay_timeout = None if not wake_deadlines else max(0.0, min(wake_deadlines) - now)
-            process_exited = self._relay_once(allow_input=returncode is None, timeout=relay_timeout)
+            process_exited = self._relay_once(
+                allow_input=returncode is None,
+                timeout=relay_timeout,
+            )
             if process_exited and self.process.returncode is None:
                 self.process.poll()
             if self._resize_pending:
                 self._apply_resize()
             self._sync_presentation()
+            if self._take_supervisor_check():
+                return None
 
     def _deliver(self, request: InteractionRequest) -> InteractionResult:
         if request.operation == InteractionOperation.DISPLAY_STATE:
@@ -400,7 +421,13 @@ class TerminalSessionGateway:
             for fd, flags in self._saved_flags.items():
                 with suppress(OSError):
                     fcntl.fcntl(fd, fcntl.F_SETFL, flags)
-            for fd in (self._master, self._slave, self._wake_read, self._wake_write, self._process_pidfd):
+            for fd in (
+                self._master,
+                self._slave,
+                self._wake_read,
+                self._wake_write,
+                self._process_pidfd,
+            ):
                 if fd >= 0:
                     with suppress(OSError):
                         os.close(fd)

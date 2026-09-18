@@ -12,11 +12,13 @@ import argparse
 import shlex
 import subprocess
 import sys
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
+from .daemon_client import RODEX_RUNTIME_WAKE_TERMINAL_RESIZE, RodexDaemonClient, RodexDaemonError
 from .status_animation_admission import status_animation_admission_command
 from .tmux_executor import SyncTmuxExecutor, SyncTmuxRunner
 from .tmux_session_capability import (
@@ -92,6 +94,7 @@ def reconcile_sharing_state(
     *,
     python_executable: str = sys.executable,
     runner: SyncTmuxRunner = subprocess.run,
+    runtime_notifier: Callable[[str], None] | None = None,
 ) -> int:
     """CAS changed live counts into exact per-session animation admission."""
     executor = SyncTmuxExecutor(
@@ -134,11 +137,30 @@ def reconcile_sharing_state(
         _require_unique_registered_roster(states)
     except ValueError:
         return 1
+    if runtime_notifier is None:
+
+        def runtime_notifier(runtime_id: str) -> None:
+            _notify_runtime_resize(
+                tmux_server_socket_path.parent,
+                python_executable,
+                runtime_id,
+            )
+
     for state in states:
+        runtime_notifier(str(state.capability.runtime_id))
         reconciled = _reconcile_one(executor, python_executable, tmux_binary, state)
         if reconciled != 0:
             return reconciled
     return 0
+
+
+def _notify_runtime_resize(runtime_root: Path, python_executable: str, runtime_id: str) -> None:
+    """Resize is a hint; exact terminal dimensions remain daemon-validated."""
+    with suppress(OSError, TimeoutError, RodexDaemonError):
+        RodexDaemonClient(runtime_root, python_executable).notify_runtime(
+            runtime_id,
+            RODEX_RUNTIME_WAKE_TERMINAL_RESIZE,
+        )
 
 
 def _parse_sharing_state(

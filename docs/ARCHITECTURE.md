@@ -79,6 +79,10 @@ runtime thread. Caller-owned environment crosses the reservation; tmux-owned val
 only from the admitted bridge process. `TmuxStatusPipeline`
 arbitrates status; animation admission owns capability/generation/lease/token/recovery fences.
 
+The daemon acceptor blocks on its Unix listener and explicit shutdown event; it has no accept timer.
+Runtime supervisors block through their gateways until terminal readiness, child exit, an exact deadline, or explicit
+registration, diagnostic, resize, presentation, or stop wake; owning runtimes revalidate tmux resize hints.
+
 Interactive routes print `Rodex attach [name].` before tmux and `Rodex exited [name].`
 after return. Tmux's exit line is erased first. One daemon-runtime PTY adapts all TUI I/O;
 attachers never create input owners. Its gateway blocks on terminal readiness, an exact

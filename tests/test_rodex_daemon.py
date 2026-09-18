@@ -15,9 +15,10 @@ import pytest
 
 import rodex.daemon as daemon_module
 from rodex.analytics import SharedAnalyticsCoordinator
-from rodex.daemon import DaemonRuntimeManager, RodexDaemonServerError
+from rodex.daemon import RODEX_DAEMON_PROCESS_NAME, DaemonRuntimeManager, RodexDaemonServerError
 from rodex.daemon_client import RodexDaemonClient
 from rodex.process_contracts import AnalyticsRuntimeConfig, RuntimeServiceConfig
+from rodex.process_guard import set_current_linux_task_name
 from rodex.process_receipts import RuntimeProcessReceipts
 from rodex.tmux_session_capability import TmuxRuntimeCapability, runtime_tmux_socket_name
 from rodex_registry import RodexRegistryId, RodexRuntimeId, RodexSessionId
@@ -92,6 +93,35 @@ class RecordingReceipts:
         return None
 
 
+@pytest.mark.parametrize("name", ["", "Rodex_Daemon", "rodex daemon", "rodex-daemon", "r" * 16])
+def test_linux_task_name_contract_rejects_ambiguous_or_truncated_names(name: str) -> None:
+    with pytest.raises(ValueError, match="Linux task name"):
+        set_current_linux_task_name(name)
+
+
+@pytest.mark.parametrize(
+    ("version", "expected"),
+    [
+        ("0.14.0a1", "rodexd_v0_14a1"),
+        ("0.15.0b2", "rodexd_v0_15b2"),
+        ("1.2.3", "rodexd_v1_2_3"),
+        ("0.14.1a1", "rodexd_v0141a1"),
+    ],
+)
+def test_daemon_process_name_follows_release_version(version: str, expected: str) -> None:
+    assert daemon_module._versioned_daemon_process_name(version) == expected
+
+
+@pytest.mark.parametrize("version", ["not-a-version", "999.999.999rc999"])
+def test_daemon_process_name_rejects_invalid_or_truncated_versions(version: str) -> None:
+    with pytest.raises(ValueError, match="daemon task name"):
+        daemon_module._versioned_daemon_process_name(version)
+
+
+def test_current_daemon_process_name_includes_current_release() -> None:
+    assert RODEX_DAEMON_PROCESS_NAME == "rodexd_v0_14a1"
+
+
 def test_server_claims_single_socket_before_constructing_multi_runtime_manager(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -117,6 +147,52 @@ def test_server_claims_single_socket_before_constructing_multi_runtime_manager(
     assert events == ["endpoint-claim"]
 
 
+def test_idle_server_blocks_on_control_event_until_stop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    select_entered = Event()
+    select_timeouts: list[float | None] = []
+    failures: list[BaseException] = []
+    real_select = daemon_module.select.select
+
+    class EmptyManager:
+        def __init__(self, _runtime_root: Path) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+    def observed_select(reads, writes, exceptional, timeout=None):
+        select_timeouts.append(timeout)
+        select_entered.set()
+        return real_select(reads, writes, exceptional, timeout)
+
+    tmp_path.chmod(0o700)
+    server = daemon_module.RodexDaemonServer(tmp_path)
+    monkeypatch.setattr(daemon_module, "DaemonRuntimeManager", EmptyManager)
+    monkeypatch.setattr(daemon_module.select, "select", observed_select)
+
+    def run_server() -> None:
+        try:
+            server.run()
+        except BaseException as error:
+            failures.append(error)
+
+    thread = Thread(target=run_server)
+    thread.start()
+    assert select_entered.wait(1)
+    time.sleep(0.1)
+    assert select_timeouts == [None]
+
+    server.stop()
+    thread.join(timeout=1)
+
+    assert not thread.is_alive()
+    assert failures == []
+    assert select_timeouts == [None]
+
+
 def test_one_manager_owns_two_runtime_socket_sets_and_one_analytics_pipeline(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -124,6 +200,8 @@ def test_one_manager_owns_two_runtime_socket_sets_and_one_analytics_pipeline(
     analytics = RecordingAnalytics()
     receipts = RecordingReceipts()
     services_started: list[str] = []
+    supervisor_wakes: list[str] = []
+    resize_wakes: list[str] = []
     release_services = Event()
 
     def admit(config: RuntimeServiceConfig, _fd: int, *, peer_pid: int):
@@ -145,6 +223,10 @@ def test_one_manager_owns_two_runtime_socket_sets_and_one_analytics_pipeline(
 
     def run_service(config: RuntimeServiceConfig, **callbacks: object) -> int:
         services_started.append(str(config.runtime_id))
+        callbacks["on_terminal_gateway_ready"](  # type: ignore[operator]
+            lambda: supervisor_wakes.append(str(config.runtime_id)),
+            lambda: resize_wakes.append(str(config.runtime_id)),
+        )
         activated = config.analytics.activate(
             rodex_sessions_id=config.runtime_id.value,
             codex_session_id=uuid.UUID(int=config.runtime_id.value),
@@ -189,6 +271,11 @@ def test_one_manager_owns_two_runtime_socket_sets_and_one_analytics_pipeline(
     assert set(services_started) == {str(config.runtime_id) for config in configs}
     assert len(analytics.activated) == 2
     assert len(analytics.events) == 2
+    for config in configs:
+        manager.wake_runtime(str(config.runtime_id), "registration")
+        manager.wake_runtime(str(config.runtime_id), "terminal_resize")
+    assert set(supervisor_wakes) == {str(config.runtime_id) for config in configs}
+    assert set(resize_wakes) == {str(config.runtime_id) for config in configs}
 
     release_services.set()
     manager.close()
@@ -364,6 +451,7 @@ def test_concurrent_first_clients_converge_on_one_private_daemon_socket(tmp_path
         assert failures == []
         assert all(not thread.is_alive() for thread in threads)
         assert len(daemon_pids) == 1
+        assert Path(f"/proc/{daemon_pids[0]}/comm").read_text().strip() == RODEX_DAEMON_PROCESS_NAME
         assert clients[0].socket_path == clients[1].socket_path
         assert clients[0].socket_path.stat().st_mode & 0o777 == 0o600
     finally:

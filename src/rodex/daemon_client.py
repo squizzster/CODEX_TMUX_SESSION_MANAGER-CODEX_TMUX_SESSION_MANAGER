@@ -18,6 +18,9 @@ RODEX_DAEMON_PROTOCOL: Final = "rodex-daemon-v1"
 RODEX_DAEMON_SOCKET_NAME: Final = "rodexd-v1.sock"
 RODEX_DAEMON_LOG_NAME: Final = "rodexd-v1.log"
 RODEX_DAEMON_START_LOCK_NAME: Final = "rodexd-v1.start.lock"
+RODEX_RUNTIME_WAKE_REGISTRATION: Final = "registration"
+RODEX_RUNTIME_WAKE_TERMINAL_RESIZE: Final = "terminal_resize"
+RODEX_RUNTIME_WAKE_CAUSES: Final = frozenset({RODEX_RUNTIME_WAKE_REGISTRATION, RODEX_RUNTIME_WAKE_TERMINAL_RESIZE})
 DAEMON_MESSAGE_LIMIT_BYTES: Final = 1024 * 1024
 DAEMON_START_TIMEOUT_SECONDS: Final = 10.0
 
@@ -151,6 +154,29 @@ class RodexDaemonClient:
                 "runtime_id": runtime_id,
             }
         )
+
+    def notify_runtime(self, runtime_id: str, cause: str) -> bool:
+        """Wake one runtime after an external state transition.
+
+        False means an already-running daemon predates this backwards-compatible
+        protocol extension and still owns its legacy supervisory timer.
+        """
+        if cause not in RODEX_RUNTIME_WAKE_CAUSES:
+            raise ValueError("runtime wake cause is invalid")
+        try:
+            self._request(
+                {
+                    "protocol": RODEX_DAEMON_PROTOCOL,
+                    "operation": "wake_runtime",
+                    "runtime_id": runtime_id,
+                    "cause": cause,
+                }
+            )
+        except RodexDaemonError as error:
+            if str(error) == "unknown daemon operation":
+                return False
+            raise
+        return True
 
     def _probe(self) -> bool:
         try:

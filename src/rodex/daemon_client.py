@@ -12,12 +12,15 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Final
 
+from .implementation_identity import RODEX_IMPLEMENTATION_ID
 from .process_contracts import RuntimeServiceConfig
 
-RODEX_DAEMON_PROTOCOL: Final = "rodex-daemon-v1"
-RODEX_DAEMON_SOCKET_NAME: Final = "rodexd-v1.sock"
-RODEX_DAEMON_LOG_NAME: Final = "rodexd-v1.log"
-RODEX_DAEMON_START_LOCK_NAME: Final = "rodexd-v1.start.lock"
+RODEX_DAEMON_PROTOCOL: Final = "rodex-daemon-v2"
+RODEX_DAEMON_SOCKET_NAME: Final = "rodexd-v2.sock"
+RODEX_DAEMON_LOG_NAME: Final = "rodexd-v2.log"
+RODEX_DAEMON_START_LOCK_NAME: Final = "rodexd-v2.start.lock"
+RODEX_DAEMON_IMPLEMENTATION_FIELD: Final = "implementation_id"
+LEGACY_DAEMON_SOCKET_NAMES: Final = ("rodexd-v1.sock",)
 RODEX_RUNTIME_WAKE_REGISTRATION: Final = "registration"
 RODEX_RUNTIME_WAKE_TERMINAL_RESIZE: Final = "terminal_resize"
 RODEX_RUNTIME_WAKE_CAUSES: Final = frozenset({RODEX_RUNTIME_WAKE_REGISTRATION, RODEX_RUNTIME_WAKE_TERMINAL_RESIZE})
@@ -81,12 +84,13 @@ class RodexDaemonClient:
         self._sleep = sleep
 
     def ensure_running(self) -> None:
-        """Serialize first start and accept only the current daemon protocol."""
+        """Serialize first start and accept only the exact current daemon code."""
         self.runtime_root.mkdir(mode=0o700, parents=True, exist_ok=True)
         lock_path = self.runtime_root / RODEX_DAEMON_START_LOCK_NAME
         descriptor = os.open(lock_path, os.O_CREAT | os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600)
         try:
             fcntl.flock(descriptor, fcntl.LOCK_EX)
+            self._reject_live_legacy_daemon()
             if self._probe():
                 return
             log_path = self.runtime_root / RODEX_DAEMON_LOG_NAME
@@ -181,18 +185,43 @@ class RodexDaemonClient:
     def _probe(self) -> bool:
         try:
             self._request({"protocol": RODEX_DAEMON_PROTOCOL, "operation": "ping"}, timeout_seconds=0.25)
-        except (OSError, RodexDaemonError, TimeoutError):
+        except (OSError, TimeoutError):
             return False
         return True
 
+    def _reject_live_legacy_daemon(self) -> None:
+        for socket_name in LEGACY_DAEMON_SOCKET_NAMES:
+            legacy_path = self.runtime_root / socket_name
+            try:
+                with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+                    connection.settimeout(0.25)
+                    connection.connect(os.fspath(legacy_path))
+            except (FileNotFoundError, ConnectionRefusedError):
+                continue
+            except (OSError, TimeoutError) as error:
+                raise RodexDaemonError(f"could not prove legacy daemon endpoint is inactive: {legacy_path}") from error
+            raise RodexDaemonError(
+                f"legacy Rodex daemon is still running at {legacy_path}; "
+                "stop all old Rodex runtimes and that daemon before starting this release"
+            )
+
     def _request(self, payload: dict[str, object], *, timeout_seconds: float = 5.0) -> dict[str, Any]:
+        if RODEX_DAEMON_IMPLEMENTATION_FIELD in payload:
+            raise ValueError("daemon implementation identity is transport-owned")
+        request = dict(payload)
+        request[RODEX_DAEMON_IMPLEMENTATION_FIELD] = RODEX_IMPLEMENTATION_ID
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
             connection.settimeout(timeout_seconds)
             connection.connect(os.fspath(self.socket_path))
-            connection.sendall(encode_daemon_message(payload))
+            connection.sendall(encode_daemon_message(request))
             response = receive_daemon_message(connection)
         if response.get("protocol") != RODEX_DAEMON_PROTOCOL:
             raise RodexDaemonError("daemon protocol does not match this Rodex generation")
+        if response.get(RODEX_DAEMON_IMPLEMENTATION_FIELD) != RODEX_IMPLEMENTATION_ID:
+            raise RodexDaemonError(
+                "shared Rodex daemon implementation does not match the current code; "
+                "stop all Rodex runtimes and the daemon before starting new sessions"
+            )
         if response.get("ok") is not True:
             detail = response.get("error")
             raise RodexDaemonError(detail if isinstance(detail, str) and detail else "daemon operation failed")

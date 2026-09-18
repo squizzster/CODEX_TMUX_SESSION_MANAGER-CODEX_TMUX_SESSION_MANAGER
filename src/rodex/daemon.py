@@ -21,12 +21,14 @@ from typing import Any, Final
 from .analytics import SharedAnalyticsCoordinator
 from .daemon_client import (
     DAEMON_MESSAGE_LIMIT_BYTES,
+    RODEX_DAEMON_IMPLEMENTATION_FIELD,
     RODEX_DAEMON_PROTOCOL,
     RODEX_RUNTIME_WAKE_REGISTRATION,
     RODEX_RUNTIME_WAKE_TERMINAL_RESIZE,
     daemon_socket_path,
     encode_daemon_message,
 )
+from .implementation_identity import RODEX_IMPLEMENTATION_ID
 from .process_contracts import RuntimeServiceConfig
 from .process_guard import LINUX_TASK_NAME_MAX_BYTES, set_current_linux_task_name
 from .process_receipts import RuntimeProcessReceipts
@@ -386,11 +388,16 @@ class RodexDaemonServer:
             request, descriptors = _receive_request(connection)
             if request.get("protocol") != RODEX_DAEMON_PROTOCOL:
                 raise RodexDaemonServerError("daemon protocol does not match this generation")
+            if request.get(RODEX_DAEMON_IMPLEMENTATION_FIELD) != RODEX_IMPLEMENTATION_ID:
+                raise RodexDaemonServerError("daemon implementation does not match this generation")
             operation = request.get("operation")
             if operation == "ping":
-                _require_fields(request, {"protocol", "operation"})
+                _require_fields(request, {"protocol", "operation", RODEX_DAEMON_IMPLEMENTATION_FIELD})
             elif operation == "reserve":
-                _require_fields(request, {"protocol", "operation", "operation_id", "runtime"})
+                _require_fields(
+                    request,
+                    {"protocol", "operation", RODEX_DAEMON_IMPLEMENTATION_FIELD, "operation_id", "runtime"},
+                )
                 runtime = request.get("runtime")
                 if not isinstance(runtime, dict):
                     raise RodexDaemonServerError("runtime reservation must be an object")
@@ -398,7 +405,14 @@ class RodexDaemonServer:
             elif operation == "await_ready":
                 _require_fields(
                     request,
-                    {"protocol", "operation", "operation_id", "runtime_id", "timeout_seconds"},
+                    {
+                        "protocol",
+                        "operation",
+                        RODEX_DAEMON_IMPLEMENTATION_FIELD,
+                        "operation_id",
+                        "runtime_id",
+                        "timeout_seconds",
+                    },
                 )
                 manager.await_ready(
                     _text(request, "operation_id"),
@@ -406,10 +420,16 @@ class RodexDaemonServer:
                     request.get("timeout_seconds"),
                 )
             elif operation == "stop":
-                _require_fields(request, {"protocol", "operation", "operation_id", "runtime_id"})
+                _require_fields(
+                    request,
+                    {"protocol", "operation", RODEX_DAEMON_IMPLEMENTATION_FIELD, "operation_id", "runtime_id"},
+                )
                 manager.stop_runtime(_text(request, "operation_id"), _text(request, "runtime_id"))
             elif operation == "wake_runtime":
-                _require_fields(request, {"protocol", "operation", "runtime_id", "cause"})
+                _require_fields(
+                    request,
+                    {"protocol", "operation", RODEX_DAEMON_IMPLEMENTATION_FIELD, "runtime_id", "cause"},
+                )
                 manager.wake_runtime(_text(request, "runtime_id"), _text(request, "cause"))
             elif operation == "bind_terminal":
                 _require_fields(
@@ -417,6 +437,7 @@ class RodexDaemonServer:
                     {
                         "protocol",
                         "operation",
+                        RODEX_DAEMON_IMPLEMENTATION_FIELD,
                         "operation_id",
                         "runtime_id",
                         "tmux_server_id",
@@ -516,11 +537,24 @@ def _require_operation_id(operation_id: str) -> None:
 
 
 def _success_response() -> bytes:
-    return encode_daemon_message({"protocol": RODEX_DAEMON_PROTOCOL, "ok": True})
+    return encode_daemon_message(
+        {
+            "protocol": RODEX_DAEMON_PROTOCOL,
+            RODEX_DAEMON_IMPLEMENTATION_FIELD: RODEX_IMPLEMENTATION_ID,
+            "ok": True,
+        }
+    )
 
 
 def _error_response(detail: str) -> bytes:
-    return encode_daemon_message({"protocol": RODEX_DAEMON_PROTOCOL, "ok": False, "error": detail[:4096]})
+    return encode_daemon_message(
+        {
+            "protocol": RODEX_DAEMON_PROTOCOL,
+            RODEX_DAEMON_IMPLEMENTATION_FIELD: RODEX_IMPLEMENTATION_ID,
+            "ok": False,
+            "error": detail[:4096],
+        }
+    )
 
 
 def main() -> int:

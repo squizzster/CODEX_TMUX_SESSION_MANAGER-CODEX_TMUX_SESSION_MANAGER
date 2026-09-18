@@ -313,6 +313,30 @@ def test_exact_start_uses_a_string_request_id_and_returns_both_codex_identities(
     assert protocol.sent[-1]["params"]["clientUserMessageId"] == "rodex:dispatch:test"
 
 
+@pytest.mark.evolutionary_regression
+def test_exact_start_accepts_terminal_system_error_when_direct_input_is_available(tmp_path: Path) -> None:
+    """Capacity failures end in systemError, but App Server still accepts a new turn."""
+    protocol = FakeWebSocket(
+        [
+            *verified_responses(status="systemError"),
+            {"id": "rodex:recovery", "result": {"turn": {"id": "turn-recovered"}}},
+        ]
+    )
+    events = FakeWebSocket(responses=[json.loads(EVENT_STREAM_READY_MESSAGE)])
+    client = CodexControlClient(
+        connector=RoutingConnector(protocol, events),
+        request_id_factory=lambda: "rodex:recovery",
+        dispatch_id_factory=lambda: "rodex:server-overloaded:test",
+    )
+
+    dispatch = client._start_turn(control(tmp_path), "Continue...", revalidate=lambda: None)
+
+    assert dispatch.turn_id == "turn-recovered"
+    assert dispatch.dispatch_id == "rodex:server-overloaded:test"
+    assert protocol.sent[-1]["method"] == "turn/start"
+    assert protocol.sent[-1]["params"]["input"] == [{"type": "text", "text": "Continue..."}]
+
+
 def test_exact_start_refuses_to_steer_an_observed_active_turn(tmp_path: Path) -> None:
     protocol = FakeWebSocket(verified_responses(status="active"))
     events = FakeWebSocket(

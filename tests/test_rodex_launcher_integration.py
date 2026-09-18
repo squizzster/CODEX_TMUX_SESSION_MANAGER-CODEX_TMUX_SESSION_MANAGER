@@ -230,7 +230,7 @@ def test_fresh_detached_launcher_uses_one_daemon_and_no_analytics_process() -> N
         daemon_pid = _wait_for("the shared Rodex daemon", live_daemon)
 
         def runtime_process_receipts() -> tuple[Path, ...] | None:
-            receipts = tuple(runtime_root.glob("rodexd-v1-process-*.json"))
+            receipts = tuple(runtime_root.glob("rodexd-v2-process-*.json"))
             return receipts if len(receipts) == 2 else None
 
         receipts = _wait_for("the exact App Server and TUI process receipts", runtime_process_receipts)
@@ -290,7 +290,7 @@ def test_fresh_detached_launcher_uses_one_daemon_and_no_analytics_process() -> N
         os.write(terminal_master, b"\x03")
 
         def runtime_children_have_exited() -> bool | None:
-            receipts_gone = not tuple(runtime_root.glob("rodexd-v1-process-*.json"))
+            receipts_gone = not tuple(runtime_root.glob("rodexd-v2-process-*.json"))
             daemon_alive = _process_command(daemon_pid) is not None
             return True if receipts_gone and daemon_alive else None
 

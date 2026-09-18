@@ -115,6 +115,34 @@ def test_event_tap_does_not_publish_ready_to_an_unverified_subscriber(tmp_path: 
         tap.close()
 
 
+@pytest.mark.parametrize(
+    ("header", "value"),
+    [
+        ("X-Rodex-Peer-Contract", "rodex-runtime-peer-v4"),
+        ("X-Rodex-Implementation-Id", "0.14.0a2+sha256.different-loaded-code"),
+    ],
+)
+def test_event_tap_rejects_prior_contract_or_different_loaded_implementation(
+    tmp_path: Path,
+    header: str,
+    value: str,
+) -> None:
+    path = tmp_path / "events.sock"
+    headers = TEST_PEER.headers()
+    headers[header] = value
+    tap = CodexProtocolEventTap(path, peer_identity=TEST_PEER)
+    tap.start()
+    try:
+        with (
+            pytest.raises(InvalidHandshake),
+            unix_connect(str(path), uri="ws://localhost/events", additional_headers=headers),
+        ):
+            pytest.fail("prior or different loaded implementation was admitted")
+        assert tap._subscribers == {}
+    finally:
+        tap.close()
+
+
 @pytest.mark.parametrize("operation", ["inspect", "start", "steer", "interrupt"])
 def test_same_opened_connection_must_echo_expected_server_incarnation(tmp_path: Path, operation: str) -> None:
     frames = []

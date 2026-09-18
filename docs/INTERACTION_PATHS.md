@@ -1,6 +1,6 @@
 # Interaction contract and production-path inventory
 
-Rodex 0.14.0a1, ALPHA. SQL generation 20, isolated tmux protocol v4, runtime peer
+Rodex 0.14.0a2, ALPHA. SQL generation 20, isolated tmux protocol v4, runtime peer
 contract v4, daemon protocol v1 and observer schema v3 form the current boundary.
 Old contracts are rejected.
 

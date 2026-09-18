@@ -15,11 +15,13 @@ listener; control endpoints are Unix sockets below a private runtime root.
   if confirmation never arrives. An exact committed/pending pair is recoverable.
 - Runtime roots are real, current-user-owned directories at mode `0700`, below either a
   private parent or root-owned sticky storage. Sockets and logs are mode `0600`.
-- `rodexd-v1.sock` is the single daemon control socket. It accepts bounded current-protocol
-  JSON only from the current uid; a start `flock` prevents duplicate daemon creation.
+- `rodexd-v2.sock` is the single daemon control socket. It accepts bounded current-protocol
+  JSON only from the current uid and exact loaded implementation; a start `flock`
+  prevents duplicate daemon creation.
   The pane bridge may pass exactly one TTY descriptor with `SCM_RIGHTS`, and the daemon
   admits it only after the complete reservation, peer PID, pane and TTY checks succeed.
 - Codex/App Server, proxy, event, and runtime-control traffic uses Unix-domain sockets;
+  every non-native handshake requires runtime-peer v5 and the exact loaded implementation.
   Rodex opens no TCP listener.
 - The mode-`0600` proxy socket accepts a private Rodex update-notice endpoint. It sends
   the validated nonempty notice only to the current primary TUI as a native warning; it

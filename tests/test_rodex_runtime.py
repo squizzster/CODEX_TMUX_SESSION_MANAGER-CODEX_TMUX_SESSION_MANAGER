@@ -444,7 +444,7 @@ class FailingEnvironmentInstallRunner(RuntimeRunner):
 
 class RecordingDaemonClient:
     def __init__(self, runtime_root: Path) -> None:
-        self.socket_path = runtime_root / "rodexd-v1.sock"
+        self.socket_path = runtime_root / "rodexd-v2.sock"
         self.reservations: list[tuple[str, RuntimeServiceConfig]] = []
         self.ready: list[tuple[str, str, float]] = []
         self.stopped: list[tuple[str, str]] = []
@@ -772,7 +772,7 @@ def test_start_directly_hosts_codex_in_tmux_and_returns_its_session_id(
         "rodex.terminal_bridge",
     ]
     joined_host_command = shlex.join(real_host_command)
-    assert f"--daemon-socket {tmp_path / 'rodexd-v1.sock'}" in joined_host_command
+    assert f"--daemon-socket {tmp_path / 'rodexd-v2.sock'}" in joined_host_command
     assert f"--runtime-id {RUNTIME_ID}" in joined_host_command
     assert "--tmux-pane %9" in joined_host_command
     assert "send-keys" not in joined_host_command

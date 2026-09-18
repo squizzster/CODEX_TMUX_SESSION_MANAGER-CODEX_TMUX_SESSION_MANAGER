@@ -35,6 +35,7 @@ EventWriter = Callable[[str], None]
 _FINAL_AGENT_MESSAGE_BYTE_LIMIT = 64 * 1024
 _MUTATION_RESPONSE_TIMEOUT_SECONDS = 5.0
 _CONTROL_RPC_CHAIN_TIMEOUT_SECONDS = 5.0
+_STARTABLE_THREAD_STATUSES = frozenset({"idle", "systemError"})
 
 
 class RodexControlError(RuntimeError):
@@ -254,7 +255,7 @@ class CodexControlClient:
         dispatch_id: str | None = None,
         revalidate: Revalidate,
     ) -> PromptDispatch:
-        """Start only when the verified thread is observed idle."""
+        """Start only when the verified thread has no active turn and accepts input."""
         if not isinstance(prompt, str) or not prompt.strip():
             raise ValueError("prompt must be non-empty")
         resolved_dispatch_id = self._resolve_dispatch_id(dispatch_id)
@@ -278,7 +279,7 @@ class CodexControlClient:
                         deadline=deadline,
                     )
                     state = _thread_state(thread)
-                    if state.status != "idle":
+                    if state.status not in _STARTABLE_THREAD_STATUSES:
                         raise RodexControlError("Codex thread is not idle; use _steer with the exact turn ID")
                     if state.can_accept_direct_input is False:
                         raise RodexControlError("Codex thread does not accept direct input")

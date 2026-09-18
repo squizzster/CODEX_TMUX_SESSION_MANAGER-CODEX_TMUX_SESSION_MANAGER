@@ -16,7 +16,15 @@ import pytest
 import rodex.daemon as daemon_module
 from rodex.analytics import SharedAnalyticsCoordinator
 from rodex.daemon import RODEX_DAEMON_PROCESS_NAME, DaemonRuntimeManager, RodexDaemonServerError
-from rodex.daemon_client import RodexDaemonClient
+from rodex.daemon_client import (
+    RODEX_DAEMON_IMPLEMENTATION_FIELD,
+    RODEX_DAEMON_PROTOCOL,
+    RodexDaemonClient,
+    RodexDaemonError,
+    encode_daemon_message,
+    receive_daemon_message,
+)
+from rodex.implementation_identity import RODEX_IMPLEMENTATION_ID
 from rodex.process_contracts import AnalyticsRuntimeConfig, RuntimeServiceConfig
 from rodex.process_guard import set_current_linux_task_name
 from rodex.process_receipts import RuntimeProcessReceipts
@@ -119,7 +127,7 @@ def test_daemon_process_name_rejects_invalid_or_truncated_versions(version: str)
 
 
 def test_current_daemon_process_name_includes_current_release() -> None:
-    assert RODEX_DAEMON_PROCESS_NAME == "rodexd_v0_14a1"
+    assert RODEX_DAEMON_PROCESS_NAME == "rodexd_v0_14a2"
 
 
 def test_server_claims_single_socket_before_constructing_multi_runtime_manager(
@@ -191,6 +199,62 @@ def test_idle_server_blocks_on_control_event_until_stop(
     assert not thread.is_alive()
     assert failures == []
     assert select_timeouts == [None]
+
+
+@pytest.mark.parametrize(
+    ("request_payload", "expected_error"),
+    [
+        ({"protocol": "rodex-daemon-v1", "operation": "ping"}, "protocol does not match"),
+        ({"protocol": RODEX_DAEMON_PROTOCOL, "operation": "ping"}, "implementation does not match"),
+    ],
+)
+def test_daemon_rejects_prior_protocol_and_missing_implementation_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    request_payload: dict[str, object],
+    expected_error: str,
+) -> None:
+    class EmptyManager:
+        def __init__(self, _runtime_root: Path) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+    server = daemon_module.RodexDaemonServer(tmp_path)
+    monkeypatch.setattr(daemon_module, "DaemonRuntimeManager", EmptyManager)
+    failures: list[BaseException] = []
+
+    def run_server() -> None:
+        try:
+            server.run()
+        except BaseException as error:
+            failures.append(error)
+
+    server_thread = Thread(target=run_server)
+    server_thread.start()
+    socket_path = tmp_path / "rodexd-v2.sock"
+    deadline = time.monotonic() + 1
+    while not socket_path.exists() and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+            connection.connect(str(socket_path))
+            connection.sendall(encode_daemon_message(request_payload))
+            response = receive_daemon_message(connection)
+
+        assert set(response) == {"protocol", RODEX_DAEMON_IMPLEMENTATION_FIELD, "ok", "error"}
+        assert response["protocol"] == RODEX_DAEMON_PROTOCOL
+        assert response[RODEX_DAEMON_IMPLEMENTATION_FIELD] == RODEX_IMPLEMENTATION_ID
+        assert response["ok"] is False
+        assert expected_error in response["error"]
+    finally:
+        server.stop()
+        server_thread.join(timeout=1)
+
+    assert not server_thread.is_alive()
+    assert failures == []
 
 
 def test_one_manager_owns_two_runtime_socket_sets_and_one_analytics_pipeline(
@@ -326,7 +390,7 @@ def test_process_receipt_reconciliation_terminates_exact_orphan_group(tmp_path: 
     process.wait(timeout=3)
 
     assert process.returncode == -15
-    assert list(tmp_path.glob("rodexd-v1-process-*.json")) == []
+    assert list(tmp_path.glob("rodexd-v2-process-*.json")) == []
 
 
 def test_process_receipt_reconciliation_escalates_for_a_surviving_group_child(tmp_path: Path) -> None:
@@ -370,7 +434,7 @@ time.sleep(30)
     except FileNotFoundError:
         child_state = "gone"
     assert child_state in {"gone", "Z"}
-    assert list(tmp_path.glob("rodexd-v1-process-*.json")) == []
+    assert list(tmp_path.glob("rodexd-v2-process-*.json")) == []
 
 
 def test_process_guard_rejects_a_parent_identity_that_already_changed() -> None:
@@ -458,3 +522,73 @@ def test_concurrent_first_clients_converge_on_one_private_daemon_socket(tmp_path
         for pid in daemon_pids:
             with suppress(ProcessLookupError):
                 os.kill(pid, signal.SIGTERM)
+
+
+def test_current_client_rejects_a_live_legacy_daemon_without_spawning_alongside_it(tmp_path: Path) -> None:
+    legacy_path = tmp_path / "rodexd-v1.sock"
+    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    listener.bind(str(legacy_path))
+    listener.listen()
+    accepted = Event()
+
+    def accept_once() -> None:
+        connection, _address = listener.accept()
+        accepted.set()
+        connection.close()
+
+    server = Thread(target=accept_once)
+    server.start()
+    spawns: list[object] = []
+    client = RodexDaemonClient(
+        tmp_path,
+        sys.executable,
+        process_spawner=lambda *_args, **_kwargs: spawns.append(object()),  # type: ignore[arg-type]
+    )
+    try:
+        with pytest.raises(RodexDaemonError, match="legacy Rodex daemon is still running"):
+            client.ensure_running()
+        assert accepted.wait(1)
+        assert spawns == []
+    finally:
+        listener.close()
+        server.join(timeout=1)
+
+
+def test_current_client_rejects_same_protocol_daemon_with_different_loaded_code(tmp_path: Path) -> None:
+    socket_path = tmp_path / "rodexd-v2.sock"
+    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    listener.bind(str(socket_path))
+    listener.listen()
+
+    def respond_once() -> None:
+        connection, _address = listener.accept()
+        try:
+            request = receive_daemon_message(connection)
+            assert request[RODEX_DAEMON_IMPLEMENTATION_FIELD] == RODEX_IMPLEMENTATION_ID
+            connection.sendall(
+                encode_daemon_message(
+                    {
+                        "protocol": RODEX_DAEMON_PROTOCOL,
+                        RODEX_DAEMON_IMPLEMENTATION_FIELD: "different-loaded-code",
+                        "ok": True,
+                    }
+                )
+            )
+        finally:
+            connection.close()
+
+    server = Thread(target=respond_once)
+    server.start()
+    spawns: list[object] = []
+    client = RodexDaemonClient(
+        tmp_path,
+        sys.executable,
+        process_spawner=lambda *_args, **_kwargs: spawns.append(object()),  # type: ignore[arg-type]
+    )
+    try:
+        with pytest.raises(RodexDaemonError, match="implementation does not match"):
+            client.ensure_running()
+        assert spawns == []
+    finally:
+        listener.close()
+        server.join(timeout=1)

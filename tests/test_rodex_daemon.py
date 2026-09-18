@@ -99,6 +99,29 @@ def test_linux_task_name_contract_rejects_ambiguous_or_truncated_names(name: str
         set_current_linux_task_name(name)
 
 
+@pytest.mark.parametrize(
+    ("version", "expected"),
+    [
+        ("0.14.0a1", "rodexd_v0_14a1"),
+        ("0.15.0b2", "rodexd_v0_15b2"),
+        ("1.2.3", "rodexd_v1_2_3"),
+        ("0.14.1a1", "rodexd_v0141a1"),
+    ],
+)
+def test_daemon_process_name_follows_release_version(version: str, expected: str) -> None:
+    assert daemon_module._versioned_daemon_process_name(version) == expected
+
+
+@pytest.mark.parametrize("version", ["not-a-version", "999.999.999rc999"])
+def test_daemon_process_name_rejects_invalid_or_truncated_versions(version: str) -> None:
+    with pytest.raises(ValueError, match="daemon task name"):
+        daemon_module._versioned_daemon_process_name(version)
+
+
+def test_current_daemon_process_name_includes_current_release() -> None:
+    assert RODEX_DAEMON_PROCESS_NAME == "rodexd_v0_14a1"
+
+
 def test_server_claims_single_socket_before_constructing_multi_runtime_manager(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

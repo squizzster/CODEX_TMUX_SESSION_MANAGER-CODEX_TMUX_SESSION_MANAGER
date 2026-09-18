@@ -28,14 +28,47 @@ from .daemon_client import (
     encode_daemon_message,
 )
 from .process_contracts import RuntimeServiceConfig
-from .process_guard import set_current_linux_task_name
+from .process_guard import LINUX_TASK_NAME_MAX_BYTES, set_current_linux_task_name
 from .process_receipts import RuntimeProcessReceipts
 from .runtime import admit_runtime_terminal_fd, run_runtime_service
 from .runtime_endpoint import ExclusiveUnixEndpoint
 from .tmux_session_capability import runtime_tmux_socket_name
+from .version import RODEX_VERSION
 
 _OPERATION_ID: Final = re.compile(r"[0-9a-f]{32}")
-RODEX_DAEMON_PROCESS_NAME: Final = "rodex_daemon"
+_RODEX_RELEASE_VERSION: Final = re.compile(
+    r"(?P<major>0|[1-9][0-9]*)\.(?P<minor>0|[1-9][0-9]*)\.(?P<patch>0|[1-9][0-9]*)"
+    r"(?:(?P<prerelease>a|b|rc)(?P<prerelease_number>0|[1-9][0-9]*))?"
+)
+
+
+def _versioned_daemon_process_name(version: str) -> str:
+    """Build a readable, untruncated Linux task name from a Rodex release."""
+    match = _RODEX_RELEASE_VERSION.fullmatch(version)
+    if match is None:
+        raise ValueError(f"Rodex version cannot form a Linux daemon task name: {version!r}")
+
+    major = match["major"]
+    minor = match["minor"]
+    patch = match["patch"]
+    prerelease = match["prerelease"] or ""
+    prerelease_number = match["prerelease_number"] or ""
+    prerelease_suffix = f"{prerelease}{prerelease_number}"
+    readable_release = f"{major}_{minor}"
+    if patch != "0" or not prerelease:
+        readable_release += f"_{patch}"
+
+    candidates = (
+        f"rodexd_v{readable_release}{prerelease_suffix}",
+        f"rodexd_v{major}{minor}{patch}{prerelease_suffix}",
+    )
+    for candidate in candidates:
+        if len(candidate.encode("ascii")) <= LINUX_TASK_NAME_MAX_BYTES:
+            return candidate
+    raise ValueError(f"Rodex version {version!r} cannot fit a {LINUX_TASK_NAME_MAX_BYTES}-byte Linux daemon task name")
+
+
+RODEX_DAEMON_PROCESS_NAME: Final = _versioned_daemon_process_name(RODEX_VERSION)
 
 
 class RodexDaemonServerError(RuntimeError):

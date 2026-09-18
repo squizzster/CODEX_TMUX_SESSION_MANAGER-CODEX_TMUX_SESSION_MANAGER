@@ -431,8 +431,11 @@ Codex, tmux, or analyzer processes.
 
 - Every interactive create, resume, recovery, relocation, and reattach prints
   `Rodex attach [display-name].` before entering the ordinary Codex TUI and
-  `Rodex exited [display-name].` after the tmux client returns successfully. Internal
-  Rodex/Codex identities and route-specific wording do not enter this human lifecycle.
+  adopts the full process title `rodex_<display_name>` with hyphens represented as
+  underscores. After the tmux client returns, Rodex prints
+  `Rodex detach [display-name].` if the runtime remains live or
+  `Rodex exited [display-name].` if it ended. Internal Rodex/Codex identities and
+  route-specific wording do not enter this human lifecycle.
   Tmux's mandatory client-exit line is erased in place before the completion message;
   the native TUI remains the sole editor and protocol owner while the daemon's one PTY
   gateway transports its keyboard input and rendered output.

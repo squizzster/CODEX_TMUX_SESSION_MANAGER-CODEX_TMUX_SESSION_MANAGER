@@ -38,6 +38,7 @@ from rodex.runtime import (
     CurrentTmuxPaneContext,
     LiveRodexRuntime,
     LiveTmuxSession,
+    RodexAttachmentOutcome,
     RodexCodexSessionNotFoundError,
     RodexRuntimeError,
     TmuxScrollbackSnapshot,
@@ -117,6 +118,7 @@ class StubLauncher:
         self.mouse_targets: list[LiveTmuxSession] = []
         self.current_tmux_session = LiveTmuxSession(tmp_path / "tmux.sock", "automatic-beluga")
         self.attached_client_count = 1
+        self.attachment_outcome = RodexAttachmentOutcome.EXITED
         self.tmp_path = tmp_path
 
     def codex_session_is_persisted(self, codex_session_id: uuid.UUID) -> bool:
@@ -163,8 +165,9 @@ class StubLauncher:
     def refresh_shared_tmux_coordination(self, runtime: LiveTmuxSession) -> None:
         self.refreshed_hooks.append(runtime)
 
-    def attach(self, runtime: LiveTmuxSession) -> None:
+    def attach(self, runtime: LiveTmuxSession) -> RodexAttachmentOutcome:
         self.attached.append(runtime)
+        return self.attachment_outcome
 
     def capture_scrollback(self, runtime: LiveTmuxSession) -> tuple[str, ...]:
         self.scrollback_captures.append(runtime)
@@ -2082,6 +2085,36 @@ def test_failed_attach_does_not_claim_that_rodex_exited_cleanly(
         run([], database_path=database, launcher=launcher)  # type: ignore[arg-type]
 
     assert capsys.readouterr().out == "Rodex attach [automatic-beluga].\n"
+
+
+def test_detached_client_reports_detach_and_uses_the_complete_session_process_title(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import setproctitle
+
+    class TitleRecordingLauncher(StubLauncher):
+        def __init__(self, root: Path) -> None:
+            super().__init__(root)
+            self.process_title_at_attach: str | None = None
+            self.attachment_outcome = RodexAttachmentOutcome.DETACHED
+
+        def attach(self, runtime: LiveTmuxSession) -> RodexAttachmentOutcome:
+            self.process_title_at_attach = setproctitle.getproctitle()
+            return super().attach(runtime)
+
+    database = tmp_path / "rodex.sqlite3"
+    launcher = TitleRecordingLauncher(tmp_path)
+    original_process_title = setproctitle.getproctitle()
+    monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
+    monkeypatch.setattr("cool_name.functions.coolname.generate_slug", lambda _word_count: "cyan-mackerel")
+
+    assert run([], database_path=database, launcher=launcher) == 0  # type: ignore[arg-type]
+
+    assert launcher.process_title_at_attach == "rodex_cyan_mackerel"
+    assert setproctitle.getproctitle() == original_process_title
+    assert capsys.readouterr().out == "Rodex attach [cyan-mackerel].\nRodex detach [cyan-mackerel].\n"
 
 
 @pytest.mark.parametrize(

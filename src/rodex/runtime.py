@@ -15,6 +15,7 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import ExitStack, suppress
 from dataclasses import asdict, dataclass, field, replace
+from enum import StrEnum
 from pathlib import Path
 from threading import Event, Lock, Thread
 from typing import Any, BinaryIO, Final
@@ -154,6 +155,13 @@ class RodexRuntimeError(RuntimeError):
 
 class RodexCodexSessionNotFoundError(RodexRuntimeError):
     """Codex explicitly reported that an exact requested identity is not saved."""
+
+
+class RodexAttachmentOutcome(StrEnum):
+    """Why control returned from one interactive tmux attachment."""
+
+    DETACHED = "detach"
+    EXITED = "exited"
 
 
 class _RuntimeDiagnosticRelay:
@@ -1804,8 +1812,8 @@ class RodexRuntimeLauncher:
         except ValueError as error:
             raise RodexRuntimeError("shared tmux global environment is malformed") from error
 
-    def attach(self, runtime: LiveTmuxSession) -> None:
-        """Attach the calling terminal to the live Rodex tmux session."""
+    def attach(self, runtime: LiveTmuxSession) -> RodexAttachmentOutcome:
+        """Attach the terminal and report whether its runtime remains live."""
         capability = self._resolve_registered_tmux_capability(runtime)
         notice: str | None = None
         if self._attach_notice is not None:
@@ -1836,6 +1844,7 @@ class RodexRuntimeLauncher:
             environment=environment,
         )
         _erase_native_tmux_exit_message()
+        return RodexAttachmentOutcome.DETACHED if self.session_exists(runtime) else RodexAttachmentOutcome.EXITED
 
     def _stable_tmux_session_target(self, runtime: LiveTmuxSession) -> str:
         target = self._lookup_tmux_session_target(runtime)

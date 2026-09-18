@@ -3,12 +3,20 @@ from __future__ import annotations
 import pytest
 
 from rodex.human_messages import rodex_session_message
+from rodex.process_title import rodex_session_process_title, session_process_title
 from rodex.statistics_commands import _print_human_statistics
 
 
 def test_session_message_uses_action_name_and_terminal_punctuation() -> None:
     assert rodex_session_message("attach", "puzzling-dogfish") == "Rodex attach [puzzling-dogfish]."
     assert rodex_session_message("mouse", "puzzling-dogfish", detail="on") == "Rodex mouse [puzzling-dogfish]: on."
+
+
+def test_attached_session_process_title_keeps_the_complete_cool_name() -> None:
+    assert session_process_title("cyan-mackerel") == "rodex_cyan_mackerel"
+
+    with rodex_session_process_title("cyan-mackerel") as title:
+        assert title == "rodex_cyan_mackerel"
 
 
 def test_human_statistics_header_uses_the_session_message_contract(

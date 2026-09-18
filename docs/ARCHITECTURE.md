@@ -83,8 +83,10 @@ The daemon acceptor blocks on its Unix listener and explicit shutdown event; it 
 Runtime supervisors block through their gateways until terminal readiness, child exit, an exact deadline, or explicit
 registration, diagnostic, resize, presentation, or stop wake; owning runtimes revalidate tmux resize hints.
 
-Interactive routes print `Rodex attach [name].` before tmux and `Rodex exited [name].`
-after return. Tmux's exit line is erased first. One daemon-runtime PTY adapts all TUI I/O;
+Interactive routes expose the attached client as `rodex_<display_name>`, print
+`Rodex attach [name].` before tmux, then classify the observed runtime after return:
+`Rodex detach [name].` while it remains live or `Rodex exited [name].` after it ends.
+Tmux's exit line is erased first. One daemon-runtime PTY adapts all TUI I/O;
 attachers never create input owners. Its gateway blocks on terminal readiness, an exact
 child `pidfd`, input-frame deadlines and wake-only state notifications; idle sessions do
 not run a fixed relay poll. Interception config owns live/Enter expressions, menus and

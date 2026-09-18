@@ -11,6 +11,7 @@ import json
 import uuid
 from collections import deque
 from collections.abc import Callable
+from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from threading import RLock
@@ -110,6 +111,7 @@ class InteractionTarget:
 
 MessageHook = Callable[[InteractionRequest], InteractionRequest]
 OutcomeObserver = Callable[[InteractionRecord], None]
+OutcomeUnsubscriber = Callable[[], None]
 
 
 class SessionInteractionPipeline:
@@ -122,10 +124,27 @@ class SessionInteractionPipeline:
         outcome_observers: tuple[OutcomeObserver, ...] = (),
     ) -> None:
         self._hooks = tuple(hooks)
-        self._outcome_observers = tuple(outcome_observers)
+        self._outcome_observers = list(outcome_observers)
         self._targets: dict[str, InteractionTarget] = {}
         self._registry_lock = RLock()
         self._records: deque[InteractionRecord] = deque(maxlen=256)
+
+    def subscribe_outcomes(self, observer: OutcomeObserver) -> OutcomeUnsubscriber:
+        """Observe content-free outcomes until the returned exact subscription is closed."""
+        if not callable(observer):
+            raise TypeError("interaction outcome observer must be callable")
+
+        def subscribed_observer(record: InteractionRecord) -> None:
+            observer(record)
+
+        with self._registry_lock:
+            self._outcome_observers.append(subscribed_observer)
+
+        def unsubscribe() -> None:
+            with self._registry_lock, suppress(ValueError):
+                self._outcome_observers.remove(subscribed_observer)
+
+        return unsubscribe
 
     def register(self, target: InteractionTarget) -> None:
         if not target.name or not target.runtime_identity:
@@ -323,7 +342,8 @@ class SessionInteractionPipeline:
         )
         with self._registry_lock:
             self._records.append(record)
-        for observer in self._outcome_observers:
+            observers = tuple(self._outcome_observers)
+        for observer in observers:
             try:
                 observer(record)
             except Exception:

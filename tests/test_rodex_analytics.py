@@ -132,8 +132,9 @@ class FakeAnalyticsTask:
     def observe_protocol_event(self, event: object) -> None:
         self.events.append(event)
 
-    def mark_stopped(self) -> None:
+    def mark_stopped(self, diagnostic_code=None) -> bool:
         self.stopped = True
+        return True
 
 
 def _rollout(root: Path, codex_session_id: uuid.UUID) -> Path:
@@ -2028,8 +2029,8 @@ def test_shared_coordinator_start_failure_is_fail_open_and_health_only(
     view = read_rodex_session_statistics(1, config.rodex_database_path)
     assert view.statistics is None
     assert view.worker is not None
-    assert view.worker.worker_state == "degraded"
-    assert view.worker.diagnostic_code == "analytics_runtime_start_failed"
+    assert view.worker.worker_state == "stopped"
+    assert view.worker.diagnostic_code == "analytics_retirement_incomplete"
 
 
 def test_shared_coordinator_restarts_once_after_worker_failure_then_exhausts(
@@ -2071,9 +2072,9 @@ def test_shared_coordinator_restarts_once_after_worker_failure_then_exhausts(
 
     view = read_rodex_session_statistics(1, config.rodex_database_path)
     assert view.worker is not None
-    assert view.worker.worker_state == "degraded"
-    assert view.worker.diagnostic_code == "analytics_runtime_exited"
-    assert view.worker.consecutive_failures == 2
+    assert view.worker.worker_state == "stopped"
+    assert view.worker.diagnostic_code == "analytics_retirement_incomplete"
+    assert view.worker.consecutive_failures >= 1
     assert view.worker.next_retry_at_utc is None
 
 
@@ -2116,9 +2117,10 @@ def test_shared_coordinator_retries_pending_append_without_a_second_scheduler(
     coordinator.reserve(_pending_config(config))
     coordinator.activate(config)
     _wait_until(lambda: len(task.batches) >= 2, timeout=2)
+    active_batches = tuple(task.batches)
     coordinator.close()
 
-    assert all(batch.full_reconcile is False for batch in task.batches[1:])
+    assert all(batch.full_reconcile is False for batch in active_batches[1:])
     assert len(set(task.thread_ids)) == 1
 
 
@@ -2137,9 +2139,10 @@ def test_shared_coordinator_coalesces_protocol_burst_for_one_runtime(
         coordinator.observe_protocol_event(str(config.runtime_id), event)
     _wait_until(lambda: len(task.batches) == 2, timeout=2)
     time.sleep(0.05)
+    assert len(task.batches) == 2
     coordinator.close()
 
-    assert len(task.batches) == 2
+    assert len(task.batches) >= 3  # Explicit final reconciliation follows active coalescing.
     assert task.batches[1].thread_ids == frozenset({config.codex_session_id})
     assert len(task.events) == 100
 

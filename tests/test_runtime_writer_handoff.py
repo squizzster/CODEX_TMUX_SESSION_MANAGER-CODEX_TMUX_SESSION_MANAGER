@@ -3,12 +3,10 @@ from __future__ import annotations
 import json
 import os
 import shutil
-import signal
 import subprocess
 import sys
 import time
 import uuid
-from contextlib import suppress
 from dataclasses import replace
 from pathlib import Path
 from threading import Event
@@ -18,6 +16,7 @@ from test_managed_startup import (
     RodexTerminalClient,
     _require_startup_prerequisite,
     _retained_standalone_codex_thread,
+    _stop_fixture_daemon,
 )
 from test_rodex_runtime import RUNTIME_ID, _create_socket_path, _mock_terminal_gateway
 
@@ -28,27 +27,6 @@ from rodex_registry import RodexRegistryId, RodexSessionId
 
 THREAD_ID = uuid.UUID("01a00654-f2bc-7a30-834a-a5f886a65f82")
 CONFLICT = f"thread-store conflict: thread {THREAD_ID} already has an active writer\n"
-
-
-def _stop_fixture_daemon(runtime_root: Path) -> None:
-    matching: list[int] = []
-    encoded_root = os.fsencode(runtime_root)
-    for process_path in Path("/proc").glob("[0-9]*"):
-        try:
-            command = (process_path / "cmdline").read_bytes().split(b"\0")
-        except OSError:
-            continue
-        if b"rodex.daemon" in command and encoded_root in command:
-            matching.append(int(process_path.name))
-    for pid in matching:
-        with suppress(ProcessLookupError):
-            os.kill(pid, signal.SIGTERM)
-    deadline = time.monotonic() + 5
-    while matching and time.monotonic() < deadline:
-        matching = [pid for pid in matching if Path(f"/proc/{pid}").exists()]
-        if matching:
-            time.sleep(0.02)
-    assert matching == []
 
 
 @pytest.mark.parametrize(
@@ -191,6 +169,7 @@ def test_host_retires_only_exact_unregistered_writer_conflicts_within_its_retry_
     )
     result = runtime_module.run_runtime_service(
         RuntimeServiceConfig(
+            workspace=tmp_path,
             codex_binary="/usr/bin/codex",
             app_server_socket_path=app_socket,
             app_server_log_path=tmp_path / "app.log",

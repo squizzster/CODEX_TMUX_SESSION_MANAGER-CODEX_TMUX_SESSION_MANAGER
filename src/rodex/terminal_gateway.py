@@ -19,7 +19,8 @@ import time
 import tty
 from collections.abc import Callable, Sequence
 from contextlib import suppress
-from threading import Lock
+from pathlib import Path
+from threading import Lock, RLock
 from typing import BinaryIO
 
 from .input_interceptor_config import InputInterceptorRegistration
@@ -51,6 +52,7 @@ class TerminalSessionGateway:
         command: Sequence[str],
         *,
         env: dict[str, str],
+        cwd: Path,
         pipeline: SessionInteractionPipeline,
         runtime_identity: str,
         registrations: tuple[InputInterceptorRegistration, ...],
@@ -71,6 +73,7 @@ class TerminalSessionGateway:
         self._slave = -1
         self._wake_read = -1
         self._wake_write = -1
+        self._wake_lock = RLock()
         self._process_pidfd = -1
         self._closed = False
         self._native_eof = False
@@ -144,6 +147,7 @@ class TerminalSessionGateway:
                     stdout=self._slave,
                     stderr=self._slave if stderr is None else stderr,
                     env=env,
+                    cwd=cwd,
                     start_new_session=True,
                     pass_fds=(gate_read,),
                 )
@@ -333,11 +337,10 @@ class TerminalSessionGateway:
 
     def _notify_relay(self) -> None:
         """Wake a blocked relay; repeated hints safely coalesce in the non-blocking pipe."""
-        wake_write = getattr(self, "_wake_write", -1)
-        if wake_write < 0:
-            return
-        with suppress(BlockingIOError, OSError):
-            os.write(wake_write, b"1")
+        with self._wake_lock:
+            if self._wake_write >= 0:
+                with suppress(BlockingIOError, OSError):
+                    os.write(self._wake_write, b"1")
 
     def _drain_relay_wake(self) -> None:
         while True:
@@ -424,13 +427,17 @@ class TerminalSessionGateway:
             for fd in (
                 self._master,
                 self._slave,
-                self._wake_read,
-                self._wake_write,
                 self._process_pidfd,
             ):
                 if fd >= 0:
                     with suppress(OSError):
                         os.close(fd)
+            with self._wake_lock:
+                for fd in (self._wake_read, self._wake_write):
+                    if fd >= 0:
+                        with suppress(OSError):
+                            os.close(fd)
+                self._wake_read = self._wake_write = -1
             if self._close_outer_fds:
                 for fd in {self._input_fd, self._output_fd}:
                     with suppress(OSError):

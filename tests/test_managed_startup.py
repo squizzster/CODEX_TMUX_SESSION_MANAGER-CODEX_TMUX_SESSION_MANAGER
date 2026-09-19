@@ -27,7 +27,9 @@ from pathlib import Path
 import pytest
 from websockets.sync.client import unix_connect
 
+from rodex.analytics import ANALYTICS_CLOSE_WAIT_SECONDS
 from rodex.app_server_contract import CODEX_APP_SERVER, AppServerClientInfo
+from rodex.daemon import SHUTDOWN_WAIT_SECONDS
 from rodex.interaction_pipeline import DeliveryStatus, InteractionOperation, InteractionRequest
 from rodex.interaction_transport import publish_session_interaction
 from rodex.runtime_peer import RuntimePeerIdentity
@@ -48,7 +50,7 @@ def _stop_fixture_daemon(runtime_root: Path) -> None:
     for pid in matching:
         with suppress(ProcessLookupError):
             os.kill(pid, signal.SIGTERM)
-    deadline = time.monotonic() + 5
+    deadline = time.monotonic() + SHUTDOWN_WAIT_SECONDS + ANALYTICS_CLOSE_WAIT_SECONDS + 3
     while matching and time.monotonic() < deadline:
         matching = [pid for pid in matching if Path(f"/proc/{pid}").exists()]
         if matching:
@@ -101,7 +103,16 @@ class RodexTerminalClient:
             if match is not None and self.exit_code is None:
                 return match.group(1).decode()
             assert self.exit_code is None, self.output.decode(errors="replace")
-        pytest.fail(f"Rodex never attached:\n{self.output.decode(errors='replace')}")
+        panes = []
+        for endpoint in Path(self.environment["RODEX_RUNTIME_DIR"]).glob(RODEX_TMUX_SOCKET_PATTERN):
+            captured = subprocess.run(
+                [self.environment["RODEX_TMUX_BINARY"], "-N", "-S", str(endpoint), "capture-pane", "-p"],
+                capture_output=True,
+                text=True,
+                timeout=3,
+            )
+            panes.append(captured.stdout + captured.stderr)
+        pytest.fail(f"Rodex never attached:\n{self.output.decode(errors='replace')}\nFixture panes: {panes}")
 
     def detach(self) -> None:
         os.write(self.terminal, b"\x04")
@@ -355,9 +366,14 @@ def test_installed_rodex_starts_reuses_and_adopts_sessions(
         await_surface(capture, "RODEX LIGHT", absent=True)
 
     def exercise_client(
-        command: list[str], *, expected_codex_id: str | None = None, exercise_inputs: bool = False
+        command: list[str],
+        *,
+        expected_codex_id: str | None = None,
+        exercise_inputs: bool = False,
+        workspace: Path = project,
+        expected_cwd: Path | None = None,
     ) -> tuple[str, str]:
-        with RodexTerminalClient(command, environment, project) as client:
+        with RodexTerminalClient(command, environment, workspace) as client:
             name = client.wait_for_attach()
             deadline = time.monotonic() + 10
             while time.monotonic() < deadline:
@@ -379,7 +395,7 @@ def test_installed_rodex_starts_reuses_and_adopts_sessions(
             assert envelope["schema_version"] == 4
             assert envelope["ok"] is True
             assert envelope["data"]["thread"]["status"] == "idle"
-            assert envelope["data"]["thread"]["cwd"] == str(project)
+            assert envelope["data"]["thread"]["cwd"] == str(expected_cwd or workspace)
             assert envelope["data"]["thread"]["can_accept_direct_input"] is not False
             assert envelope["codex"]["turn_id"] is None
             inspected_codex_ids[name] = envelope["codex"]["session_id"]
@@ -395,6 +411,11 @@ def test_installed_rodex_starts_reuses_and_adopts_sessions(
                 pytest.fail(f"Codex TUI did not render for {name}: {pane.stdout}")
             runtime_id = envelope["runtime"]["runtime_id"]
             assert runtime_id
+            if expected_cwd is None:
+                for kind in ("app-server", "native-tui"):
+                    receipt_path = runtime_root / f"rodexd-v2-process-{runtime_id}-{kind}.json"
+                    receipt = json.loads(receipt_path.read_text())
+                    assert Path(f"/proc/{receipt['pid']}/cwd").resolve() == workspace.resolve()
             endpoint = tmux("display-message", "-p", "-t", f"={name}:", "#{@rodex_protocol_proxy_socket_path}")
             assert endpoint.returncode == 0 and endpoint.stdout.strip()
             notice = f"Rodex pipeline display check {runtime_id}"
@@ -436,6 +457,19 @@ def test_installed_rodex_starts_reuses_and_adopts_sessions(
             source = installed_codex_home / filename
             if source.is_file():
                 shutil.copy2(source, isolated_codex_home / filename)
+        second_workspace = isolated / "project-b"
+        relative_workspace = second_workspace / "nested"
+        absolute_workspace = isolated / "absolute-project"
+        for workspace in (second_workspace, relative_workspace, absolute_workspace):
+            workspace.mkdir(parents=True, exist_ok=True)
+        # Explicit native --cd prompts for trust before publishing a thread.
+        # Trust only these new empty fixture directories in the isolated home.
+        config_path = isolated_codex_home / "config.toml"
+        trusted = "".join(
+            f"\n[projects.{json.dumps(str(workspace))}]\ntrust_level = 'trusted'\n"
+            for workspace in (second_workspace, relative_workspace, absolute_workspace)
+        )
+        config_path.write_text((config_path.read_text() if config_path.exists() else "") + trusted)
         login = subprocess.run([codex, "login", "status"], env=environment, capture_output=True, text=True, timeout=10)
         _require_startup_prerequisite(request, login.returncode == 0, "An authenticated Codex CLI is required")
         # The first host deliberately starts through python; the installed shim's
@@ -446,10 +480,20 @@ def test_installed_rodex_starts_reuses_and_adopts_sessions(
         assert exercise_client([str(installed_shim), first[0]]) == first
         assert exercise_client([str(installed_shim), "resume", first[0]]) == first
         assert exercise_client([str(installed_shim), "resume", inspected_codex_ids[first[0]]]) == first
-        second = exercise_client([str(installed_shim)])
+        second = exercise_client([str(installed_shim)], workspace=second_workspace)
         assert second[0] != first[0]
         assert second[1] != first[1]
         assert len(tmux("list-sessions").stdout.splitlines()) == 2
+        relative = exercise_client(
+            [str(installed_shim), "--cd", "nested"], workspace=second_workspace, expected_cwd=relative_workspace
+        )
+        stop_fixture_session(relative[0])
+        absolute = exercise_client(
+            [str(installed_shim), "--cd", str(absolute_workspace)],
+            workspace=second_workspace,
+            expected_cwd=absolute_workspace,
+        )
+        stop_fixture_session(absolute[0])
         standalone_codex_id = _create_standalone_codex_thread(codex, isolated / "standalone.sock", environment, project)
         assert standalone_codex_id not in inspected_codex_ids.values()
         adopted = exercise_client(

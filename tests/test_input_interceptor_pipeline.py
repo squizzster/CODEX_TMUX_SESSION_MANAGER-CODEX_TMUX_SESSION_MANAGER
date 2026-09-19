@@ -1,6 +1,7 @@
 """Real Python pipeline adapters with in-memory terminal I/O; never launch an application."""
 
 from pathlib import Path
+from threading import RLock
 from types import SimpleNamespace
 
 import pyte
@@ -34,6 +35,8 @@ def make_pipeline(registrations=INPUT_INTERCEPTORS, prefix="/r"):
     native_input = bytearray()
     main_messages = []
     gateway = TerminalSessionGateway.__new__(TerminalSessionGateway)
+    gateway._wake_lock = RLock()
+    gateway._wake_write = -1
     gateway._display_queue = bytearray()
     gateway._pending_surface_frame = None
     gateway._surface_renderer = TerminalSurfaceRenderer(100, 16)

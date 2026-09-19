@@ -5,8 +5,6 @@ agreement, retain clear ownership, and keep this file within 150 lines and 10,24
 
 # Rodex architecture
 
-Rodex binds session/runtime IDs to a Codex thread tree and verified tmux endpoint.
-
 ## Runtime shape
 
 ```text
@@ -75,7 +73,8 @@ Discovery compares the session snapshot with a guarded primary-pane read. Every 
 crosses `tmux_executor`; calls have deadlines and cancellation reaps the child.
 The staged pane starts a one-shot bridge. The daemon admits its same-uid peer PID, exact
 primary pane, TTY descriptor, server nonce and runtime reservation before starting the
-runtime thread. Caller-owned environment crosses the reservation; tmux-owned values come
+runtime thread, which exclusively owns the transferred descriptor until completion.
+Absolute caller cwd and environment cross the reservation; tmux-owned values come
 only from the admitted bridge process. `TmuxStatusPipeline`
 arbitrates status; animation admission owns capability/generation/lease/token/recovery fences.
 
@@ -83,13 +82,10 @@ The daemon acceptor blocks on its Unix listener and explicit shutdown event; it 
 Runtime supervisors block through their gateways until terminal readiness, child exit, an exact deadline, or explicit
 registration, diagnostic, resize, presentation, or stop wake; owning runtimes revalidate tmux resize hints.
 
-Interactive routes expose the attached client as `rodex_<display_name>`, print
-`Rodex attach [name].` before tmux, then classify the observed runtime after return:
-`Rodex detach [name].` while it remains live or `Rodex exited [name].` after it ends.
-Tmux's exit line is erased first. One daemon-runtime PTY adapts all TUI I/O;
-attachers never create input owners. Its gateway blocks on terminal readiness, an exact
-child `pidfd`, input-frame deadlines and wake-only state notifications; idle sessions do
-not run a fixed relay poll. Interception config owns live/Enter expressions, menus and
+Interactive clients use `rodex_<display_name>` and report verified attach/detach/exit.
+One daemon-runtime PTY adapts all TUI I/O; attachers never create input owners. The gateway
+blocks on terminal readiness, child `pidfd`, input-frame deadlines and state notifications,
+without fixed idle polling. Interception config owns live/Enter expressions, menus and
 typed actions; unmatched input stays native. Prefix/cursor confirmation occurs only at
 handoff. DISPLAY_STATE draws menus; light selects root commentary structurally while
 preserving the hidden native TUI, and dark redraws that projection in place.
@@ -137,11 +133,13 @@ runtime retains separate cursors, analyzers and SQL health rows, while all `poll
 work passes through that singular pipeline. Protocol bursts are coalesced; overflow asks
 for a full reconcile. One fenced transaction publishes checkpoints, statistics, trace,
 associations, and health.
+Retirement seals accepted events and reconciles on that worker with bounded best-effort
+effort; completion requires quiesced producers. Incomplete outcomes survive in health/logs.
 Source failures park by fingerprint until change and preserve the last good view. Codex
 metadata supplies turn identity; only sequence races reset cursors. Failures cannot affect the TUI.
 
-- Related writes use explicit transactions; one fork-safe process-local idle connection
-  keeps a bounded WAL generation live between sparse writes without owning a transaction.
+- Related writes use explicit transactions; catalog owners retain active borrowers and
+  at most one idle WAL generation. Fork with an active transaction requires child exec/exit.
 - Ordinary reads and mutations are existing-only. Explicit first use alone may create storage.
 - Private database/runtime paths validate owner, type, mode, descriptor, and symlink boundaries.
 - External tmux mutation requires an explicit capability and an atomic full-tuple fence.

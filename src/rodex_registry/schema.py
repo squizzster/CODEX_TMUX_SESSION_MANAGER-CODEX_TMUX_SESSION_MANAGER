@@ -4852,5 +4852,28 @@ def _verify_schema_object_definition_exact(
 
 
 def _normalise_schema_sql(value: str) -> str:
-    normalised = " ".join(value.upper().split()).rstrip(";")
-    return normalised.replace(" IF NOT EXISTS ", " ")
+    """Canonicalize generated SQL tokens, preserving every quoted literal byte."""
+    tokens = re.findall(
+        r"'(?:''|[^'])*'|\"(?:\"\"|[^\"])*\"|`(?:``|[^`])*`|\[[^\]]*\]"
+        r"|--[^\n]*(?:\n|$)|/\*[\s\S]*?\*/|[A-Za-z_][A-Za-z_0-9]*"
+        r"|0[xX][0-9a-fA-F]+|(?:\d+\.\d*|\.\d+|\d+)(?:[eE][+-]?\d+)?"
+        r"|==|!=|<>|<=|>=|\|\||->>|->|[^\s]",
+        value,
+    )
+    tokens = [token if token[0] in "'\"`[" else token.upper() for token in tokens if not token.startswith(("--", "/*"))]
+    # SQLite strips this optional clause when storing CREATE definitions. Only
+    # the CREATE prefix permits that tolerance; literals and trigger bodies do not.
+    prefix = 2
+    if tokens[:2] == ["CREATE", "UNIQUE"]:
+        prefix = 3
+    if (
+        tokens
+        and tokens[0] == "CREATE"
+        and len(tokens) > prefix
+        and tokens[prefix - 1] in {"TABLE", "INDEX", "TRIGGER", "VIEW"}
+        and tokens[prefix : prefix + 3] == ["IF", "NOT", "EXISTS"]
+    ):
+        del tokens[prefix : prefix + 3]
+    if tokens and tokens[-1] == ";":
+        tokens.pop()
+    return " ".join(tokens)

@@ -30,6 +30,7 @@ def _analytics(root: Path, *, rodex_session_id: RodexSessionId = LEADING_ZERO_SE
 
 def _service(root: Path) -> RuntimeServiceConfig:
     return RuntimeServiceConfig(
+        workspace=root,
         codex_binary="/opt/Codex CLI/codex",
         app_server_socket_path=root / "app-0000000000000001.sock",
         app_server_log_path=root / "app-0000000000000001.log",

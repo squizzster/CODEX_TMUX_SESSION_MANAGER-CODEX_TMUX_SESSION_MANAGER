@@ -23,6 +23,7 @@ from .control import (
     LiveRodexControl,
     PromptDispatch,
     RodexControlError,
+    RodexControlRejectedError,
 )
 from .errors import ExactRuntimeIdentityRequiredError, RodexLaunchError
 from .interaction_pipeline import (
@@ -382,6 +383,8 @@ class ExactTurnMutationCoordinator:
         self.interactions.register(binding)
         try:
             result = self.interactions.execute(request)
+            if result.status == DeliveryStatus.REJECTED:
+                raise RodexControlRejectedError(result.detail)
             if not result.accepted:
                 raise RodexControlError(result.detail)
             return cast(PromptDispatch | CodexThreadState, result.value)

@@ -149,8 +149,9 @@ class RodexDaemonClient:
             timeout_seconds=timeout_seconds + 1,
         )
 
-    def stop(self, operation_id: str, runtime_id: str) -> None:
-        self._request(
+    def stop(self, operation_id: str, runtime_id: str) -> str:
+        """Acknowledge cancellation admission; a stopping service still owns its resources."""
+        response = self._request(
             {
                 "protocol": RODEX_DAEMON_PROTOCOL,
                 "operation": "stop",
@@ -158,6 +159,10 @@ class RodexDaemonClient:
                 "runtime_id": runtime_id,
             }
         )
+        state = response.get("state")
+        if state not in {"stopping", "terminal"}:
+            raise RodexDaemonError("daemon stop response lacks a valid completion state")
+        return state
 
     def notify_runtime(self, runtime_id: str, cause: str) -> bool:
         """Wake one runtime after an external state transition.

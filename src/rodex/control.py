@@ -24,7 +24,7 @@ from rodex_registry.identity import (
 )
 
 from .app_server_contract import CODEX_APP_SERVER, RODEX_CONTROL_APP_SERVER_CLIENT
-from .interaction_pipeline import InteractionDeliveryIndeterminate
+from .interaction_pipeline import InteractionDeliveryIndeterminate, InteractionRejected
 from .protocol_proxy import CONTROL_CONNECTION_PATH, EVENT_STREAM_READY_METHOD
 from .runtime_peer import RuntimePeerIdentity, verified_runtime_connection
 from .tmux_session_capability import TmuxSessionCapability
@@ -40,6 +40,10 @@ _STARTABLE_THREAD_STATUSES = frozenset({"idle", "systemError"})
 
 class RodexControlError(RuntimeError):
     """A named live Codex control or event operation failed."""
+
+
+class RodexControlRejectedError(RodexControlError, InteractionRejected):
+    """Preserve a pre-dispatch rejection across nested interaction adapters."""
 
 
 class RodexDispatchIndeterminateError(RodexControlError, InteractionDeliveryIndeterminate):

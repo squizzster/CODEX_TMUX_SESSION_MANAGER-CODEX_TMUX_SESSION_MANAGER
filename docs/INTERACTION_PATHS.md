@@ -1,7 +1,7 @@
 # Interaction contract and production-path inventory
 
 Rodex 0.14.0a2, ALPHA. SQL generation 20, isolated tmux protocol v4, runtime peer
-contract v4, daemon protocol v1 and observer schema v3 form the current boundary.
+contract v5, daemon protocol v2 and observer schema v3 form the current boundary.
 Old contracts are rejected.
 
 ## Authoritative contract
@@ -43,6 +43,9 @@ Missing targets reject by default. Explicit `open_if_missing` can reopen a regis
 presentation with known launch context, but cannot invent an agent. A target disappearing
 mid-operation is rejected. Pane mutations carry the frozen pane ID into tmux. Model
 dispatch rechecks selected connection, runtime and thread after lock/transport waits.
+Deferred recovery also atomically admits its trusted cancellation generation at that
+final boundary. Input, close, disconnect or supersession before admission rejects it;
+after admission, accepted/indeterminate semantics remain unchanged.
 Observer messages wait boundedly for socket readiness, send once and require exact-pane
 admission. Reopening uses a blank view plus current reducer state, not the first spawn's
 cached event. The snapshot budget reserves transport-address overhead.

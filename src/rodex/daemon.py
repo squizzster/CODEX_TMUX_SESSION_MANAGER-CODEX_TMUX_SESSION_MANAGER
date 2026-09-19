@@ -4,13 +4,17 @@ from __future__ import annotations
 
 import argparse
 import array
+import hashlib
 import json
+import logging
 import os
 import re
 import select
 import signal
 import socket
 import struct
+import time
+from collections import OrderedDict
 from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass, field
@@ -38,6 +42,9 @@ from .tmux_session_capability import runtime_tmux_socket_name
 from .version import RODEX_VERSION
 
 _OPERATION_ID: Final = re.compile(r"[0-9a-f]{32}")
+REQUEST_TIMEOUT_SECONDS: Final = 5.0
+SHUTDOWN_WAIT_SECONDS: Final = 10.0
+COMPLETION_RECORD_LIMIT: Final = 1024
 _RODEX_RELEASE_VERSION: Final = re.compile(
     r"(?P<major>0|[1-9][0-9]*)\.(?P<minor>0|[1-9][0-9]*)\.(?P<patch>0|[1-9][0-9]*)"
     r"(?:(?P<prerelease>a|b|rc)(?P<prerelease_number>0|[1-9][0-9]*))?"
@@ -92,6 +99,14 @@ class _ManagedRuntime:
     error: str | None = None
     supervisor_wake: Callable[[], None] | None = None
     terminal_resize: Callable[[], None] | None = None
+    finishing: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class _RuntimeCompletion:
+    operation_id: str
+    config_fingerprint: str
+    error: str | None
 
 
 class DaemonRuntimeManager:
@@ -106,6 +121,8 @@ class DaemonRuntimeManager:
     ) -> None:
         self._runtime_root = runtime_root
         self._runtimes: dict[str, _ManagedRuntime] = {}
+        self._completed: OrderedDict[str, _RuntimeCompletion] = OrderedDict()
+        self._expired_operation_floor = 0
         self._lock = Lock()
         self._closing = False
         self._process_receipts = process_receipts or RuntimeProcessReceipts(runtime_root)
@@ -123,8 +140,17 @@ class DaemonRuntimeManager:
             existing = self._runtimes.get(runtime_id)
             if existing is not None:
                 if existing.operation_id == operation_id and existing.config == config:
-                    return
+                    with existing.lock:
+                        self._require_admission(existing)
+                        return
                 raise RodexDaemonServerError("runtime identity is already reserved by another operation")
+            completed = self._completed.get(runtime_id)
+            if completed is not None:
+                if completed.operation_id != operation_id or completed.config_fingerprint != _config_fingerprint(config):
+                    raise RodexDaemonServerError("runtime identity is already reserved by another operation")
+                raise RodexDaemonServerError(completed.error or "runtime operation is already terminal")
+            if int(operation_id, 16) <= self._expired_operation_floor:
+                raise RodexDaemonServerError("runtime operation expired; create a new operation identity")
             self._analytics.reserve(config.analytics)
             self._runtimes[runtime_id] = _ManagedRuntime(operation_id, config)
 
@@ -143,8 +169,11 @@ class DaemonRuntimeManager:
         config = context.config
         if config.tmux_server_id != tmux_server_id or config.tmux_pane_target != tmux_pane_target:
             raise RodexDaemonServerError("terminal bridge capability disagrees with its reservation")
+        with context.lock:
+            self._require_admission(context)
         _capability, terminal_environment = admit_runtime_terminal_fd(config, terminal_fd, peer_pid=peer_pid)
         with context.lock:
+            self._require_admission(context)
             if context.bridge_connection is not None or context.thread is not None:
                 raise RodexDaemonServerError("terminal bridge was already consumed")
             context.bridge_connection = bridge_connection
@@ -153,20 +182,36 @@ class DaemonRuntimeManager:
         return context
 
     def start_bound_runtime(self, context: _ManagedRuntime) -> None:
-        with context.lock:
-            terminal_fd = context.terminal_fd
-            terminal_environment = context.terminal_environment
-            if terminal_fd is None or terminal_environment is None or context.bridge_connection is None:
-                raise RodexDaemonServerError("runtime has no admitted terminal bridge")
-            if context.thread is not None:
-                raise RodexDaemonServerError("runtime service was already started")
-            context.thread = Thread(
-                target=self._run_context,
-                args=(context, terminal_fd, terminal_environment),
-                name=f"rodex-runtime-{context.config.runtime_id}",
-                daemon=True,
-            )
-            context.thread.start()
+        owns_failed_start = False
+        try:
+            with context.lock:
+                self._require_admission(context)
+                terminal_fd = context.terminal_fd
+                terminal_environment = context.terminal_environment
+                if terminal_fd is None or terminal_environment is None or context.bridge_connection is None:
+                    raise RodexDaemonServerError("runtime has no admitted terminal bridge")
+                if context.thread is not None:
+                    raise RodexDaemonServerError("runtime service was already started")
+                owns_failed_start = True
+                thread = Thread(
+                    target=self._run_context,
+                    args=(context, terminal_fd, terminal_environment),
+                    name=f"rodex-runtime-{context.config.runtime_id}",
+                    daemon=True,
+                )
+                thread.start()
+                context.thread = thread
+                # The service wrapper now exclusively owns this numeric descriptor.
+                context.terminal_fd = None
+                context.terminal_environment = None
+        except BaseException:
+            if owns_failed_start:
+                self._stop_context(context)
+            raise
+
+    def _require_admission(self, context: _ManagedRuntime) -> None:
+        if self._closing or context.stop.is_set() or context.finishing or context.done.is_set():
+            raise RodexDaemonServerError("runtime reservation is stopping or terminal")
 
     def await_ready(self, operation_id: str, runtime_id: str, timeout_seconds: float) -> None:
         if not isinstance(timeout_seconds, (int, float)) or isinstance(timeout_seconds, bool) or timeout_seconds <= 0:
@@ -176,12 +221,23 @@ class DaemonRuntimeManager:
             raise RodexDaemonServerError("runtime service did not become ready")
         with context.lock:
             error = context.error
+            terminal = context.done.is_set() or context.stop.is_set()
         if error is not None:
             raise RodexDaemonServerError(error)
+        if terminal:
+            raise RodexDaemonServerError("runtime service is stopping or terminal")
 
-    def stop_runtime(self, operation_id: str, runtime_id: str) -> None:
-        context = self._exact_context(operation_id, runtime_id)
+    def stop_runtime(self, operation_id: str, runtime_id: str) -> str:
+        _require_operation_id(operation_id)
+        with self._lock:
+            completed = self._completed.get(runtime_id)
+            if completed is not None and completed.operation_id == operation_id:
+                return "terminal"
+            context = self._runtimes.get(runtime_id)
+        if context is None or context.operation_id != operation_id:
+            raise RodexDaemonServerError("runtime operation does not match an exact reservation")
         self._stop_context(context)
+        return "terminal" if context.done.is_set() else "stopping"
 
     def wake_runtime(self, runtime_id: str, cause: str) -> None:
         """Deliver a same-user hint; the runtime revalidates authoritative state."""
@@ -208,7 +264,14 @@ class DaemonRuntimeManager:
             contexts = tuple(self._runtimes.values())
         for context in contexts:
             self._stop_context(context)
-        self._analytics.close()
+        deadline = time.monotonic() + SHUTDOWN_WAIT_SECONDS
+        for context in contexts:
+            with context.lock:
+                thread = context.thread
+            if thread is not None:
+                thread.join(timeout=max(0.0, deadline - time.monotonic()))
+        if not self._analytics.close():
+            logging.getLogger(__name__).warning("analytics shutdown wait expired; final reconciliation remains pending")
 
     def _run_context(
         self,
@@ -222,7 +285,7 @@ class DaemonRuntimeManager:
                 terminal_fd=terminal_fd,
                 terminal_environment=terminal_environment,
                 stop=context.stop,
-                on_started=context.ready.set,
+                on_started=lambda: self._mark_ready(context),
                 on_analytics_activated=self._analytics.activate,
                 on_analytics_event=lambda event: self._analytics.observe_protocol_event(
                     str(context.config.runtime_id), event
@@ -250,36 +313,59 @@ class DaemonRuntimeManager:
                 context.error = f"runtime service failed: {error}"
             context.ready.set()
         finally:
-            self._analytics.retire(str(context.config.runtime_id))
-            context.done.set()
-            with context.lock:
-                context.supervisor_wake = None
-                context.terminal_resize = None
-                bridge, context.bridge_connection = context.bridge_connection, None
+            self._finish_context(context)
+
+    @staticmethod
+    def _mark_ready(context: _ManagedRuntime) -> None:
+        with context.lock:
+            if not context.stop.is_set():
+                context.ready.set()
+
+    def _finish_context(self, context: _ManagedRuntime) -> None:
+        with context.lock:
+            if context.finishing:
+                return
+            context.finishing = True
+            context.supervisor_wake = None
+            context.terminal_resize = None
+            bridge, context.bridge_connection = context.bridge_connection, None
+        try:
             if bridge is not None:
                 bridge.close()
+            self._analytics.retire(str(context.config.runtime_id))
+        finally:
+            with self._lock:
+                runtime_id = str(context.config.runtime_id)
+                if self._runtimes.get(runtime_id) is context:
+                    self._completed[runtime_id] = _RuntimeCompletion(
+                        context.operation_id, _config_fingerprint(context.config), context.error
+                    )
+                    del self._runtimes[runtime_id]
+                    while len(self._completed) > COMPLETION_RECORD_LIMIT:
+                        _runtime_id, completion = self._completed.popitem(last=False)
+                        self._expired_operation_floor = max(
+                            self._expired_operation_floor, int(completion.operation_id, 16)
+                        )
+            context.done.set()
+            context.ready.set()
 
     def _stop_context(self, context: _ManagedRuntime) -> None:
-        context.stop.set()
         with context.lock:
+            context.stop.set()
+            context.ready.set()
             thread = context.thread
-            bridge = context.bridge_connection
             supervisor_wake = context.supervisor_wake
-        if supervisor_wake is not None:
-            supervisor_wake()
-        if thread is not None:
-            thread.join(timeout=10)
-        if bridge is not None:
-            with context.lock:
-                if context.bridge_connection is bridge:
-                    context.bridge_connection = None
-            bridge.close()
-        with context.lock:
             terminal_fd, context.terminal_fd = context.terminal_fd, None
             context.terminal_environment = None
-        if terminal_fd is not None and (thread is None or thread.is_alive()):
+            if thread is None and context.error is None:
+                context.error = "runtime reservation was cancelled before service start"
+        if supervisor_wake is not None:
+            supervisor_wake()
+        if terminal_fd is not None:
             with suppress(OSError):
                 os.close(terminal_fd)
+        if thread is None:
+            self._finish_context(context)
 
     @staticmethod
     def _bind_runtime_controls(
@@ -298,6 +384,9 @@ class DaemonRuntimeManager:
         _require_operation_id(operation_id)
         with self._lock:
             context = self._runtimes.get(runtime_id)
+            completed = self._completed.get(runtime_id)
+        if completed is not None and completed.operation_id == operation_id:
+            raise RodexDaemonServerError(completed.error or "runtime operation is already terminal")
         if context is None or context.operation_id != operation_id:
             raise RodexDaemonServerError("runtime operation does not match an exact reservation")
         return context
@@ -326,12 +415,14 @@ class RodexDaemonServer:
         self._stop = Event()
         self._wake_fd = os.eventfd(0, os.EFD_CLOEXEC | os.EFD_NONBLOCK)
         self._workers: set[Thread] = set()
+        self._connections: set[socket.socket] = set()
         self._workers_lock = Lock()
 
     def stop(self) -> None:
         self._stop.set()
-        with suppress(OSError):
-            os.eventfd_write(self._wake_fd, 1)
+        if self._wake_fd >= 0:
+            with suppress(OSError):
+                os.eventfd_write(self._wake_fd, 1)
 
     def run(self) -> int:
         try:
@@ -358,15 +449,28 @@ class RodexDaemonServer:
                 worker = Thread(target=self._handle_connection, args=(connection,), daemon=True)
                 with self._workers_lock:
                     self._workers.add(worker)
-                worker.start()
+                    self._connections.add(connection)
+                try:
+                    worker.start()
+                except BaseException:
+                    with self._workers_lock:
+                        self._workers.discard(worker)
+                        self._connections.discard(connection)
+                    connection.close()
+                    raise
         finally:
+            with self._workers_lock:
+                for connection in self._connections:
+                    with suppress(OSError):
+                        connection.shutdown(socket.SHUT_RDWR)
             if self._manager is not None:
                 self._manager.close()
             self._endpoint.close()
             with self._workers_lock:
                 workers = tuple(self._workers)
+            deadline = time.monotonic() + 2
             for worker in workers:
-                worker.join(timeout=2)
+                worker.join(timeout=max(0.0, deadline - time.monotonic()))
             with suppress(OSError):
                 os.close(self._wake_fd)
             self._wake_fd = -1
@@ -386,11 +490,14 @@ class RodexDaemonServer:
             if peer_uid != os.getuid():
                 raise RodexDaemonServerError("daemon peer is not the current user")
             request, descriptors = _receive_request(connection)
+            response_fields: dict[str, object] = {}
             if request.get("protocol") != RODEX_DAEMON_PROTOCOL:
                 raise RodexDaemonServerError("daemon protocol does not match this generation")
             if request.get(RODEX_DAEMON_IMPLEMENTATION_FIELD) != RODEX_IMPLEMENTATION_ID:
                 raise RodexDaemonServerError("daemon implementation does not match this generation")
             operation = request.get("operation")
+            if descriptors and operation != "bind_terminal":
+                raise RodexDaemonServerError("daemon operation did not permit passed descriptors")
             if operation == "ping":
                 _require_fields(request, {"protocol", "operation", RODEX_DAEMON_IMPLEMENTATION_FIELD})
             elif operation == "reserve":
@@ -424,7 +531,9 @@ class RodexDaemonServer:
                     request,
                     {"protocol", "operation", RODEX_DAEMON_IMPLEMENTATION_FIELD, "operation_id", "runtime_id"},
                 )
-                manager.stop_runtime(_text(request, "operation_id"), _text(request, "runtime_id"))
+                response_fields["state"] = manager.stop_runtime(
+                    _text(request, "operation_id"), _text(request, "runtime_id")
+                )
             elif operation == "wake_runtime":
                 _require_fields(
                     request,
@@ -469,7 +578,7 @@ class RodexDaemonServer:
                 raise RodexDaemonServerError("unknown daemon operation")
             if descriptors:
                 raise RodexDaemonServerError("daemon operation did not permit passed descriptors")
-            connection.sendall(_success_response())
+            connection.sendall(_success_response(**response_fields))
         except BaseException as error:
             with suppress(OSError):
                 connection.sendall(_error_response(str(error)))
@@ -481,42 +590,64 @@ class RodexDaemonServer:
                 connection.close()
             with self._workers_lock:
                 self._workers.discard(current_thread())
+                self._connections.discard(connection)
 
 
 def _receive_request(connection: socket.socket) -> tuple[dict[str, Any], tuple[int, ...]]:
     content = bytearray()
     descriptors: list[int] = []
-    first = True
-    while len(content) <= DAEMON_MESSAGE_LIMIT_BYTES:
-        if first:
-            chunk, ancillary, _flags, _address = connection.recvmsg(
-                min(65536, DAEMON_MESSAGE_LIMIT_BYTES + 1),
+    deadline = time.monotonic() + REQUEST_TIMEOUT_SECONDS
+    original_timeout = connection.gettimeout()
+    transferred = False
+    try:
+        while len(content) <= DAEMON_MESSAGE_LIMIT_BYTES:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise RodexDaemonServerError("daemon request reception timed out")
+            connection.settimeout(remaining)
+            chunk, ancillary, flags, _address = connection.recvmsg(
+                min(65536, DAEMON_MESSAGE_LIMIT_BYTES + 1 - len(content)),
                 socket.CMSG_SPACE(array.array("i").itemsize * 4),
                 socket.MSG_CMSG_CLOEXEC,
             )
-            first = False
             for level, kind, data in ancillary:
                 if level == socket.SOL_SOCKET and kind == socket.SCM_RIGHTS:
                     values = array.array("i")
                     values.frombytes(data[: len(data) - (len(data) % values.itemsize)])
                     descriptors.extend(values)
-        else:
-            chunk = connection.recv(min(65536, DAEMON_MESSAGE_LIMIT_BYTES + 1 - len(content)))
-        if not chunk:
-            raise RodexDaemonServerError("daemon request closed before a complete message")
-        content.extend(chunk)
-        newline = content.find(b"\n")
-        if newline >= 0:
-            if content[newline + 1 :]:
-                raise RodexDaemonServerError("daemon request contained trailing data")
-            try:
-                payload = json.loads(content[:newline])
-            except (UnicodeError, json.JSONDecodeError) as error:
-                raise RodexDaemonServerError("daemon request was not valid JSON") from error
-            if not isinstance(payload, dict):
-                raise RodexDaemonServerError("daemon request must be an object")
-            return payload, tuple(descriptors)
-    raise RodexDaemonServerError("daemon request exceeds its bounded contract")
+            if flags & (socket.MSG_CTRUNC | socket.MSG_TRUNC) or len(descriptors) > 4:
+                raise RodexDaemonServerError("daemon request ancillary descriptors were truncated or excessive")
+            if not chunk:
+                raise RodexDaemonServerError("daemon request closed before a complete message")
+            content.extend(chunk)
+            if len(content) > DAEMON_MESSAGE_LIMIT_BYTES:
+                break
+            newline = content.find(b"\n")
+            if newline >= 0:
+                if content[newline + 1 :]:
+                    raise RodexDaemonServerError("daemon request contained trailing data")
+                try:
+                    payload = json.loads(content[:newline])
+                except (UnicodeError, json.JSONDecodeError) as error:
+                    raise RodexDaemonServerError("daemon request was not valid JSON") from error
+                if not isinstance(payload, dict):
+                    raise RodexDaemonServerError("daemon request must be an object")
+                transferred = True
+                return payload, tuple(descriptors)
+        raise RodexDaemonServerError("daemon request exceeds its bounded contract")
+    except TimeoutError as error:
+        raise RodexDaemonServerError("daemon request reception timed out") from error
+    finally:
+        if not transferred:
+            for descriptor in descriptors:
+                with suppress(OSError):
+                    os.close(descriptor)
+        with suppress(OSError):
+            connection.settimeout(original_timeout)
+
+
+def _config_fingerprint(config: RuntimeServiceConfig) -> str:
+    return hashlib.sha256(json.dumps(config.to_payload(), sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
 def _require_fields(payload: dict[str, Any], expected: set[str]) -> None:
@@ -536,12 +667,13 @@ def _require_operation_id(operation_id: str) -> None:
         raise RodexDaemonServerError("operation ID must be 32 lowercase hexadecimal characters")
 
 
-def _success_response() -> bytes:
+def _success_response(**fields: object) -> bytes:
     return encode_daemon_message(
         {
             "protocol": RODEX_DAEMON_PROTOCOL,
             RODEX_DAEMON_IMPLEMENTATION_FIELD: RODEX_IMPLEMENTATION_ID,
             "ok": True,
+            **fields,
         }
     )
 

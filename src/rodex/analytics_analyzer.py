@@ -39,35 +39,21 @@ from rodex_registry import (
     parse_turn_statistics_snapshot,
 )
 
-
-class RodexAnalyticsError(RuntimeError):
-    """The optional analytics subsystem could not satisfy a request."""
-
-
-@dataclass(frozen=True, slots=True)
-class AnalyticsCalculation:
-    """Usable session and turn projections from one analyzer calculation."""
-
-    statistics_projection: SessionStatisticsProjection
-    coverage_state: str
-
-
-@dataclass(frozen=True, slots=True)
-class AnalyticsAnalyzerSource:
-    """One source's initialization bytes and candidate complete-line suffix."""
-
-    codex_thread_id: CodexThreadId
-    analyzer_content: bytes
-    appended_analyzer_content: bytes
-
-
-class AnalyticsBoundary(Protocol):
-    def analyze_rollouts(self, sources: Sequence[AnalyticsAnalyzerSource], user_id: str) -> AnalyticsCalculation: ...
-
-    def accept_batch(self) -> None: ...
-
-
-AnalyticsBoundaryFactory = Callable[[], AnalyticsBoundary]
+from .analytics_contracts import (
+    AnalyticsAnalyzerSource as AnalyticsAnalyzerSource,
+)
+from .analytics_contracts import (
+    AnalyticsBoundary as AnalyticsBoundary,
+)
+from .analytics_contracts import (
+    AnalyticsBoundaryFactory as AnalyticsBoundaryFactory,
+)
+from .analytics_contracts import (
+    AnalyticsCalculation as AnalyticsCalculation,
+)
+from .analytics_contracts import (
+    RodexAnalyticsError as RodexAnalyticsError,
+)
 
 
 class _AnalyzerLibrary(Protocol):

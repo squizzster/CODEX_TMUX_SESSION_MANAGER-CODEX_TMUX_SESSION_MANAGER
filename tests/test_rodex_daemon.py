@@ -37,6 +37,7 @@ def _config(root: Path, value: int) -> RuntimeServiceConfig:
     token = str(runtime_id)
     event_socket = root / f"events-{token}.sock"
     return RuntimeServiceConfig(
+        workspace=root,
         codex_binary="/usr/bin/codex",
         app_server_socket_path=root / f"app-{token}.sock",
         app_server_log_path=root / f"app-{token}.log",

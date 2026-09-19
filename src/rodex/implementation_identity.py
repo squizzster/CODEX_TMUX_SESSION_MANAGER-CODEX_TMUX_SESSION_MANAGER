@@ -37,4 +37,5 @@ def _implementation_digest() -> str:
 
 # Calculated once per process. A long-running process therefore retains the
 # identity of the code it loaded even if an editable checkout changes beneath it.
-RODEX_IMPLEMENTATION_ID: Final = f"{RODEX_VERSION}+sha256.{_implementation_digest()}"
+RODEX_IMPLEMENTATION_SHA256: Final = _implementation_digest()
+RODEX_IMPLEMENTATION_ID: Final = f"{RODEX_VERSION}+sha256.{RODEX_IMPLEMENTATION_SHA256}"

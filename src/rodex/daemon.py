@@ -433,8 +433,8 @@ class RodexDaemonServer:
             self._wake_fd = -1
             raise
         try:
-            # The single daemon endpoint is the root ownership claim. Reconcile
-            # multi-runtime process receipts only after that claim is exclusive.
+            # The implementation-scoped endpoint is this daemon's ownership claim.
+            # Reconcile only equally namespaced process receipts after it is exclusive.
             self._manager = DaemonRuntimeManager(self._runtime_root)
             while not self._stop.is_set():
                 readable, _writable, _exceptional = select.select((listener, self._wake_fd), (), ())

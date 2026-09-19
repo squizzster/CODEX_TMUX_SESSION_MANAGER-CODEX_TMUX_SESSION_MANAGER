@@ -5,8 +5,10 @@ import signal
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
+from collections.abc import Iterator
 from contextlib import suppress
 from pathlib import Path
 from threading import Event, Thread
@@ -21,15 +23,23 @@ from rodex.daemon_client import (
     RODEX_DAEMON_PROTOCOL,
     RodexDaemonClient,
     RodexDaemonError,
+    daemon_socket_path,
     encode_daemon_message,
     receive_daemon_message,
 )
-from rodex.implementation_identity import RODEX_IMPLEMENTATION_ID
+from rodex.implementation_identity import RODEX_IMPLEMENTATION_ID, RODEX_IMPLEMENTATION_SHA256
 from rodex.process_contracts import AnalyticsRuntimeConfig, RuntimeServiceConfig
 from rodex.process_guard import set_current_linux_task_name
-from rodex.process_receipts import RuntimeProcessReceipts
+from rodex.process_receipts import PROCESS_RECEIPT_PATTERN, RuntimeProcessReceipts
 from rodex.tmux_session_capability import TmuxRuntimeCapability, runtime_tmux_socket_name
 from rodex_registry import RodexRegistryId, RodexRuntimeId, RodexSessionId
+
+
+@pytest.fixture
+def short_runtime_root() -> Iterator[Path]:
+    """Keep the full implementation-hash socket below Linux's AF_UNIX path limit."""
+    with tempfile.TemporaryDirectory(prefix="rodex-test-", dir="/tmp") as directory:
+        yield Path(directory)
 
 
 def _config(root: Path, value: int) -> RuntimeServiceConfig:
@@ -157,7 +167,7 @@ def test_server_claims_single_socket_before_constructing_multi_runtime_manager(
 
 
 def test_idle_server_blocks_on_control_event_until_stop(
-    tmp_path: Path,
+    short_runtime_root: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     select_entered = Event()
@@ -177,8 +187,7 @@ def test_idle_server_blocks_on_control_event_until_stop(
         select_entered.set()
         return real_select(reads, writes, exceptional, timeout)
 
-    tmp_path.chmod(0o700)
-    server = daemon_module.RodexDaemonServer(tmp_path)
+    server = daemon_module.RodexDaemonServer(short_runtime_root)
     monkeypatch.setattr(daemon_module, "DaemonRuntimeManager", EmptyManager)
     monkeypatch.setattr(daemon_module.select, "select", observed_select)
 
@@ -210,7 +219,7 @@ def test_idle_server_blocks_on_control_event_until_stop(
     ],
 )
 def test_daemon_rejects_prior_protocol_and_missing_implementation_identity(
-    tmp_path: Path,
+    short_runtime_root: Path,
     monkeypatch: pytest.MonkeyPatch,
     request_payload: dict[str, object],
     expected_error: str,
@@ -222,7 +231,7 @@ def test_daemon_rejects_prior_protocol_and_missing_implementation_identity(
         def close(self) -> None:
             return None
 
-    server = daemon_module.RodexDaemonServer(tmp_path)
+    server = daemon_module.RodexDaemonServer(short_runtime_root)
     monkeypatch.setattr(daemon_module, "DaemonRuntimeManager", EmptyManager)
     failures: list[BaseException] = []
 
@@ -234,7 +243,7 @@ def test_daemon_rejects_prior_protocol_and_missing_implementation_identity(
 
     server_thread = Thread(target=run_server)
     server_thread.start()
-    socket_path = tmp_path / "rodexd-v2.sock"
+    socket_path = daemon_socket_path(short_runtime_root)
     deadline = time.monotonic() + 1
     while not socket_path.exists() and time.monotonic() < deadline:
         time.sleep(0.01)
@@ -391,7 +400,7 @@ def test_process_receipt_reconciliation_terminates_exact_orphan_group(tmp_path: 
     process.wait(timeout=3)
 
     assert process.returncode == -15
-    assert list(tmp_path.glob("rodexd-v2-process-*.json")) == []
+    assert list(tmp_path.glob(PROCESS_RECEIPT_PATTERN)) == []
 
 
 def test_process_receipt_reconciliation_escalates_for_a_surviving_group_child(tmp_path: Path) -> None:
@@ -435,7 +444,7 @@ time.sleep(30)
     except FileNotFoundError:
         child_state = "gone"
     assert child_state in {"gone", "Z"}
-    assert list(tmp_path.glob("rodexd-v2-process-*.json")) == []
+    assert list(tmp_path.glob(PROCESS_RECEIPT_PATTERN)) == []
 
 
 def test_process_guard_rejects_a_parent_identity_that_already_changed() -> None:
@@ -487,9 +496,11 @@ time.sleep(30)
     assert not Path(f"/proc/{child_pid}").exists()
 
 
-def test_concurrent_first_clients_converge_on_one_private_daemon_socket(tmp_path: Path) -> None:
-    tmp_path.chmod(0o700)
-    clients = (RodexDaemonClient(tmp_path, sys.executable), RodexDaemonClient(tmp_path, sys.executable))
+def test_concurrent_first_clients_converge_on_one_private_daemon_socket(short_runtime_root: Path) -> None:
+    clients = (
+        RodexDaemonClient(short_runtime_root, sys.executable),
+        RodexDaemonClient(short_runtime_root, sys.executable),
+    )
     failures: list[BaseException] = []
 
     def ensure(client: RodexDaemonClient) -> None:
@@ -510,7 +521,7 @@ def test_concurrent_first_clients_converge_on_one_private_daemon_socket(tmp_path
             command = (process_path / "cmdline").read_bytes().split(b"\0")
         except OSError:
             continue
-        if b"rodex.daemon" in command and os.fsencode(tmp_path) in command:
+        if b"rodex.daemon" in command and os.fsencode(short_runtime_root) in command:
             daemon_pids.append(int(process_path.name))
     try:
         assert failures == []
@@ -525,38 +536,54 @@ def test_concurrent_first_clients_converge_on_one_private_daemon_socket(tmp_path
                 os.kill(pid, signal.SIGTERM)
 
 
-def test_current_client_rejects_a_live_legacy_daemon_without_spawning_alongside_it(tmp_path: Path) -> None:
-    legacy_path = tmp_path / "rodexd-v1.sock"
+def test_current_client_starts_its_exact_daemon_alongside_an_older_daemon_socket(
+    short_runtime_root: Path,
+) -> None:
+    legacy_path = short_runtime_root / "rodexd-v2.sock"
     listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     listener.bind(str(legacy_path))
     listener.listen()
-    accepted = Event()
-
-    def accept_once() -> None:
-        connection, _address = listener.accept()
-        accepted.set()
-        connection.close()
-
-    server = Thread(target=accept_once)
-    server.start()
-    spawns: list[object] = []
-    client = RodexDaemonClient(
-        tmp_path,
-        sys.executable,
-        process_spawner=lambda *_args, **_kwargs: spawns.append(object()),  # type: ignore[arg-type]
-    )
+    client = RodexDaemonClient(short_runtime_root, sys.executable)
+    daemon_pids: list[int] = []
     try:
-        with pytest.raises(RodexDaemonError, match="legacy Rodex daemon is still running"):
-            client.ensure_running()
-        assert accepted.wait(1)
-        assert spawns == []
+        client.ensure_running()
+        assert client.socket_path == short_runtime_root / f"{RODEX_IMPLEMENTATION_SHA256}.sock"
+        assert client.socket_path != legacy_path
+        assert client.socket_path.is_socket()
+        assert legacy_path.is_socket()
+        for process_path in Path("/proc").glob("[0-9]*"):
+            try:
+                command = (process_path / "cmdline").read_bytes().split(b"\0")
+            except OSError:
+                continue
+            if b"rodex.daemon" in command and os.fsencode(short_runtime_root) in command:
+                daemon_pids.append(int(process_path.name))
+        assert len(daemon_pids) == 1
     finally:
+        for pid in daemon_pids:
+            with suppress(ProcessLookupError):
+                os.kill(pid, signal.SIGTERM)
         listener.close()
-        server.join(timeout=1)
 
 
-def test_current_client_rejects_same_protocol_daemon_with_different_loaded_code(tmp_path: Path) -> None:
-    socket_path = tmp_path / "rodexd-v2.sock"
+def test_current_receipt_reconciliation_ignores_an_older_implementation_namespace(tmp_path: Path) -> None:
+    older_receipt = tmp_path / "rodexd-v2-process-0000000000000001-app-server.json"
+    older_receipt.write_text("owned by the still-running older daemon\n")
+
+    RuntimeProcessReceipts(tmp_path).reconcile()
+
+    assert older_receipt.read_text() == "owned by the still-running older daemon\n"
+
+
+def test_implementation_daemon_socket_rejects_an_overlong_runtime_root_cleanly(tmp_path: Path) -> None:
+    long_root = tmp_path / ("x" * 100)
+
+    with pytest.raises(RodexDaemonError, match="daemon Unix socket path is too long"):
+        RodexDaemonClient(long_root, sys.executable)
+
+
+def test_current_client_rejects_same_protocol_daemon_with_different_loaded_code(short_runtime_root: Path) -> None:
+    socket_path = daemon_socket_path(short_runtime_root)
     listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     listener.bind(str(socket_path))
     listener.listen()
@@ -582,7 +609,7 @@ def test_current_client_rejects_same_protocol_daemon_with_different_loaded_code(
     server.start()
     spawns: list[object] = []
     client = RodexDaemonClient(
-        tmp_path,
+        short_runtime_root,
         sys.executable,
         process_spawner=lambda *_args, **_kwargs: spawns.append(object()),  # type: ignore[arg-type]
     )
@@ -602,8 +629,8 @@ def test_current_client_rejects_same_protocol_daemon_with_different_loaded_code(
         server.join(timeout=1)
 
 
-def test_current_client_reports_both_sides_of_a_daemon_protocol_mismatch(tmp_path: Path) -> None:
-    socket_path = tmp_path / "rodexd-v2.sock"
+def test_current_client_reports_both_sides_of_a_daemon_protocol_mismatch(short_runtime_root: Path) -> None:
+    socket_path = daemon_socket_path(short_runtime_root)
     listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     listener.bind(str(socket_path))
     listener.listen()
@@ -626,7 +653,7 @@ def test_current_client_reports_both_sides_of_a_daemon_protocol_mismatch(tmp_pat
 
     server = Thread(target=respond_once)
     server.start()
-    client = RodexDaemonClient(tmp_path, sys.executable)
+    client = RodexDaemonClient(short_runtime_root, sys.executable)
     try:
         with pytest.raises(RodexDaemonError) as raised:
             client.ensure_running()

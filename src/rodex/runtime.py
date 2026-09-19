@@ -41,6 +41,7 @@ from .app_server_contract import (
 )
 from .control import CodexControlClient, LiveRodexControl
 from .daemon_client import (
+    RODEX_DAEMON_SOCKET_NAME,
     RODEX_RUNTIME_WAKE_REGISTRATION,
     RodexDaemonClient,
     RodexDaemonError,
@@ -2371,7 +2372,7 @@ def default_runtime_root_path() -> Path:
     xdg_runtime = os.environ.get("XDG_RUNTIME_DIR")
     if xdg_runtime:
         candidate = Path(os.path.abspath(Path(xdg_runtime).expanduser())) / "rodex"
-        if len(os.fsencode(candidate / "app-0000000000000000.sock")) <= SUN_PATH_MAX_BYTES:
+        if len(os.fsencode(candidate / RODEX_DAEMON_SOCKET_NAME)) <= SUN_PATH_MAX_BYTES:
             return candidate
     return Path("/tmp") / f"rodex-{os.getuid()}"
 

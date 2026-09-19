@@ -28,7 +28,7 @@ from .command_contract import (
     classify_rodex_command,
 )
 from .control import CodexControlClient
-from .daemon_client import RODEX_DAEMON_PROTOCOL
+from .daemon_client import RODEX_DAEMON_PROTOCOL, daemon_socket_path
 from .errors import RodexExecutableNotFoundError, RodexLaunchError
 from .implementation_identity import RODEX_IMPLEMENTATION_ID
 from .machine_commands import execute_machine_command, print_machine_error
@@ -37,7 +37,7 @@ from .managed_session_lifecycle import (
     SessionSelection,
     UnregisteredCodexSessionSelection,
 )
-from .runtime import RodexRuntimeLauncher
+from .runtime import RodexRuntimeLauncher, default_runtime_root_path
 from .session_commands import execute_session_command
 from .statistics_commands import execute_statistics_command
 from .version import RODEX_VERSION
@@ -338,6 +338,7 @@ class UnifiedRodexApplicationPipeline:
             f"  release: {RODEX_VERSION}\n"
             f"  implementation: {RODEX_IMPLEMENTATION_ID}\n"
             f"  daemon protocol: {RODEX_DAEMON_PROTOCOL}\n"
+            f"  daemon socket: {daemon_socket_path(default_runtime_root_path())}\n"
             f"  SQLite catalog: generation {RODEX_DATABASE_SCHEMA_GENERATION} ({RODEX_DATABASE_FILENAME})"
         )
         return 0

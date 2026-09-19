@@ -23,6 +23,7 @@ import pytest
 import rodex.runtime as runtime_module
 from rodex.app_server_contract import RodexAppServerVersionError
 from rodex.control import LiveRodexControl
+from rodex.daemon_client import daemon_socket_path
 from rodex.process_contracts import AnalyticsRuntimeConfig, RuntimeServiceConfig
 from rodex.process_environment import (
     exact_environment_exec_command,
@@ -444,7 +445,7 @@ class FailingEnvironmentInstallRunner(RuntimeRunner):
 
 class RecordingDaemonClient:
     def __init__(self, runtime_root: Path) -> None:
-        self.socket_path = runtime_root / "rodexd-v2.sock"
+        self.socket_path = daemon_socket_path(runtime_root)
         self.reservations: list[tuple[str, RuntimeServiceConfig]] = []
         self.ready: list[tuple[str, str, float]] = []
         self.stopped: list[tuple[str, str]] = []
@@ -772,7 +773,7 @@ def test_start_directly_hosts_codex_in_tmux_and_returns_its_session_id(
         "rodex.terminal_bridge",
     ]
     joined_host_command = shlex.join(real_host_command)
-    assert f"--daemon-socket {tmp_path / 'rodexd-v2.sock'}" in joined_host_command
+    assert f"--daemon-socket {daemon_socket_path(tmp_path)}" in joined_host_command
     assert f"--runtime-id {RUNTIME_ID}" in joined_host_command
     assert "--tmux-pane %9" in joined_host_command
     assert "send-keys" not in joined_host_command
@@ -833,6 +834,7 @@ def test_startup_environment_failure_never_starts_host_and_removes_placeholder(
         "/usr/bin/tmux",
         runner=runner,
         connector=RecordingConnector([]),
+        daemon_client_factory=RecordingDaemonFactory(),
         python_executable="/venv/bin/python",
         environment={"PATH": "/usr/bin", "USER_SETTING": "preserved"},
     )
@@ -856,7 +858,11 @@ def test_startup_cleanup_failure_is_not_allowed_to_replace_the_causal_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("RODEX_RUNTIME_DIR", str(tmp_path))
-    launcher = RodexRuntimeLauncher("codex", "tmux")
+    launcher = RodexRuntimeLauncher(
+        "codex",
+        "tmux",
+        daemon_client_factory=RecordingDaemonFactory(),
+    )
     startup_failure = RuntimeError("environment install failed")
 
     def fail_start(*_arguments: object, **_options: object) -> None:

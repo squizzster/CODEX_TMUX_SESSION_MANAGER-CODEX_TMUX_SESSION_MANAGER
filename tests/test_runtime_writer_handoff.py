@@ -5,6 +5,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
 from dataclasses import replace
@@ -213,7 +214,7 @@ def test_real_managed_resume_retries_a_live_tui_after_an_exact_writer_conflict(
     fixture_home = isolated / "codex"
     fixture_home.mkdir(mode=0o700)
     installed_home = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
-    runtime_root = isolated / "r"
+    runtime_root = Path(tempfile.mkdtemp(prefix="rodex-writer-", dir="/tmp"))
     environment = {
         **os.environ,
         "CODEX_HOME": str(fixture_home),
@@ -272,5 +273,6 @@ def test_real_managed_resume_retries_a_live_tui_after_an_exact_writer_conflict(
         for socket_path in runtime_root.glob(RODEX_TMUX_SOCKET_PATTERN):
             subprocess.run([tmux, "-N", "-S", str(socket_path), "kill-server"], capture_output=True, timeout=5)
         _stop_fixture_daemon(runtime_root)
+        shutil.rmtree(runtime_root, ignore_errors=True)
         for filename in ("auth.json", "config.toml"):
             (fixture_home / filename).unlink(missing_ok=True)

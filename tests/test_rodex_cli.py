@@ -516,6 +516,8 @@ def test_version_reports_compatibility_without_codex_tmux_or_database(
         "rodex.cli.shutil.which",
         lambda command: pytest.fail(f"unexpected prerequisite lookup: {command}"),
     )
+    monkeypatch.delenv("RODEX_RUNTIME_DIR", raising=False)
+    monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
 
     assert run(["_version"], database_path=database) == 0
 
@@ -524,6 +526,8 @@ def test_version_reports_compatibility_without_codex_tmux_or_database(
     assert output.out.startswith("Rodex compatibility:\n  release: 0.14.0a2\n")
     assert "  implementation: 0.14.0a2+sha256." in output.out
     assert "  daemon protocol: rodex-daemon-v2\n" in output.out
+    assert f"  daemon socket: /tmp/rodex-{os.getuid()}/" in output.out
+    assert ".sock\n" in output.out
     assert "  SQLite catalog: generation 20 (rodex-v20.sqlite3)\n" in output.out
     assert not database.exists()
 

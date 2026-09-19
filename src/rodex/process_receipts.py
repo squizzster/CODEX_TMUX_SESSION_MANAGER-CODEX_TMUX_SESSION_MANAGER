@@ -14,10 +14,12 @@ from typing import Any, Final
 
 from rodex_registry.identity import RodexRuntimeId, parse_rodex_runtime_id
 
+from .implementation_identity import RODEX_IMPLEMENTATION_SHA256
+
 PROCESS_RECEIPT_PROTOCOL: Final = "rodex-process-receipt-v2"
 PROCESS_KINDS: Final = frozenset({"app-server", "native-tui"})
 _OPERATION_ID = re.compile(r"[0-9a-f]{32}")
-_RECEIPT_PATTERN = "rodexd-v2-process-*.json"
+PROCESS_RECEIPT_PATTERN: Final = f"{RODEX_IMPLEMENTATION_SHA256}.process-*.json"
 
 
 class ProcessReceiptError(RuntimeError):
@@ -85,7 +87,7 @@ class RuntimeProcessReceipts:
         _fsync_directory(self._runtime_root)
 
     def reconcile(self) -> None:
-        for path in sorted(self._runtime_root.glob(_RECEIPT_PATTERN)):
+        for path in sorted(self._runtime_root.glob(PROCESS_RECEIPT_PATTERN)):
             receipt = self._read(path)
             pid = receipt["pid"]
             if pid == os.getpid():
@@ -117,7 +119,9 @@ class RuntimeProcessReceipts:
     def _path(self, kind: str, runtime_id: RodexRuntimeId) -> Path:
         if kind not in PROCESS_KINDS:
             raise ValueError("unknown daemon child process kind")
-        return self._runtime_root / f"rodexd-v2-process-{parse_rodex_runtime_id(runtime_id)}-{kind}.json"
+        return self._runtime_root / (
+            f"{RODEX_IMPLEMENTATION_SHA256}.process-{parse_rodex_runtime_id(runtime_id)}-{kind}.json"
+        )
 
     def _read(self, path: Path) -> dict[str, Any]:
         try:

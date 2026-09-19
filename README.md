@@ -79,8 +79,11 @@ title, such as `rodex_cyan_mackerel`. After tmux returns it prints
 
 Each runtime uses a separate tmux server and immutable server incarnation. Rodex
 verifies the session, primary pane, runtime, registry, and Codex identities before
-attach, read, control, or cleanup. One `rodexd` process owns all runtime services and the
-single serialized analytics pipeline beneath a runtime root. Linux process monitors show
+attach, read, control, or cleanup. One `rodexd` process per exact implementation owns
+the runtime services and serialized analytics pipeline it created beneath a runtime root.
+Different installed implementations coexist at SHA-256-named daemon endpoints, so a new
+Rodex can create sessions without taking ownership from still-running older sessions.
+Linux process monitors show
 that daemon as a version-derived task name such as `rodexd_v0_14a2` rather than a generic
 Python process. Existing processes retain their loaded code. Daemon and runtime handshakes
 require the exact first-party implementation fingerprint, so changed code is rejected
@@ -203,7 +206,7 @@ App Server and authenticated trace identities, and closes when that work finishe
 | Runtime root | `$XDG_RUNTIME_DIR/rodex` |
 | Runtime fallback | `/tmp/rodex-<uid>` |
 | Optional runtime override | `RODEX_RUNTIME_DIR` |
-| Shared daemon socket | `<runtime-root>/rodexd-v2.sock` |
+| Implementation daemon socket | `<runtime-root>/<implementation-sha256>.sock` |
 | Per-runtime tmux socket | `<runtime-root>/tmux-v4-<runtime-id>.sock` |
 | Per-runtime service sockets | `<runtime-root>/{app,proxy,events}-<runtime-id>.sock` |
 

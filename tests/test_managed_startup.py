@@ -17,6 +17,7 @@ import signal
 import struct
 import subprocess
 import sys
+import tempfile
 import termios
 import time
 from collections.abc import Iterator
@@ -30,6 +31,7 @@ from websockets.sync.client import unix_connect
 from rodex.analytics import ANALYTICS_CLOSE_WAIT_SECONDS
 from rodex.app_server_contract import CODEX_APP_SERVER, AppServerClientInfo
 from rodex.daemon import SHUTDOWN_WAIT_SECONDS
+from rodex.implementation_identity import RODEX_IMPLEMENTATION_SHA256
 from rodex.interaction_pipeline import DeliveryStatus, InteractionOperation, InteractionRequest
 from rodex.interaction_transport import publish_session_interaction
 from rodex.runtime_peer import RuntimePeerIdentity
@@ -244,19 +246,19 @@ def test_installed_rodex_starts_reuses_and_adopts_sessions(
     isolated_codex_home.mkdir(mode=0o700)
     installed_shim = isolated / "rodex"
     shutil.copy2(project / "usr/local/bin/rodex", installed_shim)
+    runtime_root = Path(tempfile.mkdtemp(prefix="rodex-live-", dir="/tmp"))
     environment = {
         **os.environ,
         "TERM": "xterm-256color",
         "RODEX_PROJECT_DIR": str(project),
         "RODEX_CODEX_BINARY": codex,
         "RODEX_TMUX_BINARY": tmux_binary,
-        "RODEX_RUNTIME_DIR": str(isolated / "r"),
+        "RODEX_RUNTIME_DIR": str(runtime_root),
         "XDG_STATE_HOME": str(isolated / "state"),
         "CODEX_HOME": str(isolated_codex_home),
     }
     environment.pop("TMUX", None)
     environment.pop("TMUX_PANE", None)
-    runtime_root = isolated / "r"
     inspected_codex_ids: dict[str, str] = {}
 
     def tmux(*arguments: str) -> subprocess.CompletedProcess[str]:
@@ -413,7 +415,7 @@ def test_installed_rodex_starts_reuses_and_adopts_sessions(
             assert runtime_id
             if expected_cwd is None:
                 for kind in ("app-server", "native-tui"):
-                    receipt_path = runtime_root / f"rodexd-v2-process-{runtime_id}-{kind}.json"
+                    receipt_path = runtime_root / f"{RODEX_IMPLEMENTATION_SHA256}.process-{runtime_id}-{kind}.json"
                     receipt = json.loads(receipt_path.read_text())
                     assert Path(f"/proc/{receipt['pid']}/cwd").resolve() == workspace.resolve()
             endpoint = tmux("display-message", "-p", "-t", f"={name}:", "#{@rodex_protocol_proxy_socket_path}")
@@ -538,5 +540,6 @@ def test_installed_rodex_starts_reuses_and_adopts_sessions(
             tmux("kill-server")
         finally:
             _stop_fixture_daemon(runtime_root)
+            shutil.rmtree(runtime_root, ignore_errors=True)
             for filename in ("auth.json", "config.toml"):
                 (isolated_codex_home / filename).unlink(missing_ok=True)

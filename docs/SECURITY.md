@@ -15,9 +15,11 @@ listener; control endpoints are Unix sockets below a private runtime root.
   if confirmation never arrives. An exact committed/pending pair is recoverable.
 - Runtime roots are real, current-user-owned directories at mode `0700`, below either a
   private parent or root-owned sticky storage. Sockets and logs are mode `0600`.
-- `rodexd-v2.sock` is the single daemon control socket. It accepts bounded current-protocol
-  JSON only from the current uid and exact loaded implementation; a start `flock`
-  prevents duplicate daemon creation.
+- `<implementation-sha256>.sock` is the daemon control socket for one exact loaded
+  implementation. It accepts bounded current-protocol JSON only from the current uid
+  and that implementation; an equally namespaced start `flock` prevents duplicate
+  creation. Different implementation endpoints and receipt namespaces may coexist so
+  upgrades do not adopt or retire older runtimes.
   The pane bridge may pass exactly one TTY descriptor with `SCM_RIGHTS`, and the daemon
   admits it only after the complete reservation, peer PID, pane and TTY checks succeed.
   Initial decoding has a five-second absolute deadline; every unsuccessful decode closes
@@ -110,7 +112,8 @@ listener; control endpoints are Unix sockets below a private runtime root.
   primary actions also require the immutable pane ID. Name, socket, runtime, process
   context, or hook event is insufficient.
 - Under one stable per-user XDG/runtime context, Rodex uses one private canonical
-  database, one shared daemon and one tmux server per runtime. Database-enforced display-name uniqueness covers
+  database, one daemon per exact implementation, and one tmux server per runtime.
+  Database-enforced display-name uniqueness covers
   every session recorded in that database, and the complete live tmux name is the
   user-facing display name. A different `XDG_STATE_HOME` is a separate database/name
   boundary; a different `RODEX_RUNTIME_DIR` is a separate root for runtime endpoints. No

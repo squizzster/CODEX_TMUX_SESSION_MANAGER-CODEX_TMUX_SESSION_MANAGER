@@ -8,7 +8,7 @@ agreement, retain clear ownership, and keep this file within 150 lines and 10,24
 ## Runtime shape
 
 ```text
-user → Rodex CLI → rodexd-v2.sock → one shared Python daemon
+user → Rodex CLI → <implementation-sha256>.sock → one implementation-scoped Python daemon
          │                              ├── runtime A → tmux-A → TUI ↔ proxy ↔ app-server
          ├──► SQLite registry           ├── runtime B → tmux-B → TUI ↔ proxy ↔ app-server
          ├──► _cat / _tail              └── one analytics coordinator → trace/stats → SQLite
@@ -32,7 +32,7 @@ identity requires a transient App Server check.
 | `rodex.interaction_pipeline` / `interaction_transport` | Typed targets, intent-preserving hooks, outcomes and one private endpoint. |
 | `rodex.session_read_pipeline` / `session_tail` | Verified reads and incremental terminal history. |
 | `rodex.process_environment` / `environment_exec` | Exact caller-owned environment at child exec. |
-| `rodex.daemon` / `daemon_client` / `terminal_bridge` | Own one daemon socket, exact runtime reservations, pane-TTY handoff and runtime threads. |
+| `rodex.daemon` / `daemon_client` / `terminal_bridge` | Own one exact-implementation daemon socket, runtime reservations, pane-TTY handoff and runtime threads. |
 | `rodex.runtime` / `process_contracts` / `process_guard` / `process_receipts` | Stage runtimes, supervise exact native children and reconcile daemon crashes. |
 | `rodex.runtime_endpoint` / `runtime_peer` | Exclusive socket lifetime and connected runtime/process identity. |
 | `rodex.terminal_gateway` / `terminal_exec` / `terminal_surface` / `presentation_policy` | PTY, native projection, typed display policies and restoration. |
@@ -41,7 +41,7 @@ identity requires a transient App Server check.
 | `rodex.tmux_sharing_coordinator` / status modules | Convert hook wakeups into fenced roster and display transitions. |
 | Observer projection/state/pane modules | Validate events, reduce state and perform exact pane mechanics. |
 | `rodex.primary_connection_lifecycle` | Isolate primary-connection resets and terminal runtime-shutdown interrupts. |
-| `rodex.analytics.SharedAnalyticsCoordinator` / source readers | Serialize every runtime's fail-open analytics through one daemon thread. |
+| `rodex.analytics.SharedAnalyticsCoordinator` / source readers | Serialize each implementation daemon's runtime analytics through one daemon thread. |
 | `rodex_registry.agent_trace_contract` / writer / reader | Normalize traces, transactional append and bounded reads. |
 | `rodex_registry.execution` / `statistics` | Own canonical lineage, publication orchestration, and relational projections. |
 | `rodex_registry.schema` | Generate, install when authorized, and attest the complete relational catalog. |
@@ -98,7 +98,7 @@ trace-event, and tool-call identities never substitute for one another. See
 
 ALPHA hosts require complete current identity and protocol fields, without adapters.
 
-New sessions allocate IDs, create detached tmux, reserve the runtime in the shared daemon,
+New sessions allocate IDs, create detached tmux, reserve the runtime in the matching implementation daemon,
 hand off the exact pane TTY, observe one Codex root ID, and advertise a `pending` tuple.
 The immutable session-ID transition lock spans
 SQL publication, registration, namespaced tmux rename, and UI setup; competing selectors

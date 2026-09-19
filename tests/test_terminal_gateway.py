@@ -12,6 +12,7 @@ import termios
 import threading
 import time
 from contextlib import contextmanager, suppress
+from pathlib import Path
 
 import pytest
 
@@ -81,6 +82,7 @@ def start_gateway(slave, pipeline, registrations=(), presentation=None):
     return TerminalSessionGateway(
         [sys.executable, "-I", "-c", ECHO_CHILD],
         env=dict(os.environ),
+        cwd=Path.cwd(),
         pipeline=pipeline,
         runtime_identity="test-owned-runtime",
         registrations=registrations,
@@ -166,6 +168,58 @@ def test_real_child_terminal_pass_through_resize_signal_exit_and_outer_restorati
                 InteractionOperation.TERMINAL_OUTPUT,
             }
         finally:
+            gateway.close()
+
+
+def test_close_waits_for_inflight_wake_before_releasing_descriptor(monkeypatch):
+    pipeline = SessionInteractionPipeline()
+    entered, release, close_waiting = threading.Event(), threading.Event(), threading.Event()
+    with outer_terminal() as (master, slave):
+        gateway = start_gateway(slave, pipeline)
+        read_until(gateway, master, b"READY")
+        gateway.process.terminate()
+        gateway.process.wait(2)
+        wake_fd = gateway._wake_write
+        original_write = os.write
+        original_lock = gateway._wake_lock
+
+        class ObservedLock:
+            def __enter__(self):
+                if threading.current_thread().name == "gateway-close-test":
+                    close_waiting.set()
+                return original_lock.__enter__()
+
+            def __exit__(self, *args):
+                return original_lock.__exit__(*args)
+
+        def blocked_write(fd, data):
+            if fd == wake_fd:
+                entered.set()
+                assert release.wait(3)
+            return original_write(fd, data)
+
+        gateway._wake_lock = ObservedLock()
+        monkeypatch.setattr(os, "write", blocked_write)
+        notifier = threading.Thread(target=gateway._notify_relay)
+        closer = threading.Thread(target=gateway.close, name="gateway-close-test")
+        notifier.start()
+        try:
+            assert entered.wait(1)
+            closer.start()
+            assert close_waiting.wait(1)
+            os.fstat(wake_fd)  # Still owned until the pending write finishes.
+            release.set()
+            notifier.join(2)
+            closer.join(2)
+            assert not notifier.is_alive() and not closer.is_alive()
+            with pytest.raises(OSError):
+                os.fstat(wake_fd)
+            gateway._notify_relay()  # Retired callbacks cannot touch a reused number.
+        finally:
+            release.set()
+            notifier.join(3)
+            if closer.ident is not None:
+                closer.join(3)
             gateway.close()
             gateway.close()
 

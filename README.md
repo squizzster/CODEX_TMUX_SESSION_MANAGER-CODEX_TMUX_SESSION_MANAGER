@@ -79,13 +79,23 @@ title, such as `rodex_cyan_mackerel`. After tmux returns it prints
 
 Each runtime uses a separate tmux server and immutable server incarnation. Rodex
 verifies the session, primary pane, runtime, registry, and Codex identities before
-attach, read, control, or cleanup. One `rodexd` process owns all runtime services and the
-single serialized analytics pipeline beneath a runtime root. Linux process monitors show
+attach, read, control, or cleanup. One `rodexd` process per exact implementation owns
+the runtime services and serialized analytics pipeline it created beneath a runtime root.
+Different installed implementations coexist at SHA-256-named daemon endpoints, so a new
+Rodex can create sessions without taking ownership from still-running older sessions.
+Linux process monitors show
 that daemon as a version-derived task name such as `rodexd_v0_14a2` rather than a generic
 Python process. Existing processes retain their loaded code. Daemon and runtime handshakes
 require the exact first-party implementation fingerprint, so changed code is rejected
 rather than silently mixed. Stop old runtimes and their daemon after installing or
 editing Rodex.
+
+Each reservation carries its absolute caller workspace into both native child processes;
+`PWD` alone is not a working directory. Native directory options remain unchanged.
+Stop acknowledges `stopping` or `terminal`; a running worker retains its TTY until its
+own finalizer completes. Cancelled reservations cannot start. The daemon retains at most
+1,024 small completion receipts, with no caller environment; evicted operation identities
+expire and cannot restart work.
 
 When the registered main turn terminates with App Server
 `codexErrorInfo: "serverOverloaded"`, Rodex schedules `Continue...` through the same
@@ -95,6 +105,8 @@ continuation. Repeated overloads within five minutes double the delay through 60
 minutes resets the sequence to 30 seconds. The terminal `systemError` state produced by
 that failure remains startable only when Codex reports direct input is accepted. This
 recovery is always active.
+Cancellation remains effective through hooks, session-lock and transport waits until
+atomic dispatch admission. It does not undo or interrupt an already admitted request.
 
 ## Commands
 
@@ -103,6 +115,7 @@ recovery is always active.
 | Command | Contract |
 | --- | --- |
 | `_help` | Print Rodex help |
+| `_version` | Print the Rodex release and active daemon/SQLite compatibility contracts |
 | `_create [NAME] [-- CODEX_ARGS...]` | Create and attach to a managed session |
 | `_detach [SESSION\|CODEX_ARGS...]` | Create, resume, or recover without attaching |
 | `_running` | List running sessions |
@@ -158,6 +171,15 @@ and metrics. Codex remains the owner of message, command, tool, reasoning, and o
 bodies. `--include-bodies` re-reads authenticated rollout prefixes; follow mode remains
 metadata-only.
 
+Orderly retirement preserves accepted events and reconciles on the same analytics worker,
+allowing a 0.5-second append-settle interval within five seconds of cooperative effort.
+Outcomes are complete, inactive, or explicitly incomplete; `_stats-status` retains an
+incomplete diagnostic where storage is available, and the daemon log records failures
+when it is not. Daemon shutdown waits at most ten seconds for runtime workers, then five
+seconds for analytics. Those caller budgets cannot preempt an executing analyzer or SQL
+operation; unquiesced producers cannot be declared complete. Resume requests reconciliation;
+this is best effort, not a crash-durable repair queue or final-durability guarantee.
+
 ## Managed presentation
 
 The `/rodex` input menu selects a configured presentation policy:
@@ -184,7 +206,7 @@ App Server and authenticated trace identities, and closes when that work finishe
 | Runtime root | `$XDG_RUNTIME_DIR/rodex` |
 | Runtime fallback | `/tmp/rodex-<uid>` |
 | Optional runtime override | `RODEX_RUNTIME_DIR` |
-| Shared daemon socket | `<runtime-root>/rodexd-v2.sock` |
+| Implementation daemon socket | `<runtime-root>/<implementation-sha256>.sock` |
 | Per-runtime tmux socket | `<runtime-root>/tmux-v4-<runtime-id>.sock` |
 | Per-runtime service sockets | `<runtime-root>/{app,proxy,events}-<runtime-id>.sock` |
 
@@ -215,3 +237,4 @@ prerequisites fail that gate.
 - [Security model](docs/SECURITY.md)
 - [Code concepts](docs/CODE_CONCEPTS.md)
 - [SQL schema](docs/SQL_SCHEMA.md)
+- [Shared-runtime root-cause evidence and verification](docs/SHARED_RUNTIME_ROOT_CAUSES.md)

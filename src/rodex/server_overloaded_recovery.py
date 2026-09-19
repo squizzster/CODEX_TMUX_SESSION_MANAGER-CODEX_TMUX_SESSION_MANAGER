@@ -15,6 +15,7 @@ from .app_server_contract import CODEX_APP_SERVER
 from .interaction_pipeline import (
     InteractionOperation,
     InteractionRecord,
+    InteractionRejected,
     InteractionRequest,
     InteractionResult,
     SessionInteractionPipeline,
@@ -91,6 +92,7 @@ class ServerOverloadedRecoveryController:
         self._observed_terminal_turns: OrderedDict[tuple[str, str], None] = OrderedDict()
         self._pending_attempt: ServerOverloadedRecoveryAttempt | None = None
         self._pending_call: DeferredCall | None = None
+        self._dispatch_requests: dict[str, tuple[int, ServerOverloadedRecoveryAttempt]] = {}
         self._generation = 0
         self._closed = False
         self._unsubscribe_outcomes = interaction_pipeline.subscribe_outcomes(self.observe_interaction_outcome)
@@ -267,10 +269,14 @@ class ServerOverloadedRecoveryController:
 
     def _dispatch_pending(self, generation: int) -> None:
         with self._lock:
-            if self._closed or generation != self._generation or self._pending_attempt is None:
+            if (
+                self._closed
+                or generation != self._generation
+                or self._pending_attempt is None
+                or self._pending_call is None
+            ):
                 return
             attempt = self._pending_attempt
-            self._pending_attempt = None
             self._pending_call = None
         request = InteractionRequest(
             "main",
@@ -281,6 +287,8 @@ class ServerOverloadedRecoveryController:
             dispatch_id=attempt.dispatch_id,
             expected_thread_id=attempt.thread_id,
         )
+        with self._lock:
+            self._dispatch_requests[request.request_id] = (generation, attempt)
         try:
             result = self._interaction_pipeline.execute(request)
         except Exception as error:
@@ -289,7 +297,36 @@ class ServerOverloadedRecoveryController:
                 f"error={_bounded_log_value(error)}"
             )
             return
+        finally:
+            with self._lock:
+                self._dispatch_requests.pop(request.request_id, None)
+                if generation == self._generation:
+                    self._clear_pending_locked()
         self._log_dispatch_result(attempt, result)
+
+    def admit_dispatch(self, request: InteractionRequest) -> None:
+        """Order cancellation against the last safe dispatch boundary, before RPC send.
+
+        The runtime calls this after hooks, session-lock and transport waits. The
+        token lives only here; wire requests and content hooks cannot create one.
+        Once admitted, cancellation cannot revoke an accepted/indeterminate turn.
+        """
+        if request.source != SERVER_OVERLOADED_RECOVERY_SOURCE:
+            return
+        with self._lock:
+            retained = self._dispatch_requests.pop(request.request_id, None)
+            if retained is None:
+                raise InteractionRejected("recovery dispatch has no trusted pending admission")
+            generation, attempt = retained
+            if (
+                self._closed
+                or generation != self._generation
+                or self._pending_attempt is not attempt
+                or request.dispatch_id != attempt.dispatch_id
+                or request.expected_thread_id != attempt.thread_id
+            ):
+                raise InteractionRejected("recovery was cancelled before dispatch admission")
+            self._clear_pending_locked()
 
     def _log_dispatch_result(self, attempt: ServerOverloadedRecoveryAttempt, result: InteractionResult) -> None:
         outcome = "started" if result.accepted else "rejected"

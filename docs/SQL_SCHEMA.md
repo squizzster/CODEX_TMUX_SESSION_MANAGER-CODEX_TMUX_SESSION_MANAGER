@@ -16,7 +16,7 @@ suggestion followed by user agreement.
   current-user-owned mode-`0600` files. Rodex opens the parent, lock, and database with
   `O_NOFOLLOW` and `O_CLOEXEC`, and opens children relative to the retained parent
   descriptor. Parent and transition-lock descriptors remain open through each transaction;
-  one validated database descriptor remains open for the process-local WAL lifetime.
+  validated database descriptors remain borrowed through their transactions and WAL lifetime.
 - `open_rodex_bootstrap_transaction` is the only entry allowed to create the private
   parent, transition lock, or database file. It is used only by explicit first-use flows.
   `open_rodex_transaction` and `open_rodex_read_transaction` are existing-only: a missing
@@ -43,18 +43,18 @@ suggestion followed by user agreement.
   head-of-line block WAL readers. Success commits once; any exception rolls back; each
   transaction connection plus its parent and transition-lock admission descriptors close
   on exit.
-- A threadless process-local owner retains one validated main-database descriptor and one
-  idle SQLite connection for at most one exact `(path, parent, transition-lock, database)`
-  storage identity. Transactions reuse that descriptor, avoiding a same-process descriptor
-  release while SQLite still owns locks on the file. The owner keeps sparse writes in one
-  WAL generation instead of recreating `-wal` and `-shm` after every commit. It owns no
-  transaction or `flock`, uses the same `synchronous=NORMAL`, 1,000-page
-  automatic-checkpoint, and 8 MiB journal-size policy as writers, and closes SQLite before
-  releasing the descriptor when the process switches database identity or exits cleanly.
-  Before a genuine fork, the parent closes the complete owner; the child inherits no live
-  parent SQLite connection and creates its own owner only when it needs database access.
+- Threadless process-local owners retain one validated main-database descriptor per exact
+  `(path, parent, transition-lock, database)` identity with active borrowers. The complete
+  transaction-storage context acquires/releases a borrow; opening another catalog cannot
+  close it. At most one idle catalog owner retains its descriptor and SQLite connection
+  for sparse-write WAL reuse; other idle owners close SQLite before their descriptor.
+  Owners hold no transaction or `flock` and retain the same `synchronous=NORMAL`, 1,000-page
+  automatic-checkpoint and 8 MiB journal-size policy. Shutdown retirement defers closure
+  until all borrowers release. Before fork, idle owners close; active parent owners remain
+  untouched. Fork during a transaction requires immediate child exec or `_exit`: child SQL
+  acquisition is rejected, and using/unwinding inherited transaction contexts is unsupported.
 - Identity memory remains a lock-protected map of `(device, inode)` tuples. Apart from the
-  bounded WAL-lifetime main-file descriptor and connection, Rodex retains no admission
+  active borrowers and one idle WAL-lifetime descriptor/connection, Rodex retains no admission
   descriptor beyond a transaction and has no database watcher, worker, pipe, callback,
   subscription, polling loop, or recurring SQL. Storage changes are detected only at an
   actual transaction fence:
@@ -63,7 +63,9 @@ suggestion followed by user agreement.
 - The explicit integrity audit uses the same existing-only, shared-lock, read-only
   transaction. Its normal WAL-aware snapshot includes committed WAL content, executes no
   DDL, and compares every non-internal table, index, trigger, and view with the canonical
-  catalog. Location changes and live storage relocation are unsupported; the exclusive
+  catalog. Token comparison preserves quoted literals/identifiers and their whitespace;
+  only unquoted formatting and a CREATE-prefix `IF NOT EXISTS` are normalized.
+  Location changes and live storage relocation are unsupported; the exclusive
   maintenance lock does not move or repair the database.
 
 ## Schema standards

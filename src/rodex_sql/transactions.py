@@ -52,6 +52,8 @@ class _ProcessWalLifetimeOwner:
     database_descriptor: int
     database_state: os.stat_result
     connection: sqlite3.Connection | None = None
+    borrowers: int = 0
+    retiring: bool = False
 
     def close(self) -> None:
         """Close SQLite before releasing its separately validated descriptor."""
@@ -63,6 +65,7 @@ class _ProcessWalLifetimeOwner:
 
 _PROCESS_WAL_LIFETIME_LOCK = Lock()
 _PROCESS_WAL_LIFETIME_OWNER: _ProcessWalLifetimeOwner | None = None
+_PROCESS_STORAGE_OWNERS: dict[Path, _ProcessWalLifetimeOwner] = {}
 
 
 @contextmanager
@@ -210,7 +213,10 @@ def _open_transaction_storage(
             boundary,
             create=create,
         )
-        yield opened
+        try:
+            yield opened
+        finally:
+            _release_process_database_storage(opened)
 
 
 def _connect_validated_database(
@@ -289,7 +295,7 @@ def _retain_process_wal_lifetime(opened: ValidatedDatabaseFile) -> None:
     process_id = os.getpid()
     storage_identity = _wal_storage_identity(opened)
     with _PROCESS_WAL_LIFETIME_LOCK:
-        current = _PROCESS_WAL_LIFETIME_OWNER
+        current = _PROCESS_STORAGE_OWNERS.get(opened.path)
         if current is None or (
             current.process_id != process_id
             or current.database_path != opened.path
@@ -307,51 +313,68 @@ def _retain_process_database_storage(
     *,
     create: bool,
 ) -> ValidatedDatabaseFile:
-    """Borrow one process-local main-file descriptor across all connections."""
+    """Borrow authenticated storage without revoking another catalog's borrowers."""
     global _PROCESS_WAL_LIFETIME_OWNER
 
     process_id = os.getpid()
     path = boundary.path
     with _PROCESS_WAL_LIFETIME_LOCK:
-        current = _PROCESS_WAL_LIFETIME_OWNER
-        if current is not None and current.process_id != process_id:
+        if any(owner.process_id != process_id for owner in _PROCESS_STORAGE_OWNERS.values()):
             raise RodexSQLError("inherited SQLite storage owner reached an unsupported process boundary")
-        if (
-            current is not None
-            and current.database_path == path
-            and current.storage_identity.parent == (boundary.parent_state.st_dev, boundary.parent_state.st_ino)
-            and current.storage_identity.transition_lock
-            == (
-                boundary.transition_lock_state.st_dev,
-                boundary.transition_lock_state.st_ino,
-            )
-        ):
+        current = _PROCESS_STORAGE_OWNERS.get(path)
+        if current is not None:
             opened = ValidatedDatabaseFile(
                 boundary=boundary,
                 descriptor=current.database_descriptor,
                 state=current.database_state,
             )
+            require_database_identity(opened, stage="storage_borrow")
+            current.borrowers += 1
+            _PROCESS_WAL_LIFETIME_OWNER = current
+            _evict_idle_storage_owners()
             return opened
-
-        if current is not None:
-            current.close()
-            _PROCESS_WAL_LIFETIME_OWNER = None
 
         # The retained descriptor is always writable because a later write must
         # reuse it without opening and releasing another descriptor on this file.
         opened = boundary.open_database(writable=True, create=create)
         try:
-            _PROCESS_WAL_LIFETIME_OWNER = _ProcessWalLifetimeOwner(
+            current = _ProcessWalLifetimeOwner(
                 process_id=process_id,
                 database_path=path,
                 storage_identity=_wal_storage_identity(opened),
                 database_descriptor=opened.descriptor,
                 database_state=opened.state,
+                borrowers=1,
             )
+            _PROCESS_STORAGE_OWNERS[path] = current
+            _PROCESS_WAL_LIFETIME_OWNER = current
+            _evict_idle_storage_owners()
         except BaseException:
             opened.close()
             raise
         return opened
+
+
+def _release_process_database_storage(opened: ValidatedDatabaseFile) -> None:
+    with _PROCESS_WAL_LIFETIME_LOCK:
+        owner = _PROCESS_STORAGE_OWNERS[opened.path]
+        if owner.process_id != os.getpid():
+            raise RodexSQLError("cannot release inherited SQLite storage; exec before using SQL in a forked child")
+        owner.borrowers -= 1
+        _evict_idle_storage_owners()
+
+
+def _evict_idle_storage_owners() -> None:
+    """Called under the owner lock: retain borrowers and at most one idle catalog."""
+    global _PROCESS_WAL_LIFETIME_OWNER
+    for path, owner in tuple(_PROCESS_STORAGE_OWNERS.items()):
+        if owner.borrowers or (owner is _PROCESS_WAL_LIFETIME_OWNER and not owner.retiring):
+            continue
+        if owner.process_id == os.getpid():
+            owner.close()
+        del _PROCESS_STORAGE_OWNERS[path]
+        if owner is _PROCESS_WAL_LIFETIME_OWNER:
+            _PROCESS_WAL_LIFETIME_OWNER = None
 
 
 def _open_process_wal_lifetime_connection(
@@ -390,25 +413,24 @@ def _wal_storage_identity(opened: ValidatedDatabaseFile) -> _WalStorageIdentity:
 
 
 def _close_process_wal_lifetime_owner() -> None:
-    """Checkpoint and release this process's sole idle WAL lifetime owner."""
+    """Retire idle storage now and borrowed storage after its final release."""
     global _PROCESS_WAL_LIFETIME_OWNER
 
     with _PROCESS_WAL_LIFETIME_LOCK:
-        owner = _PROCESS_WAL_LIFETIME_OWNER
         _PROCESS_WAL_LIFETIME_OWNER = None
-        if owner is not None:
-            owner.close()
+        for owner in _PROCESS_STORAGE_OWNERS.values():
+            owner.retiring = True
+        _evict_idle_storage_owners()
 
 
 def _prepare_process_wal_lifetime_fork() -> None:
-    """Close parent-owned SQLite state before a child can inherit it."""
+    """Close idle SQLite state; preserve active parent borrows across fork."""
     global _PROCESS_WAL_LIFETIME_OWNER
 
     _PROCESS_WAL_LIFETIME_LOCK.acquire()
-    owner = _PROCESS_WAL_LIFETIME_OWNER
-    _PROCESS_WAL_LIFETIME_OWNER = None
-    if owner is not None:
-        owner.close()
+    if _PROCESS_WAL_LIFETIME_OWNER is not None and not _PROCESS_WAL_LIFETIME_OWNER.borrowers:
+        _PROCESS_WAL_LIFETIME_OWNER = None
+    _evict_idle_storage_owners()
 
 
 def _finish_process_wal_lifetime_fork_in_parent() -> None:
@@ -416,7 +438,7 @@ def _finish_process_wal_lifetime_fork_in_parent() -> None:
 
 
 def _finish_process_wal_lifetime_fork_in_child() -> None:
-    """Release synchronization; the parent closed SQLite before the fork."""
+    """Inherited active owners keep their parent PID and reject child SQL until exec."""
     _PROCESS_WAL_LIFETIME_LOCK.release()
 
 

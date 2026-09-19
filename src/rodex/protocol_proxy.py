@@ -239,7 +239,14 @@ class CodexProtocolEventTap:
         try:
             connection.send(ready_message)
             while True:
-                message = subscriber.get()
+                try:
+                    message = subscriber.get(timeout=0.25)
+                except queue.Empty:
+                    # The synchronous transport receives close frames on its own
+                    # reader. Its public close_code is set even without a send.
+                    if getattr(connection, "close_code", None) is not None:
+                        return
+                    continue
                 if message is _EVENT_STREAM_CLOSED:
                     return
                 connection.send(message)

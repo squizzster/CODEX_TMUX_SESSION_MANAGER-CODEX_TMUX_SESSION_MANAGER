@@ -662,8 +662,14 @@ def test_wrong_explicit_schema_generation_is_rejected_without_repair(
         )
         connection.execute("INSERT INTO rodex_schema_generations (schema_generation) VALUES (10)")
 
-    with pytest.raises(RodexSessionError, match="schema generation does not match"):
+    with pytest.raises(RodexSessionError) as raised:
         initialise_rodex_database(database)
+
+    assert str(raised.value) == (
+        "Rodex database schema generation does not match: found marker rows [(1, 10)]; "
+        "required [(1, 20)] (current default catalog rodex-v20.sqlite3); "
+        "automatic migration is not supported"
+    )
 
     assert fetch_all(database, "SELECT schema_generation FROM rodex_schema_generations") == [(10,)]
 

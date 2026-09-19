@@ -1,4 +1,4 @@
-"""Private client for the single shared Rodex runtime daemon."""
+"""Private client for the daemon serving one exact Rodex implementation."""
 
 from __future__ import annotations
 
@@ -12,24 +12,54 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Final
 
-from .implementation_identity import RODEX_IMPLEMENTATION_ID
+from rodex_sql import RODEX_DATABASE_FILENAME, RODEX_DATABASE_SCHEMA_GENERATION
+
+from .implementation_identity import RODEX_IMPLEMENTATION_ID, RODEX_IMPLEMENTATION_SHA256
 from .process_contracts import RuntimeServiceConfig
+from .version import RODEX_VERSION
 
 RODEX_DAEMON_PROTOCOL: Final = "rodex-daemon-v2"
-RODEX_DAEMON_SOCKET_NAME: Final = "rodexd-v2.sock"
-RODEX_DAEMON_LOG_NAME: Final = "rodexd-v2.log"
-RODEX_DAEMON_START_LOCK_NAME: Final = "rodexd-v2.start.lock"
+RODEX_DAEMON_SOCKET_NAME: Final = f"{RODEX_IMPLEMENTATION_SHA256}.sock"
+RODEX_DAEMON_LOG_NAME: Final = f"{RODEX_IMPLEMENTATION_SHA256}.log"
+RODEX_DAEMON_START_LOCK_NAME: Final = f"{RODEX_IMPLEMENTATION_SHA256}.start.lock"
 RODEX_DAEMON_IMPLEMENTATION_FIELD: Final = "implementation_id"
-LEGACY_DAEMON_SOCKET_NAMES: Final = ("rodexd-v1.sock",)
 RODEX_RUNTIME_WAKE_REGISTRATION: Final = "registration"
 RODEX_RUNTIME_WAKE_TERMINAL_RESIZE: Final = "terminal_resize"
 RODEX_RUNTIME_WAKE_CAUSES: Final = frozenset({RODEX_RUNTIME_WAKE_REGISTRATION, RODEX_RUNTIME_WAKE_TERMINAL_RESIZE})
 DAEMON_MESSAGE_LIMIT_BYTES: Final = 1024 * 1024
 DAEMON_START_TIMEOUT_SECONDS: Final = 10.0
+DAEMON_UNIX_SOCKET_PATH_MAX_BYTES: Final = 107
 
 
 class RodexDaemonError(RuntimeError):
     """The shared daemon could not execute an exact runtime operation."""
+
+
+def _incompatible_daemon_message(socket_path: Path, observed_implementation: object) -> str:
+    """Describe both sides of a rejected daemon handshake without implying SQL was read."""
+    return (
+        f"shared Rodex daemon is incompatible at {socket_path}\n"
+        f"  running daemon implementation: {observed_implementation!r}\n"
+        f"  current client: Rodex {RODEX_VERSION} ({RODEX_IMPLEMENTATION_ID})\n"
+        f"  daemon protocol: {RODEX_DAEMON_PROTOCOL}\n"
+        f"  SQL catalog: not checked; this client expects generation "
+        f"{RODEX_DATABASE_SCHEMA_GENERATION} ({RODEX_DATABASE_FILENAME})\n"
+        "stop all Rodex runtimes and the daemon, then retry; "
+        "Rodex does not migrate earlier runtimes or catalogs"
+    )
+
+
+def _incompatible_daemon_protocol_message(socket_path: Path, observed_protocol: object) -> str:
+    """Name both wire contracts when an existing daemon cannot speak this client's protocol."""
+    return (
+        f"shared Rodex daemon protocol is incompatible at {socket_path}\n"
+        f"  running daemon protocol: {observed_protocol!r}\n"
+        f"  current client protocol: {RODEX_DAEMON_PROTOCOL!r} (Rodex {RODEX_VERSION})\n"
+        f"  SQL catalog: not checked; this client expects generation "
+        f"{RODEX_DATABASE_SCHEMA_GENERATION} ({RODEX_DATABASE_FILENAME})\n"
+        "stop all Rodex runtimes and the daemon, then retry; "
+        "Rodex does not translate earlier wire protocols or migrate earlier catalogs"
+    )
 
 
 def daemon_socket_path(runtime_root: Path) -> Path:
@@ -78,6 +108,8 @@ class RodexDaemonClient:
     ) -> None:
         self.runtime_root = runtime_root
         self.socket_path = daemon_socket_path(runtime_root)
+        if len(os.fsencode(self.socket_path)) > DAEMON_UNIX_SOCKET_PATH_MAX_BYTES:
+            raise RodexDaemonError(f"daemon Unix socket path is too long: {self.socket_path}")
         self._python_executable = python_executable
         self._spawn_process = process_spawner
         self._monotonic = monotonic
@@ -90,7 +122,6 @@ class RodexDaemonClient:
         descriptor = os.open(lock_path, os.O_CREAT | os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600)
         try:
             fcntl.flock(descriptor, fcntl.LOCK_EX)
-            self._reject_live_legacy_daemon()
             if self._probe():
                 return
             log_path = self.runtime_root / RODEX_DAEMON_LOG_NAME
@@ -149,8 +180,9 @@ class RodexDaemonClient:
             timeout_seconds=timeout_seconds + 1,
         )
 
-    def stop(self, operation_id: str, runtime_id: str) -> None:
-        self._request(
+    def stop(self, operation_id: str, runtime_id: str) -> str:
+        """Acknowledge cancellation admission; a stopping service still owns its resources."""
+        response = self._request(
             {
                 "protocol": RODEX_DAEMON_PROTOCOL,
                 "operation": "stop",
@@ -158,6 +190,10 @@ class RodexDaemonClient:
                 "runtime_id": runtime_id,
             }
         )
+        state = response.get("state")
+        if state not in {"stopping", "terminal"}:
+            raise RodexDaemonError("daemon stop response lacks a valid completion state")
+        return state
 
     def notify_runtime(self, runtime_id: str, cause: str) -> bool:
         """Wake one runtime after an external state transition.
@@ -189,22 +225,6 @@ class RodexDaemonClient:
             return False
         return True
 
-    def _reject_live_legacy_daemon(self) -> None:
-        for socket_name in LEGACY_DAEMON_SOCKET_NAMES:
-            legacy_path = self.runtime_root / socket_name
-            try:
-                with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
-                    connection.settimeout(0.25)
-                    connection.connect(os.fspath(legacy_path))
-            except (FileNotFoundError, ConnectionRefusedError):
-                continue
-            except (OSError, TimeoutError) as error:
-                raise RodexDaemonError(f"could not prove legacy daemon endpoint is inactive: {legacy_path}") from error
-            raise RodexDaemonError(
-                f"legacy Rodex daemon is still running at {legacy_path}; "
-                "stop all old Rodex runtimes and that daemon before starting this release"
-            )
-
     def _request(self, payload: dict[str, object], *, timeout_seconds: float = 5.0) -> dict[str, Any]:
         if RODEX_DAEMON_IMPLEMENTATION_FIELD in payload:
             raise ValueError("daemon implementation identity is transport-owned")
@@ -216,11 +236,18 @@ class RodexDaemonClient:
             connection.sendall(encode_daemon_message(request))
             response = receive_daemon_message(connection)
         if response.get("protocol") != RODEX_DAEMON_PROTOCOL:
-            raise RodexDaemonError("daemon protocol does not match this Rodex generation")
+            raise RodexDaemonError(
+                _incompatible_daemon_protocol_message(
+                    self.socket_path,
+                    response.get("protocol"),
+                )
+            )
         if response.get(RODEX_DAEMON_IMPLEMENTATION_FIELD) != RODEX_IMPLEMENTATION_ID:
             raise RodexDaemonError(
-                "shared Rodex daemon implementation does not match the current code; "
-                "stop all Rodex runtimes and the daemon before starting new sessions"
+                _incompatible_daemon_message(
+                    self.socket_path,
+                    response.get(RODEX_DAEMON_IMPLEMENTATION_FIELD),
+                )
             )
         if response.get("ok") is not True:
             detail = response.get("error")

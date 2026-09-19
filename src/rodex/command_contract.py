@@ -26,6 +26,7 @@ RESULT_COMMAND: Final = "_result"
 CREATE_COMMAND: Final = "_create"
 DETACH_COMMAND: Final = "_detach"
 HELP_COMMAND: Final = "_help"
+VERSION_COMMAND: Final = "_version"
 STATS_COMMAND: Final = "_stats"
 STATS_STATUS_COMMAND: Final = "_stats-status"
 AGENTS_COMMAND: Final = "_agents"
@@ -36,6 +37,7 @@ FORCE_FLAG: Final = "--force"
 
 class CommandRoute(StrEnum):
     HELP = "help"
+    VERSION = "version"
     LAUNCH = "launch"
     SESSION = "session"
     MACHINE = "machine"
@@ -55,6 +57,11 @@ class CommandSpec:
 
 COMMAND_SPECS: Final = (
     CommandSpec(HELP_COMMAND, CommandRoute.HELP, ("_help", "Show this help and exit.")),
+    CommandSpec(
+        VERSION_COMMAND,
+        CommandRoute.VERSION,
+        ("_version", "Show Rodex release and compatibility contracts."),
+    ),
     CommandSpec(
         CREATE_COMMAND,
         CommandRoute.LAUNCH,

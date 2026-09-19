@@ -150,6 +150,7 @@ class RuntimeServiceConfig:
     """Complete configuration for one runtime managed inside ``rodexd``."""
 
     codex_binary: str
+    workspace: Path
     app_server_socket_path: Path
     app_server_log_path: Path
     protocol_proxy_socket_path: Path
@@ -167,6 +168,9 @@ class RuntimeServiceConfig:
         return self.analytics.tmux_server_id
 
     def __post_init__(self) -> None:
+        if not self.workspace.is_absolute():
+            raise ValueError("runtime workspace must be absolute")
+        object.__setattr__(self, "workspace", self.workspace.resolve())
         if not self.codex_binary or not self.tmux_binary:
             raise ValueError("runtime service binaries must be non-empty")
         if not self.tmux_pane_target.startswith("%") or not self.tmux_pane_target[1:].isdigit():
@@ -215,6 +219,7 @@ class RuntimeServiceConfig:
     def to_payload(self) -> dict[str, object]:
         return {
             "codex_binary": self.codex_binary,
+            "workspace": os.fspath(self.workspace),
             "app_server_socket_path": os.fspath(self.app_server_socket_path),
             "app_server_log_path": os.fspath(self.app_server_log_path),
             "protocol_proxy_socket_path": os.fspath(self.protocol_proxy_socket_path),
@@ -232,6 +237,7 @@ class RuntimeServiceConfig:
     def from_payload(cls, payload: Mapping[str, Any]) -> Self:
         expected = {
             "codex_binary",
+            "workspace",
             "app_server_socket_path",
             "app_server_log_path",
             "protocol_proxy_socket_path",
@@ -260,6 +266,7 @@ class RuntimeServiceConfig:
             raise ValueError("runtime Codex arguments payload must contain text")
         return cls(
             codex_binary=_required_text(payload, "codex_binary"),
+            workspace=Path(_required_text(payload, "workspace")),
             app_server_socket_path=Path(_required_text(payload, "app_server_socket_path")),
             app_server_log_path=Path(_required_text(payload, "app_server_log_path")),
             protocol_proxy_socket_path=Path(_required_text(payload, "protocol_proxy_socket_path")),

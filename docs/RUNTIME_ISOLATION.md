@@ -25,11 +25,12 @@ transcripts.
 1. The launcher allocates a runtime ID and server nonce, then claims only a completely
    unmarked, empty tmux server at `tmux-v4-<runtime-id>.sock`. A separate server for each
    runtime prevents native pane movement across runtime boundaries.
-2. A start lock converges concurrent clients on one `rodexd-v2.sock`. Every request and
-   response carries the exact first-party implementation fingerprint loaded by each
-   process; a legacy daemon or changed checkout is rejected before reservation. The
-   daemon owns one exact reservation per runtime and operation ID. It rejects conflicting
-   reservations before any runtime service starts.
+2. The implementation SHA-256 names the daemon socket, start lock, log, and crash
+   receipts. Concurrent clients for that exact implementation converge on one daemon;
+   changed or upgraded implementations start alongside it without adopting its runtimes
+   or reconciling its child receipts. Every request and response still carries the exact
+   loaded fingerprint as an endpoint-integrity check. Each daemon owns one exact
+   reservation per runtime and operation ID and rejects conflicts before startup.
 3. The staged primary pane receives its runtime marker and runs a one-shot bridge. The
    daemon verifies same-uid peer credentials, the bridge PID, pane TTY descriptor, server
    nonce, pane target and reservation before accepting the descriptor. Caller environment

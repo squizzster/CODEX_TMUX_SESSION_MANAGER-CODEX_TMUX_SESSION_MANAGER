@@ -18,6 +18,7 @@ EFFECT_OWNERS = {
         "rodex/agent_trace_commands.py:_show_agents:print",
         "rodex/agent_trace_commands.py:_show_or_follow_trace:print",
         "rodex/application_pipeline.py:UnifiedRodexApplicationPipeline._execute_help:print",
+        "rodex/application_pipeline.py:UnifiedRodexApplicationPipeline._execute_version:print",
         "rodex/cli.py:main:print",
         "rodex/machine_commands.py:_print_machine_success:print",
         "rodex/machine_commands.py:print_machine_error:print",

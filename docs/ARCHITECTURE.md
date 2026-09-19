@@ -5,12 +5,10 @@ agreement, retain clear ownership, and keep this file within 150 lines and 10,24
 
 # Rodex architecture
 
-Rodex binds session/runtime IDs to a Codex thread tree and verified tmux endpoint.
-
 ## Runtime shape
 
 ```text
-user → Rodex CLI → rodexd-v2.sock → one shared Python daemon
+user → Rodex CLI → <implementation-sha256>.sock → one implementation-scoped Python daemon
          │                              ├── runtime A → tmux-A → TUI ↔ proxy ↔ app-server
          ├──► SQLite registry           ├── runtime B → tmux-B → TUI ↔ proxy ↔ app-server
          ├──► _cat / _tail              └── one analytics coordinator → trace/stats → SQLite
@@ -34,7 +32,7 @@ identity requires a transient App Server check.
 | `rodex.interaction_pipeline` / `interaction_transport` | Typed targets, intent-preserving hooks, outcomes and one private endpoint. |
 | `rodex.session_read_pipeline` / `session_tail` | Verified reads and incremental terminal history. |
 | `rodex.process_environment` / `environment_exec` | Exact caller-owned environment at child exec. |
-| `rodex.daemon` / `daemon_client` / `terminal_bridge` | Own one daemon socket, exact runtime reservations, pane-TTY handoff and runtime threads. |
+| `rodex.daemon` / `daemon_client` / `terminal_bridge` | Own one exact-implementation daemon socket, runtime reservations, pane-TTY handoff and runtime threads. |
 | `rodex.runtime` / `process_contracts` / `process_guard` / `process_receipts` | Stage runtimes, supervise exact native children and reconcile daemon crashes. |
 | `rodex.runtime_endpoint` / `runtime_peer` | Exclusive socket lifetime and connected runtime/process identity. |
 | `rodex.terminal_gateway` / `terminal_exec` / `terminal_surface` / `presentation_policy` | PTY, native projection, typed display policies and restoration. |
@@ -43,7 +41,7 @@ identity requires a transient App Server check.
 | `rodex.tmux_sharing_coordinator` / status modules | Convert hook wakeups into fenced roster and display transitions. |
 | Observer projection/state/pane modules | Validate events, reduce state and perform exact pane mechanics. |
 | `rodex.primary_connection_lifecycle` | Isolate primary-connection resets and terminal runtime-shutdown interrupts. |
-| `rodex.analytics.SharedAnalyticsCoordinator` / source readers | Serialize every runtime's fail-open analytics through one daemon thread. |
+| `rodex.analytics.SharedAnalyticsCoordinator` / source readers | Serialize each implementation daemon's runtime analytics through one daemon thread. |
 | `rodex_registry.agent_trace_contract` / writer / reader | Normalize traces, transactional append and bounded reads. |
 | `rodex_registry.execution` / `statistics` | Own canonical lineage, publication orchestration, and relational projections. |
 | `rodex_registry.schema` | Generate, install when authorized, and attest the complete relational catalog. |
@@ -75,7 +73,8 @@ Discovery compares the session snapshot with a guarded primary-pane read. Every 
 crosses `tmux_executor`; calls have deadlines and cancellation reaps the child.
 The staged pane starts a one-shot bridge. The daemon admits its same-uid peer PID, exact
 primary pane, TTY descriptor, server nonce and runtime reservation before starting the
-runtime thread. Caller-owned environment crosses the reservation; tmux-owned values come
+runtime thread, which exclusively owns the transferred descriptor until completion.
+Absolute caller cwd and environment cross the reservation; tmux-owned values come
 only from the admitted bridge process. `TmuxStatusPipeline`
 arbitrates status; animation admission owns capability/generation/lease/token/recovery fences.
 
@@ -83,13 +82,10 @@ The daemon acceptor blocks on its Unix listener and explicit shutdown event; it 
 Runtime supervisors block through their gateways until terminal readiness, child exit, an exact deadline, or explicit
 registration, diagnostic, resize, presentation, or stop wake; owning runtimes revalidate tmux resize hints.
 
-Interactive routes expose the attached client as `rodex_<display_name>`, print
-`Rodex attach [name].` before tmux, then classify the observed runtime after return:
-`Rodex detach [name].` while it remains live or `Rodex exited [name].` after it ends.
-Tmux's exit line is erased first. One daemon-runtime PTY adapts all TUI I/O;
-attachers never create input owners. Its gateway blocks on terminal readiness, an exact
-child `pidfd`, input-frame deadlines and wake-only state notifications; idle sessions do
-not run a fixed relay poll. Interception config owns live/Enter expressions, menus and
+Interactive clients use `rodex_<display_name>` and report verified attach/detach/exit.
+One daemon-runtime PTY adapts all TUI I/O; attachers never create input owners. The gateway
+blocks on terminal readiness, child `pidfd`, input-frame deadlines and state notifications,
+without fixed idle polling. Interception config owns live/Enter expressions, menus and
 typed actions; unmatched input stays native. Prefix/cursor confirmation occurs only at
 handoff. DISPLAY_STATE draws menus; light selects root commentary structurally while
 preserving the hidden native TUI, and dark redraws that projection in place.
@@ -102,7 +98,7 @@ trace-event, and tool-call identities never substitute for one another. See
 
 ALPHA hosts require complete current identity and protocol fields, without adapters.
 
-New sessions allocate IDs, create detached tmux, reserve the runtime in the shared daemon,
+New sessions allocate IDs, create detached tmux, reserve the runtime in the matching implementation daemon,
 hand off the exact pane TTY, observe one Codex root ID, and advertise a `pending` tuple.
 The immutable session-ID transition lock spans
 SQL publication, registration, namespaced tmux rename, and UI setup; competing selectors
@@ -137,11 +133,13 @@ runtime retains separate cursors, analyzers and SQL health rows, while all `poll
 work passes through that singular pipeline. Protocol bursts are coalesced; overflow asks
 for a full reconcile. One fenced transaction publishes checkpoints, statistics, trace,
 associations, and health.
+Retirement seals accepted events and reconciles on that worker with bounded best-effort
+effort; completion requires quiesced producers. Incomplete outcomes survive in health/logs.
 Source failures park by fingerprint until change and preserve the last good view. Codex
 metadata supplies turn identity; only sequence races reset cursors. Failures cannot affect the TUI.
 
-- Related writes use explicit transactions; one fork-safe process-local idle connection
-  keeps a bounded WAL generation live between sparse writes without owning a transaction.
+- Related writes use explicit transactions; catalog owners retain active borrowers and
+  at most one idle WAL generation. Fork with an active transaction requires child exec/exit.
 - Ordinary reads and mutations are existing-only. Explicit first use alone may create storage.
 - Private database/runtime paths validate owner, type, mode, descriptor, and symlink boundaries.
 - External tmux mutation requires an explicit capability and an atomic full-tuple fence.

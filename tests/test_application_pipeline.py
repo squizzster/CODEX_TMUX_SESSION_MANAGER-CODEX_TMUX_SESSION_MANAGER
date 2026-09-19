@@ -33,6 +33,7 @@ from rodex_registry import CodexSessionId, parse_codex_session_id
     [
         ([], ("_create",), CommandRoute.LAUNCH, PipelinePreparation.RUNTIME),
         (["_help"], ("_help",), CommandRoute.HELP, PipelinePreparation.DIRECT),
+        (["_version"], ("_version",), CommandRoute.VERSION, PipelinePreparation.DIRECT),
         (["_stats"], ("_stats",), CommandRoute.STATISTICS, PipelinePreparation.DIRECT),
         (["_cat"], ("_cat",), CommandRoute.SESSION, PipelinePreparation.RUNTIME),
         (["_tail"], ("_tail",), CommandRoute.SESSION, PipelinePreparation.RUNTIME),

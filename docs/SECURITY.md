@@ -15,11 +15,16 @@ listener; control endpoints are Unix sockets below a private runtime root.
   if confirmation never arrives. An exact committed/pending pair is recoverable.
 - Runtime roots are real, current-user-owned directories at mode `0700`, below either a
   private parent or root-owned sticky storage. Sockets and logs are mode `0600`.
-- `rodexd-v2.sock` is the single daemon control socket. It accepts bounded current-protocol
-  JSON only from the current uid and exact loaded implementation; a start `flock`
-  prevents duplicate daemon creation.
+- `<implementation-sha256>.sock` is the daemon control socket for one exact loaded
+  implementation. It accepts bounded current-protocol JSON only from the current uid
+  and that implementation; an equally namespaced start `flock` prevents duplicate
+  creation. Different implementation endpoints and receipt namespaces may coexist so
+  upgrades do not adopt or retire older runtimes.
   The pane bridge may pass exactly one TTY descriptor with `SCM_RIGHTS`, and the daemon
   admits it only after the complete reservation, peer PID, pane and TTY checks succeed.
+  Initial decoding has a five-second absolute deadline; every unsuccessful decode closes
+  its received descriptors, including truncated ancillary data. Shutdown wakes pending
+  decoders. An admitted bridge has a separate runtime lifetime, without the framing timeout.
 - Codex/App Server, proxy, event, and runtime-control traffic uses Unix-domain sockets;
   every non-native handshake requires runtime-peer v5 and the exact loaded implementation.
   Rodex opens no TCP listener.
@@ -36,8 +41,8 @@ listener; control endpoints are Unix sockets below a private runtime root.
 - Rodex uses stdlib `sqlite3` behind one canonical transaction owner. The database and
   sibling transition lock are current-user-owned regular files at mode `0600` below a
   real current-user-owned private directory. Linux `O_NOFOLLOW`/`O_CLOEXEC` opens retain
-  the parent and lock descriptors through each transaction and retain one validated
-  database descriptor for the process-local WAL lifetime. SQLite connects through
+  the parent and lock descriptors through each transaction and borrow an identity-bound
+  database descriptor for its full storage lifetime. SQLite connects through
   `/proc/self/fd/<validated-database-fd>`.
 - Only an explicit first-use bootstrap transaction may create the parent, transition
   lock, or database. Ordinary readers and writers require an existing database and lock
@@ -53,12 +58,11 @@ listener; control endpoints are Unix sockets below a private runtime root.
   waits have ten-second monotonic deadlines with sleeping bounded backoff. Writers use WAL,
   `BEGIN IMMEDIATE`, foreign keys, a ten-second busy timeout, and `synchronous=NORMAL`;
   readers use a read-only/query-only deferred transaction and see a normal committed-WAL
-  snapshot. One threadless, fork-safe process-local idle SQLite connection retains at most
-  one validated WAL generation between sparse writes. It reuses the owner's validated
-  main-file descriptor, owns no transaction or cooperative lock, and uses bounded
-  checkpoint/growth settings. Identity switch and clean exit close SQLite before releasing
-  that descriptor. Before a genuine fork, the parent closes the complete owner so the child
-  inherits no live SQLite state.
+  snapshot. Threadless owners retain every actively borrowed catalog plus at most one idle
+  WAL generation between sparse writes. They own no transaction or cooperative lock and
+  use bounded checkpoint/growth settings. Eviction/exit cannot close active borrowers.
+  SQLite closes before its descriptor. Fork closes idle owners; with an active transaction
+  the child must immediately exec or `_exit`, without using or unwinding inherited SQLite.
 - Database location enforcement is synchronous. Rodex has no filesystem watcher, worker,
   subscription, callback, polling loop, or recurring SQL. A missing or different identity
   is rejected at the next transaction boundary with restart guidance. A move-away-and-back
@@ -108,7 +112,8 @@ listener; control endpoints are Unix sockets below a private runtime root.
   primary actions also require the immutable pane ID. Name, socket, runtime, process
   context, or hook event is insufficient.
 - Under one stable per-user XDG/runtime context, Rodex uses one private canonical
-  database, one shared daemon and one tmux server per runtime. Database-enforced display-name uniqueness covers
+  database, one daemon per exact implementation, and one tmux server per runtime.
+  Database-enforced display-name uniqueness covers
   every session recorded in that database, and the complete live tmux name is the
   user-facing display name. A different `XDG_STATE_HOME` is a separate database/name
   boundary; a different `RODEX_RUNTIME_DIR` is a separate root for runtime endpoints. No

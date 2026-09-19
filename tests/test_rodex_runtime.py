@@ -23,6 +23,7 @@ import pytest
 import rodex.runtime as runtime_module
 from rodex.app_server_contract import RodexAppServerVersionError
 from rodex.control import LiveRodexControl
+from rodex.daemon_client import daemon_socket_path
 from rodex.process_contracts import AnalyticsRuntimeConfig, RuntimeServiceConfig
 from rodex.process_environment import (
     exact_environment_exec_command,
@@ -444,7 +445,7 @@ class FailingEnvironmentInstallRunner(RuntimeRunner):
 
 class RecordingDaemonClient:
     def __init__(self, runtime_root: Path) -> None:
-        self.socket_path = runtime_root / "rodexd-v2.sock"
+        self.socket_path = daemon_socket_path(runtime_root)
         self.reservations: list[tuple[str, RuntimeServiceConfig]] = []
         self.ready: list[tuple[str, str, float]] = []
         self.stopped: list[tuple[str, str]] = []
@@ -772,7 +773,7 @@ def test_start_directly_hosts_codex_in_tmux_and_returns_its_session_id(
         "rodex.terminal_bridge",
     ]
     joined_host_command = shlex.join(real_host_command)
-    assert f"--daemon-socket {tmp_path / 'rodexd-v2.sock'}" in joined_host_command
+    assert f"--daemon-socket {daemon_socket_path(tmp_path)}" in joined_host_command
     assert f"--runtime-id {RUNTIME_ID}" in joined_host_command
     assert "--tmux-pane %9" in joined_host_command
     assert "send-keys" not in joined_host_command
@@ -833,6 +834,7 @@ def test_startup_environment_failure_never_starts_host_and_removes_placeholder(
         "/usr/bin/tmux",
         runner=runner,
         connector=RecordingConnector([]),
+        daemon_client_factory=RecordingDaemonFactory(),
         python_executable="/venv/bin/python",
         environment={"PATH": "/usr/bin", "USER_SETTING": "preserved"},
     )
@@ -856,7 +858,11 @@ def test_startup_cleanup_failure_is_not_allowed_to_replace_the_causal_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("RODEX_RUNTIME_DIR", str(tmp_path))
-    launcher = RodexRuntimeLauncher("codex", "tmux")
+    launcher = RodexRuntimeLauncher(
+        "codex",
+        "tmux",
+        daemon_client_factory=RecordingDaemonFactory(),
+    )
     startup_failure = RuntimeError("environment install failed")
 
     def fail_start(*_arguments: object, **_options: object) -> None:
@@ -1928,6 +1934,7 @@ def activate_analytics(config):
     ready.write_text("ready", encoding="utf-8")
 
 config = RuntimeServiceConfig(
+    workspace=database.parent,
     codex_binary=str(fake_codex),
     app_server_socket_path=database.parent / "app.sock",
     app_server_log_path=database.parent / "app.log",
@@ -4537,6 +4544,7 @@ def test_runtime_service_skips_updater_and_connects_tui_through_protocol_proxy(
     def start_process(command: list[str], **options: object) -> FakeProcess:
         process_environment = options.get("env")
         assert isinstance(process_environment, dict)
+        assert options["cwd"] == tmp_path
         spawned_environments.append(process_environment.copy())
         if "app-server" not in command:
             tui_commands.append(command)
@@ -4596,6 +4604,7 @@ def test_runtime_service_skips_updater_and_connects_tui_through_protocol_proxy(
     assert (
         run_runtime_service(
             RuntimeServiceConfig(
+                workspace=tmp_path,
                 codex_binary="/usr/bin/codex",
                 app_server_socket_path=app_socket,
                 app_server_log_path=tmp_path / "app.log",
@@ -4660,6 +4669,7 @@ def test_runtime_service_skips_updater_and_connects_tui_through_protocol_proxy(
         ]
     ]
     assert len(tui_options) == 1
+    assert tui_options[0]["cwd"] == tmp_path
     assert len(spawned_environments) == 2
     for process_environment in spawned_environments:
         assert process_environment["USER_SETTING"] == "preserved"
@@ -4681,6 +4691,7 @@ def test_runtime_service_skips_updater_and_connects_tui_through_protocol_proxy(
     else:
         assert set(tui_options[0]) == {
             "env",
+            "cwd",
             "input_fd",
             "output_fd",
             "process_owner",
@@ -4805,13 +4816,15 @@ def test_runtime_service_retries_exact_resume_during_active_writer_handoff(
         "_read_runtime_log_since",
         lambda *_args: f"thread-store conflict: thread {requested_codex_session_id} already has an active writer",
     )
-    monkeypatch.setattr(runtime_module.time, "sleep", retry_waits.append)
+    retry_stop = Event()
+    monkeypatch.setattr(retry_stop, "wait", lambda seconds: retry_waits.append(seconds) or False)
     monkeypatch.setenv("TMUX_PANE", "%9")
     monkeypatch.setattr(runtime_module, "_registered_analytics_runtime_config", lambda *_args: None)
 
     assert (
         run_runtime_service(
             RuntimeServiceConfig(
+                workspace=tmp_path,
                 codex_binary="/usr/bin/codex",
                 app_server_socket_path=app_socket,
                 app_server_log_path=tmp_path / "app.log",
@@ -4835,7 +4848,7 @@ def test_runtime_service_retries_exact_resume_during_active_writer_handoff(
             ),
             terminal_fd=os.dup(0),
             terminal_environment={"TERM": "xterm-256color", "TMUX": f"{tmp_path / 'tmux.sock'},1,0", "TMUX_PANE": "%9"},
-            stop=Event(),
+            stop=retry_stop,
         )
         == 0
     )
@@ -4995,6 +5008,7 @@ def test_runtime_service_terminates_the_tui_when_runtime_keepalive_fails(
     with pytest.raises(RodexRuntimeError, match=r"lost proxy\.sock"):
         run_runtime_service(
             RuntimeServiceConfig(
+                workspace=tmp_path,
                 codex_binary="/usr/bin/codex",
                 app_server_socket_path=tmp_path / "app.sock",
                 app_server_log_path=tmp_path / "app.log",

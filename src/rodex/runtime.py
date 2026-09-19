@@ -34,7 +34,6 @@ from rodex_registry.identity import (
 )
 
 from .agent_observer import AgentObserverCoordinator, observer_control_socket_path
-from .analytics import default_codex_sessions_root
 from .app_server_contract import (
     CODEX_APP_SERVER,
     RODEX_RUNTIME_APP_SERVER_CLIENT,
@@ -42,6 +41,7 @@ from .app_server_contract import (
 )
 from .control import CodexControlClient, LiveRodexControl
 from .daemon_client import (
+    RODEX_DAEMON_SOCKET_NAME,
     RODEX_RUNTIME_WAKE_REGISTRATION,
     RodexDaemonClient,
     RodexDaemonError,
@@ -74,6 +74,7 @@ from .protocol_proxy import (
 from .runtime_endpoint import ExclusiveUnixEndpoint
 from .runtime_peer import BoundProcessOwner, RuntimePeerIdentity, require_unix_peer_process, verified_runtime_connection
 from .server_overloaded_recovery import ServerOverloadedRecoveryController
+from .source_configuration import default_codex_sessions_root
 from .status_bar import context_status_segment
 from .terminal_gateway import TerminalSessionGateway
 from .tmux_executor import SyncTmuxExecutor, TmuxCommandResult
@@ -763,7 +764,9 @@ class RodexRuntimeLauncher:
 
         session_environment = self._user_process_environment.copy()
         session_environment["PWD"] = str(resolved_workspace)
-        operation_id = secrets.token_hex(16)
+        # Ordered identities let the daemon expire bounded completion receipts
+        # without allowing a delayed reservation to resurrect retired work.
+        operation_id = f"{time.monotonic_ns():016x}{secrets.token_hex(8)}"
         daemon_client = self._daemon_client_factory(runtime_root, self._python_executable)
         service_config: RuntimeServiceConfig | None = None
         try:
@@ -783,6 +786,7 @@ class RodexRuntimeLauncher:
             )
             service_config = RuntimeServiceConfig(
                 codex_binary=self._codex_binary,
+                workspace=resolved_workspace,
                 app_server_socket_path=runtime.app_server_socket_path,
                 app_server_log_path=runtime.app_server_log_path,
                 protocol_proxy_socket_path=runtime.protocol_proxy_socket_path,
@@ -2368,7 +2372,7 @@ def default_runtime_root_path() -> Path:
     xdg_runtime = os.environ.get("XDG_RUNTIME_DIR")
     if xdg_runtime:
         candidate = Path(os.path.abspath(Path(xdg_runtime).expanduser())) / "rodex"
-        if len(os.fsencode(candidate / "app-0000000000000000.sock")) <= SUN_PATH_MAX_BYTES:
+        if len(os.fsencode(candidate / RODEX_DAEMON_SOCKET_NAME)) <= SUN_PATH_MAX_BYTES:
             return candidate
     return Path("/tmp") / f"rodex-{os.getuid()}"
 
@@ -2388,6 +2392,7 @@ def _start_registered_main_model_message(
     context: AnalyticsRuntimeConfig | None,
     config: RuntimeServiceConfig,
     protocol_proxy: CodexProtocolProxy | None,
+    recovery: ServerOverloadedRecoveryController | None = None,
 ) -> InteractionResult:
     # Composition occurs here to keep the runtime/control dependency acyclic.
     from rodex_registry import lookup_rodex_session_names
@@ -2405,6 +2410,12 @@ def _start_registered_main_model_message(
         protocol_proxy.validate_primary_model_binding(request)
 
     revalidate_main_binding()
+
+    def admit_dispatch() -> None:
+        revalidate_main_binding()
+        if recovery is not None:
+            recovery.admit_dispatch(request)
+
     names = lookup_rodex_session_names(context.rodex_sessions_id, context.rodex_database_path)
     if names is None:
         return InteractionResult(DeliveryStatus.REJECTED, "registered session no longer exists")
@@ -2420,7 +2431,7 @@ def _start_registered_main_model_message(
         dispatch_id=request.dispatch_id,
         expected_runtime_id=str(config.runtime_id),
         expected_thread_id=str(context.codex_session_id),
-        before_dispatch=revalidate_main_binding,
+        before_dispatch=admit_dispatch,
     )
     return InteractionResult(DeliveryStatus.MODEL_TURN_STARTED, value=asdict(dispatch))
 
@@ -2442,6 +2453,7 @@ def run_runtime_service(
 ) -> int:
     """Own one daemon-managed runtime and always release its transferred pane TTY."""
     try:
+        _require_runtime_not_stopped(stop)
         return _run_runtime_service(
             config,
             terminal_fd=terminal_fd,
@@ -2527,6 +2539,10 @@ def _run_runtime_service(
                 interaction_pipeline,
                 logger=lambda message: diagnostic_relay.write(f"{message}\n".encode()),
             )
+            _require_runtime_not_stopped(stop)
+            if not config.workspace.is_dir():
+                raise RodexRuntimeError(f"runtime workspace is no longer a directory: {config.workspace}")
+            user_environment["PWD"] = os.fspath(config.workspace)
             app_server = subprocess.Popen(
                 (
                     sys.executable,
@@ -2542,13 +2558,15 @@ def _run_runtime_service(
                 stdout=diagnostic_relay,
                 stderr=subprocess.STDOUT,
                 env=user_environment,
+                cwd=config.workspace,
                 # Own shutdown independently of pane hangups, including bounded
                 # escalation to the wrapper's native App Server child.
                 start_new_session=True,
             )
             on_process_started("app-server", app_server)
             app_server_announced = True
-            _wait_for_app_server_socket(app_server, app_server_socket_path)
+            _wait_for_app_server_socket(app_server, app_server_socket_path, stop)
+            _require_runtime_not_stopped(stop)
             app_endpoint.retain_bound_path()
             app_server_socket_path.chmod(0o600)
             agent_observer_controller = AgentObserverCoordinator(
@@ -2615,6 +2633,7 @@ def _run_runtime_service(
                     registered_interaction_context,
                     config,
                     protocol_proxy,
+                    server_overloaded_recovery,
                 )
 
             primary_pane = TmuxPaneController(
@@ -2681,7 +2700,7 @@ def _run_runtime_service(
                 f"unix://{protocol_proxy_socket_path}",
                 *codex_arguments,
             ]
-            tui_options: dict[str, object] = {"env": user_environment}
+            tui_options: dict[str, object] = {"env": user_environment, "cwd": config.workspace}
             requested_codex_session_id = _requested_exact_codex_resume(codex_arguments)
             if requested_codex_session_id is not None:
                 # Startup happens before attach, so preserve exact-resume failures where
@@ -2693,6 +2712,7 @@ def _run_runtime_service(
                 else time.monotonic() + CODEX_ACTIVE_WRITER_HANDOFF_TIMEOUT_SECONDS
             )
             while True:
+                _require_runtime_not_stopped(stop)
                 attempt_log_offset = os.fstat(log.fileno()).st_size
                 if terminal_gateway is not None:
                     diagnostic_relay.bind_supervisor_wake(None)
@@ -2799,7 +2819,7 @@ def _run_runtime_service(
                 ):
                     break
                 protocol_proxy.wait_for_primary_connection_release(CODEX_PRIMARY_CONNECTION_RELEASE_TIMEOUT_SECONDS)
-                time.sleep(CODEX_ACTIVE_WRITER_RETRY_INTERVAL_SECONDS)
+                stop.wait(CODEX_ACTIVE_WRITER_RETRY_INTERVAL_SECONDS)
             try:
                 runtime_path_keepalive.close()
             except RodexRuntimeError as error:
@@ -3161,17 +3181,26 @@ def _require_short_unix_socket_path(path: Path) -> None:
         raise RodexRuntimeError(f"Unix socket path is too long: {path}")
 
 
-def _wait_for_app_server_socket(process: subprocess.Popen[bytes], socket_path: Path) -> None:
+def _require_runtime_not_stopped(stop: Event | None) -> None:
+    if stop is not None and stop.is_set():
+        raise RodexRuntimeError("runtime startup was cancelled")
+
+
+def _wait_for_app_server_socket(process: subprocess.Popen[bytes], socket_path: Path, stop: Event | None = None) -> None:
     # Native first-use database initialization can take longer than five seconds
     # on disk. Use the managed-startup allowance instead of an earlier cutoff.
     deadline = time.monotonic() + DEFAULT_STARTUP_TIMEOUT_SECONDS
     while time.monotonic() < deadline:
+        _require_runtime_not_stopped(stop)
         returncode = process.poll()
         if returncode is not None:
             raise RodexRuntimeError(f"Codex app-server exited during startup with status {returncode}")
         if socket_path.exists():
             return
-        time.sleep(_POLL_INTERVAL_SECONDS)
+        if stop is None:
+            time.sleep(_POLL_INTERVAL_SECONDS)
+        else:
+            stop.wait(_POLL_INTERVAL_SECONDS)
     raise RodexRuntimeError("timed out waiting for the Codex app-server socket")
 
 

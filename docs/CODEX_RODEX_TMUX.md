@@ -44,7 +44,7 @@ becomes a distinct candidate for the transient App Server persistence check.
 1. Bare `./rodex`, explicit `./rodex _create`, or characterized native interactive
    Codex syntax validates the `codex` and `tmux` executables.
 2. The launcher claims a dedicated tmux server, reserves the runtime through the one
-   private `rodexd-v2.sock`, and respawns its staged pane with a one-shot bridge. Rodex
+   private `<implementation-sha256>.sock`, and respawns its staged pane with a one-shot bridge. Rodex
    never types with `send-keys`.
 3. The bridge passes its pane TTY descriptor to the daemon. After exact peer, pane,
    server and runtime admission, the daemon starts that runtime's App Server, proxy and

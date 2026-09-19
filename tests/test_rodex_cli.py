@@ -33,6 +33,7 @@ from rodex.control import (
     RodexDispatchIndeterminateError,
     RodexWaitTimeoutError,
 )
+from rodex.daemon_client import RodexDaemonError
 from rodex.live_runtime import find_relocated_live_runtime, rename_tmux_identity
 from rodex.runtime import (
     CurrentTmuxPaneContext,
@@ -503,6 +504,45 @@ def test_help_rejects_arguments_without_checking_prerequisites(
 
     with pytest.raises(RodexLaunchError, match=r"^usage: rodex _help$"):
         run(["_help", "unexpected"], database_path=tmp_path / "rodex.sqlite3")
+
+
+def test_version_reports_compatibility_without_codex_tmux_or_database(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    database = tmp_path / "rodex.sqlite3"
+    monkeypatch.setattr(
+        "rodex.cli.shutil.which",
+        lambda command: pytest.fail(f"unexpected prerequisite lookup: {command}"),
+    )
+    monkeypatch.delenv("RODEX_RUNTIME_DIR", raising=False)
+    monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
+
+    assert run(["_version"], database_path=database) == 0
+
+    output = capsys.readouterr()
+    assert output.err == ""
+    assert output.out.startswith("Rodex compatibility:\n  release: 0.14.0a2\n")
+    assert "  implementation: 0.14.0a2+sha256." in output.out
+    assert "  daemon protocol: rodex-daemon-v2\n" in output.out
+    assert f"  daemon socket: /tmp/rodex-{os.getuid()}/" in output.out
+    assert ".sock\n" in output.out
+    assert "  SQLite catalog: generation 20 (rodex-v20.sqlite3)\n" in output.out
+    assert not database.exists()
+
+
+def test_version_rejects_arguments_without_checking_prerequisites(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "rodex.cli.shutil.which",
+        lambda command: pytest.fail(f"unexpected prerequisite lookup: {command}"),
+    )
+
+    with pytest.raises(RodexLaunchError, match=r"^usage: rodex _version$"):
+        run(["_version", "unexpected"], database_path=tmp_path / "rodex.sqlite3")
 
 
 @pytest.mark.parametrize("arguments", [["_context"], ["_context", "--json"]])
@@ -3877,6 +3917,42 @@ def test_sqlite_operational_error_is_a_concise_stderr_error(
 
     assert raised.value.code == 1
     assert capsys.readouterr().err == "rodex: database unavailable\n"
+
+
+def test_daemon_error_is_a_concise_stderr_error(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(
+        "rodex.cli.run",
+        lambda: (_ for _ in ()).throw(
+            RodexDaemonError("shared Rodex daemon implementation does not match the current code")
+        ),
+    )
+
+    with pytest.raises(SystemExit) as raised:
+        main()
+
+    assert raised.value.code == 1
+    assert capsys.readouterr().err == ("rodex: shared Rodex daemon implementation does not match the current code\n")
+
+
+def test_app_server_version_error_is_a_concise_stderr_error(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(
+        "rodex.cli.run",
+        lambda: (_ for _ in ()).throw(
+            RodexAppServerVersionError("exact control requires Codex App Server 0.151.0 or newer")
+        ),
+    )
+
+    with pytest.raises(SystemExit) as raised:
+        main()
+
+    assert raised.value.code == 1
+    assert capsys.readouterr().err == "rodex: exact control requires Codex App Server 0.151.0 or newer\n"
 
 
 def test_missing_executable_retains_command_not_found_exit_status(

@@ -12,6 +12,7 @@ from typing import Final
 
 from cool_name.functions import create_and_verify_cool_names_schema
 from rodex_sql import (
+    RODEX_DATABASE_FILENAME,
     RODEX_DATABASE_SCHEMA_GENERATION,
     RodexDatabaseNotFoundError,
     RodexDatabaseNotInitializedError,
@@ -2969,8 +2970,16 @@ def _connection_has_current_schema_generation(
             raise
         return False
     if rows != [(1, RODEX_DATABASE_SCHEMA_GENERATION)]:
-        raise RodexSessionError("Rodex database schema generation does not match this Rodex version")
+        raise RodexSessionError(_schema_generation_mismatch_message(rows))
     return True
+
+
+def _schema_generation_mismatch_message(rows: Sequence[object]) -> str:
+    return (
+        f"Rodex database schema generation does not match: found marker rows {rows!r}; "
+        f"required [(1, {RODEX_DATABASE_SCHEMA_GENERATION})] "
+        f"(current default catalog {RODEX_DATABASE_FILENAME}); automatic migration is not supported"
+    )
 
 
 def require_current_rodex_schema(connection: sqlite3.Connection) -> None:
@@ -3005,7 +3014,7 @@ def _require_or_create_current_schema_generation(
     _verify_schema_generations_table(connection)
     rows = connection.execute(f"SELECT id, schema_generation FROM {RODEX_SCHEMA_GENERATIONS_TABLE}").fetchall()
     if rows != [(1, RODEX_DATABASE_SCHEMA_GENERATION)]:
-        raise RodexSessionError("Rodex database schema generation does not match this Rodex version")
+        raise RodexSessionError(_schema_generation_mismatch_message(rows))
 
 
 def lookup_rodex_registry_id(
@@ -4852,5 +4861,28 @@ def _verify_schema_object_definition_exact(
 
 
 def _normalise_schema_sql(value: str) -> str:
-    normalised = " ".join(value.upper().split()).rstrip(";")
-    return normalised.replace(" IF NOT EXISTS ", " ")
+    """Canonicalize generated SQL tokens, preserving every quoted literal byte."""
+    tokens = re.findall(
+        r"'(?:''|[^'])*'|\"(?:\"\"|[^\"])*\"|`(?:``|[^`])*`|\[[^\]]*\]"
+        r"|--[^\n]*(?:\n|$)|/\*[\s\S]*?\*/|[A-Za-z_][A-Za-z_0-9]*"
+        r"|0[xX][0-9a-fA-F]+|(?:\d+\.\d*|\.\d+|\d+)(?:[eE][+-]?\d+)?"
+        r"|==|!=|<>|<=|>=|\|\||->>|->|[^\s]",
+        value,
+    )
+    tokens = [token if token[0] in "'\"`[" else token.upper() for token in tokens if not token.startswith(("--", "/*"))]
+    # SQLite strips this optional clause when storing CREATE definitions. Only
+    # the CREATE prefix permits that tolerance; literals and trigger bodies do not.
+    prefix = 2
+    if tokens[:2] == ["CREATE", "UNIQUE"]:
+        prefix = 3
+    if (
+        tokens
+        and tokens[0] == "CREATE"
+        and len(tokens) > prefix
+        and tokens[prefix - 1] in {"TABLE", "INDEX", "TRIGGER", "VIEW"}
+        and tokens[prefix : prefix + 3] == ["IF", "NOT", "EXISTS"]
+    ):
+        del tokens[prefix : prefix + 3]
+    if tokens and tokens[-1] == ";":
+        tokens.pop()
+    return " ".join(tokens)

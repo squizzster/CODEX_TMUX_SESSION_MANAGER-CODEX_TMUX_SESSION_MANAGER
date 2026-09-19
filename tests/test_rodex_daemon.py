@@ -587,9 +587,55 @@ def test_current_client_rejects_same_protocol_daemon_with_different_loaded_code(
         process_spawner=lambda *_args, **_kwargs: spawns.append(object()),  # type: ignore[arg-type]
     )
     try:
-        with pytest.raises(RodexDaemonError, match="implementation does not match"):
+        with pytest.raises(RodexDaemonError) as raised:
             client.ensure_running()
+        diagnostic = str(raised.value)
+        assert f"incompatible at {socket_path}" in diagnostic
+        assert "running daemon implementation: 'different-loaded-code'" in diagnostic
+        assert "current client: Rodex 0.14.0a2 (0.14.0a2+sha256." in diagnostic
+        assert "daemon protocol: rodex-daemon-v2" in diagnostic
+        assert "SQL catalog: not checked; this client expects generation 20 (rodex-v20.sqlite3)" in diagnostic
+        assert "does not migrate earlier runtimes or catalogs" in diagnostic
         assert spawns == []
+    finally:
+        listener.close()
+        server.join(timeout=1)
+
+
+def test_current_client_reports_both_sides_of_a_daemon_protocol_mismatch(tmp_path: Path) -> None:
+    socket_path = tmp_path / "rodexd-v2.sock"
+    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    listener.bind(str(socket_path))
+    listener.listen()
+
+    def respond_once() -> None:
+        connection, _address = listener.accept()
+        try:
+            receive_daemon_message(connection)
+            connection.sendall(
+                encode_daemon_message(
+                    {
+                        "protocol": "rodex-daemon-v1",
+                        RODEX_DAEMON_IMPLEMENTATION_FIELD: "0.13.0+sha256.previous",
+                        "ok": True,
+                    }
+                )
+            )
+        finally:
+            connection.close()
+
+    server = Thread(target=respond_once)
+    server.start()
+    client = RodexDaemonClient(tmp_path, sys.executable)
+    try:
+        with pytest.raises(RodexDaemonError) as raised:
+            client.ensure_running()
+        diagnostic = str(raised.value)
+        assert f"protocol is incompatible at {socket_path}" in diagnostic
+        assert "running daemon protocol: 'rodex-daemon-v1'" in diagnostic
+        assert "current client protocol: 'rodex-daemon-v2' (Rodex 0.14.0a2)" in diagnostic
+        assert "SQL catalog: not checked; this client expects generation 20 (rodex-v20.sqlite3)" in diagnostic
+        assert "does not translate earlier wire protocols or migrate earlier catalogs" in diagnostic
     finally:
         listener.close()
         server.join(timeout=1)

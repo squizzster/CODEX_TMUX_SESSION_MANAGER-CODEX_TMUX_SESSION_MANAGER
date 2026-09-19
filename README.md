@@ -112,6 +112,7 @@ atomic dispatch admission. It does not undo or interrupt an already admitted req
 | Command | Contract |
 | --- | --- |
 | `_help` | Print Rodex help |
+| `_version` | Print the Rodex release and active daemon/SQLite compatibility contracts |
 | `_create [NAME] [-- CODEX_ARGS...]` | Create and attach to a managed session |
 | `_detach [SESSION\|CODEX_ARGS...]` | Create, resume, or recover without attaching |
 | `_running` | List running sessions |

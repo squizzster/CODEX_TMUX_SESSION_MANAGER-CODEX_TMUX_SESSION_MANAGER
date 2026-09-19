@@ -15,18 +15,22 @@ from codex_cli_contract import (
     CodexCliRoute,
 )
 from rodex_registry import CodexSessionId
+from rodex_sql import RODEX_DATABASE_FILENAME, RODEX_DATABASE_SCHEMA_GENERATION
 
 from .agent_trace_commands import execute_agent_trace_command
 from .command_contract import (
     CREATE_COMMAND,
     HELP_COMMAND,
     HELP_TEXT,
+    VERSION_COMMAND,
     ClassifiedRodexCommand,
     CommandRoute,
     classify_rodex_command,
 )
 from .control import CodexControlClient
+from .daemon_client import RODEX_DAEMON_PROTOCOL
 from .errors import RodexExecutableNotFoundError, RodexLaunchError
+from .implementation_identity import RODEX_IMPLEMENTATION_ID
 from .machine_commands import execute_machine_command, print_machine_error
 from .managed_session_lifecycle import (
     SelectorExecution,
@@ -36,6 +40,7 @@ from .managed_session_lifecycle import (
 from .runtime import RodexRuntimeLauncher
 from .session_commands import execute_session_command
 from .statistics_commands import execute_statistics_command
+from .version import RODEX_VERSION
 
 CodexDelegator = Callable[[str, Sequence[str]], int]
 ExecutableResolver = Callable[[str], str | None]
@@ -51,6 +56,7 @@ class PipelinePreparation(StrEnum):
 
 ROUTE_PREPARATIONS: Final = {
     CommandRoute.HELP: PipelinePreparation.DIRECT,
+    CommandRoute.VERSION: PipelinePreparation.DIRECT,
     CommandRoute.CODEX: PipelinePreparation.DIRECT,
     CommandRoute.STATISTICS: PipelinePreparation.DIRECT,
     CommandRoute.AGENT_TRACE: PipelinePreparation.DIRECT,
@@ -209,6 +215,8 @@ class UnifiedRodexApplicationPipeline:
 
         if invocation.route is CommandRoute.HELP:
             return self._execute_help(argv)
+        if invocation.route is CommandRoute.VERSION:
+            return self._execute_version(argv)
         if invocation.route is CommandRoute.CODEX:
             return self._execute_codex(argv)
         if invocation.route is CommandRoute.STATISTICS:
@@ -320,6 +328,18 @@ class UnifiedRodexApplicationPipeline:
         if arguments != [HELP_COMMAND]:
             raise RodexLaunchError("usage: rodex _help")
         print(HELP_TEXT, end="")
+        return 0
+
+    def _execute_version(self, arguments: list[str]) -> int:
+        if arguments != [VERSION_COMMAND]:
+            raise RodexLaunchError("usage: rodex _version")
+        print(
+            "Rodex compatibility:\n"
+            f"  release: {RODEX_VERSION}\n"
+            f"  implementation: {RODEX_IMPLEMENTATION_ID}\n"
+            f"  daemon protocol: {RODEX_DAEMON_PROTOCOL}\n"
+            f"  SQLite catalog: generation {RODEX_DATABASE_SCHEMA_GENERATION} ({RODEX_DATABASE_FILENAME})"
+        )
         return 0
 
     def _codex_session_is_persisted(self, codex_session_id: CodexSessionId) -> bool:

@@ -12,6 +12,7 @@ from typing import Final
 
 from cool_name.functions import create_and_verify_cool_names_schema
 from rodex_sql import (
+    RODEX_DATABASE_FILENAME,
     RODEX_DATABASE_SCHEMA_GENERATION,
     RodexDatabaseNotFoundError,
     RodexDatabaseNotInitializedError,
@@ -2969,8 +2970,16 @@ def _connection_has_current_schema_generation(
             raise
         return False
     if rows != [(1, RODEX_DATABASE_SCHEMA_GENERATION)]:
-        raise RodexSessionError("Rodex database schema generation does not match this Rodex version")
+        raise RodexSessionError(_schema_generation_mismatch_message(rows))
     return True
+
+
+def _schema_generation_mismatch_message(rows: Sequence[object]) -> str:
+    return (
+        f"Rodex database schema generation does not match: found marker rows {rows!r}; "
+        f"required [(1, {RODEX_DATABASE_SCHEMA_GENERATION})] "
+        f"(current default catalog {RODEX_DATABASE_FILENAME}); automatic migration is not supported"
+    )
 
 
 def require_current_rodex_schema(connection: sqlite3.Connection) -> None:
@@ -3005,7 +3014,7 @@ def _require_or_create_current_schema_generation(
     _verify_schema_generations_table(connection)
     rows = connection.execute(f"SELECT id, schema_generation FROM {RODEX_SCHEMA_GENERATIONS_TABLE}").fetchall()
     if rows != [(1, RODEX_DATABASE_SCHEMA_GENERATION)]:
-        raise RodexSessionError("Rodex database schema generation does not match this Rodex version")
+        raise RodexSessionError(_schema_generation_mismatch_message(rows))
 
 
 def lookup_rodex_registry_id(

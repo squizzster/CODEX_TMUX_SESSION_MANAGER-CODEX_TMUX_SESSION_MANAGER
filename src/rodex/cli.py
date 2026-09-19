@@ -14,9 +14,11 @@ from cool_name import CoolNameError
 from rodex_registry import RodexSessionError
 from rodex_sql import RodexSQLError, default_rodex_database_path
 
+from .app_server_contract import RodexAppServerVersionError
 from .application_pipeline import CodexDelegator, UnifiedRodexApplicationPipeline
 from .codex_update_notice import CodexUpdateNotice
 from .control import CodexControlClient, RodexControlError
+from .daemon_client import RodexDaemonError
 from .errors import RodexExecutableNotFoundError, RodexLaunchError
 from .managed_session_lifecycle import ManagedSessionLifecycle
 from .process_environment import user_process_environment
@@ -81,7 +83,9 @@ def main() -> None:
         raise SystemExit(130) from None
     except (
         CoolNameError,
+        RodexAppServerVersionError,
         RodexControlError,
+        RodexDaemonError,
         RodexLaunchError,
         RodexRuntimeError,
         RodexSQLError,

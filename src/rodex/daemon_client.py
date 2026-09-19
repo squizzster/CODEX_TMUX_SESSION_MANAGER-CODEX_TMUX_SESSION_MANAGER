@@ -12,8 +12,11 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Final
 
+from rodex_sql import RODEX_DATABASE_FILENAME, RODEX_DATABASE_SCHEMA_GENERATION
+
 from .implementation_identity import RODEX_IMPLEMENTATION_ID
 from .process_contracts import RuntimeServiceConfig
+from .version import RODEX_VERSION
 
 RODEX_DAEMON_PROTOCOL: Final = "rodex-daemon-v2"
 RODEX_DAEMON_SOCKET_NAME: Final = "rodexd-v2.sock"
@@ -30,6 +33,33 @@ DAEMON_START_TIMEOUT_SECONDS: Final = 10.0
 
 class RodexDaemonError(RuntimeError):
     """The shared daemon could not execute an exact runtime operation."""
+
+
+def _incompatible_daemon_message(socket_path: Path, observed_implementation: object) -> str:
+    """Describe both sides of a rejected daemon handshake without implying SQL was read."""
+    return (
+        f"shared Rodex daemon is incompatible at {socket_path}\n"
+        f"  running daemon implementation: {observed_implementation!r}\n"
+        f"  current client: Rodex {RODEX_VERSION} ({RODEX_IMPLEMENTATION_ID})\n"
+        f"  daemon protocol: {RODEX_DAEMON_PROTOCOL}\n"
+        f"  SQL catalog: not checked; this client expects generation "
+        f"{RODEX_DATABASE_SCHEMA_GENERATION} ({RODEX_DATABASE_FILENAME})\n"
+        "stop all Rodex runtimes and the daemon, then retry; "
+        "Rodex does not migrate earlier runtimes or catalogs"
+    )
+
+
+def _incompatible_daemon_protocol_message(socket_path: Path, observed_protocol: object) -> str:
+    """Name both wire contracts when an existing daemon cannot speak this client's protocol."""
+    return (
+        f"shared Rodex daemon protocol is incompatible at {socket_path}\n"
+        f"  running daemon protocol: {observed_protocol!r}\n"
+        f"  current client protocol: {RODEX_DAEMON_PROTOCOL!r} (Rodex {RODEX_VERSION})\n"
+        f"  SQL catalog: not checked; this client expects generation "
+        f"{RODEX_DATABASE_SCHEMA_GENERATION} ({RODEX_DATABASE_FILENAME})\n"
+        "stop all Rodex runtimes and the daemon, then retry; "
+        "Rodex does not translate earlier wire protocols or migrate earlier catalogs"
+    )
 
 
 def daemon_socket_path(runtime_root: Path) -> Path:
@@ -221,11 +251,18 @@ class RodexDaemonClient:
             connection.sendall(encode_daemon_message(request))
             response = receive_daemon_message(connection)
         if response.get("protocol") != RODEX_DAEMON_PROTOCOL:
-            raise RodexDaemonError("daemon protocol does not match this Rodex generation")
+            raise RodexDaemonError(
+                _incompatible_daemon_protocol_message(
+                    self.socket_path,
+                    response.get("protocol"),
+                )
+            )
         if response.get(RODEX_DAEMON_IMPLEMENTATION_FIELD) != RODEX_IMPLEMENTATION_ID:
             raise RodexDaemonError(
-                "shared Rodex daemon implementation does not match the current code; "
-                "stop all Rodex runtimes and the daemon before starting new sessions"
+                _incompatible_daemon_message(
+                    self.socket_path,
+                    response.get(RODEX_DAEMON_IMPLEMENTATION_FIELD),
+                )
             )
         if response.get("ok") is not True:
             detail = response.get("error")

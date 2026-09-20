@@ -189,10 +189,10 @@ class TerminalInputInterceptor:
         self._menu: InputInterceptionMenu | None = None
         self._forwarded_prefix = ""
         self._discard_paired_lf = False
-        # A timed-out rewrite owns its prepared text until retry or user editing.
+        # A timed-out rewrite owns its prepared text until confirmed or superseded
+        # by a positively verified different draft, never by failed observation.
         # It is not yet a protocol receipt and must never run the hook again on retry.
         self._pending_prompt: str | None = None
-        self._pending_may_be_edited = False
 
     @property
     def active(self) -> bool:
@@ -209,15 +209,14 @@ class TerminalInputInterceptor:
         if self._menu is not None:
             self._accept_local(event)
             return
-        if self._pending_prompt is not None:
-            if event.kind == "control" and event.key in {b"\r", b"\n"}:
-                if self._finish_prompt_submission(event):
-                    self._discard_paired_lf = event.key == b"\r"
-                    return
-            else:
-                # Retain provenance even for potentially editing keys: history,
-                # Delete, etc. can be no-ops. Enter first checks canonical equality.
-                self._pending_may_be_edited |= _may_edit_native_draft(event)
+        if (
+            self._pending_prompt is not None
+            and event.kind == "control"
+            and event.key in {b"\r", b"\n"}
+            and self._finish_prompt_submission(event)
+        ):
+            self._discard_paired_lf = event.key == b"\r"
+            return
         if event.kind in {"text", "paste"}:
             candidate = self._candidate + event.text
             menu = InputInterceptionMenu(self._registrations, candidate)
@@ -284,7 +283,6 @@ class TerminalInputInterceptor:
             self._forward(PASTE_START + transformed.encode("utf-8") + PASTE_END)
             self._candidate = transformed
             self._pending_prompt = transformed
-            self._pending_may_be_edited = False
             self._finish_prompt_submission(event)
             return True
         self._pipeline.admit_primary_prompt(transformed.strip())
@@ -296,23 +294,21 @@ class TerminalInputInterceptor:
         """The gateway drains the PTY and confirms canonical output before CR."""
         assert self._pending_prompt is not None
         if not self._confirm_native_prefix(self._pending_prompt):
-            if self._pending_may_be_edited:
-                # A changed draft is a new submission. Verified tracked edits use
-                # early admission; native-only edits retain protocol fallback.
+            if self._candidate != self._pending_prompt and self._confirm_native_prefix(self._candidate):
+                # Only positive evidence of a different tracked draft can revoke
+                # preparation. A timeout/unknown view is not evidence of editing.
                 self._pending_prompt = None
-                self._pending_may_be_edited = False
                 return False
             self._pipeline.send_message(
                 target="main",
                 text="Rodex kept the rewritten prompt unsubmitted: editor confirmation timed out. "
-                "Press Enter to retry, or edit the draft.",
+                "Press Enter to retry. After untracked native editing, clear and retype the draft.",
                 source="prompt-admission",
                 start_model_turn=False,
             )
             return True
         self._pipeline.admit_primary_prompt(self._pending_prompt.strip())
         self._pending_prompt = None
-        self._pending_may_be_edited = False
         self._candidate = ""
         self._forward(event.raw)
         return True
@@ -441,19 +437,6 @@ class TerminalInputInterceptor:
             self._candidate = self._forwarded_prefix
         self._menu = None
         self._forwarded_prefix = ""
-
-
-def _may_edit_native_draft(event: TerminalInputEvent) -> bool:
-    """Only known cursor/repaint events are nonediting; Codex owns all other keys."""
-    if event.kind == "control" and event.key in {b"\x01", b"\x05", b"\x0c"}:
-        return False
-    if event.kind == "escape_sequence":
-        raw = event.raw
-        if raw.startswith(b"\x1b[<") or raw in {b"\x1b[1~", b"\x1b[4~", b"\x1b[7~", b"\x1b[8~"}:
-            return False
-        if raw.startswith((b"\x1b[", b"\x1bO")) and raw[-1:] in {b"C", b"D", b"H", b"F"}:
-            return False
-    return True
 
 
 def _decode_escape_sequence(raw: bytes) -> TerminalInputEvent:

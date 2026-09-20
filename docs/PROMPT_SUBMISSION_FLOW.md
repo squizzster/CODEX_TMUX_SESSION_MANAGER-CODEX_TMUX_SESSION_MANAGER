@@ -82,11 +82,16 @@ terminal client has physically painted its pixels.
 The bounded handoff lasts up to 300 ms, with snapshot rechecks at at most 10 ms relay
 wait intervals because tmux may consume output without another child-output event.
 Individual fenced tmux calls retain their own deadlines. This is **not idle polling**.
+This deadline starts at the Enter-triggered handoff, not at the first typed character:
+a complete draft may remain idle for days in the same live runtime. Prompt rules are
+read on submission, not frozen when typing begins.
 Other keyboard input is not admitted during the handoff. A timeout after editing
 keeps the canonical draft unsubmitted and unreceipted; Enter retries confirmation
-without another hook application. Nonediting events retain preparation. After a
-potentially editing key, unchanged canonical text still consumes the same preparation;
-a changed draft re-enters normal admission, with protocol fallback for untracked edits.
+without another hook application. Keys alone cannot revoke preparation: unchanged
+canonical text consumes the same preparation, and only positive confirmation of a
+different tracked draft returns to normal admission. An unavailable snapshot proves
+neither case and keeps Enter held. After untracked native edits, clear and retype the
+draft to recover a verifiable candidate; Rodex does not reconstruct Codex's editor.
 A text rule cannot inject terminal controls, blank out the whole submission, or
 acquire native slash/shell-command authority.
 
@@ -104,7 +109,7 @@ acquire native slash/shell-command authority.
 
 Unknown layouts, clipped/large collapsed pastes, and untracked editor operations are
 not claimed as verified editor state. After a Rodex rewrite, Enter stays held unless
-canonical output confirms or further editing relinquishes that prepared submission.
+canonical output confirms or a positively verified different draft supersedes it.
 There is no universal replacement of every tmux operation with PTY bytes: tmux still owns pane lifecycle,
 capability-fenced reads, resize, attachment, status and its reserved keys.
 

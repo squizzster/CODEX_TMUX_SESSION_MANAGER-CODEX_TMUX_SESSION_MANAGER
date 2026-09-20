@@ -4,6 +4,9 @@ Use `rodex` wherever you would use `codex` to run a durable Codex TUI inside a
 verified tmux runtime. Detach, reattach by name, resume the linked Codex thread, or
 control one exact turn from another local process.
 
+See [Prompt submission flow](docs/PROMPT_SUBMISSION_FLOW.md) for the end-to-end
+Rodex → Codex → app workflow and its transformation boundaries.
+
 | Field | Current value |
 | --- | --- |
 | Development mode | `ALPHA` — internal Linux pre-release; breaking changes are allowed |
@@ -171,7 +174,6 @@ share one notice until the file becomes accessible. Each refused RPC still recei
 failure response so callers cannot hang. Fix the file and submit again; valid changed
 rules replace the cached error. Only the supplied metadata fingerprint detects changes:
 rewrites preserving all eight metadata fields cannot be detected. Hooks are synchronous.
-See `docs/PROMPT_SUBMISSION_FLOW.md` for the end-to-end flow.
 
 After installing changed code, start a fresh runtime with `rodex`, or exit the old Codex
 TUI before resuming its session. Detaching and reopening a live runtime retains loaded

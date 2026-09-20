@@ -116,6 +116,7 @@ from .tmux_sharing_coordinator import (
 from .tmux_status import (
     TmuxStatusPipeline,
 )
+from .user_prompt_hook import load_user_prompt_hook
 
 SUN_PATH_MAX_BYTES: Final = 107
 DEFAULT_STARTUP_TIMEOUT_SECONDS: Final = 30.0
@@ -2521,7 +2522,7 @@ def _run_runtime_service(
     diagnostic_relay: _RuntimeDiagnosticRelay | None = None
     agent_observer_controller: AgentObserverCoordinator | None = None
     server_overloaded_recovery: ServerOverloadedRecoveryController | None = None
-    interaction_pipeline = SessionInteractionPipeline()
+    interaction_pipeline = SessionInteractionPipeline(input_text_hook=load_user_prompt_hook(environment=user_environment))
     presentation_pipeline = SessionPresentationPipeline()
     presentation_policy_interaction = PresentationPolicyInteractionAdapter(
         interaction_pipeline,

@@ -35,6 +35,7 @@ from .interaction_pipeline import (
 )
 from .interaction_transport import SESSION_INTERACTION_CONNECTION_PATH, serve_session_interaction
 from .pane_control import TmuxPaneController
+from .protocol_input_text import UserPromptHookError
 from .runtime_endpoint import ExclusiveUnixEndpoint
 from .runtime_peer import RuntimePeerIdentity, require_unix_peer_process, runtime_peer_server_hooks
 from .status_bar import (
@@ -969,7 +970,13 @@ class CodexProtocolProxy:
                 self.interactions.register(output_target)
                 tui_to_server = Thread(
                     target=_forward_messages,
-                    args=(tui_connection, app_server_connection, self.interactions, input_target.name),
+                    args=(
+                        tui_connection,
+                        app_server_connection,
+                        self.interactions,
+                        input_target.name,
+                        output_target.name,
+                    ),
                     name="rodex-codex-protocol-client-forwarder",
                     daemon=True,
                 )
@@ -1111,7 +1118,9 @@ class CodexProtocolProxy:
                 self._primary_connection_released.set()
 
 
-def _forward_messages(source: Any, destination: Any, pipeline: SessionInteractionPipeline, target: str) -> None:
+def _forward_messages(
+    source: Any, destination: Any, pipeline: SessionInteractionPipeline, target: str, output_target: str
+) -> None:
     try:
         for message in source:
             result = pipeline.execute(
@@ -1123,6 +1132,48 @@ def _forward_messages(source: Any, destination: Any, pipeline: SessionInteractio
                 )
             )
             if not result.accepted:
+                if isinstance(result.value, UserPromptHookError):
+                    frame = _json_object(message)
+                    request_id = frame.get("id") if frame is not None else None
+                    if type(request_id) in {int, str}:
+                        # This request was never admitted upstream. A correlated
+                        # RPC error lets native/control clients retry after a fix.
+                        # Display-only notification never starts a model turn.
+                        notice_delivered = True
+                        for error in result.value.errors or (result.value,):
+                            delivered = False
+                            with suppress(Exception):
+                                delivered = error.notice.notify(
+                                    lambda detail=str(error): (
+                                        pipeline.send_message(
+                                            target="main",
+                                            text=f"Rodex prompt was not submitted: {detail}",
+                                            source="user-prompt-hook",
+                                            start_model_turn=False,
+                                        ).accepted
+                                    )
+                                )
+                            notice_delivered = notice_delivered and delivered
+                        response = pipeline.execute(
+                            InteractionRequest(
+                                output_target,
+                                InteractionOperation.PROTOCOL_OUTPUT,
+                                "user-prompt-hook-rejection",
+                                payload=json.dumps(
+                                    {
+                                        "id": request_id,
+                                        "error": {
+                                            "code": -32603,
+                                            "message": "Rodex prompt not submitted; correct the hook configuration."
+                                            if notice_delivered
+                                            else result.detail,
+                                        },
+                                    }
+                                ),
+                            )
+                        )
+                        if response.accepted:
+                            continue
                 source.close(code=1011, reason="Rodex rejected protocol input")
                 break
     except (ConnectionClosed, OSError):

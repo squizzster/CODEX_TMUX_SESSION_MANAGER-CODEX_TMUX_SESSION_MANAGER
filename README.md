@@ -108,6 +108,68 @@ recovery is always active.
 Cancellation remains effective through hooks, session-lock and transport waits until
 atomic dispatch admission. It does not undo or interrupt an already admitted request.
 
+## Submitted prompt hooks
+
+The installation's `conf/hooks/user_prompt_substitutions.yaml` supplies global rules.
+User rules live at `$XDG_STATE_HOME/rodex/conf/hooks/user_prompt_substitutions.yaml`,
+falling back to `~/.local/state/rodex/conf/hooks/user_prompt_substitutions.yaml`.
+Both are ordered YAML lists. The supplied global example turns `Hello` (any letter
+case) into `Hello!`:
+
+```yaml
+- name: 'Add enthusiasm to Hello'
+  match: '^Hello$'
+  replace: 'Hello!'
+  flags: 'i'
+```
+
+Each named rule requires `name`, `match`, and `replace`; `flags` defaults to empty.
+Names must be unique within each file. A user rule with the same name replaces the
+global rule at its original position; new user rules run afterward in user-file order.
+Names are case-sensitive identities and diagnostic labels, never regex patterns.
+Patterns use Python regular
+expressions and replacement backreferences (`\1`, `\g<name>`), without slash delimiters.
+Flags are `i` (ignore case), `m` (multiline anchors), `s` (dot matches newline),
+and `g` (replace every match). Without `g`, each rule replaces the first match in each
+text input item. Rules run in file order. Single-quoted YAML strings preserve escapes.
+The file also includes the configured standalone-line `push` expansion. The earlier
+`/pattern/replacement/flags` and `s/pattern/replacement/flags` strings remain accepted
+through the same rule compiler; in that shorthand only, escape a slash as `\/`.
+These unnamed rules append in file order and cannot override a named rule.
+
+Every managed initial prompt, native submission, `_start`, `_steer`, and queued
+submission reaches the same protocol-input hook exactly once per request. Only text
+input is rewritten; images, routing, turn identity, settings, approvals, and responses
+remain native. UI annotations over unchanged text are rebased to UTF-8 byte offsets;
+annotations overlapping rewritten text are removed while the submitted text remains.
+Native commands delegated directly to Codex, specialized command fields such as review
+instructions or goal objectives, and internal agent traffic are outside this hook.
+
+The global file belongs to the Rodex installation, independent of the caller's workspace.
+The user path is frozen from the launching caller's environment, even in a shared daemon.
+Only a submitted input re-stats both files, using `file_stat_sha512`: SHA-512 of mode,
+inode, device, owner, group, size, mtime-ns, and ctime-ns, with no content reads. An
+unchanged fingerprint uses that file's cached rules; a changed fingerprint reads and
+compiles only that file before the same submission. A second call to the same stat function after reading
+checks for concurrent saves; three changing reads refuse that submission. One runtime
+owns the cache, including concurrent TUI/control submissions. No polling occurs.
+
+Empty YAML or `[]` contributes no rules from that file. An absent user file uses global
+rules alone; creating or removing it takes effect on the next submission. A missing
+global file, unreadable files, invalid YAML, and invalid rules refuse the submission
+and send descriptive, display-only Rodex notices with each file and issue. No partial
+configuration is applied. The connection stays usable. An unchanged bad fingerprint is
+cached and its notice is displayed only once per file after successful delivery; a changed
+fingerprint allows a new notice. When stat itself fails, identical failures likewise
+share one notice until the file becomes accessible. Each refused RPC still receives a
+failure response so callers cannot hang. Fix the file and submit again; valid changed
+rules replace the cached error. Only the supplied metadata fingerprint detects changes:
+rewrites preserving all eight metadata fields cannot be detected. Hooks are synchronous.
+
+After installing changed code, start a fresh runtime with `rodex`, or exit the old Codex
+TUI before resuming its session. Detaching and reopening a live runtime retains loaded
+code. Subsequent YAML edits take effect on the next submission without a restart.
+
 ## Commands
 
 ### Session and terminal
@@ -203,6 +265,8 @@ App Server and authenticated trace identities, and closes when that work finishe
 | --- | --- |
 | Durable catalog | `$XDG_STATE_HOME/rodex/rodex-v20.sqlite3` |
 | Durable catalog fallback | `~/.local/state/rodex/rodex-v20.sqlite3` |
+| User prompt overrides | `$XDG_STATE_HOME/rodex/conf/hooks/user_prompt_substitutions.yaml` |
+| User prompt overrides fallback | `~/.local/state/rodex/conf/hooks/user_prompt_substitutions.yaml` |
 | Runtime root | `$XDG_RUNTIME_DIR/rodex` |
 | Runtime fallback | `/tmp/rodex-<uid>` |
 | Optional runtime override | `RODEX_RUNTIME_DIR` |

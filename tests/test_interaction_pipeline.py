@@ -238,6 +238,32 @@ def test_target_closed_during_hook_is_rejected_without_retry():
     assert not delivered
 
 
+def test_target_closed_during_input_text_hook_is_rejected_without_delivery():
+    available = True
+    delivered = []
+
+    def hook(texts):
+        nonlocal available
+        available = False
+        return tuple(() for _ in texts)
+
+    pipeline = SessionInteractionPipeline(input_text_hook=hook)
+    pipeline.register(target_binding("protocol", delivered, exists=lambda: available))
+    result = pipeline.execute(
+        InteractionRequest(
+            "protocol",
+            InteractionOperation.PROTOCOL_INPUT,
+            "codex-client",
+            payload=json.dumps(
+                {"id": 1, "method": "turn/start", "params": {"input": [{"type": "text", "text": "Hello"}]}}
+            ),
+        )
+    )
+    assert result.status == DeliveryStatus.REJECTED
+    assert "disappeared" in result.detail
+    assert not delivered
+
+
 def test_indeterminate_dispatch_preserves_exception_and_outcome_without_retry():
     calls = []
     error = RodexDispatchIndeterminateError("may be accepted", dispatch_id="dispatch-1")

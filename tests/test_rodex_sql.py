@@ -10,6 +10,8 @@ from rodex_sql import (
     RodexDatabaseNotFoundError,
     RodexDatabaseNotInitializedError,
     RodexSQLError,
+    default_rodex_database_path,
+    default_rodex_state_root,
     index_re_try_attempt_numbers,
     open_rodex_bootstrap_transaction,
     open_rodex_read_transaction,
@@ -18,6 +20,27 @@ from rodex_sql import (
     select_lookup_id,
     select_or_insert_lookup_id,
 )
+
+
+@pytest.mark.parametrize("configured", [None, "", "~", "~/custom-state", "/explicit-state"])
+def test_shared_state_root_preserves_caller_environment_and_database_default(tmp_path, monkeypatch, configured):
+    caller_home = tmp_path / "caller-home"
+    environment = {"HOME": str(caller_home)}
+    if configured is not None:
+        environment["XDG_STATE_HOME"] = configured
+    monkeypatch.setenv("HOME", str(tmp_path / "daemon-home"))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "daemon-state"))
+    expected = {
+        None: caller_home / ".local/state/rodex",
+        "": caller_home / ".local/state/rodex",
+        "~": caller_home / "rodex",
+        "~/custom-state": caller_home / "custom-state/rodex",
+        "/explicit-state": Path("/explicit-state/rodex"),
+    }[configured]
+    assert default_rodex_state_root(environment) == expected
+    monkeypatch.setenv("HOME", str(caller_home))
+    monkeypatch.setenv("XDG_STATE_HOME", configured or "")
+    assert default_rodex_database_path() == expected / "rodex-v20.sqlite3"
 
 
 def test_index_re_try_policy_has_exactly_ten_finite_attempts() -> None:

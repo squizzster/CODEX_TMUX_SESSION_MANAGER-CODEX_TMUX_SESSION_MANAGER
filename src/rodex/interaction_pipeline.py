@@ -146,13 +146,25 @@ class SessionInteractionPipeline:
         self._records: deque[InteractionRecord] = deque(maxlen=256)
 
     def prepare_primary_prompt(self, text: str) -> str:
-        """Transform primary input before Codex can render or submit it."""
+        """Prepare and admit initial argv, which has no existing editor to update."""
+        transformed = self.transform_primary_prompt(text)
+        self.admit_primary_prompt(transformed)
+        return transformed
+
+    def transform_primary_prompt(self, text: str) -> str:
+        """Compute canonical input without admitting a future protocol request."""
         if self._input_text_hook is None:
             return text
-        transformed = apply_user_prompt_text(text, self._input_text_hook)
+        return apply_user_prompt_text(text, self._input_text_hook)
+
+    def admit_primary_prompt(self, text: str) -> None:
+        """Commit a receipt immediately before releasing verified input to Codex."""
+        if self._input_text_hook is None:
+            return
         with self._prepared_prompt_lock:
-            self._prepared_prompts.append((transformed,))
-        return transformed
+            # The admitting route supplies submission text: native editor trims
+            # surrounding whitespace, but initial argv preserves it.
+            self._prepared_prompts.append((text,))
 
     def subscribe_outcomes(self, observer: OutcomeObserver) -> OutcomeUnsubscriber:
         """Observe content-free outcomes until the returned exact subscription is closed."""

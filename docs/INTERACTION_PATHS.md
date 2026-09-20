@@ -54,8 +54,11 @@ cached event. The snapshot budget reserves transport-address overhead.
 
 Submitted user text first enters the runtime's typed prompt admission. A characterized
 managed initial-prompt argument and a verified native editor draft are transformed
-before Codex receives them. Native Enter is held until Rodex updates the same editor;
-the following primary protocol request consumes one matching preparation receipt and
+before Codex submits them. Native Enter is held until Rodex updates the same editor
+through its PTY and confirms the canonical native output in the fenced tmux pane;
+only then does Rodex admit the receipt and release Enter. A timeout retains the
+prepared draft without admitting a receipt; retry does not transform it again.
+The following primary protocol request consumes one matching preparation receipt and
 does not run the hook again. Unverified native editor state and non-terminal routes use
 the structured protocol-input fallback. `protocol_input_text` owns ordered edits and
 rebases/removes affected UTF-8 UI spans while preserving every other RPC field. Initial,
@@ -128,7 +131,7 @@ work. The record buffer contains metadata, not prompt bodies or another durable 
 | Presentation selection | Configured `light`/`dark` action → SELECT_PRESENTATION_POLICY; never starts a turn or changes App Server delivery/logging |
 | Local placeholder reply | Configured actionless command/option text → MESSAGE(false) → main display adapter |
 | Managed initial prompt | Characterized CLI prompt argument → prompt admission → canonical argv → native TUI → matching protocol receipt → App Server |
-| Verified native prompt | Keyboard candidate → exact native-composer check → prompt admission → canonical editor update → original Enter → native TUI → matching protocol receipt → App Server |
+| Verified native prompt | Keyboard candidate → original composer check → transform → PTY editor update → canonical composer confirmation → receipt admission → original Enter → native TUI → receipt consumption → App Server |
 | Unverified native prompt and other native TUI protocol operations | Native TUI → protocol-input fallback → App Server |
 | Native terminal output | Readable child PTY → TERMINAL_OUTPUT → continuously updated native projection → selected native/semantic surface + inline compositor → bounded display queue → writable outer PTY |
 | App Server primary output | Protocol-output pipeline → TUI unchanged, then typed presentation/context/observer/event projections; display filtering never rejects execution |
@@ -185,8 +188,8 @@ work. The record buffer contains metadata, not prompt bodies or another durable 
 | Runtime logs, update cache, analyzer memory files | Blocking child-diagnostic relay/file owners, not chat; new startup diagnostics wake the runtime supervisor after persistence |
 | Keyboard framing and native PTY writes | `TerminalInputDecoder` / `TerminalInputInterceptor` → `TerminalSessionGateway`; tmux retains its owned lifecycle keys |
 | Terminal readiness and lifecycle | `TerminalSessionGateway` blocks on outer/child PTYs, a wake-only pipe and the exact child `pidfd`; explicit registration/stop control events, diagnostic output, presentation revisions, tmux resize hooks and incomplete-input deadlines wake the relay without an idle supervisor timer |
-| Native composer presentation at takeover/submission | Exact primary-pane fenced snapshot; prefix and end cursor must agree, no background screen polling |
-| Native editor state | Codex; Rodex observes a bounded candidate, verifies the native composer at Enter, applies canonical text there, then releases the original Enter |
+| Native composer presentation at takeover/submission | Exact primary-pane fenced snapshot; ordinary/Ultra glyph, visible text, wrap width and end cursor must agree; bounded handoff rechecks, no idle screen polling |
+| Native editor state | Codex; Rodex observes a bounded candidate, verifies the original composer, edits through the PTY, confirms canonical output, admits the receipt, then releases original Enter |
 | Main terminal surface | `TerminalSurfaceRenderer` → gateway output queue; one native projection plus configured semantic views; only verified prompt admission updates the native editor before Enter |
 | Presentation classification | `SessionPresentationPipeline`; bounded App Server method/kind/thread/turn/item/type/phase/status fields and item-text accumulation |
 

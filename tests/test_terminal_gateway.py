@@ -14,6 +14,7 @@ import time
 from contextlib import contextmanager, suppress
 from pathlib import Path
 
+import pyte
 import pytest
 
 from rodex.input_interceptor_config import INPUT_INTERCEPTORS
@@ -190,6 +191,102 @@ def test_real_pty_rewrites_verified_prompt_before_native_enter():
 
             assert output.index(rewritten) >= output.index(b"Hello") + len(b"Hello")
             assert calls == [("Hello",)]
+        finally:
+            gateway.close()
+
+
+def test_canonical_editor_output_reaches_outer_pty_before_enter_and_receipt():
+    # A native editor fixture, not an echo process: it consumes edit events and
+    # emits a new ANSI frame. The assertion reads that actual outer PTY output.
+    child = r"""
+import os, tty
+tty.setraw(0)
+text = b''
+def render():
+    os.write(1, b'\x1b[2J\x1b[H' + '\u203a '.encode() + text)
+os.write(1, b'READY')
+render()
+while True:
+    key = os.read(0, 1)
+    if key == b'\x1b':
+        sequence = key + os.read(0, 5)
+        assert sequence == b'\x1b[200~', sequence
+        pasted = b''
+        while not pasted.endswith(b'\x1b[201~'):
+            pasted += os.read(0, 1)
+        text += pasted[:-6]
+    elif key == b'\x7f':
+        text = text[:-1]
+    elif key == b'\r':
+        os.write(1, b'\r\nSUBMITTED[' + text + b']')
+        break
+    else:
+        text += key
+    render()
+"""
+    calls = []
+    pipeline = SessionInteractionPipeline(
+        input_text_hook=lambda texts: tuple((PromptTextEdit(0, len(text), "Hello!"),) for text in texts)
+    )
+    visible = pyte.Screen(120, 36)
+    stream = pyte.ByteStream(visible)
+    with outer_terminal() as (master, slave):
+
+        def confirm(text):
+            while select.select([master], [], [], 0)[0]:
+                stream.feed(os.read(master, 65536))
+            matches = visible.display[visible.cursor.y].rstrip() == f"\u203a {text}"
+            if matches:
+                assert not pipeline._prepared_prompts
+                assert not any("SUBMITTED" in line for line in visible.display)
+                calls.append(text)
+            return matches
+
+        gateway = TerminalSessionGateway(
+            [sys.executable, "-I", "-c", child],
+            env=dict(os.environ),
+            cwd=Path.cwd(),
+            pipeline=pipeline,
+            runtime_identity="test-editor",
+            registrations=(),
+            confirm_native_prefix=confirm,
+            input_fd=slave,
+            output_fd=slave,
+        )
+        try:
+            read_until(gateway, master, b"READY")
+            os.write(master, b"Hello\r")
+            output = read_until(gateway, master, b"SUBMITTED[Hello!]")
+            assert b"SUBMITTED[Hello]" not in output
+            assert calls == ["Hello", "Hello!"]
+            assert list(pipeline._prepared_prompts) == [("Hello!",)]
+        finally:
+            gateway.close()
+
+
+def test_handoff_rechecks_tmux_snapshot_without_another_child_output_event(monkeypatch):
+    pipeline = SessionInteractionPipeline()
+    with outer_terminal() as (master, slave):
+        gateway = start_gateway(slave, pipeline)
+        try:
+            read_until(gateway, master, b"READY")
+            snapshots = []
+            waits = []
+
+            def confirm(text):
+                snapshots.append(text)
+                return len(snapshots) == 2
+
+            def relay(*, allow_input, timeout):
+                assert not allow_input
+                waits.append(timeout)
+                return False  # No PTY event; tmux independently consumed output.
+
+            gateway._confirm_presentation = confirm
+            monkeypatch.setattr(gateway, "_relay_once", relay)
+            assert gateway._confirm_prefix("Hello!")
+            assert snapshots == ["Hello!", "Hello!"]
+            assert len(waits) == 1 and 0 < waits[0] <= 0.01
         finally:
             gateway.close()
 

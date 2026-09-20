@@ -12,6 +12,7 @@ from pyte import graphics, modes
 from wcwidth import wcswidth, wcwidth
 
 from .input_menu import ARGUMENT_MENU_FOOTER, InputMenuStage, InputMenuView
+from .native_composer import composer_gutter
 from .presentation_policy import PresentationSnapshot, PresentationSurface
 
 _DEFAULT_PRESENTATION = PresentationSnapshot(0, "dark", PresentationSurface.NATIVE, "", (), ())
@@ -232,7 +233,8 @@ class TerminalSurfaceRenderer:
         if not self.native.paintable:
             return None
         line = screen.display[screen.cursor.y][: screen.cursor.x]
-        if line.lstrip() != f"\u203a {state.native_prefix}" or screen.cursor.x != wcswidth(line):
+        gutter = composer_gutter(line)
+        if gutter is None or line != gutter + state.native_prefix or screen.cursor.x != wcswidth(line):
             return None
         if screen.lines < 3:
             return None
@@ -302,7 +304,7 @@ def _native_composer_row(screen: pyte.Screen) -> int | None:
     """Locate the bottom-most native composer boundary used for input/control bridging."""
     for row in range(screen.lines - 1, -1, -1):
         line = screen.display[row].lstrip()
-        if line == "\u203a" or line.startswith("\u203a "):
+        if composer_gutter(line) is not None:
             return row
     return None
 

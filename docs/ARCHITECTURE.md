@@ -67,7 +67,10 @@ Indexed client hooks only wake the sharing coordinator, which verifies one roste
 submits changes under full capability. Root `C-c` kills a guarded private runtime or
 detaches its originating shared client; `C-d` uses tmux's current-client detach. Creation
 sets `exit-unattached off` and `destroy-unattached off`. Other keys enter the terminal
-pipeline; Rodex uses no tmux Enter binding, synthetic keys or pane piping.
+pipeline; Rodex uses no tmux Enter binding, `send-keys` or pane piping. The gateway
+alone writes the child PTY: verified prompt replacement uses DEL and bracketed paste,
+confirms native output in tmux, then admits the receipt and releases the original Enter.
+See [prompt ownership and timing](PROMPT_SUBMISSION_FLOW.md).
 
 Discovery compares the session snapshot with a guarded primary-pane read. Every tmux process
 crosses `tmux_executor`; calls have deadlines and cancellation reaps the child.

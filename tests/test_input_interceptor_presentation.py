@@ -46,6 +46,9 @@ class FakePane:
     def capture_cursor_line(self):
         return self.snapshot
 
+    def capture_composer(self):
+        return ((self.snapshot[0],), self.snapshot[1], 120) if self.snapshot else None
+
 
 def setup_presentation(registrations=INPUT_INTERCEPTORS, *, display_available=True):
     pipeline = SessionInteractionPipeline()
@@ -221,10 +224,11 @@ def test_handoff_accounts_for_captured_trailing_spaces_and_terminal_cell_width(p
 @pytest.mark.parametrize(
     "snapshot,expected",
     [
-        ("4|0|0\n\u203a /r\n4|0|0\n", ("\u203a /r", 4)),
-        ("4|0|1\n\u203a /r\n4|0|1\n", None),
-        ("4|0|0\n\u203a /r\n3|0|0\n", None),
-        ("4|9|0\n\u203a /r\n4|9|0\n", None),
+        ("4|0|0|120\n\u203a /r\n4|0|0|120\n", ("\u203a /r", 4)),
+        ("4|0|1|120\n\u203a /r\n4|0|1|120\n", None),
+        ("4|0|0|120\n\u203a /r\n3|0|0|120\n", None),
+        ("4|0|0|120\n\u203a /r\n4|0|0|80\n", None),
+        ("4|9|0|120\n\u203a /r\n4|9|0|120\n", None),
         ("invalid\n\u203a /r\ninvalid\n", None),
         ("", None),
     ],
@@ -241,3 +245,13 @@ def test_cursor_capture_brackets_one_fenced_snapshot(snapshot, expected):
     assert len(commands) == 1
     assert commands[0][3:7] == ["if-shell", "-t", "%9", "-F"]
     assert "capture-pane -p -t %9" in commands[0][-2]
+
+
+def test_multiline_composer_keeps_literal_arrow_content_and_captured_width():
+    snapshot = "9|1|0|120\n\u203a Hello\n  \u203a world\n9|1|0|120\n"
+
+    def runner(command, **_options):
+        return subprocess.CompletedProcess(command, 0, snapshot, "")
+
+    pane = TmuxPaneController("tmux", capability(), "%9", primary=True, runner=runner)
+    assert pane.capture_composer() == (("\u203a Hello", "  \u203a world"), 9, 120)

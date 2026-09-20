@@ -41,13 +41,15 @@ class DisplayHarness:
 
 
 @pytest.mark.parametrize("draft", ["/ro", "/rod", "/rode", "/rodex"])
-def test_surface_renderer_is_inline_beneath_visible_draft_and_restores_native_exactly(draft):
+@pytest.mark.parametrize("glyph", ["\u203a", "»"])
+def test_surface_renderer_is_inline_beneath_visible_draft_and_restores_native_exactly(draft, glyph):
     harness = DisplayHarness()
-    assert harness.native(NATIVE_MENU) == NATIVE_MENU
+    native_menu = NATIVE_MENU.replace("\u203a".encode(), glyph.encode())
+    assert harness.native(native_menu) == native_menu
     native_display = harness.visible.display
     assert harness.display(replace(STATE, draft=draft))
     assert harness.visible.display[0].rstrip() == "Native conversation"
-    assert harness.visible.display[4].rstrip() == f"\u203a {draft}"
+    assert harness.visible.display[4].rstrip() == f"{glyph} {draft}"
     assert harness.visible.display[5].strip() == ""
     assert harness.visible.display[6].strip() == "/rodex   issue a rodex command"
     assert "/review" not in "\n".join(harness.visible.display)

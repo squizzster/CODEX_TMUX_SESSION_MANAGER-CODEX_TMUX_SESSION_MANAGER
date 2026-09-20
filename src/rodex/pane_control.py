@@ -9,6 +9,7 @@ import sys
 import uuid
 from typing import Final
 
+from .native_composer import composer_gutter
 from .process_environment import (
     exact_environment_exec_command,
     validated_user_environment_entries,
@@ -400,6 +401,25 @@ class TmuxPaneController:
         return self._mutate_target(pane, ("select-pane", "-t", pane)).returncode == 0
 
     def capture_cursor_line(self) -> tuple[str, int] | None:
+        snapshot = self._capture_cursor_snapshot()
+        if snapshot is None:
+            return None
+        lines, cursor_x, cursor_y, _width = snapshot
+        return lines[cursor_y], cursor_x
+
+    def capture_composer(self) -> tuple[tuple[str, ...], int, int] | None:
+        snapshot = self._capture_cursor_snapshot()
+        if snapshot is None:
+            return None
+        lines, cursor_x, cursor_y, width = snapshot
+        for row in range(cursor_y, -1, -1):
+            # The native gutter is at column zero. An arrow inside continuation
+            # text is not another composer anchor.
+            if (gutter := composer_gutter(lines[row])) is not None and len(gutter) == 2:
+                return lines[row : cursor_y + 1], cursor_x, width
+        return None
+
+    def _capture_cursor_snapshot(self) -> tuple[tuple[str, ...], int, int, int] | None:
         """Read one primary presentation snapshot at an explicit input handoff.
 
         The cursor metadata brackets the capture in one fenced tmux command queue.
@@ -408,7 +428,7 @@ class TmuxPaneController:
         if not self._primary:
             return None
         pane = self._primary_pane_target
-        header = ("display-message", "-p", "-t", pane, "#{cursor_x}|#{cursor_y}|#{pane_in_mode}")
+        header = ("display-message", "-p", "-t", pane, "#{cursor_x}|#{cursor_y}|#{pane_in_mode}|#{pane_width}")
         capture = ("capture-pane", "-p", "-t", pane)
         result = self._tmux_executor.run(
             (
@@ -425,12 +445,12 @@ class TmuxPaneController:
         if result.returncode != 0 or len(lines) < 3 or lines[0] != lines[-1]:
             return None
         try:
-            cursor_x, cursor_y, pane_in_mode = map(int, lines[0].split("|"))
+            cursor_x, cursor_y, pane_in_mode, width = map(int, lines[0].split("|"))
         except ValueError:
             return None
-        if pane_in_mode or not 0 <= cursor_y < len(lines) - 2:
+        if pane_in_mode or not 0 <= cursor_y < len(lines) - 2 or not 0 <= cursor_x < width:
             return None
-        return lines[cursor_y + 1], cursor_x
+        return tuple(lines[1:-1]), cursor_x, cursor_y, width
 
     def resize(self, pane: str, size_percent: int) -> bool:
         if type(size_percent) is not int or not 1 <= size_percent <= 99:

@@ -41,6 +41,7 @@ from .terminal_surface import TerminalSurfaceRenderer
 QUEUE_LIMIT_BYTES = 1024 * 1024
 READ_CHUNK_BYTES = 16384
 HANDOFF_TIMEOUT_SECONDS = 0.3
+HANDOFF_RECHECK_SECONDS = 0.01
 EXIT_DRAIN_TIMEOUT_SECONDS = 0.5
 
 
@@ -272,15 +273,24 @@ class TerminalSessionGateway:
         try:
             deadline = time.monotonic() + HANDOFF_TIMEOUT_SECONDS
             while time.monotonic() < deadline and not self._native_eof:
+                if (
+                    not self._native_queue
+                    and not self._display_queue
+                    and self._pending_surface_frame is None
+                    and self._surface_renderer.native.paintable
+                    and self._confirm_presentation(prefix)
+                ):
+                    return True
                 remaining = max(0.0, deadline - time.monotonic())
-                process_exited = self._relay_once(allow_input=False, timeout=remaining)
+                # tmux consumes our flushed output independently. A failed snapshot
+                # can become valid without another child output event. Recheck only
+                # during this bounded handoff; ordinary idle relay remains blocking.
+                process_exited = self._relay_once(allow_input=False, timeout=min(remaining, HANDOFF_RECHECK_SECONDS))
                 if process_exited and self.process is not None and self.process.returncode is None:
                     self.process.poll()
                 if self._resize_pending:
                     self._apply_resize()
                 self._sync_presentation()
-                if not self._native_queue and not self._display_queue and self._confirm_presentation(prefix):
-                    return True
             return False
         finally:
             self._queue_rendered_surface(self._surface_renderer.resume())

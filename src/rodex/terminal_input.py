@@ -189,6 +189,10 @@ class TerminalInputInterceptor:
         self._menu: InputInterceptionMenu | None = None
         self._forwarded_prefix = ""
         self._discard_paired_lf = False
+        # A timed-out rewrite owns its prepared text until retry or user editing.
+        # It is not yet a protocol receipt and must never run the hook again on retry.
+        self._pending_prompt: str | None = None
+        self._pending_may_be_edited = False
 
     @property
     def active(self) -> bool:
@@ -205,6 +209,15 @@ class TerminalInputInterceptor:
         if self._menu is not None:
             self._accept_local(event)
             return
+        if self._pending_prompt is not None:
+            if event.kind == "control" and event.key in {b"\r", b"\n"}:
+                if self._finish_prompt_submission(event):
+                    self._discard_paired_lf = event.key == b"\r"
+                    return
+            else:
+                # Retain provenance even for potentially editing keys: history,
+                # Delete, etc. can be no-ops. Enter first checks canonical equality.
+                self._pending_may_be_edited |= _may_edit_native_draft(event)
         if event.kind in {"text", "paste"}:
             candidate = self._candidate + event.text
             menu = InputInterceptionMenu(self._registrations, candidate)
@@ -234,13 +247,27 @@ class TerminalInputInterceptor:
         draft = self._candidate
         # Codex owns slash commands and the interactive shell escape. They do not
         # become model-input RPCs, so prompt configuration must not alter or block them.
-        if not draft or draft.startswith(("/", "!")) or not self._confirm_native_prefix(draft):
+        if not draft.strip() or draft.lstrip().startswith(("/", "!")) or not self._confirm_native_prefix(draft):
             return False
         try:
-            transformed = self._pipeline.prepare_primary_prompt(draft)
+            transformed = self._pipeline.transform_primary_prompt(draft)
+            if transformed != draft:
+                # A text rule cannot gain terminal framing or native-command authority.
+                if (
+                    not transformed.strip()
+                    or transformed.lstrip().startswith(("/", "!"))
+                    or any((ord(char) < 32 and char != "\n") or 127 <= ord(char) < 160 for char in transformed)
+                ):
+                    raise UserPromptHookError(
+                        "replacement must be non-empty model text without terminal controls or native commands"
+                    )
+                try:
+                    transformed.encode("utf-8")
+                except UnicodeError as error:
+                    raise UserPromptHookError("replacement must be valid UTF-8 text") from error
         except UserPromptHookError as error:
             detail = str(error)
-            delivered = error.notice.notify(
+            error.notice.notify(
                 lambda: (
                     self._pipeline.send_message(
                         target="main",
@@ -250,10 +277,42 @@ class TerminalInputInterceptor:
                     ).accepted
                 )
             )
-            return delivered
+            # Notification availability cannot grant submission permission.
+            return True
         if transformed != draft:
             self._forward(b"\x7f" * len(draft))
             self._forward(PASTE_START + transformed.encode("utf-8") + PASTE_END)
+            self._candidate = transformed
+            self._pending_prompt = transformed
+            self._pending_may_be_edited = False
+            self._finish_prompt_submission(event)
+            return True
+        self._pipeline.admit_primary_prompt(transformed.strip())
+        self._candidate = ""
+        self._forward(event.raw)
+        return True
+
+    def _finish_prompt_submission(self, event: TerminalInputEvent) -> bool:
+        """The gateway drains the PTY and confirms canonical output before CR."""
+        assert self._pending_prompt is not None
+        if not self._confirm_native_prefix(self._pending_prompt):
+            if self._pending_may_be_edited:
+                # A changed draft is a new submission. Verified tracked edits use
+                # early admission; native-only edits retain protocol fallback.
+                self._pending_prompt = None
+                self._pending_may_be_edited = False
+                return False
+            self._pipeline.send_message(
+                target="main",
+                text="Rodex kept the rewritten prompt unsubmitted: editor confirmation timed out. "
+                "Press Enter to retry, or edit the draft.",
+                source="prompt-admission",
+                start_model_turn=False,
+            )
+            return True
+        self._pipeline.admit_primary_prompt(self._pending_prompt.strip())
+        self._pending_prompt = None
+        self._pending_may_be_edited = False
         self._candidate = ""
         self._forward(event.raw)
         return True
@@ -382,6 +441,19 @@ class TerminalInputInterceptor:
             self._candidate = self._forwarded_prefix
         self._menu = None
         self._forwarded_prefix = ""
+
+
+def _may_edit_native_draft(event: TerminalInputEvent) -> bool:
+    """Only known cursor/repaint events are nonediting; Codex owns all other keys."""
+    if event.kind == "control" and event.key in {b"\x01", b"\x05", b"\x0c"}:
+        return False
+    if event.kind == "escape_sequence":
+        raw = event.raw
+        if raw.startswith(b"\x1b[<") or raw in {b"\x1b[1~", b"\x1b[4~", b"\x1b[7~", b"\x1b[8~"}:
+            return False
+        if raw.startswith((b"\x1b[", b"\x1bO")) and raw[-1:] in {b"C", b"D", b"H", b"F"}:
+            return False
+    return True
 
 
 def _decode_escape_sequence(raw: bytes) -> TerminalInputEvent:

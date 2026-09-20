@@ -188,6 +188,133 @@ def test_verified_prompt_is_transformed_before_native_enter_and_only_once():
     assert harness.forwarded == b"Hello" + b"\x7f" * 5 + PASTE_START + b"Hello!" + PASTE_END + b"\r"
     assert deliver_primary_submission(harness, "Hello!")["params"]["input"][0]["text"] == "Hello!"
     assert calls == [("Hello",)]
+    assert harness.prefix_checks == ["Hello", "Hello!"]
+
+
+def test_replacement_is_confirmed_before_receipt_admission_and_enter():
+    calls = []
+    harness = InputHarness(registrations=(), input_text_hook=greeting_hook(calls))
+
+    def confirm(text):
+        assert b"\r" not in harness.forwarded
+        assert not harness.pipeline._prepared_prompts
+        if text == "Hello!":
+            assert harness.forwarded.endswith(PASTE_START + b"Hello!" + PASTE_END)
+        return True
+
+    harness.interceptor._confirm_native_prefix = confirm
+    harness.feed(b"Hello\r\nnext")
+    assert harness.forwarded.endswith(PASTE_END + b"\rnext")
+    assert list(harness.pipeline._prepared_prompts) == [("Hello!",)]
+
+
+def test_failed_replacement_confirmation_retries_without_rewriting_or_reapplying_hook():
+    calls = []
+
+    def non_idempotent(texts):
+        calls.append(texts)
+        return tuple((PromptTextEdit(len(text), len(text), "!"),) for text in texts)
+
+    harness = InputHarness(registrations=(), input_text_hook=non_idempotent)
+    harness.interceptor._confirm_native_prefix = lambda text: text == "Hello"
+    harness.feed(b"Hello\r\n")
+    rewritten = bytes(harness.forwarded)
+    assert rewritten.endswith(PASTE_END) and b"\r" not in rewritten
+    assert not harness.pipeline._prepared_prompts
+    harness.feed(b"\r")
+    assert bytes(harness.forwarded) == rewritten
+    harness.interceptor._confirm_native_prefix = lambda text: text == "Hello!"
+    harness.feed(b"\r")
+    assert bytes(harness.forwarded) == rewritten + b"\r"
+    assert calls == [("Hello",)]
+    assert deliver_primary_submission(harness, "Hello!")["params"]["input"][0]["text"] == "Hello!"
+    assert calls == [("Hello",)]
+
+
+def test_editing_after_failed_confirmation_is_new_submission():
+    calls = []
+    harness = InputHarness(registrations=(), input_text_hook=greeting_hook(calls))
+    harness.interceptor._confirm_native_prefix = lambda text: text == "Hello"
+    harness.feed(b"Hello\r")
+    harness.feed(b" there")
+    harness.interceptor._confirm_native_prefix = lambda text: text == "Hello! there"
+    harness.feed(b"\r")
+    assert calls == [("Hello",), ("Hello! there",)]
+    assert list(harness.pipeline._prepared_prompts) == [("Hello! there",)]
+
+
+@pytest.mark.parametrize("event", [b"\x1b[C", b"\x1b[I", b"\x1b[O", b"\x05", b"\x1b[<0;1;1M", b"\x1b[A", b"\x1b[3~"])
+def test_nonediting_events_preserve_timed_out_preparation(event):
+    calls = []
+
+    def hook(texts):
+        calls.append(texts)
+        return tuple((PromptTextEdit(len(text), len(text), "!"),) for text in texts)
+
+    harness = InputHarness(registrations=(), input_text_hook=hook)
+    harness.interceptor._confirm_native_prefix = lambda text: text == "Hello"
+    harness.feed(b"Hello\r")
+    harness.feed(event)
+    harness.interceptor._confirm_native_prefix = lambda text: text == "Hello!"
+    harness.feed(b"\r")
+    assert deliver_primary_submission(harness, "Hello!")["params"]["input"][0]["text"] == "Hello!"
+    assert calls == [("Hello",)]
+
+
+@pytest.mark.parametrize("editing", [b"\x1b[H\x1b[3~\x1b[F", b"\x19", b"\x1b[13;2u", b"\x1b[A", b"\x1b[B"])
+def test_native_edit_after_timeout_relinquishes_obsolete_preparation(editing):
+    calls = []
+    harness = InputHarness(registrations=(), input_text_hook=greeting_hook(calls))
+    harness.interceptor._confirm_native_prefix = lambda text: text == "Hello"
+    harness.feed(b"Hello\r")
+    harness.feed(editing)
+    harness.interceptor._confirm_native_prefix = lambda _text: False
+    harness.feed(b"\r")
+    assert harness.forwarded.endswith(editing + b"\r")
+    assert harness.interceptor._pending_prompt is None
+    assert not harness.pipeline._prepared_prompts
+    assert deliver_primary_submission(harness, "edited draft")["params"]["input"][0]["text"] == "edited draft"
+    assert calls == [("Hello",), ("edited draft",)]
+
+
+@pytest.mark.parametrize("replacement", ["/quit", " !pwd", "", "   ", "x\x1b[201~\r", "x\r", "x\x00", "x\x7f", "\ud800"])
+@pytest.mark.parametrize("reject_notice", [False, True])
+def test_replacement_cannot_gain_control_or_native_command_authority(replacement, reject_notice):
+    def hook(texts):
+        return tuple((PromptTextEdit(0, len(text), replacement),) for text in texts)
+
+    harness = InputHarness(registrations=(), input_text_hook=hook, reject=reject_notice)
+    harness.feed(b"Hello\r")
+    assert harness.forwarded == b"Hello"
+    assert not harness.pipeline._prepared_prompts
+    assert "Rodex prompt was not submitted" in harness.events[-1].text
+
+
+def test_initial_argv_preparation_preserves_surrounding_whitespace():
+    calls = []
+
+    def hook(texts):
+        calls.append(texts)
+        return tuple((PromptTextEdit(0, 0, " "),) for text in texts)
+
+    harness = InputHarness(registrations=(), input_text_hook=hook)
+    text = harness.pipeline.prepare_primary_prompt("Hello ")
+    assert text == " Hello "
+    assert deliver_primary_submission(harness, text)["params"]["input"][0]["text"] == text
+    assert calls == [("Hello ",)]
+
+
+def test_receipt_matches_native_submission_whitespace_normalization():
+    calls = []
+
+    def hook(texts):
+        calls.append(texts)
+        return tuple((PromptTextEdit(0, len(text), f" {text}! "),) for text in texts)
+
+    harness = InputHarness(registrations=(), input_text_hook=hook)
+    harness.feed(b"Hello\r")
+    assert deliver_primary_submission(harness, "Hello!")["params"]["input"][0]["text"] == "Hello!"
+    assert calls == [("Hello",)]
 
 
 @pytest.mark.parametrize(
@@ -261,7 +388,7 @@ def test_invalid_hook_blocks_enter_before_codex_and_preserves_editable_draft():
     assert [event.text for event in notices] == ["Rodex prompt was not submitted: bad YAML"]
 
 
-@pytest.mark.parametrize("draft", [b"/model", b"!pwd"])
+@pytest.mark.parametrize("draft", [b"/model", b"!pwd", b" /model", b" !pwd", b"   "])
 def test_native_codex_commands_bypass_prompt_admission(draft):
     def invalid(_texts):
         raise UserPromptHookError("must not run")

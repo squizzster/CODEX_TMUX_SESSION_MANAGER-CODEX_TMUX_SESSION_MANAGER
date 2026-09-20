@@ -304,7 +304,10 @@ def test_installed_rodex_starts_reuses_and_adopts_sessions(
             deadline = time.monotonic() + 5
             while time.monotonic() < deadline:
                 surface = tmux(*arguments)
-                if surface.returncode == 0 and (expected in surface.stdout) != absent:
+                # This workflow inherits the user's effort setting. Both native
+                # gutters are valid; exact glyphs are covered by prompt-handoff tests.
+                comparable = surface.stdout.replace("» ", "\u203a ")
+                if surface.returncode == 0 and (expected in comparable) != absent:
                     return surface.stdout
                 client.poll()
             pytest.fail(f"Expected {'absence of ' if absent else ''}{expected!r}: {surface.stdout!r} {surface.stderr}")

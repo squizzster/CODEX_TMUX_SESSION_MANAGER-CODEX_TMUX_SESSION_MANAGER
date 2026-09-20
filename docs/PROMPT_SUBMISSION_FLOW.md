@@ -1,76 +1,129 @@
-# Prompt submission flow
+# Prompt submission: ownership and timing
 
-Rodex owns prompt admission. Codex owns its editor, optimistic history rendering, request
-construction, and attachments. The App Server owns turns, persistence, and model events.
-The preparation receipt joins the pre-Codex text transformation to the later structured
-request without applying a non-idempotent YAML rule twice.
+The gateway owns the child PTY and release of Enter. Codex owns its editor and renders
+all native draft/history text. The session interaction pipeline owns prompt rules and
+one-use preparation receipts. tmux transports input and maintains the shared pane screen;
+the App Server owns turns and persistence. **Production does not use `tmux send-keys`.**
 
 ```mermaid
-flowchart TB
-    subgraph TERM[Terminal and tmux transport]
-        U[User keyboard] --> TC[Terminal emulator<br/>and tmux client]
-        TC --> TS[tmux server<br/>routes keys to the pane]
-        TS --> GI[Raw pane TTY<br/>Rodex gateway input]
+sequenceDiagram
+    actor U as User / terminal
+    participant M as tmux client + server
+    participant G as Rodex PTY gateway
+    participant C as Native Codex TUI
+    participant P as Rodex prompt / protocol pipeline
+    participant A as Codex App Server
+
+    U->>M: Type Hello
+    M->>G: Raw pane TTY input
+    G->>C: Forward typing through child PTY
+    C->>G: ANSI output: composer Hello
+    G->>M: Native surface output
+    M-->>U: Display Hello
+    U->>M: Enter (CR)
+    M->>G: Original Enter byte
+    Note over G,C: Hold Enter, cursor is still after Hello
+    G->>M: Fenced composer / cursor / width snapshot
+    M-->>G: Verify tracked draft at end cursor
+    alt Verified model-input draft
+        G->>P: Transform using one rule snapshot
+        P-->>G: Canonical text: Hello! (no receipt yet)
+        break Invalid rule or unsafe terminal replacement
+            Note over G,C: Refuse submission, keep original draft<br/>No editor mutation, receipt or Enter
+        end
+        opt Text changed
+            G->>C: DEL for verified draft + bracketed paste Hello!
+            C->>G: Native redraw: Hello!
+            G->>M: Flush native output
+            G->>M: Confirm canonical composer and end cursor
+            M-->>G: Fenced snapshot result
+            break Confirmation unavailable or timed out
+                Note over G,C: Keep draft, no Enter, no receipt<br/>Retry confirms prepared text without reapplying rules
+            end
+        end
+        G->>P: Admit one primary-submission receipt
+        G->>C: Release original Enter through same PTY
+    else Unverified draft or native command
+        G->>C: Original Enter unchanged
     end
-
-    subgraph EARLY[Interactive pre-submit admission]
-        GI --> TD[Decode UTF-8, paste,<br/>control keys and replies]
-        TD -- Printable text or paste --> FP[Track bounded candidate<br/>and forward unchanged]
-        FP --> TUI[Native Codex TUI and editor]
-        TD -- Enter: CR 0x0D or LF 0x0A --> HOLD[Hold the original Enter<br/>cursor remains after current draft]
-        HOLD --> V{Visible composer is exactly<br/>the candidate with cursor at end?}
-        SCREEN -. Pane snapshot<br/>for example: › Hello + end cursor .-> V
-        V -- Yes --> H[Prompt admission<br/>stat and load YAML snapshot<br/>apply ordered text edits once]
-        H --> ROUTE{Admission source?}
-        ROUTE -- Verified terminal draft --> REWRITE[Queue editor replacement<br/>DEL × draft length<br/>bracketed paste canonical text<br/>original Enter last]
-        V -- No, empty, slash command,<br/>or shell escape --> PASS[Forward original Enter unchanged]
-        REWRITE --> TUI
-        PASS --> TUI
+    Note over C,A: Only model-input submissions continue below<br/>Native commands remain Codex-owned
+    C->>P: turn/start, turn/steer, queue/add or queue/update
+    alt Matching primary receipt
+        P->>P: Consume receipt, do not transform again
+    else No matching receipt
+        P->>P: Structured text-hook fallback
     end
-
-    I[Managed initial prompt argv] --> CI[Characterized Codex CLI parse]
-    CI --> H
-    ROUTE -- Managed initial prompt --> ARGV[Canonical prompt argv]
-    ARGV --> TUI
-
-    TUI -- After Enter or initial prompt --> KIND{Codex input classification}
-    KIND -- Model or queued input --> RPC[turn/start, turn/steer,<br/>queue/add, or queue/update]
-    KIND -- Native command, shell<br/>or another local dialog --> GO
-    RPC --> PX[Rodex protocol-input pipeline]
-    C[Rodex control routes<br/>_start, _steer and queued input] --> PX
-    PX --> R{Matching preparation receipt?}
-    R -- Yes --> ONCE[Consume receipt<br/>do not transform again]
-    R -- No --> FH[Structured prompt-hook fallback<br/>for unverified and control routes]
-    FH --> ONCE
-    ONCE --> AS[Codex App Server]
-    AS --> P[Turn lifecycle<br/>persistence and model]
-
-    subgraph OUTPUT[One output and display path]
-        P --> EV[App Server events]
-        EV --> PO[Rodex protocol-output pipeline]
-        PO --> TUI
-        TUI -- Child PTY ANSI output --> GO[Rodex TERMINAL_OUTPUT<br/>native projection and surface renderer]
-        GO --> TS
-        TS -- Screen updates --> SCREEN[tmux pane and attached<br/>terminal surface shown to user]
-    end
+    P->>A: Canonical structured input
+    A-->>P: Turn and model events
+    P-->>C: Protocol-output pipeline
+    C->>G: Native history / response ANSI output
+    G->>M: Surface renderer and outer TTY
+    M-->>U: Shared pane display
 ```
 
-Ordinary draft characters cross tmux and Rodex immediately, so Codex has already rendered
-the visible composer text when Enter arrives. The pane is raw: tmux transports CR or LF
-but does not echo a visible Enter character. Rodex holds that byte while it drains pending
-editor output and confirms the exact visible prefix and end cursor. At this point the
-cursor remains after the draft on the current composer line; no submitted-history row or
-new composer line exists yet.
+## What the boundary establishes
 
-For a verified draft, Rodex queues deletion, canonical bracketed-paste text, and the
-user's original Enter in that order. This is an input-order guarantee, not a promise that
-the canonical editor state will appear as a separately observable screen frame before
-Codex consumes Enter. Codex nevertheless classifies, optimistically renders and submits
-the canonical text. Its following primary request consumes the matching preparation
-receipt rather than applying a potentially non-idempotent rule twice.
+The outer raw pane TTY receives input **before Codex receives Enter**. tmux does not
+echo CR or first move the composer cursor to a new line. Ordinary typing has already
+reached Codex; therefore replacing an already-rendered draft requires editor input.
+The DEL bytes and bracketed paste go to the **child PTY**, not `send-keys`, terminal
+scrollback surgery, or a second independent display writer. Codex performs the edit.
 
-The former path began at `Codex TUI → RPC → structured prompt hook`. Codex had already
-added the raw draft to optimistic history before the proxy could rewrite the RPC, so
-display, model input and persistence could disagree. The corrected verified path moves
-the edit ahead of native Enter. The structured boundary remains the fallback for
-unverified editor state and the primary admission point for exact-control traffic.
+The ordered contract is **verify original → transform → edit → confirm canonical
+output → admit receipt → release Enter**. Queueing replacement and Enter together
+would establish byte order only; the gateway now drains child output and the outer
+display queue before confirming the tmux pane. Confirmation recognizes ordinary `›`
+and Ultra `»`, complete continuation rows, pane-width-compatible wrapping, and the
+end cursor. A changed cursor/width, copy mode, retired runtime, partial draft or
+collapsed paste cannot authorize the handoff. This is evidence from the native
+rendered composer, not a private Codex editor API or acknowledgement that every remote
+terminal client has physically painted its pixels.
+
+The bounded handoff lasts up to 300 ms, with snapshot rechecks at at most 10 ms relay
+wait intervals because tmux may consume output without another child-output event.
+Individual fenced tmux calls retain their own deadlines. This is **not idle polling**.
+Other keyboard input is not admitted during the handoff. A timeout after editing
+keeps the canonical draft unsubmitted and unreceipted; Enter retries confirmation
+without another hook application. Nonediting events retain preparation. After a
+potentially editing key, unchanged canonical text still consumes the same preparation;
+a changed draft re-enters normal admission, with protocol fallback for untracked edits.
+A text rule cannot inject terminal controls, blank out
+the whole submission, or acquire native slash/shell-command authority.
+
+## Other entry points and limits
+
+| Entry | Transformation and receipt ownership |
+|---|---|
+| Managed initial prompt argv | Characterized CLI parse → transform and admit → canonical argv; native initial text preserves surrounding whitespace. |
+| Verified unchanged editor draft | Original confirmation → transform → admit composer-normalized text → original Enter; no unnecessary edit. |
+| Verified changed editor draft | The two-confirmation PTY path above; receipt uses Codex's whitespace-trimmed submission text. |
+| Unverified native draft | Forward unchanged to Codex; transform its later structured input. This fallback **does not guarantee matching optimistic TUI history**. |
+| `_start`, `_steer`, queued/control input | Structured admission; these callers cannot consume the primary TUI's receipt. |
+| Configured Rodex commands and menus | The terminal interceptor routes these to their registered interaction owner before prompt admission; handled local Enter is not forwarded as model input. |
+| Native commands, approvals, attachments, other RPC fields | Remain native; text rules do not gain their authority. |
+
+Unknown layouts, clipped/large collapsed pastes, and untracked editor operations are
+not claimed as verified editor state. After a Rodex rewrite, Enter stays held unless
+canonical output confirms or further editing relinquishes that prepared submission.
+There is no universal
+replacement of every tmux operation with PTY bytes: tmux still owns pane lifecycle,
+capability-fenced reads, resize, attachment, status and its reserved keys.
+
+## Root cause and regression evidence
+
+Previously a structured-only rewrite occurred after Codex's optimistic history entry.
+The first pre-Enter implementation still recognized only `›` on one row, so Codex
+0.155.1 Ultra's `»` bypassed it. It also queued DEL, paste and Enter without checking
+the resulting native frame, and reserved the receipt before that confirmation.
+Those are distinct causes; replacing `send-keys` could not fix them because production
+was already using the PTY.
+
+`test_terminal_input.py` covers admission ordering, exactly-once retry, nonediting
+events, intent/control-byte refusal and route-specific whitespace normalization.
+`test_native_composer.py` and `test_input_interceptor_presentation.py` cover glyphs,
+wrapping, literal arrow content, dimensions and snapshot fences.
+`test_terminal_gateway.py` proves canonical output reaches an actual outer PTY before
+Enter or receipt admission. `test_prompt_handoff_live.py` exercises installed Codex
+0.155.1 and real tmux with isolated state: ordinary and Ultra greetings plus a wrapped
+multiline rewrite, checking tmux history, App Server user-message events and Codex
+input history. Its non-idempotent rule exposes accidental double transformation.

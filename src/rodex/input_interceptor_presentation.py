@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from wcwidth import wcswidth
-
 from .input_interceptor_config import InputInterceptorRegistration
 from .input_menu import INPUT_MENU_TARGET, InputMenuView
 from .interaction_pipeline import (
@@ -14,6 +12,7 @@ from .interaction_pipeline import (
     InteractionTarget,
     SessionInteractionPipeline,
 )
+from .native_composer import matches_composer
 from .pane_control import TmuxPaneController
 from .tmux_session_capability import TmuxRuntimeCapability
 
@@ -55,13 +54,11 @@ class InputInterceptorPresentation:
 
     def confirm_native_prefix(self, prefix: str) -> bool:
         """A candidate is not editor state: require the exact visible prefix and end cursor."""
-        snapshot = self._pane.capture_cursor_line()
+        snapshot = self._pane.capture_composer()
         if snapshot is None:
             return False
-        line, cursor_x = snapshot
-        indentation = line[: len(line) - len(line.lstrip())]
-        expected_line = f"{indentation}\u203a {prefix}"
-        return line.rstrip() == expected_line.rstrip() and cursor_x == wcswidth(expected_line)
+        rows, cursor_x, width = snapshot
+        return matches_composer(rows, cursor_x, prefix, width)
 
     def _deliver(self, request: InteractionRequest) -> InteractionResult:
         if request.operation == InteractionOperation.INPUT_RELEASE:

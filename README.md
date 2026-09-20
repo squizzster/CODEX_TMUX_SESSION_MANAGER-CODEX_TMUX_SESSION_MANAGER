@@ -143,11 +143,16 @@ These unnamed rules append in file order and cannot override a named rule.
 Every managed initial prompt, native submission, `_start`, `_steer`, and queued
 submission reaches the same prompt hook exactly once per request. Rodex prepares a
 managed initial prompt before launching Codex. At interactive Enter, Rodex transforms a
-verified native draft, updates that same Codex editor, and only then releases Enter; the
+verified native draft, updates that same Codex editor through its PTY, confirms the
+canonical tmux composer, and only then admits a receipt and releases Enter; the
 TUI therefore classifies, displays, queues, and submits the canonical text. Its primary
 protocol request consumes the matching preparation receipt instead of applying the hook
-again. A native draft that cannot be verified safely retains the structured protocol
-fallback. Control and queued routes without a terminal draft transform at that protocol
+again. Ordinary and Ultra composers are recognized, including visible wrapped text.
+A rewrite confirmation timeout keeps the draft unsubmitted; Enter retries without
+reapplying rules. A native draft that cannot be verified initially retains the structured
+protocol fallback, which cannot guarantee matching optimistic TUI history.
+See [prompt ownership and timing](docs/PROMPT_SUBMISSION_FLOW.md) for the complete flow.
+Control and queued routes without a terminal draft transform at that protocol
 boundary. Only text input is rewritten; images, routing, turn identity, settings,
 approvals, and responses remain native. UI annotations over unchanged text are rebased
 to UTF-8 byte offsets; annotations overlapping protocol-rewritten text are removed.

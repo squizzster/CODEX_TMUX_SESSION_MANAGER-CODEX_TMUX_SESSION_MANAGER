@@ -26,6 +26,7 @@ from rodex.interaction_pipeline import (
     SessionInteractionPipeline,
 )
 from rodex.presentation_policy import PresentationSnapshot, PresentationSurface
+from rodex.protocol_input_text import PromptTextEdit
 from rodex.terminal_gateway import TerminalSessionGateway
 from rodex.terminal_surface import TerminalSurfaceRenderer
 
@@ -167,6 +168,28 @@ def test_real_child_terminal_pass_through_resize_signal_exit_and_outer_restorati
                 InteractionOperation.TERMINAL_INPUT,
                 InteractionOperation.TERMINAL_OUTPUT,
             }
+        finally:
+            gateway.close()
+
+
+def test_real_pty_rewrites_verified_prompt_before_native_enter():
+    calls = []
+
+    def hook(texts):
+        calls.append(texts)
+        return tuple((PromptTextEdit(0, len(text), "Hello!"),) if text == "Hello" else () for text in texts)
+
+    pipeline = SessionInteractionPipeline(input_text_hook=hook)
+    with outer_terminal() as (master, slave):
+        gateway = start_gateway(slave, pipeline)
+        try:
+            read_until(gateway, master, b"READY")
+            os.write(master, b"Hello\r")
+            rewritten = b"\x7f" * 5 + b"\x1b[200~Hello!\x1b[201~\r"
+            output = read_until(gateway, master, rewritten)
+
+            assert output.index(rewritten) >= output.index(b"Hello") + len(b"Hello")
+            assert calls == [("Hello",)]
         finally:
             gateway.close()
 

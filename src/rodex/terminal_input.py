@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from .input_interceptor_config import InputInterceptorRegistration
 from .input_menu import INPUT_MENU_TARGET, InputInterceptionMenu, InputMenuStage
 from .interaction_pipeline import InteractionOperation, InteractionRequest, SessionInteractionPipeline
+from .protocol_input_text import UserPromptHookError
 
 PASTE_START = b"\x1b[200~"
 PASTE_END = b"\x1b[201~"
@@ -169,7 +170,7 @@ class TerminalInputDecoder:
 
 
 class TerminalInputInterceptor:
-    """One configured input owner; successful local handling never becomes rejection."""
+    """Own pre-submit admission plus configured local takeover and release."""
 
     def __init__(
         self,
@@ -218,12 +219,44 @@ class TerminalInputInterceptor:
             if self._submit(self._candidate, self._candidate):
                 self._discard_paired_lf = event.key == b"\r"
                 return
+            if self._prepare_prompt_submission(event):
+                self._discard_paired_lf = event.key == b"\r"
+                return
             self._candidate = ""
         elif event.kind == "control" and event.key in {b"\x7f", b"\x08"}:
             self._candidate = self._candidate[:-1]
         else:
             self._candidate = ""
         self._forward(event.raw)
+
+    def _prepare_prompt_submission(self, event: TerminalInputEvent) -> bool:
+        """Rewrite one verified native draft, then release the user's exact Enter."""
+        draft = self._candidate
+        # Codex owns slash commands and the interactive shell escape. They do not
+        # become model-input RPCs, so prompt configuration must not alter or block them.
+        if not draft or draft.startswith(("/", "!")) or not self._confirm_native_prefix(draft):
+            return False
+        try:
+            transformed = self._pipeline.prepare_primary_prompt(draft)
+        except UserPromptHookError as error:
+            detail = str(error)
+            delivered = error.notice.notify(
+                lambda: (
+                    self._pipeline.send_message(
+                        target="main",
+                        text=f"Rodex prompt was not submitted: {detail}",
+                        source="user-prompt-hook",
+                        start_model_turn=False,
+                    ).accepted
+                )
+            )
+            return delivered
+        if transformed != draft:
+            self._forward(b"\x7f" * len(draft))
+            self._forward(PASTE_START + transformed.encode("utf-8") + PASTE_END)
+        self._candidate = ""
+        self._forward(event.raw)
+        return True
 
     def _accept_local(self, event: TerminalInputEvent) -> None:
         assert self._menu is not None

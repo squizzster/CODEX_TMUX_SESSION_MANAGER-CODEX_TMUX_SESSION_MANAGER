@@ -54,6 +54,15 @@ class PromptTextEdit:
 InputTextHook = Callable[[tuple[str, ...]], tuple[tuple[PromptTextEdit, ...], ...]]
 
 
+def apply_user_prompt_text(text: str, hook: InputTextHook) -> str:
+    """Apply one submission snapshot to authoritative terminal-composer text."""
+    edits_by_item = hook((text,))
+    if len(edits_by_item) != 1:
+        raise UserPromptHookError("user prompt hook returned the wrong number of text items")
+    transformed, _elements = _apply_text_edits(text, None, edits_by_item[0])
+    return transformed
+
+
 def is_user_input_submission(frame: object) -> bool:
     """Recognize submitted input, including image-only messages, but not tool output."""
     if not isinstance(frame, dict):
@@ -116,31 +125,13 @@ def apply_user_prompt_hook(payload: str | bytes | None, hook: InputTextHook) -> 
         raise UserPromptHookError("user prompt hook returned the wrong number of text items")
     changed = False
     for item, edits in zip(items, edits_by_item, strict=True):
-        original_text = text = item["text"]
+        original_text = item["text"]
         elements = item.get("text_elements")
-        for edit in edits:
-            if (
-                not isinstance(edit, PromptTextEdit)
-                or type(edit.start) is not int
-                or type(edit.end) is not int
-                or not 0 <= edit.start <= edit.end <= len(text)
-                or not isinstance(edit.replacement, str)
-            ):
-                raise UserPromptHookError("user prompt hook returned an invalid text edit")
-            if text[edit.start : edit.end] == edit.replacement:
-                continue
-            if isinstance(elements, list) and elements:
-                try:
-                    elements = _rebase_elements(
-                        elements,
-                        len(text[: edit.start].encode("utf-8")),
-                        len(text[: edit.end].encode("utf-8")),
-                        len(edit.replacement.encode("utf-8")),
-                        len(text.encode("utf-8")),
-                    )
-                except UnicodeError as error:
-                    raise UserPromptHookError("user prompt hook requires valid UTF-8 text") from error
-            text = text[: edit.start] + edit.replacement + text[edit.end :]
+        text, elements = _apply_text_edits(
+            original_text,
+            elements if isinstance(elements, list) else None,
+            edits,
+        )
         if text != original_text:
             item["text"] = text
             if isinstance(elements, list):
@@ -154,3 +145,34 @@ def apply_user_prompt_hook(payload: str | bytes | None, hook: InputTextHook) -> 
         return encoded if isinstance(payload, bytes) else serialized
     except UnicodeError as error:
         raise UserPromptHookError("user prompt hook requires valid UTF-8 text") from error
+
+
+def _apply_text_edits(
+    text: str,
+    elements: list | None,
+    edits: tuple[PromptTextEdit, ...],
+) -> tuple[str, list | None]:
+    for edit in edits:
+        if (
+            not isinstance(edit, PromptTextEdit)
+            or type(edit.start) is not int
+            or type(edit.end) is not int
+            or not 0 <= edit.start <= edit.end <= len(text)
+            or not isinstance(edit.replacement, str)
+        ):
+            raise UserPromptHookError("user prompt hook returned an invalid text edit")
+        if text[edit.start : edit.end] == edit.replacement:
+            continue
+        if elements:
+            try:
+                elements = _rebase_elements(
+                    elements,
+                    len(text[: edit.start].encode("utf-8")),
+                    len(text[: edit.end].encode("utf-8")),
+                    len(edit.replacement.encode("utf-8")),
+                    len(text.encode("utf-8")),
+                )
+            except UnicodeError as error:
+                raise UserPromptHookError("user prompt hook requires valid UTF-8 text") from error
+        text = text[: edit.start] + edit.replacement + text[edit.end :]
+    return text, elements

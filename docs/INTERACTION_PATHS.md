@@ -52,12 +52,16 @@ cached event. The snapshot budget reserves transport-address overhead.
 
 ## Processing and outcomes
 
-Submitted user input first enters the runtime's typed `input_text_hook`. Its only
-authority is ordered text edits; `protocol_input_text` alone applies those edits and
-rebases/removes affected UTF-8 UI spans, preserving every other RPC field. Initial,
-native, exact-control, and queued submissions converge here. The hook re-stats
-the installation's `conf/hooks/user_prompt_substitutions.yaml` and the optional user
-file under the caller's Rodex state root on submission. Both use the supplied
+Submitted user text first enters the runtime's typed prompt admission. A characterized
+managed initial-prompt argument and a verified native editor draft are transformed
+before Codex receives them. Native Enter is held until Rodex updates the same editor;
+the following primary protocol request consumes one matching preparation receipt and
+does not run the hook again. Unverified native editor state and non-terminal routes use
+the structured protocol-input fallback. `protocol_input_text` owns ordered edits and
+rebases/removes affected UTF-8 UI spans while preserving every other RPC field. Initial,
+native, exact-control, and queued submissions converge on this exact-once contract. The
+hook re-stats the installation's `conf/hooks/user_prompt_substitutions.yaml` and the
+optional user file under the caller's Rodex state root on submission. Both use the supplied
 metadata-only SHA-512 function and independent caches; only changed files reload
 before processing. User rules replace same-name global rules in place; new rules
 append. One runtime lock owns the combined snapshot. Invalid versions are cached as
@@ -65,7 +69,8 @@ errors, never replaced by stale rules. A descriptive `main MESSAGE(false)` notic
 delivered once per failed version of each file; failures to deliver
 remain eligible for the next attempt. A correlated RPC error refuses the submission
 through that connection's existing protocol-output pipeline without closing the
-connection. No timer or keystroke triggers configuration I/O.
+connection. Only initial-prompt admission, verified Enter, or a structured submission
+triggers configuration I/O; ordinary typing and timers do not.
 
 Hooks can inspect, transform or reject content, not change source, destination, operation,
 model-turn permission or dispatch/turn/thread identity. Protocol text changes preserve
@@ -122,7 +127,9 @@ work. The record buffer contains metadata, not prompt bodies or another durable 
 | Local release | INPUT_RELEASE → clear terminal DISPLAY_STATE; cancellation leaves native prefix; unsupported editing restores held suffix before key |
 | Presentation selection | Configured `light`/`dark` action → SELECT_PRESENTATION_POLICY; never starts a turn or changes App Server delivery/logging |
 | Local placeholder reply | Configured actionless command/option text → MESSAGE(false) → main display adapter |
-| Initial prompts and native TUI protocol operations | Native TUI → protocol-input pipeline → App Server |
+| Managed initial prompt | Characterized CLI prompt argument → prompt admission → canonical argv → native TUI → matching protocol receipt → App Server |
+| Verified native prompt | Keyboard candidate → exact native-composer check → prompt admission → canonical editor update → original Enter → native TUI → matching protocol receipt → App Server |
+| Unverified native prompt and other native TUI protocol operations | Native TUI → protocol-input fallback → App Server |
 | Native terminal output | Readable child PTY → TERMINAL_OUTPUT → continuously updated native projection → selected native/semantic surface + inline compositor → bounded display queue → writable outer PTY |
 | App Server primary output | Protocol-output pipeline → TUI unchanged, then typed presentation/context/observer/event projections; display filtering never rejects execution |
 | Main `turn/completed` failure with `codexErrorInfo: serverOverloaded` | Typed recovery controller → rolling 30–960 second delay → main MESSAGE(true) `Continue...`; terminal-input outcome cancels pending dispatch |
@@ -179,8 +186,8 @@ work. The record buffer contains metadata, not prompt bodies or another durable 
 | Keyboard framing and native PTY writes | `TerminalInputDecoder` / `TerminalInputInterceptor` → `TerminalSessionGateway`; tmux retains its owned lifecycle keys |
 | Terminal readiness and lifecycle | `TerminalSessionGateway` blocks on outer/child PTYs, a wake-only pipe and the exact child `pidfd`; explicit registration/stop control events, diagnostic output, presentation revisions, tmux resize hooks and incomplete-input deadlines wake the relay without an idle supervisor timer |
 | Native composer presentation at takeover/submission | Exact primary-pane fenced snapshot; prefix and end cursor must agree, no background screen polling |
-| Native editor state | Codex; Rodex observes a bounded candidate and verifies the native composer at handoff |
-| Main terminal surface | `TerminalSurfaceRenderer` → gateway output queue; one native projection plus configured semantic views, no editor mutation or second writer |
+| Native editor state | Codex; Rodex observes a bounded candidate, verifies the native composer at Enter, applies canonical text there, then releases the original Enter |
+| Main terminal surface | `TerminalSurfaceRenderer` → gateway output queue; one native projection plus configured semantic views; only verified prompt admission updates the native editor before Enter |
 | Presentation classification | `SessionPresentationPipeline`; bounded App Server method/kind/thread/turn/item/type/phase/status fields and item-text accumulation |
 
 ### Escape timing
@@ -204,7 +211,8 @@ effect-bearing functions require review. It also enumerates subprocess entrypoin
 restricts pane/model mutation owners and checks read-only bootstrap probes. This is
 not a proof against arbitrary Python reflection, nor a runtime monitoring system.
 
-Behavioral tests cover hook ordering, intent preservation, missing/stale targets,
+Behavioral tests cover pre-Enter prompt transformation, exact-once preparation receipts,
+hook ordering, intent preservation, missing/stale targets,
 explicit model input, indeterminate receipts, both proxy directions/control clients,
 bounded observer probes, real tmux operations, real observer startup/reopen/rendering,
 and runtime exit. The installed-command gate isolates tmux, SQLite and Codex history;

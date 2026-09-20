@@ -92,6 +92,9 @@ def test_real_codex_greeting_matches_terminal_and_persisted_input(tmp_path, requ
                     pytest.fail(f"Missing {text!r} in tmux screen: {screen}")
 
                 await_screen("OpenAI Codex")
+                # The startup banner can precede the interactive editor. Admit
+                # test typing only after Codex actually renders its composer.
+                await_screen(f"{glyph} ")
                 # Human typing, then Enter: actual client PTY, never tmux key injection.
                 for character in "Hello":
                     os.write(client.terminal, character.encode())
@@ -153,3 +156,5 @@ def test_real_codex_greeting_matches_terminal_and_persisted_input(tmp_path, requ
             for socket in runtime_root.glob(RODEX_TMUX_SOCKET_PATTERN):
                 subprocess.run([tmux, "-N", "-S", str(socket), "kill-server"], capture_output=True, timeout=3)
             _stop_fixture_daemon(runtime_root)
+            for filename in ("auth.json", "config.toml"):
+                (isolated_home / filename).unlink(missing_ok=True)

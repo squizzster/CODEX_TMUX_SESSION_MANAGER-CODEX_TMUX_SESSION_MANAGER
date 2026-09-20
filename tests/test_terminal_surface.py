@@ -26,8 +26,9 @@ class DisplayHarness:
 
     def native(self, data):
         rendered = self.renderer.native_output(data)
-        self._output.feed(rendered)
-        return rendered
+        output = rendered.stream + rendered.frame
+        self._output.feed(output)
+        return output
 
     def display(self, state):
         accepted, rendered = self.renderer.display(state)
@@ -113,8 +114,9 @@ def test_opaque_control_string_is_forwarded_without_local_bytes_inside_it():
         assert renderer.display(STATE)[0]
         first = renderer.native_output(frame[:split])
         second = renderer.native_output(frame[split:])
-        assert first.endswith(frame[:split])
-        assert second.startswith(frame[split:])
+        # CSI/escape prefixes may be held until classified, but the opaque
+        # control string must remain contiguous through arbitrary read splits.
+        assert frame in first.stream + first.frame + second.stream + second.frame
         assert "ignored" not in "\n".join(renderer.native.screen.display)
 
 
@@ -198,7 +200,7 @@ def test_wide_and_control_text_is_clipped_without_escape_effects_or_scrolling():
 def test_unavailable_composer_rejects_initial_takeover_without_output():
     renderer = TerminalSurfaceRenderer()
     assert renderer.display(STATE) == (False, b"")
-    assert renderer.native_output(b"unchanged") == b"unchanged"
+    assert renderer.native_output(b"unchanged").stream == b"unchanged"
 
 
 def test_empty_native_prefix_supports_atomic_pasted_live_matches():
@@ -294,6 +296,16 @@ def test_semantic_renderer_uses_configured_heading_and_typed_item_text_without_c
     visible = "\n".join(harness.visible.display)
     assert "CONFIGURED COMMAND OUTPUT" in visible
     assert "Visible typed output" in visible
+
+
+def test_semantic_frame_with_no_transcript_space_does_not_scroll_the_composer():
+    harness = DisplayHarness(rows=3)
+    harness.native("\x1b[2;1H\u203a prompt\x1b[2;3H".encode())
+    item = PresentationItemText("root", "turn", "message", "agentMessage", "commentary", None, "hidden\n" * 20, True)
+    rendered = harness.present(PresentationSnapshot(1, "light", PresentationSurface.SEMANTIC, "RODEX LIGHT", (), (item,)))
+    assert b"hidden" not in rendered
+    assert harness.visible.display[1].rstrip() == "\u203a prompt"
+    assert not harness.visible.history.top
 
 
 def test_dark_restores_the_complete_native_screen_after_semantic_filtering():

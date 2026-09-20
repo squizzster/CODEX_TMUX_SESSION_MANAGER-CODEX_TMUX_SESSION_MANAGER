@@ -358,6 +358,7 @@ def _animation_launch_command(
     """Own process arguments, pane-bound format expansion, and watchdog scheduling."""
     arguments = [
         tmux_format_literal(python_executable),
+        "-I",
         "-m",
         "rodex.status_animation_admission",
         "--tmux-binary",

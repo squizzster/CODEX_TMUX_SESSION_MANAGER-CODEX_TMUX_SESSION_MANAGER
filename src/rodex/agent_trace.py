@@ -24,7 +24,7 @@ from rodex_registry import (
 
 from .agent_trace_privacy import contains_codex_encrypted_value
 
-AGENT_TRACE_SCHEMA_VERSION = "rodex-agent-trace-v3"
+AGENT_TRACE_SCHEMA_VERSION = "rodex-agent-trace-v4"
 type AgentTraceSource = tuple[CodexThreadId, bytes] | tuple[CodexThreadId, bytes, int | Sequence[int]]
 
 

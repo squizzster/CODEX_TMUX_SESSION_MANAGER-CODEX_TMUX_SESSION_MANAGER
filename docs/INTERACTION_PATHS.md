@@ -1,7 +1,7 @@
 # Interaction contract and production-path inventory
 
-Rodex 0.14.0a2, ALPHA. SQL generation 20, isolated tmux protocol v4, runtime peer
-contract v5, daemon protocol v2 and observer schema v3 form the current boundary.
+Rodex 0.15.0a1, ALPHA. SQL generation 21, isolated tmux protocol v5, runtime peer
+contract v6, daemon protocol v3 and observer schema v4 form the current boundary.
 Old contracts are rejected.
 
 ## Authoritative contract
@@ -63,7 +63,7 @@ does not run the hook again. Unverified native editor state and non-terminal rou
 the structured protocol-input fallback. `protocol_input_text` owns ordered edits and
 rebases/removes affected UTF-8 UI spans while preserving every other RPC field. Initial,
 native, exact-control, and queued submissions converge on this exact-once contract. The
-hook re-stats the installation's `conf/hooks/user_prompt_substitutions.yaml` and the
+hook re-stats the installation's frozen `conf/hooks/user_prompt_substitutions.yaml` and the
 optional user file under the caller's Rodex state root on submission. Both use the supplied
 metadata-only SHA-512 function and independent caches; only changed files reload
 before processing. User rules replace same-name global rules in place; new rules

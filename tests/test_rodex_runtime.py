@@ -265,7 +265,7 @@ def _register_real_tmux_session(
         "set-option",
         "-s",
         "@rodex_shared_tmux_protocol",
-        "rodex-isolated-tmux-v4",
+        "rodex-isolated-tmux-v5",
     )
     tmux(
         "set-option",
@@ -677,7 +677,7 @@ def test_start_directly_hosts_codex_in_tmux_and_returns_its_session_id(
     assert new_session[:3] == [
         "/usr/bin/tmux",
         "-S",
-        str(tmp_path / "tmux-v4-0c01ee2ead7240e1.sock"),
+        str(tmp_path / "tmux-v5-0c01ee2ead7240e1.sock"),
     ]
     assert new_session[3:7] == ["start-server", ";", "if-shell", "-F"]
     claim = shlex.split(new_session[8])
@@ -1009,7 +1009,7 @@ def test_exact_resume_fails_when_codex_reports_that_session_id_is_not_saved(
     monkeypatch.setattr(
         launcher,
         "_resolve_bootstrap_tmux_capability",
-        lambda _runtime: _registered_capability(tmp_path / "tmux-v4-0c01ee2ead7240e1.sock").runtime_capability,
+        lambda _runtime: _registered_capability(tmp_path / "tmux-v5-0c01ee2ead7240e1.sock").runtime_capability,
     )
 
     with pytest.raises(RodexCodexSessionNotFoundError) as raised:
@@ -1921,6 +1921,7 @@ activated = AnalyticsRuntimeConfig(
     codex_session_id=uuid.UUID("01a00654-f2bc-7a30-834a-a5f886a65f82"),
 )
 runtime._registered_analytics_runtime_config = lambda *_args: activated
+runtime.TmuxPaneController.terminal_size = lambda self: (80, 24)
 runtime._resolve_runtime_service_tmux_capability = lambda *_args: TmuxRuntimeCapability(
     tmux_socket,
     "0123456789abcdef0123456789abcdef",
@@ -4694,6 +4695,7 @@ def test_runtime_service_skips_updater_and_connects_tui_through_protocol_proxy(
         assert set(tui_options[0]) == {
             "env",
             "cwd",
+            "read_terminal_size",
             "input_fd",
             "output_fd",
             "process_owner",

@@ -66,10 +66,12 @@ class TerminalSessionGateway:
         on_process_started: Callable[[subprocess.Popen[bytes]], None] = lambda _process: None,
         on_process_stopped: Callable[[subprocess.Popen[bytes]], None] = lambda _process: None,
         close_outer_fds: bool = False,
+        read_terminal_size: Callable[[], tuple[int, int]] | None = None,
     ) -> None:
         self._pipeline = pipeline
         self._input_fd = input_fd
         self._output_fd = output_fd
+        self._read_terminal_size = read_terminal_size
         self._master = -1
         self._slave = -1
         self._wake_read = -1
@@ -186,12 +188,18 @@ class TerminalSessionGateway:
             return True
 
     def _apply_resize(self) -> None:
-        """Copy the actual pane dimensions; TIOCSWINSZ signals the child foreground group."""
+        """Apply authoritative geometry; tmux may defer its outer kernel PTY resize."""
         if self._master >= 0:
-            dimensions = fcntl.ioctl(self._input_fd, termios.TIOCGWINSZ, bytes(8))
-            if not self._resize_pending and dimensions == self._last_dimensions:
-                return
+            # Claim this wake before the read. A callback during the tmux read
+            # must remain pending for the next pass, not be cleared afterward.
             self._resize_pending = False
+            if self._read_terminal_size is None:
+                dimensions = fcntl.ioctl(self._input_fd, termios.TIOCGWINSZ, bytes(8))
+            else:
+                columns, rows = self._read_terminal_size()
+                dimensions = struct.pack("HHHH", rows, columns, 0, 0)
+            if dimensions == self._last_dimensions:
+                return
             self._last_dimensions = dimensions
             rows, columns, _, _ = struct.unpack("HHHH", dimensions)
             self._queue_rendered_surface(self._surface_renderer.resize(max(columns, 1), max(rows, 1)))
@@ -257,7 +265,17 @@ class TerminalSessionGateway:
             for event in self._decoder.feed(request.payload):
                 self._interceptor.accept(event)
         else:
-            self._queue_rendered_surface(self._surface_renderer.native_output(request.payload))
+            rendered = self._surface_renderer.native_output(request.payload)
+            # Native replies are transport, never keyboard activity or prompt input.
+            self._native_queue.extend(rendered.replies)
+            if rendered.stream:
+                # A replaceable frame may precede new stream bytes, but cannot
+                # replace them. Finish it before appending this next exact token.
+                if self._pending_surface_frame is not None:
+                    self._display_queue.extend(self._pending_surface_frame)
+                    self._pending_surface_frame = None
+                self._display_queue.extend(rendered.stream)
+            self._queue_rendered_surface(rendered.frame, complete_frame=True)
         return InteractionResult(DeliveryStatus.DELIVERED)
 
     def _dispatch(self, operation: InteractionOperation, data: bytes) -> None:
@@ -299,7 +317,11 @@ class TerminalSessionGateway:
         """Block for one real relay event and report exact native-child exit readiness."""
         reads: list[int] = []
         writes: list[int] = []
-        if not self._native_eof and len(self._display_queue) < QUEUE_LIMIT_BYTES:
+        if (
+            not self._native_eof
+            and len(self._display_queue) < QUEUE_LIMIT_BYTES
+            and len(self._native_queue) < QUEUE_LIMIT_BYTES
+        ):
             reads.append(self._master)
         if allow_input and len(self._native_queue) < QUEUE_LIMIT_BYTES:
             reads.append(self._input_fd)

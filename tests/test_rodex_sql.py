@@ -40,7 +40,7 @@ def test_shared_state_root_preserves_caller_environment_and_database_default(tmp
     assert default_rodex_state_root(environment) == expected
     monkeypatch.setenv("HOME", str(caller_home))
     monkeypatch.setenv("XDG_STATE_HOME", configured or "")
-    assert default_rodex_database_path() == expected / "rodex-v20.sqlite3"
+    assert default_rodex_database_path() == expected / "rodex-v21.sqlite3"
 
 
 def test_index_re_try_policy_has_exactly_ten_finite_attempts() -> None:

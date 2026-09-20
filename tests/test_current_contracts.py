@@ -15,6 +15,7 @@ from rodex.daemon_client import RODEX_DAEMON_PROTOCOL, RODEX_DAEMON_SOCKET_NAME
 from rodex.implementation_identity import RODEX_IMPLEMENTATION_SHA256
 from rodex.machine_commands import MACHINE_ENVELOPE_SCHEMA_VERSION
 from rodex.observer_contract import OBSERVER_SCHEMA
+from rodex.process_receipts import PROCESS_RECEIPT_PROTOCOL
 from rodex.protocol_proxy import _context_percent, _rollout_context_percent, _started_thread_id
 from rodex.runtime_peer import RuntimePeerIdentity
 from rodex.tmux_session_capability import RODEX_SHARED_TMUX_PROTOCOL, runtime_tmux_socket_name
@@ -25,22 +26,23 @@ from rodex_sql import RODEX_DATABASE_FILENAME, RODEX_DATABASE_SCHEMA_GENERATION
 
 def test_current_release_declares_matching_package_and_process_versions() -> None:
     project = tomllib.loads((Path(__file__).parents[1] / "pyproject.toml").read_text())
-    assert project["project"]["version"] == RODEX_VERSION == "0.14.0a2"
-    assert RODEX_DATABASE_SCHEMA_GENERATION == 20
-    assert RODEX_DATABASE_FILENAME == "rodex-v20.sqlite3"
-    assert RODEX_SHARED_TMUX_PROTOCOL == "rodex-isolated-tmux-v4"
-    assert RODEX_DAEMON_PROTOCOL == "rodex-daemon-v2"
+    assert project["project"]["version"] == RODEX_VERSION == "0.15.0a1"
+    assert RODEX_DATABASE_SCHEMA_GENERATION == 21
+    assert RODEX_DATABASE_FILENAME == "rodex-v21.sqlite3"
+    assert RODEX_SHARED_TMUX_PROTOCOL == "rodex-isolated-tmux-v5"
+    assert RODEX_DAEMON_PROTOCOL == "rodex-daemon-v3"
+    assert PROCESS_RECEIPT_PROTOCOL == "rodex-process-receipt-v3"
     assert f"{RODEX_IMPLEMENTATION_SHA256}.sock" == RODEX_DAEMON_SOCKET_NAME
     assert len(RODEX_IMPLEMENTATION_SHA256) == 64
     assert set(RODEX_IMPLEMENTATION_SHA256) <= set("0123456789abcdef")
-    assert runtime_tmux_socket_name(RodexRuntimeId(1)) == "tmux-v4-0000000000000001.sock"
+    assert runtime_tmux_socket_name(RodexRuntimeId(1)) == "tmux-v5-0000000000000001.sock"
     peer_headers = RuntimePeerIdentity(RodexRuntimeId(1), "a" * 32).headers()
-    assert peer_headers["X-Rodex-Peer-Contract"] == "rodex-runtime-peer-v5"
-    assert peer_headers["X-Rodex-Implementation-Id"].startswith("0.14.0a2+sha256.")
-    assert MACHINE_ENVELOPE_SCHEMA_VERSION == 4
-    assert AGENT_TRACE_SCHEMA_VERSION == "rodex-agent-trace-v3"
-    assert STATISTICS_PROJECTION_SCHEMA_VERSION == "rodex-statistics-v8"
-    assert OBSERVER_SCHEMA == "rodex-agent-observer-v3"
+    assert peer_headers["X-Rodex-Peer-Contract"] == "rodex-runtime-peer-v6"
+    assert peer_headers["X-Rodex-Implementation-Id"].startswith("0.15.0a1+sha256.")
+    assert MACHINE_ENVELOPE_SCHEMA_VERSION == 5
+    assert AGENT_TRACE_SCHEMA_VERSION == "rodex-agent-trace-v4"
+    assert STATISTICS_PROJECTION_SCHEMA_VERSION == "rodex-statistics-v9"
+    assert OBSERVER_SCHEMA == "rodex-agent-observer-v4"
 
 
 @pytest.mark.parametrize("turn_id", [None, "", " ", 1])

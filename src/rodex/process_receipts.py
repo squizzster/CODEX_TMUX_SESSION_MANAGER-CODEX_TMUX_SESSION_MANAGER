@@ -16,7 +16,7 @@ from rodex_registry.identity import RodexRuntimeId, parse_rodex_runtime_id
 
 from .implementation_identity import RODEX_IMPLEMENTATION_SHA256
 
-PROCESS_RECEIPT_PROTOCOL: Final = "rodex-process-receipt-v2"
+PROCESS_RECEIPT_PROTOCOL: Final = "rodex-process-receipt-v3"
 PROCESS_KINDS: Final = frozenset({"app-server", "native-tui"})
 _OPERATION_ID = re.compile(r"[0-9a-f]{32}")
 PROCESS_RECEIPT_PATTERN: Final = f"{RODEX_IMPLEMENTATION_SHA256}.process-*.json"

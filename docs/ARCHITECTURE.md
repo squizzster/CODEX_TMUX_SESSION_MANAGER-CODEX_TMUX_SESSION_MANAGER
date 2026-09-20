@@ -8,7 +8,7 @@ agreement, retain clear ownership, and keep this file within 150 lines and 10,24
 ## Runtime shape
 
 ```text
-user → Rodex CLI → <implementation-sha256>.sock → one implementation-scoped Python daemon
+user → fixed installation → CLI → <implementation-sha256>.sock → one implementation-scoped Python daemon
          │                              ├── runtime A → tmux-A → TUI ↔ proxy ↔ app-server
          ├──► SQLite registry           ├── runtime B → tmux-B → TUI ↔ proxy ↔ app-server
          ├──► _cat / _tail              └── one analytics coordinator → trace/stats → SQLite
@@ -26,6 +26,7 @@ identity requires a transient App Server check.
 
 | Component | Responsibility |
 |---|---|
+| `rodex.installation` / `implementation_identity` | Atomically pin code, dependencies and defaults; retain one Python for every helper. |
 | `rodex.application_pipeline` / command contracts | Classify and dispatch one typed invocation. |
 | `rodex.managed_session_lifecycle` / `human_messages` / `cool_name` | Session lifecycle, names, collisions and human messages. |
 | `rodex.exact_turn_mutation` | Lock, re-resolve and validate exact start/steer/interrupt/mouse/alias operations. |
@@ -35,7 +36,7 @@ identity requires a transient App Server check.
 | `rodex.daemon` / `daemon_client` / `terminal_bridge` | Own one exact-implementation daemon socket, runtime reservations, pane-TTY handoff and runtime threads. |
 | `rodex.runtime` / `process_contracts` / `process_guard` / `process_receipts` | Stage runtimes, supervise exact native children and reconcile daemon crashes. |
 | `rodex.runtime_endpoint` / `runtime_peer` | Exclusive socket lifetime and connected runtime/process identity. |
-| `rodex.terminal_gateway` / `terminal_exec` / `terminal_surface` / `presentation_policy` | PTY, native projection, typed display policies and restoration. |
+| `rodex.terminal_gateway` / `native_terminal_*` / `terminal_surface` / `presentation_policy` | PTY, native projection, typed display policies and restoration. |
 | `rodex.tmux_session_capability` | Server/runtime/session authority and exact read/mutation fences. |
 | `rodex.tmux_shared_ctrl_c` | Native originating-client admission, guarded private exit and shared detach. |
 | `rodex.tmux_sharing_coordinator` / status modules | Convert hook wakeups into fenced roster and display transitions. |
@@ -49,7 +50,7 @@ identity requires a transient App Server check.
 
 ## Runtime isolation boundary
 
-One runtime owns one `tmux-v4-<runtime-id>.sock` server. Native pane movement cannot
+One runtime owns one `tmux-v5-<runtime-id>.sock` server. Native pane movement cannot
 cross server boundaries. Creation claims only an empty server with every ownership
 marker absent. The attempt carries its original server nonce through startup and
 cleanup; a refused claim cannot rediscover an incumbent's destruction authority.
@@ -57,14 +58,12 @@ One canonical database owns names and registered incarnations across these serve
 
 `TmuxRuntimeCapability` binds socket, server, immutable `$session_id`, primary `%pane_id`,
 and runtime; `TmuxSessionCapability` adds registered Rodex, registry, SQL-row, and Codex
-identities. The launcher mints it from a checked roster and async actors carry it. Every
-action is exact-target fenced; primary actions also require the pane ID. Names and hook
-context grant no authority. Predicates run only in direct `if-shell -F`; an owned read
+identities. The launcher mints it from a checked roster. Actors retain it and fence every action;
+primary actions require the pane ID. Names and hook context grant no authority. Predicates run only in direct `if-shell -F`; an owned read
 proves capability there, then runs `display-message` for payload alone. Mixing predicate
 and payload contexts corrupts literal tmux identifiers such as `%4`.
 
-Indexed client hooks only wake the sharing coordinator, which verifies one roster and
-submits changes under full capability. Root `C-c` kills a guarded private runtime or
+Client/layout hooks wake the coordinator; it verifies the roster and fences changes. Root `C-c` kills a guarded private runtime or
 detaches its originating shared client; `C-d` uses tmux's current-client detach. Creation
 sets `exit-unattached off` and `destroy-unattached off`. Other keys enter the terminal
 pipeline; Rodex uses no tmux Enter binding, `send-keys` or pane piping. The gateway
@@ -74,24 +73,23 @@ See [prompt ownership and timing](PROMPT_SUBMISSION_FLOW.md).
 
 Discovery compares the session snapshot with a guarded primary-pane read. Every tmux process
 crosses `tmux_executor`; calls have deadlines and cancellation reaps the child.
-The staged pane starts a one-shot bridge. The daemon admits its same-uid peer PID, exact
-primary pane, TTY descriptor, server nonce and runtime reservation before starting the
-runtime thread, which exclusively owns the transferred descriptor until completion.
+The admitted bridge transfers its TTY to its daemon runtime, then forwards foreground
+resize signals until its lifetime socket closes. Only the runtime reads/writes the TTY.
 Absolute caller cwd and environment cross the reservation; tmux-owned values come
 only from the admitted bridge process. `TmuxStatusPipeline`
 arbitrates status; animation admission owns capability/generation/lease/token/recovery fences.
 
-The daemon acceptor blocks on its Unix listener and explicit shutdown event; it has no accept timer.
-Runtime supervisors block through their gateways until terminal readiness, child exit, an exact deadline, or explicit
-registration, diagnostic, resize, presentation, or stop wake; owning runtimes revalidate tmux resize hints.
+The daemon blocks on its listener and shutdown event. Runtimes block on terminal readiness,
+child exit, deadlines or explicit wakes. Resize reads guarded tmux geometry because
+its kernel PTY dimensions can lag the hook.
 
 Interactive clients use `rodex_<display_name>` and report verified attach/detach/exit.
 One daemon-runtime PTY adapts all TUI I/O; attachers never create input owners. The gateway
 blocks on terminal readiness, child `pidfd`, input-frame deadlines and state notifications,
 without fixed idle polling. Interception config owns live/Enter expressions, menus and
 typed actions; unmatched input stays native. Prefix/cursor confirmation occurs only at
-handoff. DISPLAY_STATE draws menus; light selects root commentary structurally while
-preserving the hidden native TUI, and dark redraws that projection in place.
+handoff. One native screen owns resize/reflow and replies before light/dark presentation.
+DISPLAY_STATE draws menus; light selects commentary and dark restores native state.
 
 ## Identity and lifecycle
 
@@ -101,16 +99,13 @@ trace-event, and tool-call identities never substitute for one another. See
 
 ALPHA hosts require complete current identity and protocol fields, without adapters.
 
-New sessions allocate IDs, create detached tmux, reserve the runtime in the matching implementation daemon,
-hand off the exact pane TTY, observe one Codex root ID, and advertise a `pending` tuple.
-The immutable session-ID transition lock spans
-SQL publication, registration, namespaced tmux rename, and UI setup; competing selectors
-cannot use a partial row. Update notice and attach follow.
+New sessions allocate IDs, reserve detached tmux in the matching daemon, hand off its
+exact TTY and advertise the observed Codex root as `pending`. The session-ID lock spans
+SQL publication, registration, rename and UI setup. Update notice and attach follow.
 
-Existing selectors resolve once; live endpoints must match every advertised identity.
-Otherwise Rodex verifies a resumed Codex ID before replacement; a never-saved ID starts
-empty and relinks atomically. Opens lock through resolution/replacement, then unlock before
-attach. Pending runtimes repair interrupted confirmation; alias failures compensate rename.
+Selectors resolve once and verify live identity. Replacement verifies a resumed Codex
+ID or atomically relinks a never-saved ID. Opens unlock before attach;
+pending confirmation is repairable and alias failures compensate rename.
 
 ## Observer flow and connection lifecycle
 
@@ -120,10 +115,9 @@ App Server event → stateless projection → producer reducer → newest snapsh
 tmux pane ← presentation view ← consumer reducer ← length-framed private socket
 ```
 
-The producer owns identity, events, tombstones, epochs and revisions. A newest-only
+The producer owns events, tombstones, epochs and revisions. A newest-only
 dispatcher sends bounded snapshots; the consumer applies each revision once and resets
-at epoch/overflow boundaries. The [interaction inventory](INTERACTION_PATHS.md) records
-the chat, status, lifecycle and storage owners.
+at epoch/overflow boundaries. See the [interaction inventory](INTERACTION_PATHS.md).
 
 On primary connection loss, `PrimaryConnectionLifecycleCoordinator` calls every reset
 participant despite failures; only the reducer advances observer epoch. SQL transactions

@@ -25,7 +25,7 @@ _CONTRACT_HEADER: Final = "X-Rodex-Peer-Contract"
 _IMPLEMENTATION_HEADER: Final = "X-Rodex-Implementation-Id"
 _RUNTIME_HEADER: Final = "X-Rodex-Runtime-Id"
 _SERVER_HEADER: Final = "X-Rodex-Tmux-Server-Id"
-_CONTRACT: Final = "rodex-runtime-peer-v5"
+_CONTRACT: Final = "rodex-runtime-peer-v6"
 _SERVER_ID = re.compile(r"[0-9a-f]{32}")
 
 

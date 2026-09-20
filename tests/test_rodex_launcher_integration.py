@@ -127,7 +127,7 @@ def test_fresh_detached_launcher_uses_one_daemon_and_no_analytics_process() -> N
     integration_root = Path(tempfile.mkdtemp(prefix="rodex-launch-", dir="/tmp"))
     integration_root.chmod(0o700)
     state_home = integration_root / "state"
-    database = state_home / "rodex" / "rodex-v20.sqlite3"
+    database = state_home / "rodex" / "rodex-v21.sqlite3"
     runtime_root = integration_root / "runtime"
     tmux_socket = runtime_root / "uncreated.sock"
     codex_home = integration_root / "codex-home"

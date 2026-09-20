@@ -316,7 +316,7 @@ def test_observed_subagent_activity_projection_is_exact_and_content_free() -> No
     projected = project_subagent_activity_event(event)
 
     assert projected == {
-        "schema": "rodex-agent-observer-v3",
+        "schema": "rodex-agent-observer-v4",
         "kind": "app_server_subagent_activity",
         "method": "item/started",
         "thread_id": str(ROOT_THREAD_ID),
@@ -353,7 +353,7 @@ def test_current_codex_collaboration_invocation_projection_is_exact() -> None:
     )
 
     assert projected == {
-        "schema": "rodex-agent-observer-v3",
+        "schema": "rodex-agent-observer-v4",
         "kind": "app_server_collaboration_invocation",
         "method": "item/started",
         "thread_id": str(ROOT_THREAD_ID),
@@ -403,7 +403,7 @@ def test_agent_message_projection_accepts_only_completed_agent_authored_text() -
     projected = project_agent_message_event(_agent_message_event())
 
     assert projected == {
-        "schema": "rodex-agent-observer-v3",
+        "schema": "rodex-agent-observer-v4",
         "kind": "app_server_agent_message",
         "thread_id": str(CHILD_THREAD_ID),
         "turn_id": "turn-child",
@@ -427,7 +427,7 @@ def test_user_message_projection_preserves_exact_text_blocks_and_provenance() ->
     )
 
     assert project_user_message_event(event) == {
-        "schema": "rodex-agent-observer-v3",
+        "schema": "rodex-agent-observer-v4",
         "kind": "app_server_user_message",
         "thread_id": str(ROOT_THREAD_ID),
         "turn_id": "turn-1",
@@ -518,8 +518,9 @@ def test_exact_spawn_creates_a_disabled_top_third_without_changing_focus(
         "rodex.environment_exec",
     ]
     observer_start = split.index("--", scrubber_start) + 1
-    assert split[observer_start : observer_start + 3] == [
+    assert split[observer_start : observer_start + 4] == [
         "/usr/bin/python3",
+        "-I",
         "-m",
         "rodex.agent_observer",
     ]
@@ -699,7 +700,7 @@ def test_same_turn_parent_request_is_sent_exactly_without_entering_process_args(
         event for event in _observer_snapshot_events(snapshot) if event["kind"] == "root_request_context"
     )
     assert root_request_context == {
-        "schema": "rodex-agent-observer-v3",
+        "schema": "rodex-agent-observer-v4",
         "kind": "root_request_context",
         "thread_id": str(ROOT_THREAD_ID),
         "turn_id": "turn-1",
@@ -1016,7 +1017,7 @@ def test_observer_view_renders_exact_parent_request_after_tracked_spawn() -> Non
     initial["root_request_context_follows"] = True
     view = AgentObserverView(root_thread_id=ROOT_THREAD_ID, initial_event=initial)
     request_event = {
-        "schema": "rodex-agent-observer-v3",
+        "schema": "rodex-agent-observer-v4",
         "kind": "root_request_context",
         "thread_id": str(ROOT_THREAD_ID),
         "turn_id": "turn-1",
@@ -1054,7 +1055,7 @@ def test_parent_request_can_arrive_after_durable_turn_binding_without_being_lost
     view.accept_trace_snapshot(
         RodexAgentTraceSnapshot(
             1,
-            "rodex-agent-trace-v3",
+            "rodex-agent-trace-v4",
             "2026-08-27T00:00:01Z",
             "complete",
             1,
@@ -1074,7 +1075,7 @@ def test_parent_request_can_arrive_after_durable_turn_binding_without_being_lost
 
     lines = view.accept_root_request_context_event(
         {
-            "schema": "rodex-agent-observer-v3",
+            "schema": "rodex-agent-observer-v4",
             "kind": "root_request_context",
             "thread_id": str(ROOT_THREAD_ID),
             "turn_id": "turn-1",
@@ -1104,7 +1105,7 @@ def test_observer_view_rejects_cross_root_activity_and_parent_request() -> None:
     assert (
         view.accept_root_request_context_event(
             {
-                "schema": "rodex-agent-observer-v3",
+                "schema": "rodex-agent-observer-v4",
                 "kind": "root_request_context",
                 "thread_id": str(OTHER_THREAD_ID),
                 "turn_id": "turn-1",
@@ -1132,7 +1133,7 @@ def test_observer_view_renders_only_exact_target_trace_metadata() -> None:
     terminal_event_id = uuid.UUID("10000000-0000-4000-8000-000000000009")
     snapshot = RodexAgentTraceSnapshot(
         trace_publication_sequence=8,
-        trace_schema_version="rodex-agent-trace-v3",
+        trace_schema_version="rodex-agent-trace-v4",
         calculated_at_utc="2026-08-27T00:00:02Z",
         coverage_state="complete",
         durable_event_count=8,
@@ -1320,7 +1321,7 @@ def test_send_message_continues_the_current_turn_without_queuing_another() -> No
     view.accept_trace_snapshot(
         RodexAgentTraceSnapshot(
             1,
-            "rodex-agent-trace-v3",
+            "rodex-agent-trace-v4",
             "2026-08-27T23:54:00Z",
             "complete",
             1,
@@ -1371,7 +1372,7 @@ def test_send_message_continues_the_current_turn_without_queuing_another() -> No
     lines = view.accept_trace_snapshot(
         RodexAgentTraceSnapshot(
             2,
-            "rodex-agent-trace-v3",
+            "rodex-agent-trace-v4",
             "2026-08-27T23:54:16Z",
             "complete",
             3,
@@ -1443,7 +1444,7 @@ def test_observer_view_starts_a_new_same_agent_turn_for_followup_request() -> No
     view.accept_trace_snapshot(
         RodexAgentTraceSnapshot(
             1,
-            "rodex-agent-trace-v3",
+            "rodex-agent-trace-v4",
             "2026-08-27T00:00:00Z",
             "complete",
             1,
@@ -1481,7 +1482,7 @@ def test_observer_view_starts_a_new_same_agent_turn_for_followup_request() -> No
     ]
     assert view.accept_root_request_context_event(
         {
-            "schema": "rodex-agent-observer-v3",
+            "schema": "rodex-agent-observer-v4",
             "kind": "root_request_context",
             "thread_id": str(ROOT_THREAD_ID),
             "turn_id": "turn-2",
@@ -1500,7 +1501,7 @@ def test_observer_view_starts_a_new_same_agent_turn_for_followup_request() -> No
     view.accept_trace_snapshot(
         RodexAgentTraceSnapshot(
             2,
-            "rodex-agent-trace-v3",
+            "rodex-agent-trace-v4",
             "2026-08-27T00:00:01Z",
             "complete",
             1,
@@ -1553,7 +1554,7 @@ def test_unseen_first_turn_stays_bound_to_first_request_after_followup_arrives()
     view = AgentObserverView(root_thread_id=ROOT_THREAD_ID, initial_event=initial)
     view.accept_root_request_context_event(
         {
-            "schema": "rodex-agent-observer-v3",
+            "schema": "rodex-agent-observer-v4",
             "kind": "root_request_context",
             "thread_id": str(ROOT_THREAD_ID),
             "turn_id": "turn-1",
@@ -1565,7 +1566,7 @@ def test_unseen_first_turn_stays_bound_to_first_request_after_followup_arrives()
     view.accept_app_server_event(followup)
     view.accept_root_request_context_event(
         {
-            "schema": "rodex-agent-observer-v3",
+            "schema": "rodex-agent-observer-v4",
             "kind": "root_request_context",
             "thread_id": str(ROOT_THREAD_ID),
             "turn_id": "turn-2",
@@ -1588,7 +1589,7 @@ def test_unseen_first_turn_stays_bound_to_first_request_after_followup_arrives()
     view.accept_trace_snapshot(
         RodexAgentTraceSnapshot(
             2,
-            "rodex-agent-trace-v3",
+            "rodex-agent-trace-v4",
             "2026-08-27T00:00:04Z",
             "complete",
             3,
@@ -1644,7 +1645,7 @@ def test_delayed_old_terminal_and_new_followup_keep_exact_turn_evidence_isolated
     view = AgentObserverView(root_thread_id=ROOT_THREAD_ID, initial_event=initial)
     view.accept_root_request_context_event(
         {
-            "schema": "rodex-agent-observer-v3",
+            "schema": "rodex-agent-observer-v4",
             "kind": "root_request_context",
             "thread_id": str(ROOT_THREAD_ID),
             "turn_id": "turn-1",
@@ -1656,7 +1657,7 @@ def test_delayed_old_terminal_and_new_followup_keep_exact_turn_evidence_isolated
     view.accept_trace_snapshot(
         RodexAgentTraceSnapshot(
             1,
-            "rodex-agent-trace-v3",
+            "rodex-agent-trace-v4",
             "2026-08-27T00:00:01Z",
             "complete",
             1,
@@ -1694,7 +1695,7 @@ def test_delayed_old_terminal_and_new_followup_keep_exact_turn_evidence_isolated
     view.accept_app_server_event(followup)
     view.accept_root_request_context_event(
         {
-            "schema": "rodex-agent-observer-v3",
+            "schema": "rodex-agent-observer-v4",
             "kind": "root_request_context",
             "thread_id": str(ROOT_THREAD_ID),
             "turn_id": "turn-2",
@@ -1716,7 +1717,7 @@ def test_delayed_old_terminal_and_new_followup_keep_exact_turn_evidence_isolated
     view.accept_trace_snapshot(
         RodexAgentTraceSnapshot(
             2,
-            "rodex-agent-trace-v3",
+            "rodex-agent-trace-v4",
             "2026-08-27T00:00:04Z",
             "complete",
             4,
@@ -1770,7 +1771,7 @@ def test_unavailable_followup_never_recaps_the_previous_turn_request() -> None:
     view = AgentObserverView(root_thread_id=ROOT_THREAD_ID, initial_event=initial)
     view.accept_root_request_context_event(
         {
-            "schema": "rodex-agent-observer-v3",
+            "schema": "rodex-agent-observer-v4",
             "kind": "root_request_context",
             "thread_id": str(ROOT_THREAD_ID),
             "turn_id": "turn-1",
@@ -1782,7 +1783,7 @@ def test_unavailable_followup_never_recaps_the_previous_turn_request() -> None:
     view.accept_trace_snapshot(
         RodexAgentTraceSnapshot(
             1,
-            "rodex-agent-trace-v3",
+            "rodex-agent-trace-v4",
             "2026-08-27T00:00:01Z",
             "complete",
             2,
@@ -1821,7 +1822,7 @@ def test_unavailable_followup_never_recaps_the_previous_turn_request() -> None:
     view.accept_trace_snapshot(
         RodexAgentTraceSnapshot(
             2,
-            "rodex-agent-trace-v3",
+            "rodex-agent-trace-v4",
             "2026-08-27T00:00:03Z",
             "complete",
             3,
@@ -1865,7 +1866,7 @@ def test_observer_view_renders_exact_clean_lineage_work_and_terminal_recap() -> 
     view = AgentObserverView(root_thread_id=ROOT_THREAD_ID, initial_event=initial)
     view.accept_root_request_context_event(
         {
-            "schema": "rodex-agent-observer-v3",
+            "schema": "rodex-agent-observer-v4",
             "kind": "root_request_context",
             "thread_id": str(ROOT_THREAD_ID),
             "turn_id": "turn-1",
@@ -1877,7 +1878,7 @@ def test_observer_view_renders_exact_clean_lineage_work_and_terminal_recap() -> 
     view.accept_trace_snapshot(
         RodexAgentTraceSnapshot(
             2,
-            "rodex-agent-trace-v3",
+            "rodex-agent-trace-v4",
             "2026-08-27T00:00:03Z",
             "complete",
             3,
@@ -1944,7 +1945,7 @@ def test_observer_view_renders_inherited_agent_without_calling_it_same_agent() -
     view.accept_trace_snapshot(
         RodexAgentTraceSnapshot(
             2,
-            "rodex-agent-trace-v3",
+            "rodex-agent-trace-v4",
             "2026-08-27T00:00:01Z",
             "complete",
             1,
@@ -2098,7 +2099,7 @@ def test_interleaved_agents_never_rewrite_another_agents_work_line() -> None:
     view.accept_trace_snapshot(
         RodexAgentTraceSnapshot(
             2,
-            "rodex-agent-trace-v3",
+            "rodex-agent-trace-v4",
             "2026-08-27T00:00:02Z",
             "complete",
             3,
@@ -2185,7 +2186,7 @@ def test_transport_overflow_recovers_65_unknown_same_root_targets_from_trace() -
     )
     snapshot = RodexAgentTraceSnapshot(
         trace_publication_sequence=1,
-        trace_schema_version="rodex-agent-trace-v3",
+        trace_schema_version="rodex-agent-trace-v4",
         calculated_at_utc="2026-08-29T00:00:00Z",
         coverage_state="complete",
         durable_event_count=len(durable_events),
@@ -2216,7 +2217,7 @@ def test_app_item_completion_cannot_suppress_the_final_durable_trace_read() -> N
     view.accept_trace_snapshot(
         RodexAgentTraceSnapshot(
             trace_publication_sequence=8,
-            trace_schema_version="rodex-agent-trace-v3",
+            trace_schema_version="rodex-agent-trace-v4",
             calculated_at_utc="2026-08-27T00:00:02Z",
             coverage_state="complete",
             durable_event_count=1,
@@ -2257,7 +2258,7 @@ def test_trace_publication_notification_uses_a_nonblocking_framed_stream(
         receiver.close()
 
     assert payload == {
-        "schema": "rodex-agent-observer-v3",
+        "schema": "rodex-agent-observer-v4",
         "kind": "trace_published",
         "trace_publication_sequence": 17,
         "caught_up": True,

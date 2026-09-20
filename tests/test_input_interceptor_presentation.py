@@ -255,3 +255,29 @@ def test_multiline_composer_keeps_literal_arrow_content_and_captured_width():
 
     pane = TmuxPaneController("tmux", capability(), "%9", primary=True, runner=runner)
     assert pane.capture_composer() == (("\u203a Hello", "  \u203a world"), 9, 120)
+
+
+def test_terminal_dimensions_use_the_exact_primary_capability():
+    commands = []
+
+    def runner(command, **_options):
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0, "80|15\n", "")
+
+    pane = TmuxPaneController("tmux", capability(), "%9", primary=True, runner=runner)
+    assert pane.terminal_size() == (80, 15)
+    assert len(commands) == 1
+    assert commands[0][3:7] == ["if-shell", "-t", "%9", "-F"]
+    for expected in (capability().tmux_server_id, str(capability().runtime_id), "$1", "%9"):
+        assert expected in commands[0][-3]
+    assert "#{pane_width}|#{pane_height}" in commands[0][-2]
+
+
+@pytest.mark.parametrize("output,returncode", [("", 0), ("0|15", 0), ("80|-1", 0), ("80|15", 1), ("80|65536", 0)])
+def test_unproven_terminal_dimensions_cannot_be_used(output, returncode):
+    def runner(command, **_options):
+        return subprocess.CompletedProcess(command, returncode, output, "")
+
+    pane = TmuxPaneController("tmux", capability(), "%9", primary=True, runner=runner)
+    with pytest.raises(OSError, match="owned tmux pane dimensions"):
+        pane.terminal_size()

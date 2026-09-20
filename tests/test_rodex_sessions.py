@@ -593,7 +593,7 @@ def test_default_database_path_uses_xdg_state_home(tmp_path: Path, monkeypatch: 
     state_home = tmp_path / "state"
     monkeypatch.setenv("XDG_STATE_HOME", str(state_home))
 
-    assert default_rodex_database_path() == state_home / "rodex" / "rodex-v20.sqlite3"
+    assert default_rodex_database_path() == state_home / "rodex" / "rodex-v21.sqlite3"
 
 
 def test_default_database_path_uses_home_state_directory_without_xdg_override(
@@ -603,7 +603,7 @@ def test_default_database_path_uses_home_state_directory_without_xdg_override(
     home = tmp_path / "home"
     monkeypatch.setattr(Path, "home", lambda: home)
 
-    assert default_rodex_database_path() == (home / ".local" / "state" / "rodex" / "rodex-v20.sqlite3")
+    assert default_rodex_database_path() == (home / ".local" / "state" / "rodex" / "rodex-v21.sqlite3")
 
 
 @pytest.mark.evolutionary_regression
@@ -615,7 +615,7 @@ def test_current_generation_bootstrap_does_not_read_an_earlier_database(
     registry_directory = state_home / "rodex"
     registry_directory.mkdir(mode=0o700, parents=True)
     registry_directory.chmod(0o700)
-    previous_database = registry_directory / "rodex-v18.sqlite3"
+    previous_database = registry_directory / "rodex-v20.sqlite3"
     previous_contents = b"earlier-generation-sentinel"
     previous_database.write_bytes(previous_contents)
     previous_database.chmod(0o600)
@@ -623,7 +623,7 @@ def test_current_generation_bootstrap_does_not_read_an_earlier_database(
 
     current_database = initialise_rodex_database()
 
-    assert current_database == registry_directory / "rodex-v20.sqlite3"
+    assert current_database == registry_directory / "rodex-v21.sqlite3"
     assert current_database.is_file()
     assert previous_database.read_bytes() == previous_contents
 
@@ -660,18 +660,18 @@ def test_wrong_explicit_schema_generation_is_rejected_without_repair(
             "schema_generation INTEGER NOT NULL CHECK (schema_generation >= 1), "
             "CHECK (id = 1))"
         )
-        connection.execute("INSERT INTO rodex_schema_generations (schema_generation) VALUES (10)")
+        connection.execute("INSERT INTO rodex_schema_generations (schema_generation) VALUES (20)")
 
     with pytest.raises(RodexSessionError) as raised:
         initialise_rodex_database(database)
 
     assert str(raised.value) == (
-        "Rodex database schema generation does not match: found marker rows [(1, 10)]; "
-        "required [(1, 20)] (current default catalog rodex-v20.sqlite3); "
+        "Rodex database schema generation does not match: found marker rows [(1, 20)]; "
+        "required [(1, 21)] (current default catalog rodex-v21.sqlite3); "
         "automatic migration is not supported"
     )
 
-    assert fetch_all(database, "SELECT schema_generation FROM rodex_schema_generations") == [(10,)]
+    assert fetch_all(database, "SELECT schema_generation FROM rodex_schema_generations") == [(20,)]
 
 
 def test_default_database_path_ignores_removed_database_override(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -680,4 +680,4 @@ def test_default_database_path_ignores_removed_database_override(tmp_path: Path,
     monkeypatch.setenv("RODEX_DATABASE_PATH", str(configured))
     monkeypatch.setenv("XDG_STATE_HOME", str(state_home))
 
-    assert default_rodex_database_path() == state_home / "rodex" / "rodex-v20.sqlite3"
+    assert default_rodex_database_path() == state_home / "rodex" / "rodex-v21.sqlite3"

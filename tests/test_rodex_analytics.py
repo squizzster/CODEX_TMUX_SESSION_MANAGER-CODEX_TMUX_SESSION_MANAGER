@@ -2242,7 +2242,7 @@ def test_real_worker_publishes_exact_turn_projection_into_rodex_sql(
 
     exact = read_rodex_session_turn_statistics(1, TURN_TEST_ID, config.rodex_database_path)
     assert exact.statistics is not None
-    assert exact.statistics.statistics_projection_schema_version == "rodex-statistics-v8"
+    assert exact.statistics.statistics_projection_schema_version == "rodex-statistics-v9"
     assert exact.worker is not None
     assert exact.worker.worker_state == "up_to_date"
     assert exact.turn is not None

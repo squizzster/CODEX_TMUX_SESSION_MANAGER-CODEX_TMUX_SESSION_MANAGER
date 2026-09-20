@@ -7,83 +7,27 @@ composer and controls. Rodex-owned frames never enter Codex's editor or projecti
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import pyte
 from pyte import graphics, modes
 from wcwidth import wcswidth, wcwidth
 
 from .input_menu import ARGUMENT_MENU_FOOTER, InputMenuStage, InputMenuView
 from .native_composer import composer_gutter
+from .native_terminal_projection import NativeTerminalProjection
 from .presentation_policy import PresentationSnapshot, PresentationSurface
 
 _DEFAULT_PRESENTATION = PresentationSnapshot(0, "dark", PresentationSurface.NATIVE, "", (), ())
 
 
-class NativeTerminalProjection:
-    """Frame output independently of read sizes; opaque strings never become screen text."""
+@dataclass(frozen=True, slots=True)
+class TerminalRenderOutput:
+    """Ordered terminal stream, replaceable display frame, and exact child replies."""
 
-    def __init__(self, columns: int, rows: int) -> None:
-        self.screen = pyte.Screen(columns, rows)
-        self._stream = pyte.ByteStream(self.screen)
-        self._sequence = bytearray()
-        self._frame = "ground"
-        self._string_escape = False
-        self.synchronized_update = False
-
-    @property
-    def paintable(self) -> bool:
-        return (
-            self._frame == "ground"
-            and not self._stream.utf8_decoder.getstate()[0]
-            and not self.synchronized_update
-            and modes.DECOM not in self.screen.mode
-            and modes.IRM not in self.screen.mode
-            and self.screen.cursor.x < self.screen.columns
-        )
-
-    def feed(self, data: bytes) -> None:
-        plain = bytearray()
-        for byte in data:
-            if self._frame == "ground":
-                if byte == 27:
-                    self._stream.feed(bytes(plain))
-                    plain.clear()
-                    self._sequence = bytearray([byte])
-                    self._frame = "escape"
-                else:
-                    plain.append(byte)
-                continue
-            if self._frame == "string":
-                if byte == 7 or (self._string_escape and byte == 92):
-                    self._frame = "ground"
-                self._string_escape = byte == 27
-                continue
-            self._sequence.append(byte)
-            if self._frame == "escape":
-                if byte in b"]P_^X":
-                    self._frame = "string"
-                    self._string_escape = False
-                    self._sequence.clear()
-                    continue
-                if byte == ord("["):
-                    self._frame = "csi"
-                    continue
-                if 0x20 <= byte <= 0x2F:
-                    self._frame = "intermediate"
-                    continue
-            elif self._frame == "csi" and not 0x40 <= byte <= 0x7E:
-                if len(self._sequence) > 4096:
-                    self._sequence.clear()
-                continue
-            elif self._frame == "intermediate" and 0x20 <= byte <= 0x2F:
-                continue
-            sequence = bytes(self._sequence)
-            if sequence in {b"\x1b[?2026h", b"\x1b[?2026l"}:
-                self.synchronized_update = sequence.endswith(b"h")
-            else:
-                self._stream.feed(sequence)
-            self._sequence.clear()
-            self._frame = "ground"
-        self._stream.feed(bytes(plain))
+    stream: bytes = b""
+    frame: bytes = b""
+    replies: bytes = b""
 
 
 class TerminalSurfaceRenderer:
@@ -96,18 +40,21 @@ class TerminalSurfaceRenderer:
         self._suspended = False
         self._presentation = _DEFAULT_PRESENTATION
         self._last_semantic_frame: bytes | None = None
+        self._pending_presentation: PresentationSnapshot | None = None
 
     @property
     def presentation_surface(self) -> PresentationSurface:
         return self._presentation.surface
 
-    def native_output(self, data: bytes) -> bytes:
-        if self._presentation.surface == PresentationSurface.SEMANTIC:
-            self.native.feed(data)
-            return self._semantic_redraw()
-        restored = self._restore()
-        self.native.feed(data)
-        return restored + data + self._paint()
+    def native_output(self, data: bytes) -> TerminalRenderOutput:
+        semantic = self._presentation.surface == PresentationSurface.SEMANTIC
+        restored = b"" if semantic else self._restore()
+        output = self.native.feed(data)
+        stream = output.controls if semantic else restored + output.native + self._paint()
+        frame = self._semantic_redraw() if semantic else b""
+        if self._pending_presentation is not None and self.native.at_boundary:
+            frame = self.present(self._pending_presentation) or frame
+        return TerminalRenderOutput(stream, frame, output.replies)
 
     def display(self, state: InputMenuView | None) -> tuple[bool, bytes]:
         if state is not None and self._state is None and self._anchor(state) is None:
@@ -122,6 +69,10 @@ class TerminalSurfaceRenderer:
 
     def present(self, snapshot: PresentationSnapshot) -> bytes:
         """Select one semantic/native surface without changing the hidden native state."""
+        if not self.native.at_boundary:
+            self._pending_presentation = snapshot
+            return b""
+        self._pending_presentation = None
         if snapshot == self._presentation:
             return b""
         previous_surface = self._presentation.surface
@@ -187,10 +138,14 @@ class TerminalSurfaceRenderer:
         heading = _clip_cells(self._presentation.heading, screen.columns - 1)
         output.extend(_position(0, 0) + b"\x1b[1;36m" + heading.encode() + b"\x1b[0m")
         transcript_rows = max(0, composer_row - 2)
-        transcript = _semantic_text_lines(
-            tuple(item.text for item in self._presentation.items),
-            screen.columns - 1,
-        )[-transcript_rows:]
+        transcript = (
+            _semantic_text_lines(
+                tuple(item.text for item in self._presentation.items),
+                screen.columns - 1,
+            )[-transcript_rows:]
+            if transcript_rows
+            else []
+        )
         for row, line in enumerate(transcript, start=2):
             output.extend(_position(row, 0) + b"\x1b[0m\x1b[2K" + line.encode())
         for row in range(composer_row, screen.lines):

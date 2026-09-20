@@ -502,7 +502,7 @@ def test_round3_observer_controller_prunes_completed_activity_lifetimes(
 
 def test_round3_observer_view_releases_a_flushed_terminal_turn() -> None:
     initial = {
-        "schema": "rodex-agent-observer-v3",
+        "schema": "rodex-agent-observer-v4",
         "kind": "app_server_subagent_activity",
         "method": "item/started",
         "thread_id": str(ROOT_THREAD_ID),
@@ -518,7 +518,7 @@ def test_round3_observer_view_releases_a_flushed_terminal_turn() -> None:
     view.accept_trace_snapshot(
         RodexAgentTraceSnapshot(
             trace_publication_sequence=1,
-            trace_schema_version="rodex-agent-trace-v3",
+            trace_schema_version="rodex-agent-trace-v4",
             calculated_at_utc="2026-08-29T00:00:01Z",
             coverage_state="complete",
             durable_event_count=2,

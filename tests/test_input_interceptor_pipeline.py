@@ -37,6 +37,7 @@ def make_pipeline(registrations=INPUT_INTERCEPTORS, prefix="/r"):
     gateway = TerminalSessionGateway.__new__(TerminalSessionGateway)
     gateway._wake_lock = RLock()
     gateway._wake_write = -1
+    gateway._native_queue = native_input
     gateway._display_queue = bytearray()
     gateway._pending_surface_frame = None
     gateway._surface_renderer = TerminalSurfaceRenderer(100, 16)

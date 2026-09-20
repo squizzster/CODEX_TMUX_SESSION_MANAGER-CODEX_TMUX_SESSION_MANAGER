@@ -89,7 +89,7 @@ listener; control endpoints are Unix sockets below a private runtime root.
   lines for `token_count` records only, retaining no rollout bodies. Idle checks inspect
   metadata before bounded fingerprints, back off to a two-second ceiling, and wake early
   on existing exact-thread protocol activity.
-- Each runtime owns a separate `tmux-v4-<runtime-id>.sock` server. Creation requires
+- Each runtime owns a separate `tmux-v5-<runtime-id>.sock` server. Creation requires
   all ownership fields absent and an empty complete session inventory. Its retained
   creation nonce fences cleanup after failed or indeterminate admission.
 - Primary discovery reads the actual pane through its ownership guard. Whole-runtime
@@ -166,6 +166,11 @@ listener; control endpoints are Unix sockets below a private runtime root.
   resolved and separately checked as a root- or current-user-owned, non-writable regular
   file. The shim never syncs or rewrites the environment. A system command must use an
   immutable root-owned installation.
+- The CLI copies trusted code, dependencies and shipped defaults into a private retained
+  installation before starting runtime helpers. Publication is locked, verified and atomic;
+  published directories are never overwritten. Helpers use its Python with `-I`.
+  External editable dependency paths are rejected. This prevents accidental update drift;
+  it does not defend against deliberate edits by the owning OS user.
 - tmux global environment state is not trusted as caller state. New-session startup
   gates a disposable pane by its runtime capability, transports byte-escaped environment
   values only over tmux stdin, installs global-name tombstones, and starts the pane bridge

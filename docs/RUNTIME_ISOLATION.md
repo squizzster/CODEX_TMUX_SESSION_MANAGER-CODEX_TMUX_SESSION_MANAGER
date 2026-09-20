@@ -7,23 +7,37 @@ socket path, client count, pane ID, or Codex thread is insufficient authority al
 
 | Boundary | Current generation |
 | --- | --- |
-| Rodex package and subprocess | `0.14.0a2` |
-| SQLite registry | `20` (`rodex-v20.sqlite3`) |
-| tmux ownership | `rodex-isolated-tmux-v4` |
-| WebSocket peer identity | `rodex-runtime-peer-v5` |
-| Shared daemon | `rodex-daemon-v2` |
-| Observer frames | `rodex-agent-observer-v3` |
-| Machine envelopes | `4` |
-| Agent trace | `rodex-agent-trace-v3` |
-| Statistics projection | `rodex-statistics-v8` |
+| Rodex package and subprocess | `0.15.0a1` |
+| SQLite registry | `21` (`rodex-v21.sqlite3`) |
+| tmux ownership | `rodex-isolated-tmux-v5` |
+| WebSocket peer identity | `rodex-runtime-peer-v6` |
+| Shared daemon | `rodex-daemon-v3` |
+| Process receipts | `rodex-process-receipt-v3` |
+| Observer frames | `rodex-agent-observer-v4` |
+| Machine envelopes | `5` |
+| Agent trace | `rodex-agent-trace-v4` |
+| Statistics projection | `rodex-statistics-v9` |
 
 Rodex adopts no earlier runtime, schema, or wire generation. Codex separately owns its
 transcripts.
 
+## Fixed installation boundary
+
+The CLI publishes executable source, installed dependencies and shipped defaults into
+one private fingerprint directory before composing runtime services. A lock plus atomic
+publication prevents partial copies; a copy whose identity changes is rejected. Every
+helper inherits that directory's interpreter and uses `-I`, so a later checkout or venv
+update cannot redirect a hook to a different daemon. The default store is outside the
+bootstrap environment; see [installation retention](../INSTALL.md).
+
+User prompt overrides remain external and reload on submission. Shipped defaults are
+fixed per installation; changing them affects new launches. Catalogs remain scoped to
+schema generation, with live admission additionally fenced by exact implementation.
+
 ## Ownership pipeline
 
 1. The launcher allocates a runtime ID and server nonce, then claims only a completely
-   unmarked, empty tmux server at `tmux-v4-<runtime-id>.sock`. A separate server for each
+   unmarked, empty tmux server at `tmux-v5-<runtime-id>.sock`. A separate server for each
    runtime prevents native pane movement across runtime boundaries.
 2. The implementation SHA-256 names the daemon socket, start lock, log, and crash
    receipts. Concurrent clients for that exact implementation converge on one daemon;
@@ -31,10 +45,11 @@ transcripts.
    or reconciling its child receipts. Every request and response still carries the exact
    loaded fingerprint as an endpoint-integrity check. Each daemon owns one exact
    reservation per runtime and operation ID and rejects conflicts before startup.
-3. The staged primary pane receives its runtime marker and runs a one-shot bridge. The
+3. The staged primary pane receives its runtime marker and runs a terminal bridge. The
    daemon verifies same-uid peer credentials, the bridge PID, pane TTY descriptor, server
    nonce, pane target and reservation before accepting the descriptor. Caller environment
-   cannot supply the tmux-owned identity fields.
+   cannot supply the tmux-owned identity fields. The bridge retains foreground resize
+   signals until daemon closure without consuming native input.
 4. Durable adoption compares the expected prior runtime ID in one SQLite transaction.
    An exact complete-tuple retry is idempotent; wall-clock order never selects a winner.
    One reentrant session-transition lock serializes participating reads, resume, rename,
@@ -43,7 +58,7 @@ transcripts.
    pane. Only exact pending-to-registered completion may occur concurrently. Every
    endpoint must use that runtime's canonical name.
 6. WebSocket admission and its response both prove the runtime ID, server nonce, and
-   exact loaded first-party implementation on the connection in use. Unix peer
+   exact loaded implementation on the connection in use. Unix peer
    credentials and pinned process identities restrict native App Server and TUI admission
    to the daemon-owned exact child processes.
 7. App Server, proxy, event, observer, and keepalive lifetimes retain exclusive locks,
@@ -51,6 +66,14 @@ transcripts.
    and stale cleanup cannot remove a replacement endpoint.
 8. Destruction requires the exact primary, the sole session on its server, and the
    runtime marker on every affected pane. An extra session or unowned pane rejects it.
+
+## Terminal geometry
+
+`window-layout-changed` covers layout commands and automatic observer removal.
+The retained foreground bridge also forwards kernel `SIGWINCH`, including pane swaps
+that emit no layout hook. Both wake the same gateway. It reads logical dimensions
+through the primary-pane capability because tmux can defer updating kernel PTY size
+until after its hook. The shared native screen and child PTY resize together.
 
 ## Liveness classification
 
@@ -109,6 +132,7 @@ completed registrations cannot enter that path.
 
 | Contract | Executable evidence |
 | --- | --- |
+| Retained helpers across code/dependency/default updates; old-daemon rejection | `tests/test_installation.py` |
 | Server and topology ownership, discovery, cleanup, liveness | `tests/test_runtime_isolation.py` |
 | Connected runtime, server, and process identity | Runtime-peer and protocol-peer tests |
 | Expected-incarnation publication and coherent reads | `tests/test_runtime_registration_adoption.py` |

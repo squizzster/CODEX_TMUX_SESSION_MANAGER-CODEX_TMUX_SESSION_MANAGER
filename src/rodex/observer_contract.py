@@ -5,7 +5,7 @@ from __future__ import annotations
 import struct
 from typing import Final
 
-OBSERVER_SCHEMA: Final = "rodex-agent-observer-v3"
+OBSERVER_SCHEMA: Final = "rodex-agent-observer-v4"
 OBSERVER_CONTROL_SOCKET_PREFIX: Final = "agent-observer-"
 OBSERVER_FRAME_LENGTH: Final = struct.Struct("!Q")
 OBSERVER_MAX_FRAME_BYTES: Final = 256 * 1024

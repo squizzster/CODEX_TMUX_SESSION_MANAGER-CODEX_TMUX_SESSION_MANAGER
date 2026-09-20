@@ -138,7 +138,7 @@ def test_daemon_process_name_rejects_invalid_or_truncated_versions(version: str)
 
 
 def test_current_daemon_process_name_includes_current_release() -> None:
-    assert RODEX_DAEMON_PROCESS_NAME == "rodexd_v0_14a2"
+    assert RODEX_DAEMON_PROCESS_NAME == "rodexd_v0_15a1"
 
 
 def test_server_claims_single_socket_before_constructing_multi_runtime_manager(
@@ -345,6 +345,9 @@ def test_one_manager_owns_two_runtime_socket_sets_and_one_analytics_pipeline(
     assert set(services_started) == {str(config.runtime_id) for config in configs}
     assert len(analytics.activated) == 2
     assert len(analytics.events) == 2
+    # Initial geometry is reconciled after callback registration, before any
+    # external wake, closing the initial-size-read/subscription gap.
+    assert sorted(resize_wakes) == sorted(str(config.runtime_id) for config in configs)
     for config in configs:
         manager.wake_runtime(str(config.runtime_id), "registration")
         manager.wake_runtime(str(config.runtime_id), "terminal_resize")
@@ -619,9 +622,9 @@ def test_current_client_rejects_same_protocol_daemon_with_different_loaded_code(
         diagnostic = str(raised.value)
         assert f"incompatible at {socket_path}" in diagnostic
         assert "running daemon implementation: 'different-loaded-code'" in diagnostic
-        assert "current client: Rodex 0.14.0a2 (0.14.0a2+sha256." in diagnostic
-        assert "daemon protocol: rodex-daemon-v2" in diagnostic
-        assert "SQL catalog: not checked; this client expects generation 20 (rodex-v20.sqlite3)" in diagnostic
+        assert "current client: Rodex 0.15.0a1 (0.15.0a1+sha256." in diagnostic
+        assert "daemon protocol: rodex-daemon-v3" in diagnostic
+        assert "SQL catalog: not checked; this client expects generation 21 (rodex-v21.sqlite3)" in diagnostic
         assert "does not migrate earlier runtimes or catalogs" in diagnostic
         assert spawns == []
     finally:
@@ -660,8 +663,8 @@ def test_current_client_reports_both_sides_of_a_daemon_protocol_mismatch(short_r
         diagnostic = str(raised.value)
         assert f"protocol is incompatible at {socket_path}" in diagnostic
         assert "running daemon protocol: 'rodex-daemon-v1'" in diagnostic
-        assert "current client protocol: 'rodex-daemon-v2' (Rodex 0.14.0a2)" in diagnostic
-        assert "SQL catalog: not checked; this client expects generation 20 (rodex-v20.sqlite3)" in diagnostic
+        assert "current client protocol: 'rodex-daemon-v3' (Rodex 0.15.0a1)" in diagnostic
+        assert "SQL catalog: not checked; this client expects generation 21 (rodex-v21.sqlite3)" in diagnostic
         assert "does not translate earlier wire protocols or migrate earlier catalogs" in diagnostic
     finally:
         listener.close()

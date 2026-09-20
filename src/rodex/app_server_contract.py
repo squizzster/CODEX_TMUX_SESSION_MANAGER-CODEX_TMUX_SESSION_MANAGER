@@ -37,6 +37,8 @@ class CodexAppServerContract:
     turn_start_method: str = "turn/start"
     turn_started_method: str = "turn/started"
     turn_steer_method: str = "turn/steer"
+    thread_queue_add_method: str = "thread/queue/add"
+    thread_queue_update_method: str = "thread/queue/update"
     turn_interrupt_method: str = "turn/interrupt"
     turn_completed_method: str = "turn/completed"
     warning_method: str = "warning"

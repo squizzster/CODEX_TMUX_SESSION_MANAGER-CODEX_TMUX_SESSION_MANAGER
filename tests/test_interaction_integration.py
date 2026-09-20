@@ -4,7 +4,7 @@ import json
 import shlex
 import shutil
 import subprocess
-from contextlib import suppress
+from contextlib import ExitStack, suppress
 from dataclasses import replace
 from pathlib import Path
 from threading import Thread
@@ -42,6 +42,7 @@ from rodex.tmux_session_capability import (
     RODEX_SHARED_TMUX_SERVER_ID_OPTION,
     TmuxRuntimeCapability,
 )
+from rodex.user_prompt_hook import load_user_prompt_hook
 from rodex_registry.identity import RodexRuntimeId
 
 
@@ -147,6 +148,185 @@ def test_real_proxy_hooks_cover_both_directions_and_control_connections(tmp_path
             assert projected[0][1] == json.loads(response)
         else:
             assert projected == []
+    finally:
+        proxy.close()
+        server.shutdown(close_connections=True)
+        thread.join(timeout=3)
+
+
+@pytest.mark.parametrize("connection_path", ["/", CONTROL_CONNECTION_PATH])
+@pytest.mark.parametrize("method", ["turn/start", "turn/steer", "thread/queue/add", "thread/queue/update"])
+@pytest.mark.parametrize("with_user_override", [False, True])
+def test_configured_prompt_hook_transforms_once_at_real_proxy_boundary(
+    tmp_path, connection_path, method, with_user_override
+):
+    received = []
+    rules = tmp_path / "prompt-rules.yaml"
+    # Deliberately non-idempotent: a duplicate traversal would produce Hello!!.
+    rules.write_text("- '/Hello/Hello!/'\n", encoding="utf-8")
+    user_rules = tmp_path / "user-rules.yaml"
+    if with_user_override:
+        rules.write_text("- name: Greeting\n  match: Hello\n  replace: Global\n", encoding="utf-8")
+        user_rules.write_text("- name: Greeting\n  match: Hello\n  replace: Hello!\n", encoding="utf-8")
+
+    def upstream(connection):
+        with suppress(ConnectionClosed):
+            for message in connection:
+                received.append(json.loads(message))
+                connection.send('{"id":1,"result":{"text":"Hello"}}')
+
+    app_socket = tmp_path / "app.sock"
+    server = unix_serve(upstream, path=str(app_socket))
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    proxy_socket = tmp_path / "proxy.sock"
+    proxy = CodexProtocolProxy(
+        proxy_socket,
+        app_socket,
+        ToolCallCounter(lambda _: None),
+        interaction_pipeline=SessionInteractionPipeline(
+            input_text_hook=load_user_prompt_hook(rules, user_path=user_rules)
+        ),
+        peer_identity=TEST_PEER,
+        app_server_process=LiveTestProcess(),
+        native_tui_process=LiveTestProcess(),
+    )
+    frame = {
+        "id": 1,
+        "method": method,
+        "params": {
+            "threadId": "thread-1",
+            "clientUserMessageId": "dispatch-1",
+            "input": [{"type": "text", "text": "Hello", "text_elements": []}],
+        },
+    }
+    if method == "turn/steer":
+        frame["params"]["expectedTurnId"] = "turn-1"
+    if method == "thread/queue/update":
+        frame["params"]["queuedSubmissionId"] = "queued-1"
+    try:
+        proxy.start()
+        with unix_connect(
+            str(proxy_socket),
+            uri=f"ws://localhost{connection_path}",
+            close_timeout=1,
+            additional_headers=TEST_PEER.headers(),
+        ) as client:
+            client.send(json.dumps(frame))
+            assert json.loads(client.recv(timeout=2))["result"]["text"] == "Hello"
+        frame["params"]["input"][0]["text"] = "Hello!"
+        assert received == [frame]
+    finally:
+        proxy.close()
+        server.shutdown(close_connections=True)
+        thread.join(timeout=3)
+
+
+@pytest.mark.parametrize("connection_path", ["/", CONTROL_CONNECTION_PATH])
+@pytest.mark.parametrize("both_files_invalid", [False, True])
+def test_prompt_reload_errors_notify_once_per_hash_without_disconnect_or_model_delivery(
+    tmp_path, connection_path, both_files_invalid
+):
+    received = []
+    rules = tmp_path / "prompt-rules.yaml"
+    rules.write_text("- '/[/invalid/'\n", encoding="utf-8")
+    user_rules = tmp_path / "user-rules.yaml"
+    if both_files_invalid:
+        user_rules.write_text("[unclosed", encoding="utf-8")
+
+    def upstream(connection):
+        with suppress(ConnectionClosed):
+            for message in connection:
+                frame = json.loads(message)
+                received.append(frame)
+                connection.send(json.dumps({"id": frame["id"], "result": {"accepted": True}}))
+
+    app_socket = tmp_path / "app.sock"
+    server = unix_serve(upstream, path=str(app_socket))
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    proxy_socket = tmp_path / "proxy.sock"
+    pipeline = SessionInteractionPipeline(input_text_hook=load_user_prompt_hook(rules, user_path=user_rules))
+    proxy = CodexProtocolProxy(
+        proxy_socket,
+        app_socket,
+        ToolCallCounter(lambda _: None),
+        interaction_pipeline=pipeline,
+        peer_identity=TEST_PEER,
+        app_server_process=LiveTestProcess(),
+        native_tui_process=LiveTestProcess(),
+    )
+    warnings = []
+    try:
+        proxy.start()
+        with ExitStack() as connections:
+            primary = connections.enter_context(
+                unix_connect(
+                    str(proxy_socket),
+                    close_timeout=1,
+                    additional_headers=TEST_PEER.headers(),
+                )
+            )
+            client = (
+                primary
+                if connection_path == "/"
+                else connections.enter_context(
+                    unix_connect(
+                        str(proxy_socket),
+                        uri=f"ws://localhost{connection_path}",
+                        close_timeout=1,
+                        additional_headers=TEST_PEER.headers(),
+                    )
+                )
+            )
+
+            def submit(request_id, *, expect_notices=0):
+                client.send(
+                    json.dumps(
+                        {
+                            "id": request_id,
+                            "method": "turn/start",
+                            "params": {"threadId": "thread", "input": [{"type": "text", "text": "Hello"}]},
+                        }
+                    )
+                )
+                while True:
+                    response = json.loads(client.recv(timeout=2))
+                    if response.get("method") == "warning":
+                        warnings.append(response["params"]["message"])
+                    elif response.get("id") == request_id:
+                        break
+                if client is not primary:
+                    for _ in range(expect_notices):
+                        notice = json.loads(primary.recv(timeout=2))
+                        assert notice["method"] == "warning"
+                        warnings.append(notice["params"]["message"])
+                return response
+
+            initial_notices = 2 if both_files_invalid else 1
+            assert "error" in submit(1, expect_notices=initial_notices)
+            assert "error" in submit(2)
+            assert len(warnings) == initial_notices
+            assert str(rules) in warnings[0] and "rule 1" in warnings[0]
+            if both_files_invalid:
+                assert str(user_rules) in warnings[1]
+            assert received == []
+            rules.write_text("- '/Hello/invalid/x'\n", encoding="utf-8")
+            assert "error" in submit(3, expect_notices=1)
+            assert len(warnings) == initial_notices + 1 and "flags" in warnings[-1]
+            rules.write_text("- '/Hello/First/'\n", encoding="utf-8")
+            user_rules.write_text("[]", encoding="utf-8")
+            assert "result" in submit(4)
+            rules.write_text("- '/Hello/Second/'\n", encoding="utf-8")
+            assert "result" in submit(5)
+        assert [frame["params"]["input"][0]["text"] for frame in received] == ["First", "Second"]
+        notices = [record for record in pipeline.records if record.source == "user-prompt-hook"]
+        assert len(notices) == initial_notices + 1
+        assert all(record.operation == InteractionOperation.MESSAGE and not record.start_model_turn for record in notices)
+        rejections = [record for record in pipeline.records if record.source == "user-prompt-hook-rejection"]
+        assert len(rejections) == 3
+        assert all(record.operation == InteractionOperation.PROTOCOL_OUTPUT for record in rejections)
+        assert all(record.status == DeliveryStatus.DELIVERED for record in rejections)
     finally:
         proxy.close()
         server.shutdown(close_connections=True)

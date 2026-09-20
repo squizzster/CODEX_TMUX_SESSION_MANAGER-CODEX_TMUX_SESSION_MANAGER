@@ -52,6 +52,21 @@ cached event. The snapshot budget reserves transport-address overhead.
 
 ## Processing and outcomes
 
+Submitted user input first enters the runtime's typed `input_text_hook`. Its only
+authority is ordered text edits; `protocol_input_text` alone applies those edits and
+rebases/removes affected UTF-8 UI spans, preserving every other RPC field. Initial,
+native, exact-control, and queued submissions converge here. The hook re-stats
+the installation's `conf/hooks/user_prompt_substitutions.yaml` and the optional user
+file under the caller's Rodex state root on submission. Both use the supplied
+metadata-only SHA-512 function and independent caches; only changed files reload
+before processing. User rules replace same-name global rules in place; new rules
+append. One runtime lock owns the combined snapshot. Invalid versions are cached as
+errors, never replaced by stale rules. A descriptive `main MESSAGE(false)` notice is
+delivered once per failed version of each file; failures to deliver
+remain eligible for the next attempt. A correlated RPC error refuses the submission
+through that connection's existing protocol-output pipeline without closing the
+connection. No timer or keystroke triggers configuration I/O.
+
 Hooks can inspect, transform or reject content, not change source, destination, operation,
 model-turn permission or dispatch/turn/thread identity. Protocol text changes preserve
 RPC structure, IDs, methods and control/approval fields. Without hooks, native frames
@@ -60,8 +75,8 @@ text has a separate presentation stage. Hooks should select the operation/source
 intend to modify and remain short; they run synchronously.
 
 Accepted upstream frames feed both the destination and projections. Fan-out does not
-apply their protocol hooks again. Rejected native traffic explicitly closes the
-connection rather than leaving an RPC silently waiting forever.
+apply their protocol hooks again. Other rejected native traffic explicitly closes
+the connection so an RPC cannot remain silently waiting forever.
 
 | Outcome | Evidence |
 |---|---|

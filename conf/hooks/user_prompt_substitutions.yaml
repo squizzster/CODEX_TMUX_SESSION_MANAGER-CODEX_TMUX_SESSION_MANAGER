@@ -1,0 +1,28 @@
+# Applied once, in order, to submitted prompt text before Codex receives it.
+#
+# Each rule has:
+#   name:    A unique label; a user rule with this name overrides the global rule.
+#   match:   The regex pattern, without surrounding / delimiters.
+#   replace: The replacement text.
+#   flags:   i = ignore case, m = multiline anchors,
+#            s = dot matches newline, g = replace every match.
+#
+# Without g, replace only the first match in each text item.
+# Use single-quoted strings to preserve regex escapes and backreferences.
+#
+# Re-statted on submission; changed metadata reloads rules before that prompt.
+# No polling or unchanged-file content reads.
+# User overrides: $XDG_STATE_HOME/rodex/conf/hooks/user_prompt_substitutions.yaml
+# Fallback: ~/.local/state/rodex/conf/hooks/user_prompt_substitutions.yaml
+# Overrides keep the global rule's position; new user rules run afterward.
+# Replace this list with [] to remove global rules; user rules still apply.
+
+- name: 'Quick push to expanded'
+  match: '^[ \t]*push[.!?,;:]*[ \t]*(?=\r?$)'
+  replace: '**Commit/stash → Fetch/prune → Switch main → Pull → Find unmerged branches → Merge all → Resolve conflicts → Push → Verify → Delete merged branches → Final status**'
+  flags: 'gim'
+
+- name: 'Add enthusiasm to Hello'
+  match: '^Hello$'
+  replace: 'Hello!'
+  flags: 'i'

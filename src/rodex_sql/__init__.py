@@ -12,6 +12,7 @@ from .private_database_path import (
     RODEX_DATABASE_FILENAME,
     RODEX_DATABASE_SCHEMA_GENERATION,
     default_rodex_database_path,
+    default_rodex_state_root,
     normalise_rodex_database_path,
 )
 from .transactions import (
@@ -31,6 +32,7 @@ __all__ = [
     "RodexDatabaseNotInitializedError",
     "RodexSQLError",
     "default_rodex_database_path",
+    "default_rodex_state_root",
     "index_re_try_attempt_numbers",
     "normalise_rodex_database_path",
     "open_rodex_bootstrap_transaction",

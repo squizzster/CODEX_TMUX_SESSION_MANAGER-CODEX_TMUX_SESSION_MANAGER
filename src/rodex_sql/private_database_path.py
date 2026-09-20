@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import os
+import pwd
 import stat as stat_module
 import sys
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
@@ -97,11 +99,26 @@ class ValidatedDatabaseFile:
         self.close()
 
 
+def default_rodex_state_root(environment: Mapping[str, str] | None = None) -> Path:
+    """Resolve user state from the caller's environment without accessing its files."""
+    selected = os.environ if environment is None else environment
+    if environment is None:
+        home = Path.home()
+    else:
+        home = Path(selected["HOME"]) if selected.get("HOME") else Path(pwd.getpwuid(os.getuid()).pw_dir)
+    configured_state_home = selected.get("XDG_STATE_HOME")
+    if not configured_state_home:
+        state_home = home / ".local" / "state"
+    elif configured_state_home == "~" or configured_state_home.startswith("~/"):
+        state_home = home / configured_state_home[2:]
+    else:
+        state_home = Path(configured_state_home).expanduser()
+    return Path(os.path.abspath(state_home / "rodex"))
+
+
 def default_rodex_database_path() -> Path:
     """Resolve the durable database path for the current Linux user."""
-    configured_state_home = os.environ.get("XDG_STATE_HOME")
-    state_home = Path(configured_state_home).expanduser() if configured_state_home else Path.home() / ".local" / "state"
-    return Path(os.path.abspath(state_home / "rodex" / RODEX_DATABASE_FILENAME))
+    return default_rodex_state_root() / RODEX_DATABASE_FILENAME
 
 
 def normalise_rodex_database_path(

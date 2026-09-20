@@ -16,6 +16,8 @@ from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from threading import RLock
 
+from .protocol_input_text import InputTextHook, UserPromptHookError, apply_user_prompt_hook
+
 
 class InteractionOperation(StrEnum):
     MESSAGE = "message"
@@ -121,9 +123,11 @@ class SessionInteractionPipeline:
         self,
         *,
         hooks: tuple[MessageHook, ...] = (),
+        input_text_hook: InputTextHook | None = None,
         outcome_observers: tuple[OutcomeObserver, ...] = (),
     ) -> None:
         self._hooks = tuple(hooks)
+        self._input_text_hook = input_text_hook
         self._outcome_observers = list(outcome_observers)
         self._targets: dict[str, InteractionTarget] = {}
         self._registry_lock = RLock()
@@ -190,6 +194,8 @@ class SessionInteractionPipeline:
     def execute(self, request: InteractionRequest) -> InteractionResult:
         try:
             result = self._execute(request)
+        except UserPromptHookError as error:
+            result = InteractionResult(DeliveryStatus.REJECTED, str(error), value=error)
         except InteractionRejected as error:
             result = InteractionResult(DeliveryStatus.REJECTED, str(error))
         except InteractionDeliveryIndeterminate:
@@ -231,6 +237,9 @@ class SessionInteractionPipeline:
         request = replace(request, expected_thread_id=bound_thread_id)
         if not exists and not (request.open_if_missing or request.operation == InteractionOperation.OPEN):
             raise InteractionRejected(f"interaction target is not available: {request.target}")
+        input_text_hook = self._input_text_hook if request.operation == InteractionOperation.PROTOCOL_INPUT else None
+        if input_text_hook is not None:
+            request = replace(request, payload=apply_user_prompt_hook(request.payload, input_text_hook))
         transformed = request
         for hook in self._hooks:
             transformed = hook(transformed)
@@ -241,7 +250,7 @@ class SessionInteractionPipeline:
                 raise InteractionRejected("interaction target changed while processing the operation")
         if model_operation and target.model_thread_id() != bound_thread_id:
             raise InteractionRejected("model thread binding changed while processing the message")
-        still_exists = exists if not self._hooks or lookup_operation else target.exists()
+        still_exists = exists if lookup_operation or (not self._hooks and input_text_hook is None) else target.exists()
         if not still_exists and not lookup_operation:
             if exists:
                 raise InteractionRejected("existing interaction target disappeared while processing the operation")

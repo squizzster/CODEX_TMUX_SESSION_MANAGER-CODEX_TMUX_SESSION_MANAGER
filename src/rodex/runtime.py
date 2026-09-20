@@ -23,6 +23,7 @@ from typing import Any, BinaryIO, Final
 from websockets.exceptions import ConnectionClosed, InvalidHandshake
 from websockets.sync.client import unix_connect
 
+from codex_cli_contract import CODEX_CLI_0_151_0, CodexCliRoute
 from rodex_registry.identity import (
     CodexSessionId,
     RodexRegistryId,
@@ -2523,6 +2524,12 @@ def _run_runtime_service(
     agent_observer_controller: AgentObserverCoordinator | None = None
     server_overloaded_recovery: ServerOverloadedRecoveryController | None = None
     interaction_pipeline = SessionInteractionPipeline(input_text_hook=load_user_prompt_hook(environment=user_environment))
+    codex_invocation = CODEX_CLI_0_151_0.classify(tuple(codex_arguments))
+    if codex_invocation.route is CodexCliRoute.MANAGED_INTERACTIVE and codex_invocation.prompt_index is not None:
+        prompt_index = codex_invocation.prompt_index
+        prepared_arguments = list(codex_arguments)
+        prepared_arguments[prompt_index] = interaction_pipeline.prepare_primary_prompt(prepared_arguments[prompt_index])
+        codex_arguments = tuple(prepared_arguments)
     presentation_pipeline = SessionPresentationPipeline()
     presentation_policy_interaction = PresentationPolicyInteractionAdapter(
         interaction_pipeline,

@@ -57,8 +57,8 @@ becomes a distinct candidate for the transient App Server persistence check.
    renames tmux to the unique display name, and configures status/input safety. A competing
    selector cannot attach to the intermediate row.
 7. Rodex carries that capability to tmux's immutable `$session_id` and attaches
-   to the ordinary Codex prompt; an initial prompt and interactive options have already
-   reached that TUI unchanged and exactly once.
+   to the ordinary Codex prompt; interactive options reach that TUI unchanged, while a
+   characterized initial prompt reaches it after one exact Rodex prompt admission.
 
 The checkout launcher and installed shim execute the project's `.venv/bin/rodex`
 entrypoint directly. At the process boundary, `rodex.process_environment` compares an

@@ -138,10 +138,16 @@ through the same rule compiler; in that shorthand only, escape a slash as `\/`.
 These unnamed rules append in file order and cannot override a named rule.
 
 Every managed initial prompt, native submission, `_start`, `_steer`, and queued
-submission reaches the same protocol-input hook exactly once per request. Only text
-input is rewritten; images, routing, turn identity, settings, approvals, and responses
-remain native. UI annotations over unchanged text are rebased to UTF-8 byte offsets;
-annotations overlapping rewritten text are removed while the submitted text remains.
+submission reaches the same prompt hook exactly once per request. Rodex prepares a
+managed initial prompt before launching Codex. At interactive Enter, Rodex transforms a
+verified native draft, updates that same Codex editor, and only then releases Enter; the
+TUI therefore classifies, displays, queues, and submits the canonical text. Its primary
+protocol request consumes the matching preparation receipt instead of applying the hook
+again. A native draft that cannot be verified safely retains the structured protocol
+fallback. Control and queued routes without a terminal draft transform at that protocol
+boundary. Only text input is rewritten; images, routing, turn identity, settings,
+approvals, and responses remain native. UI annotations over unchanged text are rebased
+to UTF-8 byte offsets; annotations overlapping protocol-rewritten text are removed.
 Native commands delegated directly to Codex, specialized command fields such as review
 instructions or goal objectives, and internal agent traffic are outside this hook.
 
@@ -165,6 +171,7 @@ share one notice until the file becomes accessible. Each refused RPC still recei
 failure response so callers cannot hang. Fix the file and submit again; valid changed
 rules replace the cached error. Only the supplied metadata fingerprint detects changes:
 rewrites preserving all eight metadata fields cannot be detected. Hooks are synchronous.
+See `docs/PROMPT_SUBMISSION_FLOW.md` for the end-to-end flow.
 
 After installing changed code, start a fresh runtime with `rodex`, or exit the old Codex
 TUI before resuming its session. Detaching and reopening a live runtime retains loaded

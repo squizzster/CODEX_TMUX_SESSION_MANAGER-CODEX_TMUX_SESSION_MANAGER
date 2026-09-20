@@ -54,6 +54,7 @@ class CodexCliInvocation:
     route: CodexCliRoute
     reason: CodexCliClassificationReason
     selector_candidate: str | None = None
+    prompt_index: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,12 +96,14 @@ class CodexCliContract:
                 selector_candidate=arguments[1],
             )
         positionals: list[str] = []
+        positional_indices: list[int] = []
         seen_options: set[str] = set()
         index = 0
         while index < len(arguments):
             token = arguments[index]
             if token == "--":
                 positionals.extend(arguments[index + 1 :])
+                positional_indices.extend(range(index + 1, len(arguments)))
                 break
 
             matched = self._match_option(token)
@@ -168,6 +171,7 @@ class CodexCliContract:
                     CodexCliClassificationReason.SUBCOMMAND,
                 )
             positionals.append(token)
+            positional_indices.append(index)
             index += 1
 
         if _managed_option_conflict(seen_options):
@@ -185,7 +189,8 @@ class CodexCliContract:
             arguments,
             CodexCliRoute.MANAGED_INTERACTIVE,
             CodexCliClassificationReason.INTERACTIVE,
-            selector_candidate,
+            selector_candidate=selector_candidate,
+            prompt_index=positional_indices[0] if len(positional_indices) == 1 else None,
         )
 
     def _match_option(

@@ -1,5 +1,6 @@
 """Configured admission and lossless terminal framing, independent of native rendering."""
 
+import json
 import re
 from dataclasses import replace
 
@@ -21,6 +22,7 @@ from rodex.interaction_pipeline import (
     InteractionTarget,
     SessionInteractionPipeline,
 )
+from rodex.protocol_input_text import PromptTextEdit, UserPromptHookError
 from rodex.terminal_input import (
     ESCAPE_WAIT_SECONDS,
     PASTE_END,
@@ -28,6 +30,7 @@ from rodex.terminal_input import (
     TerminalInputDecoder,
     TerminalInputInterceptor,
 )
+from rodex.user_prompt_hook import USER_PROMPT_SUBSTITUTIONS_PATH, load_user_prompt_hook
 
 
 @pytest.mark.parametrize("text", ["/ro", "/rod", "/rode", "/rodex"])
@@ -76,11 +79,20 @@ def test_invalid_configured_expressions_fail_at_registration(pattern):
 
 
 class InputHarness:
-    def __init__(self, *, confirm=True, registrations=INPUT_INTERCEPTORS, reject=False):
+    def __init__(self, *, confirm=True, registrations=INPUT_INTERCEPTORS, reject=False, input_text_hook=None):
         self.forwarded = bytearray()
         self.events = []
         self.prefix_checks = []
-        self.pipeline = SessionInteractionPipeline()
+        self.pipeline = SessionInteractionPipeline(input_text_hook=input_text_hook)
+        self.pipeline.register(
+            InteractionTarget(
+                "main",
+                "test-runtime",
+                frozenset({InteractionOperation.MESSAGE}),
+                exists=lambda: True,
+                deliver=self.deliver,
+            )
+        )
         self.pipeline.register(
             InteractionTarget(
                 INPUT_MENU_TARGET,
@@ -128,6 +140,138 @@ class InputHarness:
         self.feed(b"\x1b")
         for event in self.decoder.expire_incomplete(1):
             self.interceptor.accept(event)
+
+
+def greeting_hook(calls):
+    def hook(texts):
+        calls.append(texts)
+        return tuple((PromptTextEdit(0, len(text), "Hello!"),) if text == "Hello" else () for text in texts)
+
+    return hook
+
+
+def deliver_primary_submission(harness, text):
+    delivered = []
+    harness.pipeline.register(
+        InteractionTarget(
+            "wire",
+            "test-runtime",
+            frozenset({InteractionOperation.PROTOCOL_INPUT}),
+            exists=lambda: True,
+            deliver=lambda request: delivered.append(request) or InteractionResult(DeliveryStatus.DELIVERED),
+        )
+    )
+    frame = {
+        "id": 1,
+        "method": "turn/start",
+        "params": {"threadId": "thread-1", "input": [{"type": "text", "text": text}]},
+    }
+    result = harness.pipeline.execute(
+        InteractionRequest(
+            "wire",
+            InteractionOperation.PROTOCOL_INPUT,
+            "codex-client",
+            payload=json.dumps(frame),
+            consumes_prepared_prompt=True,
+        )
+    )
+    assert result.accepted
+    return json.loads(delivered[0].payload)
+
+
+def test_verified_prompt_is_transformed_before_native_enter_and_only_once():
+    calls = []
+    harness = InputHarness(registrations=(), input_text_hook=greeting_hook(calls))
+
+    harness.feed(b"Hello\r")
+
+    assert harness.forwarded == b"Hello" + b"\x7f" * 5 + PASTE_START + b"Hello!" + PASTE_END + b"\r"
+    assert deliver_primary_submission(harness, "Hello!")["params"]["input"][0]["text"] == "Hello!"
+    assert calls == [("Hello",)]
+
+
+@pytest.mark.parametrize(
+    ("entered", "canonical"),
+    [
+        ("Hello", "Hello!"),
+        (
+            "push",
+            "**Commit/stash → Fetch/prune → Switch main → Pull → Find unmerged branches → Merge all → "
+            "Resolve conflicts → Push → Verify → Delete merged branches → Final status**",
+        ),
+    ],
+)
+def test_supplied_yaml_rules_rewrite_the_native_editor_before_enter(entered, canonical):
+    harness = InputHarness(
+        registrations=(),
+        input_text_hook=load_user_prompt_hook(USER_PROMPT_SUBSTITUTIONS_PATH),
+    )
+
+    harness.feed(entered.encode() + b"\r")
+
+    assert harness.forwarded == (
+        entered.encode() + b"\x7f" * len(entered) + PASTE_START + canonical.encode() + PASTE_END + b"\r"
+    )
+
+
+def test_unchanged_verified_prompt_still_uses_one_hook_snapshot():
+    calls = []
+    harness = InputHarness(registrations=(), input_text_hook=greeting_hook(calls))
+
+    harness.feed(b"Already canonical\r")
+
+    assert harness.forwarded == b"Already canonical\r"
+    assert deliver_primary_submission(harness, "Already canonical")["params"]["input"][0]["text"] == "Already canonical"
+    assert calls == [("Already canonical",)]
+
+
+def test_codex_ide_context_prefix_consumes_the_same_early_admission():
+    calls = []
+    harness = InputHarness(registrations=(), input_text_hook=greeting_hook(calls))
+
+    harness.feed(b"Hello\r")
+
+    submitted = "## IDE context\n## My request for Codex:\nHello!"
+    assert deliver_primary_submission(harness, submitted)["params"]["input"][0]["text"] == submitted
+    assert calls == [("Hello",)]
+
+
+def test_unverified_native_draft_falls_back_to_protocol_admission():
+    calls = []
+    harness = InputHarness(confirm=False, registrations=(), input_text_hook=greeting_hook(calls))
+
+    harness.feed(b"Hello\r")
+
+    assert harness.forwarded == b"Hello\r"
+    assert deliver_primary_submission(harness, "Hello")["params"]["input"][0]["text"] == "Hello!"
+    assert calls == [("Hello",)]
+
+
+def test_invalid_hook_blocks_enter_before_codex_and_preserves_editable_draft():
+    def invalid(_texts):
+        raise UserPromptHookError("bad YAML")
+
+    harness = InputHarness(registrations=(), input_text_hook=invalid)
+
+    harness.feed(b"Hello\r")
+
+    assert harness.forwarded == b"Hello"
+    assert harness.interceptor._candidate == "Hello"
+    notices = [event for event in harness.events if event.target == "main"]
+    assert [event.text for event in notices] == ["Rodex prompt was not submitted: bad YAML"]
+
+
+@pytest.mark.parametrize("draft", [b"/model", b"!pwd"])
+def test_native_codex_commands_bypass_prompt_admission(draft):
+    def invalid(_texts):
+        raise UserPromptHookError("must not run")
+
+    harness = InputHarness(registrations=(), input_text_hook=invalid)
+
+    harness.feed(draft + b"\r")
+
+    assert harness.forwarded == draft + b"\r"
+    assert harness.events == []
 
 
 def test_slash_and_r_are_immediate_native_input_then_o_enters_local_owner():

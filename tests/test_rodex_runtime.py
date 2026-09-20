@@ -4411,6 +4411,7 @@ def test_runtime_path_keepalives_share_runtime_paths_independently(
             ["--model", "gpt-5.6-sol", "Project: CODEX_TMUX_SESSION_MANAGER"],
             False,
         ),
+        (["Hello"], False),
     ],
 )
 @pytest.mark.parametrize("bootstrap_virtualenv", [True, False])
@@ -4657,6 +4658,7 @@ def test_runtime_service_skips_updater_and_connects_tui_through_protocol_proxy(
         proxy_socket,
         event_socket,
     )
+    expected_codex_arguments = ["Hello!"] if codex_arguments == ["Hello"] else codex_arguments
     assert tui_commands == [
         [
             "/usr/bin/codex",
@@ -4665,7 +4667,7 @@ def test_runtime_service_skips_updater_and_connects_tui_through_protocol_proxy(
             "--no-alt-screen",
             "--remote",
             f"unix://{proxy_socket}",
-            *codex_arguments,
+            *expected_codex_arguments,
         ]
     ]
     assert len(tui_options) == 1

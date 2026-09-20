@@ -76,6 +76,7 @@ def test_exact_resume_is_a_selector_candidate(selector: str) -> None:
 
     assert invocation.route is CodexCliRoute.RESUME_SELECTOR
     assert invocation.selector_candidate == selector
+    assert invocation.prompt_index is None
     assert invocation.arguments == ("resume", selector)
 
 
@@ -122,6 +123,23 @@ def test_current_interactive_shapes_are_managed(arguments: tuple[str, ...]) -> N
     assert invocation.arguments == arguments
     assert invocation.route is CodexCliRoute.MANAGED_INTERACTIVE
     assert invocation.reason is CodexCliClassificationReason.INTERACTIVE
+
+
+@pytest.mark.parametrize(
+    ("arguments", "prompt_index"),
+    [
+        ((), None),
+        (("Hello",), 0),
+        (("--model", "gpt-5.6-sol"), None),
+        (("--model", "gpt-5.6-sol", "Hello"), 2),
+        (("--", "Hello"), 1),
+        (("--image=first.png", "second.png", "--", "Hello"), 3),
+    ],
+)
+def test_managed_contract_identifies_only_the_initial_prompt_argument(
+    arguments: tuple[str, ...], prompt_index: int | None
+) -> None:
+    assert CODEX_CLI_0_151_0.classify(arguments).prompt_index == prompt_index
 
 
 def test_only_one_raw_bare_prompt_is_a_possible_session_selector() -> None:

@@ -44,7 +44,7 @@ becomes a distinct candidate for the transient App Server persistence check.
 1. Bare `./rodex`, explicit `./rodex _create`, or characterized native interactive
    Codex syntax validates the `codex` and `tmux` executables.
 2. The launcher claims a dedicated tmux server, reserves the runtime through the one
-   private `<implementation-sha256>.sock`, and respawns its staged pane with a one-shot bridge. Rodex
+   private `<implementation-sha256>.sock`, and respawns its staged pane with a TTY bridge that retains foreground resize notifications. Rodex
    never types with `send-keys`.
 3. The bridge passes its pane TTY descriptor to the daemon. After exact peer, pane,
    server and runtime admission, the daemon starts that runtime's App Server, proxy and
@@ -122,7 +122,7 @@ never construct or execute the tmux process prefix themselves.
 
 ## Runtime tmux authority
 
-Each managed runtime owns a separate server at `tmux-v4-<runtime-id>.sock`. Protocol,
+Each managed runtime owns a separate server at `tmux-v5-<runtime-id>.sock`. Protocol,
 server incarnation and runtime markers bind that server to one creation attempt. Only
 an entirely unmarked, empty server may be claimed. Failure cleanup retains the original
 attempt's nonce and cannot obtain an incumbent's authority by rediscovery.

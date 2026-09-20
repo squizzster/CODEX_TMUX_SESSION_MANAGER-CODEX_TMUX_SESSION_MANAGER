@@ -76,6 +76,21 @@ class TmuxPaneController:
         """An unacknowledged split must be reconciled before another is admitted."""
         return self._creation_operation_id is not None and self._observer_pane_target is None
 
+    def terminal_size(self) -> tuple[int, int]:
+        """Read current primary columns/rows; kernel PTY resize may still be deferred."""
+        if not self._primary:
+            raise ValueError("terminal dimensions require the primary pane owner")
+        result = self._tmux_executor.run(
+            primary_pane_capability_read_arguments(self._capability, "#{pane_width}|#{pane_height}")
+        )
+        try:
+            columns, rows = map(int, result.stdout.strip().split("|"))
+        except ValueError as error:
+            raise OSError("could not read the owned tmux pane dimensions") from error
+        if result.returncode or not (1 <= columns <= 65535 and 1 <= rows <= 65535):
+            raise OSError("could not read the owned tmux pane dimensions")
+        return columns, rows
+
     def locate(self) -> str | None:
         if self._primary:
             identity = self._tmux_executor.run(

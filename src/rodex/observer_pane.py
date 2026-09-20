@@ -101,6 +101,7 @@ class ObserverPaneController:
     ) -> str | None:
         command = (
             self._python_executable,
+            "-I",
             "-m",
             "rodex.agent_observer",
             "--rodex-database",

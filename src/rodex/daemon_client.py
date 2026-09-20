@@ -18,7 +18,7 @@ from .implementation_identity import RODEX_IMPLEMENTATION_ID, RODEX_IMPLEMENTATI
 from .process_contracts import RuntimeServiceConfig
 from .version import RODEX_VERSION
 
-RODEX_DAEMON_PROTOCOL: Final = "rodex-daemon-v2"
+RODEX_DAEMON_PROTOCOL: Final = "rodex-daemon-v3"
 RODEX_DAEMON_SOCKET_NAME: Final = f"{RODEX_IMPLEMENTATION_SHA256}.sock"
 RODEX_DAEMON_LOG_NAME: Final = f"{RODEX_IMPLEMENTATION_SHA256}.log"
 RODEX_DAEMON_START_LOCK_NAME: Final = f"{RODEX_IMPLEMENTATION_SHA256}.start.lock"
@@ -44,7 +44,7 @@ def _incompatible_daemon_message(socket_path: Path, observed_implementation: obj
         f"  daemon protocol: {RODEX_DAEMON_PROTOCOL}\n"
         f"  SQL catalog: not checked; this client expects generation "
         f"{RODEX_DATABASE_SCHEMA_GENERATION} ({RODEX_DATABASE_FILENAME})\n"
-        "stop all Rodex runtimes and the daemon, then retry; "
+        "use this session's retained installation, or start a separate current-version session; "
         "Rodex does not migrate earlier runtimes or catalogs"
     )
 
@@ -57,7 +57,7 @@ def _incompatible_daemon_protocol_message(socket_path: Path, observed_protocol: 
         f"  current client protocol: {RODEX_DAEMON_PROTOCOL!r} (Rodex {RODEX_VERSION})\n"
         f"  SQL catalog: not checked; this client expects generation "
         f"{RODEX_DATABASE_SCHEMA_GENERATION} ({RODEX_DATABASE_FILENAME})\n"
-        "stop all Rodex runtimes and the daemon, then retry; "
+        "use this session's retained installation, or start a separate current-version session; "
         "Rodex does not translate earlier wire protocols or migrate earlier catalogs"
     )
 
@@ -196,26 +196,17 @@ class RodexDaemonClient:
         return state
 
     def notify_runtime(self, runtime_id: str, cause: str) -> bool:
-        """Wake one runtime after an external state transition.
-
-        False means an already-running daemon predates this backwards-compatible
-        protocol extension and still owns its legacy supervisory timer.
-        """
+        """Wake one runtime through the exact current daemon contract."""
         if cause not in RODEX_RUNTIME_WAKE_CAUSES:
             raise ValueError("runtime wake cause is invalid")
-        try:
-            self._request(
-                {
-                    "protocol": RODEX_DAEMON_PROTOCOL,
-                    "operation": "wake_runtime",
-                    "runtime_id": runtime_id,
-                    "cause": cause,
-                }
-            )
-        except RodexDaemonError as error:
-            if str(error) == "unknown daemon operation":
-                return False
-            raise
+        self._request(
+            {
+                "protocol": RODEX_DAEMON_PROTOCOL,
+                "operation": "wake_runtime",
+                "runtime_id": runtime_id,
+                "cause": cause,
+            }
+        )
         return True
 
     def _probe(self) -> bool:

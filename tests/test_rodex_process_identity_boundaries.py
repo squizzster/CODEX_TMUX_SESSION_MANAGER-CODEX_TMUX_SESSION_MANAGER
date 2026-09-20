@@ -37,7 +37,7 @@ def _service(root: Path) -> RuntimeServiceConfig:
         protocol_proxy_socket_path=root / "proxy-0000000000000001.sock",
         protocol_event_socket_path=root / "events-0000000000000001.sock",
         tmux_binary="/opt/tmux bin/tmux",
-        tmux_server_socket_path=root / "tmux-v4-0000000000000001.sock",
+        tmux_server_socket_path=root / "tmux-v5-0000000000000001.sock",
         tmux_pane_target="%7",
         runtime_id=RUNTIME_ID,
         codex_arguments=("resume", "thread with spaces"),

@@ -340,7 +340,7 @@ def test_observer_snapshot_reserves_transport_identity_space():
     for number in range(32):
         snapshot = producer.observe(
             {
-                "schema": "rodex-agent-observer-v3",
+                "schema": "rodex-agent-observer-v4",
                 "kind": "app_server_agent_message",
                 "thread_id": "thread",
                 "turn_id": "turn",

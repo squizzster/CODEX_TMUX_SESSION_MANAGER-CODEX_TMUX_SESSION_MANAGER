@@ -75,7 +75,7 @@ from .source_configuration import default_codex_sessions_root as default_codex_s
 
 ANALYTICS_RESTART_DELAY_SECONDS = 2.0
 ANALYTICS_HEALTH_RETRY_DELAY_SECONDS = 1.0
-STATISTICS_PROJECTION_SCHEMA_VERSION = "rodex-statistics-v8"
+STATISTICS_PROJECTION_SCHEMA_VERSION = "rodex-statistics-v9"
 _LOGGER = logging.getLogger(__name__)
 
 

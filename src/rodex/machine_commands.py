@@ -47,7 +47,7 @@ from .live_runtime import (
 )
 from .runtime import RodexRuntimeError, RodexRuntimeLauncher
 
-MACHINE_ENVELOPE_SCHEMA_VERSION = 4
+MACHINE_ENVELOPE_SCHEMA_VERSION = 5
 
 
 def execute_machine_command(

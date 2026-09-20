@@ -10,13 +10,15 @@ Rodex → Codex → app workflow and its transformation boundaries.
 | Field | Current value |
 | --- | --- |
 | Development mode | `ALPHA` — internal Linux pre-release; breaking changes are allowed |
-| Rodex release | `0.14.0a2` |
-| SQLite catalog | generation `20`, `rodex-v20.sqlite3` |
-| tmux ownership | `rodex-isolated-tmux-v4` |
-| Runtime peer identity | `rodex-runtime-peer-v5` |
-| Machine envelope | generation `4` |
-| Agent trace | `rodex-agent-trace-v3` |
-| Statistics | `rodex-statistics-v8` |
+| Rodex release | `0.15.0a1` |
+| SQLite catalog | generation `21`, `rodex-v21.sqlite3` |
+| tmux ownership | `rodex-isolated-tmux-v5` |
+| Runtime peer identity | `rodex-runtime-peer-v6` |
+| Daemon / process receipts | `rodex-daemon-v3` / `rodex-process-receipt-v3` |
+| Observer frames | `rodex-agent-observer-v4` |
+| Machine envelope | generation `5` |
+| Agent trace | `rodex-agent-trace-v4` |
+| Statistics | `rodex-statistics-v9` |
 
 Only these generations are supported. Rodex does not migrate earlier catalogs,
 adopt earlier runtimes, or translate earlier wire formats. Codex owns its transcripts.
@@ -87,11 +89,13 @@ the runtime services and serialized analytics pipeline it created beneath a runt
 Different installed implementations coexist at SHA-256-named daemon endpoints, so a new
 Rodex can create sessions without taking ownership from still-running older sessions.
 Linux process monitors show
-that daemon as a version-derived task name such as `rodexd_v0_14a2` rather than a generic
+that daemon as a version-derived task name such as `rodexd_v0_15a1` rather than a generic
 Python process. Existing processes retain their loaded code. Daemon and runtime handshakes
-require the exact first-party implementation fingerprint, so changed code is rejected
-rather than silently mixed. Stop old runtimes and their daemon after installing or
-editing Rodex.
+require the exact code, dependency and shipped-configuration fingerprint. Before CLI
+composition, Rodex publishes a fixed local installation under the user state directory;
+all daemons, hooks and observers retain that installation’s Python path. Updating the
+checkout or its environment cannot replace those running helpers. See [installation
+and update boundaries](INSTALL.md#update-or-remove).
 
 Each reservation carries its absolute caller workspace into both native child processes;
 `PWD` alone is not a working directory. Native directory options remain unchanged.
@@ -113,7 +117,9 @@ atomic dispatch admission. It does not undo or interrupt an already admitted req
 
 ## Submitted prompt hooks
 
-The installation's `conf/hooks/user_prompt_substitutions.yaml` supplies global rules.
+The installation's `conf/hooks/user_prompt_substitutions.yaml` supplies frozen global
+defaults. Editing the checkout defaults creates a new installation on the next launch;
+live rule changes belong in the external user file.
 User rules live at `$XDG_STATE_HOME/rodex/conf/hooks/user_prompt_substitutions.yaml`,
 falling back to `~/.local/state/rodex/conf/hooks/user_prompt_substitutions.yaml`.
 Both are ordered YAML lists. The supplied global example turns `Hello` (any letter
@@ -182,7 +188,7 @@ rewrites preserving all eight metadata fields cannot be detected. Hooks are sync
 
 After installing changed code, start a fresh runtime with `rodex`, or exit the old Codex
 TUI before resuming its session. Detaching and reopening a live runtime retains loaded
-code. Subsequent YAML edits take effect on the next submission without a restart.
+code. Subsequent user-YAML edits take effect on the next submission without a restart.
 
 ## Commands
 
@@ -220,7 +226,7 @@ ASCII letter or digit. Reserved Codex command names are case-insensitive.
 
 Mutations resolve the selector again while holding the session transition lock, verify
 the durable runtime and connected peer, and send the exact turn guard. JSON responses
-use the generation-4 envelope. Supply `--dispatch` when the caller needs stable
+use the generation-5 envelope. Supply `--dispatch` when the caller needs stable
 correlation after lost output; an indeterminate mutation must be inspected rather than
 blindly retried.
 
@@ -268,6 +274,9 @@ The `/rodex` input menu selects a configured presentation policy:
 
 This local presentation does not start a turn or alter Codex execution, logs, or
 events. Approval and other unrecognized modal controls stay native.
+Both policies share native cursor/resize state and terminal-query handling. Cursor
+replies use the child's coordinates; capability and colour queries reach the actual
+terminal. Policy changes wait for complete terminal controls and synchronized updates.
 
 An exact `subAgentActivity(kind=started)` opens an input-disabled observer in the top
 third of the window. It stays open while tracked agent work is active, uses typed
@@ -277,15 +286,17 @@ App Server and authenticated trace identities, and closes when that work finishe
 
 | Resource | Path |
 | --- | --- |
-| Durable catalog | `$XDG_STATE_HOME/rodex/rodex-v20.sqlite3` |
-| Durable catalog fallback | `~/.local/state/rodex/rodex-v20.sqlite3` |
+| Durable catalog | `$XDG_STATE_HOME/rodex/rodex-v21.sqlite3` |
+| Durable catalog fallback | `~/.local/state/rodex/rodex-v21.sqlite3` |
 | User prompt overrides | `$XDG_STATE_HOME/rodex/conf/hooks/user_prompt_substitutions.yaml` |
 | User prompt overrides fallback | `~/.local/state/rodex/conf/hooks/user_prompt_substitutions.yaml` |
 | Runtime root | `$XDG_RUNTIME_DIR/rodex` |
 | Runtime fallback | `/tmp/rodex-<uid>` |
 | Optional runtime override | `RODEX_RUNTIME_DIR` |
+| Retained installations | `<Rodex state root>/implementations/<implementation-sha256>` |
+| Optional installation store | absolute `RODEX_INSTALLATIONS_ROOT` |
 | Implementation daemon socket | `<runtime-root>/<implementation-sha256>.sock` |
-| Per-runtime tmux socket | `<runtime-root>/tmux-v4-<runtime-id>.sock` |
+| Per-runtime tmux socket | `<runtime-root>/tmux-v5-<runtime-id>.sock` |
 | Per-runtime service sockets | `<runtime-root>/{app,proxy,events}-<runtime-id>.sock` |
 
 The catalog and runtime paths are private to the current Linux user. Rodex exposes no
@@ -320,3 +331,4 @@ from existing user sessions.
 - [Code concepts](docs/CODE_CONCEPTS.md)
 - [SQL schema](docs/SQL_SCHEMA.md)
 - [Shared-runtime root-cause evidence and verification](docs/SHARED_RUNTIME_ROOT_CAUSES.md)
+- [Terminal display diagnosis and fix verification](docs/TERMINAL_DISPLAY_TRACE_2026-09-20.md)

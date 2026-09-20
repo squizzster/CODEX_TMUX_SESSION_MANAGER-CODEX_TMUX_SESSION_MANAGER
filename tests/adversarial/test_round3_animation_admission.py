@@ -181,7 +181,7 @@ def test_animation_launch_owns_the_exact_pane_and_scheduling_for_every_stage(
     expected_schedule = ("-d", str(ANIMATION_OWNER_WATCHDOG_DELAY_SECONDS)) if mode == "watchdog-gate" else ()
     assert command[4:-1] == expected_schedule
     process_arguments = shlex.split(command[-1])
-    assert process_arguments[:4] == ["exec", "/venv/bin/python", "-m", "rodex.status_animation_admission"]
+    assert process_arguments[:5] == ["exec", "/venv/bin/python", "-I", "-m", "rodex.status_animation_admission"]
     assert process_arguments[process_arguments.index("--tmux-primary-pane-id") + 1] == capability.pane_target
     assert process_arguments[process_arguments.index("--owner-token") + 1] == "exact-owner-token"
     assert f"--{mode}" in process_arguments

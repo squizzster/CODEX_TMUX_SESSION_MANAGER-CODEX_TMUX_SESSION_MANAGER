@@ -22,13 +22,14 @@ from rodex.input_menu import INPUT_MENU_TARGET, InputMenuStage, InputMenuView
 from rodex.interaction_pipeline import (
     DeliveryStatus,
     InteractionOperation,
+    InteractionRequest,
     InteractionResult,
     InteractionTarget,
     SessionInteractionPipeline,
 )
-from rodex.presentation_policy import PresentationSnapshot, PresentationSurface
+from rodex.presentation_policy import PresentationSnapshot, PresentationSurface, SessionPresentationPipeline
 from rodex.protocol_input_text import PromptTextEdit
-from rodex.terminal_gateway import TerminalSessionGateway
+from rodex.terminal_gateway import QUEUE_LIMIT_BYTES, TerminalSessionGateway
 from rodex.terminal_surface import TerminalSurfaceRenderer
 
 ECHO_CHILD = """
@@ -145,6 +146,98 @@ def test_new_complete_surface_waits_for_inflight_terminal_bytes_and_coalesces(mo
     gateway._flush(19, gateway._display_queue)
     assert gateway._display_queue == second
     assert gateway._pending_surface_frame is None
+
+
+@pytest.mark.parametrize("write_size", [1, 7])
+def test_partial_writes_and_frame_replacement_preserve_controls_and_replies(monkeypatch, write_size):
+    gateway = TerminalSessionGateway.__new__(TerminalSessionGateway)
+    gateway._output_fd, gateway._master = 19, 20
+    gateway._display_queue, gateway._native_queue = bytearray(), bytearray()
+    gateway._pending_surface_frame = None
+    gateway._surface_renderer = TerminalSurfaceRenderer(80, 12)
+    gateway._surface_renderer.native_output(b"\x1b[9;1H\xe2\x80\xba prompt\x1b[9;9H")
+    gateway._queue_rendered_surface(
+        gateway._surface_renderer.present(PresentationSnapshot(1, "light", PresentationSurface.SEMANTIC, "FIRST", (), ()))
+    )
+    written = bytearray()
+
+    def partial_write(fd, data):
+        assert fd == gateway._output_fd
+        written.extend(data[:write_size])
+        return min(len(data), write_size)
+
+    monkeypatch.setattr(os, "write", partial_write)
+    # Leave a presentation frame partly written while several new frames and
+    # fragmented controls arrive. Controls cannot be replaced by newer frames.
+    gateway._flush(gateway._output_fd, gateway._display_queue)
+    for data in (b"\x1b[2;3H", b"\x1b]10;?", b"\x1b\\", b"\x1bP+q544e", b"\x1b\\", b"\x1b[c\x1b[6n", b"more text"):
+        result = gateway._deliver(
+            InteractionRequest("terminal", InteractionOperation.TERMINAL_OUTPUT, "test", payload=data)
+        )
+        assert result.accepted
+    while gateway._display_queue:
+        gateway._flush(gateway._output_fd, gateway._display_queue)
+    for control in (b"\x1b]10;?\x1b\\", b"\x1bP+q544e\x1b\\", b"\x1b[c"):
+        assert written.count(control) == 1
+    assert b"\x1b[6n" not in written
+    assert gateway._native_queue == b"\x1b[2;3R"
+
+
+@pytest.mark.parametrize("mode", ["dark", "light"])
+def test_real_child_cursor_reply_bypasses_keyboard_hooks(mode):
+    child = r"""
+import os, tty
+tty.setraw(0)
+os.write(1, '\x1b[9;1H\u203a prompt\x1b[2;3H\x1b[6n'.encode())
+reply = b''
+while not reply.endswith(b'R'):
+    reply += os.read(0, 1)
+assert reply == b'\x1b[2;3R', reply
+os.write(1, b'\x1b[2J\x1b[HREPLY=' + reply.hex().encode())
+"""
+    calls = []
+    pipeline = SessionInteractionPipeline(input_text_hook=lambda texts: calls.append(texts) or tuple(() for _ in texts))
+    presentation = SessionPresentationPipeline()
+    presentation.select_policy(mode)
+    with outer_terminal() as (master, slave):
+        gateway = TerminalSessionGateway(
+            [sys.executable, "-I", "-c", child],
+            env=dict(os.environ),
+            cwd=Path.cwd(),
+            pipeline=pipeline,
+            runtime_identity="test-cursor-query",
+            registrations=(),
+            confirm_native_prefix=lambda _: False,
+            presentation=presentation,
+            input_fd=slave,
+            output_fd=slave,
+        )
+        try:
+            read_until(gateway, master, b"REPLY=1b5b323b3352")
+            assert gateway.wait(timeout=2) == 0
+            assert calls == []
+            assert gateway._interceptor._candidate == ""
+            assert all(record.operation == InteractionOperation.TERMINAL_OUTPUT for record in pipeline.records)
+        finally:
+            gateway.close()
+
+
+def test_unread_child_replies_apply_backpressure_to_native_queries(monkeypatch):
+    gateway = TerminalSessionGateway.__new__(TerminalSessionGateway)
+    gateway._master, gateway._input_fd, gateway._output_fd = 19, 20, 21
+    gateway._wake_read = gateway._process_pidfd = -1
+    gateway._native_eof = False
+    gateway.process = None
+    gateway._display_queue = bytearray()
+    gateway._native_queue = bytearray(b"\x1b[0n" * (QUEUE_LIMIT_BYTES // 4))
+
+    def select_ready(reads, writes, errors, timeout):
+        assert reads == []  # A query-only child cannot grow the reply queue forever.
+        assert writes == [gateway._master]
+        return [], [], []
+
+    monkeypatch.setattr(select, "select", select_ready)
+    gateway._relay_once(allow_input=False, timeout=0)
 
 
 def test_real_child_terminal_pass_through_resize_signal_exit_and_outer_restoration():
@@ -565,4 +658,68 @@ def test_signal_before_child_claims_terminal_never_targets_host_group(monkeypatc
             gateway.forward_signal(signal.SIGINT)
             assert sent == [(gateway.process.pid, signal.SIGINT)]
         finally:
+            gateway.close()
+
+
+def test_resize_arriving_during_geometry_read_is_preserved_and_duplicate_is_inert():
+    actual = [80, 23]
+    entered, advanced = threading.Event(), threading.Event()
+    racing = False
+
+    def size():
+        observed = tuple(actual)
+        if racing:
+            entered.set()
+            assert advanced.wait(2)
+        return observed
+
+    with outer_terminal() as (master, slave):
+        gateway = TerminalSessionGateway(
+            [sys.executable, "-I", "-c", ECHO_CHILD],
+            env=dict(os.environ),
+            cwd=Path.cwd(),
+            pipeline=SessionInteractionPipeline(),
+            runtime_identity="resize-race",
+            registrations=(),
+            confirm_native_prefix=lambda _: False,
+            input_fd=slave,
+            output_fd=slave,
+            read_terminal_size=size,
+        )
+        worker = None
+        try:
+            read_until(gateway, master, b"READY")
+            actual[:] = [80, 15]
+            gateway.resize()
+            racing = True
+
+            def next_resize():
+                assert entered.wait(2)
+                actual[:] = [80, 7]
+                gateway.resize()
+                advanced.set()
+
+            worker = threading.Thread(target=next_resize)
+            worker.start()
+            gateway._apply_resize()
+            worker.join(timeout=2)
+            assert not worker.is_alive()
+            racing = False
+            with suppress(subprocess.TimeoutExpired):
+                gateway.wait(timeout=0.05)
+            os.write(master, b"?")
+            read_until(gateway, master, b"SIZE=7,80")
+
+            # A duplicate hint must not restore/erase an active display overlay.
+            def unexpected_resize(*_args):
+                pytest.fail("unchanged terminal dimensions repainted the surface")
+
+            gateway._surface_renderer.resize = unexpected_resize
+            gateway.resize()
+            with suppress(subprocess.TimeoutExpired):
+                gateway.wait(timeout=0.05)
+        finally:
+            advanced.set()
+            if worker:
+                worker.join(timeout=2)
             gateway.close()

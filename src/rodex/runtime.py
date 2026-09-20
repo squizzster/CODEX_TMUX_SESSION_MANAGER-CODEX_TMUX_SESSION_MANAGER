@@ -141,11 +141,7 @@ RODEX_SHARED_TMUX_COORDINATION_HOOKS: Final = (
     "client-detached",
     "client-session-changed",
     "client-resized",
-    "after-kill-pane",
-    "after-resize-pane",
-    "after-resize-window",
-    "after-select-layout",
-    "after-split-window",
+    "window-layout-changed",
 )
 Runner = Callable[..., subprocess.CompletedProcess[str]]
 Connector = Callable[..., Any]
@@ -2733,6 +2729,7 @@ def _run_runtime_service(
                     runtime_identity=str(config.runtime_id),
                     registrations=INPUT_INTERCEPTORS,
                     confirm_native_prefix=input_presentation.confirm_native_prefix,
+                    read_terminal_size=primary_pane.terminal_size,
                     presentation=presentation_pipeline,
                     input_fd=terminal_fd,
                     output_fd=terminal_fd,

@@ -74,6 +74,7 @@ def sharing_coordinator_hook_command(
     command = shlex.join(
         (
             tmux_format_literal(python_executable),
+            "-I",
             "-m",
             "rodex.tmux_sharing_coordinator",
             "--tmux-binary",

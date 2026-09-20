@@ -1,10 +1,161 @@
 # Terminal display synchronization trace — 2026-09-20
 
-Status: diagnosis only; no application fixes applied. Project mode remains ALPHA.
-Examined application commit: `5f221a14140b7f86e5ef2787035a542b90bfb8d4`.
+Status: source corrections implemented and release verification passed; see
+[final release verification](#final-release-verification).
+The original diagnosis below records the pre-fix application at
+`5f221a14140b7f86e5ef2787035a542b90bfb8d4`. Project mode remains ALPHA.
 Environment: Rodex `0.14.0a2`, installed Codex `0.155.1`, tmux `3.2a`, pyte `0.8.2`.
 
-## Conclusion
+## Live incident: mutable helper imports crossed a running installation
+
+During this work the user reproduced display-only corruption in the live
+`sepia-harrier` chat and supplied `/tmp/example_1.png` and its red-box annotation.
+The application remained usable and the layout later recovered. A subsequent tmux
+message named `rodex.tmux_sharing_coordinator` and ended with `returned 1`, although
+the command redirected both stdout and stderr. These are separate observations;
+they do not establish that one terminal byte sequence caused both symptoms.
+
+The live daemon was Rodex `0.14.0a2`, PID 3475475, started at 20:10:14 UTC. Its exact
+loaded first-party fingerprint was
+`853d2f4e41c86d6fedf7d2f2ced79f20fd56f487b4c28ac2857f7344ba8edb4a`.
+The affected runtime was `27bb7bcfb5f3f8c3`, server nonce
+`291e995c0f2c4040617fc6aade0f971b`, tmux session `$0`, primary pane `%0`.
+The screenshot clock showed 21:01; uploaded image modification times are not exact
+failure timestamps. App-server and daemon log files were empty. The Codex rollout
+and tmux messages retained activity, but no raw terminal stream at the failure instant.
+
+The source trace establishes this causal chain:
+
+1. The running daemon retained its old imported implementation and owned its
+   SHA-named endpoint. Its tmux hook command retained the mutable checkout's
+   `.venv/bin/python` path, rather than a retained installation.
+2. Editing that checkout changed what the next hook or observer subprocess imported.
+   A fresh helper computed the edited implementation fingerprint. Merely retaining
+   the daemon's already-loaded Python modules did not retain those later imports.
+3. Before a protocol bump, the fresh sharing helper addressed the edited SHA's
+   daemon socket. `_notify_runtime_resize` suppressed connection failures, so the
+   original daemon could silently miss the pane-size transition.
+4. After tmux protocol 4 was bumped to 5, a fresh helper rejected the still-running
+   protocol-4 server before enumerating its roster and returned 1. tmux itself
+   reports a failed `run-shell -b` job in the pane; shell stdout/stderr redirection
+   does not suppress tmux's own failure display.
+5. Observer launches used the same mutable interpreter/source boundary and could
+   likewise import a different runtime contract. Fixing only one hook command,
+   adding a repaint or redirecting more output would leave that boundary broken.
+
+The in-place edits during this investigation exposed this fault. The original
+checkout and virtual environment were restored to the exact loaded 0.14 fingerprint;
+the matching live hook then returned 0 and the outer/child PTY dimensions agreed.
+The user's database and live session were preserved. All new changes moved to the
+separate `CODEX_TMUX_SESSION_MANAGER_RELEASE_0_15` worktree.
+
+The unsolicited failure message is explained directly by the verified command,
+protocol mismatch and tmux job-reporting path. Missed resize delivery is a verified
+mechanism relevant to the red-box display drift; its exact historical contribution
+remains unresolved without the missing bytes/timing. In steady dark presentation
+without a local overlay, Rodex forwards native output: the internal pyte resize
+fault alone cannot explain corruption of that raw visible stream.
+
+The durable correction publishes a verified local installation before composing
+CLI/runtime services. Code, Python dependencies and shipped defaults have one
+fingerprint; each installation retains its own interpreter outside the replaceable
+bootstrap environment. Daemons, observers and every hook use it with `-I`.
+Concurrent publication is locked and atomic, changed copies are rejected, and
+external editable dependencies cannot silently escape the copy. User rule overrides
+remain external and reload on submission. No older wire/catalog adapter is added.
+
+`tests/test_installation.py` replaces a development checkout's release, protocol,
+catalog, dependency and defaults while retaining an earlier installation. It checks
+that both installations keep their own contents even after the bootstrap is removed.
+A separate regression sends the retained helper through a real tmux roster and the
+real daemon wire handler to a recording resize recipient after replacement. That
+callback is delivered; an explicitly misdirected newer identity is rejected without
+another callback. These tests isolate the protocol/lifecycle mechanism without a model.
+
+## Additional confirmed resize-delivery defect
+
+A negative-control fixture deliberately separated the daemon resize callback from
+its pane's foreground `SIGWINCH`. It revealed another source fault independent of
+version drift: tmux can run `after-resize-window` before applying the new dimensions
+to the outer kernel PTY. Rodex consumed that wake by copying the old `TIOCGWINSZ`
+value, cleared its pending flag, and received no later daemon wake when tmux finally
+updated the kernel size.
+
+A real tmux 3.2a hook probe measured a logical 80×15 pane while the hook's kernel
+query still returned 80×23. The kernel changed approximately 240 ms after the resize
+command returned. The early callback left the child at 23 rows even after the outer
+PTY reached 15; a second callback then corrected it. The original signal-driven
+fixture had received the later foreground `SIGWINCH`, hiding this daemon-specific
+ordering. Earlier live samples happened to receive enough later hooks to recover.
+
+The source fix supplies `TerminalSessionGateway` with the primary pane owner's
+capability-fenced `#{pane_width}|#{pane_height}` read. Those dimensions describe the
+tmux grid already rendering the output. The gateway uses them for initial sizing
+and every resize callback, updates the native model and sets the child PTY size
+through the same path. No arbitrary sleep or periodic size polling is needed.
+Non-tmux gateways retain their ordinary kernel-size provider. A failed capability
+read cannot substitute a stale size or authorize another pane.
+
+The real-PTY regression disables foreground `SIGWINCH` repair, confirms that a
+withheld callback leaves native coordinates stale, then delivers the callback and
+checks correct child size, cursor reply and relative Working-counter update. Both
+policies' real-terminal query/resize tests now use that independent callback route.
+This proves the lost-final-size mechanism and its correction; it still cannot
+reconstruct the exact bytes absent from the user's historical red-box frame.
+
+## Missing geometry events and the foreground bridge
+
+Real tmux tests also found that `next-layout`, `previous-layout` and natural observer
+process exit can resize the primary pane without any of the old command-specific
+hooks firing. Natural observer disappearance is especially relevant to the reported
+split/close sequence: `after-kill-pane` runs for that command, not every pane exit.
+The generic `window-layout-changed` hook fired for all five previously covered
+geometry commands as well as these missing routes, so it replaces those five hooks.
+Sharing-related client hooks remain.
+
+That generic event still does not cover every operation on tmux 3.2a. Swapping two
+unequal panes changed the primary from 15 rows to 7 without a layout event; this tmux
+version also rejects `after-swap-pane`. The prior terminal bridge handed its TTY to
+the daemon, then exec'd `cat` to hold the lifetime socket. That discarded the normal
+foreground `SIGWINCH` path which would have covered the swap and completed deferred
+kernel resizing.
+
+The bridge now retains a small blocking signal/lifetime loop. `SIGWINCH` wakes a pipe;
+normal control flow sends a current-contract resize hint to the same pinned daemon.
+The bridge never reads or writes the pane TTY. The gateway remains its only I/O owner
+and revalidates current tmux geometry. The bridge exits when the daemon closes the
+retained connection. Pending resize signals coalesce; there is no idle polling and
+no additional helper process for each signal.
+
+`tests/test_terminal_bridge.py` performs an actual kernel PTY resize after descriptor
+handoff, verifies the exact daemon wake request, proves typed bytes remain available
+to the handed-off descriptor, and checks bridge exit on lifetime-socket closure.
+`tests/test_tmux_resize_notifications.py` exercises split/close, both layout-navigation
+commands, resize-pane/window, select-layout and natural observer exit using the
+production hook set. With foreground notifications enabled it also verifies unequal
+pane swaps. Missing callbacks, stale kernel-size reads and mutable helper imports
+are independent contributors; the correction covers all three at their owners.
+
+## Concurrent and initial resize admission
+
+The dimension provider introduced a blocking, authoritative tmux read. Review then
+verified an existing flag-ordering race made visible by that read: a second callback
+could set `_resize_pending` during the first read, only for `_apply_resize` to clear
+it afterward. A real PTY probe left the child at 15 rows while the newest geometry
+was 7, even after draining the wake pipe. The gateway now claims the pending wake
+before reading; a callback during the read or application remains pending for the
+next pass. A permanent concurrent-provider regression verifies the child reaches 7.
+Identical dimensions produce no renderer operation, so duplicate client/layout/kernel
+hints cannot erase an active overlay awaiting its next native update.
+
+There was also a startup subscription gap: the bridge could submit a hint after the
+gateway's first size read but before the daemon registered its resize callback.
+The daemon now registers controls first, then schedules one reconciliation. The
+initial authoritative read and this subscribe-then-reconcile step cover both sides
+of the handoff without depending on another user action. Daemon tests assert that
+initial callback occurs before explicit subsequent wake requests.
+
+## Original trace conclusion
 
 The reported intermittent Working-counter overlap was **not reproduced** with real
 Codex in this investigation. The user also could not reproduce it during the
@@ -111,7 +262,7 @@ to the shared terminal boundary before presentation selection. Cursor replies mu
 refer to the native terminal state, not to the visually rearranged light frame.
 Verify a real child receives a correct reply in both modes and across a mode change.
 
-## Resize notifications: observed behavior, not a third confirmed defect
+## Original resize-notification observations
 
 The normal observer route was traced through `AgentObserverCoordinator`,
 `ObserverPaneController`, `TmuxPaneController`, the installed tmux hooks,
@@ -189,3 +340,131 @@ While the local evidence directory exists, rerun the no-model defect checks with
 ```bash
 .venv/bin/python -m pytest -q .tmp.tQKHAE/test_confirmed_display_findings.py
 ```
+
+## Fix verification
+
+The following supersedes the original diagnosis's "not implemented" status.
+The original intermittent report remains unproven; these corrections address the
+independently reproduced defects and related failures found during their review.
+
+### Shared terminal state
+
+[NativeTerminalScreen](../src/rodex/native_terminal_screen.py) replaces direct
+`pyte.Screen.resize()` delegation. Height reduction removes rows below the cursor
+first, then scrolls only the remaining reduction. Expansion restores eligible
+native history. Width changes reflow soft-wrapped logical lines, preserving styles,
+wide/combining characters and cursor position. History is bounded to 50,000 rows;
+native screen/history clears end restoration eligibility. The visible buffer and
+cursor are updated together before subsequent relative terminal operations.
+
+The model remains shared by light, dark and local menus. It never receives Rodex's
+own display frames. The paintability contract also checks the cursor's row. A tiny
+semantic viewport with no transcript space omits the transcript instead of letting
+Python's `[-0:]` slice render every item and scroll the composer.
+
+Expectations in [resize tests](../tests/test_native_terminal_resize.py) come from
+real tmux captures and cursor reports, including shrink/expand, relative Working
+counter updates, simultaneous height/width changes, Unicode and native clears.
+Independent real-tmux probes additionally checked sparse cursor positions, regional
+scrolling, wrapped-line erasure, tabstops and saved cursor restoration. Those agreed
+with tmux. A one-column viewport containing a wide glyph remains a degenerate
+difference: tmux itself exposes an out-of-bounds cursor there; widening recovered
+agreement. These checks do not claim universal terminal-emulator equivalence.
+
+### Shared terminal protocol
+
+[NativeTerminalProjection](../src/rodex/native_terminal_projection.py) frames native
+output before presentation selection. Cursor/status queries produce one local reply
+using the native state at the query's exact position in the byte stream. This includes
+origin-relative coordinates, delayed autowrap, private CPR and zero-padded numeric
+parameters. Those queries are consumed in both modes, preventing a second reply
+from the semantic display's different cursor position.
+
+Device capabilities and opaque OSC/DCS controls continue to the real terminal in
+both modes; pyte's default VT102 reply does not substitute for actual capabilities.
+The gateway queues locally generated replies directly to the child PTY, outside
+keyboard interception and prompt hooks, with backpressure when the child cannot
+consume them. Actual-terminal replies retain the existing input decoder's opaque
+terminal-reply route.
+
+The renderer returns ordered stream bytes, a replaceable frame and child replies
+as separate effects. The gateway coalesces only frames. Policy changes wait until
+UTF-8, escape/control strings and synchronized-update blocks are complete. This
+also fixes dropping an OSC terminator or synchronized-update closer during a mode
+change. Grouped and zero-padded `2026` parameters follow the same boundary logic.
+
+[Protocol tests](../tests/test_native_terminal_protocol.py) exercise both modes and
+every byte split for queries, opaque controls, UTF-8 and mode transitions. Real child
+PTYs verify received cursor/status/capability replies across resize and mode changes.
+[Gateway tests](../tests/test_terminal_gateway.py) cover partial writes, pending-frame
+replacement, reply backpressure and keyboard-hook isolation. Independent review
+also passed 90 queue/handoff combinations with one-byte writes.
+
+### Validation result
+
+The user subsequently supplied `example_1.png` and `example_1_red_box.png`, confirming
+the original symptom: stray `52`, Working/composer rows and tool-interaction text
+were visibly mixed. The user then reported recovery; a read-only capture of the
+same `sepia-harrier` pane showed the ordinary layout again. That pane's daemon
+started at 20:10:14 UTC, before these fixes, and `/proc/<pid>/comm` identified
+`rodexd_v0_14a2`. This is user-observed evidence in the older implementation, not a
+reproduction in the corrected runtime. No byte trace was captured at the failure
+instant, so the causal link to either corrected defect remains unproven.
+
+Managed live checks of the terminal fix used real Codex, three observer-controller
+split/close cycles and four client resizes per policy. Dark recorded 878 native
+reads and 14 resize applications; light recorded 725 reads and 13 applications
+(including initial/duplicate resize hints). Both completed the bounded model turn,
+with zero invalid cursor, buffer-row or buffer-column states. Light returned to
+dark and accepted/cleared a new draft. Some early post-split captures were briefly
+blank and recovered; asynchronous outer/child size intervals remain observable.
+These instrumented checks do not establish absence of every display race. The
+fixture's shutdown logged incomplete analytics retirement; its runtime processes,
+copied authentication/configuration and generated Codex temporary trees were removed.
+
+At the user's request the release is `0.15.0a1`, with all Rodex compatibility
+generations advanced: SQLite 21, tmux 5, runtime peer 6, daemon 3, process receipts 3,
+observer 4, machine envelopes 5, agent trace 4 and statistics 9. No migration or
+compatibility adapter was added. Dependency resolution also updated coverage,
+ruff and wcwidth within the declared requirements.
+
+### Final release verification
+
+- `uv run ruff format --check .`: passed, 220 Python files.
+- `uv run ruff check .`: passed.
+- `uv run pytest --require-live-startup --cov --cov-report=term-missing -ra`:
+  **2,231 passed, 3 skipped, 84.99% coverage**, in 247.17 seconds.
+- Two skips are explicitly opt-in App Server model/user-input integrations. The third
+  is an exact Codex fixture-version check: installed Codex is 0.155.1. Required managed
+  startup and all three real prompt-handoff cases passed. One existing Python warning
+  concerns the writer-handoff test's use of `forkpty` in a threaded test process.
+- `uv build`: source distribution and wheel built successfully.
+- Built wheel installed in a clean Python 3.12.13 environment: **2 live startup tests
+  passed** in 62.34 seconds, including native typing, light/dark selection, detach,
+  reopen, runtime reuse and saved-thread adoption, with isolated SQL/tmux/Codex state.
+  That startup gate submits no model prompt. Temporary verification environments and
+  copied authentication/configuration were removed after their processes stopped.
+
+The first full run exposed four stale argv assertions missing the new helper `-I`
+flag and a live prompt fixture that started typing after the banner, before requiring
+its composer. The assertions now check the isolated helper invocation and the fixture
+waits for the actual editor. Affected tests and the entire release gate subsequently
+passed; no application assertion was weakened.
+
+Permanent regressions cover native resize/reflow against real tmux, exact terminal
+replies across policies and byte splits, stream/frame queue ordering, geometry hooks,
+foreground SIGWINCH forwarding, concurrent and startup resize admission, and retained
+helper/code/dependency/default isolation across an update. The historical red-box
+frame remains unattributed at byte level; these are proved source mechanisms and
+regressions, not a claim to have reconstructed missing historical evidence.
+
+Fresh 0.15 launches enter the fixed installation. Pre-0.15 live processes still require
+their original checkout/environment to remain intact; this fix cannot retrofit them.
+The user's original 0.14 checkout remains clean at its recorded fingerprint, with its
+live database and sessions preserved. The release work is isolated on
+`fix/terminal-state-release` in `CODEX_TMUX_SESSION_MANAGER_RELEASE_0_15`.
+
+Additional local evidence is in the release worktree's ignored `.tmp.HJk9mg/`
+(validation logs) and `.tmp.resize-review.KLk4PE/` (tmux timing/event/race probes).
+Earlier screenshot and timeline evidence remains in the original checkout's ignored
+`.tmp.B69GNT/`. Temporary evidence may expire; the tests and this report are versioned.

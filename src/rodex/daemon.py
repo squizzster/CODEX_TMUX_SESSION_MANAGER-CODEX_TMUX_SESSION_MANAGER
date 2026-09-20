@@ -379,6 +379,10 @@ class DaemonRuntimeManager:
             stopped = context.stop.is_set()
         if stopped:
             supervisor_wake()
+        else:
+            # Subscribe first, then reconcile: hooks during initial gateway
+            # construction could arrive before these callbacks existed.
+            terminal_resize()
 
     def _exact_context(self, operation_id: str, runtime_id: str) -> _ManagedRuntime:
         _require_operation_id(operation_id)

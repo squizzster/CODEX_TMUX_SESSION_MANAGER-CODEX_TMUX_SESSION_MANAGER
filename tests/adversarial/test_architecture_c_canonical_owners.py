@@ -64,7 +64,7 @@ def _capability(socket_path: Path) -> TmuxSessionCapability:
 
 def _activity(*, item_id: str, target: uuid.UUID) -> dict[str, object]:
     return {
-        "schema": "rodex-agent-observer-v3",
+        "schema": "rodex-agent-observer-v4",
         "kind": "app_server_subagent_activity",
         "method": "item/started",
         "thread_id": str(ROOT_THREAD_ID),

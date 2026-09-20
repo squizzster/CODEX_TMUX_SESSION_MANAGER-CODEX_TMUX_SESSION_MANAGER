@@ -118,8 +118,8 @@ def test_event_tap_does_not_publish_ready_to_an_unverified_subscriber(tmp_path: 
 @pytest.mark.parametrize(
     ("header", "value"),
     [
-        ("X-Rodex-Peer-Contract", "rodex-runtime-peer-v4"),
-        ("X-Rodex-Implementation-Id", "0.14.0a2+sha256.different-loaded-code"),
+        ("X-Rodex-Peer-Contract", "rodex-runtime-peer-v5"),
+        ("X-Rodex-Implementation-Id", "0.15.0a1+sha256.different-loaded-code"),
     ],
 )
 def test_event_tap_rejects_prior_contract_or_different_loaded_implementation(

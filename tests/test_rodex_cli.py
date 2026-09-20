@@ -523,12 +523,12 @@ def test_version_reports_compatibility_without_codex_tmux_or_database(
 
     output = capsys.readouterr()
     assert output.err == ""
-    assert output.out.startswith("Rodex compatibility:\n  release: 0.14.0a2\n")
-    assert "  implementation: 0.14.0a2+sha256." in output.out
-    assert "  daemon protocol: rodex-daemon-v2\n" in output.out
+    assert output.out.startswith("Rodex compatibility:\n  release: 0.15.0a1\n")
+    assert "  implementation: 0.15.0a1+sha256." in output.out
+    assert "  daemon protocol: rodex-daemon-v3\n" in output.out
     assert f"  daemon socket: /tmp/rodex-{os.getuid()}/" in output.out
     assert ".sock\n" in output.out
-    assert "  SQLite catalog: generation 20 (rodex-v20.sqlite3)\n" in output.out
+    assert "  SQLite catalog: generation 21 (rodex-v21.sqlite3)\n" in output.out
     assert not database.exists()
 
 
@@ -1228,7 +1228,7 @@ def test_machine_start_reads_stdin_and_emits_the_versioned_identity_envelope(
     assert control.started == [(launcher.control, "run focused tests\n")]
     assert control.started_dispatch_ids == ["controller:dispatch:42"]
     payload = json.loads(capsys.readouterr().out)
-    assert payload["schema_version"] == 4
+    assert payload["schema_version"] == 5
     assert payload["operation"] == "turn.start"
     assert payload["ok"] is True
     assert payload["runtime"] == {
@@ -1713,7 +1713,7 @@ def test_machine_inspect_emits_only_the_current_runtime_and_app_server_contract(
 
     assert status == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["schema_version"] == 4
+    assert payload["schema_version"] == 5
     assert payload["operation"] == "thread.inspect"
     assert payload["ok"] is True
     assert payload["runtime"] == {
@@ -3828,7 +3828,7 @@ def test_alias_replacement_without_force_is_reported_on_stderr(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     state_home = tmp_path / "state"
-    database = state_home / "rodex" / "rodex-v20.sqlite3"
+    database = state_home / "rodex" / "rodex-v21.sqlite3"
     monkeypatch.setattr(
         "cool_name.functions.coolname.generate_slug",
         lambda _word_count: "black-sawfly",
@@ -3879,7 +3879,7 @@ def test_empty_alias_is_a_concise_stderr_error(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     state_home = tmp_path / "state"
-    database = state_home / "rodex" / "rodex-v20.sqlite3"
+    database = state_home / "rodex" / "rodex-v21.sqlite3"
     monkeypatch.setattr("cool_name.functions.coolname.generate_slug", lambda _word_count: "safe-name")
     monkeypatch.setattr("rodex_registry.lifecycle.current_rodex_sessions_user_identity", lambda: DNA)
     monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)

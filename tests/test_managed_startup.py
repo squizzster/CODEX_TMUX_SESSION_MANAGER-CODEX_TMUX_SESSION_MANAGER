@@ -397,7 +397,7 @@ def test_installed_rodex_starts_reuses_and_adopts_sessions(
             )
             assert inspected.returncode == 0, inspected.stdout + inspected.stderr
             envelope = json.loads(inspected.stdout)
-            assert envelope["schema_version"] == 4
+            assert envelope["schema_version"] == 5
             assert envelope["ok"] is True
             assert envelope["data"]["thread"]["status"] == "idle"
             assert envelope["data"]["thread"]["cwd"] == str(expected_cwd or workspace)

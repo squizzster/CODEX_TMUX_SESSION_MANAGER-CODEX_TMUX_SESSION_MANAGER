@@ -304,6 +304,10 @@ uv build
 Coverage must remain at least 70%. The required live-startup gate uses installed,
 authenticated Codex plus real isolated tmux, SQL, and Codex history paths; missing
 prerequisites fail that gate.
+The prompt-handoff cases submit small real prompts to verify matching terminal,
+App Server, and native-history text in ordinary and Ultra modes, including a wrapped
+multiline replacement. They can use model quota; all runtimes and history are isolated
+from existing user sessions.
 
 ## Documentation
 

@@ -87,8 +87,8 @@ keeps the canonical draft unsubmitted and unreceipted; Enter retries confirmatio
 without another hook application. Nonediting events retain preparation. After a
 potentially editing key, unchanged canonical text still consumes the same preparation;
 a changed draft re-enters normal admission, with protocol fallback for untracked edits.
-A text rule cannot inject terminal controls, blank out
-the whole submission, or acquire native slash/shell-command authority.
+A text rule cannot inject terminal controls, blank out the whole submission, or
+acquire native slash/shell-command authority.
 
 ## Other entry points and limits
 
@@ -105,8 +105,7 @@ the whole submission, or acquire native slash/shell-command authority.
 Unknown layouts, clipped/large collapsed pastes, and untracked editor operations are
 not claimed as verified editor state. After a Rodex rewrite, Enter stays held unless
 canonical output confirms or further editing relinquishes that prepared submission.
-There is no universal
-replacement of every tmux operation with PTY bytes: tmux still owns pane lifecycle,
+There is no universal replacement of every tmux operation with PTY bytes: tmux still owns pane lifecycle,
 capability-fenced reads, resize, attachment, status and its reserved keys.
 
 ## Root cause and regression evidence
@@ -127,3 +126,13 @@ Enter or receipt admission. `test_prompt_handoff_live.py` exercises installed Co
 0.155.1 and real tmux with isolated state: ordinary and Ultra greetings plus a wrapped
 multiline rewrite, checking tmux history, App Server user-message events and Codex
 input history. Its non-idempotent rule exposes accidental double transformation.
+
+Manual acceptance on 2026-09-20 also confirmed both visible endpoints: typing `Hello`
+produced `Hello!` in tmux history and in the assistant's received input. Submitting the
+configured `push` shorthand during an active assistant turn delivered the full workflow
+expansion, and the user confirmed that tmux displayed the same text. The expansion test
+did not perform Git operations; publication was authorized separately afterward.
+
+These are observed acceptance cases, not a claim that every native editor layout or
+editing sequence can be verified. After code changes, a new `rodex` session loads the
+new implementation; reattaching an existing runtime retains its loaded code.

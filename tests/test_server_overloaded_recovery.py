@@ -15,11 +15,14 @@ from rodex.interaction_pipeline import (
     InteractionTarget,
     SessionInteractionPipeline,
 )
+from rodex.protocol_proxy import CodexProtocolProxy, ToolCallCounter
+from rodex.runtime_peer import RuntimePeerIdentity
 from rodex.server_overloaded_recovery import (
     SERVER_OVERLOADED_CONTINUATION_TEXT,
     SERVER_OVERLOADED_RECOVERY_SOURCE,
     ServerOverloadedRecoveryController,
 )
+from rodex_registry import RodexRuntimeId
 
 ROOT_THREAD = "01a0b3b6-4645-7fa1-841d-9e579eeded0e"
 
@@ -158,6 +161,58 @@ def test_server_overloaded_starts_continue_through_the_shared_pipeline_after_ini
         assert "dispatchStarted" in harness.logs[-1]
     finally:
         harness.close()
+
+
+@pytest.mark.evolutionary_regression
+def test_child_thread_start_does_not_replace_main_binding_before_overload_recovery(tmp_path) -> None:
+    """A spawned child must not make the registered root recovery look stale."""
+    pipeline = SessionInteractionPipeline()
+    model_requests: list[InteractionRequest] = []
+    deferred_calls: list[FakeDeferredCall] = []
+    peer = RuntimePeerIdentity(RodexRuntimeId.parse("a" * 16), "b" * 32)
+
+    def deliver_model_request(request: InteractionRequest) -> InteractionResult:
+        model_requests.append(request)
+        return InteractionResult(DeliveryStatus.MODEL_TURN_STARTED, value={"turn_id": "continued-turn"})
+
+    def defer(delay: float, callback) -> FakeDeferredCall:
+        deferred = FakeDeferredCall(delay, callback)
+        deferred_calls.append(deferred)
+        return deferred
+
+    proxy = CodexProtocolProxy(
+        tmp_path / "proxy.sock",
+        tmp_path / "app.sock",
+        ToolCallCounter(lambda _count: None),
+        interaction_pipeline=pipeline,
+        peer_identity=peer,
+        app_server_process=object(),
+        native_tui_process=object(),
+        model_message_sender=deliver_model_request,
+    )
+    controller = ServerOverloadedRecoveryController(
+        pipeline,
+        deferred_call_factory=defer,
+    )
+    primary_connection = object()
+    assert proxy._claim_primary_connection(primary_connection)
+    try:
+        root_started = thread_started()
+        proxy._observe_primary_thread(root_started)
+        controller.observe_protocol_event(root_started)
+
+        child_started = thread_started("child-thread")
+        proxy._observe_primary_thread(child_started)
+        controller.observe_protocol_event(child_started)
+
+        controller.observe_protocol_event(server_overloaded("failed-root-turn"))
+        deferred_calls[-1].fire()
+
+        assert len(model_requests) == 1
+        assert model_requests[0].expected_thread_id == ROOT_THREAD
+    finally:
+        controller.close()
+        proxy._release_primary_connection(primary_connection)
 
 
 @pytest.mark.parametrize("cancel", ["input", "disconnect", "close"])

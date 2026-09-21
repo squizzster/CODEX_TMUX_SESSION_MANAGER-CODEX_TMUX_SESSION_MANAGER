@@ -1089,7 +1089,10 @@ class CodexProtocolProxy:
         thread_id = _started_thread_id(params) if isinstance(params, dict) else None
         if thread_id is not None:
             with self._connection_lock:
-                self._primary_thread_id = thread_id
+                # One TUI connection owns one main thread, while App Server also
+                # reports child-thread starts on that same event stream.
+                if self._primary_thread_id is None:
+                    self._primary_thread_id = thread_id
 
     def _claim_primary_connection(self, tui_connection: Any) -> bool:
         with self._primary_lifecycle_lock, self._connection_lock:

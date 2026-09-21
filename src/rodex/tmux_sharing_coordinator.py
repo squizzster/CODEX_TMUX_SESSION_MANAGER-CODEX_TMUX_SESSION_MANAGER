@@ -19,6 +19,12 @@ from pathlib import Path
 from typing import Final
 
 from .daemon_client import RODEX_RUNTIME_WAKE_TERMINAL_RESIZE, RodexDaemonClient, RodexDaemonError
+from .installation import RodexInstallationError, retained_installation_interpreter
+from .legacy_runtime_compat import (
+    LEGACY_MUTABLE_TMUX_PROTOCOL,
+    LegacyRuntimeCompatibilityError,
+    notify_legacy_runtime_resize,
+)
 from .status_animation_admission import status_animation_admission_command
 from .tmux_executor import SyncTmuxExecutor, SyncTmuxRunner
 from .tmux_session_capability import (
@@ -37,10 +43,24 @@ from .tmux_session_capability import (
     combine_tmux_if_shell_conditions,
     parse_tmux_session_capability,
     registered_primary_pane_if_shell_condition,
+    server_identity_if_shell_condition,
     tmux_format_literal,
 )
 
 RODEX_SHARING_ATTACHED_COUNT_OPTION: Final = "@rodex_sharing_attached_count"
+RODEX_SHARED_TMUX_COORDINATOR_COMMAND_OPTION: Final = "@rodex_shared_tmux_coordinator_command"
+RODEX_SHARED_TMUX_HOOK_INDEX: Final = 731
+RODEX_LEGACY_COORDINATION_HOOKS: Final = (
+    "client-attached",
+    "client-detached",
+    "client-session-changed",
+    "client-resized",
+    "after-kill-pane",
+    "after-resize-pane",
+    "after-resize-window",
+    "after-select-layout",
+    "after-split-window",
+)
 _SESSION_RECORD_FORMAT: Final = "\t".join(
     (
         "#{session_id}",
@@ -69,12 +89,15 @@ def sharing_coordinator_hook_command(
     tmux_binary: str,
     tmux_server_socket_path: Path,
     tmux_server_id: str,
+    *,
+    isolated: bool = True,
 ) -> str:
     """Build a global hook that wakes discovery without conveying authority."""
-    command = shlex.join(
+    arguments = [tmux_format_literal(python_executable)]
+    if isolated:
+        arguments.append("-I")
+    arguments.extend(
         (
-            tmux_format_literal(python_executable),
-            "-I",
             "-m",
             "rodex.tmux_sharing_coordinator",
             "--tmux-binary",
@@ -85,6 +108,7 @@ def sharing_coordinator_hook_command(
             tmux_server_id,
         )
     )
+    command = shlex.join(arguments)
     return shlex.join(("run-shell", "-b", f"exec {command} >/dev/null 2>&1"))
 
 
@@ -103,7 +127,7 @@ def reconcile_sharing_state(
         tmux_server_socket_path,
         runner=runner,
     )
-    protocol = executor.run(
+    server_identity = executor.run(
         (
             "show-options",
             "-s",
@@ -116,8 +140,13 @@ def reconcile_sharing_state(
             RODEX_SHARED_TMUX_SERVER_ID_OPTION,
         )
     )
-    if protocol.returncode != 0 or protocol.stdout.strip() != f"{RODEX_SHARED_TMUX_PROTOCOL}\n{expected_server_id}":
+    identity_fields = server_identity.stdout.splitlines()
+    if server_identity.returncode != 0 or identity_fields not in (
+        [RODEX_SHARED_TMUX_PROTOCOL, expected_server_id],
+        [LEGACY_MUTABLE_TMUX_PROTOCOL, expected_server_id],
+    ):
         return 1
+    tmux_protocol = identity_fields[0]
     listed = executor.run(("list-sessions", "-F", _SESSION_RECORD_FORMAT))
     if listed.returncode != 0:
         return listed.returncode
@@ -145,18 +174,178 @@ def reconcile_sharing_state(
                 tmux_server_socket_path.parent,
                 python_executable,
                 runtime_id,
+                tmux_protocol,
             )
 
     for state in states:
         runtime_notifier(str(state.capability.runtime_id))
-        reconciled = _reconcile_one(executor, python_executable, tmux_binary, state)
+        reconciled = _reconcile_one(executor, python_executable, tmux_binary, tmux_protocol, state)
         if reconciled != 0:
             return reconciled
     return 0
 
 
-def _notify_runtime_resize(runtime_root: Path, python_executable: str, runtime_id: str) -> None:
+def retain_legacy_coordinator(
+    tmux_binary: str,
+    tmux_server_socket_path: Path,
+    expected_server_id: str,
+    *,
+    python_executable: str = sys.executable,
+    runner: SyncTmuxRunner = subprocess.run,
+    installation_resolver: Callable[[], Path] = retained_installation_interpreter,
+) -> int:
+    """Move one redirected tmux-v4 hook onto this bridge's immutable installation."""
+    executor = SyncTmuxExecutor(tmux_binary, tmux_server_socket_path, runner=runner)
+    server_identity = executor.run(
+        (
+            "show-options",
+            "-s",
+            "-v",
+            RODEX_SHARED_TMUX_PROTOCOL_OPTION,
+            ";",
+            "show-options",
+            "-s",
+            "-v",
+            RODEX_SHARED_TMUX_SERVER_ID_OPTION,
+        )
+    )
+    identity_fields = server_identity.stdout.splitlines()
+    if server_identity.returncode != 0 or len(identity_fields) != 2:
+        return 1
+    if identity_fields != [LEGACY_MUTABLE_TMUX_PROTOCOL, expected_server_id]:
+        return 0 if identity_fields == [RODEX_SHARED_TMUX_PROTOCOL, expected_server_id] else 1
+    hook_names = tuple(f"{event}[{RODEX_SHARED_TMUX_HOOK_INDEX}]" for event in RODEX_LEGACY_COORDINATION_HOOKS)
+    observed_owner = executor.run(
+        (
+            "show-options",
+            "-s",
+            "-v",
+            RODEX_SHARED_TMUX_COORDINATOR_COMMAND_OPTION,
+            *(argument for hook_name in hook_names for argument in (";", "show-hooks", "-g", hook_name)),
+        )
+    )
+    owner_lines = observed_owner.stdout.splitlines()
+    if observed_owner.returncode != 0 or len(owner_lines) != len(hook_names) + 1:
+        return 1
+    installed_command = owner_lines[0]
+    for hook_name, line in zip(hook_names, owner_lines[1:], strict=True):
+        observed_name, separator, observed_command = line.partition(" ")
+        if (
+            observed_name != hook_name
+            or not separator
+            or not _shell_commands_are_equivalent(observed_command, installed_command)
+        ):
+            return 1
+    current_process_command = sharing_coordinator_hook_command(
+        python_executable,
+        tmux_binary,
+        tmux_server_socket_path,
+        expected_server_id,
+    )
+    current_process_unisolated_command = sharing_coordinator_hook_command(
+        python_executable,
+        tmux_binary,
+        tmux_server_socket_path,
+        expected_server_id,
+        isolated=False,
+    )
+    if installed_command not in {current_process_command, current_process_unisolated_command}:
+        return 1
+    retained_python = installation_resolver()
+    retained_command = sharing_coordinator_hook_command(
+        str(retained_python),
+        tmux_binary,
+        tmux_server_socket_path,
+        expected_server_id,
+    )
+    if installed_command == retained_command:
+        return 0
+    actions: tuple[tuple[str, ...], ...] = (
+        *(
+            (
+                "set-option",
+                "-g",
+                hook_name,
+                retained_command,
+            )
+            for hook_name in hook_names
+        ),
+        (
+            "set-option",
+            "-s",
+            RODEX_SHARED_TMUX_COORDINATOR_COMMAND_OPTION,
+            retained_command,
+        ),
+    )
+    server_condition = server_identity_if_shell_condition(
+        expected_server_id,
+        tmux_protocol=LEGACY_MUTABLE_TMUX_PROTOCOL,
+    )
+    mutation_condition = combine_tmux_if_shell_conditions(
+        server_condition,
+        f"#{{==:#{{{RODEX_SHARED_TMUX_COORDINATOR_COMMAND_OPTION}}},#{{l:{tmux_format_literal(installed_command)}}}}}",
+    )
+    result = executor.run(
+        (
+            "if-shell",
+            "-F",
+            mutation_condition,
+            _command_sequence(*actions),
+            shlex.join(("run-shell", "false")),
+        )
+    )
+    if result.returncode != 0:
+        return result.returncode
+    verification = executor.run(
+        (
+            "if-shell",
+            "-F",
+            combine_tmux_if_shell_conditions(
+                server_condition,
+                f"#{{==:#{{{RODEX_SHARED_TMUX_COORDINATOR_COMMAND_OPTION}}},"
+                f"#{{l:{tmux_format_literal(retained_command)}}}}}",
+            ),
+            _command_sequence(
+                (
+                    "show-options",
+                    "-s",
+                    "-v",
+                    RODEX_SHARED_TMUX_COORDINATOR_COMMAND_OPTION,
+                ),
+                *(("show-hooks", "-g", hook_name) for hook_name in hook_names),
+            ),
+            shlex.join(("run-shell", "false")),
+        )
+    )
+    verified_lines = verification.stdout.splitlines()
+    if (
+        verification.returncode != 0
+        or len(verified_lines) != len(hook_names) + 1
+        or not _shell_commands_are_equivalent(verified_lines[0], retained_command)
+    ):
+        return 1
+    for hook_name, line in zip(hook_names, verified_lines[1:], strict=True):
+        observed_name, separator, observed_command = line.partition(" ")
+        if (
+            observed_name != hook_name
+            or not separator
+            or not _shell_commands_are_equivalent(observed_command, retained_command)
+        ):
+            return 1
+    return 0
+
+
+def _notify_runtime_resize(
+    runtime_root: Path,
+    python_executable: str,
+    runtime_id: str,
+    tmux_protocol: str,
+) -> None:
     """Resize is a hint; exact terminal dimensions remain daemon-validated."""
+    if tmux_protocol == LEGACY_MUTABLE_TMUX_PROTOCOL:
+        with suppress(LegacyRuntimeCompatibilityError):
+            notify_legacy_runtime_resize(runtime_root, runtime_id)
+        return
     with suppress(OSError, TimeoutError, RodexDaemonError):
         RodexDaemonClient(runtime_root, python_executable).notify_runtime(
             runtime_id,
@@ -230,6 +419,7 @@ def _reconcile_one(
     executor: SyncTmuxExecutor,
     python_executable: str,
     tmux_binary: str,
+    tmux_protocol: str,
     state: _SharingState,
 ) -> int:
     capability = state.capability
@@ -250,7 +440,7 @@ def _reconcile_one(
     else:
         previous_count_condition = f"#{{==:#{{{RODEX_SHARING_ATTACHED_COUNT_OPTION}}},{state.previous_attached_count}}}"
         event = "attached" if state.attached_count > state.previous_attached_count else "detached"
-        action = _command_sequence(
+        commands: tuple[tuple[str, ...] | str, ...] = (
             (
                 "set-option",
                 "-t",
@@ -258,13 +448,17 @@ def _reconcile_one(
                 RODEX_SHARING_ATTACHED_COUNT_OPTION,
                 str(state.attached_count),
             ),
-            status_animation_admission_command(
-                python_executable,
-                tmux_binary,
-                capability,
-                event,
-            ),
         )
+        if tmux_protocol == RODEX_SHARED_TMUX_PROTOCOL:
+            commands += (
+                status_animation_admission_command(
+                    python_executable,
+                    tmux_binary,
+                    capability,
+                    event,
+                ),
+            )
+        action = _command_sequence(*commands)
     return executor.run(
         (
             "if-shell",
@@ -272,7 +466,7 @@ def _reconcile_one(
             capability.pane_target,
             "-F",
             combine_tmux_if_shell_conditions(
-                registered_primary_pane_if_shell_condition(capability),
+                registered_primary_pane_if_shell_condition(capability, tmux_protocol=tmux_protocol),
                 current_count_condition,
                 previous_count_condition,
             ),
@@ -285,6 +479,16 @@ def _command_sequence(*commands: tuple[str, ...] | str) -> str:
     return " ; ".join(command if isinstance(command, str) else shlex.join(command) for command in commands)
 
 
+def _shell_commands_are_equivalent(left: str, right: str) -> bool:
+    """Compare tmux-normalized shell commands without trusting textual quoting."""
+    if not left or not right:
+        return False
+    try:
+        return shlex.split(left) == shlex.split(right)
+    except ValueError:
+        return False
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="python -m rodex.tmux_sharing_coordinator")
     parser.add_argument("--tmux-binary", required=True)
@@ -295,11 +499,21 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def main(arguments: Sequence[str] | None = None) -> int:
     args = _build_parser().parse_args(arguments)
-    return reconcile_sharing_state(
+    reconciled = reconcile_sharing_state(
         args.tmux_binary,
         args.tmux_server_socket,
         args.expected_server_id,
     )
+    if reconciled != 0:
+        return reconciled
+    try:
+        return retain_legacy_coordinator(
+            args.tmux_binary,
+            args.tmux_server_socket,
+            args.expected_server_id,
+        )
+    except (OSError, RodexInstallationError):
+        return 1
 
 
 if __name__ == "__main__":

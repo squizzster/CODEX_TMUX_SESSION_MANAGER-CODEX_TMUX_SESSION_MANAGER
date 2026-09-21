@@ -111,6 +111,8 @@ from .tmux_session_capability import (
 )
 from .tmux_shared_ctrl_c import shared_ctrl_c_binding_command
 from .tmux_sharing_coordinator import (
+    RODEX_SHARED_TMUX_COORDINATOR_COMMAND_OPTION,
+    RODEX_SHARED_TMUX_HOOK_INDEX,
     RODEX_SHARING_ATTACHED_COUNT_OPTION,
     sharing_coordinator_hook_command,
 )
@@ -132,10 +134,8 @@ RODEX_TMUX_COMMAND_TIMEOUT_SECONDS: Final = 5.0
 RODEX_TMUX_RENAME_TIMEOUT_SECONDS: Final = 5.0
 _POLL_INTERVAL_SECONDS: Final = 0.05
 RODEX_TMUX_REQUIRED_CLIENT_FEATURES: Final = "RGB"
-RODEX_SHARED_TMUX_COORDINATOR_COMMAND_OPTION: Final = "@rodex_shared_tmux_coordinator_command"
 RODEX_SHARED_TMUX_CTRL_C_COMMAND_OPTION: Final = "@rodex_shared_tmux_ctrl_c_command"
 RODEX_SHARED_TMUX_CTRL_D_COMMAND_OPTION: Final = "@rodex_shared_tmux_ctrl_d_command"
-RODEX_SHARED_TMUX_HOOK_INDEX: Final = 731
 RODEX_SHARED_TMUX_COORDINATION_HOOKS: Final = (
     "client-attached",
     "client-detached",

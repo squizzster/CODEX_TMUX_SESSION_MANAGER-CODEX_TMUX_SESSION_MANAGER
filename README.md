@@ -97,6 +97,13 @@ all daemons, hooks and observers retain that installation’s Python path. Updat
 checkout or its environment cannot replace those running helpers. See [installation
 and update boundaries](INSTALL.md#update-or-remove).
 
+One bounded compatibility bridge covers live 0.14 runtimes created before retained
+installations existed. If their mutable tmux-v4 coordinator is redirected into 0.15,
+the coordinator accepts only the known v4 contract, binds the runtime to its private
+v2 daemon receipt and same-user socket, delivers the resize hint, and replaces only its
+owned hook slots with the same bridge from an immutable installation. It does not adopt
+the old catalog, start or stop the old runtime, or relax unknown-version fencing.
+
 Each reservation carries its absolute caller workspace into both native child processes;
 `PWD` alone is not a working directory. Native directory options remain unchanged.
 Stop acknowledges `stopping` or `terminal`; a running worker retains its TTY until its

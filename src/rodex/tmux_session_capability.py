@@ -169,13 +169,19 @@ def parse_tmux_server_id(value: str) -> str:
     return value
 
 
-def server_identity_if_shell_condition(tmux_server_id: str) -> str:
+def server_identity_if_shell_condition(
+    tmux_server_id: str,
+    *,
+    tmux_protocol: str = RODEX_SHARED_TMUX_PROTOCOL,
+) -> str:
     """Fence a server-global action in one direct ``if-shell -F`` evaluation."""
     parse_tmux_server_id(tmux_server_id)
+    if not tmux_protocol:
+        raise ValueError("tmux protocol must be non-empty")
     return combine_tmux_if_shell_conditions(
         _literal_comparison(
             f"#{{{RODEX_SHARED_TMUX_PROTOCOL_OPTION}}}",
-            RODEX_SHARED_TMUX_PROTOCOL,
+            tmux_protocol,
         ),
         _literal_comparison(
             f"#{{{RODEX_SHARED_TMUX_SERVER_ID_OPTION}}}",
@@ -186,10 +192,12 @@ def server_identity_if_shell_condition(tmux_server_id: str) -> str:
 
 def capability_identity_if_shell_condition(
     capability: TmuxRuntimeCapability | TmuxSessionCapability,
+    *,
+    tmux_protocol: str = RODEX_SHARED_TMUX_PROTOCOL,
 ) -> str:
     """Fence any pane in one exact session/runtime for direct ``if-shell -F``."""
     return combine_tmux_if_shell_conditions(
-        server_identity_if_shell_condition(capability.tmux_server_id),
+        server_identity_if_shell_condition(capability.tmux_server_id, tmux_protocol=tmux_protocol),
         _literal_comparison(f"#{{{RODEX_SERVER_RUNTIME_ID_OPTION}}}", str(capability.runtime_id)),
         _literal_comparison("#{session_id}", capability.tmux_session_id),
         _literal_comparison(
@@ -205,10 +213,12 @@ def capability_identity_if_shell_condition(
 
 def registered_capability_if_shell_condition(
     capability: TmuxSessionCapability,
+    *,
+    tmux_protocol: str = RODEX_SHARED_TMUX_PROTOCOL,
 ) -> str:
     """Fence one registered runtime in a direct ``if-shell -F`` evaluation."""
     return combine_tmux_if_shell_conditions(
-        capability_identity_if_shell_condition(capability),
+        capability_identity_if_shell_condition(capability, tmux_protocol=tmux_protocol),
         _literal_comparison(
             f"#{{{RODEX_REGISTRATION_STATE_OPTION}}}",
             RODEX_REGISTRATION_REGISTERED,
@@ -245,10 +255,12 @@ def primary_pane_capability_if_shell_condition(
 
 def registered_primary_pane_if_shell_condition(
     capability: TmuxSessionCapability,
+    *,
+    tmux_protocol: str = RODEX_SHARED_TMUX_PROTOCOL,
 ) -> str:
     """Fence a registered primary pane in a direct ``if-shell -F`` evaluation."""
     return combine_tmux_if_shell_conditions(
-        registered_capability_if_shell_condition(capability),
+        registered_capability_if_shell_condition(capability, tmux_protocol=tmux_protocol),
         _literal_comparison("#{pane_id}", capability.tmux_primary_pane_id),
         _literal_comparison(f"#{{{RODEX_PANE_RUNTIME_ID_OPTION}}}", str(capability.runtime_id)),
     )

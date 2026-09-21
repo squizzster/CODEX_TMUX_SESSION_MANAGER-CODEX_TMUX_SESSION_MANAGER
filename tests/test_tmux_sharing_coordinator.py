@@ -1,15 +1,24 @@
 from __future__ import annotations
 
+import shlex
 import subprocess
 import uuid
 from pathlib import Path
 
+import pytest
+from terminal_tmux_fixture import tmux_terminal
+
+from rodex.legacy_runtime_compat import LEGACY_MUTABLE_TMUX_PROTOCOL
 from rodex.tmux_session_capability import (
     RODEX_SHARED_TMUX_PROTOCOL,
     RODEX_SHARED_TMUX_SERVER_ID_OPTION,
 )
 from rodex.tmux_sharing_coordinator import (
+    RODEX_LEGACY_COORDINATION_HOOKS,
+    RODEX_SHARED_TMUX_COORDINATOR_COMMAND_OPTION,
+    RODEX_SHARED_TMUX_HOOK_INDEX,
     reconcile_sharing_state,
+    retain_legacy_coordinator,
     sharing_coordinator_hook_command,
 )
 
@@ -136,6 +145,235 @@ def test_changed_count_is_admitted_only_through_the_exact_full_capability(
     assert "--tmux-primary-pane-id %3" in action
     assert "--expected-runtime-id 0123456789abcdef" in action
     assert "#{session_id}" not in action.split("--tmux-session-id", maxsplit=1)[1]
+
+
+def test_legacy_mutable_hook_reconciles_without_launching_current_animation(tmp_path: Path) -> None:
+    runner = _SharingRunner(
+        f"{_registered_row(attached='1', previous='0')}\n",
+        protocol=LEGACY_MUTABLE_TMUX_PROTOCOL,
+    )
+    notified: list[str] = []
+
+    result = reconcile_sharing_state(
+        "tmux",
+        tmp_path / "tmux-v4-runtime.sock",
+        SERVER_ID,
+        runner=runner,
+        runtime_notifier=notified.append,
+    )
+
+    assert result == 0
+    assert notified == ["0123456789abcdef"]
+    assert len(runner.mutations) == 1
+    condition = runner.mutations[0][-2]
+    action = runner.mutations[0][-1]
+    assert LEGACY_MUTABLE_TMUX_PROTOCOL in condition
+    assert RODEX_SHARED_TMUX_PROTOCOL not in condition
+    assert "set-option -t %3 @rodex_sharing_attached_count 1" in action
+    assert "rodex.status_animation_admission" not in action
+
+
+def test_real_tmux_v4_roster_reconciles_under_current_bridge(tmp_path: Path) -> None:
+    notified: list[str] = []
+    with tmux_terminal(tmp_path / "terminal") as terminal:
+        terminal.tmux("set-option", "-s", "@rodex_shared_tmux_protocol", LEGACY_MUTABLE_TMUX_PROTOCOL)
+        terminal.tmux("set-option", "-s", "@rodex_shared_tmux_server_id", SERVER_ID)
+        terminal.tmux("set-option", "-s", "@rodex_server_runtime_id", "0123456789abcdef")
+        session_id = terminal.tmux("display-message", "-p", "-t", "fixture", "#{session_id}").strip()
+        pane_id = terminal.tmux("display-message", "-p", "-t", "fixture", "#{pane_id}").strip()
+        options = {
+            "@rodex_primary_pane_id": pane_id,
+            "@rodex_sharing_attached_count": "1",
+            "@rodex_runtime_id": "0123456789abcdef",
+            "@rodex_registration_state": "registered",
+            "@rodex_session_id": "1111111111111111",
+            "@rodex_registry_id": "2222222222222222",
+            "@rodex_sessions_id": "1",
+            "@rodex_codex_session_id": "01a00654-f2bc-7a30-834a-a5f886a65f82",
+        }
+        for name, value in options.items():
+            terminal.tmux("set-option", "-t", "fixture", name, value)
+        terminal.tmux("set-option", "-p", "-t", "fixture", "@rodex_pane_runtime_id", "0123456789abcdef")
+
+        result = reconcile_sharing_state(
+            "/usr/bin/tmux",
+            Path(terminal.socket_path),
+            SERVER_ID,
+            runtime_notifier=notified.append,
+        )
+
+        assert result == 0
+        assert notified == ["0123456789abcdef"]
+        assert session_id.startswith("$")
+        assert terminal.tmux("show-options", "-v", "-t", "fixture", "@rodex_sharing_attached_count").strip() == "0"
+
+
+@pytest.mark.parametrize("isolated", [False, True])
+def test_legacy_mutable_hook_is_rebound_to_retained_interpreter(tmp_path: Path, isolated: bool) -> None:
+    socket_path = tmp_path / "tmux-v4-runtime.sock"
+    mutable_python = "/mutable/.venv/bin/python"
+    retained_python = tmp_path / "installations/identity/.venv/bin/python"
+    installed = sharing_coordinator_hook_command(
+        mutable_python,
+        "/usr/bin/tmux",
+        socket_path,
+        SERVER_ID,
+        isolated=isolated,
+    )
+    retained = sharing_coordinator_hook_command(
+        str(retained_python),
+        "/usr/bin/tmux",
+        socket_path,
+        SERVER_ID,
+    )
+    calls: list[list[str]] = []
+
+    def runner(command: list[str], **_options: object) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        if command[3] == "show-options":
+            if RODEX_SHARED_TMUX_COORDINATOR_COMMAND_OPTION in command:
+                hooks = (
+                    f"{event}[{RODEX_SHARED_TMUX_HOOK_INDEX}] {installed}" for event in RODEX_LEGACY_COORDINATION_HOOKS
+                )
+                output = "\n".join((installed, *hooks)) + "\n"
+            else:
+                output = f"{LEGACY_MUTABLE_TMUX_PROTOCOL}\n{SERVER_ID}\n"
+        elif command[3] == "if-shell" and "show-hooks" in command[-2]:
+            hooks = (f"{event}[{RODEX_SHARED_TMUX_HOOK_INDEX}] {retained}" for event in RODEX_LEGACY_COORDINATION_HOOKS)
+            output = "\n".join((retained, *hooks)) + "\n"
+        else:
+            output = ""
+        return subprocess.CompletedProcess(command, 0, stdout=output, stderr="")
+
+    result = retain_legacy_coordinator(
+        "/usr/bin/tmux",
+        socket_path,
+        SERVER_ID,
+        python_executable=mutable_python,
+        runner=runner,
+        installation_resolver=lambda: retained_python,
+    )
+
+    assert result == 0
+    mutation = calls[-2]
+    assert mutation[3] == "if-shell"
+    assert LEGACY_MUTABLE_TMUX_PROTOCOL in mutation[-3]
+    action = mutation[-2]
+    assert f"set-option -s {RODEX_SHARED_TMUX_COORDINATOR_COMMAND_OPTION}" in action
+    assert action.count(str(retained_python)) == len(RODEX_LEGACY_COORDINATION_HOOKS) + 1
+    assert action.count("rodex.tmux_sharing_coordinator") == len(RODEX_LEGACY_COORDINATION_HOOKS) + 1
+    for event in RODEX_LEGACY_COORDINATION_HOOKS:
+        assert f"{event}[{RODEX_SHARED_TMUX_HOOK_INDEX}]" in action
+
+
+def test_real_tmux_v4_hooks_are_verified_after_immutable_rebinding(tmp_path: Path) -> None:
+    mutable_python = "/mutable/.venv/bin/python"
+    retained_python = tmp_path / "installations/identity/.venv/bin/python"
+    observations: list[subprocess.CompletedProcess[str]] = []
+
+    def runner(command: list[str], **options: object) -> subprocess.CompletedProcess[str]:
+        completed = subprocess.run(command, **options)
+        observations.append(completed)
+        return completed
+
+    with tmux_terminal(tmp_path / "terminal") as terminal:
+        socket_path = Path(terminal.socket_path)
+        terminal.tmux("set-option", "-s", "@rodex_shared_tmux_protocol", LEGACY_MUTABLE_TMUX_PROTOCOL)
+        terminal.tmux("set-option", "-s", "@rodex_shared_tmux_server_id", SERVER_ID)
+        installed = sharing_coordinator_hook_command(
+            mutable_python,
+            "/usr/bin/tmux",
+            socket_path,
+            SERVER_ID,
+        )
+        terminal.tmux("set-option", "-s", RODEX_SHARED_TMUX_COORDINATOR_COMMAND_OPTION, installed)
+        for event in RODEX_LEGACY_COORDINATION_HOOKS:
+            terminal.tmux(
+                "set-option",
+                "-g",
+                f"{event}[{RODEX_SHARED_TMUX_HOOK_INDEX}]",
+                installed,
+            )
+
+        result = retain_legacy_coordinator(
+            "/usr/bin/tmux",
+            socket_path,
+            SERVER_ID,
+            python_executable=mutable_python,
+            runner=runner,
+            installation_resolver=lambda: retained_python,
+        )
+
+        retained = sharing_coordinator_hook_command(
+            str(retained_python),
+            "/usr/bin/tmux",
+            socket_path,
+            SERVER_ID,
+        )
+        assert result == 0, [(item.args, item.returncode, item.stdout, item.stderr) for item in observations]
+        assert terminal.tmux("show-options", "-s", "-v", RODEX_SHARED_TMUX_COORDINATOR_COMMAND_OPTION).strip() == retained
+        for event in RODEX_LEGACY_COORDINATION_HOOKS:
+            hook_name = f"{event}[{RODEX_SHARED_TMUX_HOOK_INDEX}]"
+            observed_name, separator, observed_command = (
+                terminal.tmux("show-hooks", "-g", hook_name).strip().partition(" ")
+            )
+            assert (observed_name, separator) == (hook_name, " ")
+            assert shlex.split(observed_command) == shlex.split(retained)
+
+
+def test_current_coordinator_never_enters_legacy_retention(tmp_path: Path) -> None:
+    calls: list[list[str]] = []
+
+    def runner(command: list[str], **_options: object) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout=f"{RODEX_SHARED_TMUX_PROTOCOL}\n{SERVER_ID}\n",
+            stderr="",
+        )
+
+    result = retain_legacy_coordinator(
+        "/usr/bin/tmux",
+        tmp_path / "tmux-v5-runtime.sock",
+        SERVER_ID,
+        runner=runner,
+        installation_resolver=lambda: pytest.fail("current runtime must not resolve a legacy bridge"),
+    )
+
+    assert result == 0
+    assert len(calls) == 1
+
+
+def test_legacy_retention_refuses_foreign_coordinator_owner(tmp_path: Path) -> None:
+    calls: list[list[str]] = []
+
+    def runner(command: list[str], **_options: object) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        if RODEX_SHARED_TMUX_COORDINATOR_COMMAND_OPTION in command:
+            owner = "run-shell -b foreign-owner"
+            hooks = (f"{event}[{RODEX_SHARED_TMUX_HOOK_INDEX}] {owner}" for event in RODEX_LEGACY_COORDINATION_HOOKS)
+            output = "\n".join((owner, *hooks)) + "\n"
+        else:
+            output = f"{LEGACY_MUTABLE_TMUX_PROTOCOL}\n{SERVER_ID}\n"
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout=output,
+            stderr="",
+        )
+
+    result = retain_legacy_coordinator(
+        "/usr/bin/tmux",
+        tmp_path / "tmux-v4-runtime.sock",
+        SERVER_ID,
+        python_executable="/mutable/.venv/bin/python",
+        runner=runner,
+        installation_resolver=lambda: pytest.fail("foreign owner must not publish an installation"),
+    )
+
+    assert result == 1
+    assert len(calls) == 2
 
 
 def test_malformed_registered_roster_aborts_before_any_mutation(tmp_path: Path) -> None:

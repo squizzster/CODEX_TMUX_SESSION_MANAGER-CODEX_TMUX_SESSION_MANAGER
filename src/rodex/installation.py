@@ -142,14 +142,14 @@ def prepare_installation(
         os.close(descriptor)
 
 
-def enter_fixed_installation() -> None:
-    """Re-exec once, before CLI composition, so every descendant inherits one version."""
+def retained_installation_interpreter() -> Path:
+    """Publish or validate this implementation's immutable interpreter."""
     project = _project_directory()
     if (project / INSTALLATION_MANIFEST).exists():
         interpreter = _validate(project, RODEX_IMPLEMENTATION_SHA256)
         if Path(sys.prefix).resolve() != interpreter.parent.parent:
             raise RodexInstallationError("installation was loaded by a different Python environment")
-        return
+        return interpreter
     configured = os.environ.get("RODEX_INSTALLATIONS_ROOT")
     if configured:
         store = Path(configured)
@@ -159,7 +159,14 @@ def enter_fixed_installation() -> None:
         store = state_root / "implementations"
     if not store.is_absolute():
         raise RodexInstallationError("RODEX_INSTALLATIONS_ROOT must be an absolute path")
-    interpreter = prepare_installation(store)
+    return prepare_installation(store)
+
+
+def enter_fixed_installation() -> None:
+    """Re-exec once, before CLI composition, so every descendant inherits one version."""
+    interpreter = retained_installation_interpreter()
+    if Path(sys.prefix).resolve() == interpreter.parent.parent:
+        return
     # Remove only the checkout environment used to bootstrap Rodex. Caller-owned
     # environments and cwd remain unchanged for Codex and its tools.
     environment = user_process_environment(os.environ)

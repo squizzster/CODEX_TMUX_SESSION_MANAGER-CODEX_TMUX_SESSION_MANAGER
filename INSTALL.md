@@ -155,10 +155,14 @@ For installations launched with 0.15 or later:
 4. Use a retained installation's `.venv/bin/rodex` to return to its sessions. Keep its
    directory and base Python until those sessions have ended.
 
-When upgrading from 0.14, use a separate checkout and environment while old sessions
-remain live. Earlier releases did not pin their helpers; editing their checkout or
-upgrading their environment can break resize notifications and observer launches.
-This release does not retrofit running old processes or migrate their database.
+When upgrading from 0.14, a separate checkout and environment remains the cleanest
+boundary while old sessions are live. Earlier releases did not pin their helpers. If a
+0.14 tmux-v4 coordinator is nevertheless redirected through an upgraded checkout, 0.15
+authenticates its exact live v2 daemon through the private process receipt, forwards
+terminal resize, and moves those Rodex-owned tmux hook slots onto a retained 0.15
+compatibility installation. This narrow repair does not adopt the old runtime, translate
+its catalog, or grant current-version lifecycle control over it. Unknown generations and
+foreign hook owners remain untouched.
 
 Do not move or replace the live SQLite database as part of an update. Rodex treats
 database or protected-parent movement as terminal and requires a fresh process.

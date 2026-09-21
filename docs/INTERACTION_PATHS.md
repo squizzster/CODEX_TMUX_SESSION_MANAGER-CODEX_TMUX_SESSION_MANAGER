@@ -2,7 +2,8 @@
 
 Rodex 0.15.0a1, ALPHA. SQL generation 21, isolated tmux protocol v5, runtime peer
 contract v6, daemon protocol v3 and observer schema v4 form the current boundary.
-Old contracts are rejected.
+Old contracts are rejected except for the receipt-bound tmux-v4 resize bridge described
+below; it has no lifecycle or model-control authority.
 
 ## Authoritative contract
 
@@ -111,7 +112,7 @@ work. The record buffer contains metadata, not prompt bodies or another durable 
 | `python -m rodex.agent_observer` | Receiver/liveness → consumer/view → terminal presentation |
 | `python -m rodex.environment_exec` | Prepared environment → process exec |
 | `python -I -m rodex.terminal_exec` | Fresh session → controlling child PTY → unchanged native TUI argv/environment |
-| `python -m rodex.tmux_sharing_coordinator` | Server identity → roster reconciliation |
+| `python -m rodex.tmux_sharing_coordinator` | Server identity → roster reconciliation; exact tmux-v4 predecessor → receipt-bound resize-only bridge and immutable hook retention |
 | `python -m rodex.status_animation_admission` | Admitted animation, watchdog, watchdog gate |
 
 ## User and automation routes
@@ -172,7 +173,7 @@ work. The record buffer contains metadata, not prompt bodies or another durable 
 | Startup rollback/stop | Managed lifecycle/runtime → exact session kill |
 | Ctrl-D | Owned root binding → detach current client only |
 | Ctrl-C | Native originating-client admission → private guarded termination or shared detach |
-| Resize, external SIGINT | tmux resize/layout hook → daemon resize wake → gateway → child terminal dimensions; daemon runtime → foreground process group |
+| Resize, external SIGINT | Current tmux resize/layout hook → exact daemon resize wake → gateway → child terminal dimensions; a redirected tmux-v4 hook first proves its v2 daemon through the private process receipt and same-user socket, then retains the bridge; daemon runtime → foreground process group |
 | Natural exit, signals, keepalive failure | Daemon runtime closes its children/gateway/proxy/observer/status/event tap and paths; the shared coordinator retires its analytics state |
 
 ## Deliberate domain boundaries
@@ -183,6 +184,7 @@ work. The record buffer contains metadata, not prompt bodies or another durable 
 | Shared arrival/departure animation | Roster coordinator → animation admission → renderer/watchdog |
 | Tool count and context/compaction animation | Protocol/rollout/timer → `TmuxStatusOption` |
 | Every tmux subprocess | `SyncTmuxExecutor` / `AsyncTmuxExecutor` |
+| Pre-retention tmux-v4 resize compatibility | `legacy_runtime_compat` → private v2 receipt/process/socket verification → resize wake only; no start, stop, adoption, catalog access or model input |
 | Transient catalog/startup App Server probes | Runtime's read-only initialize/thread-read/loaded-list adapters |
 | SQL connection/publication | `rodex_sql` transactions and registry publication pipeline |
 | Runtime logs, update cache, analyzer memory files | Blocking child-diagnostic relay/file owners, not chat; new startup diagnostics wake the runtime supervisor after persistence |

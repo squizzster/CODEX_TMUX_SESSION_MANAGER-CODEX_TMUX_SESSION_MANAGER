@@ -78,6 +78,9 @@ EFFECT_OWNERS = {
         "rodex/runtime.py:RodexRuntimeLauncher._list_loaded_codex_threads:.send",
         "rodex/runtime.py:RodexRuntimeLauncher._read_persisted_codex_session:.send",
     },
+    "legacy runtime compatibility transport": {
+        "rodex/legacy_runtime_compat.py:_request:.sendall",
+    },
     "storage and diagnostics": {
         "rodex_sql/transactions.py:_connect_validated_database:sqlite3.connect",
         "rodex/analytics_analyzer.py:_load_analyzer_bytes:os.write",

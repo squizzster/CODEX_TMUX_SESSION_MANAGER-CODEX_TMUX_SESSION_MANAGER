@@ -80,7 +80,15 @@ def require_unix_peer_process(connection: Any, process: Any) -> None:
     another ancestry while it is being checked.
     """
     try:
-        credentials = connection.socket.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i"))
+        require_unix_socket_peer_process(connection.socket, process)
+    except AttributeError as error:
+        raise RuntimePeerIdentityError("could not verify the retained App Server process") from error
+
+
+def require_unix_socket_peer_process(connection: socket.socket, process: Any) -> None:
+    """Verify the process owning a connected Unix stream before using it."""
+    try:
+        credentials = connection.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i"))
         peer_pid, peer_uid, _peer_gid = struct.unpack("3i", credentials)
         matches = (
             peer_uid == os.getuid()
@@ -92,6 +100,14 @@ def require_unix_peer_process(connection: Any, process: Any) -> None:
         raise RuntimePeerIdentityError("could not verify the retained App Server process") from error
     if not matches:
         raise RuntimePeerIdentityError("Unix peer is not the retained live App Server process")
+
+
+def require_unix_listener_process(path: Path, process: Any) -> None:
+    """Prove a child-owned rendezvous alias reaches that child's live listener."""
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+        connection.settimeout(1)
+        connection.connect(os.fspath(path))
+        require_unix_socket_peer_process(connection, process)
 
 
 def _parent_process_id(pid: int) -> int:

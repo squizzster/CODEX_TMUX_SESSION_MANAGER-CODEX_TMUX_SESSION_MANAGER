@@ -231,6 +231,73 @@ def _retained_standalone_codex_thread(
 
 
 @pytest.mark.live_startup
+def test_installed_rodex_attaches_with_current_codex_unix_transport(
+    tmp_path: Path, request: pytest.FixtureRequest
+) -> None:
+    codex, tmux = shutil.which("codex"), shutil.which("tmux")
+    _require_startup_prerequisite(request, codex is not None and tmux is not None, "Codex and tmux are required")
+    assert codex is not None and tmux is not None
+    project = Path(__file__).parents[1]
+    codex_home = tmp_path / "codex"
+    codex_home.mkdir(mode=0o700)
+    installed_home = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
+    for filename in ("auth.json", "config.toml"):
+        source = installed_home / filename
+        if source.is_file():
+            shutil.copy2(source, codex_home / filename)
+
+    with tempfile.TemporaryDirectory(prefix="rodex-live-", dir="/tmp") as runtime_directory:
+        runtime_root = Path(runtime_directory)
+        environment = {
+            **os.environ,
+            "CODEX_HOME": str(codex_home),
+            "TERM": "xterm-256color",
+            "RODEX_RUNTIME_DIR": runtime_directory,
+            "XDG_STATE_HOME": str(tmp_path / "state"),
+            "RODEX_CODEX_BINARY": codex,
+            "RODEX_TMUX_BINARY": tmux,
+        }
+        environment.pop("TMUX", None)
+        environment.pop("TMUX_PANE", None)
+        login = subprocess.run([codex, "login", "status"], env=environment, capture_output=True, timeout=10)
+        _require_startup_prerequisite(request, login.returncode == 0, "An authenticated Codex CLI is required")
+        try:
+            with RodexTerminalClient([str(project / "rodex")], environment, project) as client:
+                name = client.wait_for_attach()
+                sockets = list(runtime_root.glob(RODEX_TMUX_SOCKET_PATTERN))
+                assert len(sockets) == 1
+                deadline = time.monotonic() + 15
+                while time.monotonic() < deadline:
+                    pane = subprocess.run(
+                        [tmux, "-N", "-S", str(sockets[0]), "capture-pane", "-p", "-t", f"={name}:"],
+                        capture_output=True,
+                        text=True,
+                        timeout=3,
+                    )
+                    if pane.returncode == 0 and "OpenAI Codex" in pane.stdout:
+                        break
+                    client.poll()
+                else:
+                    pytest.fail(f"Codex TUI did not render after Rodex attach: {pane.stdout}")
+                inspected = subprocess.run(
+                    [str(project / "rodex"), "_inspect", name, "--json"],
+                    env=environment,
+                    capture_output=True,
+                    text=True,
+                    timeout=15,
+                )
+                assert inspected.returncode == 0, inspected.stdout + inspected.stderr
+                envelope = json.loads(inspected.stdout)
+                assert envelope["ok"] is True
+                assert envelope["data"]["thread"]["status"] == "idle"
+                runtime_id = envelope["runtime"]["runtime_id"]
+                assert (runtime_root / f"app-{runtime_id}.sock").exists()
+                client.detach()
+        finally:
+            _stop_fixture_daemon(runtime_root)
+
+
+@pytest.mark.live_startup
 def test_installed_rodex_starts_reuses_and_adopts_sessions(
     tmp_path_factory: pytest.TempPathFactory,
     request: pytest.FixtureRequest,

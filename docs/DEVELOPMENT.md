@@ -45,9 +45,14 @@ paths can also overflow Unix-socket limits; use pytest's normal temporary roots.
 - Installation and lifecycle: [retained installations](../tests/test_installation.py),
   [daemon](../tests/test_rodex_daemon.py), [runtime isolation](../tests/test_runtime_isolation.py),
   [runtime adoption](../tests/test_runtime_registration_adoption.py).
+  [Retained handoff admission](../tests/test_runtime_upgrade.py) checks idle-only
+  upgrades and attachment without replacement; installation tests verify a busy turn
+  completes across `--force-old` reconnect before its idle runtime is upgraded.
 - Input and display: [terminal input](../tests/test_terminal_input.py),
   [gateway](../tests/test_terminal_gateway.py), [native composer](../tests/test_native_composer.py),
   [observer safety](../tests/test_observer_runtime_safety.py).
+  [Working status](../tests/test_working_status.py) checks root activity and tmux-owned
+  dots; live prompt-handoff tests verify the native elapsed timer advances without input.
 - Persistence: [SQLite adversarial boundaries](../tests/adversarial/test_round3_sqlite_boundaries.py)
   and the registry/analytics suites beside the relevant implementation tests.
 - New effect-bearing paths: update the classification in

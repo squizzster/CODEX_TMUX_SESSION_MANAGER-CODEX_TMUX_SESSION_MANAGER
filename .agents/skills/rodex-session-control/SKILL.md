@@ -16,7 +16,9 @@ inspection does not authorize starting, steering, interrupting, or stopping work
 2. Before mutation, run `rodex _inspect SESSION --json`. Require `ok: true`, a
    non-null `runtime.runtime_id`, and `schema_version` matching
    [`MACHINE_ENVELOPE_SCHEMA_VERSION`](../../../src/rodex/machine_commands.py).
-   Check the intended workspace in `data.thread.cwd`; resume uses the resumer's cwd.
+   Check the intended workspace in `data.thread.cwd`. Resuming an ended runtime uses
+   the resumer's cwd; upgrading a retained live runtime preserves its existing cwd.
+   [CLI workflows](../../../docs/CLI.md#open-detach-and-resume) define both paths.
    Inspection rejects missing durable identity or an App Server below
    [`CODEX_APP_SERVER.minimum_version`](../../../src/rodex/app_server_contract.py).
 3. For start/steer, require `data.thread.can_accept_direct_input` not false.

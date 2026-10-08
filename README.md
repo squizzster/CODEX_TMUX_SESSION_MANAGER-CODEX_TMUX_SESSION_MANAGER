@@ -287,6 +287,13 @@ Both policies share native cursor/resize state and terminal-query handling. Curs
 replies use the child's coordinates; capability and colour queries reach the actual
 terminal. Policy changes wait for complete terminal controls and synchronized updates.
 
+Managed Codex TUIs default to `tui.animations=false`: working/status text remains,
+but decorative spinner and shimmer redraws do not continuously wake the daemon.
+An explicit `rodex --config tui.animations=true` restores animations for that runtime.
+Native presentation retains semantic history without rebuilding or waking an unused
+view; selecting `light` reveals the retained history immediately. Terminal parsing
+batches adjacent updates while preserving exact query and encoding boundaries.
+
 An exact `subAgentActivity(kind=started)` opens an input-disabled observer in the top
 third of the window. It stays open while tracked agent work is active, uses typed
 App Server and authenticated trace identities, and closes when that work finishes.
@@ -328,6 +335,13 @@ The prompt-handoff cases submit small real prompts to verify matching terminal,
 App Server, and native-history text in ordinary and Ultra modes, including a wrapped
 multiline replacement. They can use model quota; all runtimes and history are isolated
 from existing user sessions.
+
+`uv run python tests/benchmark_terminal_cpu.py --baseline REVISION` compares parser
+and native-presentation CPU with a local Git revision using deterministic synthetic
+input. It also checks output, control replies, and terminal-state equivalence across
+random read splits. Timings are diagnostic; regression tests enforce bounded parser
+feeds, zero hidden-view wakes, and correct visible-history invalidation without
+machine-dependent timing thresholds.
 
 ## Documentation
 

@@ -2726,6 +2726,10 @@ def _run_runtime_service(
                 # updater here would block thread registration before attach.
                 "--config",
                 "check_for_update_on_startup=false",
+                # Decorative redraws otherwise drive every managed PTY at ~30 Hz.
+                # Later explicit Codex arguments can opt animations back in.
+                "--config",
+                "tui.animations=false",
                 "--no-alt-screen",
                 "--remote",
                 f"unix://{protocol_proxy_socket_path}",

@@ -2,6 +2,9 @@
 
 from rodex.interaction_pipeline import InteractionOperation, InteractionRequest, SessionInteractionPipeline
 from rodex.presentation_policy import (
+    PRESENTATION_EVENT_HISTORY_LIMIT,
+    PRESENTATION_ITEM_SELECTOR_HISTORY_LIMIT,
+    PRESENTATION_ITEM_TEXT_HISTORY_LIMIT,
     PRESENTATION_POLICY_TARGET,
     PresentationEventKind,
     PresentationEventSelector,
@@ -96,7 +99,7 @@ def test_light_projects_only_exact_root_commentary_while_dark_remains_native():
 
 
 def test_revision_is_a_cheap_change_token_and_subscribers_receive_only_real_changes():
-    presentation = SessionPresentationPipeline()
+    presentation = SessionPresentationPipeline(initial_policy="light")
     wakes = []
     unsubscribe = presentation.subscribe(lambda: wakes.append(presentation.revision))
 
@@ -108,9 +111,93 @@ def test_revision_is_a_cheap_change_token_and_subscribers_receive_only_real_chan
     assert wakes == [1]
 
     unsubscribe()
-    presentation.select_policy("light")
+    presentation.select_policy("dark")
     assert presentation.revision == 2
     assert wakes == [1]
+
+
+def test_native_view_keeps_history_without_waking_and_reveals_it_on_policy_change():
+    presentation = SessionPresentationPipeline()
+    wakes = []
+    presentation.subscribe(lambda: wakes.append(presentation.snapshot()))
+    presentation.bind_root_thread(ROOT)
+    presentation.observe_protocol_output(message_started())
+    for _ in range(PRESENTATION_EVENT_HISTORY_LIMIT + 1):
+        presentation.observe_protocol_output(message_delta("x"))
+    presentation.observe_protocol_output(message_completed("Completed in native mode"))
+    presentation.observe_protocol_input({"id": 7, "method": "thread/read"})
+    presentation.observe_protocol_output(
+        thread_read_response(
+            7,
+            {"id": "hydrated", "type": "agentMessage", "phase": "commentary", "text": "From history"},
+        )
+    )
+    presentation.observe_protocol_output(message_started("partial"))
+    presentation.observe_protocol_output(message_delta("discard on disconnect", "partial"))
+    presentation.reset_after_disconnect()
+
+    assert wakes == []
+    assert presentation.revision == presentation.snapshot().revision == 0
+    assert presentation.snapshot().events == presentation.snapshot().items == ()
+    presentation.select_policy("light")
+    assert len(wakes) == 1
+    assert [item.text for item in wakes[0].items] == ["Completed in native mode", "From history"]
+    presentation.select_policy("light")
+    assert len(wakes) == 1
+    presentation.select_policy("dark")
+    assert len(wakes) == 2 and wakes[-1].items == ()
+
+
+def test_hidden_event_wakes_only_when_it_evicts_visible_event_history():
+    presentation = SessionPresentationPipeline(initial_policy="light")
+    presentation.bind_root_thread(ROOT)
+    presentation.observe_protocol_output(message_completed("Retained separately"))
+    wakes = []
+    presentation.subscribe(lambda: wakes.append(presentation.snapshot()))
+
+    for _ in range(PRESENTATION_EVENT_HISTORY_LIMIT - 1):
+        presentation.observe_protocol_output({"method": "hidden", "params": {"threadId": CHILD}})
+    assert wakes == []
+    presentation.observe_protocol_output({"method": "hidden", "params": {"threadId": CHILD}})
+    assert len(wakes) == 1 and wakes[0].events == ()
+    assert [item.text for item in wakes[0].items] == ["Retained separately"]
+    presentation.observe_protocol_output({"method": "hidden", "params": {"threadId": CHILD}})
+    assert len(wakes) == 1
+
+
+def test_child_item_eviction_invalidates_visible_root_item_and_rebinding_reveals_child_history():
+    presentation = SessionPresentationPipeline(initial_policy="light")
+    presentation.bind_root_thread(ROOT)
+    presentation.observe_protocol_output(message_completed("Root item"))
+    wakes = []
+    presentation.subscribe(lambda: wakes.append(presentation.snapshot()))
+
+    for index in range(PRESENTATION_ITEM_TEXT_HISTORY_LIMIT - 1):
+        presentation.observe_protocol_output(message_completed("Child item", f"child-{index}", thread_id=CHILD))
+    assert wakes == []
+    presentation.observe_protocol_output(message_completed("Last child item", "last-child", thread_id=CHILD))
+    assert len(wakes) == 1 and wakes[0].items == ()
+    presentation.bind_root_thread(CHILD)
+    assert len(wakes) == 2
+    assert len(wakes[-1].items) == PRESENTATION_ITEM_TEXT_HISTORY_LIMIT
+    assert wakes[-1].items[-1].text == "Last child item"
+
+
+def test_unbound_view_and_hidden_disconnect_do_not_wake_but_visible_disconnect_does():
+    presentation = SessionPresentationPipeline(initial_policy="light")
+    wakes = []
+    presentation.subscribe(lambda: wakes.append(presentation.snapshot()))
+    presentation.observe_protocol_output(message_started())
+    presentation.observe_protocol_output(message_delta("Waiting for root"))
+    assert wakes == []
+    presentation.bind_root_thread(ROOT)
+    assert len(wakes) == 1 and wakes[0].items[0].text == "Waiting for root"
+    presentation.reset_after_disconnect()
+    assert len(wakes) == 2 and wakes[-1].items == ()
+    presentation.observe_protocol_output(message_started("child", thread_id=CHILD))
+    presentation.observe_protocol_output(message_delta("Hidden partial", "child", thread_id=CHILD))
+    presentation.reset_after_disconnect()
+    assert len(wakes) == 2
 
 
 def test_streamed_commentary_is_visible_before_completion_and_completed_text_is_not_duplicated():
@@ -254,6 +341,8 @@ def test_item_retains_configured_selector_evidence_while_later_events_supply_its
             {"id": "command-1", "type": "commandExecution", "status": "inProgress"},
         )
     )
+    wakes = []
+    presentation.subscribe(lambda: wakes.append(presentation.snapshot()))
     for index in range(20):
         presentation.observe_protocol_output(
             {
@@ -268,6 +357,37 @@ def test_item_retains_configured_selector_evidence_while_later_events_supply_its
         )
 
     assert [item.text for item in presentation.snapshot().items] == ["01234567890123456789"]
+    assert len(wakes) == 20
+    assert wakes[-1].items == presentation.snapshot().items
+
+
+def test_other_policy_selector_history_eviction_invalidates_selected_item():
+    policies = tuple(
+        PresentationPolicyConfig(
+            name,
+            PresentationSurface.SEMANTIC,
+            (PresentationEventSelector(methods=frozenset({method})),),
+            name,
+        )
+        for name, method in (("completed", "item/completed"), ("deltas", "item/agentMessage/delta"))
+    )
+    presentation = SessionPresentationPipeline(policies, initial_policy="completed")
+    presentation.bind_root_thread(ROOT)
+    presentation.observe_protocol_output(message_completed("Retained text"))
+    initial = presentation.snapshot()
+    wakes = []
+    presentation.subscribe(lambda: wakes.append(presentation.snapshot()))
+
+    for _ in range(PRESENTATION_ITEM_SELECTOR_HISTORY_LIMIT - 1):
+        presentation.observe_protocol_output(message_delta(""))
+    assert wakes == []
+    presentation.observe_protocol_output(message_delta(""))
+    assert len(wakes) == 1
+    assert wakes[0].revision == initial.revision + 1
+    assert wakes[0].items == ()
+    assert wakes[0].events == initial.events
+    presentation.select_policy("deltas")
+    assert [item.text for item in wakes[-1].items] == ["Retained text"]
 
 
 def test_thread_read_response_hydrates_typed_history_once_using_exact_request_identity():

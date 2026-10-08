@@ -1,366 +1,196 @@
-# SQL schema methodology
+# SQLite contracts and schema methodology
 
-This document describes the current v21 SQLite boundary and the standards applied to
-future schema decisions. These authoritative standards may be modified only by an agent
-suggestion followed by user agreement.
+[`rodex_registry.schema`](../src/rodex_registry/schema.py) is the canonical generated
+catalog and attestation authority; [current-contract tests](../tests/test_current_contracts.py)
+pin its generation. This document preserves schema design standards and non-obvious
+constraints, not a copied table/column reference. Semantic changes to these standards
+require user agreement.
 
-## Current SQLite boundary
+## Storage and transactions
 
-- Rodex uses Python's stdlib `sqlite3` exclusively. `rodex_sql.transactions` is the sole
-  owner of SQLite connection creation, connection PRAGMAs, the cooperative database lock,
-  `BEGIN`, `COMMIT`, rollback, WAL activation, and connection close. Domain modules receive
-  a connection only inside one of these context-managed transactions.
-- `rodex_sql.private_database_path` normalizes the path and owns secure Linux filesystem
-  admission. The immediate parent must be a real current-user-owned directory with no
-  group/world permissions. The sibling transition lock and database must be regular
-  current-user-owned mode-`0600` files. Rodex opens the parent, lock, and database with
-  `O_NOFOLLOW` and `O_CLOEXEC`, and opens children relative to the retained parent
-  descriptor. Parent and transition-lock descriptors remain open through each transaction;
-  validated database descriptors remain borrowed through their transactions and WAL lifetime.
-- `open_rodex_bootstrap_transaction` is the only entry allowed to create the private
-  parent, transition lock, or database file. It is used only by explicit first-use flows.
-  `open_rodex_transaction` and `open_rodex_read_transaction` are existing-only: a missing
-  database or transition lock fails without creating filesystem state. An existing private
-  database and lock are admitted from their exact opened descriptors by the first
-  transaction that uses them. That transaction records only the parent, lock, and database
-  `(device, inode)` identities in process memory. Even the bootstrap entry will not recreate
-  storage that this process previously admitted and later finds missing.
-- SQLite opens `/proc/self/fd/<validated-database-fd>` in URI `mode=rw` or `mode=ro`, then
-  must report the canonical requested main path through `PRAGMA database_list`. Rodex
-  revalidates parent, transition-lock, and database descriptor/path identities plus owner,
-  type, mode, and symlink state before connect, after connect, before `BEGIN`, and before
-  `COMMIT`, and revalidates identity on connection/SQLite errors. A mismatch fails the
-  current operation with `database_moved` and restart guidance.
-- Every ordinary transaction holds a shared `flock` on the retained transition-lock
-  descriptor for its complete storage lifetime. The maintenance entry holds the exclusive
-  form and is for offline diagnostics. Lock acquisition has a ten-second monotonic deadline
-  with sleeping exponential backoff capped at 50 ms; it does not spin. All Rodex processes
-  that access the database must honor this boundary.
-- Writer transactions use `BEGIN IMMEDIATE`, WAL, `synchronous=NORMAL`, foreign keys, and a
-  ten-second busy timeout. Enabling WAL is a bounded cold-path operation with the same
-  sleeping deadline/backoff. Read transactions use a read-only URI, `query_only=ON`, and a
-  deferred `BEGIN`, so a writer does not hold the cooperative lock exclusively or
-  head-of-line block WAL readers. Success commits once; any exception rolls back; each
-  transaction connection plus its parent and transition-lock admission descriptors close
-  on exit.
-- Threadless process-local owners retain one validated main-database descriptor per exact
-  `(path, parent, transition-lock, database)` identity with active borrowers. The complete
-  transaction-storage context acquires/releases a borrow; opening another catalog cannot
-  close it. At most one idle catalog owner retains its descriptor and SQLite connection
-  for sparse-write WAL reuse; other idle owners close SQLite before their descriptor.
-  Owners hold no transaction or `flock` and retain the same `synchronous=NORMAL`, 1,000-page
-  automatic-checkpoint and 8 MiB journal-size policy. Shutdown retirement defers closure
-  until all borrowers release. Before fork, idle owners close; active parent owners remain
-  untouched. Fork during a transaction requires immediate child exec or `_exit`: child SQL
-  acquisition is rejected, and using/unwinding inherited transaction contexts is unsupported.
-- Identity memory remains a lock-protected map of `(device, inode)` tuples. Apart from the
-  active borrowers and one idle WAL-lifetime descriptor/connection, Rodex retains no admission
-  descriptor beyond a transaction and has no database watcher, worker, pipe, callback,
-  subscription, polling loop, or recurring SQL. Storage changes are detected only at an
-  actual transaction fence:
-  a missing or different later identity fails, while a move-away-and-back completed entirely
-  between transactions is outside this synchronous observation model.
-- The explicit integrity audit uses the same existing-only, shared-lock, read-only
-  transaction. Its normal WAL-aware snapshot includes committed WAL content, executes no
-  DDL, and compares every non-internal table, index, trigger, and view with the canonical
-  catalog. Token comparison preserves quoted literals/identifiers and their whitespace;
-  only unquoted formatting and a CREATE-prefix `IF NOT EXISTS` are normalized.
-  Location changes and live storage relocation are unsupported; the exclusive
-  maintenance lock does not move or repair the database.
+[`rodex_sql.transactions`](../src/rodex_sql/transactions.py) alone owns stdlib
+`sqlite3` connections, PRAGMAs, locks, transaction boundaries, WAL lifetime, and close.
+Domain code receives a connection only inside its context managers:
+
+- `open_rodex_bootstrap_transaction`: explicit first-use creation only.
+- `open_rodex_transaction`: existing-only writer, `BEGIN IMMEDIATE`.
+- `open_rodex_read_transaction`: existing-only read-only URI, `query_only=ON`,
+  deferred `BEGIN`, WAL-aware snapshot.
+- `open_rodex_maintenance_lock`: exclusive offline coordination, not relocation or repair.
+
+[`private_database_path`](../src/rodex_sql/private_database_path.py) admits a real,
+current-user private parent and regular mode-`0600` database/transition-lock files.
+No-follow, close-on-exec, descriptor-relative opens retain parent/lock descriptors
+through a transaction and borrow the validated main descriptor through its storage
+lifetime. SQLite connects through `/proc/self/fd/<validated-database-fd>` and must
+report the canonical main path.
+
+The first admission records parent, lock, and database `(device, inode)` identities.
+Revalidate descriptors/pathnames, owner, mode, type, symlinks, and reported SQLite path
+before/after connect, before `BEGIN`/`COMMIT`, and on errors. Missing/replaced storage
+fails with `database_moved`; even bootstrap cannot recreate something this process
+already admitted. Restart is required after an authorized offline move. There is no
+watcher: move-away-and-back entirely between fences is unobservable.
+
+Ordinary transactions and integrity audits hold a shared `flock`; writers do not
+exclusively block WAL readers. Lock/WAL activation waits have ten-second monotonic
+deadlines and sleeping backoff capped at 50 ms. Writers enable foreign keys, WAL,
+`synchronous=NORMAL`, and a ten-second busy timeout. Commit once on success, roll back
+on exception; do not put source I/O or external process work under the writer lock.
+Direct same-uid SQLite access ignoring the cooperative lock is outside this contract.
+
+Process-local owners retain every active catalog borrower, with at most one idle
+descriptor/connection for sparse-write WAL reuse. Opening catalog B cannot close A's
+borrowed descriptor. Idle owners hold no transaction or `flock`; close SQLite before
+its descriptor. Policy remains 1,000-page auto-checkpoint and 8 MiB journal-size limit.
+Before fork, close idle owners, not active parent borrowers. A child forked during a
+transaction must immediately exec or `_exit`; acquiring SQL or using/unwinding inherited
+contexts is unsupported. No recurring SQL or watcher maintains this storage boundary.
+
+`require_current_rodex_schema` uses a cheap generation-marker read on the steady path;
+mutations recheck inside their writer transaction. Only empty marker-less storage
+may bootstrap. Nonempty unmarked or incompatible catalogs fail before domain DDL;
+there is no implicit reset/migration/repair. Verified additive extensions preserve
+current-generation contents. `audit_rodex_database_integrity` explicitly attests all
+non-internal tables, indexes, views, and triggers in a read-only snapshot including
+committed WAL. It performs no DDL. SQL token comparison preserves quoted bytes and
+literal whitespace, normalizing only unquoted formatting and CREATE-prefix `IF NOT EXISTS`.
 
 ## Schema standards
 
-- Table names are always plural.
-- Every table starts with `id INTEGER PRIMARY KEY AUTOINCREMENT`.
-- Every durable, reusable, or identity-bearing concept is represented once as a
-  canonical row. Its uniform internal integer identity is separate from its semantic
-  unique key; dependent rows use `<table_name>_id`; externally visible entities use a
-  separate opaque public identity; provenance and activity use separate rows.
-- A connecting field is named `<referenced_table>_<lookup_field>`; a link to another
-  table's primary key therefore ends in `<plural_table>_id`.
-- Foreign-key fields use `INTEGER` and reference the target table's `id`.
-- Required values use `NOT NULL`. Nullability represents a genuine domain state, never
-  implementation convenience.
-- Enforce identity, cardinality, and referential integrity with database constraints,
-  not application assumptions alone.
-- Lookups use `INTEGER` relational keys or `BIGINT` domain IDs. Stored `TEXT` may be
-  payload, but is not indexed or searched when integer identity fields exist.
-- Index fields used for lookup, joins, or enforced uniqueness. Do not index payload
-  without an observed query that needs it.
-- Every natural key and one-to-one relationship has a named unique index whose ordered
-  fields match the authoritative lookup key.
-- Do not copy an identity onto an owning or relationship row. Resolve the canonical
-  identity once and store its integer foreign key on memberships and relationships.
-- Preserve required canonical identity when adding an optional user-defined identity;
-  represent the latter with a separate nullable relationship rather than replacement.
-- Do not introduce redundant association tables without a current cardinality or
-  ownership requirement.
-- Lookup tables use their complete natural key: `SELECT id` first and `INSERT` only
-  when no row exists. This avoids unnecessary AUTOINCREMENT gaps.
-- SQLite foreign-key enforcement is enabled for every transaction.
-- Cold schema initialisation creates and verifies the complete current generation in one
-  transaction. Once the generation marker is current, steady-state initialisation checks
-  that marker in one cheap WAL-aware read transaction. Every ordinary mutation rechecks
-  the generation inside its one writer transaction; only empty marker-less private
-  storage receives the cold schema bootstrap in that same transaction. A nonempty
-  marker-less database or a different generation fails closed before v21 domain DDL.
-- `synchronous=NORMAL` preserves SQLite consistency, but an operating-system crash or
-  power loss can lose recently committed transactions that have not reached durable
-  storage; this is not a `FULL` synchronous durability promise.
-- UTC timestamps use fixed microsecond ISO-8601 `TEXT`, such as
-  `2026-08-15T12:34:56.123456Z`.
-- Access updates compare those canonical timestamps in the writer
-  transaction, so a delayed older writer cannot regress the durable high-water mark.
-  Durable text must already use canonical UTC microsecond form. A value up to 24 hours
-  ahead of an incoming observation is retained as plausible reordering; a larger lead is
-  treated as a poisoned high-water mark and healed to the incoming canonical timestamp.
-- Runtime resume persists one incarnation tuple: runtime ID/start, tmux endpoint, and
-  current Codex root are either all accepted or all rejected against the expected previous
-  runtime ID in one transaction. Identical complete-tuple retries are idempotent.
-  Timestamps describe the transition; they do not select its winner. A stale incarnation
-  cannot partially replace any member of that tuple.
-- Unsigned identity up to 64 bits is stored losslessly in one signed `BIGINT` through
-  an explicit two's-complement codec. Wider identity is stored losslessly in ordered
-  signed `BIGINT` fields with one composite unique index.
-- Every identity `BIGINT` enforces `typeof(column) = 'integer'`; readers pass stored
-  values through strict codecs without coercion so malformed storage fails closed.
-- Derived-identity field names state the source value, derivation, integer storage,
-  and part order. Never truncate identity merely to fit one column.
-- Names must identify the domain that owns an identity. Similar representations from
-  different domains are never assumed to be interchangeable, even when stored on the
-  same owning row.
-- When text needs deterministic identity, derive integer lookup fields from it and
-  retain the original text only when useful as payload. The derivation must be stable
-  and preserve enough bits for the domain's collision requirements.
-- Normalisation, derivation, insertion, and lookup share one authoritative pipeline.
-  A matching derived integer identity is occupied; do not fall back to a text lookup.
-- Random Rodex IDs use exactly 64 bits, one unique index, and ten bounded
-  candidates before failing explicitly. They never change representation or width.
-  This includes runtime IDs: their compact form is an intentional agent-legibility
-  boundary, while the unique index and incarnation check carry the integrity contract.
-  Generated cool names try ten candidates at each approved word count before escalating
-  to the next word count, then fail explicitly.
-- Rodex does not implicitly reset, rewrite, or repair incompatible schema generations.
-  Additive, verified schema extensions preserve current-generation contents.
+- Plural tables begin with `id INTEGER PRIMARY KEY AUTOINCREMENT`.
+- Represent each durable/reusable identity once. Keep internal integer PK, semantic
+  unique key, and externally visible opaque identity separate; provenance/activity
+  use separate rows. Do not duplicate canonical identity onto relationship rows.
+- Connecting fields use `<referenced_table>_<lookup_field>`; FK-to-PK fields therefore
+  end in `<plural_table>_id`, use `INTEGER`, and reference `id`.
+- Required values are `NOT NULL`; nullable values represent real domain states.
+  Constraints enforce identity, cardinality, and referential integrity. Enable FKs
+  in every transaction; do not rely solely on application assumptions.
+- Each natural key/one-to-one relation has a named unique index in lookup-key order.
+  Resolve complete natural keys with `SELECT id`, then insert only when absent;
+  avoid needless AUTOINCREMENT gaps. Caches cannot cross rollback/database boundaries.
+- Look up/join through integer keys or `BIGINT` domain IDs. Text may be payload, not
+  a parallel index/search path when integer identity exists. Index actual lookup/join
+  needs, not hypothetical payload queries. Do not add redundant association tables
+  without a present ownership/cardinality requirement.
+- Optional user-defined identity supplements canonical identity via a nullable
+  relationship; it does not replace the permanent identity.
+- Names identify the owning domain and any derivation/storage/part order. Similar
+  representations do not make different domains interchangeable.
+- Unsigned 64-bit identity uses lossless signed two's-complement `BIGINT`; wider IDs
+  use ordered parts plus a composite unique index. Never truncate to fit. Enforce
+  `typeof(column) = 'integer'` and strict non-coercing readers.
+- Text-derived identities share one normalization/derivation/insert/lookup pipeline
+  with enough bits for the collision domain. A matching derived key is occupied;
+  never fall back to text lookup. Keep original text only when useful as payload.
+- Random Rodex IDs remain exactly 64 bits with one unique index and ten bounded
+  candidates. Generated names try ten candidates per approved word count, then
+  escalate up to the configured limit or fail explicitly.
+- Timestamps use canonical UTC microsecond ISO-8601 text. Writer comparisons preserve
+  access high-water marks against delayed observations. A lead up to 24 hours is
+  plausible reordering; a larger lead is healed as poisoned state.
 
-## Current v21 execution, request, statistics, and agent-trace projection
+## Identity and lineage
 
-- `rodex_registries` contains the database instance's one durable 64-bit ID row. Live tmux
-  identity includes it so another registry cannot adopt the same session/Codex pair.
-- `rodex_sessions` contains one signed-BIGINT Rodex session ID and
-  permanent/optional display-name links. The public Rodex
-  session ID is always serialized as a 16-character lowercase hex string, never a JSON
-  number. The current ALPHA v21 generation is stored in `rodex-v21.sqlite3`.
-  `rodex_schema_generations` marks the exact generation inside the database; Rodex
-  rejects nonempty unmarked databases and wrong generations before creating any domain
-  table. Files for every other generation remain outside the current v21 database path
-  and are never opened, read, migrated, or rewritten by v21 bootstrap.
-- `rodex_runtime_instances` contains one signed-`BIGINT` random 64-bit `runtime_id` and
-  its start time for a Rodex session. Unique indexes fence both session cardinality and
-  runtime ID reuse. Allocation uses the same ten-candidate indexed-selection pipeline
-  as the public Rodex session ID.
-  Resume replaces this control identity; the table contains no conversation content.
-- `rodex_sessions_statistics` is the latest successful aggregate snapshot, one row per
-  Rodex session. Every fixed aggregate and its available base count is a typed scalar
-  column. Rodex allocates its session-local monotonic
-  `statistics_publication_sequence` only when a changed authenticated projection is
-  successfully published; no-op lifecycle events do not advance it. The sequence is a
-  compare-and-set and relational consistency
-  token, not a turn count or retained history; temporary analyzer dataset identities,
-  dataset revisions, prior Rodex snapshots, and redundant JSON documents are excluded.
-- `rodex_sessions_statistics_distributions` stores the seven bounded distribution kinds
-  as `n`, total, median, p75, p90, p95, and maximum fields. Empty and nonempty shapes are
-  constrained in SQL.
-- `rodex_sessions_statistics_named_counts` stores only genuine dynamic maps as bounded
-  category/name/count facts. Its `(session, category, name)` key supports deterministic
-  reconstruction and direct aggregation. `rodex_sessions_statistics_audit_limits`
-  retains limitation order with `(session, ordinal)`.
-- `model_names`, `reasoning_effort_names`, and `tool_names` are independent append-only
-  dimensions.
-  Each has an `AUTOINCREMENT` integer primary key and a unique exact source name. A
-  publication resolves each distinct name once in its transaction by selecting before
-  inserting; database-local caches never cross a rollback or database boundary.
-- `codex_threads` is the sole storage location for a Codex-owned 128-bit thread UUID,
-  held losslessly as two signed `BIGINT` halves with independent semantic uniqueness.
-  `rodex_sessions_codex_threads` is verified session membership and stores only
-  `codex_threads_id`; it stores neither UUID halves nor lineage. Membership rows reject
-  update and delete after verification. The one-to-one
-  `rodex_sessions_current_codex_threads` relationship selects the active root.
-  Historical root memberships may remain after recovery without entering the active
-  recursive tree. Session model/reasoning counts use that same current tree in the same
-  read transaction as the source projection; retained old roots cannot inflate them.
-  Database triggers reject both insertion and update paths that would
-  make the current root a sub-agent spawn, and the lifecycle boundary rejects the same
-  transition before writing.
-- `rodex_sessions_codex_rollout_sources` owns the immutable canonical rollout path
-  observed for each thread. `rodex_sessions_analytics_worker_thread_checkpoints` owns
-  each runtime analyzer's accepted append-stream prefix byte count, observation mtime,
-  SHA-256, and verification time for that rollout. Codex rollouts are a trusted
-  append-only event stream: the resident hot path extends this digest from suffix bytes
-  only, while cold startup, clean replay, and explicit body reads re-hash the durable
-  accepted prefix.
-  Clean replay invalidates cached verified lineage metadata together with reader state;
-  no source can reuse pre-recovery parent, depth, path, nickname, or inheritance facts.
-  This avoids a full historical reread for every emitted record without presenting the
-  digest as continuous hostile-file authentication. Composite session/row foreign keys
-  prevent a worker checkpoint from joining another session's worker or rollout. This
-  separates source identity from worker-specific progress.
-- `rodex_sessions_codex_turns` stores only stable execution-turn identity per exact
-  `(Codex thread, turn_id)`. Codex turn IDs are strict canonical lowercase UUIDs stored
-  losslessly as two signed `BIGINT` halves; a separate opaque 128-bit public ID is safe
-  to expose. Exact-turn JSON names these separately as `codex_turn_id` and `turn_id`.
-  SQL guards reject update/delete of canonical turn identity, so trace and spawn foreign
-  keys remain durable. `rodex_sessions_codex_turn_states` owns the mutable
-  lifecycle projection—start, terminal time, outcome, model, and reasoning effort—so
-  activity is not folded into the canonical identity. Nullable `model_names_id` and
-  `reasoning_effort_names_id` fields there preserve the two separate turn-scoped facts.
-  `rodex_sessions_statistics_turn_metrics` owns the replaceable scalar statistics
-  projection for one core turn.
-  `rodex_sessions_statistics_turn_named_counts` normalizes the remaining dynamic
-  category maps. Canonical collaboration operations are model-tool facts, so neither
-  statistics table stores collaboration scalar columns or `collaboration_tool` named
-  counts; read views derive that vocabulary directly from the stored `model_tool` rows.
-- `rodex_sessions_codex_activity_scopes` canonicalizes one exact activity owner: a
-  session/thread pair with either one turn foreign key or an explicit no-turn state.
-  Partial unique indexes enforce one no-turn scope per thread and one scope per turn;
-  composite foreign keys prove that any non-null turn belongs to that exact thread and
-  session. Events, items, tool calls, aliases, and typed details carry its integer ID,
-  while a trigger makes the scope identity immutable after insertion.
-- `rodex_sessions_subagent_spawns` is the sole stored lineage edge and records exactly
-  one verified relationship from each sub-agent source to its direct parent's spawning
-  turn. Composite deferred
-  foreign keys bind the child membership, parent membership, spawning turn's owning
-  source, and the Rodex session. Agent path, optional nickname, and clean/inherited
-  history provenance are immutable properties of this spawn relationship. The schema
-  cannot attach a child to its own turn, an unrelated source's turn, or another
-  session's turn, and rejects update or delete of a published lineage edge.
-- `rodex_sessions_agent_requests` is the canonical identity for one observed
-  **turn-producing** agent request. It receives its own opaque 128-bit public ID and
-  joins one exact parent user-message reference, collaboration tool request activity,
-  spawn/follow-up activity, activity scope, and target `codex_threads` row. Semantic
-  uniqueness is enforced independently for the tool activity and sub-agent activity. An
-  insert trigger proves
-  same session/scope/turn ownership, requires the latest user message preceding the
-  collaboration tool request (which must itself precede the activity), and
-  accepts only `collaboration.spawn_agent → started` or
-  `collaboration.followup_task → interacted`. The row records identity and provenance;
-  plaintext bodies remain authenticated rollout references. A
-  `collaboration.send_message → interacted` activity deliberately has no request row:
-  it continues an existing agent turn rather than producing another one.
-- `rodex_sessions_agent_request_target_turns` separately associates one canonical
-  request with one target agent turn. The normalizer pairs unmatched requests and later
-  unclaimed turns FIFO per exact target thread. Unique indexes enforce one target turn
-  per request and one request per target turn; a trigger proves target membership and
-  time ordering, rejects a later request while an earlier request remains unmatched, and
-  rejects a later eligible turn while an earlier one remains unclaimed. A follow-up on
-  an existing agent therefore becomes another request row and another turn association
-  without changing the agent's canonical thread or earlier history.
-- `rodex_sessions_analytics_workers` stores independent one-to-one runtime analytics
-  health within the shared coordinator. Its bounded
-  diagnostic code cannot contain free-form errors or paths. Failure never fabricates or
-  overwrites a statistics snapshot.
-- `rodex_sessions_agent_trace_publications` is an independent session-local CAS head.
-  It records trace schema, calculation time, coverage, durable event count, and
-  unrecognized-record count. Statistics and trace publication sequences are separate
-  domains even though the worker commits both projections atomically. Each append
-  advances those counts from the persisted head plus newly inserted rows; it never
-  recounts the historical event ledger. Coverage is cumulative at this boundary: a
-  prior `gapped` head remains gapped, and a nonzero cumulative unrecognized-record count
-  cannot be published as `complete`.
-- Agent-trace publication has one canonical pre-transaction contract. It normalizes
-  UTC/text/typed details, validates every identity and source coordinate, rejects
-  duplicate source keys, and computes canonical detail hashes before `BEGIN IMMEDIATE`.
-  The transactional writer accepts only the contract-issued immutable prepared form
-  and rejects callers outside an active Rodex transaction before SQL. After current
-  same-transaction membership updates, it resolves only the distinct thread IDs present
-  in the batch through bounded row-value `VALUES` chunks; unrelated memberships are
-  neither selected nor materialized.
-- `rodex_sessions_agent_trace_events` is the append-only event ledger. Its natural key
-  is `(Codex thread row, rollout record ordinal, derived event ordinal)`. Each event has
-  a bounded kind, non-null canonical activity-scope foreign key, timestamp, and first
-  publication sequence. A physical authenticated line ordinal supplies the coordinate
-  when Codex does not embed one. A canonical typed-detail SHA-256 makes replay equality
-  cover the complete fact, not only its envelope. Every event also receives a random
-  opaque 128-bit public identity; internal monotonic SQL IDs never cross the command
-  boundary. Exact SQL-attested triggers reject update or delete of event provenance.
-  Replaying authenticated history is idempotent; changed facts at a published source
-  coordinate are rejected as a conflict.
-- Trace detail tables are typed by domain: messages, tool calls, command executions,
-  contexts, token usage, rate-limit windows, and sub-agent activities. Rate-limit
-  normalization retains every supplied primary and secondary window in that order,
-  without manufacturing rows for absent windows. There are no JSON
-  columns. SQL stores bounded metadata and body byte counts; message, command, tool, and
-  output bodies remain references to the authenticated rollout by default. Explicit
-  body reads select authenticated rollout checkpoints for all current and historical
-  session memberships, re-hash each requested prefix, and redact hidden reasoning and
-  encrypted text through the same shared classifier used during normalization.
-  Message, command, and tool satellites carry the same activity-scope ID plus a literal
-  event kind and exact composite foreign keys to their event and optional item/tool-call
-  rows. Every typed detail rejects update and delete after publication. SQL therefore
-  rejects cross-session, cross-turn, wrong-event-domain, and post-publication mutation.
-  A sub-agent activity additionally binds
-  `(Rodex session, event_id, event_kind)` to the same event tuple, preventing a detail
-  from claiming another session. Its `target_codex_threads_id` can point to a canonical
-  identity before verified session membership exists; later verification reuses that
-  row without updating the activity. The activity also holds the exact canonical
-  collaboration tool-call foreign key resolved from its source call ID. The bounded
-  public trace read projects that linked tool identity, source call ID, argument byte
-  count, and capture state as `collaboration_invocation`. It projects `turn_request`
-  only when the narrower request row actually exists; it never derives a follow-up from
-  `activity_kind = interacted` alone. The current projection exposes `send_message`
-  only from the exact linked tool call.
-  `rodex_sessions_codex_items` is the sole storage location for every observed Codex
-  item identity. A strict canonical UUID is stored losslessly as two signed `BIGINT`
-  halves; a non-UUID source identity is retained in
-  `rodex_sessions_codex_item_aliases` with four indexed SHA-256 `BIGINT` parts and exact
-  text for collision verification. The alias repeats the canonical activity-scope key
-  and has exact composite foreign keys to its item for both thread and scope ownership.
-  Both forms resolve to one canonical item row with an opaque 128-bit public identity;
-  alias update/delete is prohibited. Message, command, and tool activities retain only
-  its integer foreign key, while public reads expose semantic UUID, source alias, and
-  opaque public ID as separate fields. `rodex_sessions_codex_tool_calls` owns one
-  canonical invocation with a tool-name foreign key and opaque 128-bit public identity.
-  The name may transition once from unknown to verified while every identity and
-  ownership field remains unchanged; any later update and every delete are rejected.
-  `rodex_sessions_codex_tool_call_aliases` independently canonicalizes its observed
-  call-ID, item, or source-event aliases, using integer foreign keys for item and event
-  aliases. These alias rows are also immutable. Thus any observed alias can resolve the
-  same invocation without duplicating the canonical call. Request, output, and status
-  remain explicit immutable rows in
-  `rodex_sessions_agent_trace_tool_call_activities`; activity kind comes from the
-  source record type, including valid empty request or output payloads.
-- Per-thread lifecycle, token, command, tool, file, web, collaboration, and compaction
-  summaries are grouped from the existing turn and named-count rows by internal
-  `rodex_sessions_codex_threads_id`; no redundant agent-summary table is stored, and
-  public JSON exposes Codex UUIDs rather than membership IDs.
-- Publishing a team projection, turn metrics, exact thread closure, rollout checkpoints,
-  trace batch, and healthy state is one registry/session/runtime/Codex-identity-fenced
-  transaction. Statistics mark-and-sweep removes superseded metrics and dynamic counts,
-  not stable core turns. Trace events append idempotently under their own CAS head.
-  Health-only failure publication does not mutate last-good statistics, checkpoints, or
-  trace events.
-- Each coordinator-owned runtime analyzer enters SQL through its registry boundary. It caches stable lookup
-  identities for its database lifetime, prepares a publication once, and reuses that
-  immutable publication if SQLite asks it to retry; a retry never reruns analysis or
-  source I/O inside the transaction. Cold startup warms resident analyzer and trace
-  state from the accepted checkpoint prefix, then publishes only later suffix bytes. A
-  stale publication-sequence compare-and-set conflict discards the in-memory source cursor
-  and reloads SQL before accepting a subsequent append, preventing a stale worker from
-  skipping bytes. Other deterministic semantic conflicts publish degraded health and park
-  by authenticated source fingerprint without resetting every source cursor.
-- Child rollout staging retains its own `session_meta` and records after
-  `subagent_history_start_ordinal`; inherited parent history is excluded before analysis.
-  A clean child with no inherited history legitimately omits both `forked_from_id` and
-  the cutoff; Rodex canonicalizes that observed shape to cutoff zero. Cold recovery
-  first follows exact 128-bit targets already named by lifecycle or parent activity.
-  If historical activity carries no child UUID, one startup-only fallback enumerates
-  regular JSONL files in the root UUIDv7 three-day window, reads only the first metadata
-  line, authenticates the complete root/parent closure, and caches exact paths. Resident
-  append wakes never repeat that directory scan.
-  Original physical coordinates travel beside filtered bytes so trace/body references
-  do not shift when inherited lines are removed.
-  Collaboration operations derive from canonical model-tool counts, while verified
-  spawn relationships determine agents started at session, source, and exact-turn scope.
-- Strict typed projection parsing rejects missing, unknown, or wrongly typed analyzer
-  fields before SQL begins. Reads select root and child rows in one transaction; the CLI
-  presentation layer can reconstruct every analyzer statistic without stored JSON.
+[`identity.py`](../src/rodex_registry/identity.py),
+[`execution.py`](../src/rodex_registry/execution.py), and
+[`lifecycle.py`](../src/rodex_registry/lifecycle.py) own normalization and transitions.
+
+Rodex registry, session, and runtime IDs are distinct 64-bit values, exposed as
+16-character lowercase hex strings, not JSON numbers. Internal SQL row IDs never
+substitute for them. Codex thread/turn IDs are separate 128-bit UUIDs stored in two
+signed halves; public turn/event/item/tool IDs are separate opaque identities.
+App Server `thread.id` and `thread.sessionId` coincide for the managed root, not
+necessarily forks. Exact-turn statistics JSON separates `codex_turn_id` from public
+`turn_id`; control commands use native `codex.turn_id`, not the public statistics ID.
+
+Permanent generated names are immutable anchors; optional aliases are preferred
+display names. Name uniqueness spans the canonical database, not other state roots.
+Resume replaces runtime ID/start, endpoint, and current root as one tuple against the
+expected previous runtime. Complete-tuple retries are idempotent; timestamps do not
+choose the winner. Stale writers cannot replace only part of the tuple.
+
+`codex_threads` owns UUID identity. Immutable `rodex_sessions_codex_threads`
+memberships, current-root selection, rollout sources, and direct-parent spawn edges
+are separate relations. Historical roots remain members without entering the current
+recursive tree or inflating its counts. Triggers and lifecycle validation forbid the
+current root from becoming a sub-agent. Spawn edges bind child, parent, exact parent
+turn, session, path/nickname, and inheritance provenance; they are immutable.
+
+Canonical `rodex_sessions_codex_turns` survive replaceable statistics. Mutable turn
+state/model/reasoning and statistics metrics are separate projections. Activity scopes
+bind one exact session/thread to either a turn or explicit no-turn state, with partial
+uniqueness and composite FKs. Trace satellites carry scope plus literal event kind to
+reject cross-session, cross-turn, or wrong-domain references.
+
+Canonical items and calls can have multiple observed aliases, not duplicate identities.
+UUID item identities are lossless; non-UUID aliases use four SHA-256 integer parts and
+text for collision verification. Calls canonicalize call-ID, item, or source-event
+aliases. Aliases are immutable; a call name may become verified once from unknown,
+without changing ownership. Request/output/status remain separate activities,
+including valid empty payloads.
+
+## Agent requests and trace
+
+[`agent_trace_contract`](../src/rodex_registry/agent_trace_contract.py) validates and
+normalizes typed facts, UTC/text/IDs, source coordinates, duplicate keys, and detail
+hashes before `BEGIN`. Only its sealed `PreparedAgentTracePublication` is accepted;
+manually constructed, copied, or replaced prepared values are not an alternative API.
+[`agent_trace_writer`](../src/rodex_registry/agent_trace_writer.py) requires an active
+Rodex transaction. It resolves only batch-referenced threads in bounded `VALUES`
+chunks after same-transaction membership writes. Request reconciliation is internal
+to this writer, not an independently sequenced public step.
+
+The append-only event key is `(thread row, physical rollout record ordinal, derived
+event ordinal)`. Detail hashes cover the complete fact: equal authenticated replay is
+idempotent; changed facts at an existing coordinate conflict. Published provenance,
+typed details, aliases, and ownership are immutable. Target thread identity can exist
+before verified membership; later verification reuses it without mutating the activity.
+Rate-limit normalization preserves supplied primary/secondary windows in order and
+does not invent absent windows. Typed satellites contain no JSON columns.
+
+`rodex_sessions_agent_requests` represents only turn-producing spawn/follow-up
+requests. Each joins the exact collaboration tool request, activity, scope, target,
+and latest parent user-message reference preceding the tool request in that same
+turn. A separate association pairs unmatched requests with unclaimed target turns
+FIFO per thread, enforcing one-to-one ownership and time order. Reusing an agent adds
+a request/turn association, not a new thread or overwritten history.
+
+`send_message` deliberately creates no request row: `interacted` alone cannot identify
+follow-up intent. Public reads expose `collaboration_invocation` only through the
+linked exact tool call and `turn_request` only when its narrower row exists.
+Body/prose limits live in [security](SECURITY.md#content-and-privacy); source admission
+and inherited-history filtering live in [analytics](ANALYTICS.md#source-admission-and-append-work).
+
+## Publication and durability
+
+[`statistics.py`](../src/rodex_registry/statistics.py) and
+[`analytics_registry.py`](../src/rodex_registry/analytics_registry.py) publish through
+one registry/session/runtime/Codex-fenced transaction: checkpoints, lineage, trace,
+changed metrics, and health either commit together or do not. Strict projection
+parsing rejects missing/extra/wrongly typed fields before SQL.
+
+Statistics and trace have independent session-local compare-and-set heads. No-op
+statistics do not advance their head. Trace totals add newly inserted facts to the
+persisted head instead of recounting history. Coverage is cumulative: a prior gap or
+nonzero unrecognized-record count cannot become complete through an ordinary append.
+Statistics mark-and-sweep replaces metrics/counts, never canonical turns or trace.
+Failure-health writes preserve last-good statistics, checkpoints, and trace.
+
+Fixed metrics are typed scalar columns; distributions, genuine dynamic counts, and
+ordered audit limits have relational rows. Model/reasoning/tool dimensions are
+append-only. Collaboration counts derive from canonical model-tool facts, not another
+stored vocabulary. Per-thread summaries derive from current-tree memberships/turns
+in the same read snapshot; there is no redundant agent-summary table or retained
+analyzer dataset/JSON snapshot history. Rollout identity and worker-specific accepted
+prefix checkpoints are separate, with composite session FKs.
+
+WAL with `synchronous=NORMAL` preserves consistency, but an operating-system crash or
+power loss can lose recently committed transactions that have not reached durable
+storage. This is not `FULL` synchronous durability. Analytics retirement has a
+separate [best-effort completion limit](ANALYTICS.md#retirement-limits).
+
+Evidence: [schema implementation](../src/rodex_registry/schema.py),
+[SQLite adversarial boundaries](../tests/adversarial/test_round3_sqlite_boundaries.py),
+and [effect ownership](../tests/adversarial/test_interaction_path_ownership.py).

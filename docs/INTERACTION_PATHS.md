@@ -1,251 +1,157 @@
-# Interaction contract and production-path inventory
+# Interaction routes and ownership
 
-Rodex 0.15.0a1, ALPHA. SQL generation 21, isolated tmux protocol v5, runtime peer
-contract v6, daemon protocol v3 and observer schema v4 form the current boundary.
-Old contracts are rejected except for the receipt-bound tmux-v4 resize bridge described
-below; it has no lifecycle or model-control authority.
+## Typed intent
 
-## Authoritative contract
+[`SessionInteractionPipeline`](../src/rodex/interaction_pipeline.py) owns target
+resolution, validation, ordered content hooks, delivery, and bounded content-free
+outcomes. A daemon runtime shares it across gateway, interceptors, proxy, and observer;
+exact commands use the same contract under their transition lock. The observer process
+uses its own instance for rendering.
 
-`SessionInteractionPipeline` owns target resolution, validation, ordered content hooks,
-post-hook checks, delivery, bounded content-free outcome records and exact outcome subscriptions. Each daemon runtime shares one
-instance between terminal gateway, interceptors, proxy and observer. Exact-turn commands use the same contract inside
-their existing transition lock. The observer renderer uses it in its own process.
+Display intent does not imply model intent: `send_message(..., start_model_turn=False)`
+is a notice, not a prompt. `main` may explicitly start a model turn; the observer is
+a multi-agent view and has no single model-thread binding. Main open/close belongs to
+session lifecycle, not pane presentation. Missing targets reject unless explicit
+`open_if_missing` has a registered launch context; a label cannot invent an agent.
 
-```python
-pipeline.send_message(target="main", text="Visible information", start_model_turn=False)
-pipeline.send_message(target="agent-observer", text="Visible information", start_model_turn=False)
-pipeline.send_message(target="main", text="Please investigate", start_model_turn=True)
+[`publish_session_interaction`](../src/rodex/interaction_transport.py) exposes these
+operations on a private endpoint. It cannot accept arbitrary protocol frames, terminal
+bytes, snapshots, launch commands, or hooks. `publish_tui_notice` uses this same path.
+Hooks may transform/reject content, never change source, target, operation, turn/thread,
+model permission, or dispatch identity. They run synchronously and should remain short.
+Protocol edits retain non-text RPC fields; unmodified native frames preserve exact bytes.
+Accepted fan-out does not apply the same hook twice.
+
+## Production routes
+
+| Intent/source | Authoritative path |
+| --- | --- |
+| Create, selector open, resume, detach | [application pipeline](../src/rodex/application_pipeline.py) → [managed lifecycle](../src/rodex/managed_session_lifecycle.py) → runtime |
+| Native delegation | [`cli._exec_codex`](../src/rodex/cli.py); outside managed interaction |
+| Native typing/output | decoder/interceptor → [gateway](../src/rodex/terminal_gateway.py) → child PTY / terminal surface |
+| Managed initial prompt, verified Enter, queued or control text | [prompt admission](PROMPT_SUBMISSION_FLOW.md) → primary receipt or structured fallback |
+| App Server frames | [proxy](../src/rodex/protocol_proxy.py) protocol input/output → original destination, then bounded projections |
+| `_start`, `_steer`, `_interrupt`, alias, mouse | [exact mutation coordinator](../src/rodex/exact_turn_mutation.py) → fenced adapter |
+| `_cat`, `_tail`, `_events` | [live read pipeline](../src/rodex/session_read_pipeline.py); terminal text and protocol events remain distinct |
+| `_stats`, `_stats-status`, `_agents`, `_trace` | [statistics](../src/rodex/statistics_commands.py) / [trace commands](../src/rodex/agent_trace_commands.py) → owned durable reads |
+| Local menu selection | [configuration](../src/rodex/input_interceptor_config.py) → submitted-command handler → typed target/operation |
+| Attach/update notices | registered capability → display-only interaction |
+| Analytics publication | committed SQL receipt → observer wake → bounded indexed reads |
+| Resize/registration/stop/child exit | explicit supervisor or descriptor wake → runtime owner |
+
+The proxy forwards accepted primary output to Codex before its presentation/context/
+observer projections. Control-client output goes only to its destination, never into
+the primary presentation. Ordinary clients use separate upstream connections; reading
+or mutating does not make a control client the subscribed primary.
+
+## Outcomes and recovery
+
+`delivered` means transport accepted, observer admitted, or stdout flushed, not confirmed
+pixels. `queued` admits a newest-state snapshot, not every intermediate message.
+`model_turn_started` carries an exact turn/dispatch receipt. `rejected` performed no
+requested delivery; `failed` exposes failure; `indeterminate` requires reconciliation
+before retry. Observer failures cannot undo accepted work. Prompt rejection returns a
+correlated RPC error without hanging the caller; other rejected native traffic closes
+its connection when needed to avoid an unanswered RPC.
+
+Model dispatch rechecks selector, connection, runtime, and thread after lock/transport
+waits. Start accepts the statuses in [`_STARTABLE_THREAD_STATUSES`](../src/rodex/control.py)
+(`idle` and `systemError`) unless direct input is explicitly refused. Active turns
+require exact steer/interrupt intent. The current `_help` summary says idle-only;
+the source predicate is authoritative for admission. See the
+[automation skill](../.agents/skills/rodex-session-control/SKILL.md) for retry semantics.
+
+[`ServerOverloadedRecoveryController`](../src/rodex/server_overloaded_recovery.py)
+always watches the registered main thread, not child-thread starts on that connection.
+A terminal `serverOverloaded` failure schedules `Continue...` after 30 seconds.
+Repeats within five minutes double to a 960-second ceiling; a longer gap resets the
+sequence. Terminal keyboard input, disconnect, close, or supersession cancels pending
+work through hooks, lock waits, and transport setup until atomic dispatch admission.
+Cancellation does not undo an admitted request. This is the explicit model-resubmission exception; generic
+indeterminate mutations are not automatically resent.
+
+## Terminal and presentation
+
+[`TerminalSessionGateway`](../src/rodex/terminal_gateway.py) blocks on outer/child PTY
+readiness, a wake pipe, child `pidfd`, and explicit input/handoff deadlines. Registration,
+stop, persisted diagnostics, selected-view revisions, and resize wake it without a
+fixed idle relay timer. [Prompt handoff](PROMPT_SUBMISSION_FLOW.md#enter-handoff)
+uses bounded event-specific rechecks, not idle screen polling.
+
+[`NativeTerminalProjection`](../src/rodex/native_terminal_projection.py) continuously
+advances one [`NativeTerminalScreen`](../src/rodex/native_terminal_screen.py), even
+while semantic presentation is visible. [`TerminalSurfaceRenderer`](../src/rodex/terminal_surface.py)
+composites without feeding its own frames back into that native screen. Preserve:
+
+- Exact query/UTF-8/encoding-switch boundaries when batching bytes. Cursor replies
+  use child coordinates; capability and colour queries reach the real terminal.
+- Complete escape tokens and synchronized updates before switching surfaces.
+  Coalescing semantic frames must not discard required native bytes or replies.
+- Native clear/resize/reflow ownership. A clear ends eligibility for old reflow history.
+- [`SessionPresentationPipeline`](../src/rodex/presentation_policy.py) identity:
+  deltas inherit the exact started item and `thread/read` uses request correlation.
+  Keep hidden semantic history without rebuilding/waking an unused native-policy view;
+  invalidate on selected item/event/selector eviction as well as new text.
+
+Menus are configuration-driven, not command-name branches in decoder or renderer.
+[`InputInterceptionMenu`](../src/rodex/input_menu.py) owns cyclic selection,
+Enter, and back/cancel. Empty option lists are configuration errors, never empty
+pickers; actionless options are placeholders. Configured typed and selected commands
+converge on one handler. Unsupported editing restores held input before forwarding.
+Approval/unrecognized modal input stays native. [Operations](OPERATIONS.md#terminal-settings)
+owns available presentation choices.
+
+[`TerminalInputDecoder`](../src/rodex/terminal_input.py) distinguishes lone Escape
+with a 35 ms deadline; complete arrow frames decode immediately. Rodex leaves tmux's
+own `escape-time` unchanged, so it can add latency. This is framing, not a menu delay.
+Production uses neither `tmux send-keys` nor a tmux Enter binding or pane-piping adapter.
+
+## Observer state
+
+```text
+App Server event → projection → producer reducer → newest complete snapshot
+                                                        ↓ private framed socket
+input-disabled pane ← view ← consumer reducer ← validated runtime/server frame
 ```
 
-`publish_session_interaction(socket_path, InteractionRequest(...), peer_identity=...)` submits the same
-operations over the private `/rodex-interaction` endpoint. It cannot submit raw protocol
-frames, raw terminal bytes, interceptor events, observer snapshots, launch commands or hooks. `publish_tui_notice` is an explicit
-display-only convenience function using this transport, not a second delivery path.
+[`observer_projection`](../src/rodex/observer_projection.py) validates/bounds events.
+[`ObserverStateReducer`](../src/rodex/observer_state.py) owns identity, tombstones,
+epochs, revisions, and a running-agent ledger separate from presentation history.
+The dispatcher in [agent_observer.py](../src/rodex/agent_observer.py) is transport,
+not state authority. Consumers apply revisions once and replace state on epoch/overflow.
+Root identity and the [frame contract](../src/rodex/observer_contract.py) fence admission.
 
-| Target | Display | Model input | Pane operations |
-|---|---|---|---|
-| `main` | Native Codex warning, inline or in its F2 warning center | Registered, currently displayed thread; idle-only start | Locate, focus, resize |
-| `agent-observer` | Observer text | Rejected: multi-agent view has no single thread binding | Open/reuse, locate, focus, resize, close |
-| Registered model target | No independent display | Exact coordinator start, steer or interrupt | None |
-| Per-connection protocol target | Input/output frames | Native RPC intent preserved | None |
-| `terminal` | Native output and configured inline completion | Native keyboard bytes; no implicit model intent | None |
-| `input-interceptor-menu` | Shared command/argument view and release | Selection only; never starts a turn | None |
-| `input-interceptor:<name>` | Configured action, placeholder or configuration error | Local handler; no implicit model turn | None |
-| `presentation-policy` | Select configured native/semantic main viewport | Never changes model/protocol input | None |
+The top-third, input-disabled pane stays open while any tracked agent is working,
+closes at zero, and reopens with current reducer state, not the first spawn's cached
+prompt. Exact request/turn identity prevents old completion from clearing newer work.
+Only relevant lifecycle events reconcile panes; unrelated deltas do not query tmux.
+Primary disconnect resets all participants even if one fails; only the reducer
+advances epoch. Pane closure removes its tmux history, not the durable trace.
 
-Future agent-chat targets need an explicit thread and adapter; labels never imply one.
-Primary open/close are session lifecycle operations, not pane-control operations.
-Model input uses normal conversation echo, without printing a duplicate prompt.
-Starting an active thread fails; steering requires its own operation and exact turn ID.
-Alias announcements deliberately start when idle or steer the observed active turn.
+Correlation requires the exact collaboration call ID: `spawn_agent` creates a thread
+and turn, `followup_task` another turn on that thread, `send_message` no new turn.
+Generic `interacted` cannot identify the operation. Unbound turn-producing requests
+wait FIFO for distinct target turns; `send_message` cannot acquire a later turn or
+terminal recap. [SQL provenance](SQL_SCHEMA.md#agent-requests-and-trace) is authoritative.
 
-Missing targets reject by default. Explicit `open_if_missing` can reopen a registered
-presentation with known launch context, but cannot invent an agent. A target disappearing
-mid-operation is rejected. Pane mutations carry the frozen pane ID into tmux. Model
-dispatch rechecks selected connection, runtime and thread after lock/transport waits.
-Deferred recovery also atomically admits its trusted cancellation generation at that
-final boundary. Input, close, disconnect or supersession before admission rejects it;
-after admission, accepted/indeterminate semantics remain unchanged.
-Observer messages wait boundedly for socket readiness, send once and require exact-pane
-admission. Reopening uses a blank view plus current reducer state, not the first spawn's
-cached event. The snapshot budget reserves transport-address overhead.
+Live collaboration prompts and exact same-turn root user text have different labels
+and provenance. Missing plaintext stays unavailable, never inferred from replies.
+The allowed text/privacy boundary is in [security](SECURITY.md#content-and-privacy).
+Committed analytics wakes bounded indexed observer reads; no trace-polling timer is
+needed. Presentation includes only active/terminal-pending exact turns.
 
-## Processing and outcomes
+## Effect audit
 
-Submitted user text first enters the runtime's typed prompt admission. A characterized
-managed initial-prompt argument and a verified native editor draft are transformed
-before Codex submits them. Native Enter is held until Rodex updates the same editor
-through its PTY and confirms the canonical native output in the fenced tmux pane;
-only then does Rodex admit the receipt and release Enter. A timeout retains the
-prepared draft without admitting a receipt; retry does not transform it again.
-The following primary protocol request consumes one matching preparation receipt and
-does not run the hook again. Unverified native editor state and non-terminal routes use
-the structured protocol-input fallback. `protocol_input_text` owns ordered edits and
-rebases/removes affected UTF-8 UI spans while preserving every other RPC field. Initial,
-native, exact-control, and queued submissions converge on this exact-once contract. The
-hook re-stats the installation's frozen `conf/hooks/user_prompt_substitutions.yaml` and the
-optional user file under the caller's Rodex state root on submission. Both use the supplied
-metadata-only SHA-512 function and independent caches; only changed files reload
-before processing. User rules replace same-name global rules in place; new rules
-append. One runtime lock owns the combined snapshot. Invalid versions are cached as
-errors, never replaced by stale rules. A descriptive `main MESSAGE(false)` notice is
-delivered once per failed version of each file; failures to deliver
-remain eligible for the next attempt. A correlated RPC error refuses the submission
-through that connection's existing protocol-output pipeline without closing the
-connection. Only initial-prompt admission, verified Enter, or a structured submission
-triggers configuration I/O; ordinary typing and timers do not.
+[`EFFECT_OWNERS`](../tests/adversarial/test_interaction_path_ownership.py) is the
+executable per-function inventory of terminal writes, socket sends, process execution,
+injected effect sinks, and SQL connections across production packages. Add/remove
+classifications there when a route changes, and update the route-level map above.
+It also checks subprocess entrypoints, mutation owners, and read-only bootstrap probes;
+it is not a proof against arbitrary Python reflection or a runtime monitor.
 
-Hooks can inspect, transform or reject content, not change source, destination, operation,
-model-turn permission or dispatch/turn/thread identity. Protocol text changes preserve
-RPC structure, IDs, methods and control/approval fields. Without hooks, native frames
-retain their exact bytes. Structured observer state remains reducer-owned; rendered
-text has a separate presentation stage. Hooks should select the operation/source they
-intend to modify and remain short; they run synchronously.
-
-Accepted upstream frames feed both the destination and projections. Fan-out does not
-apply their protocol hooks again. Other rejected native traffic explicitly closes
-the connection so an RPC cannot remain silently waiting forever.
-
-| Outcome | Evidence |
-|---|---|
-| `completed` | Requested operation completed |
-| `queued` | Newest-state dispatcher admitted an observer snapshot |
-| `delivered` | Native transport accepted, observer admitted, or stdout flushed; pixels are not confirmed |
-| `model_turn_started` | Exact control returned a turn/dispatch receipt |
-| `rejected` | Invalid, absent, stale or unsupported request; no requested delivery |
-| `failed` | Operation/delivery failed; the error remains visible |
-| `indeterminate` | Acceptance unknown; retain dispatch identity and reconcile before retrying |
-
-No automatic message/model resubmission occurs except the typed `serverOverloaded`
-terminal-turn recovery described below. Snapshot retries synchronize idempotent
-latest state, not a FIFO of every message. Outcome-observer failures cannot undo accepted
-work. The record buffer contains metadata, not prompt bodies or another durable chat log.
-
-## Entrypoints
-
-| Entrypoint | Owner |
-|---|---|
-| Repository/installed shims and console script | Validate/exec → `rodex.main` → `cli.run` → application pipeline |
-| `python -I -m rodex.daemon` | One private daemon endpoint → runtime manager → singular analytics coordinator |
-| `python -m rodex.terminal_bridge` | Exact pane/TTY descriptor handoff → daemon runtime reservation |
-| `python -m rodex.agent_observer` | Receiver/liveness → consumer/view → terminal presentation |
-| `python -m rodex.environment_exec` | Prepared environment → process exec |
-| `python -I -m rodex.terminal_exec` | Fresh session → controlling child PTY → unchanged native TUI argv/environment |
-| `python -m rodex.tmux_sharing_coordinator` | Server identity → roster reconciliation; exact tmux-v4 predecessor → receipt-bound resize-only bridge and immutable hook retention |
-| `python -m rodex.status_animation_admission` | Admitted animation, watchdog, watchdog gate |
-
-## User and automation routes
-
-| Intent | Authoritative route/effect |
-|---|---|
-| No arguments, `_create`, `_detach`, native interactive options/prompt | Application → managed lifecycle → daemon runtime/TUI → protocol-input pipeline |
-| Existing name/alias/UUID, with or without `resume` | Same selector/open/resume/adoption pipeline |
-| Unmatched explicit resume, delegated native syntax | `cli._exec_codex`; native replacement, outside managed interaction |
-| Native typing and terminal replies | TERMINAL_INPUT → decoder/interceptor → native child PTY → TUI → protocol-input pipeline |
-| Configured live matches | Every `live.reg_exp_intercept` match → verified native prefix → shared menu INTERACTIVE_INPUT → terminal DISPLAY_STATE |
-| Command/option navigation | One `InputInterceptionMenu` owns filtering, wrapping selection, Enter/open and Escape/back; immutable view → same display pipeline |
-| Option confirmation | Explicit selected command + configured option → SUBMITTED_COMMAND → its configured target/operation/payload; options without actions remain placeholders |
-| Selected command without options | INPUT_CONFIGURATION_ERROR → main MESSAGE(false); report bad config, clear verified native prefix, release keyboard; no empty picker or command submission |
-| Configured Enter match | Interception `on_enter.reg_exp_intercept` → SUBMITTED_COMMAND, including pasted input without live takeover; unmatched Enter stays native |
-| Local release | INPUT_RELEASE → clear terminal DISPLAY_STATE; cancellation leaves native prefix; unsupported editing restores held suffix before key |
-| Presentation selection | Configured `light`/`dark` action → SELECT_PRESENTATION_POLICY; never starts a turn or changes App Server delivery/logging |
-| Local placeholder reply | Configured actionless command/option text → MESSAGE(false) → main display adapter |
-| Managed initial prompt | Characterized CLI prompt argument → prompt admission → canonical argv → native TUI → matching protocol receipt → App Server |
-| Verified native prompt | Keyboard candidate → original composer check → transform → PTY editor update → canonical composer confirmation → receipt admission → original Enter → native TUI → receipt consumption → App Server |
-| Unverified native prompt and other native TUI protocol operations | Native TUI → protocol-input fallback → App Server |
-| Native terminal output | Readable child PTY → TERMINAL_OUTPUT → continuously updated native projection → selected native/semantic surface + inline compositor → bounded display queue → writable outer PTY |
-| App Server primary output | Protocol-output pipeline → TUI unchanged, then typed presentation/context/observer/event projections; display filtering never rejects execution |
-| Main `turn/completed` failure with `codexErrorInfo: serverOverloaded` | Typed recovery controller → rolling 30–960 second delay → main MESSAGE(true) `Continue...`; terminal-input outcome cancels pending dispatch |
-| Primary TUI requests | Protocol-input pipeline → request correlation → App Server unchanged; correlated `thread/read` responses hydrate bounded typed presentation text |
-| App Server control-client output | Protocol-output pipeline → its exact destination; never enters the primary presentation projection |
-| `_start`, `_steer`, `_interrupt` | Exact selector lock → interaction operation → exact-control adapter → proxy |
-| `_alias` | Serialized SQL/tmux rename → explicit start/steer announcement |
-| Attach/update notice | Registered capability → bounded update producer → display-only interaction |
-| `_inspect`, `_dispatch-status`, `_result`, exact `_wait` | Verified control reads/events, preserving JSON/dispatch identity |
-| Human `_wait` | Verified live control → wait until idle |
-| `_cat`, `_tail`, `_events` | Live read pipeline → scrollback/events → invoking terminal; event feedback refusal retained |
-| `_mouse` | Exact mutation coordinator → session mouse option/readback |
-| `_running`, `_context` | Registry/verified runtime discovery → invoking terminal |
-| `_stats`, `_stats-status`, `_agents`, `_trace` | Statistics/trace read owners → invoking terminal |
-| `_help`, lifecycle banners, command errors | Application/command formatting → invoking terminal |
-
-## Observer, background and lifecycle routes
-
-| Origin | Owner/effect |
-|---|---|
-| Committed registration | Independently activate observer and attempt analytics startup |
-| Agent work starts | Exact spawn, successful follow-up or known-child active/turn-start event → reducer running-agent ledger → OPEN → pane adapter |
-| Agent work finishes | Matching child turn/request completion or inactive status → reducer removes one agent → last agent closes observer via CLOSE; main chat remains intact |
-| Reopened agent work | Current target/path/turn fact → observer snapshot → view tracking; no original spawn or prompt replay |
-| Later agent activity/prose | Projection → reducer → DISPLAY_STATE → dispatcher → pane-bound control frame |
-| Observer message | MESSAGE → readiness-bounded send → receiver admission → terminal presentation |
-| Observer bootstrap | Initial projected event via OPEN → view → terminal presentation |
-| Reopen | Registered blank launch context + current reducer snapshot → new view |
-| Analytics trace publication | Committed SQL receipt → nonblocking observer wake → indexed trace/evidence reads → presentation |
-| Startup/overflow SQL catch-up | Durable projection → view → same terminal presentation |
-| Analytics initial/event/retry wake | Scheduler → authenticated reader/analyzer → registry transaction: checkpoint, lineage, trace, statistics, health |
-| Primary disconnect | Reset all lifecycle participants; reducer clears work/identity and advances epoch; close observer; retire connection targets |
-| Capacity-recovery timer | Runtime-owned cancellable deferred call; primary disconnect/runtime close cancels it while retaining the runtime's rolling overload count |
-| Session creation | Managed lifecycle/runtime → server claim, daemon reservation, exact bridge/TTY admission |
-| Registration/rename/rollback | Registry transition and runtime markers → acknowledged daemon supervisor wake; one namespaced rename owner |
-| Attach | Registered capability → interactive tmux attach |
-| Startup rollback/stop | Managed lifecycle/runtime → exact session kill |
-| Ctrl-D | Owned root binding → detach current client only |
-| Ctrl-C | Native originating-client admission → private guarded termination or shared detach |
-| Resize, external SIGINT | Current tmux resize/layout hook → exact daemon resize wake → gateway → child terminal dimensions; a redirected tmux-v4 hook first proves its v2 daemon through the private process receipt and same-user socket, then retains the bridge; daemon runtime → foreground process group |
-| Natural exit, signals, keepalive failure | Daemon runtime closes its children/gateway/proxy/observer/status/event tap and paths; the shared coordinator retires its analytics state |
-
-## Deliberate domain boundaries
-
-| Surface | Authoritative owner |
-|---|---|
-| Static/transient status and safety claims | `TmuxStatusPipeline` / `TmuxStatusClaimCommands` |
-| Shared arrival/departure animation | Roster coordinator → animation admission → renderer/watchdog |
-| Tool count and context/compaction animation | Protocol/rollout/timer → `TmuxStatusOption` |
-| Every tmux subprocess | `SyncTmuxExecutor` / `AsyncTmuxExecutor` |
-| Pre-retention tmux-v4 resize compatibility | `legacy_runtime_compat` → private v2 receipt/process/socket verification → resize wake only; no start, stop, adoption, catalog access or model input |
-| Transient catalog/startup App Server probes | Runtime's read-only initialize/thread-read/loaded-list adapters |
-| SQL connection/publication | `rodex_sql` transactions and registry publication pipeline |
-| Runtime logs, update cache, analyzer memory files | Blocking child-diagnostic relay/file owners, not chat; new startup diagnostics wake the runtime supervisor after persistence |
-| Keyboard framing and native PTY writes | `TerminalInputDecoder` / `TerminalInputInterceptor` → `TerminalSessionGateway`; tmux retains its owned lifecycle keys |
-| Terminal readiness and lifecycle | `TerminalSessionGateway` blocks on outer/child PTYs, a wake-only pipe and the exact child `pidfd`; explicit registration/stop control events, diagnostic output, presentation revisions, tmux resize hooks and incomplete-input deadlines wake the relay without an idle supervisor timer |
-| Native composer presentation at takeover/submission | Exact primary-pane fenced snapshot; ordinary/Ultra glyph, visible text, wrap width and end cursor must agree; bounded handoff rechecks, no idle screen polling |
-| Native editor state | Codex; Rodex observes a bounded candidate, verifies the original composer, edits through the PTY, confirms canonical output, admits the receipt, then releases original Enter |
-| Main terminal surface | `TerminalSurfaceRenderer` → gateway output queue; one native projection plus configured semantic views; only verified prompt admission updates the native editor before Enter |
-| Presentation classification | `SessionPresentationPipeline`; bounded App Server method/kind/thread/turn/item/type/phase/status fields and item-text accumulation |
-
-### Escape timing
-
-A lone Escape must be distinguished from the start of an arrow or Alt-key sequence.
-The inspected tmux 3.2a server reported `escape-time 500`; Rodex leaves that server
-setting unchanged. `TerminalInputDecoder` adds a 35 ms lone-Escape wait and exposes its
-exact deadline to the gateway's blocking descriptor wait. No periodic relay poll is
-needed when no further keyboard or child-output bytes arrive. The combined waits can
-still include tmux's configured escape time; complete
-Up/Down frames are decoded immediately. This is input framing, not a menu transition
-delay. The valid argument picker goes back one level; the command list releases local
-input. Commands without options never enter a picker and need no Escape recovery.
-
-## Enforced audit and evidence
-
-`test_interaction_path_ownership.py` recursively scans every production package and
-classifies module + enclosing function + effect primitive: terminal writes, socket
-sends, process execution, injected effect sinks and SQL connections. New or removed
-effect-bearing functions require review. It also enumerates subprocess entrypoints,
-restricts pane/model mutation owners and checks read-only bootstrap probes. This is
-not a proof against arbitrary Python reflection, nor a runtime monitoring system.
-
-Behavioral tests cover pre-Enter prompt transformation, exact-once preparation receipts,
-hook ordering, intent preservation, missing/stale targets,
-explicit model input, indeterminate receipts, both proxy directions/control clients,
-bounded observer probes, real tmux operations, real observer startup/reopen/rendering,
-and runtime exit. The installed-command gate isolates tmux, SQLite and Codex history;
-it verifies startup/resume, real native slash menus, local takeover/menu/submission/release,
-ordinary editing afterwards, and no model turn from display-only delivery. Isolated PTYs
-test controlling-terminal identity, event-driven idle waiting and presentation wakes,
-input/output hooks, final-output drain, resize, signals, spawn failure and terminal
-restoration. Tests never attach to or stop an existing user session.
-
-Current checks cover both menu levels, regex filtering, cyclic selection, configured
-actions/headings/options, fixed footer, rapid Escape, rejected delivery, missing-option
-errors and immediate keyboard release. Terminal transcripts verify semantic filtering,
-streaming typed text, hidden native activity, configured future item types, menu operation
-inside semantic mode, native restoration, modal-control fallback and frame coalescing
-without truncating in-flight terminal tokens. Protocol tests verify exact request/response
-identity, root-thread scoping, history hydration, delta/item correlation and disconnect reset.
-The isolated installed-command gate starts Rodex, selects light through the real menu,
-restores dark through submitted input, resumes/reattaches, and stops only its own tmux
-fixtures without inspecting process state through `/proc/PID/stat`.
-
-The observer lifecycle uses a separate reducer-owned running-agent ledger, not
-the presentation event/tombstone count. Starts are idempotent per request; turn/request
-identity prevents an older completion from clearing newer work. Known agent identities
-survive idle periods for reopening and are cleared with the connection epoch. Current
-work facts restore target/turn tracking and the current trace cursor in a fresh pane
-without replaying old prompts or historical trace requests.
-Only relevant lifecycle/activity events reconcile pane visibility; unrelated streaming
-deltas do not query tmux. The focused observer/interaction checks include a real isolated
-tmux close/reopen test, with no live-user sessions or Codex model launches. The release
-gate is the current Ruff, full coverage/live-startup, source-distribution and wheel
-workflow in the README.
+Status effects remain under [`TmuxStatusPipeline`](../src/rodex/tmux_status.py);
+sharing animations have their own [admission owner](../src/rodex/status_animation_admission.py).
+tmux effects use the [executor boundary](../src/rodex/tmux_executor.py); SQL effects
+use [transactions](../src/rodex_sql/transactions.py). [Runtime isolation](RUNTIME_ISOLATION.md)
+owns cleanup/hook authority, including the resize-only compatibility exception.
+See [development](DEVELOPMENT.md#test-selection) for focused tests and live gates.

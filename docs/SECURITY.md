@@ -1,206 +1,98 @@
-# Security model
+# Security and privacy
 
-Rodex is a local, single-Linux-user tool. Its trust boundary is the operating-system
-user account: processes already running as the same uid can inspect that user's tmux,
-Codex, and SQLite state and are not treated as hostile tenants. Rodex exposes no network
-listener; control endpoints are Unix sockets below a private runtime root.
+## Trust boundary
 
-## Enforced boundaries
+Rodex is a local, single-Linux-user tool. Processes sharing its uid are not hostile
+tenants; use separate OS accounts for that boundary. Rodex exposes no TCP/network
+listener: control and protocol endpoints are private Unix sockets. Its checks prevent
+misaddressing, stale ownership, and accidental executable drift, not deliberate edits
+by the owning user. It is not an IDS or filesystem/tmux surveillance service.
 
-- A live attach or control action requires the durable SQL row and matching advertised
-  Rodex session, registry, Codex thread, and `registered` state. Exact machine control
-  additionally requires the current persisted/live 64-bit runtime ID and characterized
-  App Server version. Missing, duplicated, or conflicting identity fails closed.
-- New runtimes begin `pending`, become usable after the SQL identity commits, and exit
-  if confirmation never arrives. An exact committed/pending pair is recoverable.
-- Runtime roots are real, current-user-owned directories at mode `0700`, below either a
-  private parent or root-owned sticky storage. Sockets and logs are mode `0600`.
-- `<implementation-sha256>.sock` is the daemon control socket for one exact loaded
-  implementation. It accepts bounded current-protocol JSON only from the current uid
-  and that implementation; an equally namespaced start `flock` prevents duplicate
-  creation. Different implementation endpoints and receipt namespaces may coexist so
-  upgrades do not adopt or retire older runtimes.
-  The pane bridge may pass exactly one TTY descriptor with `SCM_RIGHTS`, and the daemon
-  admits it only after the complete reservation, peer PID, pane and TTY checks succeed.
-  Initial decoding has a five-second absolute deadline; every unsuccessful decode closes
-  its received descriptors, including truncated ancillary data. Shutdown wakes pending
-  decoders. An admitted bridge has a separate runtime lifetime, without the framing timeout.
-- Codex/App Server, proxy, event, and runtime-control traffic uses Unix-domain sockets;
-  every non-native handshake requires runtime-peer v5 and the exact loaded implementation.
-  Rodex opens no TCP listener.
-- The mode-`0600` proxy socket accepts a private Rodex update-notice endpoint. It sends
-  the validated nonempty notice only to the current primary TUI as a native warning; it
-  opens no upstream App Server connection and excludes the notice from protocol
-  subscribers, SQLite, Codex thread content, and model turns.
-- Managed Codex startup update prompts are disabled. Rodex's replacement check runs only
-  read-only, bounded version commands, caches the npm result for 24 hours, fails open,
-  and never installs or invokes an update. A nonblocking current-user regular-file lock
-  elects one cross-process refresh owner; contenders retain the latest valid cache without
-  waiting. Cache freshness requires a wall-clock age from zero through 24 hours; a
-  future-dated timestamp is stale rather than extending the cache lifetime.
-- Rodex uses stdlib `sqlite3` behind one canonical transaction owner. The database and
-  sibling transition lock are current-user-owned regular files at mode `0600` below a
-  real current-user-owned private directory. Linux `O_NOFOLLOW`/`O_CLOEXEC` opens retain
-  the parent and lock descriptors through each transaction and borrow an identity-bound
-  database descriptor for its full storage lifetime. SQLite connects through
-  `/proc/self/fd/<validated-database-fd>`.
-- Only an explicit first-use bootstrap transaction may create the parent, transition
-  lock, or database. Ordinary readers and writers require an existing database and lock
-  and never create missing filesystem state. The first secure transaction records the
-  parent, transition-lock, and database `(device, inode)` identities in process memory;
-  bootstrap does not recreate a path that this process previously admitted and later finds
-  missing.
-- Rodex revalidates the retained and pathname identities, ownership, type, mode, symlink
-  state, and SQLite-reported main path before connect, after connect, before `BEGIN`, and
-  before `COMMIT`, and on connection/SQLite errors. Every ordinary transaction and
-  integrity audit holds a shared `flock` on the retained sibling transition lock. The
-  offline diagnostic maintenance entry uses its exclusive form. Lock and WAL-transition
-  waits have ten-second monotonic deadlines with sleeping bounded backoff. Writers use WAL,
-  `BEGIN IMMEDIATE`, foreign keys, a ten-second busy timeout, and `synchronous=NORMAL`;
-  readers use a read-only/query-only deferred transaction and see a normal committed-WAL
-  snapshot. Threadless owners retain every actively borrowed catalog plus at most one idle
-  WAL generation between sparse writes. They own no transaction or cooperative lock and
-  use bounded checkpoint/growth settings. Eviction/exit cannot close active borrowers.
-  SQLite closes before its descriptor. Fork closes idle owners; with an active transaction
-  the child must immediately exec or `_exit`, without using or unwinding inherited SQLite.
-- Database location enforcement is synchronous. Rodex has no filesystem watcher, worker,
-  subscription, callback, polling loop, or recurring SQL. A missing or different identity
-  is rejected at the next transaction boundary with restart guidance. A move-away-and-back
-  completed entirely between transactions is not observable. The explicit integrity audit
-  uses the same existing-only shared-lock boundary, includes committed WAL, performs no DDL,
-  and rejects unexpected views as well as tables, indexes, and triggers. Live storage
-  relocation and implicit repair are unsupported. Direct same-uid SQLite access that
-  ignores the cooperative lock is outside the supported contract.
-- Named runtime transitions use current-user-owned regular advisory-lock files at mode
-  `0600` with no-follow opens, keyed by immutable Rodex session ID. Creation holds that
-  lock from durable row publication through tmux identity/UI setup and registration
-  confirmation. Existing-session transitions hold it through identity checking and
-  endpoint replacement, then release it before terminal attachment. The verified runtime
-  incarnation resolves to tmux's immutable `$session_id` for that final attach.
-- One daemon-owned analytics coordinator serializes all runtime analysis on one thread.
-  Per-runtime cursors, workers, health, retry state and event buffers never confer runtime
-  authority; daemon reservation and activation bind them to the exact runtime identity.
-  Analytics reads only current-user-owned regular rollout files inside the configured
-  sessions root, using no-follow and nonblocking opens before authenticating the Codex
-  thread ID and stable complete-record prefix. Startup-only lineage discovery is bounded
-  to the root UUIDv7 three-day window and reads only candidate metadata lines.
-- The live context follower accepts only an absolute, exact-thread rollout filename
-  beneath that configured sessions root. It reads a bounded tail and bounded appended
-  lines for `token_count` records only, retaining no rollout bodies. Idle checks inspect
-  metadata before bounded fingerprints, back off to a two-second ceiling, and wake early
-  on existing exact-thread protocol activity.
-- Each runtime owns a separate `tmux-v5-<runtime-id>.sock` server. Creation requires
-  all ownership fields absent and an empty complete session inventory. Its retained
-  creation nonce fences cleanup after failed or indeterminate admission.
-- Primary discovery reads the actual pane through its ownership guard. Whole-runtime
-  destruction additionally requires one session and every affected pane owned by that
-  runtime. A foreign pane or unmarked observer candidate blocks destruction.
-- Rodex WebSocket admission and the connected client validate runtime ID and server
-  nonce before protocol traffic. The native App Server peer must belong to the retained
-  live child process tree. A matching Codex thread alone cannot establish that boundary.
-- App-server, proxy, event and observer endpoint lifetimes use an exclusive lock and
-  retain the bound endpoint inode. A permitted child-created App Server rendezvous alias
-  must be a current-user absolute symlink into a current-user private real directory;
-  Rodex pins the alias, directory and mode-`0600` physical socket and verifies that the
-  retained App Server process owns the listener. Cleanup removes only the retained alias,
-  never its child-owned target. A losing owner cannot unlink an incumbent's endpoint;
-  old cleanup cannot unlink a replacement. Locks remain stable across restarts.
-- The daemon records each App Server and TUI process group with runtime, operation, PID,
-  start time and uid. Parent-death guards stop native children if the daemon dies; a new
-  daemon reconciles only an exactly matching receipt, preventing PID-reuse kills.
-- The owning daemon-runtime authority is `(absolute socket, server incarnation, immutable
-  $session_id, primary %pane_id, runtime incarnation)`. External registered authority
-  adds exact Rodex session, registry, SQL-row, Codex, and `registered` identities. The
-  launcher mints it after a coherent snapshot and uniqueness-checked roster; async actors
-  carry it. Every terminal action repeats its applicable fields at the exact target;
-  primary actions also require the immutable pane ID. Name, socket, runtime, process
-  context, or hook event is insufficient.
-- Under one stable per-user XDG/runtime context, Rodex uses one private canonical
-  database, one daemon per exact implementation, and one tmux server per runtime.
-  Database-enforced display-name uniqueness covers
-  every session recorded in that database, and the complete live tmux name is the
-  user-facing display name. A different `XDG_STATE_HOME` is a separate database/name
-  boundary; a different `RODEX_RUNTIME_DIR` is a separate root for runtime endpoints. No
-  internet-wide uniqueness service exists. The database ID remains in the registered
-  capability to reject stale or replaced storage; it is not part of the name.
-- Server-global indexed client hooks are wake-only. They carry no source session or
-  mutation target; the sharing coordinator re-inventories all registered sessions and
-  submits a changed count only through that session's full capability. Rodex owns and
-  verifies only its dedicated hook indices and options behind a server-incarnation fence,
-  and never removes local session hooks. Root `C-c` and `C-d` are installed exactly or
-  initialization fails closed if a non-Rodex binding owns either key. `C-d` uses tmux's
-  synchronous current-client `detach-client` context without a reusable client-name
-  target. Rodex sets `exit-unattached off` and exact-session `destroy-unattached off` so
-  detach cannot implicitly destroy the runtime. Hook shell text is quoted and tmux
-  format text is escaped. Capability comparisons are evaluated only as direct
-  `if-shell -F` conditions, where literal operands keep `$session_id` and `%pane_id`
-  sigils as comparison data. Capability-fenced reads select a payload-only
-  `display-message` branch after that condition succeeds.
-- These are synchronous operation-boundary checks. Rodex is not an IDS and adds no
-  filesystem/tmux surveillance, inotify watcher, or real-time monitor. An unavoidable
-  same-uid external race can install a key binding between Rodex's last absence check and
-  bind because tmux has no conditional bind-if-absent primitive; Rodex can overwrite that
-  racing change. Readback detects a later competing change, not absence at the bind
-  instant, so same-uid tmux configuration must be coordinated during initialization.
-- `_cat`, `_tail`, and `_events` resolve the same owned, registered live identity before
-  reading; terminal reads target its immutable primary pane. `_agents`, `_trace`, and
-  `_stats` resolve the owned durable identity and need
-  no live runtime; explicit trace body reads re-authenticate the recorded rollout prefix.
-  Terminal following emits only tmux's plain text and creates no persistent conversation
-  copy.
-- The input-disabled agent observer admits plaintext from a completed `agentMessage`
-  authored by a tracked child, the current App Server's explicit collaboration `prompt`,
-  and the latest completed root `userMessage` when the same exact turn performs that
-  collaboration. Prompt text is tied to the exact `collabAgentToolCall` identity; root
-  user text is separately labelled as provenance, never as the collaboration payload.
-  Live text travels after process startup through length-framed messages on a
-  runtime-specific mode-`0600` Unix stream socket and is not copied into process
-  arguments or a second SQLite body. SQL records canonical tool/activity identity,
-  encrypted-body metadata, and turn-request provenance through authenticated trace
-  references. When Codex does not expose plaintext, Rodex reports it unavailable rather
-  than inferring or recovering it. The view verifies the root and sender identities,
-  strips terminal controls, and excludes user messages from other roots or turns,
-  system/developer messages, hidden reasoning, commands, arbitrary tool arguments, and
-  output payloads.
-- The install shim executes only the project's preinstalled `.venv/bin/rodex` boundary.
-  Before execution it scans project source, the complete virtual environment (including
-  site packages), and generated bytecode once, rejecting untrusted ownership,
-  group/world-writable content, and non-environment symlinks. Only `.git` and
-  nonexecuting pytest/Ruff caches are pruned. The entrypoint's absolute interpreter is
-  resolved and separately checked as a root- or current-user-owned, non-writable regular
-  file. The shim never syncs or rewrites the environment. A system command must use an
-  immutable root-owned installation.
-- The CLI copies trusted code, dependencies and shipped defaults into a private retained
-  installation before starting runtime helpers. Publication is locked, verified and atomic;
-  published directories are never overwritten. Helpers use its Python with `-I`.
-  External editable dependency paths are rejected. This prevents accidental update drift;
-  it does not defend against deliberate edits by the owning OS user.
-- tmux global environment state is not trusted as caller state. New-session startup
-  gates a disposable pane by its runtime capability, transports byte-escaped environment
-  values only over tmux stdin, installs global-name tombstones, and starts the pane bridge
-  only after that installation succeeds. Host and observer exec boundaries remove names
-  outside the caller/tmux contract. General environment payload does not enter process
-  arguments; pane working directories remain explicit tmux control arguments.
-  Each runtime server remains within the same-UID boundary: protection against malicious concurrent
-  mutation of dynamic-loader state would require a separately trusted static launcher.
+[Runtime isolation](RUNTIME_ISOLATION.md) is authoritative for capability tuples,
+connected peer/process checks, destructive topology guards, endpoint cleanup, and
+compatibility. Names, compact IDs, inherited tmux context, or matching thread IDs
+alone never authorize an operation. An orphan is safer than attaching to or deleting
+the wrong runtime; unverifiable sessions are reported, not auto-adopted or removed.
 
-Rodex does not auto-adopt or auto-delete an unregistered or unverifiable tmux session.
-`rodex _running` reports it for explicit diagnosis. This is deliberate: an orphan is
-less harmful than attaching to or destroying the wrong runtime.
+## Executable admission
 
-The 16-hex Rodex session ID is an integrity discriminator, not a credential.
-Authorization comes from the current-uid filesystem boundary plus the exact durable and
-live identity tuple. Do not expose the ID later as a bearer-authentication token.
-The 16-hex runtime ID has the same role: incarnation fencing, not authentication. Its
-compact form is chosen for reliable agent transcription; authorization still comes from
-the current-user boundary and the complete durable/live identity tuple.
+The [installed shim](../usr/local/bin/rodex) scans the checkout, complete virtualenv,
+site packages, and bytecode before executing the preinstalled entrypoint. It rejects
+untrusted ownership and group/world-write access. Symlinks are rejected except the
+specific environment interpreter aliases and `lib64` case handled by the shim;
+merely pointing inside the environment is not sufficient. `.git`, `.venv/.lock`, and
+nonexecuting pytest/Ruff cache contents have explicit exemptions. Ignored scratch
+directories are otherwise included. The absolute interpreter is separately resolved
+and checked as a root/current-user-owned regular file without group/world write access.
 
-Runtime adoption compares the expected previous incarnation in the same transaction
-that publishes the replacement. Exact complete-tuple retries are idempotent; clock
-rollback does not select a different winner. Pending readers can complete only the
-already durable incumbent. Transition locks are reentrant within a thread and retain
-process identity across fork.
+The shim never syncs dependencies. Root execution against a user-owned checkout is
+rejected; shared system commands need a root-owned installation. The repository-local
+[launcher](../rodex) is a direct development entrypoint, not the installed shim's scan.
+[`enter_fixed_installation`](../src/rodex/installation.py) then pins code/dependencies/
+defaults before helpers start. [Installation](../INSTALL.md) owns update, retention,
+and relocation procedures; do not bypass admission by rewriting manifests or markers.
 
-Shared `Ctrl-C` detaches the originating client. Private `Ctrl-C` terminates only under
-the complete destructive guard. Both execute as native tmux commands without a delayed
-helper, confirmation callback, arming state or expiry timer.
+## Files, sockets, and child environment
+
+Runtime roots are real current-user mode-`0700` directories under an accepted private
+or root-owned sticky parent. Sockets/logs are mode `0600`. Daemon endpoints and start
+locks are implementation-namespaced; same-uid peer checks and bounded protocol decoding
+do not permit another build to acquire a runtime. [Runtime lifetimes](RUNTIME_ISOLATION.md#resource-lifetime)
+cover descriptor transfer, endpoint aliases, receipts, and PID-reuse protection.
+
+[SQLite storage admission](SQL_SCHEMA.md#storage-and-transactions) owns no-follow
+opens, retained descriptors, cooperative locks, and synchronous identity checks.
+It does not promise detection of every move between transactions or protection from
+same-uid direct SQLite access that ignores the lock.
+
+tmux's global environment is not caller authority. Startup stages an inert pane,
+fences the runtime, installs byte-escaped caller values over tmux stdin, marks
+global-only names removed, and only then starts the bridge. General environment
+payload does not enter process arguments; cwd remains an explicit control argument.
+[`environment_exec`](../src/rodex/environment_exec.py) removes names outside the
+caller/tmux contract at host and observer exec boundaries. Same-uid concurrent
+dynamic-loader mutation is outside this Python-launcher boundary.
+
+Update notices terminate at a private downstream-only proxy endpoint: no extra upstream
+connection, subscriber event, thread content, or model turn. Version checking is
+read-only and fail-open; a nonblocking file claim chooses one refresh owner. Future
+cache timestamps are stale, not a way to extend the 24-hour lifetime.
+
+## Content and privacy
+
+Codex owns message, command, tool, reasoning, and output bodies. Rodex SQLite retains
+typed identities, source coordinates/hashes, sizes, capture state, and metrics, not
+duplicate plaintext bodies. The [trace reader](../src/rodex_registry/agent_trace_reader.py)
+reads SQL metadata; [`_attach_authenticated_rollout_bodies`](../src/rodex/agent_trace_commands.py)
+expands an explicit snapshot request after re-authenticating recorded prefixes across
+current/historical memberships. Follow mode remains metadata-only. That command
+adapter's `_safe_event_body` and `_redact_message_content` exclude hidden reasoning;
+[`agent_trace_privacy`](../src/rodex/agent_trace_privacy.py) supplies the shared
+encrypted-value classifier/redactor for normalization and expansion.
+
+Analytics reads only authenticated files under its configured root; its resident
+append trust assumption is explicit in [analytics](ANALYTICS.md#source-admission-and-append-work).
+The separate live context follower accepts an absolute exact-thread rollout, reads
+bounded tails/appends for token counts, and retains no bodies. Metadata checks precede
+bounded fingerprints; idle waits back off to two seconds and exact-thread activity
+wakes it early. See the [proxy's rollout follower](../src/rodex/protocol_proxy.py).
+
+The observer permits only:
+
+- Completed `agentMessage` items authored by tracked children.
+- The current App Server's explicit collaboration `prompt`, tied to the exact call.
+- The latest completed root user message when that same exact turn requests the
+  collaboration, separately labelled as provenance, not the delegated payload.
+
+Text is bounded before encoding, stripped of terminal controls, and sent after pane
+startup through private length-framed messages, not process arguments or a SQLite
+plaintext copy. Missing/encrypted plaintext stays unavailable; never infer it from
+child behavior. Other roots/turns, system/developer instructions, hidden reasoning,
+commands, arbitrary tool arguments, and output bodies are excluded. Correlation and
+pane state belong to [the observer pipeline](INTERACTION_PATHS.md#observer-state).
+
+`_cat`/`_tail` read verified primary-pane plain text without creating another durable
+conversation log. `_events` is a verified live protocol surface, not the restricted
+observer view; do not assume all observation commands share the observer's filter.
+Interaction outcome buffers contain metadata, not prompt bodies. Analytics failure
+logs retain exception type/code locations, never exception bodies or frame locals.

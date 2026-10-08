@@ -54,22 +54,19 @@ The Rodex identity and permanent name survive. A resumed runtime uses the resume
 current working directory, not a permanently pinned original workspace.
 
 After an implementation update, opening a supported retained live session upgrades
-only that session: the old installation verifies an idle thread and saved history,
-stops its exact reservation, then the current daemon resumes the same thread with
-its existing cwd and name. Busy turns fail on stderr with commands to retry once
-idle or reconnect without upgrading:
+that session only when its thread is idle, preserving its thread, cwd, and name.
+Busy turns report commands to retry once idle or reconnect without upgrading:
 
 ```bash
 rodex SESSION --force-old
 rodex resume SESSION --force-old
 ```
 
-This attaches through the session's retained Rodex installation while its work
-continues, including a busy turn. It also skips upgrading an idle live runtime.
-It never restarts an ended runtime; use the normal selector to resume one.
-Other sessions remain on the old daemon. Upgrade never substitutes a fresh Codex
-thread for missing history. [Retained-runtime handoff](RUNTIME_ISOLATION.md#retained-runtime-upgrade)
-defines supported ownership and compatibility.
+This attaches through the retained installation, including during a busy turn,
+without stopping, restarting, or sending model input. It also skips an available
+idle upgrade. Ended runtimes require normal resume, and missing history remains an
+error. [Retained-runtime handoff](RUNTIME_ISOLATION.md#retained-runtime-upgrade)
+defines admission and ownership.
 
 `_detach` follows the create/open/resume flow without attaching and reports identities
 as JSON. `_running` reports unverified or unregistered sessions separately; it does

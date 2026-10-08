@@ -1170,6 +1170,7 @@ def test_help_exposes_only_the_current_exact_control_commands(
 
     help_text = capsys.readouterr().out
     assert "_start SESSION" in help_text
+    assert "idle or in systemError" in help_text
     assert "_steer SESSION" in help_text
     assert "_send" not in help_text
 

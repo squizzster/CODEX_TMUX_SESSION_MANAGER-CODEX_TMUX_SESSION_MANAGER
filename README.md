@@ -3,8 +3,9 @@
 Durable Codex TUI sessions in isolated tmux servers, with named reattachment,
 exact-turn local automation, and rollout-derived analytics.
 
-The tmux bar shows `Working.` through `Working....`; Codex's elapsed timer refreshes
-every three seconds during active work, with decorative animations disabled by default.
+The tmux bar and terminal window title show `Working.` through `Working....` during
+active work. Codex's elapsed timer refreshes every three seconds, with decorative
+animations disabled by default.
 Current Rodex upgrades supported retained runtimes only when idle. Use
 `rodex SESSION --force-old` to reattach through their existing installation while work continues.
 

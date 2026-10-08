@@ -154,12 +154,13 @@ classifications there when a route changes, and update the route-level map above
 It also checks subprocess entrypoints, mutation owners, and read-only bootstrap probes;
 it is not a proof against arbitrary Python reflection or a runtime monitor.
 
-Status effects remain under [`TmuxStatusPipeline`](../src/rodex/tmux_status.py);
+Status-bar and terminal-title configuration remain under [`TmuxStatusPipeline`](../src/rodex/tmux_status.py);
 sharing animations have their own [admission owner](../src/rodex/status_animation_admission.py).
 [`CodexWorkingStatusObserver`](../src/rodex/protocol_proxy.py) projects main-thread
 activity into transitions; [`TmuxWorkingStatus`](../src/rodex/tmux_status.py) atomically
 publishes the activity option and redraw cadence through the existing status publisher.
-tmux's status format advances the dots locally without a Rodex animation timer.
+tmux's bar and terminal-title formats share the dot cycle and refresh cadence,
+without a Rodex animation timer.
 tmux effects use the [executor boundary](../src/rodex/tmux_executor.py); SQL effects
 use [transactions](../src/rodex_sql/transactions.py). [Runtime isolation](RUNTIME_ISOLATION.md)
 owns cleanup/hook authority, including the resize-only compatibility exception.

@@ -48,7 +48,10 @@ becomes a distinct candidate for the transient App Server persistence check.
    never types with `send-keys`.
 3. The bridge passes its pane TTY descriptor to the daemon. After exact peer, pane,
    server and runtime admission, the daemon starts that runtime's App Server, proxy and
-   inline Codex TUI. The TUI uses `--no-alt-screen`; its startup updater is disabled.
+   inline Codex TUI. If Codex exposes the requested App Server endpoint as an absolute
+   rendezvous symlink, Rodex pins that alias, its private target directory, and its
+   physical mode-`0600` socket, then verifies the retained App Server owns the listener.
+   The TUI uses `--no-alt-screen`; its startup updater is disabled.
 4. Rodex asks that private app-server for its one loaded Codex session ID.
 5. Under the unregistered immutable Rodex session-ID transition lock, one SQLite
    transaction creates the Rodex/runtime identities, canonical root-thread membership,

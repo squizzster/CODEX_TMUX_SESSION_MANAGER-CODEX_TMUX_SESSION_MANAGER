@@ -111,7 +111,9 @@ continuation. Repeated overloads within five minutes double the delay through 60
 240, 480, and 960 seconds; later repeats remain at 960 seconds. A gap longer than five
 minutes resets the sequence to 30 seconds. The terminal `systemError` state produced by
 that failure remains startable only when Codex reports direct input is accepted. This
-recovery is always active.
+recovery is always active. The primary connection binds its first started root thread;
+child-thread starts reported on that same App Server stream cannot replace the recovery
+target.
 Cancellation remains effective through hooks, session-lock and transport waits until
 atomic dispatch admission. It does not undo or interrupt an already admitted request.
 

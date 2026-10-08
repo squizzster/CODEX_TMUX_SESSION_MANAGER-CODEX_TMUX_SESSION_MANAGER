@@ -44,16 +44,14 @@ class NativeTerminalProjection:
         )
 
     def feed(self, data: bytes) -> NativeTerminalOutput:
-        native, controls, replies, plain = bytearray(), bytearray(), bytearray(), bytearray()
+        native, controls, replies, projection = bytearray(), bytearray(), bytearray(), bytearray()
         for byte in data:
             if self._frame == "ground":
                 if byte == 27:
-                    self._stream.feed(bytes(plain))
-                    plain.clear()
                     self._sequence = bytearray([byte])
                     self._frame = "escape"
                 else:
-                    plain.append(byte)
+                    projection.append(byte)
                     native.append(byte)
                     if byte == 7:
                         controls.append(byte)
@@ -92,6 +90,12 @@ class NativeTerminalProjection:
             elif self._frame == "intermediate" and not 0x30 <= byte <= 0x7E:
                 continue
             sequence = bytes(self._sequence)
+            encoding_switch = sequence in {b"\x1b%@", b"\x1b%G", b"\x1b%8"}
+            if projection and (encoding_switch or (sequence.startswith(b"\x1b[") and sequence.endswith(b"n"))):
+                # Replies describe the screen at this exact byte position. Other
+                # tokens can share one Pyte feed without delaying native output.
+                self._stream.feed(bytes(projection))
+                projection.clear()
             reply = None if self._oversize_csi else self._query_reply(sequence)
             if reply is not None:
                 replies.extend(reply)
@@ -102,13 +106,18 @@ class NativeTerminalProjection:
                 elif (synchronized := _synchronized_update(sequence)) is not None:
                     controls.extend(sequence)
                     self.synchronized_update = synchronized
-                    self._stream.feed(sequence)  # Preserve other modes in a grouped command.
-                else:
+                    projection.extend(sequence)  # Preserve other modes in a grouped command.
+                elif encoding_switch:
+                    # ByteStream decodes a whole feed before parsing it. Apply
+                    # encoding changes before decoding the next run of bytes.
                     self._stream.feed(sequence)
+                else:
+                    projection.extend(sequence)
             self._sequence.clear()
             self._oversize_csi = False
             self._frame = "ground"
-        self._stream.feed(bytes(plain))
+        if projection:
+            self._stream.feed(bytes(projection))
         return NativeTerminalOutput(bytes(native), bytes(controls), bytes(replies))
 
     def _query_reply(self, sequence: bytes) -> bytes | None:

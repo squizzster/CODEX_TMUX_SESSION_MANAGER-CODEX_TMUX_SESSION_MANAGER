@@ -40,6 +40,80 @@ def test_cursor_query_respects_origin_and_delayed_autowrap():
     assert projection.feed(b"\x1b[3;8r\x1b[?6h\x1b[2;3H\x1b[6n").replies == b"\x1b[2;3R"
 
 
+def test_projection_batches_ansi_updates_without_deferring_screen_state(monkeypatch):
+    projection = NativeTerminalProjection(80, 12)
+    feeds = []
+    original_feed = projection._stream.feed
+
+    def feed(data):
+        feeds.append(data)
+        original_feed(data)
+
+    monkeypatch.setattr(projection._stream, "feed", feed)
+    data = b"\x1b[?2026;25h\x1b[5;9H\x1b[31mred\x1b[0m\x1b[?2026l"
+    output = projection.feed(data)
+    assert feeds == [data]
+    assert output.native == data and output.replies == b""
+    assert projection.screen.display[4][8:11] == "red"
+    assert projection.screen.buffer[4][8].fg == "red"
+    assert (projection.screen.cursor.y, projection.screen.cursor.x) == (4, 11)
+    assert projection.paintable and not projection.screen.cursor.hidden
+
+
+def test_query_flushes_only_preceding_projection_and_opaque_controls_never_enter_pyte(monkeypatch):
+    projection = NativeTerminalProjection(80, 12)
+    feeds = []
+    original_feed = projection._stream.feed
+
+    def feed(data):
+        feeds.append(data)
+        original_feed(data)
+
+    monkeypatch.setattr(projection._stream, "feed", feed)
+    before = b"\x1b[5;9Habc"
+    after = b"\x1b[2;3Hxyz"
+    opaque = b"\x1b]10;?\x1b\\\x1bP+q544e\x1b\\\x1b[c"
+    output = projection.feed(before + opaque + b"\x1b[6n" + after)
+    assert feeds == [before, after]
+    assert output.replies == b"\x1b[5;12R"
+    assert output.controls == opaque
+    assert output.native == before + opaque + after
+    assert (projection.screen.cursor.y, projection.screen.cursor.x) == (1, 5)
+
+
+def test_mixed_unicode_controls_and_queries_have_identical_state_for_every_read_split():
+    data = (
+        "\x1b[?2026h\x1b[2;1H世界e\u0301\x1b[31mred\x1b[0m".encode()
+        + b"\x1b]0;opaque\x07\x1b[6n\x1b[?2026l\x1b[3;1Hnext\x1b[?6n"
+    )
+    whole = NativeTerminalProjection(80, 12)
+    expected = whole.feed(data)
+    for split in range(1, len(data)):
+        projection = NativeTerminalProjection(80, 12)
+        first = projection.feed(data[:split])
+        second = projection.feed(data[split:])
+        assert first.native + second.native == expected.native
+        assert first.controls + second.controls == expected.controls
+        assert first.replies + second.replies == expected.replies
+        assert projection.screen.buffer == whole.screen.buffer
+        assert projection.screen.cursor.attrs == whole.screen.cursor.attrs
+        assert (projection.screen.cursor.y, projection.screen.cursor.x) == (2, 4)
+        assert projection.paintable
+
+
+@pytest.mark.parametrize("utf8_switch", [b"\x1b%G", b"\x1b%8"])
+def test_encoding_switches_apply_before_decoding_following_bytes_for_every_read_split(utf8_switch):
+    data = b"\xc3\xa9\x1b%@\xe9" + utf8_switch + b"\xc3\xa9\x1b%@\xe9\x1b[6n"
+    for split in range(len(data) + 1):
+        projection = NativeTerminalProjection(80, 12)
+        first = projection.feed(data[:split])
+        second = projection.feed(data[split:])
+        assert projection.screen.display[0].rstrip() == "éééé"
+        assert first.native + second.native == data.removesuffix(b"\x1b[6n")
+        assert first.replies + second.replies == b"\x1b[1;5R"
+        assert projection.paintable
+
+
 @pytest.mark.parametrize("source,target", [("dark", "light"), ("light", "dark")])
 @pytest.mark.parametrize(
     "token",

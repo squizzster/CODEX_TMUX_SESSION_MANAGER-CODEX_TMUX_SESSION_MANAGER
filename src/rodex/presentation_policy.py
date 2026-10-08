@@ -156,7 +156,7 @@ class PresentationSnapshot:
 
 
 class PresentationSnapshotSource(Protocol):
-    """Expose revisioned presentation state plus a wake-only change signal."""
+    """Expose the selected view's revision and wake only when that view changes."""
 
     @property
     def revision(self) -> int: ...
@@ -213,7 +213,7 @@ class SessionPresentationPipeline:
         self._selected_policy = initial_policy
         self._root_thread_id: str | None = None
         self._sequence = 0
-        self._revision = 0
+        self._view_revision = 0
         self._events: deque[ProtocolPresentationEvent] = deque(maxlen=PRESENTATION_EVENT_HISTORY_LIMIT)
         self._item_texts: OrderedDict[tuple[str, str], _AccumulatedItemText] = OrderedDict()
         self._item_identities: OrderedDict[tuple[str, str], tuple[str, str | None]] = OrderedDict()
@@ -227,9 +227,9 @@ class SessionPresentationPipeline:
 
     @property
     def revision(self) -> int:
-        """Return the cheap change token without rebuilding the presentation view."""
+        """Hidden history keeps accumulating without invalidating the selected view."""
         with self._lock:
-            return self._revision
+            return self._view_revision
 
     def subscribe(self, listener: Callable[[], None]) -> Callable[[], None]:
         """Register one non-blocking wake callback and return its exact unsubscriber."""
@@ -245,8 +245,8 @@ class SessionPresentationPipeline:
         return unsubscribe
 
     def _advance_revision(self) -> None:
-        """Advance state and wake subscribers without making notification authoritative."""
-        self._revision += 1
+        """Invalidate the selected view; subscribers treat the wake as a hint."""
+        self._view_revision += 1
         for listener in tuple(self._change_listeners):
             # Presentation state remains authoritative if a wake destination
             # concurrently closes or otherwise cannot accept the hint.
@@ -261,7 +261,8 @@ class SessionPresentationPipeline:
             if self._root_thread_id == thread_id:
                 return
             self._root_thread_id = thread_id
-            self._advance_revision()
+            if self._policies[self._selected_policy].surface == PresentationSurface.SEMANTIC:
+                self._advance_revision()
 
     def select_policy(self, policy_name: str) -> None:
         if policy_name not in self._policies:
@@ -297,25 +298,26 @@ class SessionPresentationPipeline:
             projected = self._project_event(event)
             if projected is None:
                 return
-            self._events.append(projected)
-            self._remember_item_identity(projected)
-            self._accumulate_item_text(projected)
-            self._advance_revision()
+            if self._retain_event(projected):
+                self._advance_revision()
 
     def reset_after_disconnect(self) -> None:
         """Discard connection-scoped partial text while retaining completed item text."""
         with self._lock:
             incomplete_keys = [key for key, item_text in self._item_texts.items() if not item_text.complete]
+            visible_change = any(self._visible_item(self._item_texts[key]) is not None for key in incomplete_keys)
             for key in incomplete_keys:
                 del self._item_texts[key]
             self._item_identities.clear()
             self._request_methods.clear()
-            if incomplete_keys:
+            if visible_change:
                 self._advance_revision()
 
     def snapshot(self) -> PresentationSnapshot:
         with self._lock:
             policy = self._policies[self._selected_policy]
+            if policy.surface == PresentationSurface.NATIVE or self._root_thread_id is None:
+                return PresentationSnapshot(self._view_revision, policy.name, policy.surface, policy.heading, (), ())
             root_thread_id = self._root_thread_id
             events = tuple(
                 event
@@ -330,7 +332,38 @@ class SessionPresentationPipeline:
                 and item_text.thread_id == root_thread_id
                 and item_text.admitted_by(policy)
             )
-            return PresentationSnapshot(self._revision, policy.name, policy.surface, policy.heading, events, items)
+            return PresentationSnapshot(self._view_revision, policy.name, policy.surface, policy.heading, events, items)
+
+    def _event_visible(self, event: ProtocolPresentationEvent) -> bool:
+        policy = self._policies[self._selected_policy]
+        return (
+            policy.surface == PresentationSurface.SEMANTIC
+            and self._root_thread_id is not None
+            and event.thread_id == self._root_thread_id
+            and policy.admits(event)
+        )
+
+    def _visible_item(self, item: _AccumulatedItemText | None) -> PresentationItemText | None:
+        policy = self._policies[self._selected_policy]
+        if (
+            policy.surface == PresentationSurface.SEMANTIC
+            and item is not None
+            and item.text
+            and self._root_thread_id is not None
+            and item.thread_id == self._root_thread_id
+            and item.admitted_by(policy)
+        ):
+            return item.snapshot()
+        return None
+
+    def _retain_event(self, event: ProtocolPresentationEvent) -> bool:
+        """Retain all history, checking only the changed/evicted entries for visibility."""
+        visible_change = self._event_visible(event)
+        if len(self._events) == PRESENTATION_EVENT_HISTORY_LIMIT:
+            visible_change |= self._event_visible(self._events[0])
+        self._events.append(event)
+        self._remember_item_identity(event)
+        return self._accumulate_item_text(event) or visible_change
 
     def _project_event(self, event: Mapping[str, object]) -> ProtocolPresentationEvent | None:
         raw_method = event.get("method")
@@ -413,10 +446,7 @@ class SessionPresentationPipeline:
                 )
                 if self._completed_item_text_already_matches(projected):
                     continue
-                self._events.append(projected)
-                self._remember_item_identity(projected)
-                self._accumulate_item_text(projected)
-                changed = True
+                changed = self._retain_event(projected) or changed
         if changed:
             self._advance_revision()
 
@@ -434,14 +464,16 @@ class SessionPresentationPipeline:
             and existing.text == (event.text or "")
         )
 
-    def _accumulate_item_text(self, event: ProtocolPresentationEvent) -> None:
+    def _accumulate_item_text(self, event: ProtocolPresentationEvent) -> bool:
         if event.item_type is None or event.thread_id is None or event.item_id is None:
-            return
+            return False
         key = (event.thread_id, event.item_id)
         item_text = self._item_texts.get(key)
+        before = self._visible_item(item_text)
+        visible_eviction = False
         if item_text is None:
             if not self._admitted_by_any_semantic_policy(event):
-                return
+                return False
             item_text = _AccumulatedItemText(
                 event.thread_id,
                 event.turn_id,
@@ -452,7 +484,8 @@ class SessionPresentationPipeline:
             )
             self._item_texts[key] = item_text
             if len(self._item_texts) > PRESENTATION_ITEM_TEXT_HISTORY_LIMIT:
-                self._item_texts.popitem(last=False)
+                _, evicted = self._item_texts.popitem(last=False)
+                visible_eviction = self._visible_item(evicted) is not None
         elif event.phase is not None:
             item_text.phase = event.phase
         item_text.item_type = event.item_type
@@ -468,6 +501,7 @@ class SessionPresentationPipeline:
             item_text.complete = True
         if self._admitted_by_any_semantic_policy(event):
             item_text.selector_events.append(event)
+        return visible_eviction or before != self._visible_item(item_text)
 
     def _admitted_by_any_semantic_policy(self, event: ProtocolPresentationEvent) -> bool:
         return any(

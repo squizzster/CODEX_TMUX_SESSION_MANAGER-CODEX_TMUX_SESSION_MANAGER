@@ -97,5 +97,8 @@ Use `_running`, `_context --json` from the affected pane, and exact inspection b
 acting. [Liveness classification](RUNTIME_ISOLATION.md#liveness-and-replacement)
 distinguishes unreachable endpoints from permission, timeout, or identity errors.
 An incompatible live runtime belongs to its retained installation; detaching does
-not update it. Never overwrite ownership markers, replace live SQL files, or infer
+not update it. Opening its name through the current command upgrades a
+[supported retained runtime](RUNTIME_ISOLATION.md#retained-runtime-upgrade) once its
+turn is idle; busy turns report on stderr that the caller must wait and retry.
+Never overwrite ownership markers, replace live SQL files, or infer
 destruction authority from a display name or PID alone.

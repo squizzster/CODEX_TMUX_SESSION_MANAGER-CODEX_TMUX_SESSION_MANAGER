@@ -37,7 +37,10 @@ and relocation procedures; do not bypass admission by rewriting manifests or mar
 Runtime roots are real current-user mode-`0700` directories under an accepted private
 or root-owned sticky parent. Sockets/logs are mode `0600`. Daemon endpoints and start
 locks are implementation-namespaced; same-uid peer checks and bounded protocol decoding
-do not permit another build to acquire a runtime. [Runtime lifetimes](RUNTIME_ISOLATION.md#resource-lifetime)
+keep live transport access bound to the owning build. The explicit
+[idle upgrade handoff](RUNTIME_ISOLATION.md#retained-runtime-upgrade) runs through that
+owner's retained interpreter before the current build starts a replacement incarnation.
+[Runtime lifetimes](RUNTIME_ISOLATION.md#resource-lifetime)
 cover descriptor transfer, endpoint aliases, receipts, and PID-reuse protection.
 
 [SQLite storage admission](SQL_SCHEMA.md#storage-and-transactions) owns no-follow

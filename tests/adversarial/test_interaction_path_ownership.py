@@ -51,6 +51,8 @@ EFFECT_OWNERS = {
         "rodex/runtime.py:RodexRuntimeLauncher.codex_session_is_persisted:self._spawn_process",
         "rodex/tmux_executor.py:AsyncTmuxExecutor.run:self._runner",
         "rodex/tmux_executor.py:SyncTmuxExecutor.run:self._runner",
+        "rodex/runtime_upgrade.py:RetainedRuntimeUpgrade.stop:self._runner",
+        "rodex/retained_runtime_handoff.py:main:print",
     },
     "interaction and observer transport adapters": {
         "rodex/agent_observer.py:_send_observer_event_frame:.sendall",
@@ -207,6 +209,7 @@ def test_all_subprocess_entrypoints_are_classified():
         "rodex/terminal_bridge.py",
         "rodex/tmux_sharing_coordinator.py",
         "rodex/status_animation_admission.py",
+        "rodex/retained_runtime_handoff.py",
     }
 
 

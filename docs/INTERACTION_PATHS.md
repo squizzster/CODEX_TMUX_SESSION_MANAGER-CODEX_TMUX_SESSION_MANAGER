@@ -163,4 +163,10 @@ tmux's status format advances the dots locally without a Rodex animation timer.
 tmux effects use the [executor boundary](../src/rodex/tmux_executor.py); SQL effects
 use [transactions](../src/rodex_sql/transactions.py). [Runtime isolation](RUNTIME_ISOLATION.md)
 owns cleanup/hook authority, including the resize-only compatibility exception.
+Selected-session upgrades use
+[`RetainedRuntimeUpgrade`](../src/rodex/runtime_upgrade.py) to run a bounded
+[handoff adapter](../src/rodex/retained_runtime_handoff.py) through the old retained
+interpreter. Its result/error output is private to the current launcher; control
+inspection, exact reservation stop and tmux ownership checks use the existing old
+domain owners. Successful terminal shutdown returns to managed exact-thread resume.
 See [development](DEVELOPMENT.md#test-selection) for focused tests and live gates.

@@ -49,6 +49,14 @@ empty-session recovery with a replacement Codex ID; other failures remain errors
 The Rodex identity and permanent name survive. A resumed runtime uses the resumer's
 current working directory, not a permanently pinned original workspace.
 
+After an implementation update, opening a supported retained live session upgrades
+only that session: the old installation verifies an idle thread and saved history,
+stops its exact reservation, then the current daemon resumes the same thread with
+its existing cwd and name. Busy turns fail on stderr: wait until idle and retry.
+Other sessions remain on the old daemon. Upgrade never substitutes a fresh Codex
+thread for missing history. [Retained-runtime handoff](RUNTIME_ISOLATION.md#retained-runtime-upgrade)
+defines supported ownership and compatibility.
+
 `_detach` follows the create/open/resume flow without attaching and reports identities
 as JSON. `_running` reports unverified or unregistered sessions separately; it does
 not silently adopt or delete them. [Lifecycle authority](RUNTIME_ISOLATION.md) explains

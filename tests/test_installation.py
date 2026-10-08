@@ -9,12 +9,19 @@ import shutil
 import socket
 import subprocess
 import sysconfig
+import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
 from terminal_tmux_fixture import tmux_terminal
+from test_managed_startup import (
+    RodexTerminalClient,
+    _create_standalone_codex_thread,
+    _require_startup_prerequisite,
+    _stop_fixture_daemon,
+)
 
 from rodex.implementation_identity import FIRST_PARTY_PACKAGES
 from rodex.installation import RodexInstallationError, prepare_installation
@@ -57,6 +64,133 @@ print(json.dumps(dict(identity=RODEX_IMPLEMENTATION_ID, daemon=RODEX_DAEMON_PROT
         [interpreter, "-I", "-c", code], cwd=cwd, env=environment, capture_output=True, text=True, check=True, timeout=15
     )
     return json.loads(completed.stdout)
+
+
+@pytest.mark.live_startup
+def test_current_resume_upgrades_one_idle_retained_runtime_and_preserves_its_daemon_peers(
+    tmp_path, development_installation, request
+):
+    """Actual old interpreter → old daemon stop → same Codex thread on new daemon."""
+    from rodex_registry import lookup_owned_rodex_sessions_id_from_a_cool_name, lookup_rodex_runtime_registration
+    from rodex_sql import RODEX_DATABASE_FILENAME
+
+    codex, tmux = shutil.which("codex"), shutil.which("tmux")
+    _require_startup_prerequisite(request, bool(codex and tmux), "Codex and tmux are required")
+    source, _library = development_installation
+    # Simulate an installation predating the new adapter: its existing control,
+    # receipts and daemon APIs must be sufficient for the current helper.
+    runtime_path = source / "rodex/runtime.py"
+    original_runtime = runtime_path.read_text()
+    start = original_runtime.index("    def prepare_runtime_upgrade(")
+    end = original_runtime.index("    def reconcile_session_ui(", start)
+    runtime_path.write_text(
+        (original_runtime[:start] + original_runtime[end:]).replace(
+            "from .runtime_upgrade import RetainedRuntimeUpgrade, retained_coordinator_interpreter\n", ""
+        )
+    )
+    missing_modules = {
+        name: (source / "rodex" / name).read_text() for name in ("runtime_upgrade.py", "retained_runtime_handoff.py")
+    }
+    for name in missing_modules:
+        (source / "rodex" / name).unlink()
+    old_python = publish(tmp_path, development_installation)
+    old_identity = info(old_python)
+    assert not (old_python.parents[2] / "src/rodex/retained_runtime_handoff.py").exists()
+    runtime_path.write_text(original_runtime)
+    for name, content in missing_modules.items():
+        (source / "rodex" / name).write_text(content)
+    new_python = publish(tmp_path, development_installation)
+    assert old_python != new_python
+
+    codex_home = tmp_path / "codex"
+    codex_home.mkdir(mode=0o700)
+    installed_home = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
+    for filename in ("auth.json", "config.toml"):
+        origin = installed_home / filename
+        if origin.is_file():
+            shutil.copy2(origin, codex_home / filename)
+    original_workspace = tmp_path / "original-workspace"
+    original_workspace.mkdir()
+    database = tmp_path / "state/rodex" / RODEX_DATABASE_FILENAME
+    with tempfile.TemporaryDirectory(prefix="rdx-upgrade-") as runtime_directory:
+        runtime_root = Path(runtime_directory)
+        environment = {
+            **os.environ,
+            "TERM": "xterm-256color",
+            "RODEX_CODEX_BINARY": codex,
+            "RODEX_TMUX_BINARY": tmux,
+            "RODEX_RUNTIME_DIR": runtime_directory,
+            "XDG_STATE_HOME": str(tmp_path / "state"),
+            "CODEX_HOME": str(codex_home),
+        }
+        environment.pop("TMUX", None)
+        environment.pop("TMUX_PANE", None)
+
+        def run_cli(interpreter, *arguments):
+            return subprocess.run(
+                [str(interpreter), "-I", "-c", "from rodex import main; main()", *arguments],
+                env=environment,
+                cwd=PROJECT,
+                capture_output=True,
+                text=True,
+                timeout=50,
+            )
+
+        def inspect(interpreter, name):
+            result = run_cli(interpreter, "_inspect", name, "--json")
+            assert result.returncode == 0, result.stdout + result.stderr
+            return json.loads(result.stdout)
+
+        def child_receipts(fingerprint):
+            return {
+                path.name: json.loads(path.read_text()) for path in runtime_root.glob(f"{fingerprint}.process-*.json")
+            }
+
+        try:
+            sessions = []
+            for index in range(2):
+                thread = _create_standalone_codex_thread(
+                    codex, runtime_root / f"fixture-{index}.sock", environment, original_workspace
+                )
+                started = run_cli(old_python, "_detach", "resume", thread)
+                assert started.returncode == 0, started.stdout + started.stderr
+                session = json.loads(started.stdout)
+                assert session["codex_session_id"] == thread
+                sessions.append(session)
+            selected, other = sessions
+            old_selected = inspect(old_python, selected["rodex_session_name"])
+            old_other = inspect(old_python, other["rodex_session_name"])
+            before = child_receipts(old_python.parents[2].name)
+            assert len(before) == 4  # One App Server and TUI per session, one shared daemon.
+
+            command = [str(new_python), "-I", "-c", "from rodex import main; main()", selected["rodex_session_name"]]
+            with RodexTerminalClient(command, environment, PROJECT) as client:
+                assert client.wait_for_attach() == selected["rodex_session_name"]
+                upgraded = inspect(new_python, selected["rodex_session_name"])
+                assert upgraded["runtime"]["runtime_id"] != old_selected["runtime"]["runtime_id"]
+                assert upgraded["rodex"]["session_identifier"] == selected["rodex_session_id"]
+                assert upgraded["codex"]["thread_id"] == selected["codex_session_id"]
+                assert upgraded["data"]["thread"]["cwd"] == str(original_workspace)
+                client.detach()
+
+            # The unselected old runtime retains its exact incarnation and native PIDs.
+            assert inspect(old_python, other["rodex_session_name"])["runtime"] == old_other["runtime"]
+            after = child_receipts(old_python.parents[2].name)
+            other_id = old_other["runtime"]["runtime_id"]
+            assert after == {name: receipt for name, receipt in before.items() if other_id in name}
+            assert len(child_receipts(new_python.parents[2].name)) == 2
+            assert (runtime_root / f"{old_python.parents[2].name}.sock").is_socket()
+            assert (runtime_root / f"{new_python.parents[2].name}.sock").is_socket()
+            session_id = lookup_owned_rodex_sessions_id_from_a_cool_name(selected["rodex_session_name"], database)
+            registration = lookup_rodex_runtime_registration(session_id, database)
+            assert str(registration.runtime_id) == upgraded["runtime"]["runtime_id"]
+            # Subsequent resume reuses the current runtime, without another handoff.
+            reopened = run_cli(new_python, "_detach", selected["rodex_session_name"])
+            assert reopened.returncode == 0, reopened.stdout + reopened.stderr
+            assert inspect(new_python, selected["rodex_session_name"])["runtime"] == upgraded["runtime"]
+            assert info(old_python) == old_identity
+        finally:
+            _stop_fixture_daemon(runtime_root)
 
 
 def test_published_installation_keeps_code_dependencies_and_defaults_after_replacement(

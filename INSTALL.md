@@ -75,10 +75,13 @@ Python while associated sessions are running. Locations and overrides are in
 [local state](docs/OPERATIONS.md#local-state).
 
 New implementations can coexist with old daemons. A retained installation's
-`.venv/bin/rodex` entrypoint accesses its exact implementation's sessions; a newer
-entrypoint cannot acquire older live runtimes. Catalogs are schema-generation scoped:
-builds within one generation share the catalog, but live admission also requires the
-exact implementation. Earlier catalogs are not migrated; Codex owns its transcripts.
+`.venv/bin/rodex` entrypoint accesses its exact implementation's sessions. Opening
+a supported older session through the current entrypoint upgrades that selected
+runtime when its Codex thread is idle. Busy turns fail on stderr with an instruction
+to wait and retry. The handoff preserves its thread, Rodex identity, name, and cwd;
+other sessions continue on their owning daemon. Catalogs are schema-generation scoped:
+builds within one generation share the catalog, but live handshakes still require
+the exact implementation. Earlier catalogs are not migrated; Codex owns its transcripts.
 The narrowly permitted pre-retention resize bridge is documented under
 [runtime compatibility](docs/RUNTIME_ISOLATION.md#compatibility-boundary).
 
@@ -88,8 +91,8 @@ For runtimes launched with 0.15 or later:
 
 1. Update the bootstrap checkout to reviewed code and run `uv sync --locked`.
 2. Reinstall the shim if it changed and run the applicable development gates.
-3. Start a fresh runtime to use the new implementation. Detaching and reattaching
-   keeps the live runtime's loaded code and retained helpers.
+3. Run `rodex NAME` while its turn is idle to upgrade a supported retained runtime.
+   A session already using the current implementation simply reattaches.
 4. Keep old retained installations until their sessions exit.
 
 Pre-0.15 runtimes did not pin helpers. Prefer a separate checkout/environment during

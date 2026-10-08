@@ -11,6 +11,7 @@ from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
 from threading import Barrier, Event, Lock, Thread, current_thread
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -60,6 +61,7 @@ from rodex_registry import (
     lookup_codex_session_id_from_a_rodex_sessions_id,
     lookup_rodex_registry_id,
     lookup_rodex_runtime_instance,
+    lookup_rodex_runtime_registration,
     lookup_rodex_session_id_from_a_rodex_sessions_id,
     lookup_rodex_session_names,
     lookup_rodex_sessions_id_from_a_codex_session_id,
@@ -162,6 +164,9 @@ class StubLauncher:
 
     def reconcile_session_ui(self, runtime: LiveTmuxSession) -> None:
         self.reconciled.append(runtime)
+
+    def prepare_runtime_upgrade(self, _runtime: LiveTmuxSession) -> None:
+        return None
 
     def refresh_shared_tmux_coordination(self, runtime: LiveTmuxSession) -> None:
         self.refreshed_hooks.append(runtime)
@@ -4502,3 +4507,94 @@ def test_main_prints_actionable_multiline_resume_guidance(
     assert capsys.readouterr().err == (
         "rodex: Codex session already belongs to Rodex sturdy-warthog.\nResume with: rodex sturdy-warthog\n"
     )
+
+
+@pytest.mark.parametrize("prefix", [[], ["resume"], ["_detach"]])
+def test_retained_runtime_upgrade_uses_exact_resume_and_original_workspace(tmp_path, monkeypatch, prefix):
+    database = tmp_path / "rodex.sqlite3"
+    monkeypatch.setattr("cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga")
+    monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
+    create_exact_controlled_session(database, tmp_path)
+    workspace = tmp_path / "original-workspace"
+    workspace.mkdir()
+    launcher = StubLauncher(tmp_path)
+    stopped = []
+
+    def stop(old_database):
+        assert old_database == database
+        assert lookup_rodex_runtime_registration(1, database).runtime_id == RUNTIME_ID
+        stopped.append(RUNTIME_ID)
+        return workspace
+
+    monkeypatch.setattr(launcher, "prepare_runtime_upgrade", lambda _runtime: SimpleNamespace(stop=stop))
+    assert run([*prefix, "automatic-beluga"], database_path=database, launcher=launcher) == 0
+    assert stopped == [RUNTIME_ID]
+    assert launcher.started == [(workspace, ["resume", str(CODEX_SESSION_ID)])]
+    assert launcher.reconciled == []
+    assert len(launcher.configured) == 1
+    assert lookup_rodex_runtime_registration(1, database).runtime_id == launcher.started_runtime_ids[0] != RUNTIME_ID
+    assert lookup_codex_session_id_from_a_rodex_sessions_id(1, database) == CODEX_SESSION_ID
+
+
+def test_busy_upgrade_reports_stderr_and_never_replaces_the_runtime(tmp_path, monkeypatch, capsys):
+    database = tmp_path / "rodex.sqlite3"
+    monkeypatch.setattr("cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga")
+    monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
+    create_exact_controlled_session(database, tmp_path)
+    launcher = StubLauncher(tmp_path)
+
+    def stop(_database):
+        raise RodexLaunchError("session 'automatic-beluga' is active; wait until its turn is idle and retry resume")
+
+    monkeypatch.setattr(launcher, "prepare_runtime_upgrade", lambda _runtime: SimpleNamespace(stop=stop))
+    monkeypatch.setattr(cli_module, "run", lambda: run(["automatic-beluga"], database_path=database, launcher=launcher))
+    with pytest.raises(SystemExit) as raised:
+        main()
+    assert raised.value.code == 1
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert "wait until its turn is idle and retry resume" in output.err
+    assert launcher.started == launcher.stopped == launcher.reconciled == launcher.attached == []
+    assert lookup_rodex_runtime_registration(1, database).runtime_id == RUNTIME_ID
+
+
+def test_upgrade_never_substitutes_a_fresh_codex_thread_when_exact_resume_fails(tmp_path, monkeypatch):
+    database = tmp_path / "rodex.sqlite3"
+    monkeypatch.setattr("cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga")
+    monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
+    create_exact_controlled_session(database, tmp_path)
+    launcher = StubLauncher(tmp_path)
+    launcher.start_error = RodexCodexSessionNotFoundError("saved transcript disappeared")
+    monkeypatch.setattr(
+        launcher, "prepare_runtime_upgrade", lambda _runtime: SimpleNamespace(stop=lambda _path: tmp_path)
+    )
+    with pytest.raises(RodexLaunchError, match=r"could not be upgraded.*exact Codex session"):
+        run(["automatic-beluga"], database_path=database, launcher=launcher)
+    assert launcher.started == [(tmp_path, ["resume", str(CODEX_SESSION_ID)])]
+    assert lookup_codex_session_id_from_a_rodex_sessions_id(1, database) == CODEX_SESSION_ID
+    assert lookup_rodex_runtime_registration(1, database).runtime_id == RUNTIME_ID
+
+
+def test_relocated_runtime_upgrade_uses_the_repaired_incarnation_as_cas_predecessor(tmp_path, monkeypatch):
+    database = tmp_path / "rodex.sqlite3"
+    monkeypatch.setattr("cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga")
+    monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
+    create_exact_controlled_session(database, tmp_path)
+    launcher = StubLauncher(tmp_path)
+    launcher.live = False
+    relocated_id = RodexRuntimeId.parse("4444444444444444")
+    launcher.control = replace(launcher.control, runtime_id=relocated_id)
+    relocated = LiveTmuxSession(tmp_path / "tmux.sock", "relocated-old", runtime_id=relocated_id)
+    control = launcher.discover_runtime_control(relocated)
+    monkeypatch.setattr(
+        managed_lifecycle_module, "find_relocated_live_runtime", lambda *_args, **_kw: (relocated, control)
+    )
+
+    def stop(_database):
+        assert lookup_rodex_runtime_registration(1, database).runtime_id == relocated_id
+        return tmp_path
+
+    monkeypatch.setattr(launcher, "prepare_runtime_upgrade", lambda _runtime: SimpleNamespace(stop=stop))
+    assert run(["automatic-beluga"], database_path=database, launcher=launcher) == 0
+    assert launcher.started == [(tmp_path, ["resume", str(CODEX_SESSION_ID)])]
+    assert lookup_rodex_runtime_registration(1, database).runtime_id == launcher.started_runtime_ids[0]

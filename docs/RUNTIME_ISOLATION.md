@@ -11,12 +11,45 @@ Do not replicate that manifest in callers. Live handshakes also require the exac
 loaded fingerprint; [retained installations](../INSTALL.md#retained-installations-and-compatibility)
 keep helpers on that implementation across checkout updates.
 
-Earlier catalogs, runtimes, and wire formats are not generally adopted or translated.
-There is one deliberate exception: [`notify_legacy_runtime_resize`](../src/rodex/legacy_runtime_compat.py)
+Earlier catalogs and unknown wire formats are not adopted or translated. A selected
+registered runtime in a supported retained installation can undergo the explicit
+[idle upgrade handoff](#retained-runtime-upgrade) below. Independently,
+[`notify_legacy_runtime_resize`](../src/rodex/legacy_runtime_compat.py)
 accepts the known pre-retention tmux-v4 coordinator, authenticates its v2 daemon
 through a private process receipt and same-user socket, forwards resize, and pins
 only its owned hook slots to a retained bridge. It cannot start, stop, adopt, access
 an old catalog, or send model input. Unknown generations and foreign hooks remain fenced.
+
+## Retained-runtime upgrade
+
+`rodex NAME`, `rodex resume NAME`, and `_detach NAME` use the same selected-session
+pipeline. When its coordinator belongs to another retained installation,
+[`RetainedRuntimeUpgrade`](../src/rodex/runtime_upgrade.py) parses the known hook,
+regenerates it for the exact server, and verifies its private fingerprint manifest.
+It never executes the stored shell text or overwrites old helpers.
+
+The [handoff adapter](../src/rodex/retained_runtime_handoff.py) runs with the owning
+interpreter and `-I`, importing that installation's existing control/daemon APIs.
+Supported admission requires the shared catalog contract, tmux-v5, daemon-v3 and
+process-receipt-v3. The parent retains the session transition lock throughout.
+The adapter rechecks durable/full tmux identity and whole-runtime topology, inspects
+the exact thread, verifies saved history and both live child receipts, then rechecks
+idle immediately before stopping only that reservation. A busy thread reports on
+stderr that the caller must wait and retry; it is not interrupted or waited on.
+
+The old daemon must report `terminal`, and the old tmux session must exit, before
+the current launcher resumes the exact Codex UUID on a new daemon runtime/server.
+The existing CAS registration path carries the predecessor incarnation, Rodex identity,
+name and original thread cwd. No missing-history fallback can replace its Codex UUID.
+Other old sessions and the daemon remain running; retained installations remain intact.
+If replacement startup fails, the saved thread remains available for a later resume.
+
+The old daemon has no atomic stop-if-idle operation. The transition lock serializes
+managed mutations, and the final inspection catches intervening turn changes, but
+native typing can still race that inspection and stop. This adapter does not claim
+an atomic native-input exclusion. Tests cover
+[handoff admission](../tests/test_runtime_upgrade.py) and
+[two-session retained installation upgrades](../tests/test_installation.py).
 
 ## Capability and admission
 

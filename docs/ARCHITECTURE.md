@@ -23,6 +23,9 @@ caller → retained installation → CLI → implementation-scoped daemon
   open, resume, and recovery. [`RodexRuntimeLauncher`](../src/rodex/runtime.py) stages
   tmux and native children. [`DaemonRuntimeManager`](../src/rodex/daemon.py) owns
   reservations, TTY admission, runtime workers, and stop receipts.
+  [`RetainedRuntimeUpgrade`](../src/rodex/runtime_upgrade.py) delegates a selected
+  older idle runtime's shutdown to its owning interpreter, then returns to ordinary
+  exact-thread resume and CAS registration on the current implementation.
 - [`ExactTurnMutationCoordinator`](../src/rodex/exact_turn_mutation.py) owns start,
   steer, interrupt, mouse, and alias transitions. It resolves, locks, re-resolves,
   then revalidates immediately before mutation. Transport is not a public unfenced

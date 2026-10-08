@@ -378,6 +378,7 @@ def _prepare_selected_session(
     if rodex_session_id is None:
         raise RodexLaunchError(f"Rodex session has no Rodex identity: {session_selector}")
     registry_id = lookup_rodex_registry_id(database_path)
+    active_tmux: LiveTmuxSession | None = None
     if launcher.session_exists(recorded_tmux):
         control = verify_live_runtime_identity(
             launcher,
@@ -389,26 +390,17 @@ def _prepare_selected_session(
             expected_codex_session_id=codex_session_id,
         )
         active_tmux = _attachable_runtime_identity(recorded_tmux, control)
-        active_tmux = _prepare_existing_tmux_identity(
-            launcher,
-            active_tmux,
-            display_name,
-            session_id,
-            database_path,
-        )
-        record_a_rodex_session_access(session_id, database_path)
-        return _PreparedSelectedSession(
-            session_id,
-            display_name,
-            active_tmux,
-        )
 
-    relocated_match = find_relocated_live_runtime(
-        launcher,
-        recorded_tmux.tmux_server_socket_path,
-        expected_rodex_session_id=rodex_session_id,
-        expected_registry_id=registry_id,
-        expected_codex_session_id=codex_session_id,
+    relocated_match = (
+        None
+        if active_tmux is not None
+        else find_relocated_live_runtime(
+            launcher,
+            recorded_tmux.tmux_server_socket_path,
+            expected_rodex_session_id=rodex_session_id,
+            expected_registry_id=registry_id,
+            expected_codex_session_id=codex_session_id,
+        )
     )
     if relocated_match is not None:
         relocated, relocated_control = relocated_match
@@ -441,19 +433,25 @@ def _prepare_selected_session(
             expected_registry_id=registry_id,
             expected_codex_session_id=codex_session_id,
         )
-        relocated = _attachable_runtime_identity(relocated, relocated_control)
-        active_tmux = _prepare_existing_tmux_identity(
-            launcher,
-            relocated,
-            display_name,
-            session_id,
-            database_path,
-        )
-        return _PreparedSelectedSession(
-            session_id,
-            display_name,
-            active_tmux,
-        )
+        active_tmux = _attachable_runtime_identity(relocated, relocated_control)
+        expected_runtime_id = relocated_control.runtime_id
+
+    upgrade_workspace: Path | None = None
+    if active_tmux is not None:
+        upgrade = launcher.prepare_runtime_upgrade(active_tmux)
+        if upgrade is None:
+            active_tmux = _prepare_existing_tmux_identity(
+                launcher,
+                active_tmux,
+                display_name,
+                session_id,
+                database_path,
+            )
+            record_a_rodex_session_access(session_id, database_path)
+            return _PreparedSelectedSession(session_id, display_name, active_tmux)
+        if not codex_available:
+            raise RodexExecutableNotFoundError(f"Codex executable was not found: {configured_codex}")
+        upgrade_workspace = upgrade.stop(database_path)
 
     if not codex_available:
         raise RodexExecutableNotFoundError(f"Codex executable was not found: {configured_codex}")
@@ -462,12 +460,17 @@ def _prepare_selected_session(
         resumed_runtime, observed_codex_session_id = _start_managed_runtime(
             launcher,
             database_path,
-            Path.cwd(),
+            upgrade_workspace or Path.cwd(),
             ["resume", str(codex_session_id)],
             rodex_session_id=rodex_session_id,
             rodex_registry_id=registry_id,
         )
-    except RodexCodexSessionNotFoundError:
+    except RodexCodexSessionNotFoundError as error:
+        if upgrade_workspace is not None:
+            raise RodexLaunchError(
+                f"Rodex session {display_name!r} could not be upgraded: "
+                f"its exact Codex session {codex_session_id} has no saved history"
+            ) from error
         try:
             resumed_runtime, observed_codex_session_id = _start_managed_runtime(
                 launcher,
@@ -489,7 +492,7 @@ def _prepare_selected_session(
             f"Rodex session {display_name!r} is recorded but not running; "
             f"Codex session {codex_session_id} could not be resumed: {error}"
         ) from error
-    active_tmux: LiveTmuxSession = resumed_runtime
+    active_tmux = resumed_runtime
     try:
         if not replaced_unsaved_codex_identity and observed_codex_session_id != codex_session_id:
             raise RodexLaunchError(

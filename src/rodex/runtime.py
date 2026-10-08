@@ -81,6 +81,7 @@ from .runtime_peer import (
     require_unix_peer_process,
     verified_runtime_connection,
 )
+from .runtime_upgrade import RetainedRuntimeUpgrade, retained_coordinator_interpreter
 from .server_overloaded_recovery import ServerOverloadedRecoveryController
 from .source_configuration import default_codex_sessions_root
 from .status_bar import context_status_segment
@@ -1441,6 +1442,34 @@ class RodexRuntimeLauncher:
             publish_base_status=True,
         )
         self._install_terminal_key_contracts(runtime, capability)
+
+    def prepare_runtime_upgrade(self, runtime: LiveTmuxSession) -> RetainedRuntimeUpgrade | None:
+        """Recognize a retained older owner before touching its helpers or UI."""
+        capability = self._resolve_registered_tmux_capability(runtime)
+        command = self._read_tmux_server_option(
+            runtime,
+            RODEX_SHARED_TMUX_COORDINATOR_COMMAND_OPTION,
+            expected_server_id=capability.tmux_server_id,
+        )
+        expected = sharing_coordinator_hook_command(
+            self._python_executable,
+            self._tmux_binary,
+            runtime.tmux_server_socket_path,
+            capability.tmux_server_id,
+        )
+        if not command or _shell_commands_are_equivalent(command, expected):
+            return None
+        interpreter = retained_coordinator_interpreter(command, tmux_binary=self._tmux_binary, capability=capability)
+        return RetainedRuntimeUpgrade(
+            interpreter,
+            capability,
+            runtime.tmux_session_name,
+            command,
+            self._codex_binary,
+            self._tmux_binary,
+            self._user_process_environment,
+            self._run,
+        )
 
     def reconcile_session_ui(self, runtime: LiveTmuxSession) -> None:
         """Refresh static UI configuration without replacing a transient claim."""

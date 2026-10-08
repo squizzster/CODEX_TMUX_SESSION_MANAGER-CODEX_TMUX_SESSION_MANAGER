@@ -45,6 +45,65 @@ def _content(*records: dict[str, object]) -> bytes:
     return b"".join(json.dumps(record).encode() + b"\n" for record in records)
 
 
+@pytest.mark.parametrize("label", ["auto-compact-1", "auto-compact-4", "future-internal-label"])
+def test_internal_response_label_is_thread_scoped_without_replacing_active_turn(label: str) -> None:
+    prefix = _content(
+        {"type": "event_msg", "payload": {"type": "task_started", "turn_id": TURN_A_ID}},
+        {
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "synthetic compaction context"}],
+                "internal_chat_message_metadata_passthrough": {"turn_id": label},
+            },
+        },
+    )
+    suffix = _content({"type": "event_msg", "payload": {"type": "agent_message", "message": "continued"}})
+    cold = normalize_rollout_trace(
+        ((THREAD_ID, prefix + suffix),),
+        based_on_trace_publication_sequence=None,
+        calculated_at_utc="2026-10-08T14:57:49Z",
+    )
+    assert [event.codex_turn_id for event in cold.events] == [TURN_A_ID, None, TURN_A_ID]
+    assert cold.events[1].event_kind == "message"
+    assert cold.coverage_state == "gapped"
+    prepare_agent_trace_publication(cold)  # No invented or noncanonical SQL turn identity.
+
+    normalizer = StatefulAgentTraceNormalizer()
+    normalizer.warmup(((THREAD_ID, prefix),))
+    resumed = normalizer.prepare(
+        ((THREAD_ID, suffix, 2),),
+        based_on_trace_publication_sequence=1,
+        calculated_at_utc="2026-10-08T14:57:50Z",
+    )
+    assert resumed.events == cold.events[2:]
+
+
+@pytest.mark.parametrize(
+    "record_type,payload_type",
+    [
+        ("event_msg", "task_started"),
+        ("event_msg", "task_complete"),
+        ("turn_context", None),
+    ],
+)
+def test_internal_labels_do_not_relax_canonical_lifecycle_turn_identity(
+    record_type: str, payload_type: str | None
+) -> None:
+    with pytest.raises(ValueError, match="Codex turn ID"):
+        normalize_rollout_trace(
+            (
+                (
+                    THREAD_ID,
+                    _content({"type": record_type, "payload": {"type": payload_type, "turn_id": "auto-compact-1"}}),
+                ),
+            ),
+            based_on_trace_publication_sequence=None,
+            calculated_at_utc="2026-10-08T14:57:49Z",
+        )
+
+
 def _publish_trace(database: Path, publication: RodexAgentTracePublication) -> object:
     prepared = prepare_agent_trace_publication(publication)
     with open_rodex_transaction(database) as connection:

@@ -115,6 +115,9 @@ class FakeAnalyticsAdapter:
 
 
 class FakeAnalyticsTask:
+    recovery_retry_at: float | None = None
+    recovery_wake_at: float | None = None
+
     def __init__(self, *, result: str = "up_to_date") -> None:
         self.result = result
         self.started = Event()
@@ -1423,7 +1426,8 @@ def test_new_topology_is_promoted_only_after_its_source_batch_is_accepted(
     config = _config(tmp_path)
     _rollout(config.codex_sessions_root, CODEX_SESSION_ID)
     _create(config)
-    worker = AnalyticsRolloutWorker(config)
+    clock = [100.0]
+    worker = AnalyticsRolloutWorker(config, monotonic=lambda: clock[0])
     assert worker.poll_once() == "up_to_date"
     child_thread_id = uuid.UUID(int=CODEX_SESSION_ID.int + 100)
     _subagent_rollout(
@@ -1457,6 +1461,8 @@ def test_new_topology_is_promoted_only_after_its_source_batch_is_accepted(
     assert child_thread_id in worker._pending_resolution_thread_ids
     monkeypatch.setattr(worker._source_reader, "read", original_read)
 
+    assert worker.poll_once(AnalyticsDirtyBatch(frozenset({child_thread_id}))) == "recovery_wait"
+    clock[0] = worker.recovery_retry_at
     assert worker.poll_once(AnalyticsDirtyBatch(frozenset({child_thread_id}))) == "up_to_date"
     assert child_thread_id in worker._verified_sources
 
@@ -1754,7 +1760,8 @@ def test_deterministic_publication_conflict_parks_large_prefix_across_dirty_gene
         output.write(large_record)
     _create(config)
     adapter = FakeAnalyticsAdapter()
-    worker = AnalyticsRolloutWorker(config, adapter_factory=lambda: adapter)
+    clock = [100.0]
+    worker = AnalyticsRolloutWorker(config, adapter_factory=lambda: adapter, monotonic=lambda: clock[0])
     from rodex import analytics_source_reader as source_reader_module
 
     captured_bytes = 0
@@ -1776,8 +1783,10 @@ def test_deterministic_publication_conflict_parks_large_prefix_across_dirty_gene
     dirty = AnalyticsDirtyBatch(frozenset({CODEX_SESSION_ID}))
 
     assert worker.poll_once() == "clean_replay"
+    assert worker.poll_once(dirty) == "recovery_wait"
+    clock[0] = worker.recovery_retry_at
     for _ in range(8):
-        assert worker.poll_once(dirty) == "clean_replay"
+        assert worker.poll_once(dirty) == "failure_parked"
 
     assert len(adapter.analyses) == 1
     assert captured_bytes <= rollout.stat().st_size + 4096
@@ -2038,7 +2047,7 @@ def test_analyzer_failure_preserves_last_good_aggregate_and_increments_health(
     assert view.worker is not None
     assert view.worker.worker_state == "degraded"
     assert view.worker.consecutive_failures == 1
-    assert view.worker.next_retry_at_utc is None
+    assert view.worker.next_retry_at_utc is not None
 
 
 def test_transient_publication_retry_reuses_the_prepared_analysis(
@@ -2140,7 +2149,8 @@ def test_failed_analysis_resets_resident_state_for_one_clean_replay(
     failed = FakeAnalyticsAdapter()
     recovered = FakeAnalyticsAdapter()
     adapters = iter((failed, recovered))
-    worker = AnalyticsRolloutWorker(config, adapter_factory=lambda: next(adapters))
+    clock = [100.0]
+    worker = AnalyticsRolloutWorker(config, adapter_factory=lambda: next(adapters), monotonic=lambda: clock[0])
 
     assert worker.poll_once() == "up_to_date"
     assert CODEX_SESSION_ID in worker._verified_sources
@@ -2150,10 +2160,13 @@ def test_failed_analysis_resets_resident_state_for_one_clean_replay(
     failed.fail = True
     assert worker.poll_once() == "clean_replay"
     assert worker._verified_sources == {}
+    assert worker.poll_once() == "recovery_wait"
+    clock[0] = worker.recovery_retry_at
     assert worker.poll_once() == "up_to_date"
 
-    assert recovered.analyses[0][0] == (rollout.read_bytes(),)
-    assert recovered.appended_analyses[0] == (addition,)
+    # Reconstruct the latest accepted baseline before replaying the failed suffix.
+    assert recovered.analyses[0][0] == (rollout.read_bytes()[: -len(addition)],)
+    assert recovered.appended_analyses[1] == (addition,)
 
 
 def test_analyzer_schema_drift_degrades_without_replacing_relational_snapshot(
@@ -2425,7 +2438,15 @@ def test_shared_coordinator_bounds_repeated_start_failure_to_two_attempts(
     coordinator.start()
     coordinator.reserve(_pending_config(config))
     coordinator.activate(config)
-    _wait_until(lambda: attempts == 2)
+    # The factory increments attempts before the supervisor persists its health.
+    # Wait for the observable completion, not that intermediate callback state.
+    _wait_until(
+        lambda: (
+            attempts == 2
+            and (view := read_rodex_session_statistics(1, config.rodex_database_path)).worker is not None
+            and view.worker.consecutive_failures == 2
+        )
+    )
 
     assert attempts == 2
     view = read_rodex_session_statistics(1, config.rodex_database_path)

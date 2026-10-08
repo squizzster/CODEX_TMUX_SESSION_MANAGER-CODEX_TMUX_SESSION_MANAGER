@@ -7,6 +7,7 @@ import gc
 import json
 import logging
 import os
+import sqlite3
 import time
 from collections import Counter, OrderedDict, deque
 from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -16,6 +17,7 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from threading import Event, Lock, Thread
+from traceback import extract_tb
 from typing import Any
 
 from rodex_registry import (
@@ -55,6 +57,7 @@ from .analytics_contracts import (
     RodexAnalyticsError,
     create_analytics_adapter,
 )
+from .analytics_recovery import AnalyticsRecoveryBudget
 from .analytics_scheduler import (
     ANALYTICS_MAX_BATCH_SECONDS,
     ANALYTICS_MAX_RETRY_WINDOW_SECONDS,
@@ -152,6 +155,7 @@ class _PendingAnalyticsFailureHealth:
 
     fingerprint: _AnalyticsFailureFingerprint
     retry_not_before_monotonic: float
+    count_failure: bool = True
 
 
 def _analyzer_sources(
@@ -330,12 +334,28 @@ class AnalyticsRolloutWorker:
         self._trace_normalizer = StatefulAgentTraceNormalizer()
         self._verified_sources: dict[CodexThreadId, VerifiedRollout] = {}
         self._last_health_transition: tuple[str, str | None] | None = None
+        self._last_health_retry_at: float | None = None
         self._last_failure_health_fingerprint: _AnalyticsFailureFingerprint | None = None
         self._parked_failure: _AnalyticsFailureFingerprint | None = None
         self._pending_failure_health: _PendingAnalyticsFailureHealth | None = None
         self._consecutive_failures = 0
         self._published_turns: dict[tuple[CodexThreadId, str], TurnStatisticsProjection] | None = None
         self._latest_turns: dict[CodexThreadId, TurnStatisticsProjection] = {}
+        self._recovery = AnalyticsRecoveryBudget()
+        self._last_logged_failure: tuple[str, str] | None = None
+
+    @property
+    def recovery_retry_at(self) -> float | None:
+        """Monotonic recovery deadline, authoritative even during retirement."""
+        return self._recovery.retry_at
+
+    @property
+    def recovery_wake_at(self) -> float | None:
+        """Use the same scheduler for cheap health retries and costly recovery."""
+        deadlines = [self.recovery_retry_at]
+        if self._pending_failure_health is not None:
+            deadlines.append(self._pending_failure_health.retry_not_before_monotonic)
+        return min((deadline for deadline in deadlines if deadline is not None), default=None)
 
     def observe_protocol_event(self, event: Mapping[str, Any]) -> None:
         """Feed exact lifecycle identity metadata into bounded source resolution."""
@@ -343,6 +363,12 @@ class AnalyticsRolloutWorker:
 
     def poll_once(self, batch: AnalyticsDirtyBatch | None = None) -> str:
         """Perform one reconciliation; no analytics failure is allowed to escape."""
+        attempt_started_at = self._monotonic()
+        if self.recovery_retry_at is not None and attempt_started_at < self.recovery_retry_at:
+            if batch is not None:
+                self._pending_resolution_thread_ids.update(batch.thread_ids)
+            self._retry_pending_failure_health(self._expected_codex_session_id)
+            return "recovery_wait"
         expected_codex_session_id = self._expected_codex_session_id
         failure_reads: tuple[StableRolloutRead, ...] = ()
         try:
@@ -383,8 +409,23 @@ class AnalyticsRolloutWorker:
                 )
                 self._consecutive_failures = checkpoint.worker.consecutive_failures
             if self._parked_failure_is_current(batch):
+                self._recovery.retry_at = None
+                assert self._parked_failure is not None
+                if self._pending_failure_health is None and not self._project_health(
+                    "degraded",
+                    self._parked_failure.diagnostic_code,
+                    codex_session_id,
+                    failed=True,
+                    failure_fingerprint=self._parked_failure,
+                    count_failure=False,
+                ):
+                    self._pending_failure_health = _PendingAnalyticsFailureHealth(
+                        fingerprint=self._parked_failure,
+                        retry_not_before_monotonic=self._monotonic() + ANALYTICS_HEALTH_RETRY_DELAY_SECONDS,
+                        count_failure=False,
+                    )
                 self._retry_pending_failure_health(codex_session_id)
-                return "clean_replay"
+                return "failure_parked" if self._pending_failure_health is None else "recovery_wait"
             prepared = self._prepared_publication
             if prepared is not None:
                 if batch is not None:
@@ -453,6 +494,7 @@ class AnalyticsRolloutWorker:
                 self._source_reader.accept([item.prepared_read for item in stable_reads])
                 self._promote_verified_sources(stable_reads)
                 self._requires_full_reconcile = False
+                self._accept_recovery()
                 if any(source_growth):
                     return "pending_append"
                 if unresolved_thread_ids:
@@ -625,6 +667,7 @@ class AnalyticsRolloutWorker:
             self._source_reader.accept([item.prepared_read for item in stable_reads])
             self._promote_verified_sources(stable_reads)
             self._requires_full_reconcile = False
+            self._accept_recovery()
             if trace_target_thread_ids:
                 self._pending_resolution_thread_ids.update(trace_target_thread_ids)
                 return "pending_append"
@@ -660,6 +703,7 @@ class AnalyticsRolloutWorker:
         except RodexDatabaseMovedError:
             raise
         except Exception as error:
+            self._recovery.failed(started_at=attempt_started_at, finished_at=self._monotonic())
             if batch is not None:
                 self._pending_resolution_thread_ids.update(batch.thread_ids)
             self._pending_resolution_thread_ids.update(self._deferred_dirty_thread_ids)
@@ -674,20 +718,32 @@ class AnalyticsRolloutWorker:
                     )
                 ),
             )
+            log_key = (diagnostic_code, failure_fingerprint.diagnostic_detail)
+            if log_key != self._last_logged_failure:
+                # Never log exception messages, source bodies, or frame locals:
+                # dependency exceptions can contain private transcript text.
+                frames = extract_tb(error.__traceback__)[-6:]
+                _LOGGER.error(
+                    "analytics failure runtime=%s diagnostic=%s exception=%s frames=%s retry_in_seconds=%.3f",
+                    self._config.runtime_id,
+                    diagnostic_code,
+                    type(error).__qualname__,
+                    " > ".join(f"{Path(frame.filename).name}:{frame.lineno}:{frame.name}" for frame in frames),
+                    max(0.0, self.recovery_retry_at - self._monotonic()),
+                )
+                self._last_logged_failure = log_key
             health_persisted = self._project_health(
                 "degraded",
                 diagnostic_code,
                 expected_codex_session_id,
                 failed=True,
                 failure_fingerprint=failure_fingerprint,
+                retry_at=self.recovery_retry_at,
             )
             self._parked_failure = (
                 failure_fingerprint
                 if failure_fingerprint.sources
-                and isinstance(
-                    error,
-                    (RodexAnalyticsError, RodexSessionStatisticsConflictError),
-                )
+                and not isinstance(error, (OSError, AnalyticsSourceReadError, sqlite3.OperationalError))
                 else None
             )
             self._pending_failure_health = (
@@ -695,7 +751,7 @@ class AnalyticsRolloutWorker:
                     fingerprint=failure_fingerprint,
                     retry_not_before_monotonic=(self._monotonic() + ANALYTICS_HEALTH_RETRY_DELAY_SECONDS),
                 )
-                if self._parked_failure is not None and not health_persisted
+                if not health_persisted
                 else None
             )
             self._adapter = None
@@ -704,6 +760,14 @@ class AnalyticsRolloutWorker:
             self._source_reader.require_clean_replay()
             self._verified_sources.clear()
             self._trace_normalizer.require_clean_replay()
+            # Recovery must warm from the latest durable acceptance, not the
+            # startup checkpoint or a mixture of accepted and failed state.
+            self._checkpoint = None
+            self._publication_sequence = None
+            self._trace_publication_sequence = None
+            self._published_turns = None
+            self._latest_turns.clear()
+            self._accepted_observations.clear()
             self._requires_full_reconcile = True
             return "clean_replay"
 
@@ -715,7 +779,8 @@ class AnalyticsRolloutWorker:
         if parked is None:
             return False
         captured_thread_ids = frozenset(thread_id for thread_id, _source in parked.sources)
-        if batch is not None and not batch.thread_ids.issubset(captured_thread_ids):
+        pending_thread_ids = self._pending_resolution_thread_ids | (set() if batch is None else set(batch.thread_ids))
+        if not pending_thread_ids.issubset(captured_thread_ids):
             self._parked_failure = None
             self._pending_failure_health = None
             return False
@@ -747,6 +812,8 @@ class AnalyticsRolloutWorker:
             expected_codex_session_id,
             failed=True,
             failure_fingerprint=pending.fingerprint,
+            retry_at=self.recovery_retry_at,
+            count_failure=pending.count_failure,
         ):
             self._pending_failure_health = None
             return
@@ -909,6 +976,7 @@ class AnalyticsRolloutWorker:
         self._source_reader.accept([item.prepared_read for item in prepared.stable_reads])
         self._promote_verified_sources(prepared.stable_reads)
         self._requires_full_reconcile = False
+        self._accept_recovery()
         self._parked_failure = None
         self._pending_failure_health = None
         self._prepared_publication = None
@@ -935,6 +1003,12 @@ class AnalyticsRolloutWorker:
                 peer_identity=RuntimePeerIdentity(self._config.runtime_id, self._config.tmux_server_id),
             )
         return outcome
+
+    def _accept_recovery(self) -> None:
+        self._recovery.accepted()
+        self._last_logged_failure = None
+        self._pending_failure_health = None
+        self._parked_failure = None
 
     def _promote_verified_sources(
         self,
@@ -972,6 +1046,8 @@ class AnalyticsRolloutWorker:
         *,
         failed: bool = False,
         failure_fingerprint: _AnalyticsFailureFingerprint | None = None,
+        retry_at: float | None = None,
+        count_failure: bool = True,
     ) -> bool:
         session_id = self._session_id
         if session_id is None or expected_codex_session_id is None:
@@ -982,22 +1058,34 @@ class AnalyticsRolloutWorker:
                 return False
             transition = (state, diagnostic_code)
             if failed:
-                if failure_fingerprint is not None and self._last_failure_health_fingerprint == failure_fingerprint:
+                if (
+                    failure_fingerprint is not None
+                    and self._last_failure_health_fingerprint == failure_fingerprint
+                    and self._last_health_retry_at == retry_at
+                ):
                     return True
-            elif self._last_health_transition == transition:
+            elif self._last_health_transition == transition and self._last_health_retry_at == retry_at:
                 return True
             now = self._now()
+            increment_failure = count_failure or self._last_failure_health_fingerprint != failure_fingerprint
             registry.record_health_transition(
                 worker_state=state,
                 diagnostic_code=diagnostic_code,
                 attempted_at_utc=now.isoformat(timespec="microseconds"),
                 failed=failed,
-                next_retry_at_utc=None,
-                prior_consecutive_failures=self._consecutive_failures,
+                next_retry_at_utc=(
+                    None
+                    if retry_at is None
+                    else (now + timedelta(seconds=max(0.0, retry_at - self._monotonic()))).isoformat(
+                        timespec="microseconds"
+                    )
+                ),
+                prior_consecutive_failures=max(0, self._consecutive_failures - (failed and not increment_failure)),
             )
             self._last_health_transition = transition
+            self._last_health_retry_at = retry_at
             self._last_failure_health_fingerprint = failure_fingerprint if failed else None
-            self._consecutive_failures = self._consecutive_failures + 1 if failed else 0
+            self._consecutive_failures = self._consecutive_failures + int(increment_failure) if failed else 0
         except RodexDatabaseMovedError:
             raise
         except Exception:
@@ -1403,6 +1491,14 @@ class SharedAnalyticsCoordinator:
             if entry is None or entry.worker is not worker:
                 return
             entry.start_attempts = 0
+            if result in {"clean_replay", "recovery_wait"} and worker.recovery_wake_at is not None:
+                entry.next_retry_at = worker.recovery_wake_at
+                if entry.retiring:
+                    assert entry.retirement_deadline is not None
+                    entry.next_retry_at = min(entry.next_retry_at, entry.retirement_deadline)
+                entry.retry_deadline = None
+                self._wake.set()
+                return
             if entry.retiring:
                 assert entry.retirement_settle_at is not None and entry.retirement_deadline is not None
                 if result == "up_to_date" and not entry.pending_events and not entry.full_reconcile:

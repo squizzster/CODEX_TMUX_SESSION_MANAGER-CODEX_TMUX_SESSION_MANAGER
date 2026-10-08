@@ -343,18 +343,31 @@ newline-complete suffixes; ordinary wakes never repeat discovery or reload uncha
 prefixes.
 
 One resident analyzer and stateful trace normalizer own calculation for the worker
-lifetime. Direct-parent topology is staged before a new child. Catch-up, stale
-compare-and-set recovery, and clean replay have finite windows; exhausting one parks the
-work for a later event instead of polling or looping. Rodex owns scheduling,
+lifetime. Direct-parent topology is staged before a new child. Catch-up and stale
+compare-and-set recovery have finite windows. Analysis failures use a separate,
+worker-owned recovery deadline that incoming events, source growth, and retirement cannot
+reset. The delay has a 30-second exponential floor capped at 15 minutes and an uncapped
+99-times-failed-attempt-duration component, targeting at most 1% repeated failed-work
+duty per runtime. Normal successful append processing has no such delay. Rodex owns scheduling,
 authenticated rollout provenance, bounded recovery, health, and persistence.
 Response-item turn scope comes from Codex's nested passthrough metadata, keeping a
 collaboration function call and its `SubAgentActivity` on one canonical parent turn.
+That metadata also carries synthetic labels such as `auto-compact-1`; these messages
+remain visible at thread scope with gapped coverage, without replacing the active
+canonical turn. Public lifecycle turn IDs remain strictly validated.
 The authenticated `SubAgentActivity(kind=started)` event binds its child thread to that
 exact parent turn. An already committed lineage edge is the restart fallback, while
 first-linked timestamps are used only for legacy histories that contain neither exact
 fact; contradictory exact facts fail closed instead of guessing.
-Publication-sequence races reload SQL/cursors; deterministic semantic conflicts publish
-degraded health and park by authenticated source fingerprint.
+Publication-sequence races reload SQL/cursors; deterministic failures, including internal
+exceptions, publish degraded health and park unchanged authenticated prefixes. Changed
+input can recover only after the retained deadline; environmental I/O and SQLite
+operational errors remain eligible for delayed retries. Recovery reloads the latest
+durable checkpoint before rebuilding accepted analyzer and trace state. The existing
+coordinator also handles cheap health-only retries, without replaying rollouts.
+Failure logs record exception type and code locations, never exception bodies or frame
+locals; `_stats-status` exposes the scheduled retry time. Successful acceptance clears
+the failure budget and returns to suffix-only work.
 
 Canonical thread, turn, item, and tool-call identities outlive replaceable statistics.
 Session membership, current-root selection, rollout source, and sub-agent lineage are

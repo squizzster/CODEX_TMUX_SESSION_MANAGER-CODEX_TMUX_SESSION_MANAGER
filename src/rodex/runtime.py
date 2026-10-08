@@ -72,8 +72,14 @@ from .protocol_proxy import (
     TmuxToolCallStatus,
     ToolCallCounter,
 )
-from .runtime_endpoint import ExclusiveUnixEndpoint
-from .runtime_peer import BoundProcessOwner, RuntimePeerIdentity, require_unix_peer_process, verified_runtime_connection
+from .runtime_endpoint import BoundUnixAlias, ExclusiveUnixEndpoint
+from .runtime_peer import (
+    BoundProcessOwner,
+    RuntimePeerIdentity,
+    require_unix_listener_process,
+    require_unix_peer_process,
+    verified_runtime_connection,
+)
 from .server_overloaded_recovery import ServerOverloadedRecoveryController
 from .source_configuration import default_codex_sessions_root
 from .status_bar import context_status_segment
@@ -261,13 +267,21 @@ class _RuntimePathKeepalive:
 
     def __init__(
         self,
-        paths: Sequence[Path],
+        paths: Sequence[Path | BoundUnixAlias],
         *,
         interval_seconds: float = RUNTIME_PATH_KEEPALIVE_INTERVAL_SECONDS,
     ) -> None:
         if interval_seconds <= 0:
             raise ValueError("runtime path keepalive interval must be positive")
-        self._paths = tuple(dict.fromkeys(paths))
+        expanded_paths: list[Path] = []
+        self._aliases: dict[Path, Path] = {}
+        for path in paths:
+            if isinstance(path, BoundUnixAlias):
+                self._aliases[path.path] = path.target
+                expanded_paths.extend((path.path, path.target.parent, path.target))
+            else:
+                expanded_paths.append(path)
+        self._paths = tuple(dict.fromkeys(expanded_paths))
         if not self._paths:
             raise ValueError("runtime path keepalive requires at least one path")
         self._interval_seconds = interval_seconds
@@ -293,8 +307,12 @@ class _RuntimePathKeepalive:
                 descriptor = os.open(path, os.O_PATH | os.O_NOFOLLOW | os.O_CLOEXEC)
                 self._descriptors[path] = descriptor
                 state = os.fstat(descriptor)
+                alias_target = self._aliases.get(path)
                 if stat_module.S_ISLNK(state.st_mode):
-                    raise RodexRuntimeError(f"live runtime path is a symlink: {path}")
+                    if alias_target is None or path.readlink() != alias_target or state.st_uid != os.getuid():
+                        raise RodexRuntimeError(f"live runtime path is an unverified symlink: {path}")
+                elif alias_target is not None:
+                    raise RodexRuntimeError(f"live runtime alias is no longer a symlink: {path}")
                 self._identities[path] = (state.st_dev, state.st_ino, state.st_mode & 0o170000, state.st_uid)
             self._refresh()
         except (OSError, RodexRuntimeError) as error:
@@ -352,7 +370,13 @@ class _RuntimePathKeepalive:
                 descriptor = self._descriptors.get(path)
                 if descriptor is None:
                     raise RodexRuntimeError("runtime path keepalive is closed")
-                os.utime(f"/proc/self/fd/{descriptor}", None, follow_symlinks=True)
+                alias_target = self._aliases.get(path)
+                if alias_target is None:
+                    os.utime(f"/proc/self/fd/{descriptor}", None, follow_symlinks=True)
+                else:
+                    if path.readlink() != alias_target:
+                        raise RodexRuntimeError(f"live runtime alias target changed: {path}")
+                    os.utime(path, None, follow_symlinks=False)
                 if _runtime_path_identity(path) != expected:
                     raise RodexRuntimeError(f"live runtime path identity changed while refreshing: {path}")
             except RodexRuntimeError:
@@ -652,7 +676,7 @@ class RodexRuntimeLauncher:
         log_path = runtime_root / f"catalog-{token}.log"
         _require_short_unix_socket_path(socket_path)
         with ExitStack() as cleanup:
-            endpoint = ExclusiveUnixEndpoint(socket_path)
+            endpoint = ExclusiveUnixEndpoint(socket_path, allow_child_alias=True)
             endpoint.acquire()
             cleanup.callback(endpoint.close)
             cleanup.callback(log_path.unlink, missing_ok=True)
@@ -669,6 +693,8 @@ class RodexRuntimeLauncher:
             cleanup.callback(_stop_child_process, process, owns_process_group=True)
             _wait_for_app_server_socket(process, socket_path)
             endpoint.retain_bound_path()
+            if endpoint.bound_alias is not None:
+                require_unix_listener_process(socket_path, process)
             return self._read_persisted_codex_session(socket_path, codex_session_id, process)
 
     def _read_persisted_codex_session(
@@ -2506,7 +2532,7 @@ def _run_runtime_service(
         config.tmux_server_id,
     )
     peer_identity = RuntimePeerIdentity(config.runtime_id, config.tmux_server_id)
-    app_endpoint = ExclusiveUnixEndpoint(app_server_socket_path)
+    app_endpoint = ExclusiveUnixEndpoint(app_server_socket_path, allow_child_alias=True)
     app_server: subprocess.Popen[bytes] | None = None
     app_server_announced = False
     tui: subprocess.Popen[bytes] | None = None
@@ -2572,7 +2598,8 @@ def _run_runtime_service(
             _wait_for_app_server_socket(app_server, app_server_socket_path, stop)
             _require_runtime_not_stopped(stop)
             app_endpoint.retain_bound_path()
-            app_server_socket_path.chmod(0o600)
+            if app_endpoint.bound_alias is not None:
+                require_unix_listener_process(app_server_socket_path, app_server)
             agent_observer_controller = AgentObserverCoordinator(
                 tmux_binary,
                 tmux_runtime_capability,
@@ -2674,7 +2701,7 @@ def _run_runtime_service(
                 (
                     app_server_log_path.parent,
                     tmux_server_socket_path,
-                    app_server_socket_path,
+                    app_endpoint.bound_alias or app_server_socket_path,
                     app_server_log_path,
                     protocol_proxy_socket_path,
                     protocol_event_socket_path,

@@ -147,6 +147,94 @@ def test_stateful_trace_links_later_item_batches_to_the_accepted_turn() -> None:
     assert second.events[0].detail.command_argument_count == 2  # type: ignore[union-attr]
 
 
+def test_stateful_trace_retains_exact_subagent_spawning_turn_across_batches() -> None:
+    source = _content(
+        {
+            "ordinal": 1,
+            "timestamp": "2026-10-08T12:00:00Z",
+            "type": "event_msg",
+            "payload": {"type": "task_started", "turn_id": TURN_A_ID},
+        },
+        {
+            "ordinal": 2,
+            "timestamp": "2026-10-08T12:00:01Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "item_completed",
+                "turn_id": TURN_A_ID,
+                "item": {
+                    "type": "SubAgentActivity",
+                    "id": "call-spawn",
+                    "kind": "started",
+                    "agent_thread_id": str(CHILD_THREAD_ID),
+                    "agent_path": "/root/review",
+                },
+            },
+        },
+    )
+    expected = {CHILD_THREAD_ID: frozenset({(THREAD_ID, TURN_A_ID)})}
+    normalizer = StatefulAgentTraceNormalizer()
+
+    normalizer.prepare(
+        ((THREAD_ID, source),),
+        based_on_trace_publication_sequence=None,
+        calculated_at_utc="2026-10-08T12:00:02Z",
+    )
+    assert normalizer.candidate_subagent_spawning_turns() == expected
+    normalizer.accept_batch()
+    normalizer.prepare(
+        ((THREAD_ID, b"", 2),),
+        based_on_trace_publication_sequence=1,
+        calculated_at_utc="2026-10-08T12:00:03Z",
+    )
+    assert normalizer.candidate_subagent_spawning_turns() == expected
+
+    normalizer.require_clean_replay()
+    normalizer.warmup(((THREAD_ID, source),))
+    normalizer.prepare(
+        ((THREAD_ID, b"", 2),),
+        based_on_trace_publication_sequence=1,
+        calculated_at_utc="2026-10-08T12:00:04Z",
+    )
+    assert normalizer.candidate_subagent_spawning_turns() == expected
+
+
+def test_legacy_subagent_status_preserves_exact_spawning_turn() -> None:
+    normalizer = StatefulAgentTraceNormalizer()
+
+    publication = normalizer.prepare(
+        (
+            (
+                THREAD_ID,
+                _content(
+                    {
+                        "ordinal": 1,
+                        "type": "event_msg",
+                        "payload": {"type": "task_started", "turn_id": TURN_A_ID},
+                    },
+                    {
+                        "ordinal": 2,
+                        "type": "event_msg",
+                        "payload": {
+                            "type": "sub_agent_activity",
+                            "id": "call-legacy-spawn",
+                            "status": "started",
+                            "agent_thread_id": str(CHILD_THREAD_ID),
+                            "agent_path": "/root/review",
+                        },
+                    },
+                ),
+            ),
+        ),
+        based_on_trace_publication_sequence=None,
+        calculated_at_utc="2026-10-08T12:00:00Z",
+    )
+
+    activity = next(event.detail for event in publication.events if isinstance(event.detail, TraceSubagentActivity))
+    assert activity.activity_kind == "started"
+    assert normalizer.candidate_subagent_spawning_turns() == {CHILD_THREAD_ID: frozenset({(THREAD_ID, TURN_A_ID)})}
+
+
 def test_stateful_trace_pairs_namespaced_function_request_and_later_output() -> None:
     normalizer = StatefulAgentTraceNormalizer()
     request = normalizer.prepare(

@@ -99,7 +99,11 @@ listener; control endpoints are Unix sockets below a private runtime root.
   nonce before protocol traffic. The native App Server peer must belong to the retained
   live child process tree. A matching Codex thread alone cannot establish that boundary.
 - App-server, proxy, event and observer endpoint lifetimes use an exclusive lock and
-  retain the bound socket inode. A losing owner cannot unlink an incumbent's endpoint;
+  retain the bound endpoint inode. A permitted child-created App Server rendezvous alias
+  must be a current-user absolute symlink into a current-user private real directory;
+  Rodex pins the alias, directory and mode-`0600` physical socket and verifies that the
+  retained App Server process owns the listener. Cleanup removes only the retained alias,
+  never its child-owned target. A losing owner cannot unlink an incumbent's endpoint;
   old cleanup cannot unlink a replacement. Locks remain stable across restarts.
 - The daemon records each App Server and TUI process group with runtime, operation, PID,
   start time and uid. Parent-death guards stop native children if the daemon dies; a new

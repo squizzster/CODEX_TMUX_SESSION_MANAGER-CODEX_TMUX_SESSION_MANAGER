@@ -26,6 +26,7 @@ from .agent_trace_privacy import contains_codex_encrypted_value
 
 AGENT_TRACE_SCHEMA_VERSION = "rodex-agent-trace-v4"
 type AgentTraceSource = tuple[CodexThreadId, bytes] | tuple[CodexThreadId, bytes, int | Sequence[int]]
+type SubagentSpawningTurn = tuple[CodexThreadId, str]
 
 
 class StatefulAgentTraceNormalizer:
@@ -36,6 +37,8 @@ class StatefulAgentTraceNormalizer:
         self._candidate_active_turns: dict[CodexThreadId, str | None] | None = None
         self._accepted_tool_names: dict[tuple[CodexThreadId, str], str] = {}
         self._candidate_tool_names: dict[tuple[CodexThreadId, str], str] | None = None
+        self._accepted_subagent_spawning_turns: dict[CodexThreadId, set[SubagentSpawningTurn]] = {}
+        self._candidate_subagent_spawning_turns: dict[CodexThreadId, set[SubagentSpawningTurn]] | None = None
 
     def prepare(
         self,
@@ -47,6 +50,7 @@ class StatefulAgentTraceNormalizer:
     ) -> RodexAgentTracePublication:
         candidate = dict(self._accepted_active_turns)
         candidate_tool_names = dict(self._accepted_tool_names)
+        candidate_spawning_turns = _copy_subagent_spawning_turns(self._accepted_subagent_spawning_turns)
         publication = normalize_rollout_trace(
             sources,
             based_on_trace_publication_sequence=based_on_trace_publication_sequence,
@@ -55,37 +59,78 @@ class StatefulAgentTraceNormalizer:
             _active_turns=candidate,
             _tool_names=candidate_tool_names,
         )
+        _remember_subagent_spawning_turns(candidate_spawning_turns, publication.events)
         self._candidate_active_turns = candidate
         self._candidate_tool_names = candidate_tool_names
+        self._candidate_subagent_spawning_turns = candidate_spawning_turns
         return publication
 
     def warmup(self, sources: Sequence[AgentTraceSource]) -> None:
         """Restore source-local context from an accepted prefix without publishing it."""
         active_turns = dict(self._accepted_active_turns)
         tool_names = dict(self._accepted_tool_names)
-        normalize_rollout_trace(
+        spawning_turns = _copy_subagent_spawning_turns(self._accepted_subagent_spawning_turns)
+        publication = normalize_rollout_trace(
             sources,
             based_on_trace_publication_sequence=None,
             calculated_at_utc="warmup",
             _active_turns=active_turns,
             _tool_names=tool_names,
         )
+        _remember_subagent_spawning_turns(spawning_turns, publication.events)
         self._accepted_active_turns = active_turns
         self._accepted_tool_names = tool_names
+        self._accepted_subagent_spawning_turns = spawning_turns
+
+    def candidate_subagent_spawning_turns(
+        self,
+    ) -> dict[CodexThreadId, frozenset[SubagentSpawningTurn]]:
+        """Return exact child-to-parent-turn facts represented by the candidate trace."""
+        candidate = self._candidate_subagent_spawning_turns
+        if candidate is None:
+            raise RuntimeError("agent trace candidate spawning turns are unavailable before prepare")
+        return {thread_id: frozenset(turns) for thread_id, turns in candidate.items()}
 
     def accept_batch(self) -> None:
         if self._candidate_active_turns is not None:
             self._accepted_active_turns = self._candidate_active_turns
         if self._candidate_tool_names is not None:
             self._accepted_tool_names = self._candidate_tool_names
+        if self._candidate_subagent_spawning_turns is not None:
+            self._accepted_subagent_spawning_turns = self._candidate_subagent_spawning_turns
         self._candidate_active_turns = None
         self._candidate_tool_names = None
+        self._candidate_subagent_spawning_turns = None
 
     def require_clean_replay(self) -> None:
         self._accepted_active_turns.clear()
         self._candidate_active_turns = None
         self._accepted_tool_names.clear()
         self._candidate_tool_names = None
+        self._accepted_subagent_spawning_turns.clear()
+        self._candidate_subagent_spawning_turns = None
+
+
+def _copy_subagent_spawning_turns(
+    spawning_turns: Mapping[CodexThreadId, set[SubagentSpawningTurn]],
+) -> dict[CodexThreadId, set[SubagentSpawningTurn]]:
+    return {thread_id: set(turns) for thread_id, turns in spawning_turns.items()}
+
+
+def _remember_subagent_spawning_turns(
+    spawning_turns: dict[CodexThreadId, set[SubagentSpawningTurn]],
+    events: Sequence[RodexAgentTraceEvent],
+) -> None:
+    for event in events:
+        detail = event.detail
+        if (
+            not isinstance(detail, TraceSubagentActivity)
+            or detail.activity_kind != "started"
+            or detail.target_codex_thread_id is None
+            or event.codex_turn_id is None
+        ):
+            continue
+        spawning_turns.setdefault(detail.target_codex_thread_id, set()).add((event.codex_thread_id, event.codex_turn_id))
 
 
 def normalize_rollout_trace(
@@ -455,7 +500,7 @@ def _subagent_detail(item: Mapping[str, Any], *, target: CodexThreadId | None = 
         target = _optional_thread_id(item.get("agent_thread_id"))
     return TraceSubagentActivity(
         target_codex_thread_id=target,
-        activity_kind=_text(item.get("kind")) or "unknown",
+        activity_kind=_text(item.get("kind") or item.get("status")) or "unknown",
         agent_path=_text(item.get("agent_path")),
         collaboration_call_id=_text(item.get("id")),
     )

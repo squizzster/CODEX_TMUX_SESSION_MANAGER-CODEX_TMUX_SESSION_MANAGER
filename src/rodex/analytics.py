@@ -43,7 +43,11 @@ from rodex_registry import (
 from rodex_sql import RodexDatabaseMovedError, RodexDatabaseNotFoundError
 
 from .agent_observer import notify_agent_observer_trace_publication
-from .agent_trace import AGENT_TRACE_SCHEMA_VERSION, StatefulAgentTraceNormalizer
+from .agent_trace import (
+    AGENT_TRACE_SCHEMA_VERSION,
+    StatefulAgentTraceNormalizer,
+    SubagentSpawningTurn,
+)
 from .analytics_contracts import (
     AnalyticsAnalyzerSource,
     AnalyticsBoundary,
@@ -525,11 +529,13 @@ class AnalyticsRolloutWorker:
                 calculated_at_utc=calculated_at_utc,
                 source_coverage_state=calculation.coverage_state,
             )
+            trace_spawning_turns = self._trace_normalizer.candidate_subagent_spawning_turns()
             previous_turns = self._published_turns
             if previous_turns is None:
                 verified_collaboration = _derive_verified_collaboration_projection(
                     calculation.statistics_projection,
                     analyzed_sources=tuple(next_observations.values()),
+                    trace_spawning_turns=trace_spawning_turns,
                 )
                 turn_updates = _turns_by_key(verified_collaboration.statistics_projection.turn_statistics)
                 changed_turn_keys = None
@@ -539,6 +545,7 @@ class AnalyticsRolloutWorker:
                     calculation.statistics_projection,
                     analyzed_sources=tuple(next_observations.values()),
                     resident_turns=previous_turns,
+                    trace_spawning_turns=trace_spawning_turns,
                 )
                 projected_updates = _turns_by_key(verified_collaboration.statistics_projection.turn_statistics)
                 changed_turn_keys = frozenset(
@@ -1787,6 +1794,7 @@ def _derive_verified_collaboration_projection(
     projection: SessionStatisticsProjection,
     *,
     analyzed_sources: Sequence[RodexSessionCodexThreadObservation],
+    trace_spawning_turns: Mapping[CodexThreadId, frozenset[SubagentSpawningTurn]] | None = None,
 ) -> VerifiedCollaborationProjection:
     """Derive exact-turn and team collaboration from authenticated source truth."""
     sources = tuple(analyzed_sources)
@@ -1794,6 +1802,7 @@ def _derive_verified_collaboration_projection(
     if len(sources_by_thread) != len(sources):
         raise RodexAnalyticsError("verified collaboration sources contain a duplicate thread")
 
+    turns_by_key = _turns_by_key(projection.turn_statistics)
     spawning_turn_id_by_child_thread: dict[CodexThreadId, str] = {}
     for child in sources:
         parent_thread_id = child.parent_codex_thread_id
@@ -1801,34 +1810,28 @@ def _derive_verified_collaboration_projection(
             continue
         if parent_thread_id not in sources_by_thread:
             raise RodexAnalyticsError(f"verified sub-agent has no parent source: {child.codex_thread_id}")
-        linked_at = _collaboration_timestamp(
-            child.first_linked_at_utc,
-            f"sub-agent {child.codex_thread_id} first-linked time",
-        )
-        owners = [
-            turn
-            for turn in projection.turn_statistics
-            if turn.codex_thread_id == parent_thread_id
-            and turn.started_at_utc is not None
-            and _collaboration_timestamp(
-                turn.started_at_utc,
-                f"turn {turn.codex_turn_id} start time",
+        recorded_turn_id = _recorded_spawning_turn_id(child, trace_spawning_turns=trace_spawning_turns)
+        if recorded_turn_id is None:
+            linked_at = _collaboration_timestamp(
+                child.first_linked_at_utc,
+                f"sub-agent {child.codex_thread_id} first-linked time",
             )
-            <= linked_at
-            and (
-                turn.terminal_at_utc is None
-                or linked_at
-                <= _collaboration_timestamp(
-                    turn.terminal_at_utc,
-                    f"turn {turn.codex_turn_id} terminal time",
+            owners = [
+                turn
+                for turn in projection.turn_statistics
+                if turn.codex_thread_id == parent_thread_id and _turn_owns_collaboration_timestamp(turn, linked_at)
+            ]
+            if len(owners) != 1:
+                raise RodexAnalyticsError(
+                    f"verified sub-agent must belong to exactly one direct-parent turn: {child.codex_thread_id}"
                 )
+            owner = owners[0]
+        else:
+            owner = _require_candidate_spawning_turn(
+                child,
+                recorded_turn_id=recorded_turn_id,
+                candidate_turns=turns_by_key,
             )
-        ]
-        if len(owners) != 1:
-            raise RodexAnalyticsError(
-                f"verified sub-agent must belong to exactly one direct-parent turn: {child.codex_thread_id}"
-            )
-        owner = owners[0]
         spawning_turn_id_by_child_thread[child.codex_thread_id] = owner.codex_turn_id
 
     children_started_by_turn: dict[tuple[CodexThreadId, str], int] = {}
@@ -1884,6 +1887,7 @@ def _derive_incremental_verified_collaboration_projection(
     *,
     analyzed_sources: Sequence[RodexSessionCodexThreadObservation],
     resident_turns: Mapping[tuple[CodexThreadId, str], TurnStatisticsProjection],
+    trace_spawning_turns: Mapping[CodexThreadId, frozenset[SubagentSpawningTurn]] | None = None,
 ) -> VerifiedCollaborationProjection:
     """Decorate only analyzer-changed turns from resident verified source lineage."""
     projected_turns_by_key = _turns_by_key(projection.turn_statistics)
@@ -1891,7 +1895,10 @@ def _derive_incremental_verified_collaboration_projection(
     sources_by_thread = {item.codex_thread_id: item for item in supplied_sources}
     if len(sources_by_thread) != len(supplied_sources):
         raise RodexAnalyticsError("verified collaboration sources contain a duplicate thread")
-    candidate_turns_by_thread: dict[CodexThreadId, dict[tuple[CodexThreadId, str], TurnStatisticsProjection]] = {}
+    candidate_turns_by_thread: dict[
+        CodexThreadId,
+        dict[tuple[CodexThreadId, str], TurnStatisticsProjection],
+    ] = {}
     resolved_sources: list[RodexSessionCodexThreadObservation] = []
     for source in supplied_sources:
         parent_thread_id = source.parent_codex_thread_id
@@ -1900,6 +1907,7 @@ def _derive_incremental_verified_collaboration_projection(
             continue
         if parent_thread_id not in sources_by_thread:
             raise RodexAnalyticsError(f"verified sub-agent has no parent source: {source.codex_thread_id}")
+        recorded_turn_id = _recorded_spawning_turn_id(source, trace_spawning_turns=trace_spawning_turns)
         if source.spawning_codex_turn_id is not None:
             resolved_sources.append(source)
             continue
@@ -1918,16 +1926,23 @@ def _derive_incremental_verified_collaboration_projection(
                 }
             )
             candidate_turns_by_thread[parent_thread_id] = candidates
-        linked_at = _collaboration_timestamp(
-            source.first_linked_at_utc,
-            f"sub-agent {source.codex_thread_id} first-linked time",
-        )
-        owners = [turn for turn in candidates.values() if _turn_owns_collaboration_timestamp(turn, linked_at)]
-        if len(owners) != 1:
-            raise RodexAnalyticsError(
-                f"new verified sub-agent must belong to exactly one direct-parent turn: {source.codex_thread_id}"
+        if recorded_turn_id is None:
+            linked_at = _collaboration_timestamp(
+                source.first_linked_at_utc,
+                f"sub-agent {source.codex_thread_id} first-linked time",
             )
-        owner = owners[0]
+            owners = [turn for turn in candidates.values() if _turn_owns_collaboration_timestamp(turn, linked_at)]
+            if len(owners) != 1:
+                raise RodexAnalyticsError(
+                    f"new verified sub-agent must belong to exactly one direct-parent turn: {source.codex_thread_id}"
+                )
+            owner = owners[0]
+        else:
+            owner = _require_candidate_spawning_turn(
+                source,
+                recorded_turn_id=recorded_turn_id,
+                candidate_turns=candidates,
+            )
         projected_turns_by_key.setdefault((owner.codex_thread_id, owner.codex_turn_id), owner)
         resolved_sources.append(replace(source, spawning_codex_turn_id=owner.codex_turn_id))
     sources = tuple(resolved_sources)
@@ -1967,6 +1982,52 @@ def _derive_incremental_verified_collaboration_projection(
         ),
         analyzed_sources=sources,
     )
+
+
+def _recorded_spawning_turn_id(
+    source: RodexSessionCodexThreadObservation,
+    *,
+    trace_spawning_turns: Mapping[CodexThreadId, frozenset[SubagentSpawningTurn]] | None,
+) -> str | None:
+    """Resolve exact trace or previously accepted ownership before timestamp fallback."""
+    parent_thread_id = source.parent_codex_thread_id
+    if parent_thread_id is None:
+        return None
+    exact_turns = (
+        frozenset() if trace_spawning_turns is None else trace_spawning_turns.get(source.codex_thread_id, frozenset())
+    )
+    if len(exact_turns) > 1:
+        raise RodexAnalyticsError(f"verified sub-agent has conflicting exact spawning turns: {source.codex_thread_id}")
+    exact_turn = next(iter(exact_turns), None)
+    if exact_turn is not None:
+        exact_parent_thread_id, exact_turn_id = exact_turn
+        if exact_parent_thread_id != parent_thread_id:
+            raise RodexAnalyticsError(
+                f"verified sub-agent exact spawning parent disagrees with source lineage: {source.codex_thread_id}"
+            )
+        if source.spawning_codex_turn_id is not None and source.spawning_codex_turn_id != exact_turn_id:
+            raise RodexAnalyticsError(
+                f"verified sub-agent exact spawning turn disagrees with accepted lineage: {source.codex_thread_id}"
+            )
+        return exact_turn_id
+    return source.spawning_codex_turn_id
+
+
+def _require_candidate_spawning_turn(
+    source: RodexSessionCodexThreadObservation,
+    *,
+    recorded_turn_id: str,
+    candidate_turns: Mapping[tuple[CodexThreadId, str], TurnStatisticsProjection],
+) -> TurnStatisticsProjection:
+    parent_thread_id = source.parent_codex_thread_id
+    if parent_thread_id is None:  # pragma: no cover - caller enforces child lineage.
+        raise AssertionError("root source cannot have a spawning turn")
+    owner = candidate_turns.get((parent_thread_id, recorded_turn_id))
+    if owner is None:
+        raise RodexAnalyticsError(
+            f"verified sub-agent spawning turn is absent from parent statistics: {source.codex_thread_id}"
+        )
+    return owner
 
 
 def _derive_verified_turn_collaboration(

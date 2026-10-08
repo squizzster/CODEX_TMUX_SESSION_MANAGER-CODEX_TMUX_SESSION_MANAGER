@@ -175,6 +175,99 @@ def _rollout(root: Path, codex_session_id: uuid.UUID) -> Path:
     return path
 
 
+def _crash_orphaned_spawn_rollout(
+    root: Path,
+    codex_session_id: uuid.UUID,
+    child_thread_id: uuid.UUID,
+) -> Path:
+    path = root / "2026" / "08" / "16" / f"rollout-crash-orphan-{codex_session_id}.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    records = [
+        {
+            "ordinal": 0,
+            "timestamp": "2026-08-16T12:00:00Z",
+            "type": "session_meta",
+            "payload": {
+                "session_id": str(codex_session_id),
+                "id": str(codex_session_id),
+                "timestamp": "2026-08-16T12:00:00Z",
+                "thread_source": "user",
+            },
+        },
+        {
+            "ordinal": 1,
+            "timestamp": "2026-08-16T12:00:01Z",
+            "type": "event_msg",
+            "payload": {"type": "task_started", "turn_id": TURN_TEST_ID},
+        },
+        {
+            "ordinal": 2,
+            "timestamp": "2026-08-16T12:00:02Z",
+            "type": "turn_context",
+            "payload": {
+                "turn_id": TURN_TEST_ID,
+                "model": "gpt-test",
+                "effort": "xhigh",
+            },
+        },
+        {
+            "ordinal": 3,
+            "timestamp": "2026-08-16T12:01:00Z",
+            "type": "event_msg",
+            "payload": {"type": "task_started", "turn_id": TURN_NEXT_ID},
+        },
+        {
+            "ordinal": 4,
+            "timestamp": "2026-08-16T12:01:01Z",
+            "type": "turn_context",
+            "payload": {
+                "turn_id": TURN_NEXT_ID,
+                "model": "gpt-test",
+                "effort": "xhigh",
+            },
+        },
+        {
+            "ordinal": 5,
+            "timestamp": "2026-08-16T12:01:02Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "namespace": "collaboration",
+                "name": "spawn_agent",
+                "call_id": "call-exact-spawn",
+                "arguments": '{"task_name":"review"}',
+                "internal_chat_message_metadata_passthrough": {
+                    "turn_id": TURN_NEXT_ID,
+                },
+            },
+        },
+        {
+            "ordinal": 6,
+            "timestamp": "2026-08-16T12:01:03Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "item_completed",
+                "turn_id": TURN_NEXT_ID,
+                "item": {
+                    "type": "SubAgentActivity",
+                    "id": "call-exact-spawn",
+                    "kind": "started",
+                    "agent_thread_id": str(child_thread_id),
+                    "agent_path": "/root/review",
+                },
+            },
+        },
+        {
+            "ordinal": 7,
+            "timestamp": "2026-08-16T12:01:04Z",
+            "type": "event_msg",
+            "payload": {"type": "task_complete", "turn_id": TURN_NEXT_ID},
+        },
+    ]
+    path.write_text("".join(json.dumps(record) + "\n" for record in records), encoding="utf-8")
+    return path
+
+
 def _subagent_rollout(
     root: Path,
     root_thread_id: uuid.UUID,
@@ -492,6 +585,163 @@ def test_verified_collaboration_rejects_missing_or_ambiguous_turn_ownership(
         _derive_verified_collaboration_projection(_collaboration_projection(turns), analyzed_sources=sources)
 
 
+def test_verified_collaboration_uses_exact_spawn_event_over_crash_orphaned_turn(
+    tmp_path: Path,
+) -> None:
+    child_thread_id = uuid.UUID(int=CODEX_SESSION_ID.int + 100)
+    turns = (
+        _collaboration_turn(
+            CODEX_SESSION_ID,
+            "crash-orphaned",
+            started_at_utc="2026-08-16T12:00:00Z",
+            terminal_at_utc=None,
+        ),
+        _collaboration_turn(
+            CODEX_SESSION_ID,
+            "actual-spawning-turn",
+            started_at_utc="2026-08-16T12:01:00Z",
+            terminal_at_utc="2026-08-16T12:02:00Z",
+            model_tools=(("spawn_agent", 1),),
+        ),
+    )
+    sources = (
+        _collaboration_source(
+            tmp_path,
+            CODEX_SESSION_ID,
+            linked_at_utc="2026-08-16T12:00:00Z",
+        ),
+        _collaboration_source(
+            tmp_path,
+            child_thread_id,
+            parent_thread_id=CODEX_SESSION_ID,
+            depth=1,
+            linked_at_utc="2026-08-16T12:01:30Z",
+        ),
+    )
+
+    verified = _derive_verified_collaboration_projection(
+        _collaboration_projection(turns),
+        analyzed_sources=sources,
+        trace_spawning_turns={child_thread_id: frozenset({(CODEX_SESSION_ID, "actual-spawning-turn")})},
+    )
+
+    assert verified.analyzed_sources[1].spawning_codex_turn_id == "actual-spawning-turn"
+    assert [turn.collaboration_agents_started_count for turn in verified.statistics_projection.turn_statistics] == [0, 1]
+
+
+def test_verified_collaboration_rejects_conflicting_exact_spawn_events(
+    tmp_path: Path,
+) -> None:
+    child_thread_id = uuid.UUID(int=CODEX_SESSION_ID.int + 100)
+    turns = (
+        _collaboration_turn(
+            CODEX_SESSION_ID,
+            "first",
+            started_at_utc="2026-08-16T12:00:00Z",
+            terminal_at_utc=None,
+            model_tools=(("spawn_agent", 1),),
+        ),
+        _collaboration_turn(
+            CODEX_SESSION_ID,
+            "second",
+            started_at_utc="2026-08-16T12:01:00Z",
+            terminal_at_utc=None,
+        ),
+    )
+    sources = (
+        _collaboration_source(
+            tmp_path,
+            CODEX_SESSION_ID,
+            linked_at_utc="2026-08-16T12:00:00Z",
+        ),
+        _collaboration_source(
+            tmp_path,
+            child_thread_id,
+            parent_thread_id=CODEX_SESSION_ID,
+            depth=1,
+            linked_at_utc="2026-08-16T12:01:30Z",
+        ),
+    )
+
+    with pytest.raises(RodexAnalyticsError, match="conflicting exact spawning turns"):
+        _derive_verified_collaboration_projection(
+            _collaboration_projection(turns),
+            analyzed_sources=sources,
+            trace_spawning_turns={
+                child_thread_id: frozenset(
+                    {
+                        (CODEX_SESSION_ID, "first"),
+                        (CODEX_SESSION_ID, "second"),
+                    }
+                )
+            },
+        )
+
+
+@pytest.mark.parametrize(
+    ("exact_parent_thread_id", "exact_turn_id", "accepted_turn_id", "diagnostic"),
+    [
+        (
+            REPLACEMENT_CODEX_SESSION_ID,
+            "spawning-turn",
+            None,
+            "exact spawning parent disagrees with source lineage",
+        ),
+        (
+            CODEX_SESSION_ID,
+            "spawning-turn",
+            "previously-accepted-turn",
+            "exact spawning turn disagrees with accepted lineage",
+        ),
+        (
+            CODEX_SESSION_ID,
+            "missing-turn",
+            None,
+            "spawning turn is absent from parent statistics",
+        ),
+    ],
+)
+def test_verified_collaboration_rejects_inconsistent_exact_spawn_ownership(
+    tmp_path: Path,
+    exact_parent_thread_id: uuid.UUID,
+    exact_turn_id: str,
+    accepted_turn_id: str | None,
+    diagnostic: str,
+) -> None:
+    child_thread_id = uuid.UUID(int=CODEX_SESSION_ID.int + 100)
+    turn = _collaboration_turn(
+        CODEX_SESSION_ID,
+        "spawning-turn",
+        started_at_utc="2026-08-16T12:00:00Z",
+        terminal_at_utc="2026-08-16T12:01:00Z",
+        model_tools=(("spawn_agent", 1),),
+    )
+    child = _collaboration_source(
+        tmp_path,
+        child_thread_id,
+        parent_thread_id=CODEX_SESSION_ID,
+        depth=1,
+        linked_at_utc="2026-08-16T12:00:30Z",
+    )
+    child = replace(child, spawning_codex_turn_id=accepted_turn_id)
+
+    with pytest.raises(RodexAnalyticsError, match=diagnostic):
+        _derive_verified_collaboration_projection(
+            _collaboration_projection((turn,)),
+            analyzed_sources=(
+                _collaboration_source(
+                    tmp_path,
+                    CODEX_SESSION_ID,
+                    linked_at_utc="2026-08-16T12:00:00Z",
+                ),
+                child,
+            ),
+            trace_spawning_turns={
+                child_thread_id: frozenset({(exact_parent_thread_id, exact_turn_id)}),
+            },
+        )
+
+
 def test_verified_collaboration_rejects_session_and_turn_tool_disagreement(
     tmp_path: Path,
 ) -> None:
@@ -644,6 +894,84 @@ def test_worker_discovers_subagent_and_removes_inherited_parent_history(
     assert view.worker.worker_state == "up_to_date"
     assert view.statistics.projection.audit_privacy
     assert b'"type":"session_meta"' not in config.rodex_database_path.read_bytes()
+
+
+def test_worker_uses_exact_spawn_event_when_a_crash_left_an_older_turn_open(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    child_thread_id = uuid.UUID(int=CODEX_SESSION_ID.int + 100)
+    root_rollout = _crash_orphaned_spawn_rollout(
+        config.codex_sessions_root,
+        CODEX_SESSION_ID,
+        child_thread_id,
+    )
+    _subagent_rollout(
+        config.codex_sessions_root,
+        CODEX_SESSION_ID,
+        child_thread_id,
+        linked_at_utc="2026-08-16T12:01:03Z",
+        inherited_history=False,
+    )
+    _create(config)
+
+    worker = AnalyticsRolloutWorker(config)
+    assert worker.poll_once() == "up_to_date"
+
+    child = next(
+        source
+        for source in list_rodex_session_codex_threads(1, config.rodex_database_path)
+        if source.codex_thread_id == child_thread_id
+    )
+    assert child.spawning_codex_turn_id == TURN_NEXT_ID
+    orphaned = read_rodex_session_turn_statistics(1, TURN_TEST_ID, config.rodex_database_path)
+    spawning = read_rodex_session_turn_statistics(1, TURN_NEXT_ID, config.rodex_database_path)
+    assert orphaned.turn is not None
+    assert orphaned.turn.projection.collaboration_agents_started_count == 0
+    assert spawning.turn is not None
+    assert spawning.turn.projection.collaboration_agents_started_count == 1
+
+    with root_rollout.open("a", encoding="utf-8") as output:
+        output.writelines(
+            json.dumps(record) + "\n"
+            for record in (
+                {
+                    "ordinal": 8,
+                    "timestamp": "2026-08-16T12:02:00Z",
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "task_started",
+                        "turn_id": TURN_SECOND_ID,
+                    },
+                },
+                {
+                    "ordinal": 9,
+                    "timestamp": "2026-08-16T12:02:01Z",
+                    "type": "turn_context",
+                    "payload": {
+                        "turn_id": TURN_SECOND_ID,
+                        "model": "gpt-test",
+                        "effort": "xhigh",
+                    },
+                },
+                {
+                    "ordinal": 10,
+                    "timestamp": "2026-08-16T12:02:02Z",
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "task_complete",
+                        "turn_id": TURN_SECOND_ID,
+                    },
+                },
+            )
+        )
+
+    restarted = AnalyticsRolloutWorker(config)
+    assert restarted.poll_once(AnalyticsDirtyBatch(frozenset({CODEX_SESSION_ID}))) == "up_to_date"
+    view = read_rodex_session_statistics(1, config.rodex_database_path)
+    assert view.worker is not None
+    assert view.worker.worker_state == "up_to_date"
+    assert view.worker.consecutive_failures == 0
 
 
 def test_worker_notifies_the_observer_only_after_durable_trace_publication(

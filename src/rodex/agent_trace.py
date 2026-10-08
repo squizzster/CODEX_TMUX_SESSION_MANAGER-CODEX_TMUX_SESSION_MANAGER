@@ -177,12 +177,24 @@ def normalize_rollout_trace(
                 ordinal = physical_ordinal
             payload = _mapping(record.get("payload"))
             record_type = _text(record.get("type"))
-            record_turn_id = _canonical_record_turn_id(record_type, payload)
-            if record_turn_id is not None:
-                active_turn_id = record_turn_id
+            try:
+                record_turn_id = _canonical_record_turn_id(record_type, payload)
+            except ValueError:
+                if record_type != "response_item":
+                    raise
+                # Passthrough message metadata also carries local labels such
+                # as auto-compact-1, not just public Codex turn identities.
+                # Preserve the event at thread scope without inventing a UUID
+                # or attributing synthetic content to the active user turn.
+                event_turn_id = None
+                coverage_gapped = True
+            else:
+                if record_turn_id is not None:
+                    active_turn_id = record_turn_id
+                event_turn_id = active_turn_id
             normalized = _normalize_record(
                 parsed_thread_id,
-                active_turn_id,
+                event_turn_id,
                 ordinal,
                 _text(record.get("timestamp")),
                 record_type,

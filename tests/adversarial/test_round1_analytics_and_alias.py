@@ -110,7 +110,8 @@ def test_round1_permanent_analytics_error_is_parked_until_source_state_changes(
 ) -> None:
     config, rollout = _analytics_fixture(tmp_path)
     adapter = PermanentlyFailingAdapter()
-    worker = AnalyticsRolloutWorker(config, adapter_factory=lambda: adapter)
+    monotonic_clock = [0.0]
+    worker = AnalyticsRolloutWorker(config, adapter_factory=lambda: adapter, monotonic=lambda: monotonic_clock[0])
     dirty = AnalyticsDirtyBatch(frozenset({CODEX_SESSION_ID}))
     health_writes: list[dict[str, object]] = []
     real_record_health = RodexAnalyticsRegistry.record_health_transition
@@ -135,7 +136,7 @@ def test_round1_permanent_analytics_error_is_parked_until_source_state_changes(
     assert worker.poll_once() == "clean_replay"
     initial_size = rollout.stat().st_size
     for _ in range(6):
-        assert worker.poll_once(dirty) == "clean_replay"
+        assert worker.poll_once(dirty) == "recovery_wait"
 
     snapshot = read_rodex_session_statistics(
         config.rodex_sessions_id,
@@ -152,9 +153,11 @@ def test_round1_permanent_analytics_error_is_parked_until_source_state_changes(
         output.write('{"type":"event_msg","payload":{"changed":true}}\n')
     changed_size = rollout.stat().st_size
 
+    assert worker.poll_once(dirty) == "recovery_wait"
+    monotonic_clock[0] = worker.recovery_retry_at
     assert worker.poll_once(dirty) == "clean_replay"
     for _ in range(6):
-        assert worker.poll_once(dirty) == "clean_replay"
+        assert worker.poll_once(dirty) == "recovery_wait"
 
     changed_snapshot = read_rodex_session_statistics(
         config.rodex_sessions_id,
@@ -214,13 +217,13 @@ def test_round1_parked_failure_retries_only_failed_health_persistence(
 
     assert worker.poll_once() == "clean_replay"
     for _ in range(10):
-        assert worker.poll_once(dirty) == "clean_replay"
+        assert worker.poll_once(dirty) == "recovery_wait"
     assert health_attempts == 1
 
     monotonic_clock[0] += 2
-    assert worker.poll_once(dirty) == "clean_replay"
+    assert worker.poll_once(dirty) == "recovery_wait"
     for _ in range(10):
-        assert worker.poll_once(dirty) == "clean_replay"
+        assert worker.poll_once(dirty) == "recovery_wait"
 
     snapshot = read_rodex_session_statistics(
         config.rodex_sessions_id,

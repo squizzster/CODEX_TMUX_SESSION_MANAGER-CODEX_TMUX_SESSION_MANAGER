@@ -31,6 +31,7 @@ from rodex.presentation_policy import PresentationSnapshot, PresentationSurface,
 from rodex.protocol_input_text import PromptTextEdit
 from rodex.terminal_gateway import QUEUE_LIMIT_BYTES, WORKING_COUNTER_REFRESH_SECONDS, TerminalSessionGateway
 from rodex.terminal_surface import TerminalSurfaceRenderer
+from rodex.terminal_title import TERMINAL_TITLE_IDLE_FIELD, terminal_title_pane_escape
 
 ECHO_CHILD = """
 import fcntl, os, signal, struct, sys, termios, tty
@@ -128,6 +129,7 @@ def test_new_complete_surface_waits_for_inflight_terminal_bytes_and_coalesces(mo
     gateway._output_fd = 19
     gateway._display_queue = bytearray(b"\x1b]unfinished-native-control-string")
     gateway._pending_surface_frame = None
+    gateway._pending_title_frame = None
     gateway._surface_renderer = TerminalSurfaceRenderer(80, 12)
     gateway._surface_renderer.native_output(b"\x1b[9;1H\xe2\x80\xba prompt\x1b[9;9H")
     first = gateway._surface_renderer.present(
@@ -154,6 +156,7 @@ def test_partial_writes_and_frame_replacement_preserve_controls_and_replies(monk
     gateway._output_fd, gateway._master = 19, 20
     gateway._display_queue, gateway._native_queue = bytearray(), bytearray()
     gateway._pending_surface_frame = None
+    gateway._pending_title_frame = None
     gateway._surface_renderer = TerminalSurfaceRenderer(80, 12)
     gateway._surface_renderer.native_output(b"\x1b[9;1H\xe2\x80\xba prompt\x1b[9;9H")
     gateway._queue_rendered_surface(
@@ -491,6 +494,34 @@ def test_working_counter_refresh_is_due_every_three_seconds_and_skips_missed_tic
             gateway.set_working(False)
             assert gateway._refresh_working_counter(deadline + 18) is None
             assert len(signals) == 2
+        finally:
+            gateway.close()
+
+
+def test_working_title_refresh_uses_elapsed_time_and_coalesces_missed_frames(monkeypatch):
+    pipeline = SessionInteractionPipeline()
+    with outer_terminal() as (master, slave):
+        gateway = start_gateway(slave, pipeline)
+        try:
+            read_until(gateway, master, b"READY")
+            clock = [100.0]
+            monkeypatch.setattr("rodex.terminal_gateway.time.monotonic", lambda: clock[0])
+
+            gateway.set_working(True)
+            assert gateway._working_title_deadline == 100.0
+            assert gateway._refresh_working_title(100.0) == 100.25
+            assert gateway._display_queue == terminal_title_pane_escape("---------")
+
+            gateway._refresh_working_title(100.25)
+            assert gateway._pending_title_frame == terminal_title_pane_escape(" ------- ")
+
+            gateway._refresh_working_title(105.0)
+            assert gateway._pending_title_frame == terminal_title_pane_escape("0m05s")
+            assert gateway._working_title_deadline == 105.25
+
+            gateway.set_working(False)
+            assert gateway._refresh_working_title(106.0) is None
+            assert gateway._pending_title_frame == terminal_title_pane_escape(TERMINAL_TITLE_IDLE_FIELD)
         finally:
             gateway.close()
 

@@ -17,6 +17,7 @@ import pytest
 
 from rodex.protocol_proxy import CodexWorkingStatusObserver
 from rodex.status_bar import RODEX_STATUS_LEFT_FORMAT, RODEX_WORKING_STATUS_FORMAT
+from rodex.terminal_title import TERMINAL_TITLE_ANIMATION_FRAMES, TERMINAL_TITLE_IDLE_FIELD
 from rodex.tmux_session_capability import (
     RODEX_SHARED_TMUX_PROTOCOL,
     TmuxRuntimeCapability,
@@ -162,7 +163,7 @@ def test_status_callback_failure_does_not_interrupt_protocol_observation() -> No
     observer.close()
 
 
-def test_real_tmux_advances_fixed_width_dots_without_rodex_frame_publications(tmp_path: Path) -> None:
+def test_real_tmux_advances_bar_dots_and_projects_gateway_title_fields(tmp_path: Path) -> None:
     tmux_binary = shutil.which("tmux")
     if tmux_binary is None:
         pytest.skip("real tmux required for working status rendering")
@@ -261,28 +262,36 @@ def test_real_tmux_advances_fixed_width_dots_without_rodex_frame_publications(tm
         stream = pyte.Stream(screen)
         seen = set()
         seen_titles = set()
+        title_frame_index = 0
+        next_title_frame_at = time.monotonic()
         deadline = time.monotonic() + 6
-        while (len(seen) < 4 or len(seen_titles) < 4) and time.monotonic() < deadline:
+        while (len(seen) < 4 or len(seen_titles) < len(TERMINAL_TITLE_ANIMATION_FRAMES)) and time.monotonic() < deadline:
             assert client.poll() is None, "tmux client exited before status rendering"
+            now = time.monotonic()
+            if title_frame_index < len(TERMINAL_TITLE_ANIMATION_FRAMES) and now >= next_title_frame_at:
+                tmux("select-pane", "-t", pane_id, "-T", TERMINAL_TITLE_ANIMATION_FRAMES[title_frame_index])
+                title_frame_index += 1
+                next_title_frame_at += 0.25
             if select.select([master], [], [], 0.2)[0]:
                 stream.feed(os.read(master, 65536).decode())
                 match = re.search(r"Working(\.{1,4}) ", screen.display[0])
                 if match:
                     seen.add(match.group(1))
-                title_match = re.fullmatch(r"Rodex: working \| Working(\.{1,4}) *", screen.title)
+                title_match = re.fullmatch(r"\[(.*)] working", screen.title)
                 if title_match:
                     seen_titles.add(title_match.group(1))
         assert seen == {".", "..", "...", "...."}, screen.display[0]
-        assert seen_titles == seen, screen.title
+        assert seen_titles == set(TERMINAL_TITLE_ANIMATION_FRAMES), screen.title
         assert len(publications) == 1
 
         observer.observe_protocol_event(turn_event("turn/completed", status="completed"))
         deadline = time.monotonic() + 2
-        while ("Working" in screen.display[0] or "Working" in screen.title) and time.monotonic() < deadline:
+        idle_title = f"[{TERMINAL_TITLE_IDLE_FIELD}] working"
+        while ("Working" in screen.display[0] or screen.title != idle_title) and time.monotonic() < deadline:
             if select.select([master], [], [], 0.1)[0]:
                 stream.feed(os.read(master, 65536).decode())
         assert "Working" not in screen.display[0]
-        assert screen.title == "Rodex: working"
+        assert screen.title == idle_title
         assert tmux("show-option", "-v", "-t", pane_id, "@rodex_working") == "0"
         assert tmux("show-option", "-v", "-t", pane_id, "status-interval") == "15"
         assert len(publications) == 2

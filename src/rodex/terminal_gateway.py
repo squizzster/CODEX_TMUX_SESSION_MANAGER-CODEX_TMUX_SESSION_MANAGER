@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import errno
 import fcntl
+import math
 import os
 import pty
 import select
@@ -38,6 +39,12 @@ from .presentation_policy import PresentationSnapshotSource, PresentationSurface
 from .runtime_peer import BoundProcessOwner
 from .terminal_input import TerminalInputDecoder, TerminalInputInterceptor
 from .terminal_surface import TerminalSurfaceRenderer
+from .terminal_title import (
+    TERMINAL_TITLE_FRAME_INTERVAL_SECONDS,
+    TERMINAL_TITLE_IDLE_FIELD,
+    terminal_title_pane_escape,
+    working_terminal_title_field,
+)
 
 QUEUE_LIMIT_BYTES = 1024 * 1024
 READ_CHUNK_BYTES = 16384
@@ -90,6 +97,7 @@ class TerminalSessionGateway:
         self._native_queue = bytearray()
         self._display_queue = bytearray()
         self._pending_surface_frame: bytes | None = None
+        self._pending_title_frame: bytes | None = None
         self._saved_flags: dict[int, int] = {}
         self._saved_attributes: list | None = None
         self.process: subprocess.Popen[bytes] | None = None
@@ -101,7 +109,10 @@ class TerminalSessionGateway:
         self._supervisor_lock = Lock()
         self._working_lock = Lock()
         self._working = False
+        self._working_started_at: float | None = None
         self._working_refresh_deadline: float | None = None
+        self._working_title_deadline: float | None = None
+        self._working_title_reset_pending = False
         self._supervisor_requests = 0
         self._consumed_supervisor_requests = 0
         self._confirm_presentation = confirm_native_prefix
@@ -186,14 +197,18 @@ class TerminalSessionGateway:
         self._notify_relay()
 
     def set_working(self, working: bool) -> None:
-        """Enable native elapsed-counter redraws only while the main turn is active."""
+        """Enable active-only native counter and terminal-title refreshes."""
         if not isinstance(working, bool):
             raise ValueError("working state must be a boolean")
         with self._working_lock:
             if self._closed or self._working == working:
                 return
+            now = time.monotonic()
             self._working = working
-            self._working_refresh_deadline = time.monotonic() + WORKING_COUNTER_REFRESH_SECONDS if working else None
+            self._working_started_at = now if working else None
+            self._working_refresh_deadline = now + WORKING_COUNTER_REFRESH_SECONDS if working else None
+            self._working_title_deadline = now if working else None
+            self._working_title_reset_pending = not working
         self._notify_relay()
 
     def _refresh_working_counter(self, now: float) -> float | None:
@@ -207,6 +222,29 @@ class TerminalSessionGateway:
                 self._working_refresh_deadline = now + WORKING_COUNTER_REFRESH_SECONDS
                 self.forward_signal(signal.SIGWINCH)
             return self._working_refresh_deadline
+
+    def _refresh_working_title(self, now: float) -> float | None:
+        """Queue one current title frame and skip any ticks missed by a busy relay."""
+        field: str | None = None
+        with self._working_lock:
+            if self._closed:
+                return None
+            if self._working_title_reset_pending:
+                self._working_title_reset_pending = False
+                field = TERMINAL_TITLE_IDLE_FIELD
+            elif self._working and self._working_started_at is not None and self._working_title_deadline is not None:
+                if now < self._working_title_deadline:
+                    return self._working_title_deadline
+                elapsed = max(0.0, now - self._working_started_at)
+                field = working_terminal_title_field(elapsed)
+                next_tick = math.floor(elapsed / TERMINAL_TITLE_FRAME_INTERVAL_SECONDS) + 1
+                self._working_title_deadline = (
+                    self._working_started_at + next_tick * TERMINAL_TITLE_FRAME_INTERVAL_SECONDS
+                )
+            next_deadline = self._working_title_deadline
+        if field is not None:
+            self._queue_terminal_title(field)
+        return next_deadline
 
     def _take_supervisor_check(self) -> bool:
         with self._supervisor_lock:
@@ -256,16 +294,22 @@ class TerminalSessionGateway:
                 if exit_deadline is None:
                     exit_deadline = now + EXIT_DRAIN_TIMEOUT_SECONDS
                 if (
-                    self._native_eof and not self._display_queue and self._pending_surface_frame is None
+                    self._native_eof
+                    and not self._display_queue
+                    and self._pending_surface_frame is None
+                    and self._pending_title_frame is None
                 ) or now >= exit_deadline:
                     return returncode
             if deadline is not None and now >= deadline:
                 raise subprocess.TimeoutExpired(self.process.args, timeout)
             wake_deadlines = [value for value in (deadline, exit_deadline) if value is not None]
             if returncode is None:
-                working_deadline = self._refresh_working_counter(now)
-                if working_deadline is not None:
-                    wake_deadlines.append(working_deadline)
+                for working_deadline in (
+                    self._refresh_working_counter(now),
+                    self._refresh_working_title(now),
+                ):
+                    if working_deadline is not None:
+                        wake_deadlines.append(working_deadline)
                 incomplete_deadline = self._decoder.incomplete_deadline()
                 if incomplete_deadline is not None:
                     wake_deadlines.append(incomplete_deadline)
@@ -442,6 +486,14 @@ class TerminalSessionGateway:
             return
         self._display_queue.extend(rendered)
 
+    def _queue_terminal_title(self, field: str) -> None:
+        """Coalesce title frames behind any terminal bytes already in flight."""
+        rendered = terminal_title_pane_escape(field)
+        if self._display_queue:
+            self._pending_title_frame = rendered
+            return
+        self._display_queue.extend(rendered)
+
     def _flush(self, fd: int, queue: bytearray) -> None:
         try:
             written = os.write(fd, queue[:READ_CHUNK_BYTES])
@@ -454,9 +506,13 @@ class TerminalSessionGateway:
             queue.clear()
             return
         del queue[:written]
-        if fd == self._output_fd and not queue and self._pending_surface_frame is not None:
-            queue.extend(self._pending_surface_frame)
-            self._pending_surface_frame = None
+        if fd == self._output_fd and not queue:
+            if self._pending_title_frame is not None:
+                queue.extend(self._pending_title_frame)
+                self._pending_title_frame = None
+            elif self._pending_surface_frame is not None:
+                queue.extend(self._pending_surface_frame)
+                self._pending_surface_frame = None
 
     def close(self) -> None:
         """Idempotent resource cleanup, including constructor and writer-retry failures."""

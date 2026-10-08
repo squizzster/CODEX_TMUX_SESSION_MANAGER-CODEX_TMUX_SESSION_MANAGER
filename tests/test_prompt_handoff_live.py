@@ -15,6 +15,7 @@ from test_managed_startup import RodexTerminalClient, _require_startup_prerequis
 from websockets.sync.client import unix_connect
 
 from rodex.runtime_peer import RuntimePeerIdentity, verified_runtime_connection
+from rodex.terminal_title import TERMINAL_TITLE_ANIMATION_FRAMES, TERMINAL_TITLE_IDLE_FIELD
 from rodex.tmux_session_capability import RODEX_TMUX_SOCKET_PATTERN
 
 
@@ -223,7 +224,7 @@ def test_real_codex_working_counter_advances_without_keyboard_input(tmp_path, re
                 assert max(elapsed_readings) - min(elapsed_readings) >= 6, elapsed_readings
                 assert working == "0", screen
                 assert tmux_read("show-option", "-v", "-t", f"={name}:", "status-interval").strip() == "15"
-                title_prefix = f"Rodex: {name}"
+                idle_title = f"[{TERMINAL_TITLE_IDLE_FIELD}] {name}"
 
                 def terminal_titles():
                     return [title.decode() for title in re.findall(rb"\x1b\][02];(.*?)(?:\x07|\x1b\\)", client.output)]
@@ -232,15 +233,21 @@ def test_real_codex_working_counter_advances_without_keyboard_input(tmp_path, re
                 while time.monotonic() < deadline:
                     client.poll()
                     titles = terminal_titles()
-                    if titles and titles[-1] == title_prefix:
+                    if titles and titles[-1] == idle_title:
                         break
-                assert titles[-1] == title_prefix, titles
-                title_frames = {
-                    title_match.group(1)
+                assert titles[-1] == idle_title, titles
+                active_fields = {
+                    title_match.group("field")
                     for title in titles
-                    if (title_match := re.fullmatch(re.escape(title_prefix) + r" \| Working(\.{1,4}) *", title))
+                    if (
+                        title_match := re.fullmatch(
+                            rf"\[(?P<field>.*)] {re.escape(name)}",
+                            title,
+                        )
+                    )
                 }
-                assert title_frames == {".", "..", "...", "...."}, titles
+                assert set(TERMINAL_TITLE_ANIMATION_FRAMES) <= active_fields, titles
+                assert any(re.fullmatch(r"\d+m\d{2}s", field) for field in active_fields), titles
                 client.detach()
         finally:
             for socket in runtime_root.glob(RODEX_TMUX_SOCKET_PATTERN):

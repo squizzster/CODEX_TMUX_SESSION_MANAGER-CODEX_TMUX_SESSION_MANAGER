@@ -51,9 +51,11 @@ paths can also overflow Unix-socket limits; use pytest's normal temporary roots.
 - Input and display: [terminal input](../tests/test_terminal_input.py),
   [gateway](../tests/test_terminal_gateway.py), [native composer](../tests/test_native_composer.py),
   [observer safety](../tests/test_observer_runtime_safety.py).
-  [Working status](../tests/test_working_status.py) checks root activity and tmux-owned
-  dots in both the bar and terminal window title; live prompt-handoff tests verify
-  the title cycle and idle reset alongside the native elapsed timer advancing without input.
+  [Working status](../tests/test_working_status.py) checks root activity, tmux-owned
+  bar dots, and outer-title projection. [Terminal-title tests](../tests/test_terminal_title.py)
+  pin the quarter-second pulse and minute/hour/day elapsed shapes; gateway tests cover
+  active-only scheduling and coalescing. Live prompt-handoff tests verify the title
+  cycle, elapsed window, and idle reset alongside the native elapsed timer.
 - Persistence: [SQLite adversarial boundaries](../tests/adversarial/test_round3_sqlite_boundaries.py)
   and the registry/analytics suites beside the relevant implementation tests.
 - New effect-bearing paths: update the classification in

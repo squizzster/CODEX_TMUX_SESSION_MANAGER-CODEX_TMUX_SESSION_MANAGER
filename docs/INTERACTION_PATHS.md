@@ -81,7 +81,10 @@ uses bounded event-specific rechecks, not idle screen polling.
 Main-thread working transitions enable a three-second native elapsed-counter refresh
 deadline in the gateway. A due refresh sends the existing native resize signal without
 changing terminal geometry or composer input; terminal turn/disconnect transitions
-remove the deadline. Idle relaying retains its event-driven wait.
+remove the deadline. The same active state enables a 250-millisecond terminal-title
+deadline: the gateway coalesces pane-title control tokens, skips missed frames, and
+restores the idle dash field on completion. tmux projects that pane title through its
+configured outer-title format. Idle relaying retains its event-driven wait.
 
 [`NativeTerminalProjection`](../src/rodex/native_terminal_projection.py) continuously
 advances one [`NativeTerminalScreen`](../src/rodex/native_terminal_screen.py), even
@@ -154,13 +157,14 @@ classifications there when a route changes, and update the route-level map above
 It also checks subprocess entrypoints, mutation owners, and read-only bootstrap probes;
 it is not a proof against arbitrary Python reflection or a runtime monitor.
 
-Status-bar and terminal-title configuration remain under [`TmuxStatusPipeline`](../src/rodex/tmux_status.py);
+Status-bar and outer terminal-title configuration remain under [`TmuxStatusPipeline`](../src/rodex/tmux_status.py);
 sharing animations have their own [admission owner](../src/rodex/status_animation_admission.py).
 [`CodexWorkingStatusObserver`](../src/rodex/protocol_proxy.py) projects main-thread
 activity into transitions; [`TmuxWorkingStatus`](../src/rodex/tmux_status.py) atomically
 publishes the activity option and redraw cadence through the existing status publisher.
-tmux's bar and terminal-title formats share the dot cycle and refresh cadence,
-without a Rodex animation timer.
+tmux advances the bar dots without Rodex frames. Active terminal-title timing belongs
+to the existing gateway relay; [`terminal_title.py`](../src/rodex/terminal_title.py)
+owns its fixed frames, elapsed rendering, and restricted control token.
 tmux effects use the [executor boundary](../src/rodex/tmux_executor.py); SQL effects
 use [transactions](../src/rodex_sql/transactions.py). [Runtime isolation](RUNTIME_ISOLATION.md)
 owns cleanup/hook authority, including the resize-only compatibility exception.

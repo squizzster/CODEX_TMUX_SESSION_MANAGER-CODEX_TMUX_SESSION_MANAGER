@@ -7,6 +7,8 @@ from dataclasses import dataclass, replace
 from enum import StrEnum
 from typing import Final
 
+from .terminal_title import TERMINAL_TITLE_IDLE_FIELD
+
 
 class StatusBarPart(StrEnum):
     """Stable names for independently changeable Rodex status segments."""
@@ -169,7 +171,9 @@ _WORKING_DOTS_FORMAT: Final = (
 )
 _WORKING_TEXT_FORMAT: Final = f"Working{_WORKING_DOTS_FORMAT}"
 RODEX_WORKING_STATUS_FORMAT: Final = f"#{{?{RODEX_WORKING_STATUS_OPTION},| {_WORKING_TEXT_FORMAT} | ,}}"
-RODEX_TERMINAL_TITLE_FORMAT: Final = f"Rodex: #S#{{?{RODEX_WORKING_STATUS_OPTION}, | {_WORKING_TEXT_FORMAT},}}"
+RODEX_TERMINAL_TITLE_FORMAT: Final = (
+    f"[#{{?{RODEX_WORKING_STATUS_OPTION},#{{pane_title}},{TERMINAL_TITLE_IDLE_FIELD}}}] #S"
+)
 RODEX_STATUS_COLOURS: Final = StatusBarColours(
     base_foreground="black",
     base_background="#FDF7FF",

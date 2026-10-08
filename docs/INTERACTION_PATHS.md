@@ -57,8 +57,7 @@ its connection when needed to avoid an unanswered RPC.
 Model dispatch rechecks selector, connection, runtime, and thread after lock/transport
 waits. Start accepts the statuses in [`_STARTABLE_THREAD_STATUSES`](../src/rodex/control.py)
 (`idle` and `systemError`) unless direct input is explicitly refused. Active turns
-require exact steer/interrupt intent. The current `_help` summary says idle-only;
-the source predicate is authoritative for admission. See the
+require exact steer/interrupt intent. See the
 [automation skill](../.agents/skills/rodex-session-control/SKILL.md) for retry semantics.
 
 [`ServerOverloadedRecoveryController`](../src/rodex/server_overloaded_recovery.py)
@@ -81,7 +80,9 @@ uses bounded event-specific rechecks, not idle screen polling.
 Main-thread working transitions enable a three-second native elapsed-counter refresh
 deadline in the gateway. A due refresh sends the existing native resize signal without
 changing terminal geometry or composer input; terminal turn/disconnect transitions
-remove the deadline. Idle relaying retains its event-driven wait.
+remove the deadline. The same active state drives the 250-millisecond title pulse;
+the gateway coalesces frames and restores the idle field. Idle relaying remains
+event-driven.
 
 [`NativeTerminalProjection`](../src/rodex/native_terminal_projection.py) continuously
 advances one [`NativeTerminalScreen`](../src/rodex/native_terminal_screen.py), even
@@ -154,25 +155,20 @@ classifications there when a route changes, and update the route-level map above
 It also checks subprocess entrypoints, mutation owners, and read-only bootstrap probes;
 it is not a proof against arbitrary Python reflection or a runtime monitor.
 
-Status-bar and terminal-title configuration remain under [`TmuxStatusPipeline`](../src/rodex/tmux_status.py);
+Status-bar and outer terminal-title configuration remain under [`TmuxStatusPipeline`](../src/rodex/tmux_status.py);
 sharing animations have their own [admission owner](../src/rodex/status_animation_admission.py).
 [`CodexWorkingStatusObserver`](../src/rodex/protocol_proxy.py) projects main-thread
 activity into transitions; [`TmuxWorkingStatus`](../src/rodex/tmux_status.py) atomically
 publishes the activity option and redraw cadence through the existing status publisher.
-tmux's bar and terminal-title formats share the dot cycle and refresh cadence,
-without a Rodex animation timer.
+tmux advances the bar dots without Rodex frames. Active terminal-title timing belongs
+to the existing gateway relay; [`terminal_title.py`](../src/rodex/terminal_title.py)
+owns its fixed frames, elapsed rendering, and restricted control token.
 tmux effects use the [executor boundary](../src/rodex/tmux_executor.py); SQL effects
 use [transactions](../src/rodex_sql/transactions.py). [Runtime isolation](RUNTIME_ISOLATION.md)
 owns cleanup/hook authority, including the resize-only compatibility exception.
-Selected-session upgrades use
-[`RetainedRuntimeUpgrade`](../src/rodex/runtime_upgrade.py) to run a bounded
-[handoff adapter](../src/rodex/retained_runtime_handoff.py) through the old retained
-interpreter. Its result/error output is private to the current launcher; control
-inspection, exact reservation stop and tmux ownership checks use the existing old
-domain owners. Successful terminal shutdown returns to managed exact-thread resume.
-For a recognized owned selector, `--force-old` uses that adapter's interactive
-attachment branch after releasing the transition lock. It rechecks exact ownership
-and delegates to the old launcher's existing attach boundary with inherited TTY
-streams and no timeout; it performs no stop, restart, or model dispatch. Unrecognized
-invocations retain their Codex arguments.
+[`RetainedRuntimeUpgrade`](../src/rodex/runtime_upgrade.py) and its
+[handoff adapter](../src/rodex/retained_runtime_handoff.py) own selected-session
+upgrade and `--force-old` attachment effects. [Runtime isolation](RUNTIME_ISOLATION.md#retained-runtime-upgrade)
+defines their admission and identity checks; unmatched invocations retain their
+Codex arguments.
 See [development](DEVELOPMENT.md#test-selection) for focused tests and live gates.

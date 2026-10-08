@@ -40,6 +40,7 @@ def make_pipeline(registrations=INPUT_INTERCEPTORS, prefix="/r"):
     gateway._native_queue = native_input
     gateway._display_queue = bytearray()
     gateway._pending_surface_frame = None
+    gateway._pending_title_frame = None
     gateway._surface_renderer = TerminalSurfaceRenderer(100, 16)
     gateway._decoder = TerminalInputDecoder()
     gateway._interceptor = TerminalInputInterceptor(registrations, pipeline, native_input.extend, lambda _prefix: True)

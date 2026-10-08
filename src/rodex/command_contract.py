@@ -107,7 +107,7 @@ COMMAND_SPECS: Final = (
         CommandRoute.MACHINE,
         (
             "_start SESSION [--dispatch ID] --stdin --json",
-            "Start work only when the thread is idle.",
+            "Start work when the thread is idle or in systemError.",
         ),
     ),
     CommandSpec(

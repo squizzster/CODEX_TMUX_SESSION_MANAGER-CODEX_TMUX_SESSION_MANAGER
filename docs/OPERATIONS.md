@@ -46,16 +46,15 @@ terminal parser. Completion, interruption, failure, or primary disconnect clears
 indicator and restores tmux's 15-second idle status interval. Child-thread activity
 does not change the main thread's indicator.
 
-The terminal window title mirrors this cycle as `Rodex: NAME | Working...` and
-returns to `Rodex: NAME` when idle. It uses the same working state and tmux refresh,
-with no additional Rodex animation timer.
+The terminal window title rests at `[---------] NAME`. During active main-thread work,
+the nine-cell field pulses every 250 milliseconds. Every five seconds it shows elapsed
+work time for one second:
+`59m23s` below an hour, `23h20m` below a day, and `10d23h20m` once days are needed.
 
-During an active main turn, Rodex also requests a native Codex redraw every three
-seconds through its ordinary resize signal, preserving the actual terminal size and
-composer input. This advances Codex's `Working (… • esc to interrupt)` elapsed counter
-with decorative animations disabled. The gateway removes that refresh deadline as
-soon as the turn becomes idle or disconnects; idle terminal relaying still blocks on
-events.
+The gateway coalesces title frames, skips obsolete ones when busy, and stops the title
+deadline at idle. It also requests a native Codex redraw every three seconds during
+active work, preserving terminal size and composer input while advancing Codex's
+`Working (… • esc to interrupt)` counter. Idle relaying remains event-driven.
 
 tmux's 50,000-line history limit is installed before pane creation; it is not retroactive.
 Managed Codex uses `--no-alt-screen` so rendered rows enter that history. Mouse behavior
@@ -74,8 +73,8 @@ when choosing to update Codex. [Installation](../INSTALL.md) covers Rodex update
 
 Measure interval CPU deltas, not just accumulated process time or lifetime `%CPU`.
 Record the exact PID/start time, implementation fingerprint, active runtimes, workload,
-and sample duration. The visible name `rodexd_v0_15a1` identifies a release, not a build:
-several retained implementations can share it. Never kill by that name alone.
+and sample duration. The visible daemon name identifies a release, not a build; several
+retained implementations can share it. Never kill by that name alone.
 
 Separate these costs before changing architecture:
 

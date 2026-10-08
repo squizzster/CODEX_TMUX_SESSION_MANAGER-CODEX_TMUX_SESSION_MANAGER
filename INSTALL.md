@@ -5,7 +5,7 @@
 - Linux with `/proc` and `pidfd` support.
 - Python 3.12 or newer, `uv`, and tmux on `PATH`.
 - Installed, authenticated stable Codex CLI at or above the minimum enforced by
-  [`CODEX_APP_SERVER`](src/rodex/app_server_contract.py) (currently 0.151.0).
+  [`CODEX_APP_SERVER`](src/rodex/app_server_contract.py).
 
 [pyproject.toml](pyproject.toml) and [uv.lock](uv.lock) own dependency constraints.
 The `uv_build` version range is a build-backend requirement, not a minimum `uv` CLI
@@ -74,16 +74,15 @@ are never overwritten or automatically removed. Retain their directories and bas
 Python while associated sessions are running. Locations and overrides are in
 [local state](docs/OPERATIONS.md#local-state).
 
-New implementations can coexist with old daemons. A retained installation's
+Retained implementations can coexist. A retained installation's
 `.venv/bin/rodex` entrypoint accesses its exact implementation's sessions. Opening
 a supported older session through the current entrypoint upgrades that selected
 runtime when its Codex thread is idle. Busy turns fail on stderr with commands to
 retry when idle or reconnect using `rodex NAME --force-old`. The flag attaches
 through the retained installation without upgrading or interrupting its work.
-The handoff preserves its thread, Rodex identity, name, and cwd;
-other sessions continue on their owning daemon. Catalogs are schema-generation scoped:
-builds within one generation share the catalog, but live handshakes still require
-the exact implementation. Earlier catalogs are not migrated; Codex owns its transcripts.
+Other sessions remain on their owning daemon. Catalogs are schema-generation scoped:
+builds within one generation share the catalog, while live handshakes require the
+exact implementation. Earlier catalogs are not migrated; Codex owns its transcripts.
 The narrowly permitted pre-retention resize bridge is documented under
 [runtime compatibility](docs/RUNTIME_ISOLATION.md#compatibility-boundary).
 

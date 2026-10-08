@@ -76,12 +76,14 @@ visible-history invalidation. Pair them with [interval runtime measurements](OPE
 
 ## Documentation changes
 
-[README.md](../README.md) directly indexes every maintained Markdown file, including
-root installation guidance and the automation skill. Keep implementation details in
-source/tests; link to canonical explanations instead of copying them. Documentation
-describes current behavior and constraints; historical investigations remain in Git.
+[README.md](../README.md) is the compact product introduction, with brief features,
+a quick start, and entry links. [DESIGN.md](../DESIGN.md) maps the technical guides;
+read only the topics relevant to the task. Keep detailed contracts in their topic
+guides and source/tests, linked rather than repeated. Every maintained guide and the
+automation skill should be reachable through this map. Historical investigations
+remain in Git.
 
-For docs-only changes, check relative links/anchors, source paths, README coverage,
+For docs-only changes, check relative links/anchors, source paths, documentation reachability,
 and `git diff --check`; run relevant existing contract tests. Verify command examples
 against definitions or safe help execution, without launching quota-using tests merely
 to validate prose. State which live or installation checks were not performed.

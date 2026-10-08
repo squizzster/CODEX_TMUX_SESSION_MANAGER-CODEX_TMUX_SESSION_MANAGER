@@ -12,6 +12,7 @@ from threading import Condition, Thread
 from typing import Final
 
 from .status_bar import (
+    RODEX_IDLE_STATUS_INTERVAL_SECONDS,
     RODEX_STATUS_COLOURS,
     RODEX_STATUS_LEFT_FORMAT,
     RODEX_STATUS_LEFT_LENGTH,
@@ -19,6 +20,8 @@ from .status_bar import (
     RODEX_STATUS_RIGHT_LENGTH,
     RODEX_STATUS_STYLE,
     RODEX_WINDOW_STATUS_FORMAT,
+    RODEX_WORKING_STATUS_INTERVAL_SECONDS,
+    RODEX_WORKING_STATUS_OPTION,
 )
 from .tmux_executor import SyncTmuxExecutor, SyncTmuxRunner
 from .tmux_session_capability import (
@@ -62,6 +65,7 @@ class TmuxStatusOption:
             tmux_pane_target,
             option_name,
         )
+        self._pane_target = tmux_pane_target
         self._tmux_executor = SyncTmuxExecutor(
             tmux_binary,
             capability.tmux_server_socket_path,
@@ -110,6 +114,9 @@ class TmuxStatusOption:
             self._pending_value = None
             self._condition.notify_all()
 
+    def _option_commands(self, value: str) -> tuple[tuple[str, ...], ...]:
+        return ((*self._set_option_arguments, value),)
+
     def _publish_pending_values(self) -> None:
         while True:
             with self._condition:
@@ -134,7 +141,7 @@ class TmuxStatusOption:
                 result = self._tmux_executor.run(
                     (
                         *self._command_arguments,
-                        shlex.join((*self._set_option_arguments, value)),
+                        _tmux_command_sequence(*self._option_commands(value)),
                     ),
                     output="discard",
                 )
@@ -152,6 +159,39 @@ class TmuxStatusOption:
                     self._retry_not_before = 0.0
                 else:
                     self._retry_not_before = time.monotonic() + self._failure_backoff_seconds
+
+
+class TmuxWorkingStatus(TmuxStatusOption):
+    """Publish working transitions; tmux advances the dots without Rodex ticks."""
+
+    def __init__(
+        self,
+        tmux_binary: str,
+        capability: TmuxRuntimeCapability,
+        tmux_pane_target: str,
+        *,
+        runner: SyncTmuxRunner = subprocess.run,
+    ) -> None:
+        super().__init__(
+            tmux_binary,
+            capability,
+            tmux_pane_target,
+            RODEX_WORKING_STATUS_OPTION,
+            runner=runner,
+        )
+
+    def update(self, working: bool) -> None:
+        """Queue only state changes, with the matching redraw cadence atomically."""
+        if not isinstance(working, bool):
+            raise ValueError("working state must be a boolean")
+        self.publish("1" if working else "0")
+
+    def _option_commands(self, value: str) -> tuple[tuple[str, ...], ...]:
+        interval = RODEX_WORKING_STATUS_INTERVAL_SECONDS if value == "1" else RODEX_IDLE_STATUS_INTERVAL_SECONDS
+        return (
+            *super()._option_commands(value),
+            ("set-option", "-t", self._pane_target, "status-interval", str(interval)),
+        )
 
 
 STATUS_CLAIM_PRIORITY_OPTION: Final = "@rodex_status_claim_priority"

@@ -68,6 +68,7 @@ from .protocol_proxy import (
     CodexContextStatusObserver,
     CodexProtocolEventTap,
     CodexProtocolProxy,
+    CodexWorkingStatusObserver,
     TmuxContextStatus,
     TmuxToolCallStatus,
     ToolCallCounter,
@@ -124,6 +125,7 @@ from .tmux_sharing_coordinator import (
 )
 from .tmux_status import (
     TmuxStatusPipeline,
+    TmuxWorkingStatus,
 )
 from .user_prompt_hook import load_user_prompt_hook
 
@@ -2541,6 +2543,7 @@ def _run_runtime_service(
     protocol_proxy: CodexProtocolProxy | None = None
     protocol_event_tap: CodexProtocolEventTap | None = None
     context_status_observer: CodexContextStatusObserver | None = None
+    working_status_observer: CodexWorkingStatusObserver | None = None
     runtime_path_keepalive: _RuntimePathKeepalive | None = None
     diagnostic_relay: _RuntimeDiagnosticRelay | None = None
     agent_observer_controller: AgentObserverCoordinator | None = None
@@ -2624,6 +2627,22 @@ def _run_runtime_service(
                 codex_sessions_root=config.analytics.codex_sessions_root,
             )
             context_status_observer = live_context_observer
+            working_status = TmuxWorkingStatus(
+                tmux_binary,
+                tmux_runtime_capability,
+                tmux_pane_target,
+            )
+            working_status.update(False)
+
+            def publish_working_state(working: bool) -> None:
+                if terminal_gateway is not None:
+                    terminal_gateway.set_working(working)
+                working_status.update(working)
+
+            live_working_observer = CodexWorkingStatusObserver(publish_working_state)
+            working_status_observer = live_working_observer
+            if config.analytics.codex_session_id is not None:
+                live_working_observer.bind_root_thread(str(config.analytics.codex_session_id))
             live_event_tap = CodexProtocolEventTap(protocol_event_socket_path, peer_identity=peer_identity)
             protocol_event_tap = live_event_tap
             live_event_tap.start()
@@ -2634,6 +2653,7 @@ def _run_runtime_service(
             ) -> None:
                 presentation_pipeline.observe_protocol_output(event)
                 live_context_observer.observe_protocol_event(event)
+                live_working_observer.observe_protocol_event(event)
                 if server_overloaded_recovery is not None:
                     with suppress(Exception):
                         server_overloaded_recovery.observe_protocol_event(event)
@@ -2651,7 +2671,12 @@ def _run_runtime_service(
             ) -> None:
                 presentation_pipeline.observe_protocol_input(request)
 
-            lifecycle_participants = [presentation_pipeline, live_context_observer, live_event_tap]
+            lifecycle_participants = [
+                presentation_pipeline,
+                live_context_observer,
+                live_working_observer,
+                live_event_tap,
+            ]
             if server_overloaded_recovery is not None:
                 lifecycle_participants.append(server_overloaded_recovery)
             if agent_observer_controller is not None:
@@ -2769,6 +2794,7 @@ def _run_runtime_service(
                     on_process_stopped=lambda process: on_process_stopped("native-tui", process),
                 )
                 tui = terminal_gateway.process
+                live_working_observer.publish_current_state()
                 diagnostic_relay.bind_supervisor_wake(terminal_gateway.request_supervisor_check)
                 on_terminal_gateway_ready(terminal_gateway.request_supervisor_check, terminal_gateway.resize)
                 on_started()
@@ -2786,6 +2812,7 @@ def _run_runtime_service(
                                 assert activated_analytics.codex_session_id is not None
                                 root_thread_id = str(activated_analytics.codex_session_id)
                                 presentation_pipeline.bind_root_thread(root_thread_id)
+                                live_working_observer.bind_root_thread(root_thread_id)
                                 if server_overloaded_recovery is not None:
                                     server_overloaded_recovery.bind_root_thread(root_thread_id)
                                 if agent_observer_controller is not None:
@@ -2886,6 +2913,9 @@ def _run_runtime_service(
                 if server_overloaded_recovery is not None:
                     with suppress(Exception):
                         server_overloaded_recovery.close()
+                if working_status_observer is not None:
+                    with suppress(Exception):
+                        working_status_observer.close()
                 try:
                     if protocol_proxy is not None:
                         protocol_proxy.close()

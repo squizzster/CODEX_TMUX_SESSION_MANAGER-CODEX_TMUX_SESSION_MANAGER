@@ -124,6 +124,7 @@ def _mock_terminal_gateway(monkeypatch: pytest.MonkeyPatch) -> list:
             self.process = runtime_module.subprocess.Popen(command, **options)
             self.closed = False
             self.wait_timeouts = []
+            self.working_updates = []
             gateways.append(self)
 
         def wait(self, timeout=None):
@@ -138,6 +139,9 @@ def _mock_terminal_gateway(monkeypatch: pytest.MonkeyPatch) -> list:
 
         def resize(self):
             return None
+
+        def set_working(self, working):
+            self.working_updates.append(working)
 
         def request_supervisor_check(self):
             return None
@@ -155,8 +159,16 @@ def _mock_terminal_gateway(monkeypatch: pytest.MonkeyPatch) -> list:
         def close(self):
             return None
 
+    class FakeWorkingStatus:
+        def __init__(self, *_args):
+            return None
+
+        def update(self, _working):
+            return None
+
     monkeypatch.setattr(runtime_module, "TerminalSessionGateway", FakeGateway)
     monkeypatch.setattr(runtime_module, "InputInterceptorPresentation", FakePresentation)
+    monkeypatch.setattr(runtime_module, "TmuxWorkingStatus", FakeWorkingStatus)
     return gateways
 
 
@@ -4436,6 +4448,7 @@ def test_runtime_service_skips_updater_and_connects_tui_through_protocol_proxy(
     tui_options: list[dict[str, object]] = []
     spawned_environments: list[dict[str, str]] = []
     status_updates: list[int] = []
+    working_updates: list[bool] = []
     proxy_lifecycle: list[str] = []
     protected_paths: tuple[Path, ...] | None = None
     tmux_runtime_capability = TmuxRuntimeCapability(
@@ -4477,6 +4490,13 @@ def test_runtime_service_skips_updater_and_connects_tui_through_protocol_proxy(
 
         def update(self, rendered_status: str) -> None:
             assert "Context: --" in rendered_status
+
+    class FakeWorkingStatus:
+        def __init__(self, *args: object) -> None:
+            assert args == ("/usr/bin/tmux", tmux_runtime_capability, "%9")
+
+        def update(self, working: bool) -> None:
+            working_updates.append(working)
 
     class FakeProxy:
         def __init__(self, *args: object, **kwargs: object) -> None:
@@ -4578,6 +4598,7 @@ def test_runtime_service_skips_updater_and_connects_tui_through_protocol_proxy(
     )
     monkeypatch.setattr(runtime_module, "TmuxToolCallStatus", FakeStatus)
     monkeypatch.setattr(runtime_module, "TmuxContextStatus", FakeContextStatus)
+    monkeypatch.setattr(runtime_module, "TmuxWorkingStatus", FakeWorkingStatus)
     monkeypatch.setattr(runtime_module, "CodexProtocolEventTap", FakeEventTap)
     monkeypatch.setattr(runtime_module, "CodexProtocolProxy", FakeProxy)
     monkeypatch.setattr(
@@ -4638,7 +4659,9 @@ def test_runtime_service_skips_updater_and_connects_tui_through_protocol_proxy(
     )
 
     assert status_updates == [0]
+    assert working_updates == [False, False]
     assert len(gateways) == 1 and gateways[0].closed
+    assert gateways[0].working_updates == [False]
     assert len(gateways[0].wait_timeouts) == 1
     assert gateways[0].wait_timeouts[0] > 50
     assert proxy_lifecycle == [

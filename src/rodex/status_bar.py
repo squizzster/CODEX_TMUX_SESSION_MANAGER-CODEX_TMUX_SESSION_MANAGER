@@ -12,6 +12,7 @@ class StatusBarPart(StrEnum):
     """Stable names for independently changeable Rodex status segments."""
 
     RODEX_IDENTITY = "rodex_identity"
+    WORKING = "working"
     TOOL_COUNT = "tool_count"
     MOUSE_MODE = "mouse_mode"
     CONTEXT = "context"
@@ -156,6 +157,17 @@ class _ContextColourBand:
 
 RODEX_CONTEXT_STATUS_OPTION: Final = "@rodex_context_status"
 RODEX_TOOL_CALL_STATUS_OPTION: Final = "@rodex_tool_calls"
+RODEX_WORKING_STATUS_OPTION: Final = "@rodex_working"
+RODEX_WORKING_STATUS_INTERVAL_SECONDS: Final = 1
+RODEX_IDLE_STATUS_INTERVAL_SECONDS: Final = 15
+
+# tmux expands the wall-clock second before evaluating this format. Advance
+# fixed-width dots in its own status renderer, without a process per frame or
+# animation bytes entering the native PTY / Rodex terminal projection.
+_WORKING_DOTS_FORMAT: Final = (
+    "#{?#{==:#{e|%:%S,4},0},.   ,#{?#{==:#{e|%:%S,4},1},..  ,#{?#{==:#{e|%:%S,4},2},... ,....}}}"
+)
+RODEX_WORKING_STATUS_FORMAT: Final = f"#{{?{RODEX_WORKING_STATUS_OPTION},| Working{_WORKING_DOTS_FORMAT} | ,}}"
 RODEX_STATUS_COLOURS: Final = StatusBarColours(
     base_foreground="black",
     base_background="#FDF7FF",
@@ -256,6 +268,11 @@ _BASE_STATUS_BAR: Final = TmuxStatusBar(
             part=StatusBarPart.RODEX_IDENTITY,
             foreground=RODEX_STATUS_COLOURS.primary_blue,
             content_format=" Rodex: #S ",
+        ),
+        StatusBarSegment(
+            part=StatusBarPart.WORKING,
+            foreground=RODEX_STATUS_COLOURS.primary_blue,
+            content_format=RODEX_WORKING_STATUS_FORMAT,
         ),
         StatusBarSegment(
             part=StatusBarPart.TOOL_COUNT,

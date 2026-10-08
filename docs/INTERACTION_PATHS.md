@@ -78,6 +78,11 @@ stop, persisted diagnostics, selected-view revisions, and resize wake it without
 fixed idle relay timer. [Prompt handoff](PROMPT_SUBMISSION_FLOW.md#enter-handoff)
 uses bounded event-specific rechecks, not idle screen polling.
 
+Main-thread working transitions enable a three-second native elapsed-counter refresh
+deadline in the gateway. A due refresh sends the existing native resize signal without
+changing terminal geometry or composer input; terminal turn/disconnect transitions
+remove the deadline. Idle relaying retains its event-driven wait.
+
 [`NativeTerminalProjection`](../src/rodex/native_terminal_projection.py) continuously
 advances one [`NativeTerminalScreen`](../src/rodex/native_terminal_screen.py), even
 while semantic presentation is visible. [`TerminalSurfaceRenderer`](../src/rodex/terminal_surface.py)
@@ -151,6 +156,10 @@ it is not a proof against arbitrary Python reflection or a runtime monitor.
 
 Status effects remain under [`TmuxStatusPipeline`](../src/rodex/tmux_status.py);
 sharing animations have their own [admission owner](../src/rodex/status_animation_admission.py).
+[`CodexWorkingStatusObserver`](../src/rodex/protocol_proxy.py) projects main-thread
+activity into transitions; [`TmuxWorkingStatus`](../src/rodex/tmux_status.py) atomically
+publishes the activity option and redraw cadence through the existing status publisher.
+tmux's status format advances the dots locally without a Rodex animation timer.
 tmux effects use the [executor boundary](../src/rodex/tmux_executor.py); SQL effects
 use [transactions](../src/rodex_sql/transactions.py). [Runtime isolation](RUNTIME_ISOLATION.md)
 owns cleanup/hook authority, including the resize-only compatibility exception.

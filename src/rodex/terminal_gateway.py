@@ -11,6 +11,7 @@ import fcntl
 import os
 import pty
 import select
+import signal
 import struct
 import subprocess
 import sys
@@ -43,6 +44,7 @@ READ_CHUNK_BYTES = 16384
 HANDOFF_TIMEOUT_SECONDS = 0.3
 HANDOFF_RECHECK_SECONDS = 0.01
 EXIT_DRAIN_TIMEOUT_SECONDS = 0.5
+WORKING_COUNTER_REFRESH_SECONDS = 3.0
 
 
 class TerminalSessionGateway:
@@ -97,6 +99,9 @@ class TerminalSessionGateway:
         self._presentation_revision: int | None = None
         self._unsubscribe_presentation: Callable[[], None] | None = None
         self._supervisor_lock = Lock()
+        self._working_lock = Lock()
+        self._working = False
+        self._working_refresh_deadline: float | None = None
         self._supervisor_requests = 0
         self._consumed_supervisor_requests = 0
         self._confirm_presentation = confirm_native_prefix
@@ -180,6 +185,29 @@ class TerminalSessionGateway:
             self._supervisor_requests += 1
         self._notify_relay()
 
+    def set_working(self, working: bool) -> None:
+        """Enable native elapsed-counter redraws only while the main turn is active."""
+        if not isinstance(working, bool):
+            raise ValueError("working state must be a boolean")
+        with self._working_lock:
+            if self._closed or self._working == working:
+                return
+            self._working = working
+            self._working_refresh_deadline = time.monotonic() + WORKING_COUNTER_REFRESH_SECONDS if working else None
+        self._notify_relay()
+
+    def _refresh_working_counter(self, now: float) -> float | None:
+        """Request an ordinary native redraw without changing geometry or input."""
+        with self._working_lock:
+            deadline = self._working_refresh_deadline
+            if self._closed or deadline is None:
+                return None
+            if now >= deadline:
+                # Skip missed ticks instead of replaying redraws after a busy relay.
+                self._working_refresh_deadline = now + WORKING_COUNTER_REFRESH_SECONDS
+                self.forward_signal(signal.SIGWINCH)
+            return self._working_refresh_deadline
+
     def _take_supervisor_check(self) -> bool:
         with self._supervisor_lock:
             if self._supervisor_requests == self._consumed_supervisor_requests:
@@ -235,6 +263,9 @@ class TerminalSessionGateway:
                 raise subprocess.TimeoutExpired(self.process.args, timeout)
             wake_deadlines = [value for value in (deadline, exit_deadline) if value is not None]
             if returncode is None:
+                working_deadline = self._refresh_working_counter(now)
+                if working_deadline is not None:
+                    wake_deadlines.append(working_deadline)
                 incomplete_deadline = self._decoder.incomplete_deadline()
                 if incomplete_deadline is not None:
                     wake_deadlines.append(incomplete_deadline)

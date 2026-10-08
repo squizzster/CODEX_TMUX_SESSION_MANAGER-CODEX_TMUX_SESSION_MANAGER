@@ -39,6 +39,20 @@ Managed Codex defaults to `tui.animations=false` to avoid decorative spinner/shi
 redraw work. `rodex --config tui.animations=true` explicitly restores it. The source
 of launch defaults is [`runtime.py`](../src/rodex/runtime.py), not a second Codex config.
 
+The Rodex bar shows `Working.` through `Working....` while the main Codex thread is
+active. tmux advances the fixed-width dots once per second; Rodex publishes only
+working/idle transitions, with no animation frames passing through the native TUI or
+terminal parser. Completion, interruption, failure, or primary disconnect clears the
+indicator and restores tmux's 15-second idle status interval. Child-thread activity
+does not change the main thread's indicator.
+
+During an active main turn, Rodex also requests a native Codex redraw every three
+seconds through its ordinary resize signal, preserving the actual terminal size and
+composer input. This advances Codex's `Working (… • esc to interrupt)` elapsed counter
+with decorative animations disabled. The gateway removes that refresh deadline as
+soon as the turn becomes idle or disconnects; idle terminal relaying still blocks on
+events.
+
 tmux's 50,000-line history limit is installed before pane creation; it is not retroactive.
 Managed Codex uses `--no-alt-screen` so rendered rows enter that history. Mouse behavior
 inherits tmux's global value unless `_mouse` sets a session override. With the default

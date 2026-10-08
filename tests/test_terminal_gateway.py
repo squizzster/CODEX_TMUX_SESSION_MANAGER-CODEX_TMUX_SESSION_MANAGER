@@ -29,7 +29,7 @@ from rodex.interaction_pipeline import (
 )
 from rodex.presentation_policy import PresentationSnapshot, PresentationSurface, SessionPresentationPipeline
 from rodex.protocol_input_text import PromptTextEdit
-from rodex.terminal_gateway import QUEUE_LIMIT_BYTES, TerminalSessionGateway
+from rodex.terminal_gateway import QUEUE_LIMIT_BYTES, WORKING_COUNTER_REFRESH_SECONDS, TerminalSessionGateway
 from rodex.terminal_surface import TerminalSurfaceRenderer
 
 ECHO_CHILD = """
@@ -465,6 +465,57 @@ def test_idle_gateway_blocks_once_until_supervisor_deadline(monkeypatch):
             assert len(select_calls) == 1
             assert select_calls[0] == pytest.approx(0.12, abs=0.02)
             assert size_probes == []
+        finally:
+            gateway.close()
+
+
+def test_working_counter_refresh_is_due_every_three_seconds_and_skips_missed_ticks(monkeypatch):
+    pipeline = SessionInteractionPipeline()
+    with outer_terminal() as (master, slave):
+        gateway = start_gateway(slave, pipeline)
+        try:
+            read_until(gateway, master, b"READY")
+            signals = []
+            monkeypatch.setattr(gateway, "forward_signal", signals.append)
+            now = time.monotonic()
+            gateway.set_working(True)
+            deadline = gateway._working_refresh_deadline
+            assert deadline == pytest.approx(now + 3, abs=0.01)
+            assert WORKING_COUNTER_REFRESH_SECONDS == 3
+            assert gateway._refresh_working_counter(deadline - 0.01) == deadline
+            assert signals == []
+            assert gateway._refresh_working_counter(deadline) == deadline + 3
+            assert signals == [signal.SIGWINCH]
+            assert gateway._refresh_working_counter(deadline + 12) == deadline + 15
+            assert signals == [signal.SIGWINCH, signal.SIGWINCH]
+            gateway.set_working(False)
+            assert gateway._refresh_working_counter(deadline + 18) is None
+            assert len(signals) == 2
+        finally:
+            gateway.close()
+
+
+def test_working_counter_redraw_reaches_native_child_without_changing_input_or_geometry(monkeypatch):
+    pipeline = SessionInteractionPipeline()
+    with outer_terminal() as (master, slave):
+        gateway = start_gateway(slave, pipeline)
+        try:
+            read_until(gateway, master, b"READY")
+            monkeypatch.setattr("rodex.terminal_gateway.WORKING_COUNTER_REFRESH_SECONDS", 0.05)
+            dimensions = gateway._last_dimensions
+            gateway.set_working(True)
+            assert b"RESIZED" in read_until(gateway, master, b"RESIZED")
+            assert gateway._last_dimensions == dimensions
+            assert gateway._native_queue == b""
+            gateway.set_working(False)
+            # Drain the transition wake, then prove idle again waits for an event.
+            with suppress(subprocess.TimeoutExpired):
+                gateway.wait(timeout=0.02)
+            signals = []
+            monkeypatch.setattr(gateway, "forward_signal", signals.append)
+            with pytest.raises(subprocess.TimeoutExpired):
+                gateway.wait(timeout=0.12)
+            assert signals == []
         finally:
             gateway.close()
 

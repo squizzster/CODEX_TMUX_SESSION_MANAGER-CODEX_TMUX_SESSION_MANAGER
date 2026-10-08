@@ -63,6 +63,14 @@ TOOL_CALL_ITEM_TYPES: Final = frozenset(
 )
 
 ToolCountCallback = Callable[[int], None]
+_WORKING_STATUS_EVENT_METHODS: Final = frozenset(
+    {
+        CODEX_APP_SERVER.thread_started_method,
+        CODEX_APP_SERVER.thread_status_changed_method,
+        CODEX_APP_SERVER.turn_started_method,
+        CODEX_APP_SERVER.turn_completed_method,
+    }
+)
 ProtocolEventCallback = Callable[[str | bytes, dict[str, Any] | None], None]
 ContextStatusCallback = Callable[[str], None]
 DisconnectCallback = Callable[[], None]
@@ -359,6 +367,107 @@ class TmuxContextStatus:
         if not isinstance(rendered_status, str) or not rendered_status:
             raise ValueError("rendered context status must be non-empty")
         self._option.publish(rendered_status)
+
+
+class CodexWorkingStatusObserver:
+    """Project exact main-thread activity into state transitions, never frames."""
+
+    def __init__(self, on_working_changed: Callable[[bool], None]) -> None:
+        self._on_working_changed = on_working_changed
+        self._root_thread_id: str | None = None
+        self._active_turn_id: str | None = None
+        self._working = False
+        self._closed = False
+        self._lock = Lock()
+
+    def bind_root_thread(self, thread_id: str) -> None:
+        """Prefer the registered root; child starts cannot replace its identity."""
+        if not isinstance(thread_id, str) or not thread_id:
+            raise ValueError("working status requires a root thread identity")
+        with self._lock:
+            if self._closed or self._root_thread_id == thread_id:
+                return
+            self._active_turn_id = None
+            self._set_working_locked(False)
+            self._root_thread_id = thread_id
+
+    def publish_current_state(self) -> None:
+        """Reconcile a newly installed gateway in order with protocol transitions."""
+        with self._lock:
+            if not self._closed:
+                self._publish_locked(self._working)
+
+    def observe_protocol_event(self, event: dict[str, Any] | None) -> None:
+        """Observe main-thread starts, terminal turns, and resumed thread state."""
+        if event is None:
+            return
+        method = event.get("method")
+        if not isinstance(method, str) or method not in _WORKING_STATUS_EVENT_METHODS:
+            return
+        params = event.get("params")
+        if not isinstance(params, dict):
+            return
+        thread_id = (
+            _started_thread_id(params) if method == CODEX_APP_SERVER.thread_started_method else _event_thread_id(params)
+        )
+        if thread_id is None:
+            return
+        with self._lock:
+            if self._closed:
+                return
+            if method == CODEX_APP_SERVER.thread_started_method and self._root_thread_id is None:
+                self._root_thread_id = thread_id
+            if thread_id != self._root_thread_id:
+                return
+            if method in {CODEX_APP_SERVER.turn_started_method, CODEX_APP_SERVER.turn_completed_method}:
+                turn = params.get("turn")
+                turn_id = turn.get("id") if isinstance(turn, dict) else None
+                if not isinstance(turn_id, str) or not turn_id:
+                    return
+                if method == CODEX_APP_SERVER.turn_started_method:
+                    self._active_turn_id = turn_id
+                    self._set_working_locked(True)
+                elif self._active_turn_id is None or turn_id == self._active_turn_id:
+                    self._active_turn_id = None
+                    self._set_working_locked(False)
+                return
+            thread = params.get("thread")
+            status = thread.get("status") if isinstance(thread, dict) else params.get("status")
+            status_type = status.get("type") if isinstance(status, dict) else None
+            if status_type == "active":
+                self._set_working_locked(True)
+            elif status_type in {"idle", "systemError", "notLoaded"}:
+                self._active_turn_id = None
+                self._set_working_locked(False)
+
+    def reset_after_disconnect(self) -> None:
+        """Clear activity while retaining the runtime's registered root identity."""
+        with self._lock:
+            if self._closed:
+                return
+            self._active_turn_id = None
+            self._set_working_locked(False)
+
+    def close(self) -> None:
+        with self._lock:
+            if self._closed:
+                return
+            self._active_turn_id = None
+            self._set_working_locked(False)
+            self._closed = True
+
+    def _set_working_locked(self, working: bool) -> None:
+        if self._working == working:
+            return
+        self._working = working
+        self._publish_locked(working)
+
+    def _publish_locked(self, working: bool) -> None:
+        try:
+            self._on_working_changed(working)
+        except (OSError, subprocess.SubprocessError):
+            # The original protocol output was already delivered to the TUI.
+            return
 
 
 class CodexContextStatusObserver:

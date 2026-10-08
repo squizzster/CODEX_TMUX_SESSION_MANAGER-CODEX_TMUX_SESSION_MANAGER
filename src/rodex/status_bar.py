@@ -167,7 +167,9 @@ RODEX_IDLE_STATUS_INTERVAL_SECONDS: Final = 15
 _WORKING_DOTS_FORMAT: Final = (
     "#{?#{==:#{e|%:%S,4},0},.   ,#{?#{==:#{e|%:%S,4},1},..  ,#{?#{==:#{e|%:%S,4},2},... ,....}}}"
 )
-RODEX_WORKING_STATUS_FORMAT: Final = f"#{{?{RODEX_WORKING_STATUS_OPTION},| Working{_WORKING_DOTS_FORMAT} | ,}}"
+_WORKING_TEXT_FORMAT: Final = f"Working{_WORKING_DOTS_FORMAT}"
+RODEX_WORKING_STATUS_FORMAT: Final = f"#{{?{RODEX_WORKING_STATUS_OPTION},| {_WORKING_TEXT_FORMAT} | ,}}"
+RODEX_TERMINAL_TITLE_FORMAT: Final = f"Rodex: #S#{{?{RODEX_WORKING_STATUS_OPTION}, | {_WORKING_TEXT_FORMAT},}}"
 RODEX_STATUS_COLOURS: Final = StatusBarColours(
     base_foreground="black",
     base_background="#FDF7FF",

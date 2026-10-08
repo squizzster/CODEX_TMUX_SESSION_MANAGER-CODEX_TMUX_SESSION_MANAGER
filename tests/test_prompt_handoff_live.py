@@ -223,6 +223,24 @@ def test_real_codex_working_counter_advances_without_keyboard_input(tmp_path, re
                 assert max(elapsed_readings) - min(elapsed_readings) >= 6, elapsed_readings
                 assert working == "0", screen
                 assert tmux_read("show-option", "-v", "-t", f"={name}:", "status-interval").strip() == "15"
+                title_prefix = f"Rodex: {name}"
+
+                def terminal_titles():
+                    return [title.decode() for title in re.findall(rb"\x1b\][02];(.*?)(?:\x07|\x1b\\)", client.output)]
+
+                deadline = time.monotonic() + 2
+                while time.monotonic() < deadline:
+                    client.poll()
+                    titles = terminal_titles()
+                    if titles and titles[-1] == title_prefix:
+                        break
+                assert titles[-1] == title_prefix, titles
+                title_frames = {
+                    title_match.group(1)
+                    for title in titles
+                    if (title_match := re.fullmatch(re.escape(title_prefix) + r" \| Working(\.{1,4}) *", title))
+                }
+                assert title_frames == {".", "..", "...", "...."}, titles
                 client.detach()
         finally:
             for socket in runtime_root.glob(RODEX_TMUX_SOCKET_PATTERN):

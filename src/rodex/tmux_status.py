@@ -19,6 +19,7 @@ from .status_bar import (
     RODEX_STATUS_RIGHT_FORMAT,
     RODEX_STATUS_RIGHT_LENGTH,
     RODEX_STATUS_STYLE,
+    RODEX_TERMINAL_TITLE_FORMAT,
     RODEX_WINDOW_STATUS_FORMAT,
     RODEX_WORKING_STATUS_INTERVAL_SECONDS,
     RODEX_WORKING_STATUS_OPTION,
@@ -369,6 +370,8 @@ class TmuxStatusPipeline:
         else:
             self.reconcile_base_status()
         for option_name, value in (
+            ("set-titles-string", RODEX_TERMINAL_TITLE_FORMAT),
+            ("set-titles", "on"),
             ("status-left-length", RODEX_STATUS_LEFT_LENGTH),
             ("window-status-format", RODEX_WINDOW_STATUS_FORMAT),
             ("window-status-current-format", RODEX_WINDOW_STATUS_FORMAT),

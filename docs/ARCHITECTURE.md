@@ -1,147 +1,69 @@
-# Agent instructions
+# Architecture
 
-Keep this a current blueprint, not a change log. Amend a standard only after user
-agreement, retain clear ownership, and keep this file within 150 lines and 10,240 bytes.
-
-# Rodex architecture
-
-## Runtime shape
+Rodex preserves native Codex behavior while adding durable session identity and exact
+local control. It is more than a protocol relay: terminal projection, lifecycle
+admission, observer state, and rollout analytics have separate owners.
 
 ```text
-user → fixed installation → CLI → <implementation-sha256>.sock → one implementation-scoped Python daemon
-         │                              ├── runtime A → tmux-A → TUI ↔ proxy ↔ app-server
-         ├──► SQLite registry           ├── runtime B → tmux-B → TUI ↔ proxy ↔ app-server
-         ├──► _cat / _tail              └── one analytics coordinator → trace/stats → SQLite
-         └──► bounded update check ───────────────────────────────────────► TUI warning
+caller → retained installation → CLI → implementation-scoped daemon
+                                  │     ├─ runtime A: tmux A → TUI ↔ proxy ↔ App Server
+                                  │     ├─ runtime B: tmux B → TUI ↔ proxy ↔ App Server
+                                  │     └─ one analytics coordinator → SQLite
+                                  └─ registry / verified reads / native passthrough
 ```
 
-## Application control plane
+## Application and lifecycle
 
-`rodex.cli` composes dependencies; `rodex.application_pipeline` characterizes argv once
-and routes direct reads/passthrough, selectors, and managed runtime work. One interactive
-token receives one lookup; unmatched input is a prompt. An unregistered canonical Codex
-identity requires a transient App Server check.
+- [`UnifiedRodexApplicationPipeline`](../src/rodex/application_pipeline.py)
+  classifies once using the [Rodex command contract](../src/rodex/command_contract.py)
+  and [characterized Codex grammar](../src/codex_cli_contract/v0_151_0.py).
+  [`cli.run`](../src/rodex/cli.py) composes dependencies; handlers do not duplicate
+  domain policy. [CLI routing](CLI.md#invocation-routing) explains ambiguous input.
+- [`ManagedSessionLifecycle`](../src/rodex/managed_session_lifecycle.py) owns create,
+  open, resume, and recovery. [`RodexRuntimeLauncher`](../src/rodex/runtime.py) stages
+  tmux and native children. [`DaemonRuntimeManager`](../src/rodex/daemon.py) owns
+  reservations, TTY admission, runtime workers, and stop receipts.
+- [`ExactTurnMutationCoordinator`](../src/rodex/exact_turn_mutation.py) owns start,
+  steer, interrupt, mouse, and alias transitions. It resolves, locks, re-resolves,
+  then revalidates immediately before mutation. Transport is not a public unfenced
+  prompt API. [Runtime isolation](RUNTIME_ISOLATION.md) owns identity/lifetime rules.
+- Cross-system transitions do external work outside SQLite writer transactions and
+  compensate only resources changed by that operation. Post-success access telemetry
+  is best-effort; its failure must not make successful model work retryable.
 
-## Canonical owners
+## Interaction and presentation
 
-| Component | Responsibility |
-|---|---|
-| `rodex.installation` / `implementation_identity` | Atomically pin code, dependencies and defaults; retain one Python for every helper. |
-| `rodex.application_pipeline` / command contracts | Classify and dispatch one typed invocation. |
-| `rodex.managed_session_lifecycle` / `human_messages` / `cool_name` | Session lifecycle, names, collisions and human messages. |
-| `rodex.exact_turn_mutation` | Lock, re-resolve and validate exact start/steer/interrupt/mouse/alias operations. |
-| `rodex.interaction_pipeline` / `interaction_transport` | Typed targets, intent-preserving hooks, outcomes and one private endpoint. |
-| `rodex.session_read_pipeline` / `session_tail` | Verified reads and incremental terminal history. |
-| `rodex.process_environment` / `environment_exec` | Exact caller-owned environment at child exec. |
-| `rodex.daemon` / `daemon_client` / `terminal_bridge` | Own one exact-implementation daemon socket, runtime reservations, pane-TTY handoff and runtime threads. |
-| `rodex.runtime` / `process_contracts` / `process_guard` / `process_receipts` | Stage runtimes, supervise exact native children and reconcile daemon crashes. |
-| `rodex.runtime_endpoint` / `runtime_peer` | Exclusive socket lifetime and connected runtime/process identity. |
-| `rodex.terminal_gateway` / `native_terminal_*` / `terminal_surface` / `presentation_policy` | PTY, native projection, typed display policies and restoration. |
-| `rodex.tmux_session_capability` | Server/runtime/session authority and exact read/mutation fences. |
-| `rodex.tmux_shared_ctrl_c` | Native originating-client admission, guarded private exit and shared detach. |
-| `rodex.tmux_sharing_coordinator` / status modules | Convert hook wakeups into fenced roster and display transitions. |
-| Observer projection/state/pane modules | Validate events, reduce state and perform exact pane mechanics. |
-| `rodex.primary_connection_lifecycle` | Isolate primary-connection resets and terminal runtime-shutdown interrupts. |
-| `rodex.analytics.SharedAnalyticsCoordinator` / source readers | Serialize each implementation daemon's runtime analytics through one daemon thread. |
-| `rodex_registry.agent_trace_contract` / writer / reader | Normalize traces, transactional append and bounded reads. |
-| `rodex_registry.execution` / `statistics` | Own canonical lineage, publication orchestration, and relational projections. |
-| `rodex_registry.schema` | Generate, install when authorized, and attest the complete relational catalog. |
-| `rodex_sql` | Private paths, storage identity, transactions, WAL lifetime and natural keys. |
+- [`SessionInteractionPipeline`](../src/rodex/interaction_pipeline.py) owns typed
+  intent, target validation, content hooks, delivery, and outcome records. Adapters
+  return to this contract; they must not partially reimplement its policy.
+- [`TerminalSessionGateway`](../src/rodex/terminal_gateway.py) is the one native PTY
+  input/output owner, regardless of attached-client count. The foreground
+  [terminal bridge](../src/rodex/terminal_bridge.py) transfers its TTY and resize
+  notifications without consuming native input.
+- [Interaction paths](INTERACTION_PATHS.md) maps terminal, protocol, menu, observer,
+  and background effects to owners. [Prompt submission](PROMPT_SUBMISSION_FLOW.md)
+  owns the pre-Enter and structured-input contract; Codex still owns the editor.
+- [`PrimaryConnectionLifecycleCoordinator`](../src/rodex/primary_connection_lifecycle.py)
+  resets every participant even if one fails. Observer epoch ownership remains in
+  the reducer, not in reset callers or transport.
 
-## Runtime isolation boundary
+## Persistence and resources
 
-One runtime owns one `tmux-v5-<runtime-id>.sock` server. Native pane movement cannot
-cross server boundaries. Creation claims only an empty server with every ownership
-marker absent. The attempt carries its original server nonce through startup and
-cleanup; a refused claim cannot rediscover an incumbent's destruction authority.
-One canonical database owns names and registered incarnations across these servers.
+- [`SharedAnalyticsCoordinator`](../src/rodex/analytics.py) serializes runtime workers
+  on one daemon thread, preserving separate cursors, retries, and health. See
+  [analytics](ANALYTICS.md) for bounded work and incomplete-coverage semantics.
+- [`rodex_registry`](../src/rodex_registry/__init__.py) owns durable session/lineage
+  transitions and publication. The [trace contract](../src/rodex_registry/agent_trace_contract.py)
+  prepares facts before SQL; its [writer](../src/rodex_registry/agent_trace_writer.py)
+  appends them inside the caller's transaction. [SQL methodology](SQL_SCHEMA.md)
+  owns schema standards, identity domains, and atomicity.
+- [`rodex_sql.transactions`](../src/rodex_sql/transactions.py) alone creates SQLite
+  connections and transaction boundaries. No background database watcher exists.
+- [`SyncTmuxExecutor` and `AsyncTmuxExecutor`](../src/rodex/tmux_executor.py) alone
+  launch tmux. Domain owners supply arguments/capabilities, never a second subprocess
+  boundary. Captured calls are deadline-bounded; attachment has its natural lifetime.
 
-`TmuxRuntimeCapability` binds socket, server, immutable `$session_id`, primary `%pane_id`,
-and runtime; `TmuxSessionCapability` adds registered Rodex, registry, SQL-row, and Codex
-identities. The launcher mints it from a checked roster. Actors retain it and fence every action;
-primary actions require the pane ID. Names and hook context grant no authority. Predicates run only in direct `if-shell -F`; an owned read
-proves capability there, then runs `display-message` for payload alone. Mixing predicate
-and payload contexts corrupts literal tmux identifiers such as `%4`.
-
-Client/layout hooks wake the coordinator; it verifies the roster and fences changes. Root `C-c` kills a guarded private runtime or
-detaches its originating shared client; `C-d` uses tmux's current-client detach. Creation
-sets `exit-unattached off` and `destroy-unattached off`. Other keys enter the terminal
-pipeline; Rodex uses no tmux Enter binding, `send-keys` or pane piping. The gateway
-alone writes the child PTY: verified prompt replacement uses DEL and bracketed paste,
-confirms native output in tmux, then admits the receipt and releases the original Enter.
-See [prompt ownership and timing](PROMPT_SUBMISSION_FLOW.md).
-
-Discovery compares the session snapshot with a guarded primary-pane read. Every tmux process
-crosses `tmux_executor`; calls have deadlines and cancellation reaps the child.
-The admitted bridge transfers its TTY to its daemon runtime, then forwards foreground
-resize signals until its lifetime socket closes. Only the runtime reads/writes the TTY.
-Absolute caller cwd and environment cross the reservation; tmux-owned values come
-only from the admitted bridge process. `TmuxStatusPipeline`
-arbitrates status; animation admission owns capability/generation/lease/token/recovery fences.
-
-The daemon blocks on its listener and shutdown event. Runtimes block on terminal readiness,
-child exit, deadlines or explicit wakes. Resize reads guarded tmux geometry because
-its kernel PTY dimensions can lag the hook.
-
-Interactive clients use `rodex_<display_name>` and report verified attach/detach/exit.
-One daemon-runtime PTY adapts all TUI I/O; attachers never create input owners. The gateway
-blocks on terminal readiness, child `pidfd`, input-frame deadlines and state notifications,
-without fixed idle polling. Interception config owns live/Enter expressions, menus and
-typed actions; unmatched input stays native. Prefix/cursor confirmation occurs only at
-handoff. One native screen owns resize/reflow and replies before light/dark presentation.
-DISPLAY_STATE draws menus; light selects commentary and dark restores native state.
-
-## Identity and lifecycle
-
-`rodex_sessions.id` is private. Session, registry, runtime, Codex thread, turn, item,
-trace-event, and tool-call identities never substitute for one another. See
-[SQL_SCHEMA.md](SQL_SCHEMA.md).
-
-ALPHA hosts require complete current identity and protocol fields, without adapters.
-
-New sessions allocate IDs, reserve detached tmux in the matching daemon, hand off its
-exact TTY and advertise the observed Codex root as `pending`. The session-ID lock spans
-SQL publication, registration, rename and UI setup. Update notice and attach follow.
-
-Selectors resolve once and verify live identity. Replacement verifies a resumed Codex
-ID or atomically relinks a never-saved ID. Opens unlock before attach;
-pending confirmation is repairable and alias failures compensate rename.
-
-## Observer flow and connection lifecycle
-
-```text
-App Server event → stateless projection → producer reducer → newest snapshot dispatcher
-                                              ↓
-tmux pane ← presentation view ← consumer reducer ← length-framed private socket
-```
-
-The producer owns events, tombstones, epochs and revisions. A newest-only
-dispatcher sends bounded snapshots; the consumer applies each revision once and resets
-at epoch/overflow boundaries. See the [interaction inventory](INTERACTION_PATHS.md).
-
-On primary connection loss, `PrimaryConnectionLifecycleCoordinator` calls every reset
-participant despite failures; only the reducer advances observer epoch. SQL transactions
-check database identity synchronously; the daemon has no database watcher.
-
-## Persistence and integrity
-
-One daemon-owned coordinator fairly schedules every active runtime on one thread. Each
-runtime retains separate cursors, analyzers and SQL health rows, while all `poll_once`
-work passes through that singular pipeline. Protocol bursts are coalesced; overflow asks
-for a full reconcile. One fenced transaction publishes checkpoints, statistics, trace,
-associations, and health.
-Retirement seals accepted events and reconciles on that worker with bounded best-effort
-effort; completion requires quiesced producers. Incomplete outcomes survive in health/logs.
-Source failures park by fingerprint until change and preserve the last good view. Codex
-metadata supplies turn identity; only sequence races reset cursors. Failures cannot affect the TUI.
-
-- Related writes use explicit transactions; catalog owners retain active borrowers and
-  at most one idle WAL generation. Fork with an active transaction requires child exec/exit.
-- Ordinary reads and mutations are existing-only. Explicit first use alone may create storage.
-- Private database/runtime paths validate owner, type, mode, descriptor, and symlink boundaries.
-- External tmux mutation requires an explicit capability and an atomic full-tuple fence.
-- Exact App Server and TUI process-group receipts survive daemon failure. A new daemon
-  verifies PID, start time, uid and process group before retiring an orphan; native
-  children also arm Linux parent-death signals.
-- Runtime path refresh fails closed when continued runtime addressing is unsafe; database
-  storage validation occurs synchronously at SQL transaction boundaries.
+The [effect-owner audit](../tests/adversarial/test_interaction_path_ownership.py)
+enforces production effect boundaries. Keep new routes classified in that test and
+[the interaction inventory](INTERACTION_PATHS.md#effect-audit), not in a parallel
+informal call graph. Executable/privacy assumptions live in [security](SECURITY.md).

@@ -1,157 +1,125 @@
 # Runtime isolation
 
-Every operation must address one proven live incarnation. A selector, display name,
-socket path, client count, pane ID, or Codex thread is insufficient authority alone.
+A selector, display name, socket, client count, pane ID, or Codex thread is an
+address or observation, not sufficient authority to act on a runtime.
 
-## Contract manifest
+## Compatibility boundary
 
-| Boundary | Current generation |
+[Current-contract tests](../tests/test_current_contracts.py) pin release, catalog,
+tmux, daemon, process-receipt, peer, observer, machine, trace, and statistics versions.
+Do not replicate that manifest in callers. Live handshakes also require the exact
+loaded fingerprint; [retained installations](../INSTALL.md#retained-installations-and-compatibility)
+keep helpers on that implementation across checkout updates.
+
+Earlier catalogs, runtimes, and wire formats are not generally adopted or translated.
+There is one deliberate exception: [`notify_legacy_runtime_resize`](../src/rodex/legacy_runtime_compat.py)
+accepts the known pre-retention tmux-v4 coordinator, authenticates its v2 daemon
+through a private process receipt and same-user socket, forwards resize, and pins
+only its owned hook slots to a retained bridge. It cannot start, stop, adopt, access
+an old catalog, or send model input. Unknown generations and foreign hooks remain fenced.
+
+## Capability and admission
+
+[`TmuxRuntimeCapability` and `TmuxSessionCapability`](../src/rodex/tmux_session_capability.py)
+are the authority types. Runtime authority binds the absolute socket, server
+incarnation, immutable tmux `$session_id`, primary `%pane_id`, and runtime ID.
+Registered authority adds Rodex session, registry, SQL-row, Codex, and registration
+identities. Rodex's 16-hex IDs are integrity discriminators, not bearer credentials.
+
+[`RodexRuntimeLauncher`](../src/rodex/runtime.py) mints authority from a coherent,
+uniqueness-checked roster. Every effect rechecks its applicable tuple at the exact
+target; primary actions also require the pane ID. tmux predicates belong in direct
+`if-shell -F` conditions, with payload-only `display-message` in the selected branch.
+Rendering a predicate as display output changes literal `$`/`%` semantics.
+
+The creation/admission sequence is:
+
+1. Claim an entirely unmarked, empty tmux server dedicated to this runtime. Retain
+   the creation nonce for cleanup; failure must not rediscover incumbent authority.
+2. Reserve one runtime/operation in its implementation-scoped
+   [`DaemonRuntimeManager`](../src/rodex/daemon.py). Different implementations cannot
+   reconcile each other's reservations or child receipts.
+3. Transfer exactly one pane TTY descriptor from the bridge. Verify same-uid peer,
+   PID, pane, TTY, nonce, and reservation before ownership transfers. The daemon
+   runtime becomes the sole TTY owner; a manager timeout cannot revoke it.
+4. Under the session transition lock, commit the expected-incarnation SQL transition,
+   then confirm registration and UI identity before releasing the lock. New runtimes
+   advertise `pending`; an exact durable/pending pair can finish interrupted confirmation.
+   Unconfirmed runtimes expire rather than becoming implicitly registered.
+5. Admit protocol traffic only after both ends verify the runtime/server/fingerprint.
+   [`RuntimePeerIdentity`](../src/rodex/runtime_peer.py) also pins native peers to the
+   retained child process tree; a matching thread ID alone is insufficient.
+
+Locks span identity-sensitive transitions, not terminal attachment. Attachment uses
+immutable `$session_id`, so a concurrent alias cannot redirect it. An unambiguous
+full-capability match can repair an externally renamed endpoint; ambiguous or foreign
+matches cannot. Alias finalization uses compare-and-swap and compensates its own tmux
+rename on failure. See [SQL incarnation rules](SQL_SCHEMA.md#identity-and-lineage).
+
+## Liveness and replacement
+
+`RodexRuntimeLauncher.session_exists` retains the expected incarnation through the query.
+
+| Observation | Meaning |
 | --- | --- |
-| Rodex package and subprocess | `0.15.0a1` |
-| SQLite registry | `21` (`rodex-v21.sqlite3`) |
-| tmux ownership | `rodex-isolated-tmux-v5` |
-| WebSocket peer identity | `rodex-runtime-peer-v6` |
-| Shared daemon | `rodex-daemon-v3` |
-| Process receipts | `rodex-process-receipt-v3` |
-| Observer frames | `rodex-agent-observer-v4` |
-| Machine envelopes | `5` |
-| Agent trace | `rodex-agent-trace-v4` |
-| Statistics projection | `rodex-statistics-v9` |
+| Successful inventory lacks the runtime; canonical socket absent; owned socket refuses connection | Proven unreachable |
+| Timeout, unavailable executor, malformed/ambiguous inventory, invalid file type, permissions | Error, not negative liveness |
 
-Rodex adopts no earlier runtime, schema, or wire generation. Codex separately owns its
-transcripts.
+Unreachable is not destruction authority or proof that native children exited.
+Replacement still requires the expected durable incarnation and Codex writer admission.
+Concurrent opens serialize and converge on one runtime. Only the unregistered exact
+resume path retries a departing active writer within its bounded handoff window;
+unrelated failures and completed registrations cannot enter that path.
 
-## Fixed installation boundary
+## Resource lifetime
 
-The CLI publishes executable source, installed dependencies and shipped defaults into
-one private fingerprint directory before composing runtime services. A lock plus atomic
-publication prevents partial copies; a copy whose identity changes is rejected. Every
-helper inherits that directory's interpreter and uses `-I`, so a later checkout or venv
-update cannot redirect a hook to a different daemon. The default store is outside the
-bootstrap environment; see [installation retention](../INSTALL.md).
+- [`ExclusiveUnixEndpoint`](../src/rodex/runtime_endpoint.py) retains endpoint locks
+  and inodes: losers cannot unlink incumbents, and stale cleanup cannot remove replacements.
+  A child-created App Server rendezvous alias is allowed only after alias, private
+  directory, physical socket, and listener ownership verification. Cleanup removes
+  the retained alias, not the child's target.
+- Daemon request decoding has a five-second absolute deadline and closes every
+  rejected/truncated `SCM_RIGHTS` acquisition. An admitted bridge has the runtime's
+  lifetime, not the framing timeout. Shutdown wakes incomplete decoders.
+- Stop acknowledges `stopping` or `terminal`; only actual finalization proves terminal.
+  Cancelled reservations cannot start. Completed contexts compact to at most 1,024
+  small identity/outcome receipts without caller environments; evicted operations
+  expire and cannot replay as new work.
+- [`RuntimeProcessReceipts`](../src/rodex/process_receipts.py) bind native process
+  groups to operation/runtime, PID, Linux start time, and uid. Parent-death guards
+  protect daemon-owned children. Reconciliation verifies every field before signalling;
+  termination escalates after three seconds only for the creation-owned group.
+- Runtime cwd is an explicit reservation field passed to App Server and TUI.
+  Setting `PWD` is not `chdir`; native directory options must not be applied twice.
 
-User prompt overrides remain external and reload on submission. Shipped defaults are
-fixed per installation; changing them affects new launches. Catalogs remain scoped to
-schema generation, with live admission additionally fenced by exact implementation.
+## tmux and observer lifecycle
 
-## Ownership pipeline
+Whole-runtime destruction additionally proves the sole server session and ownership
+of every affected pane. Foreign panes block it. [CLI lifecycle keys](CLI.md#open-detach-and-resume)
+execute in native originating-client context; `exit-unattached` and
+`destroy-unattached` are disabled so the final detach does not destroy a runtime.
 
-1. The launcher allocates a runtime ID and server nonce, then claims only a completely
-   unmarked, empty tmux server at `tmux-v5-<runtime-id>.sock`. A separate server for each
-   runtime prevents native pane movement across runtime boundaries.
-2. The implementation SHA-256 names the daemon socket, start lock, log, and crash
-   receipts. Concurrent clients for that exact implementation converge on one daemon;
-   changed or upgraded implementations start alongside it without adopting its runtimes
-   or reconciling its child receipts. Every request and response still carries the exact
-   loaded fingerprint as an endpoint-integrity check. Each daemon owns one exact
-   reservation per runtime and operation ID and rejects conflicts before startup.
-3. The staged primary pane receives its runtime marker and runs a terminal bridge. The
-   daemon verifies same-uid peer credentials, the bridge PID, pane TTY descriptor, server
-   nonce, pane target and reservation before accepting the descriptor. Caller environment
-   cannot supply the tmux-owned identity fields. The bridge retains foreground resize
-   signals until daemon closure without consuming native input.
-4. Durable adoption compares the expected prior runtime ID in one SQLite transaction.
-   An exact complete-tuple retry is idempotent; wall-clock order never selects a winner.
-   One reentrant session-transition lock serializes participating reads, resume, rename,
-   publication, and registration.
-5. Discovery compares durable metadata with a guarded snapshot from the actual primary
-   pane. Only exact pending-to-registered completion may occur concurrently. Every
-   endpoint must use that runtime's canonical name.
-6. WebSocket admission and its response both prove the runtime ID, server nonce, and
-   exact loaded implementation on the connection in use. Unix peer
-   credentials and pinned process identities restrict native App Server and TUI admission
-   to the daemon-owned exact child processes.
-7. App Server, proxy, event, observer, and keepalive lifetimes retain exclusive locks,
-   bound socket inodes, or path descriptors. A contender cannot unlink an incumbent,
-   and stale cleanup cannot remove a replacement endpoint.
-8. Destruction requires the exact primary, the sole session on its server, and the
-   runtime marker on every affected pane. An extra session or unowned pane rejects it.
+Global client/layout hooks are wake-only because a detached session may no longer
+exist when the hook runs. The coordinator inventories the roster and uses each
+session's capability. It touches only owned hook indices, never local session hooks.
+Existing foreign `C-c`/`C-d` bindings fail initialization. tmux has no atomic
+bind-if-absent primitive: coordinate same-uid configuration during initialization;
+readback cannot rule out a racing overwrite at the bind instant.
 
-## Terminal geometry
+Resize hooks and the retained foreground bridge's `SIGWINCH` wake the same gateway.
+It reads guarded logical pane dimensions because tmux's kernel PTY size can lag its
+hook. Generic layout changes and pane swaps must both reach this path.
 
-`window-layout-changed` covers layout commands and automatic observer removal.
-The retained foreground bridge also forwards kernel `SIGWINCH`, including pane swaps
-that emit no layout hook. Both wake the same gateway. It reads logical dimensions
-through the primary-pane capability because tmux can defer updating kernel PTY size
-until after its hook. The shared native screen and child PTY resize together.
+Observer creation publishes an operation receipt before splitting; a lost split
+reply cannot authorize a second pane. Registration publishes its binding last.
+Uncertain retirement retains the original target and generation tombstone; new work
+waits for that outcome. Frames carry runtime/server identity because separate tmux
+servers can both contain `%0`. [Observer state](INTERACTION_PATHS.md#observer-state)
+owns visibility, not pane mechanics.
 
-## Liveness classification
-
-`session_exists` preserves the durable runtime ID through its endpoint query.
-
-| Observation | Result |
-| --- | --- |
-| Successful inventory lacks the recorded runtime | Unreachable |
-| Canonical socket is absent | Unreachable |
-| Connection to an owned Unix socket is refused | Unreachable |
-| Timeout or executor unavailable | Error |
-| Malformed or ambiguous inventory | Error |
-| Invalid file type or permission failure | Error |
-
-Only a proven unreachable result is negative liveness. It is not cleanup authority and
-does not prove orphaned child processes exited. Durable incarnation comparison and the
-Codex active-writer admission still govern replacement.
-
-## Client lifecycle
-
-- Shared `Ctrl-C` detaches the originating tmux client.
-- Private `Ctrl-C` destroys the exact runtime only after the full guard passes.
-- `Ctrl-D` and `Ctrl-b d` detach the originating client.
-- tmux evaluates membership on the actual client during native dispatch. No shell
-  helper, deferred confirmation, warning token, or expiry timer mediates `Ctrl-C`.
-
-## Observer lifecycle
-
-Observer creation publishes an operation receipt before splitting. Its immutable launch
-command carries that operation ID, so another coordinator can reconcile a lost split
-reply without authorizing a second split. Registration verifies membership and ownership,
-publishes the binding last, and verifies it again.
-
-Uncertain retirement keeps the original pane target and generation tombstone. New work
-waits for that pane's outcome, preventing a delayed old command from recreating a retired
-pane or replacing a newer one. Observer frames and subscriptions carry runtime and server
-identity because separate tmux servers may both contain pane `%0`.
-
-## App Server process lifecycle
-
-Managed and transient App Servers run in their own process sessions. The daemon writes
-private receipts containing runtime, operation, PID, process group, uid and Linux start
-time. App Server and native TUI wrappers arm a parent-death signal; daemon startup
-reconciles a surviving receipt only after all recorded process identity fields match.
-Cleanup sends
-ordinary termination, then after three seconds kills only the creation-owned process
-group and reaps its leader. This releases a stalled native Codex writer without targeting
-another runtime.
-
-Cold App Server readiness has the same bounded 30-second allowance as managed startup.
-An unregistered exact resume that encounters the saved thread's active writer stops its
-failed TUI and retries inside the existing bounded handoff window. Unrelated errors and
-completed registrations cannot enter that path.
-
-## Verification map
-
-| Contract | Executable evidence |
-| --- | --- |
-| Retained helpers across code/dependency/default updates; old-daemon rejection | `tests/test_installation.py` |
-| Server and topology ownership, discovery, cleanup, liveness | `tests/test_runtime_isolation.py` |
-| Connected runtime, server, and process identity | Runtime-peer and protocol-peer tests |
-| Expected-incarnation publication and coherent reads | `tests/test_runtime_registration_adoption.py` |
-| Cross-process and reentrant transitions | `tests/test_session_transition_lock.py` |
-| Native originating-client `Ctrl-C` behavior | `tests/test_tmux_shared_ctrl_c.py` |
-| Observer socket, operation, pane, and retirement safety | `tests/test_observer_runtime_safety.py` |
-| Installed Codex and isolated live lifecycle | `tests/test_managed_startup.py` |
-| Process-group shutdown and writer release | `tests/test_app_server_shutdown.py` |
-| Exact bounded resume retry | `tests/test_runtime_writer_handoff.py` |
-| Shared daemon, TTY transfer, crash receipts and singular analytics | `tests/test_rodex_daemon.py` |
-
-Run the complete release gate:
-
-```bash
-uv run ruff format --check .
-uv run ruff check .
-uv run pytest --require-live-startup --cov --cov-report=term-missing
-uv build
-```
-
-Rodex isolates cooperating runtimes within one Linux user account. It does not isolate
-arbitrary hostile processes sharing that account; use separate OS users for that boundary.
+Evidence: [runtime isolation](../tests/test_runtime_isolation.py),
+[daemon lifetimes](../tests/test_daemon_resource_lifetimes.py),
+[runtime peers](../tests/test_runtime_peer.py),
+[registration/adoption](../tests/test_runtime_registration_adoption.py),
+[transition locks](../tests/test_session_transition_lock.py), and
+[observer safety](../tests/test_observer_runtime_safety.py).

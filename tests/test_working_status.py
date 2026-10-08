@@ -21,7 +21,7 @@ from rodex.tmux_session_capability import (
     RODEX_SHARED_TMUX_PROTOCOL,
     TmuxRuntimeCapability,
 )
-from rodex.tmux_status import TmuxWorkingStatus
+from rodex.tmux_status import TmuxStatusPipeline, TmuxWorkingStatus
 from rodex_registry import RodexRuntimeId
 
 
@@ -215,6 +215,11 @@ def test_real_tmux_advances_fixed_width_dots_without_rodex_frame_publications(tm
         ):
             tmux("set-option", "-s", option, value)
         tmux("set-option", "-p", "-t", pane_id, "@rodex_pane_runtime_id", str(runtime_id))
+
+        def configure_tmux(*arguments):
+            return subprocess.CompletedProcess(arguments, 0, tmux(*arguments), "")
+
+        TmuxStatusPipeline(configure_tmux, pane_id).configure_base_status(reset_transient_claims=True)
         for option, value in (
             ("@rodex_runtime_id", str(runtime_id)),
             ("@rodex_primary_pane_id", pane_id),
@@ -255,23 +260,29 @@ def test_real_tmux_advances_fixed_width_dots_without_rodex_frame_publications(tm
         screen = pyte.Screen(180, 24)
         stream = pyte.Stream(screen)
         seen = set()
+        seen_titles = set()
         deadline = time.monotonic() + 6
-        while len(seen) < 4 and time.monotonic() < deadline:
+        while (len(seen) < 4 or len(seen_titles) < 4) and time.monotonic() < deadline:
             assert client.poll() is None, "tmux client exited before status rendering"
             if select.select([master], [], [], 0.2)[0]:
                 stream.feed(os.read(master, 65536).decode())
                 match = re.search(r"Working(\.{1,4}) ", screen.display[0])
                 if match:
                     seen.add(match.group(1))
+                title_match = re.fullmatch(r"Rodex: working \| Working(\.{1,4}) *", screen.title)
+                if title_match:
+                    seen_titles.add(title_match.group(1))
         assert seen == {".", "..", "...", "...."}, screen.display[0]
+        assert seen_titles == seen, screen.title
         assert len(publications) == 1
 
         observer.observe_protocol_event(turn_event("turn/completed", status="completed"))
         deadline = time.monotonic() + 2
-        while "Working" in screen.display[0] and time.monotonic() < deadline:
+        while ("Working" in screen.display[0] or "Working" in screen.title) and time.monotonic() < deadline:
             if select.select([master], [], [], 0.1)[0]:
                 stream.feed(os.read(master, 65536).decode())
         assert "Working" not in screen.display[0]
+        assert screen.title == "Rodex: working"
         assert tmux("show-option", "-v", "-t", pane_id, "@rodex_working") == "0"
         assert tmux("show-option", "-v", "-t", pane_id, "status-interval") == "15"
         assert len(publications) == 2

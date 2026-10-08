@@ -46,6 +46,10 @@ terminal parser. Completion, interruption, failure, or primary disconnect clears
 indicator and restores tmux's 15-second idle status interval. Child-thread activity
 does not change the main thread's indicator.
 
+The terminal window title mirrors this cycle as `Rodex: NAME | Working...` and
+returns to `Rodex: NAME` when idle. It uses the same working state and tmux refresh,
+with no additional Rodex animation timer.
+
 During an active main turn, Rodex also requests a native Codex redraw every three
 seconds through its ordinary resize signal, preserving the actual terminal size and
 composer input. This advances Codex's `Working (… • esc to interrupt)` elapsed counter

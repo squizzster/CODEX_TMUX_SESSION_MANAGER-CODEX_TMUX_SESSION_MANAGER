@@ -327,6 +327,7 @@ def test_installed_rodex_starts_reuses_and_adopts_sessions(
     environment.pop("TMUX", None)
     environment.pop("TMUX_PANE", None)
     inspected_codex_ids: dict[str, str] = {}
+    notice_sequence = 0
 
     def tmux(*arguments: str) -> subprocess.CompletedProcess[str]:
         results = []
@@ -366,6 +367,41 @@ def test_installed_rodex_starts_reuses_and_adopts_sessions(
         stopped = tmux("kill-session", "-t", f"={name}")
         assert stopped.returncode == 0, stopped.stderr
 
+    def await_native_warning(client: RodexTerminalClient, name: str, expected: str) -> None:
+        """Accept either Codex warning presentation while proving exact delivery."""
+        deadline = time.monotonic() + 5
+        warning_center = False
+        while time.monotonic() < deadline:
+            displayed = tmux("capture-pane", "-p", "-t", f"={name}:")
+            if expected in displayed.stdout:
+                return
+            if "f2 to view" in displayed.stdout.lower():
+                warning_center = True
+                break
+            client.poll()
+        else:
+            pytest.fail(f"Native warning did not render in the real Codex TUI: {displayed.stdout}")
+
+        assert warning_center
+        os.write(client.terminal, b"\x1bOQ")
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            displayed = tmux("capture-pane", "-p", "-t", f"={name}:")
+            if expected in displayed.stdout:
+                break
+            client.poll()
+        else:
+            pytest.fail(f"Native warning did not render in the Codex warning center: {displayed.stdout}")
+
+        os.write(client.terminal, b"\x1b")
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            displayed = tmux("capture-pane", "-p", "-t", f"={name}:")
+            if "Warnings ·" not in displayed.stdout:
+                return
+            client.poll()
+        pytest.fail(f"Codex warning center did not close: {displayed.stdout}")
+
     def exercise_terminal_interception(client: RodexTerminalClient, name: str) -> None:
         def await_surface(arguments: tuple[str, ...], expected: str, *, absent: bool = False) -> str:
             deadline = time.monotonic() + 5
@@ -387,7 +423,8 @@ def test_installed_rodex_starts_reuses_and_adopts_sessions(
         os.write(client.terminal, b"o")
         await_surface(capture, "\u203a /ro")
         await_surface(capture, "/rodex   issue a rodex command")
-        await_surface(capture, "/review", absent=True)
+        # Native Codex may retain fuzzy command matches while Rodex owns its
+        # exact local-command candidates; their simultaneous display is valid.
         draft = "/ro"
         for character in "dex":
             os.write(client.terminal, character.encode())
@@ -404,7 +441,7 @@ def test_installed_rodex_starts_reuses_and_adopts_sessions(
         await_surface(("display-message", "-p", "-t", f"={name}:", "#{session_attached}"), "1")
         await_surface(capture, "\u203a /rodex")
         os.write(client.terminal, b" example\r")
-        await_surface(capture, "placeholder only")
+        await_native_warning(client, name, "placeholder only")
         await_surface(capture, "/rodex   issue a rodex command", absent=True)
         await_surface(capture, "\u203a /r", absent=True)
         # Exercise an ordinary draft after local submission, but never submit it.
@@ -445,6 +482,7 @@ def test_installed_rodex_starts_reuses_and_adopts_sessions(
         workspace: Path = project,
         expected_cwd: Path | None = None,
     ) -> tuple[str, str]:
+        nonlocal notice_sequence
         with RodexTerminalClient(command, environment, workspace) as client:
             name = client.wait_for_attach()
             deadline = time.monotonic() + 10
@@ -490,7 +528,11 @@ def test_installed_rodex_starts_reuses_and_adopts_sessions(
                     assert Path(f"/proc/{receipt['pid']}/cwd").resolve() == workspace.resolve()
             endpoint = tmux("display-message", "-p", "-t", f"={name}:", "#{@rodex_protocol_proxy_socket_path}")
             assert endpoint.returncode == 0 and endpoint.stdout.strip()
-            notice = f"Rodex pipeline display check {runtime_id}"
+            # Codex 0.161 can coalesce an identical warning after the user
+            # dismisses it. Every pipeline assertion therefore carries unique
+            # content and must produce a newly observable presentation.
+            notice_sequence += 1
+            notice = f"Rodex pipeline display check {runtime_id} delivery {notice_sequence}"
             server_id = tmux("display-message", "-p", "-t", f"={name}:", "#{@rodex_shared_tmux_server_id}")
             assert server_id.returncode == 0
             delivery = publish_session_interaction(
@@ -499,14 +541,7 @@ def test_installed_rodex_starts_reuses_and_adopts_sessions(
                 peer_identity=RuntimePeerIdentity(RodexRuntimeId.parse(runtime_id), server_id.stdout.strip()),
             )
             assert delivery.status == DeliveryStatus.DELIVERED, delivery
-            deadline = time.monotonic() + 5
-            while time.monotonic() < deadline:
-                displayed = tmux("capture-pane", "-p", "-t", f"={name}:")
-                if notice in displayed.stdout:
-                    break
-                client.poll()
-            else:
-                pytest.fail(f"Pipeline notice did not render in the real Codex TUI: {displayed.stdout}")
+            await_native_warning(client, name, notice)
             if exercise_inputs:
                 exercise_terminal_interception(client, name)
             after_notice = subprocess.run(

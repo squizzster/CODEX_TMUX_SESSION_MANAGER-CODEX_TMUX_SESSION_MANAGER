@@ -235,8 +235,10 @@ content.
 The proxy forwards ordinary protocol frames unchanged in both directions, counts unique
 tool starts, and fans structured TUI events to bounded live subscribers. Its sole
 Rodex-local exception is the update-notice endpoint: a notice becomes a downstream-only
-native warning on the subscribed primary TUI and therefore a TUI-owned scrollback line
-that survives redraw. For the status bar, the exact primary `thread/started` rollout path
+native warning on the subscribed primary TUI. Codex owns its presentation: current
+versions may render the warning inline or collapse it behind the TUI's F2 warning center;
+either route survives ordinary redraw without becoming thread content. For the status bar,
+the exact primary `thread/started` rollout path
 also supplies appended token snapshots between the App Server's turn-boundary usage
 notifications; the shared coordinator preserves compaction-animation priority. The
 follower checks cheap metadata before its bounded boundary hash, backs idle waits off
@@ -344,6 +346,10 @@ work for a later event instead of polling or looping. Rodex owns scheduling,
 authenticated rollout provenance, bounded recovery, health, and persistence.
 Response-item turn scope comes from Codex's nested passthrough metadata, keeping a
 collaboration function call and its `SubAgentActivity` on one canonical parent turn.
+The authenticated `SubAgentActivity(kind=started)` event binds its child thread to that
+exact parent turn. An already committed lineage edge is the restart fallback, while
+first-linked timestamps are used only for legacy histories that contain neither exact
+fact; contradictory exact facts fail closed instead of guessing.
 Publication-sequence races reload SQL/cursors; deterministic semantic conflicts publish
 degraded health and park by authenticated source fingerprint.
 

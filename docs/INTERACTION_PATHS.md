@@ -24,7 +24,7 @@ display-only convenience function using this transport, not a second delivery pa
 
 | Target | Display | Model input | Pane operations |
 |---|---|---|---|
-| `main` | Native Codex warning/scrollback | Registered, currently displayed thread; idle-only start | Locate, focus, resize |
+| `main` | Native Codex warning, inline or in its F2 warning center | Registered, currently displayed thread; idle-only start | Locate, focus, resize |
 | `agent-observer` | Observer text | Rejected: multi-agent view has no single thread binding | Open/reuse, locate, focus, resize, close |
 | Registered model target | No independent display | Exact coordinator start, steer or interrupt | None |
 | Per-connection protocol target | Input/output frames | Native RPC intent preserved | None |

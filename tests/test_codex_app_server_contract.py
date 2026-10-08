@@ -104,6 +104,77 @@ def test_checked_in_contract_is_generated_from_the_minimum_supported_cli(
     assert checked_in == _characterize_schema(schema_root)
 
 
+@pytest.mark.evolutionary_regression
+def test_installed_newer_cli_preserves_the_characterized_forward_contract(
+    tmp_path: Path,
+) -> None:
+    """A newer installed Codex must not silently outrun Rodex's consumed schema."""
+    codex = shutil.which("codex")
+    if codex is None:
+        pytest.skip("Codex CLI is not installed")
+    version_output = subprocess.run(
+        [codex, "--version"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    prefix = "codex-cli "
+    if not version_output.startswith(prefix):
+        pytest.skip(f"installed CLI has no stable release: {version_output}")
+    version = version_output.removeprefix(prefix)
+    try:
+        installed_release = tuple(int(part) for part in version.split("."))
+        minimum_release = tuple(int(part) for part in CODEX_APP_SERVER.minimum_version.split("."))
+    except ValueError:
+        pytest.skip(f"installed CLI has no stable release: {version_output}")
+    if len(installed_release) != 3 or installed_release <= minimum_release:
+        pytest.skip(f"installed CLI is not newer than the fixture baseline: {version_output}")
+
+    schema_root = tmp_path / "schema"
+    subprocess.run(
+        [
+            codex,
+            "app-server",
+            "generate-json-schema",
+            "--experimental",
+            "--out",
+            str(schema_root),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    fixture_path = Path(__file__).parent / "fixtures" / "codex_app_server_0_151_contract.json"
+    expected = json.loads(fixture_path.read_text(encoding="utf-8"))
+    actual = _characterize_schema(schema_root)
+    actual["codex_cli_version"] = CODEX_APP_SERVER.minimum_version
+    assert actual == expected
+
+    item_completed = _load_schema(schema_root, "v2/ItemCompletedNotification.json")
+    definitions = item_completed["definitions"]
+    thread_items = {option["title"]: option for option in definitions["ThreadItem"]["oneOf"]}
+    collaboration = thread_items["CollabAgentToolCallThreadItem"]
+    activity = thread_items["SubAgentActivityThreadItem"]
+    assert collaboration["properties"]["type"]["enum"] == ["collabAgentToolCall"]
+    assert {
+        "id",
+        "receiverThreadIds",
+        "senderThreadId",
+        "status",
+        "tool",
+        "type",
+    }.issubset(collaboration["required"])
+    assert {"spawnAgent", "followupTask", "sendMessage"}.issubset(definitions["CollabAgentTool"]["enum"])
+    assert activity["properties"]["type"]["enum"] == ["subAgentActivity"]
+    assert {"agentPath", "agentThreadId", "id", "kind", "type"} == set(activity["required"])
+    assert definitions["SubAgentActivityKind"]["enum"] == [
+        "started",
+        "interacted",
+        "interrupted",
+        "completed",
+    ]
+
+
 def test_live_initialize_metadata_accepts_the_minimum_and_newer_stable_versions() -> None:
     assert CODEX_APP_SERVER.require_minimum_version({"userAgent": "rodex-control/0.151.0 (Linux; x86_64)"}) == "0.151.0"
     assert CODEX_APP_SERVER.require_minimum_version({"userAgent": "rodex-control/0.151.1 (Linux; x86_64)"}) == "0.151.1"

@@ -70,7 +70,7 @@ print(json.dumps(dict(identity=RODEX_IMPLEMENTATION_ID, daemon=RODEX_DAEMON_PROT
 def test_current_resume_upgrades_one_idle_retained_runtime_and_preserves_its_daemon_peers(
     tmp_path, development_installation, request
 ):
-    """Actual old interpreter → old daemon stop → same Codex thread on new daemon."""
+    """Busy retained attachment preserves work; idle upgrade preserves the thread."""
     from rodex_registry import lookup_owned_rodex_sessions_id_from_a_cool_name, lookup_rodex_runtime_registration
     from rodex_sql import RODEX_DATABASE_FILENAME
 
@@ -126,13 +126,14 @@ def test_current_resume_upgrades_one_idle_retained_runtime_and_preserves_its_dae
         environment.pop("TMUX", None)
         environment.pop("TMUX_PANE", None)
 
-        def run_cli(interpreter, *arguments):
+        def run_cli(interpreter, *arguments, input_text=None):
             return subprocess.run(
                 [str(interpreter), "-I", "-c", "from rodex import main; main()", *arguments],
                 env=environment,
                 cwd=PROJECT,
                 capture_output=True,
                 text=True,
+                input=input_text,
                 timeout=50,
             )
 
@@ -162,6 +163,39 @@ def test_current_resume_upgrades_one_idle_retained_runtime_and_preserves_its_dae
             old_other = inspect(old_python, other["rodex_session_name"])
             before = child_receipts(old_python.parents[2].name)
             assert len(before) == 4  # One App Server and TUI per session, one shared daemon.
+
+            name = selected["rodex_session_name"]
+            started = run_cli(
+                old_python,
+                "_start",
+                name,
+                "--stdin",
+                "--json",
+                input_text="Run sleep 15 in the shell, wait for it to finish, then reply Done. Do not edit any files.",
+            )
+            assert started.returncode == 0, started.stdout + started.stderr
+            turn_id = json.loads(started.stdout)["codex"]["turn_id"]
+            assert inspect(old_python, name)["data"]["thread"]["active_turn_id"] == turn_id
+            refused = run_cli(new_python, name)
+            assert refused.returncode == 1, refused.stdout + refused.stderr
+            assert "Upgrading would interrupt its work" in refused.stderr
+            assert f"rodex {name} --force-old" in refused.stderr
+            assert child_receipts(old_python.parents[2].name) == before
+
+            old_command = [str(new_python), "-I", "-c", "from rodex import main; main()", name, "--force-old"]
+            with RodexTerminalClient(old_command, environment, PROJECT) as client:
+                assert client.wait_for_attach() == name
+                still_working = inspect(old_python, name)
+                assert still_working["runtime"] == old_selected["runtime"]
+                assert still_working["codex"]["turn_id"] == turn_id
+                assert still_working["data"]["thread"]["status"] == "active"
+                assert child_receipts(old_python.parents[2].name) == before
+                assert not (runtime_root / f"{new_python.parents[2].name}.sock").exists()
+                client.detach()
+            finished = run_cli(old_python, "_wait", name, "--turn", turn_id, "--timeout", "40s", "--json")
+            assert finished.returncode == 0, finished.stdout + finished.stderr
+            assert inspect(old_python, name)["data"]["thread"]["status"] == "idle"
+            assert child_receipts(old_python.parents[2].name) == before
 
             command = [str(new_python), "-I", "-c", "from rodex import main; main()", selected["rodex_session_name"]]
             with RodexTerminalClient(command, environment, PROJECT) as client:

@@ -35,7 +35,17 @@ process-receipt-v3. The parent retains the session transition lock throughout.
 The adapter rechecks durable/full tmux identity and whole-runtime topology, inspects
 the exact thread, verifies saved history and both live child receipts, then rechecks
 idle immediately before stopping only that reservation. A busy thread reports on
-stderr that the caller must wait and retry; it is not interrupted or waited on.
+stderr why upgrading would interrupt it, plus commands to retry when idle or
+reconnect with `--force-old`; it is not interrupted or waited on.
+
+For a recognized owned selector, `--force-old` skips the upgrade and attaches
+through that same retained interpreter. The parent releases its transition lock
+before interactive attachment; the adapter revalidates the durable registration,
+full tmux capability, and coordinator, then calls the owning launcher's guarded
+attach. It inherits terminal input/output and has no upgrade timeout. This path
+does not stop, restart, or send model-control input, and does not replace helpers
+or ownership markers. An ended runtime is refused rather than recreated. Unmatched
+selectors and other Codex syntax keep the original arguments, including the flag.
 
 The old daemon must report `terminal`, and the old tmux session must exit, before
 the current launcher resumes the exact Codex UUID on a new daemon runtime/server.

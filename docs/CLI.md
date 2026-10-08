@@ -22,6 +22,7 @@ rodex 'Review this project'
 rodex -- 'resume'
 rodex SESSION
 rodex resume SESSION
+rodex SESSION --force-old
 rodex _detach SESSION
 ```
 
@@ -31,6 +32,9 @@ rodex _detach SESSION
 - A matching permanent name, alias, or linked Codex UUID opens the same Rodex session.
   An unresolved ordinary bare token becomes a prompt; unmatched explicit
   `resume SELECTOR` is delegated unchanged to Codex.
+  `--force-old` is consumed only for a recognized owned selector (bare or explicit
+  `resume`); otherwise the original invocation passes unchanged to Codex. Native
+  commands, option values, and literal prompts after `--` retain their meaning.
 - An unregistered canonical Codex UUID is checked through a transient App Server.
   A persisted, non-ephemeral thread can be adopted into a new Rodex session. An exact
   missing-thread result makes the UUID text a prompt; other errors are not absence.
@@ -52,7 +56,17 @@ current working directory, not a permanently pinned original workspace.
 After an implementation update, opening a supported retained live session upgrades
 only that session: the old installation verifies an idle thread and saved history,
 stops its exact reservation, then the current daemon resumes the same thread with
-its existing cwd and name. Busy turns fail on stderr: wait until idle and retry.
+its existing cwd and name. Busy turns fail on stderr with commands to retry once
+idle or reconnect without upgrading:
+
+```bash
+rodex SESSION --force-old
+rodex resume SESSION --force-old
+```
+
+This attaches through the session's retained Rodex installation while its work
+continues, including a busy turn. It also skips upgrading an idle live runtime.
+It never restarts an ended runtime; use the normal selector to resume one.
 Other sessions remain on the old daemon. Upgrade never substitutes a fresh Codex
 thread for missing history. [Retained-runtime handoff](RUNTIME_ISOLATION.md#retained-runtime-upgrade)
 defines supported ownership and compatibility.

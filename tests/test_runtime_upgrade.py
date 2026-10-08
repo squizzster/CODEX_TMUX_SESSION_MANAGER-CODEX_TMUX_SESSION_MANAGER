@@ -149,6 +149,9 @@ def admitted_handoff(tmp_path, monkeypatch, selected, retained):
         live=True,
         stop_states=["stopping", "terminal"],
         reads=0,
+        attached=[],
+        attach_outcome="detach",
+        coordinator=request["coordinator_command"],
     )
 
     class Launcher:
@@ -159,7 +162,7 @@ def admitted_handoff(tmp_path, monkeypatch, selected, retained):
             return control
 
         def _read_tmux_server_option(self, *_args, **_kwargs):
-            return request["coordinator_command"]
+            return observed.coordinator
 
         def _tmux(self, *_args):
             return TmuxCommandResult(0, observed.ownership)
@@ -169,6 +172,10 @@ def admitted_handoff(tmp_path, monkeypatch, selected, retained):
 
         def session_exists(self, _runtime):
             return observed.live
+
+        def attach(self, runtime):
+            observed.attached.append(runtime)
+            return observed.attach_outcome
 
     class Client:
         def inspect_live(self, _control):
@@ -209,6 +216,7 @@ def admitted_handoff(tmp_path, monkeypatch, selected, retained):
     monkeypatch.setattr(handoff, "RuntimeProcessReceipts", Receipts)
     monkeypatch.setattr(handoff, "RodexDaemonClient", Daemon)
     monkeypatch.setattr(handoff, "lookup_rodex_registry_id", lambda _path: selected.registry_id)
+    monkeypatch.setattr(handoff, "lookup_rodex_session_names", lambda *_args: SimpleNamespace(display_name="worker"))
     monkeypatch.setattr(
         handoff,
         "lookup_rodex_runtime_registration",
@@ -241,9 +249,69 @@ def test_idle_handoff_waits_for_exact_terminal_shutdown(admitted_handoff):
 def test_busy_turn_is_refused_without_stopping(admitted_handoff, which_check):
     request, observed, state = admitted_handoff
     observed.states[which_check] = replace(state, status="active", active_turn_id="turn-1")
-    with pytest.raises(RuntimeError, match="wait until its turn is idle and retry resume"):
+    with pytest.raises(RuntimeError) as raised:
         handoff.stop_selected_idle_runtime(request)
+    assert str(raised.value) == (
+        "Session 'worker' is still working on an older Rodex version.\n"
+        "Upgrading would interrupt its work. Wait until it is idle, then run: rodex worker\n"
+        "Reconnect without upgrading: rodex worker --force-old"
+    )
     assert observed.stops == []
+
+
+@pytest.mark.parametrize("outcome", ["detach", "exited"])
+def test_retained_attachment_keeps_busy_runtime_unchanged(admitted_handoff, outcome):
+    request, observed, state = admitted_handoff
+    observed.states = [replace(state, status="active", active_turn_id="multi-hour-turn")]
+    observed.attach_outcome = outcome
+    # Attachment needs neither saved history nor authority to destroy the server.
+    observed.persisted = False
+    observed.ownership = "0"
+    assert handoff.attach_selected_runtime(request) == outcome
+    assert len(observed.attached) == 1
+    assert str(observed.attached[0].runtime_id) == request["capability"]["runtime_id"]
+    assert observed.reads == 0
+    assert observed.stops == []
+    assert observed.live
+
+
+@pytest.mark.parametrize("change", ["catalog", "incarnation", "coordinator", "implementation"])
+def test_retained_attachment_rejects_changed_ownership_without_touching_work(admitted_handoff, monkeypatch, change):
+    request, observed, _state = admitted_handoff
+    if change == "catalog":
+        monkeypatch.setattr(handoff, "lookup_rodex_registry_id", lambda _path: None)
+    elif change == "incarnation":
+        monkeypatch.setattr(handoff, "lookup_rodex_runtime_registration", lambda *_args: None)
+    elif change == "coordinator":
+        request["coordinator_command"] = "changed"
+    else:
+        request["implementation"] = "c" * 64
+    with pytest.raises(RuntimeError):
+        handoff.attach_selected_runtime(request)
+    assert observed.attached == observed.stops == []
+
+
+@pytest.mark.parametrize("code, outcome", [(0, "detach"), (2, "exited"), (1, None)])
+def test_interactive_retained_helper_inherits_tty_and_has_no_upgrade_timeout(selected, retained, tmp_path, code, outcome):
+    calls = []
+
+    def runner(command, **options):
+        calls.append((command, options))
+        return subprocess.CompletedProcess(command, code)
+
+    upgrade = RetainedRuntimeUpgrade(
+        retained, selected, "worker", hook(retained, selected), "codex", "/usr/bin/tmux", {"TMUX": "outer"}, runner
+    )
+    if outcome is None:
+        with pytest.raises(RodexLaunchError, match="runtime was left running"):
+            upgrade.attach(tmp_path / "catalog.sqlite3")
+    else:
+        assert upgrade.attach(tmp_path / "catalog.sqlite3") == outcome
+    command, options = calls[0]
+    assert command[:2] == [str(retained), "-I"]
+    assert command[3] == "--attach"
+    assert json.loads(command[4])["capability"]["runtime_id"] == str(selected.runtime_id)
+    assert options == {"check": False, "env": {}}
 
 
 @pytest.mark.parametrize("reason", ["history", "foreign-pane", "receipt", "process", "incarnation"])

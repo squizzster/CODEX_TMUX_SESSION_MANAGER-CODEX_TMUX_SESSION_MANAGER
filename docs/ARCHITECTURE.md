@@ -26,6 +26,8 @@ caller → retained installation → CLI → implementation-scoped daemon
   [`RetainedRuntimeUpgrade`](../src/rodex/runtime_upgrade.py) delegates a selected
   older idle runtime's shutdown to its owning interpreter, then returns to ordinary
   exact-thread resume and CAS registration on the current implementation.
+  A recognized selector with `--force-old` instead delegates guarded attachment
+  through that interpreter and leaves its runtime running unchanged.
 - [`ExactTurnMutationCoordinator`](../src/rodex/exact_turn_mutation.py) owns start,
   steer, interrupt, mouse, and alias transitions. It resolves, locks, re-resolves,
   then revalidates immediately before mutation. Transport is not a public unfenced

@@ -4544,7 +4544,11 @@ def test_busy_upgrade_reports_stderr_and_never_replaces_the_runtime(tmp_path, mo
     launcher = StubLauncher(tmp_path)
 
     def stop(_database):
-        raise RodexLaunchError("session 'automatic-beluga' is active; wait until its turn is idle and retry resume")
+        raise RodexLaunchError(
+            "Session 'automatic-beluga' is still working on an older Rodex version.\n"
+            "Upgrading would interrupt its work. Wait until it is idle, then run: rodex automatic-beluga\n"
+            "Reconnect without upgrading: rodex automatic-beluga --force-old"
+        )
 
     monkeypatch.setattr(launcher, "prepare_runtime_upgrade", lambda _runtime: SimpleNamespace(stop=stop))
     monkeypatch.setattr(cli_module, "run", lambda: run(["automatic-beluga"], database_path=database, launcher=launcher))
@@ -4553,8 +4557,76 @@ def test_busy_upgrade_reports_stderr_and_never_replaces_the_runtime(tmp_path, mo
     assert raised.value.code == 1
     output = capsys.readouterr()
     assert output.out == ""
-    assert "wait until its turn is idle and retry resume" in output.err
+    assert "Upgrading would interrupt its work" in output.err
+    assert "rodex automatic-beluga --force-old" in output.err
     assert launcher.started == launcher.stopped == launcher.reconciled == launcher.attached == []
+    assert lookup_rodex_runtime_registration(1, database).runtime_id == RUNTIME_ID
+
+
+@pytest.mark.parametrize("selector", ["automatic-beluga", str(CODEX_SESSION_ID)])
+@pytest.mark.parametrize("prefix", [[], ["resume"]])
+def test_force_old_attaches_unchanged_after_releasing_session_lock_without_codex_preflight(
+    tmp_path, monkeypatch, selector, prefix
+):
+    database = tmp_path / "rodex.sqlite3"
+    monkeypatch.setattr("cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga")
+    monkeypatch.setattr(
+        "rodex.cli.shutil.which", lambda binary: None if binary == "codex" else available_prerequisite(binary)
+    )
+    create_exact_controlled_session(database, tmp_path)
+    launcher = StubLauncher(tmp_path)
+    lock_held = False
+    real_lock = managed_lifecycle_module.session_transition_lock
+    attachments = []
+
+    @contextmanager
+    def track_lock(*arguments):
+        nonlocal lock_held
+        with real_lock(*arguments):
+            lock_held = True
+            try:
+                yield
+            finally:
+                lock_held = False
+
+    def attach(old_database):
+        assert not lock_held
+        assert old_database == database
+        assert lookup_rodex_runtime_registration(1, database).runtime_id == RUNTIME_ID
+        attachments.append(RUNTIME_ID)
+        return "detach"
+
+    monkeypatch.setattr(managed_lifecycle_module, "session_transition_lock", track_lock)
+    monkeypatch.setattr(launcher, "prepare_runtime_upgrade", lambda _runtime: SimpleNamespace(attach=attach))
+    assert run([*prefix, selector, "--force-old"], database_path=database, launcher=launcher) == 0
+    assert attachments == [RUNTIME_ID]
+    assert launcher.started == launcher.stopped == launcher.reconciled == launcher.attached == launcher.configured == []
+    assert lookup_rodex_runtime_registration(1, database).runtime_id == RUNTIME_ID
+    assert lookup_codex_session_id_from_a_rodex_sessions_id(1, database) == CODEX_SESSION_ID
+
+
+def test_force_old_on_current_version_uses_normal_attach_without_restarting(tmp_path, monkeypatch):
+    database = tmp_path / "rodex.sqlite3"
+    monkeypatch.setattr("cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga")
+    monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
+    create_exact_controlled_session(database, tmp_path)
+    launcher = StubLauncher(tmp_path)
+    assert run(["automatic-beluga", "--force-old"], database_path=database, launcher=launcher) == 0
+    assert len(launcher.attached) == 1
+    assert launcher.started == launcher.stopped == []
+    assert lookup_rodex_runtime_registration(1, database).runtime_id == RUNTIME_ID
+
+
+def test_force_old_never_recreates_a_runtime_that_has_exited(tmp_path, monkeypatch):
+    database = tmp_path / "rodex.sqlite3"
+    monkeypatch.setattr("cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga")
+    monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
+    create_exact_controlled_session(database, tmp_path)
+    launcher = StubLauncher(tmp_path)
+    launcher.live = False
+    with pytest.raises(RodexLaunchError, match="no longer running"):
+        run(["automatic-beluga", "--force-old"], database_path=database, launcher=launcher)
+    assert launcher.started == launcher.stopped == launcher.attached == []
     assert lookup_rodex_runtime_registration(1, database).runtime_id == RUNTIME_ID
 
 

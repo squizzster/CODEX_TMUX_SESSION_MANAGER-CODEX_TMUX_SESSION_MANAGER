@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from enum import StrEnum
+from functools import partial
 from pathlib import Path
 
 from cool_name import (
@@ -64,6 +65,7 @@ class OwnedSessionSelection:
 
     supplied_selector: str
     rodex_sessions_id: int
+    force_old: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,6 +101,7 @@ class _PreparedSelectedSession:
     session_id: int
     display_name: str
     active_tmux: LiveTmuxSession
+    retained_attach: Callable[[], str] | None = None
 
 
 class ManagedSessionLifecycle:
@@ -336,6 +339,7 @@ def _open_selected_session(
             launcher,
             codex_available=codex_available,
             configured_codex=configured_codex,
+            force_old=selection.force_old,
         )
     if detach:
         _print_existing_detached_runtime(
@@ -344,7 +348,9 @@ def _open_selected_session(
             database_path,
         )
         return
-    _attach_managed_session(launcher, prepared.active_tmux, prepared.display_name)
+    _attach_managed_session(
+        launcher, prepared.active_tmux, prepared.display_name, retained_attach=prepared.retained_attach
+    )
 
 
 def _prepare_selected_session(
@@ -355,6 +361,7 @@ def _prepare_selected_session(
     *,
     codex_available: bool,
     configured_codex: str,
+    force_old: bool = False,
 ) -> _PreparedSelectedSession:
     """Resolve or resume one identity while its cross-process transition is locked."""
     names = lookup_rodex_session_names(session_id, database_path)
@@ -439,6 +446,9 @@ def _prepare_selected_session(
     upgrade_workspace: Path | None = None
     if active_tmux is not None:
         upgrade = launcher.prepare_runtime_upgrade(active_tmux)
+        if upgrade is not None and force_old:
+            record_a_rodex_session_access(session_id, database_path)
+            return _PreparedSelectedSession(session_id, display_name, active_tmux, partial(upgrade.attach, database_path))
         if upgrade is None:
             active_tmux = _prepare_existing_tmux_identity(
                 launcher,
@@ -452,6 +462,9 @@ def _prepare_selected_session(
         if not codex_available:
             raise RodexExecutableNotFoundError(f"Codex executable was not found: {configured_codex}")
         upgrade_workspace = upgrade.stop(database_path)
+
+    if force_old:
+        raise RodexLaunchError(f"session {display_name!r} is no longer running; use rodex {display_name} to resume it")
 
     if not codex_available:
         raise RodexExecutableNotFoundError(f"Codex executable was not found: {configured_codex}")
@@ -540,11 +553,13 @@ def _attach_managed_session(
     launcher: RodexRuntimeLauncher,
     runtime: LiveTmuxSession,
     display_name: str,
+    *,
+    retained_attach: Callable[[], str] | None = None,
 ) -> None:
     """Present one stable human lifecycle around every managed attachment."""
     with rodex_session_process_title(display_name):
         print(rodex_session_message("attach", display_name), flush=True)
-        outcome = launcher.attach(runtime)
+        outcome = launcher.attach(runtime) if retained_attach is None else RodexAttachmentOutcome(retained_attach())
         if not isinstance(outcome, RodexAttachmentOutcome):
             raise RodexRuntimeError("tmux attachment returned an invalid lifecycle outcome")
         print(rodex_session_message(outcome.value, display_name), flush=True)

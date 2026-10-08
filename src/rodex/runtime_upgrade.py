@@ -1,8 +1,8 @@
 """Selected-runtime upgrades through an authenticated retained installation.
 
 The current launcher never speaks an older runtime's control/daemon protocol.
-A bounded helper runs with the old interpreter, stops only its exact idle
-reservation, and returns the working directory for the ordinary current resume.
+A helper runs with the old interpreter to attach unchanged, or stops only its
+exact idle reservation for the ordinary current resume.
 """
 
 from __future__ import annotations
@@ -74,7 +74,7 @@ def retained_coordinator_interpreter(
 
 @dataclass(frozen=True, slots=True)
 class RetainedRuntimeUpgrade:
-    """One old installation and exact registered incarnation to stop for resume."""
+    """One authenticated retained incarnation for attachment or idle upgrade."""
 
     interpreter: Path
     capability: TmuxSessionCapability
@@ -85,8 +85,7 @@ class RetainedRuntimeUpgrade:
     environment: dict[str, str]
     _runner: SyncTmuxRunner = subprocess.run
 
-    def stop(self, database_path: Path) -> Path:
-        """Require idle and final old-daemon shutdown before allowing replacement."""
+    def _request(self, database_path: Path) -> dict:
         capability = {
             field.name: (
                 self.capability.internal_session_id
@@ -95,7 +94,7 @@ class RetainedRuntimeUpgrade:
             )
             for field in fields(self.capability)
         }
-        request = {
+        return {
             "protocol": UPGRADE_PROTOCOL,
             "implementation": self.interpreter.parents[2].name,
             "capability": capability,
@@ -105,6 +104,34 @@ class RetainedRuntimeUpgrade:
             "codex_binary": self.codex_binary,
             "tmux_binary": self.tmux_binary,
         }
+
+    def attach(self, database_path: Path) -> str:
+        """Use the owning implementation's attach path, with the caller's TTY."""
+        environment = dict(self.environment)
+        environment.pop("TMUX", None)
+        try:
+            result = self._runner(
+                [
+                    str(self.interpreter),
+                    "-I",
+                    str(Path(__file__).with_name("retained_runtime_handoff.py")),
+                    "--attach",
+                    json.dumps(self._request(database_path)),
+                ],
+                check=False,
+                env=environment,
+            )
+        except (OSError, subprocess.SubprocessError) as error:
+            raise RodexLaunchError(f"could not reconnect through the retained Rodex installation: {error}") from error
+        if result.returncode not in (0, 2):
+            raise RodexLaunchError(
+                "could not reconnect through the retained Rodex installation; runtime was left running"
+            )
+        return "detach" if result.returncode == 0 else "exited"
+
+    def stop(self, database_path: Path) -> Path:
+        """Require idle and final old-daemon shutdown before allowing replacement."""
+        request = self._request(database_path)
         try:
             result = self._runner(
                 [str(self.interpreter), "-I", str(Path(__file__).with_name("retained_runtime_handoff.py"))],

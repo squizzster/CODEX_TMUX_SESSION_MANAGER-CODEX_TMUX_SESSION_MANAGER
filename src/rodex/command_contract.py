@@ -33,6 +33,7 @@ AGENTS_COMMAND: Final = "_agents"
 TRACE_COMMAND: Final = "_trace"
 MOUSE_COMMAND: Final = "_mouse"
 FORCE_FLAG: Final = "--force"
+FORCE_OLD_FLAG: Final = "--force-old"
 
 
 class CommandRoute(StrEnum):
@@ -209,6 +210,7 @@ def _help_text() -> str:
             "to attach, resume, recover, or adopt it.",
             "'resume SESSION' uses the same selector pipeline for a Rodex name, alias, or Codex UUID.",
             "An unmatched 'resume SESSION' passes unchanged to Codex.",
+            "Add '--force-old' to a recognized Rodex selector to attach without upgrading its running runtime.",
             "A sole unmatched token, current interactive options, or an optional prompt starts a managed session.",
             "Use '--' before one token to force prompt meaning without selector or subcommand interpretation.",
             f"Other Codex {CODEX_CLI_0_151_0.characterized_release} subcommand forms and "

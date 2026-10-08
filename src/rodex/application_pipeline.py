@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from pathlib import Path
 from typing import Final, Protocol
@@ -20,6 +20,7 @@ from rodex_sql import RODEX_DATABASE_FILENAME, RODEX_DATABASE_SCHEMA_GENERATION
 from .agent_trace_commands import execute_agent_trace_command
 from .command_contract import (
     CREATE_COMMAND,
+    FORCE_OLD_FLAG,
     HELP_COMMAND,
     HELP_TEXT,
     VERSION_COMMAND,
@@ -33,6 +34,7 @@ from .errors import RodexExecutableNotFoundError, RodexLaunchError
 from .implementation_identity import RODEX_IMPLEMENTATION_ID
 from .machine_commands import execute_machine_command, print_machine_error
 from .managed_session_lifecycle import (
+    OwnedSessionSelection,
     SelectorExecution,
     SessionSelection,
     UnregisteredCodexSessionSelection,
@@ -118,6 +120,7 @@ class RodexInvocation:
     preparation: PipelinePreparation
     classification: ClassifiedRodexCommand | None = None
     codex_invocation: CodexCliInvocation | None = None
+    force_old: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -153,6 +156,20 @@ def select_rodex_invocation(
             ROUTE_PREPARATIONS[route],
             classification,
         )
+    # Treat the Rodex-only flag as provisional until catalog lookup recognizes
+    # an owned selector. All other syntax and unmatched selectors reach Codex
+    # with their original arguments, including the flag.
+    if normalized.count(FORCE_OLD_FLAG) == 1 and "--" not in normalized:
+        selector_arguments = tuple(token for token in normalized if token != FORCE_OLD_FLAG)
+        candidate = codex_cli_contract.classify(selector_arguments)
+        if candidate.selector_candidate is not None:
+            return RodexInvocation(
+                normalized,
+                CommandRoute.SELECTOR,
+                PipelinePreparation.SELECTOR,
+                codex_invocation=candidate,
+                force_old=True,
+            )
     codex_invocation = codex_cli_contract.classify(normalized)
     if codex_invocation.route is CodexCliRoute.PASSTHROUGH:
         return RodexInvocation(
@@ -293,6 +310,19 @@ class UnifiedRodexApplicationPipeline:
             selector = invocation.codex_invocation.selector_candidate
             assert selector is not None
             selection = self._session_lifecycle.resolve_selector(selector, self._database_path)
+            if invocation.force_old:
+                if not isinstance(selection, OwnedSessionSelection):
+                    return PreparedRodexInvocation(
+                        replace(
+                            invocation,
+                            route=CommandRoute.CODEX,
+                            preparation=PipelinePreparation.DIRECT,
+                            codex_invocation=self._codex_cli_contract.classify(invocation.arguments),
+                            force_old=False,
+                        ),
+                        None,
+                    )
+                selection = replace(selection, force_old=True)
             if isinstance(selection, UnregisteredCodexSessionSelection) and not self._codex_session_is_persisted(
                 selection.codex_session_id
             ):

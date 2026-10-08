@@ -110,6 +110,68 @@ def test_every_declared_route_has_one_preparation_and_every_command_uses_it() ->
     assert exact_wait.preparation is PipelinePreparation.RUNTIME
 
 
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ["worker", "--force-old"],
+        ["--force-old", "worker"],
+        ["resume", "worker", "--force-old"],
+        ["resume", "--force-old", "worker"],
+        ["--force-old", "resume", "worker"],
+    ],
+)
+def test_force_old_is_consumed_only_after_an_owned_resume_is_recognized(tmp_path, arguments):
+    trace: list[object] = []
+    selection = OwnedSessionSelection("worker", 41)
+    assert _pipeline(tmp_path, trace, selected_session=selection).execute(arguments) == 0
+    assert trace[-1] == (
+        "selector",
+        OwnedSessionSelection("worker", 41, force_old=True),
+        tmp_path / "rodex.sqlite3",
+        "launcher",
+        True,
+        "codex",
+    )
+
+
+@pytest.mark.parametrize(
+    "selection",
+    [None, UnregisteredCodexSessionSelection("worker", parse_codex_session_id("01a081ed-0a6e-7a13-a3e9-062e70df918e"))],
+)
+@pytest.mark.parametrize("arguments", [["worker", "--force-old"], ["resume", "worker", "--force-old"]])
+def test_unmatched_force_old_invocation_passes_unchanged_without_runtime_or_history_probe(tmp_path, selection, arguments):
+    trace: list[object] = []
+    assert _pipeline(tmp_path, trace, selected_session=selection).execute(arguments) == 17
+    assert trace == [
+        ("selector_resolver", "worker", tmp_path / "rodex.sqlite3"),
+        ("resolve_executable", "codex"),
+        ("codex", "/bin/codex", tuple(arguments)),
+    ]
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ["exec", "--force-old", "worker"],
+        ["resume", "worker", "extra prompt", "--force-old"],
+        ["--model", "worker", "--force-old"],
+        ["--config", "--force-old", "worker"],
+        ["--image", "--force-old", "worker"],
+        ["worker", "--force-old", "--force-old"],
+        ["--force-old"],
+        ["--force-old=worker"],
+        ["--", "worker", "--force-old"],
+        ["worker --force-old"],
+    ],
+)
+def test_force_old_does_not_intercept_codex_commands_options_values_or_literal_prompts(arguments):
+    invocation = select_rodex_invocation(arguments)
+    assert not invocation.force_old
+    assert invocation.arguments == tuple(arguments)
+    assert invocation.codex_invocation is not None
+    assert invocation.codex_invocation.arguments == tuple(arguments)
+
+
 def _pipeline(
     tmp_path: Path,
     trace: list[object],

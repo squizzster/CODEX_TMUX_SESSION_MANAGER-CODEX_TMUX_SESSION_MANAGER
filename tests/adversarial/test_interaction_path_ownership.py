@@ -52,6 +52,7 @@ EFFECT_OWNERS = {
         "rodex/tmux_executor.py:AsyncTmuxExecutor.run:self._runner",
         "rodex/tmux_executor.py:SyncTmuxExecutor.run:self._runner",
         "rodex/runtime_upgrade.py:RetainedRuntimeUpgrade.stop:self._runner",
+        "rodex/runtime_upgrade.py:RetainedRuntimeUpgrade.attach:self._runner",
         "rodex/retained_runtime_handoff.py:main:print",
     },
     "interaction and observer transport adapters": {

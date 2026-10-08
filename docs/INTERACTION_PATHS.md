@@ -169,4 +169,9 @@ Selected-session upgrades use
 interpreter. Its result/error output is private to the current launcher; control
 inspection, exact reservation stop and tmux ownership checks use the existing old
 domain owners. Successful terminal shutdown returns to managed exact-thread resume.
+For a recognized owned selector, `--force-old` uses that adapter's interactive
+attachment branch after releasing the transition lock. It rechecks exact ownership
+and delegates to the old launcher's existing attach boundary with inherited TTY
+streams and no timeout; it performs no stop, restart, or model dispatch. Unrecognized
+invocations retain their Codex arguments.
 See [development](DEVELOPMENT.md#test-selection) for focused tests and live gates.

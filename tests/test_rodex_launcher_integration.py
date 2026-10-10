@@ -14,8 +14,6 @@ from pathlib import Path
 
 import pytest
 
-from rodex.process_receipts import PROCESS_RECEIPT_PATTERN
-
 PROJECT_ROOT = Path(__file__).parents[1]
 
 
@@ -232,10 +230,14 @@ def test_fresh_detached_launcher_uses_one_daemon_and_no_analytics_process() -> N
         daemon_pid = _wait_for("the shared Rodex daemon", live_daemon)
 
         def runtime_process_receipts() -> tuple[Path, ...] | None:
-            receipts = tuple(runtime_root.glob(PROCESS_RECEIPT_PATTERN))
-            return receipts if len(receipts) == 2 else None
+            receipts = tuple(runtime_root.glob("*.process-*.json"))
+            keys = {path.name.partition(".process-")[0] for path in receipts}
+            return receipts if len(receipts) == 2 and len(keys) == 1 else None
 
         receipts = _wait_for("the exact App Server and TUI process receipts", runtime_process_receipts)
+        installation_key = receipts[0].name.partition(".process-")[0]
+        assert len(installation_key) == 64 and not set(installation_key).difference("0123456789abcdef")
+        receipt_pattern = f"{installation_key}.process-*.json"
         receipt_payloads = [json.loads(path.read_text(encoding="utf-8")) for path in receipts]
         assert {payload["kind"] for payload in receipt_payloads} == {"app-server", "native-tui"}
         for payload in receipt_payloads:
@@ -292,7 +294,7 @@ def test_fresh_detached_launcher_uses_one_daemon_and_no_analytics_process() -> N
         os.write(terminal_master, b"\x03")
 
         def runtime_children_have_exited() -> bool | None:
-            receipts_gone = not tuple(runtime_root.glob(PROCESS_RECEIPT_PATTERN))
+            receipts_gone = not tuple(runtime_root.glob(receipt_pattern))
             daemon_alive = _process_command(daemon_pid) is not None
             return True if receipts_gone and daemon_alive else None
 

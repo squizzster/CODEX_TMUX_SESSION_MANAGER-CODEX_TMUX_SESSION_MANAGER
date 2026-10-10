@@ -54,7 +54,7 @@ def retained_coordinator_interpreter(
             raise ValueError("coordinator does not use a retained interpreter")
         root = interpreter.parents[2]
         if re.fullmatch(r"[0-9a-f]{64}", root.name) is None:
-            raise ValueError("retained installation fingerprint is invalid")
+            raise ValueError("retained installation key is invalid")
         state = root.lstat()
         if not stat.S_ISDIR(state.st_mode) or state.st_uid != os.getuid() or state.st_mode & 0o022:
             raise ValueError("retained installation is not privately owned")

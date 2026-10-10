@@ -235,7 +235,7 @@ def test_published_installation_keeps_code_dependencies_and_defaults_after_repla
     before = info(first)
     edits = (
         (source / "rodex/version.py", "0.15.0a1", "0.16.0a1"),
-        (source / "rodex/daemon_client.py", "rodex-daemon-v3", "rodex-daemon-v4"),
+        (source / "rodex/daemon_client.py", "rodex-daemon-v4", "rodex-daemon-v5"),
         (source / "rodex/tmux_session_capability.py", "PROTOCOL_GENERATION: Final = 5", "PROTOCOL_GENERATION: Final = 6"),
         (source / "rodex_sql/private_database_path.py", "Final = 21", "Final = 22"),
         (library / "installation_probe_dependency.py", "'A'", "'B'"),
@@ -251,7 +251,7 @@ def test_published_installation_keeps_code_dependencies_and_defaults_after_repla
     assert first != second
     assert after["dependency"] == "B"
     assert after["database"] == "rodex-v22.sqlite3"
-    assert after["daemon"] == "rodex-daemon-v4"
+    assert after["daemon"] == "rodex-daemon-v5"
     assert after["tmux"] == "rodex-isolated-tmux-v6"
     assert after["configuration"].endswith("# replacement defaults\n")
     assert info(first, cwd=source, environment={**os.environ, "PYTHONPATH": str(source)}) == before
@@ -285,7 +285,7 @@ def test_external_editable_dependency_is_rejected(tmp_path, development_installa
     (library / "external.pth").write_text(str(tmp_path / "mutable-external") + "\n")
     with pytest.raises(RodexInstallationError, match="external dependency"):
         publish(tmp_path, development_installation)
-    assert not (tmp_path / "installations").exists()
+    assert not [path for path in (tmp_path / "installations").iterdir() if path.is_dir()]
 
 
 def test_replaced_checkout_cannot_redirect_retained_tmux_hook(tmp_path, development_installation):
@@ -407,18 +407,19 @@ def test_installation_store_stays_outside_bootstrap_environment(tmp_path, monkey
     assert (state_home / "rodex").stat().st_mode & 0o777 == 0o700
 
 
-def test_changed_copy_is_not_published(tmp_path, development_installation, monkeypatch):
+def test_unchanged_bootstrap_reuses_retained_installation_without_copying(
+    tmp_path, development_installation, monkeypatch
+):
     import rodex.installation as installation
 
-    actual_copy = installation.shutil.copytree
+    first = publish(tmp_path, development_installation)
 
-    def changed_copy(source, destination, *args, **kwargs):
-        result = actual_copy(source, destination, *args, **kwargs)
-        if source == development_installation[0] / "rodex":
-            (destination / "version.py").write_text("RODEX_VERSION = 'incomplete-copy'\n")
-        return result
+    def unexpected_copy(*_args, **_kwargs):
+        raise AssertionError("unchanged startup copied its environment again")
 
-    monkeypatch.setattr(installation.shutil, "copytree", changed_copy)
-    with pytest.raises(RodexInstallationError, match="changed while preparing"):
-        publish(tmp_path, development_installation)
-    assert all(path.suffix == ".lock" for path in (tmp_path / "installations").iterdir())
+    def unexpected_lock(*_args, **_kwargs):
+        raise AssertionError("unchanged startup acquired the publication lock")
+
+    monkeypatch.setattr(installation.shutil, "copytree", unexpected_copy)
+    monkeypatch.setattr(installation.fcntl, "flock", unexpected_lock)
+    assert publish(tmp_path, development_installation) == first

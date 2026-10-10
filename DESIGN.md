@@ -29,6 +29,7 @@ there is no need to read the whole set.
 - [Automation skill](.agents/skills/rodex-session-control/SKILL.md) — control one verified session and turn.
 - [Operations](docs/OPERATIONS.md) — local state, terminal settings, and diagnosis.
 - [Development](docs/DEVELOPMENT.md) — validation and focused test selection.
+- [Version tracker](VERSION_TRACKER.md) — pending changes and verified package milestones.
 
 Release and dependency facts live in [pyproject.toml](pyproject.toml);
 [current-contract tests](tests/test_current_contracts.py) pin compatibility generations.

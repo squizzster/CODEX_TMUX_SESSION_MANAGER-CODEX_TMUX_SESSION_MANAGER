@@ -20,14 +20,16 @@ from rodex.analytics import SharedAnalyticsCoordinator
 from rodex.daemon import RODEX_DAEMON_PROCESS_NAME, DaemonRuntimeManager, RodexDaemonServerError
 from rodex.daemon_client import (
     RODEX_DAEMON_IMPLEMENTATION_FIELD,
+    RODEX_DAEMON_INSTANCE_FIELD,
     RODEX_DAEMON_PROTOCOL,
     RodexDaemonClient,
     RodexDaemonError,
+    daemon_instance_path,
     daemon_socket_path,
     encode_daemon_message,
     receive_daemon_message,
 )
-from rodex.implementation_identity import RODEX_IMPLEMENTATION_ID, RODEX_IMPLEMENTATION_SHA256
+from rodex.implementation_identity import RODEX_IMPLEMENTATION_ID, RODEX_IMPLEMENTATION_KEY
 from rodex.process_contracts import AnalyticsRuntimeConfig, RuntimeServiceConfig
 from rodex.process_guard import set_current_linux_task_name
 from rodex.process_receipts import PROCESS_RECEIPT_PATTERN, RuntimeProcessReceipts
@@ -68,6 +70,12 @@ def _config(root: Path, value: int) -> RuntimeServiceConfig:
         ),
         user_environment=(("PATH", "/usr/bin"),),
     )
+
+
+def _write_daemon_instance(root: Path, instance_id: str) -> None:
+    path = daemon_instance_path(root)
+    path.write_text(f"{instance_id}\n")
+    path.chmod(0o600)
 
 
 class RecordingAnalytics:
@@ -216,9 +224,30 @@ def test_idle_server_blocks_on_control_event_until_stop(
     [
         ({"protocol": "rodex-daemon-v1", "operation": "ping"}, "protocol does not match"),
         ({"protocol": RODEX_DAEMON_PROTOCOL, "operation": "ping"}, "implementation does not match"),
+        (
+            {
+                "protocol": RODEX_DAEMON_PROTOCOL,
+                RODEX_DAEMON_IMPLEMENTATION_FIELD: RODEX_IMPLEMENTATION_ID,
+                "operation": "wake_runtime",
+                "runtime_id": "0123456789abcdef",
+                "cause": "terminal_resize",
+            },
+            "daemon incarnation",
+        ),
+        (
+            {
+                "protocol": RODEX_DAEMON_PROTOCOL,
+                RODEX_DAEMON_IMPLEMENTATION_FIELD: RODEX_IMPLEMENTATION_ID,
+                RODEX_DAEMON_INSTANCE_FIELD: "0" * 64,
+                "operation": "wake_runtime",
+                "runtime_id": "0123456789abcdef",
+                "cause": "terminal_resize",
+            },
+            "daemon incarnation",
+        ),
     ],
 )
-def test_daemon_rejects_prior_protocol_and_missing_implementation_identity(
+def test_daemon_rejects_prior_protocol_and_missing_transport_identities(
     short_runtime_root: Path,
     monkeypatch: pytest.MonkeyPatch,
     request_payload: dict[str, object],
@@ -254,9 +283,17 @@ def test_daemon_rejects_prior_protocol_and_missing_implementation_identity(
             connection.sendall(encode_daemon_message(request_payload))
             response = receive_daemon_message(connection)
 
-        assert set(response) == {"protocol", RODEX_DAEMON_IMPLEMENTATION_FIELD, "ok", "error"}
+        assert set(response) == {
+            "protocol",
+            RODEX_DAEMON_IMPLEMENTATION_FIELD,
+            RODEX_DAEMON_INSTANCE_FIELD,
+            "ok",
+            "error",
+        }
         assert response["protocol"] == RODEX_DAEMON_PROTOCOL
         assert response[RODEX_DAEMON_IMPLEMENTATION_FIELD] == RODEX_IMPLEMENTATION_ID
+        assert len(response[RODEX_DAEMON_INSTANCE_FIELD]) == 64
+        assert not set(response[RODEX_DAEMON_INSTANCE_FIELD]).difference("0123456789abcdef")
         assert response["ok"] is False
         assert expected_error in response["error"]
     finally:
@@ -532,7 +569,9 @@ def test_concurrent_first_clients_converge_on_one_private_daemon_socket(short_ru
         assert len(daemon_pids) == 1
         assert Path(f"/proc/{daemon_pids[0]}/comm").read_text().strip() == RODEX_DAEMON_PROCESS_NAME
         assert clients[0].socket_path == clients[1].socket_path
+        assert clients[0].require_daemon_instance_id() == clients[1].require_daemon_instance_id()
         assert clients[0].socket_path.stat().st_mode & 0o777 == 0o600
+        assert daemon_instance_path(short_runtime_root).stat().st_mode & 0o777 == 0o600
     finally:
         for pid in daemon_pids:
             with suppress(ProcessLookupError):
@@ -550,7 +589,7 @@ def test_current_client_starts_its_exact_daemon_alongside_an_older_daemon_socket
     daemon_pids: list[int] = []
     try:
         client.ensure_running()
-        assert client.socket_path == short_runtime_root / f"{RODEX_IMPLEMENTATION_SHA256}.sock"
+        assert client.socket_path == short_runtime_root / f"{RODEX_IMPLEMENTATION_KEY}.sock"
         assert client.socket_path != legacy_path
         assert client.socket_path.is_socket()
         assert legacy_path.is_socket()
@@ -586,6 +625,7 @@ def test_implementation_daemon_socket_rejects_an_overlong_runtime_root_cleanly(t
 
 
 def test_current_client_rejects_same_protocol_daemon_with_different_loaded_code(short_runtime_root: Path) -> None:
+    _write_daemon_instance(short_runtime_root, "a" * 64)
     socket_path = daemon_socket_path(short_runtime_root)
     listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     listener.bind(str(socket_path))
@@ -622,8 +662,8 @@ def test_current_client_rejects_same_protocol_daemon_with_different_loaded_code(
         diagnostic = str(raised.value)
         assert f"incompatible at {socket_path}" in diagnostic
         assert "running daemon implementation: 'different-loaded-code'" in diagnostic
-        assert "current client: Rodex 0.15.0a1 (0.15.0a1+sha256." in diagnostic
-        assert "daemon protocol: rodex-daemon-v3" in diagnostic
+        assert "current client: Rodex 0.15.0a1 (0.15.0a1+installation." in diagnostic
+        assert "daemon protocol: rodex-daemon-v4" in diagnostic
         assert "SQL catalog: not checked; this client expects generation 21 (rodex-v21.sqlite3)" in diagnostic
         assert "does not migrate earlier runtimes or catalogs" in diagnostic
         assert spawns == []
@@ -632,7 +672,51 @@ def test_current_client_rejects_same_protocol_daemon_with_different_loaded_code(
         server.join(timeout=1)
 
 
+def test_client_rejects_daemon_incarnation_change_between_discovery_and_operation(
+    short_runtime_root: Path,
+) -> None:
+    socket_path = daemon_socket_path(short_runtime_root)
+    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    listener.bind(str(socket_path))
+    listener.listen()
+    first_instance, replacement_instance = "a" * 64, "b" * 64
+    _write_daemon_instance(short_runtime_root, first_instance)
+
+    def respond() -> None:
+        for expected_operation, response_instance in (
+            ("ping", first_instance),
+            ("wake_runtime", replacement_instance),
+        ):
+            connection, _address = listener.accept()
+            with connection:
+                request = receive_daemon_message(connection)
+                assert request["operation"] == expected_operation
+                if expected_operation != "ping":
+                    assert request[RODEX_DAEMON_INSTANCE_FIELD] == first_instance
+                connection.sendall(
+                    encode_daemon_message(
+                        {
+                            "protocol": RODEX_DAEMON_PROTOCOL,
+                            RODEX_DAEMON_IMPLEMENTATION_FIELD: RODEX_IMPLEMENTATION_ID,
+                            RODEX_DAEMON_INSTANCE_FIELD: response_instance,
+                            "ok": True,
+                        }
+                    )
+                )
+
+    server = Thread(target=respond)
+    server.start()
+    try:
+        client = RodexDaemonClient(short_runtime_root, sys.executable)
+        with pytest.raises(RodexDaemonError, match="daemon incarnation changed"):
+            client.notify_runtime("0123456789abcdef", "terminal_resize")
+    finally:
+        listener.close()
+        server.join(timeout=1)
+
+
 def test_current_client_reports_both_sides_of_a_daemon_protocol_mismatch(short_runtime_root: Path) -> None:
+    _write_daemon_instance(short_runtime_root, "a" * 64)
     socket_path = daemon_socket_path(short_runtime_root)
     listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     listener.bind(str(socket_path))
@@ -646,7 +730,7 @@ def test_current_client_reports_both_sides_of_a_daemon_protocol_mismatch(short_r
                 encode_daemon_message(
                     {
                         "protocol": "rodex-daemon-v1",
-                        RODEX_DAEMON_IMPLEMENTATION_FIELD: "0.13.0+sha256.previous",
+                        RODEX_DAEMON_IMPLEMENTATION_FIELD: "0.13.0+installation.previous",
                         "ok": True,
                     }
                 )
@@ -663,7 +747,7 @@ def test_current_client_reports_both_sides_of_a_daemon_protocol_mismatch(short_r
         diagnostic = str(raised.value)
         assert f"protocol is incompatible at {socket_path}" in diagnostic
         assert "running daemon protocol: 'rodex-daemon-v1'" in diagnostic
-        assert "current client protocol: 'rodex-daemon-v3' (Rodex 0.15.0a1)" in diagnostic
+        assert "current client protocol: 'rodex-daemon-v4' (Rodex 0.15.0a1)" in diagnostic
         assert "SQL catalog: not checked; this client expects generation 21 (rodex-v21.sqlite3)" in diagnostic
         assert "does not translate earlier wire protocols or migrate earlier catalogs" in diagnostic
     finally:

@@ -529,8 +529,8 @@ def test_version_reports_compatibility_without_codex_tmux_or_database(
     output = capsys.readouterr()
     assert output.err == ""
     assert output.out.startswith("Rodex compatibility:\n  release: 0.15.0a1\n")
-    assert "  implementation: 0.15.0a1+sha256." in output.out
-    assert "  daemon protocol: rodex-daemon-v3\n" in output.out
+    assert "  implementation: 0.15.0a1+installation." in output.out
+    assert "  daemon protocol: rodex-daemon-v4\n" in output.out
     assert f"  daemon socket: /tmp/rodex-{os.getuid()}/" in output.out
     assert ".sock\n" in output.out
     assert "  SQLite catalog: generation 21 (rodex-v21.sqlite3)\n" in output.out

@@ -9,10 +9,12 @@ import json
 import logging
 import os
 import re
+import secrets
 import select
 import signal
 import socket
 import struct
+import tempfile
 import time
 from collections import OrderedDict
 from collections.abc import Callable
@@ -26,9 +28,11 @@ from .analytics import SharedAnalyticsCoordinator
 from .daemon_client import (
     DAEMON_MESSAGE_LIMIT_BYTES,
     RODEX_DAEMON_IMPLEMENTATION_FIELD,
+    RODEX_DAEMON_INSTANCE_FIELD,
     RODEX_DAEMON_PROTOCOL,
     RODEX_RUNTIME_WAKE_REGISTRATION,
     RODEX_RUNTIME_WAKE_TERMINAL_RESIZE,
+    daemon_instance_path,
     daemon_socket_path,
     encode_daemon_message,
 )
@@ -415,6 +419,7 @@ class RodexDaemonServer:
     def __init__(self, runtime_root: Path) -> None:
         self._runtime_root = runtime_root
         self._endpoint = ExclusiveUnixEndpoint(daemon_socket_path(runtime_root))
+        self._instance_id = secrets.token_hex(32)
         self._manager: DaemonRuntimeManager | None = None
         self._stop = Event()
         self._wake_fd = os.eventfd(0, os.EFD_CLOEXEC | os.EFD_NONBLOCK)
@@ -437,6 +442,7 @@ class RodexDaemonServer:
             self._wake_fd = -1
             raise
         try:
+            self._publish_instance_capability()
             # The implementation-scoped endpoint is this daemon's ownership claim.
             # Reconcile only equally namespaced process receipts after it is exclusive.
             self._manager = DaemonRuntimeManager(self._runtime_root)
@@ -469,6 +475,7 @@ class RodexDaemonServer:
                         connection.shutdown(socket.SHUT_RDWR)
             if self._manager is not None:
                 self._manager.close()
+            self._remove_instance_capability()
             self._endpoint.close()
             with self._workers_lock:
                 workers = tuple(self._workers)
@@ -479,6 +486,26 @@ class RodexDaemonServer:
                 os.close(self._wake_fd)
             self._wake_fd = -1
         return 0
+
+    def _publish_instance_capability(self) -> None:
+        path = daemon_instance_path(self._runtime_root)
+        descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=self._runtime_root)
+        temporary = Path(temporary_name)
+        try:
+            os.fchmod(descriptor, 0o600)
+            with os.fdopen(descriptor, "w", encoding="ascii") as stream:
+                stream.write(f"{self._instance_id}\n")
+            temporary.replace(path)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+    def _remove_instance_capability(self) -> None:
+        path = daemon_instance_path(self._runtime_root)
+        try:
+            if path.read_text(encoding="ascii").strip() == self._instance_id:
+                path.unlink()
+        except OSError:
+            return
 
     def _handle_connection(self, connection: socket.socket) -> None:
         retained = False
@@ -500,14 +527,31 @@ class RodexDaemonServer:
             if request.get(RODEX_DAEMON_IMPLEMENTATION_FIELD) != RODEX_IMPLEMENTATION_ID:
                 raise RodexDaemonServerError("daemon implementation does not match this generation")
             operation = request.get("operation")
+            if request.get(RODEX_DAEMON_INSTANCE_FIELD) != self._instance_id:
+                raise RodexDaemonServerError("daemon request does not match this daemon incarnation")
             if descriptors and operation != "bind_terminal":
                 raise RodexDaemonServerError("daemon operation did not permit passed descriptors")
             if operation == "ping":
-                _require_fields(request, {"protocol", "operation", RODEX_DAEMON_IMPLEMENTATION_FIELD})
+                _require_fields(
+                    request,
+                    {
+                        "protocol",
+                        "operation",
+                        RODEX_DAEMON_IMPLEMENTATION_FIELD,
+                        RODEX_DAEMON_INSTANCE_FIELD,
+                    },
+                )
             elif operation == "reserve":
                 _require_fields(
                     request,
-                    {"protocol", "operation", RODEX_DAEMON_IMPLEMENTATION_FIELD, "operation_id", "runtime"},
+                    {
+                        "protocol",
+                        "operation",
+                        RODEX_DAEMON_IMPLEMENTATION_FIELD,
+                        RODEX_DAEMON_INSTANCE_FIELD,
+                        "operation_id",
+                        "runtime",
+                    },
                 )
                 runtime = request.get("runtime")
                 if not isinstance(runtime, dict):
@@ -520,6 +564,7 @@ class RodexDaemonServer:
                         "protocol",
                         "operation",
                         RODEX_DAEMON_IMPLEMENTATION_FIELD,
+                        RODEX_DAEMON_INSTANCE_FIELD,
                         "operation_id",
                         "runtime_id",
                         "timeout_seconds",
@@ -533,7 +578,14 @@ class RodexDaemonServer:
             elif operation == "stop":
                 _require_fields(
                     request,
-                    {"protocol", "operation", RODEX_DAEMON_IMPLEMENTATION_FIELD, "operation_id", "runtime_id"},
+                    {
+                        "protocol",
+                        "operation",
+                        RODEX_DAEMON_IMPLEMENTATION_FIELD,
+                        RODEX_DAEMON_INSTANCE_FIELD,
+                        "operation_id",
+                        "runtime_id",
+                    },
                 )
                 response_fields["state"] = manager.stop_runtime(
                     _text(request, "operation_id"), _text(request, "runtime_id")
@@ -541,7 +593,14 @@ class RodexDaemonServer:
             elif operation == "wake_runtime":
                 _require_fields(
                     request,
-                    {"protocol", "operation", RODEX_DAEMON_IMPLEMENTATION_FIELD, "runtime_id", "cause"},
+                    {
+                        "protocol",
+                        "operation",
+                        RODEX_DAEMON_IMPLEMENTATION_FIELD,
+                        RODEX_DAEMON_INSTANCE_FIELD,
+                        "runtime_id",
+                        "cause",
+                    },
                 )
                 manager.wake_runtime(_text(request, "runtime_id"), _text(request, "cause"))
             elif operation == "bind_terminal":
@@ -551,6 +610,7 @@ class RodexDaemonServer:
                         "protocol",
                         "operation",
                         RODEX_DAEMON_IMPLEMENTATION_FIELD,
+                        RODEX_DAEMON_INSTANCE_FIELD,
                         "operation_id",
                         "runtime_id",
                         "tmux_server_id",
@@ -573,7 +633,7 @@ class RodexDaemonServer:
                 descriptors = ()
                 try:
                     manager.start_bound_runtime(context)
-                    connection.sendall(_success_response())
+                    connection.sendall(_success_response(self._instance_id))
                 except BaseException:
                     manager.stop_runtime(context.operation_id, str(context.config.runtime_id))
                     raise
@@ -582,10 +642,10 @@ class RodexDaemonServer:
                 raise RodexDaemonServerError("unknown daemon operation")
             if descriptors:
                 raise RodexDaemonServerError("daemon operation did not permit passed descriptors")
-            connection.sendall(_success_response(**response_fields))
+            connection.sendall(_success_response(self._instance_id, **response_fields))
         except BaseException as error:
             with suppress(OSError):
-                connection.sendall(_error_response(str(error)))
+                connection.sendall(_error_response(self._instance_id, str(error)))
         finally:
             for descriptor in descriptors:
                 with suppress(OSError):
@@ -671,22 +731,24 @@ def _require_operation_id(operation_id: str) -> None:
         raise RodexDaemonServerError("operation ID must be 32 lowercase hexadecimal characters")
 
 
-def _success_response(**fields: object) -> bytes:
+def _success_response(daemon_instance_id: str, **fields: object) -> bytes:
     return encode_daemon_message(
         {
             "protocol": RODEX_DAEMON_PROTOCOL,
             RODEX_DAEMON_IMPLEMENTATION_FIELD: RODEX_IMPLEMENTATION_ID,
+            RODEX_DAEMON_INSTANCE_FIELD: daemon_instance_id,
             "ok": True,
             **fields,
         }
     )
 
 
-def _error_response(detail: str) -> bytes:
+def _error_response(daemon_instance_id: str, detail: str) -> bytes:
     return encode_daemon_message(
         {
             "protocol": RODEX_DAEMON_PROTOCOL,
             RODEX_DAEMON_IMPLEMENTATION_FIELD: RODEX_IMPLEMENTATION_ID,
+            RODEX_DAEMON_INSTANCE_FIELD: daemon_instance_id,
             "ok": False,
             "error": detail[:4096],
         }

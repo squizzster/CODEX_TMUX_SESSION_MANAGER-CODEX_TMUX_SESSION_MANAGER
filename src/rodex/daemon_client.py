@@ -5,7 +5,9 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import re
 import socket
+import stat
 import subprocess
 import time
 from collections.abc import Callable
@@ -14,21 +16,24 @@ from typing import Any, Final
 
 from rodex_sql import RODEX_DATABASE_FILENAME, RODEX_DATABASE_SCHEMA_GENERATION
 
-from .implementation_identity import RODEX_IMPLEMENTATION_ID, RODEX_IMPLEMENTATION_SHA256
+from .implementation_identity import RODEX_IMPLEMENTATION_ID, RODEX_IMPLEMENTATION_KEY
 from .process_contracts import RuntimeServiceConfig
 from .version import RODEX_VERSION
 
-RODEX_DAEMON_PROTOCOL: Final = "rodex-daemon-v3"
-RODEX_DAEMON_SOCKET_NAME: Final = f"{RODEX_IMPLEMENTATION_SHA256}.sock"
-RODEX_DAEMON_LOG_NAME: Final = f"{RODEX_IMPLEMENTATION_SHA256}.log"
-RODEX_DAEMON_START_LOCK_NAME: Final = f"{RODEX_IMPLEMENTATION_SHA256}.start.lock"
+RODEX_DAEMON_PROTOCOL: Final = "rodex-daemon-v4"
+RODEX_DAEMON_SOCKET_NAME: Final = f"{RODEX_IMPLEMENTATION_KEY}.sock"
+RODEX_DAEMON_LOG_NAME: Final = f"{RODEX_IMPLEMENTATION_KEY}.log"
+RODEX_DAEMON_START_LOCK_NAME: Final = f"{RODEX_IMPLEMENTATION_KEY}.start.lock"
+RODEX_DAEMON_INSTANCE_NAME: Final = f"{RODEX_IMPLEMENTATION_KEY}.daemon-instance"
 RODEX_DAEMON_IMPLEMENTATION_FIELD: Final = "implementation_id"
+RODEX_DAEMON_INSTANCE_FIELD: Final = "daemon_instance_id"
 RODEX_RUNTIME_WAKE_REGISTRATION: Final = "registration"
 RODEX_RUNTIME_WAKE_TERMINAL_RESIZE: Final = "terminal_resize"
 RODEX_RUNTIME_WAKE_CAUSES: Final = frozenset({RODEX_RUNTIME_WAKE_REGISTRATION, RODEX_RUNTIME_WAKE_TERMINAL_RESIZE})
 DAEMON_MESSAGE_LIMIT_BYTES: Final = 1024 * 1024
 DAEMON_START_TIMEOUT_SECONDS: Final = 10.0
 DAEMON_UNIX_SOCKET_PATH_MAX_BYTES: Final = 107
+_DAEMON_INSTANCE_ID = re.compile(r"[0-9a-f]{64}")
 
 
 class RodexDaemonError(RuntimeError):
@@ -64,6 +69,10 @@ def _incompatible_daemon_protocol_message(socket_path: Path, observed_protocol: 
 
 def daemon_socket_path(runtime_root: Path) -> Path:
     return runtime_root / RODEX_DAEMON_SOCKET_NAME
+
+
+def daemon_instance_path(runtime_root: Path) -> Path:
+    return runtime_root / RODEX_DAEMON_INSTANCE_NAME
 
 
 def encode_daemon_message(payload: dict[str, object]) -> bytes:
@@ -114,6 +123,7 @@ class RodexDaemonClient:
         self._spawn_process = process_spawner
         self._monotonic = monotonic
         self._sleep = sleep
+        self._daemon_instance_id: str | None = None
 
     def ensure_running(self) -> None:
         """Serialize first start and accept only the exact current daemon code."""
@@ -211,21 +221,72 @@ class RodexDaemonClient:
 
     def _probe(self) -> bool:
         try:
-            self._request({"protocol": RODEX_DAEMON_PROTOCOL, "operation": "ping"}, timeout_seconds=0.25)
+            self.require_daemon_instance_id(timeout_seconds=0.25)
         except (OSError, TimeoutError):
             return False
         return True
 
+    def require_daemon_instance_id(self, *, timeout_seconds: float = 5.0) -> str:
+        """Read the private capability, then bind this client to that daemon incarnation."""
+        capability_path = daemon_instance_path(self.runtime_root)
+        observed_state = capability_path.lstat()
+        if (
+            not stat.S_ISREG(observed_state.st_mode)
+            or observed_state.st_uid != os.getuid()
+            or observed_state.st_mode & 0o077
+        ):
+            raise RodexDaemonError("shared Rodex daemon incarnation capability is not private")
+        observed = capability_path.read_text().strip()
+        if _DAEMON_INSTANCE_ID.fullmatch(observed) is None:
+            raise RodexDaemonError("shared Rodex daemon incarnation capability is invalid")
+        if self._daemon_instance_id is not None and observed != self._daemon_instance_id:
+            raise RodexDaemonError("shared Rodex daemon incarnation changed")
+        response = self._exchange(
+            {
+                "protocol": RODEX_DAEMON_PROTOCOL,
+                "operation": "ping",
+                RODEX_DAEMON_INSTANCE_FIELD: observed,
+            },
+            timeout_seconds=timeout_seconds,
+        )
+        self._require_compatible_response(response)
+        if response.get(RODEX_DAEMON_INSTANCE_FIELD) != observed:
+            raise RodexDaemonError("shared Rodex daemon incarnation changed")
+        if response.get("ok") is not True:
+            detail = response.get("error")
+            raise RodexDaemonError(detail if isinstance(detail, str) and detail else "daemon operation failed")
+        self._daemon_instance_id = observed
+        return observed
+
     def _request(self, payload: dict[str, object], *, timeout_seconds: float = 5.0) -> dict[str, Any]:
-        if RODEX_DAEMON_IMPLEMENTATION_FIELD in payload:
-            raise ValueError("daemon implementation identity is transport-owned")
+        if RODEX_DAEMON_IMPLEMENTATION_FIELD in payload or RODEX_DAEMON_INSTANCE_FIELD in payload:
+            raise ValueError("daemon implementation and incarnation identities are transport-owned")
+        daemon_instance_id = self._daemon_instance_id
+        if daemon_instance_id is None:
+            daemon_instance_id = self.require_daemon_instance_id(timeout_seconds=timeout_seconds)
         request = dict(payload)
         request[RODEX_DAEMON_IMPLEMENTATION_FIELD] = RODEX_IMPLEMENTATION_ID
+        request[RODEX_DAEMON_INSTANCE_FIELD] = daemon_instance_id
+        response = self._exchange(request, timeout_seconds=timeout_seconds)
+        self._require_compatible_response(response)
+        if response.get(RODEX_DAEMON_INSTANCE_FIELD) != daemon_instance_id:
+            raise RodexDaemonError("shared Rodex daemon incarnation changed")
+        if response.get("ok") is not True:
+            detail = response.get("error")
+            raise RodexDaemonError(detail if isinstance(detail, str) and detail else "daemon operation failed")
+        return response
+
+    def _exchange(self, payload: dict[str, object], *, timeout_seconds: float) -> dict[str, Any]:
+        request = dict(payload)
+        if RODEX_DAEMON_IMPLEMENTATION_FIELD not in request:
+            request[RODEX_DAEMON_IMPLEMENTATION_FIELD] = RODEX_IMPLEMENTATION_ID
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
             connection.settimeout(timeout_seconds)
             connection.connect(os.fspath(self.socket_path))
             connection.sendall(encode_daemon_message(request))
-            response = receive_daemon_message(connection)
+            return receive_daemon_message(connection)
+
+    def _require_compatible_response(self, response: dict[str, Any]) -> None:
         if response.get("protocol") != RODEX_DAEMON_PROTOCOL:
             raise RodexDaemonError(
                 _incompatible_daemon_protocol_message(
@@ -240,7 +301,3 @@ class RodexDaemonClient:
                     response.get(RODEX_DAEMON_IMPLEMENTATION_FIELD),
                 )
             )
-        if response.get("ok") is not True:
-            detail = response.get("error")
-            raise RodexDaemonError(detail if isinstance(detail, str) and detail else "daemon operation failed")
-        return response

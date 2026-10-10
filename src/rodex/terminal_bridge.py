@@ -17,6 +17,7 @@ from rodex_registry.identity import parse_rodex_runtime_id
 
 from .daemon_client import (
     RODEX_DAEMON_IMPLEMENTATION_FIELD,
+    RODEX_DAEMON_INSTANCE_FIELD,
     RODEX_DAEMON_PROTOCOL,
     RODEX_RUNTIME_WAKE_TERMINAL_RESIZE,
     RodexDaemonClient,
@@ -77,10 +78,13 @@ def main() -> None:
     if not arguments.tmux_pane.startswith("%") or not arguments.tmux_pane[1:].isdigit():
         parser.error("--tmux-pane must be an exact pane target")
 
+    client = RodexDaemonClient(arguments.daemon_socket.parent, sys.executable)
+    daemon_instance_id = client.require_daemon_instance_id()
     request = encode_daemon_message(
         {
             "protocol": RODEX_DAEMON_PROTOCOL,
             RODEX_DAEMON_IMPLEMENTATION_FIELD: RODEX_IMPLEMENTATION_ID,
+            RODEX_DAEMON_INSTANCE_FIELD: daemon_instance_id,
             "operation": "bind_terminal",
             "operation_id": arguments.operation_id,
             "runtime_id": str(arguments.runtime_id),
@@ -101,11 +105,11 @@ def main() -> None:
         if (
             response.get("protocol") != RODEX_DAEMON_PROTOCOL
             or response.get(RODEX_DAEMON_IMPLEMENTATION_FIELD) != RODEX_IMPLEMENTATION_ID
+            or response.get(RODEX_DAEMON_INSTANCE_FIELD) != daemon_instance_id
             or response.get("ok") is not True
         ):
             detail = response.get("error")
             raise RuntimeError(detail if isinstance(detail, str) and detail else "terminal bridge was rejected")
-        client = RodexDaemonClient(arguments.daemon_socket.parent, sys.executable)
         wait_for_runtime(
             connection,
             lambda: client.notify_runtime(str(arguments.runtime_id), RODEX_RUNTIME_WAKE_TERMINAL_RESIZE),

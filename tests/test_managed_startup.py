@@ -30,12 +30,13 @@ from websockets.sync.client import unix_connect
 
 from rodex.analytics import ANALYTICS_CLOSE_WAIT_SECONDS
 from rodex.app_server_contract import CODEX_APP_SERVER, AppServerClientInfo
+from rodex.codex_update_notice import StableCodexVersion, default_codex_update_cache_path
 from rodex.daemon import SHUTDOWN_WAIT_SECONDS
-from rodex.implementation_identity import RODEX_IMPLEMENTATION_SHA256
 from rodex.interaction_pipeline import DeliveryStatus, InteractionOperation, InteractionRequest
 from rodex.interaction_transport import publish_session_interaction
 from rodex.runtime_peer import RuntimePeerIdentity
 from rodex.tmux_session_capability import RODEX_TMUX_SOCKET_PATTERN
+from rodex.version import RODEX_VERSION
 from rodex_registry import RodexRuntimeId
 
 
@@ -321,6 +322,7 @@ def test_installed_rodex_starts_reuses_and_adopts_sessions(
         "RODEX_CODEX_BINARY": codex,
         "RODEX_TMUX_BINARY": tmux_binary,
         "RODEX_RUNTIME_DIR": str(runtime_root),
+        "XDG_CACHE_HOME": str(isolated / "cache"),
         "XDG_STATE_HOME": str(isolated / "state"),
         "CODEX_HOME": str(isolated_codex_home),
     }
@@ -328,6 +330,14 @@ def test_installed_rodex_starts_reuses_and_adopts_sessions(
     environment.pop("TMUX_PANE", None)
     inspected_codex_ids: dict[str, str] = {}
     notice_sequence = 0
+    installed_version_result = subprocess.run(
+        [codex, "--version"], env=environment, capture_output=True, text=True, check=True, timeout=10
+    )
+    installed_version = StableCodexVersion.parse_codex_version_output(installed_version_result.stdout)
+    assert installed_version is not None
+    update_cache = default_codex_update_cache_path(environment)
+    update_cache.parent.mkdir(mode=0o700, parents=True)
+    update_cache.write_text(f"{installed_version.text}\n")
 
     def tmux(*arguments: str) -> subprocess.CompletedProcess[str]:
         results = []
@@ -521,9 +531,15 @@ def test_installed_rodex_starts_reuses_and_adopts_sessions(
                 pytest.fail(f"Codex TUI did not render for {name}: {pane.stdout}")
             runtime_id = envelope["runtime"]["runtime_id"]
             assert runtime_id
+            app_server_receipts = tuple(runtime_root.glob(f"*.process-{runtime_id}-app-server.json"))
+            assert len(app_server_receipts) == 1
+            installation_key = app_server_receipts[0].name.partition(".process-")[0]
+            assert len(installation_key) == 64 and not set(installation_key).difference("0123456789abcdef")
             if expected_cwd is None:
                 for kind in ("app-server", "native-tui"):
-                    receipt_path = runtime_root / f"{RODEX_IMPLEMENTATION_SHA256}.process-{runtime_id}-{kind}.json"
+                    receipt_paths = tuple(runtime_root.glob(f"*.process-{runtime_id}-{kind}.json"))
+                    assert len(receipt_paths) == 1
+                    receipt_path = receipt_paths[0]
                     receipt = json.loads(receipt_path.read_text())
                     assert Path(f"/proc/{receipt['pid']}/cwd").resolve() == workspace.resolve()
             endpoint = tmux("display-message", "-p", "-t", f"={name}:", "#{@rodex_protocol_proxy_socket_path}")
@@ -538,7 +554,11 @@ def test_installed_rodex_starts_reuses_and_adopts_sessions(
             delivery = publish_session_interaction(
                 Path(endpoint.stdout.strip()),
                 InteractionRequest("main", InteractionOperation.MESSAGE, "startup-test", text=notice),
-                peer_identity=RuntimePeerIdentity(RodexRuntimeId.parse(runtime_id), server_id.stdout.strip()),
+                peer_identity=RuntimePeerIdentity(
+                    RodexRuntimeId.parse(runtime_id),
+                    server_id.stdout.strip(),
+                    f"{RODEX_VERSION}+installation.{installation_key}",
+                ),
             )
             assert delivery.status == DeliveryStatus.DELIVERED, delivery
             await_native_warning(client, name, notice)

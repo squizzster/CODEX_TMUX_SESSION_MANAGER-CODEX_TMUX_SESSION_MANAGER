@@ -149,16 +149,24 @@ def _is_live_process_descendant(peer_pid: int, owner_pid: int) -> bool:
 class RuntimePeerIdentity:
     runtime_id: RodexRuntimeId
     tmux_server_id: str
+    implementation_id: str = RODEX_IMPLEMENTATION_ID
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "runtime_id", parse_rodex_runtime_id(self.runtime_id))
         if not isinstance(self.tmux_server_id, str) or _SERVER_ID.fullmatch(self.tmux_server_id) is None:
             raise ValueError("tmux server identity must be 32 lowercase hexadecimal characters")
+        if (
+            not isinstance(self.implementation_id, str)
+            or not self.implementation_id
+            or "\r" in self.implementation_id
+            or "\n" in self.implementation_id
+        ):
+            raise ValueError("implementation identity must be one nonempty HTTP header value")
 
     def headers(self) -> dict[str, str]:
         return {
             _CONTRACT_HEADER: _CONTRACT,
-            _IMPLEMENTATION_HEADER: RODEX_IMPLEMENTATION_ID,
+            _IMPLEMENTATION_HEADER: self.implementation_id,
             _RUNTIME_HEADER: str(self.runtime_id),
             _SERVER_HEADER: self.tmux_server_id,
         }

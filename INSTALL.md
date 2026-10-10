@@ -24,6 +24,8 @@ The [checkout launcher](rodex) executes `.venv/bin/rodex` directly. Startup neve
 syncs dependencies or downloads code. Before CLI composition,
 [`enter_fixed_installation`](src/rodex/installation.py) publishes/reuses a private
 copy of code, installed dependencies, and shipped defaults, then re-executes there.
+An unchanged bootstrap is recognized from lightweight file metadata; routine startup
+does not hash source or dependency contents.
 
 ## Install the per-user command
 
@@ -38,9 +40,10 @@ install -m 0755 usr/local/bin/rodex "$HOME/.local/bin/rodex"
 ```
 
 Ensure `$HOME/.local/bin` is on `PATH`. Only the shim is copied; the checkout and
-its `.venv` remain the bootstrap for new invocations. The shim rejects untrusted
-ownership, writable executable content, and unexpected symlinks, including in
-ignored project directories. See [executable admission](docs/SECURITY.md#executable-admission).
+its `.venv` remain the bootstrap for new invocations. The shim checks only that the
+configured project and executable entrypoint exist, then delegates normal executable
+admission to the operating system. It does not recursively inspect the checkout.
+See the [launcher boundary](docs/SECURITY.md#launcher-boundary).
 
 ```bash
 command -v rodex
@@ -61,18 +64,21 @@ Codex passthrough and transient App Server probes.
 
 ## Retained installations and compatibility
 
-The fingerprint in [`implementation_digest`](src/rodex/implementation_identity.py)
-covers first-party source, installed dependency contents, Python version, and shipped
-defaults. Documentation edits do not change it. External/editable dependency paths
-are rejected; only Rodex itself may use the checkout's editable path. Wheel installs
-include the same prompt defaults and use the same retention boundary.
+Rodex records first-party source-file metadata, top-level environment entries, the
+Python version, and shipped-default metadata in a bootstrap cache. If that ordinary
+state is unchanged, startup reuses the retained interpreter without reading executable
+contents. A change publishes one new retained copy with an opaque installation key.
+External/editable dependency paths are rejected because they cannot be copied into a
+self-contained retained environment; only Rodex itself may use the checkout's editable
+path. Wheel installs include the same prompt defaults and use the same boundary.
 
-Publication is locked, verified, and atomic. Helpers use the retained interpreter
-with `-I`. Python aliases normalize within the selected environment, not to a shared
-base interpreter. Identical contents can reuse the same fingerprint store. Published copies
-are never overwritten or automatically removed. Retain their directories and base
-Python while associated sessions are running. Locations and overrides are in
-[local state](docs/OPERATIONS.md#local-state).
+Publication is locked and atomic. The lock coordinates the uncommon copy operation,
+not every retained runtime. Helpers use the retained interpreter with `-I`. Python
+aliases normalize within the selected environment, not to a shared base interpreter.
+Published copies are never overwritten or automatically removed. Retain their
+directories and base Python while associated sessions are running. Locations and
+overrides are in [local state](docs/OPERATIONS.md#local-state). The installation key
+is a routing namespace, not a security attestation or content digest.
 
 Retained implementations can coexist. A retained installation's
 `.venv/bin/rodex` entrypoint accesses its exact implementation's sessions. Opening
@@ -117,16 +123,16 @@ next transaction boundary and require a fresh process.
 
 ## System installation and removal
 
-A shared `/usr/local/bin/rodex` must point to a separately maintained root-owned,
-non-group/world-writable checkout and environment, not a user's development tree.
-Set that stable absolute path as the shim's default before installing it:
+A shared `/usr/local/bin/rodex` should point to a separately maintained checkout and
+environment rather than a user's changing development tree. Set that stable absolute
+path as the shim's default before installing it:
 
 ```bash
 sudo install -m 0755 usr/local/bin/rodex /usr/local/bin/rodex
 ```
 
-The supplied checkout-bound shim deliberately rejects root execution against a
-user-owned project. Prefer the per-user installation.
+Prefer the per-user installation. The shim does not attempt to enforce a multi-user
+trust policy; use ordinary filesystem ownership and OS accounts for that boundary.
 
 Removing `$HOME/.local/bin/rodex` (or `/usr/local/bin/rodex` for the system route)
 removes only that command. It does not remove the checkout, retained installations,

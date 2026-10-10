@@ -226,15 +226,42 @@ def test_usr_local_bin_shim_reports_a_missing_project(tmp_path: Path) -> None:
     assert "set RODEX_PROJECT_DIR" in result.stderr
 
 
-def test_usr_local_bin_shim_rejects_group_writable_project_code(
+def test_usr_local_bin_shim_does_not_scan_unrelated_project_content(
     tmp_path: Path,
 ) -> None:
     project_root = tmp_path / "project"
     project_root.mkdir()
     (project_root / "pyproject.toml").write_text("[project]\nname='probe'\n")
-    insecure_source = project_root / "probe.py"
-    insecure_source.write_text("print('unsafe')\n", encoding="utf-8")
-    insecure_source.chmod(0o664)
+    unrelated_source = project_root / "probe.py"
+    unrelated_source.write_text("print('ordinary editable checkout')\n", encoding="utf-8")
+    unrelated_source.chmod(0o666)
+    entrypoint = project_root / ".venv/bin/rodex"
+    entrypoint.parent.mkdir(parents=True)
+    entrypoint.write_text('#!/bin/sh\nprintf "direct-entrypoint\\n"\n', encoding="utf-8")
+    entrypoint.chmod(0o755)
+    shim = Path(__file__).parents[1] / "usr" / "local" / "bin" / "rodex"
+    environment = os.environ.copy()
+    environment["RODEX_PROJECT_DIR"] = str(project_root)
+
+    result = subprocess.run(
+        [shim, "_running"],
+        check=False,
+        env=environment,
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 0
+    assert result.stdout == "direct-entrypoint\n"
+    assert result.stderr == ""
+
+
+def test_usr_local_bin_shim_reports_a_missing_project_entrypoint(
+    tmp_path: Path,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    (project_root / "pyproject.toml").write_text("[project]\nname='probe'\n")
     shim = Path(__file__).parents[1] / "usr" / "local" / "bin" / "rodex"
     environment = os.environ.copy()
     environment["RODEX_PROJECT_DIR"] = str(project_root)
@@ -248,31 +275,5 @@ def test_usr_local_bin_shim_rejects_group_writable_project_code(
     )
 
     assert result.returncode == 1
-    assert "refusing group/world-writable project path" in result.stderr
-    assert str(insecure_source) in result.stderr
-
-
-def test_usr_local_bin_shim_rejects_an_insecure_virtualenv_root(
-    tmp_path: Path,
-) -> None:
-    project_root = tmp_path / "project"
-    project_root.mkdir()
-    (project_root / "pyproject.toml").write_text("[project]\nname='probe'\n")
-    virtualenv = project_root / ".venv"
-    virtualenv.mkdir(mode=0o777)
-    virtualenv.chmod(0o777)
-    shim = Path(__file__).parents[1] / "usr" / "local" / "bin" / "rodex"
-    environment = os.environ.copy()
-    environment["RODEX_PROJECT_DIR"] = str(project_root)
-
-    result = subprocess.run(
-        [shim, "_running"],
-        check=False,
-        env=environment,
-        text=True,
-        capture_output=True,
-    )
-
-    assert result.returncode == 1
-    assert "refusing group/world-writable project path" in result.stderr
-    assert str(virtualenv) in result.stderr
+    assert "project entrypoint is missing or not executable" in result.stderr
+    assert str(project_root / ".venv/bin/rodex") in result.stderr

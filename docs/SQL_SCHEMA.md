@@ -149,6 +149,9 @@ typed details, aliases, and ownership are immutable. Target thread identity can 
 before verified membership; later verification reuses it without mutating the activity.
 Rate-limit normalization preserves supplied primary/secondary windows in order and
 does not invent absent windows. Typed satellites contain no JSON columns.
+Message detail stores `assistant`, `developer`, `user`, and `system` as distinct
+roles. `unknown` is reserved for a missing or unsupported source role, not for a
+recognized Codex developer instruction.
 
 `rodex_sessions_agent_requests` represents only turn-producing spawn/follow-up
 requests. Each joins the exact collaboration tool request, activity, scope, target,

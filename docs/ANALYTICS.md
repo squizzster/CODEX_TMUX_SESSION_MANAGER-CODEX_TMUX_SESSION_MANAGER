@@ -46,6 +46,8 @@ facts. Canonical lifecycle turn IDs stay strict UUIDs. Synthetic labels such as
 active canonical turn. Exact spawn facts bind child to parent turn; durable lineage
 is the restart fallback. First-linked timestamps apply only to legacy histories with
 neither fact; contradictory exact evidence fails closed instead of guessing.
+Message roles preserve Codex's `assistant`, `developer`, `user`, and `system`
+identities; `unknown` remains the explicit fallback for absent or unsupported roles.
 
 ## Publication and recovery
 

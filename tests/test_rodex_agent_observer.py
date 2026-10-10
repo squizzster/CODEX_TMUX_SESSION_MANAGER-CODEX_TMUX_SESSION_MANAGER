@@ -1055,7 +1055,7 @@ def test_parent_request_can_arrive_after_durable_turn_binding_without_being_lost
     view.accept_trace_snapshot(
         RodexAgentTraceSnapshot(
             1,
-            "rodex-agent-trace-v4",
+            "rodex-agent-trace-v5",
             "2026-08-27T00:00:01Z",
             "complete",
             1,
@@ -1133,7 +1133,7 @@ def test_observer_view_renders_only_exact_target_trace_metadata() -> None:
     terminal_event_id = uuid.UUID("10000000-0000-4000-8000-000000000009")
     snapshot = RodexAgentTraceSnapshot(
         trace_publication_sequence=8,
-        trace_schema_version="rodex-agent-trace-v4",
+        trace_schema_version="rodex-agent-trace-v5",
         calculated_at_utc="2026-08-27T00:00:02Z",
         coverage_state="complete",
         durable_event_count=8,
@@ -1321,7 +1321,7 @@ def test_send_message_continues_the_current_turn_without_queuing_another() -> No
     view.accept_trace_snapshot(
         RodexAgentTraceSnapshot(
             1,
-            "rodex-agent-trace-v4",
+            "rodex-agent-trace-v5",
             "2026-08-27T23:54:00Z",
             "complete",
             1,
@@ -1372,7 +1372,7 @@ def test_send_message_continues_the_current_turn_without_queuing_another() -> No
     lines = view.accept_trace_snapshot(
         RodexAgentTraceSnapshot(
             2,
-            "rodex-agent-trace-v4",
+            "rodex-agent-trace-v5",
             "2026-08-27T23:54:16Z",
             "complete",
             3,
@@ -1444,7 +1444,7 @@ def test_observer_view_starts_a_new_same_agent_turn_for_followup_request() -> No
     view.accept_trace_snapshot(
         RodexAgentTraceSnapshot(
             1,
-            "rodex-agent-trace-v4",
+            "rodex-agent-trace-v5",
             "2026-08-27T00:00:00Z",
             "complete",
             1,
@@ -1501,7 +1501,7 @@ def test_observer_view_starts_a_new_same_agent_turn_for_followup_request() -> No
     view.accept_trace_snapshot(
         RodexAgentTraceSnapshot(
             2,
-            "rodex-agent-trace-v4",
+            "rodex-agent-trace-v5",
             "2026-08-27T00:00:01Z",
             "complete",
             1,
@@ -1589,7 +1589,7 @@ def test_unseen_first_turn_stays_bound_to_first_request_after_followup_arrives()
     view.accept_trace_snapshot(
         RodexAgentTraceSnapshot(
             2,
-            "rodex-agent-trace-v4",
+            "rodex-agent-trace-v5",
             "2026-08-27T00:00:04Z",
             "complete",
             3,
@@ -1657,7 +1657,7 @@ def test_delayed_old_terminal_and_new_followup_keep_exact_turn_evidence_isolated
     view.accept_trace_snapshot(
         RodexAgentTraceSnapshot(
             1,
-            "rodex-agent-trace-v4",
+            "rodex-agent-trace-v5",
             "2026-08-27T00:00:01Z",
             "complete",
             1,
@@ -1717,7 +1717,7 @@ def test_delayed_old_terminal_and_new_followup_keep_exact_turn_evidence_isolated
     view.accept_trace_snapshot(
         RodexAgentTraceSnapshot(
             2,
-            "rodex-agent-trace-v4",
+            "rodex-agent-trace-v5",
             "2026-08-27T00:00:04Z",
             "complete",
             4,
@@ -1783,7 +1783,7 @@ def test_unavailable_followup_never_recaps_the_previous_turn_request() -> None:
     view.accept_trace_snapshot(
         RodexAgentTraceSnapshot(
             1,
-            "rodex-agent-trace-v4",
+            "rodex-agent-trace-v5",
             "2026-08-27T00:00:01Z",
             "complete",
             2,
@@ -1822,7 +1822,7 @@ def test_unavailable_followup_never_recaps_the_previous_turn_request() -> None:
     view.accept_trace_snapshot(
         RodexAgentTraceSnapshot(
             2,
-            "rodex-agent-trace-v4",
+            "rodex-agent-trace-v5",
             "2026-08-27T00:00:03Z",
             "complete",
             3,
@@ -1878,7 +1878,7 @@ def test_observer_view_renders_exact_clean_lineage_work_and_terminal_recap() -> 
     view.accept_trace_snapshot(
         RodexAgentTraceSnapshot(
             2,
-            "rodex-agent-trace-v4",
+            "rodex-agent-trace-v5",
             "2026-08-27T00:00:03Z",
             "complete",
             3,
@@ -1945,7 +1945,7 @@ def test_observer_view_renders_inherited_agent_without_calling_it_same_agent() -
     view.accept_trace_snapshot(
         RodexAgentTraceSnapshot(
             2,
-            "rodex-agent-trace-v4",
+            "rodex-agent-trace-v5",
             "2026-08-27T00:00:01Z",
             "complete",
             1,
@@ -2099,7 +2099,7 @@ def test_interleaved_agents_never_rewrite_another_agents_work_line() -> None:
     view.accept_trace_snapshot(
         RodexAgentTraceSnapshot(
             2,
-            "rodex-agent-trace-v4",
+            "rodex-agent-trace-v5",
             "2026-08-27T00:00:02Z",
             "complete",
             3,
@@ -2186,7 +2186,7 @@ def test_transport_overflow_recovers_65_unknown_same_root_targets_from_trace() -
     )
     snapshot = RodexAgentTraceSnapshot(
         trace_publication_sequence=1,
-        trace_schema_version="rodex-agent-trace-v4",
+        trace_schema_version="rodex-agent-trace-v5",
         calculated_at_utc="2026-08-29T00:00:00Z",
         coverage_state="complete",
         durable_event_count=len(durable_events),
@@ -2217,7 +2217,7 @@ def test_app_item_completion_cannot_suppress_the_final_durable_trace_read() -> N
     view.accept_trace_snapshot(
         RodexAgentTraceSnapshot(
             trace_publication_sequence=8,
-            trace_schema_version="rodex-agent-trace-v4",
+            trace_schema_version="rodex-agent-trace-v5",
             calculated_at_utc="2026-08-27T00:00:02Z",
             coverage_state="complete",
             durable_event_count=1,

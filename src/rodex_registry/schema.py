@@ -1209,7 +1209,7 @@ CREATE TABLE IF NOT EXISTS {RODEX_SESSIONS_AGENT_TRACE_MESSAGES_TABLE} (
         'commentary', 'final_answer', 'analysis', 'unknown'
     )),
     message_role TEXT NOT NULL CHECK (message_role IN (
-        'assistant', 'user', 'system', 'unknown'
+        'assistant', 'developer', 'user', 'system', 'unknown'
     )),
     content_block_count INTEGER NOT NULL CHECK (content_block_count >= 0),
     body_utf8_bytes INTEGER NOT NULL CHECK (body_utf8_bytes >= 0),

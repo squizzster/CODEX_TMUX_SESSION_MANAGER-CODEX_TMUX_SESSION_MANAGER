@@ -12,11 +12,13 @@ These locations belong to the current Linux user, not to the caller's project.
 | Retained installations | `implementations/<installation-key>` under the state root; absolute `RODEX_INSTALLATIONS_ROOT` overrides the store |
 | Runtime root | suitable `$XDG_RUNTIME_DIR/rodex`, otherwise `/tmp/rodex-<uid>`; `RODEX_RUNTIME_DIR` overrides it |
 | Daemon endpoint | `<runtime-root>/<installation-key>.sock` |
+| Daemon coordination | `<installation-key>.start.lock`, `<installation-key>.log`, and the mode-`0600` `<installation-key>.daemon-instance` capability under the runtime root; the capability is replaced for each daemon start |
 | tmux endpoint | `<runtime-root>/tmux-v5-<runtime-id>.sock` |
 | Service sockets | `<runtime-root>/{app,proxy,events}-<runtime-id>.sock` |
 | Codex rollouts | `RODEX_CODEX_SESSIONS_ROOT`, otherwise `$CODEX_HOME/sessions`, otherwise `~/.codex/sessions` |
 
 Path authorities: [`default_runtime_root_path`](../src/rodex/runtime.py),
+[`daemon_socket_path` and `daemon_instance_path`](../src/rodex/daemon_client.py),
 [installation retention](../src/rodex/installation.py), and
 [`default_codex_sessions_root`](../src/rodex/source_configuration.py).
 [Prompt configuration](PROMPT_SUBMISSION_FLOW.md#rule-files) owns the user override path.

@@ -31,10 +31,16 @@ files are untampered. [Installation](../INSTALL.md) owns update, retention, and 
 ## Files, sockets, and child environment
 
 Runtime roots are real current-user mode-`0700` directories under an accepted private
-or root-owned sticky parent. Sockets/logs are mode `0600`. Daemon endpoints and start
-locks are implementation-namespaced; same-uid peer checks and bounded protocol decoding
-keep live transport access bound to the owning build. The explicit
-[idle upgrade handoff](RUNTIME_ISOLATION.md#retained-runtime-upgrade) runs through that
+or root-owned sticky parent. Sockets/logs are mode `0600`. Daemon endpoints, start
+locks, and incarnation capabilities are implementation-namespaced. Each daemon start
+publishes a new private 256-bit incarnation value; requests and responses must match
+both it and the installation identity. This rejects stale or replaced daemon state,
+but the readable same-user capability is not a defense against a hostile same-uid
+process. Same-uid peer checks and bounded protocol decoding keep live transport access
+within the stated local trust boundary. The exact
+[daemon identity contract](RUNTIME_ISOLATION.md#capability-and-admission) applies to
+ordinary requests. The explicit
+[idle upgrade handoff](RUNTIME_ISOLATION.md#retained-runtime-upgrade) runs through the
 owner's retained interpreter before the current build starts a replacement incarnation.
 [Runtime lifetimes](RUNTIME_ISOLATION.md#resource-lifetime)
 cover descriptor transfer, endpoint aliases, receipts, and PID-reuse protection.

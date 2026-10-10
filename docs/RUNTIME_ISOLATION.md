@@ -30,8 +30,9 @@ It never executes the stored shell text or overwrites old helpers.
 
 The [handoff adapter](../src/rodex/retained_runtime_handoff.py) runs with the owning
 interpreter and `-I`, importing that installation's existing control/daemon APIs.
-Supported admission requires the shared catalog contract, tmux-v5, daemon-v3 and
-process-receipt-v3. The parent retains the session transition lock throughout.
+Supported admission requires the shared catalog contract, tmux-v5,
+process-receipt-v3, and either daemon-v3 or daemon-v4. The parent retains the session
+transition lock throughout.
 The adapter rechecks durable/full tmux identity and whole-runtime topology, inspects
 the exact thread, verifies saved history and both live child receipts, then rechecks
 idle immediately before stopping only that reservation. A busy thread reports on
@@ -75,13 +76,23 @@ target; primary actions also require the pane ID. tmux predicates belong in dire
 `if-shell -F` conditions, with payload-only `display-message` in the selected branch.
 Rendering a predicate as display output changes literal `$`/`%` semantics.
 
+The shared daemon has two deliberately different identities. The opaque retained
+installation key selects the compatible endpoint and code generation. At each daemon
+start, [`RodexDaemonServer`](../src/rodex/daemon.py) generates a separate random
+256-bit incarnation ID and atomically publishes it as a current-user-owned, mode-`0600`
+regular file. [`RodexDaemonClient`](../src/rodex/daemon_client.py) binds to that value,
+sends both identities on every operation, verifies both response fields, and rejects
+a changed incarnation. This detects stale or replaced daemon state inside Rodex's
+single-user trust boundary; it is not authentication against a hostile same-uid process.
+
 The creation/admission sequence is:
 
 1. Claim an entirely unmarked, empty tmux server dedicated to this runtime. Retain
    the creation nonce for cleanup; failure must not rediscover incumbent authority.
 2. Reserve one runtime/operation in its implementation-scoped
-   [`DaemonRuntimeManager`](../src/rodex/daemon.py). Different implementations cannot
-   reconcile each other's reservations or child receipts.
+   [`DaemonRuntimeManager`](../src/rodex/daemon.py), after verifying that daemon's
+   current incarnation. Different implementations cannot reconcile each other's
+   reservations or child receipts.
 3. Transfer exactly one pane TTY descriptor from the bridge. Verify same-uid peer,
    PID, pane, TTY, nonce, and reservation before ownership transfers. The daemon
    runtime becomes the sole TTY owner; a manager timeout cannot revoke it.
@@ -89,7 +100,8 @@ The creation/admission sequence is:
    then confirm registration and UI identity before releasing the lock. New runtimes
    advertise `pending`; an exact durable/pending pair can finish interrupted confirmation.
    Unconfirmed runtimes expire rather than becoming implicitly registered.
-5. Admit protocol traffic only after both ends verify the runtime/server/installation key.
+5. Admit protocol traffic only after both ends verify the runtime/server/installation
+   key and, for shared-daemon traffic, the daemon incarnation.
    [`RuntimePeerIdentity`](../src/rodex/runtime_peer.py) also pins native peers to the
    retained child process tree; a matching thread ID alone is insufficient.
 

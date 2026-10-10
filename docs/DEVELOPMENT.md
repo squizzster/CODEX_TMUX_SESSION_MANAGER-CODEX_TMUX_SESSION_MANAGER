@@ -75,12 +75,13 @@ visible-history invalidation. Pair them with [interval runtime measurements](OPE
 
 ## Documentation changes
 
-[README.md](../README.md) is the compact product introduction, with brief features,
-a quick start, and entry links. [DESIGN.md](../DESIGN.md) maps the technical guides;
-read only the topics relevant to the task. Keep detailed contracts in their topic
-guides and source/tests, linked rather than repeated. Every maintained guide and the
-automation skill should be reachable through this map. Historical investigations
-remain in Git.
+[README.md](../README.md) is the compact product introduction, quick start, and
+complete index of maintained project documentation. [DESIGN.md](../DESIGN.md) is the
+task-oriented map for technical guides, while [VERSION_TRACKER.md](../VERSION_TRACKER.md)
+owns concise version history and pending change notes. Keep detailed contracts in
+their topic guides and source/tests, linked rather than repeated. Every maintained
+Markdown guide and repository-local agent instruction must be linked directly from
+the README. Historical investigations remain in Git.
 
 For docs-only changes, check relative links/anchors, source paths, documentation reachability,
 and `git diff --check`; run relevant existing contract tests. Verify command examples

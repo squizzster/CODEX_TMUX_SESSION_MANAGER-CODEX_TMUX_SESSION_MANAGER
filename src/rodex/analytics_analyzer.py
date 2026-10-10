@@ -83,7 +83,11 @@ class CodexProtocolAnalyticsAdapter:
             )
             coverage_state = "complete"
             for index, source in enumerate(sources):
-                loaded = _load_analyzer_bytes(library, protocol_id, source.analyzer_content, index)
+                analyzer_content = _adapt_token_accounting_content(
+                    source.analyzer_content,
+                    source.codex_thread_id,
+                )
+                loaded = _load_analyzer_bytes(library, protocol_id, analyzer_content, index)
                 _operation_value(
                     loaded,
                     "load verified Codex rollout",
@@ -102,7 +106,10 @@ class CodexProtocolAnalyticsAdapter:
             if stats_result.status != "ok":
                 coverage_state = "gapped"
             return AnalyticsCalculation(
-                statistics_projection=_parse_projection(stats),
+                statistics_projection=replace(
+                    _parse_projection(stats),
+                    audit_token_method=_RODEX_TOKEN_METHOD,
+                ),
                 coverage_state=coverage_state,
             )
         finally:
@@ -117,6 +124,144 @@ class CodexProtocolAnalyticsAdapter:
 class _SourceState:
     session_id: str
     pending_content: bytes = b""
+    token_accounting: _TokenAccountingState = field(default_factory=lambda: _TokenAccountingState())
+
+
+_TOKEN_FIELDS = (
+    "input_tokens",
+    "cached_input_tokens",
+    "cache_write_input_tokens",
+    "output_tokens",
+    "reasoning_output_tokens",
+    "total_tokens",
+)
+_RODEX_TOKEN_METHOD = (
+    "unique response usage from token_usage_record; cumulative snapshots are legacy fallback and modern reconciliation"
+)
+
+
+@dataclass(slots=True)
+class _TokenAccountingState:
+    canonical_seen: bool = False
+    latest_canonical_total: dict[str, int] | None = None
+    response_fingerprints: dict[str, tuple[str | None, tuple[int, ...]]] = field(default_factory=dict)
+
+
+def _adapt_token_accounting_content(content: bytes, thread_id: CodexThreadId) -> bytes:
+    """Present one authoritative token stream to the pinned analyzer."""
+    state = _TokenAccountingState()
+    adapted_lines: list[bytes] = []
+    for line in content.splitlines(keepends=True):
+        body = line.rstrip(b"\r\n")
+        ending = line[len(body) :]
+        if not body.strip():
+            adapted_lines.append(line)
+            continue
+        try:
+            record = json.loads(body, parse_constant=_reject_json_constant)
+        except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
+            adapted_lines.append(line)
+            continue
+        if not isinstance(record, dict):
+            adapted_lines.append(line)
+            continue
+        adapted = _adapt_token_accounting_record(record, thread_id, state)
+        if adapted is record:
+            adapted_lines.append(line)
+        else:
+            adapted_lines.append(json.dumps(adapted, ensure_ascii=False, separators=(",", ":")).encode("utf-8") + ending)
+    return b"".join(adapted_lines)
+
+
+def _adapt_token_accounting_record(
+    record: dict[str, Any],
+    thread_id: CodexThreadId,
+    state: _TokenAccountingState,
+) -> dict[str, Any]:
+    """Convert Codex's canonical response usage into the analyzer's token input."""
+    payload_value = record.get("payload")
+    payload = payload_value if isinstance(payload_value, Mapping) else {}
+    record_type = record.get("type")
+    payload_type = payload.get("type")
+    if record_type == "token_usage_record":
+        supplied_thread_id = payload.get("thread_id")
+        if supplied_thread_id is not None and supplied_thread_id != str(thread_id):
+            raise RodexAnalyticsError("token usage record identifies a different thread")
+        response_id = payload.get("response_id")
+        if not isinstance(response_id, str) or not response_id:
+            raise RodexAnalyticsError("token usage record has no response identity")
+        usage = _token_vector(payload.get("usage"), "token usage")
+        thread_total = _token_vector(payload.get("thread_token_usage"), "thread token usage")
+        turn_id_value = payload.get("turn_id")
+        turn_id = turn_id_value if isinstance(turn_id_value, str) and turn_id_value else None
+        fingerprint = (turn_id, tuple(usage[name] for name in _TOKEN_FIELDS))
+        previous = state.response_fingerprints.get(response_id)
+        if previous is not None and previous != fingerprint:
+            raise RodexAnalyticsError("token usage response identity has conflicting values")
+        if previous is None:
+            state.response_fingerprints[response_id] = fingerprint
+            state.latest_canonical_total = thread_total
+        elif state.latest_canonical_total is None:
+            raise RodexAnalyticsError("token usage accounting lost its cumulative state")
+        state.canonical_seen = True
+        return _token_count_record(
+            record,
+            turn_id=turn_id,
+            total=(thread_total if previous is None else state.latest_canonical_total),
+            last=usage,
+        )
+    if record_type == "event_msg" and payload_type in {"token_count", "token_usage"}:
+        if not state.canonical_seen:
+            if payload_type == "token_count":
+                return record
+            adapted_payload = dict(payload)
+            adapted_payload["type"] = "token_count"
+            return {**record, "payload": adapted_payload}
+        if state.latest_canonical_total is None:
+            raise RodexAnalyticsError("token usage accounting has no canonical cumulative total")
+        info_value = payload.get("info")
+        info = dict(info_value) if isinstance(info_value, Mapping) else {}
+        info["total_token_usage"] = dict(state.latest_canonical_total)
+        adapted_payload = dict(payload)
+        adapted_payload["type"] = "token_count"
+        adapted_payload["info"] = info
+        return {**record, "payload": adapted_payload}
+    return record
+
+
+def _token_count_record(
+    record: Mapping[str, Any],
+    *,
+    turn_id: str | None,
+    total: Mapping[str, int],
+    last: Mapping[str, int],
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "type": "token_count",
+        "info": {
+            "total_token_usage": dict(total),
+            "last_token_usage": dict(last),
+        },
+    }
+    if turn_id is not None:
+        payload["turn_id"] = turn_id
+    return {**record, "type": "event_msg", "payload": payload}
+
+
+def _token_vector(value: object, label: str) -> dict[str, int]:
+    if not isinstance(value, Mapping):
+        raise RodexAnalyticsError(f"{label} is missing")
+    vector: dict[str, int] = {}
+    for name in _TOKEN_FIELDS:
+        supplied = value.get(name, 0)
+        if isinstance(supplied, bool) or not isinstance(supplied, int) or supplied < 0:
+            raise RodexAnalyticsError(f"{label} has an invalid {name}")
+        vector[name] = supplied
+    if vector["cached_input_tokens"] > vector["input_tokens"]:
+        raise RodexAnalyticsError(f"{label} has cached input greater than input")
+    if vector["reasoning_output_tokens"] > vector["output_tokens"]:
+        raise RodexAnalyticsError(f"{label} has reasoning output greater than output")
+    return vector
 
 
 @dataclass(slots=True)
@@ -622,13 +767,13 @@ class StatefulCodexProtocolAnalyticsAdapter:
                     self._coverage_gapped = True
                     changed = True
                 for record in records:
-                    self._consume_record(
+                    adapted_record = self._consume_record(
                         source.codex_thread_id,
                         state,
                         record,
                         touches,
                     )
-                    event_name = self._new_event_name(record)
+                    event_name = self._new_event_name(adapted_record)
                     if event_name is not None:
                         self._unknown_event_types_by_source.setdefault(source.codex_thread_id, set()).add(str(event_name))
                         self._coverage_gapped = True
@@ -648,6 +793,7 @@ class StatefulCodexProtocolAnalyticsAdapter:
             snapshot = report.to_dict()
             snapshot.pop("source")
             audit = dict(snapshot["audit"])
+            audit["token_method"] = _RODEX_TOKEN_METHOD
             audit["new_event_type_warnings"] = warning_count
             snapshot.update(
                 {
@@ -691,7 +837,7 @@ class StatefulCodexProtocolAnalyticsAdapter:
         state: _SourceState,
         record: dict[str, Any],
         touches: _BatchTouches,
-    ) -> None:
+    ) -> dict[str, Any]:
         self._analyzer.records += 1
         self._analyzer.sequence += 1
         payload_value = record.get("payload")
@@ -702,9 +848,13 @@ class StatefulCodexProtocolAnalyticsAdapter:
             self._analyzer.sessions.discard(state.session_id)
             state.session_id = identifier
             self._analyzer.sessions.add(identifier)
-            return
-        self._remember_touches(record, payload, state.session_id, touches)
-        self._analyzer._consume(record, payload, state.session_id)
+            return record
+        adapted_record = _adapt_token_accounting_record(record, thread_id, state.token_accounting)
+        adapted_payload_value = adapted_record.get("payload")
+        adapted_payload = dict(adapted_payload_value) if isinstance(adapted_payload_value, Mapping) else {}
+        self._remember_touches(adapted_record, adapted_payload, state.session_id, touches)
+        self._analyzer._consume(adapted_record, adapted_payload, state.session_id)
+        return adapted_record
 
     def _remember_touches(
         self,

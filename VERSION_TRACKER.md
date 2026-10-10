@@ -27,7 +27,9 @@ repository currently has no Git release tags, so they do not imply a published r
   incarnation. Retained-runtime handoff continues to admit supported daemon-v3 and
   daemon-v4 installations.
 - The current-only catalog is generation 22 (`rodex-v22.sqlite3`) and the agent-trace
-  contract is v5. Generation 21 remains untouched and is not implicitly migrated.
+  contract is v5. Statistics projection v10 counts each canonical response-usage
+  record once while retaining cumulative snapshots as a legacy fallback. Generation
+  21 remains untouched and is not implicitly migrated.
 - Documentation now distinguishes installation routing, daemon-incarnation checks,
   and the single-user security boundary.
 

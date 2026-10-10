@@ -49,6 +49,12 @@ neither fact; contradictory exact evidence fails closed instead of guessing.
 Message roles preserve Codex's `assistant`, `developer`, `user`, and `system`
 identities; `unknown` remains the explicit fallback for absent or unsupported roles.
 
+Token statistics use each unique top-level `token_usage_record` response once. The
+later cumulative `event_msg/token_count` representation supplies context observations
+and reconciliation without adding the same response again. Rollouts without canonical
+response-usage records retain the cumulative positive-delta fallback, including reset
+epochs.
+
 ## Publication and recovery
 
 The [registry analytics boundary](../src/rodex_registry/analytics_registry.py)

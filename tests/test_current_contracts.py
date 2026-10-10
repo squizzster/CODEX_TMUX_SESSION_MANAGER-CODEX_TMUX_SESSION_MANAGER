@@ -41,7 +41,7 @@ def test_current_release_declares_matching_package_and_process_versions() -> Non
     assert peer_headers["X-Rodex-Implementation-Id"].startswith("0.15.0a1+installation.")
     assert MACHINE_ENVELOPE_SCHEMA_VERSION == 5
     assert AGENT_TRACE_SCHEMA_VERSION == "rodex-agent-trace-v5"
-    assert STATISTICS_PROJECTION_SCHEMA_VERSION == "rodex-statistics-v9"
+    assert STATISTICS_PROJECTION_SCHEMA_VERSION == "rodex-statistics-v10"
     assert OBSERVER_SCHEMA == "rodex-agent-observer-v4"
 
 

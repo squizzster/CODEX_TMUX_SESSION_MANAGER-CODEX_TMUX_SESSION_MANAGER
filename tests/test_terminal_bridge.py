@@ -14,15 +14,26 @@ import time
 import tty
 from contextlib import suppress
 
-from rodex.daemon_client import RODEX_DAEMON_PROTOCOL, daemon_socket_path, encode_daemon_message, receive_daemon_message
+from rodex.daemon_client import (
+    RODEX_DAEMON_INSTANCE_FIELD,
+    RODEX_DAEMON_PROTOCOL,
+    daemon_instance_path,
+    daemon_socket_path,
+    encode_daemon_message,
+    receive_daemon_message,
+)
 from rodex.implementation_identity import RODEX_IMPLEMENTATION_ID
 
 
 def test_bridge_forwards_real_sigwinch_and_never_consumes_native_input(tmp_path):
+    daemon_instance_id = "d" * 64
     directory_fd = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
     from pathlib import Path
 
     endpoint = daemon_socket_path(Path(f"/proc/{os.getpid()}/fd/{directory_fd}"))
+    capability = daemon_instance_path(tmp_path)
+    capability.write_text(f"{daemon_instance_id}\n")
+    capability.chmod(0o600)
     listener = socket.socket(socket.AF_UNIX)
     listener.bind(str(endpoint))
     listener.listen(4)
@@ -51,10 +62,29 @@ def test_bridge_forwards_real_sigwinch_and_never_consumes_native_input(tmp_path)
     bridge = None
     transferred = []
     try:
+        discovery, _ = listener.accept()
+        with discovery:
+            assert receive_daemon_message(discovery) == {
+                "protocol": RODEX_DAEMON_PROTOCOL,
+                "implementation_id": RODEX_IMPLEMENTATION_ID,
+                RODEX_DAEMON_INSTANCE_FIELD: daemon_instance_id,
+                "operation": "ping",
+            }
+            discovery.sendall(
+                encode_daemon_message(
+                    {
+                        "protocol": RODEX_DAEMON_PROTOCOL,
+                        "implementation_id": RODEX_IMPLEMENTATION_ID,
+                        RODEX_DAEMON_INSTANCE_FIELD: daemon_instance_id,
+                        "ok": True,
+                    }
+                )
+            )
         bridge, _ = listener.accept()
         bridge.settimeout(5)
         request, ancillary, _flags, _address = bridge.recvmsg(65536, socket.CMSG_SPACE(array.array("i").itemsize))
         assert b'"operation":"bind_terminal"' in request
+        assert daemon_instance_id.encode() in request
         for level, kind, data in ancillary:
             if (level, kind) == (socket.SOL_SOCKET, socket.SCM_RIGHTS):
                 descriptors = array.array("i")
@@ -63,7 +93,12 @@ def test_bridge_forwards_real_sigwinch_and_never_consumes_native_input(tmp_path)
         assert len(transferred) == 1
         tty.setraw(transferred[0])
         reply = encode_daemon_message(
-            {"protocol": RODEX_DAEMON_PROTOCOL, "implementation_id": RODEX_IMPLEMENTATION_ID, "ok": True}
+            {
+                "protocol": RODEX_DAEMON_PROTOCOL,
+                "implementation_id": RODEX_IMPLEMENTATION_ID,
+                RODEX_DAEMON_INSTANCE_FIELD: daemon_instance_id,
+                "ok": True,
+            }
         )
         bridge.sendall(reply)
 
@@ -74,6 +109,7 @@ def test_bridge_forwards_real_sigwinch_and_never_consumes_native_input(tmp_path)
                 assert request == {
                     "protocol": RODEX_DAEMON_PROTOCOL,
                     "implementation_id": RODEX_IMPLEMENTATION_ID,
+                    RODEX_DAEMON_INSTANCE_FIELD: daemon_instance_id,
                     "operation": "wake_runtime",
                     "runtime_id": "0123456789abcdef",
                     "cause": "terminal_resize",

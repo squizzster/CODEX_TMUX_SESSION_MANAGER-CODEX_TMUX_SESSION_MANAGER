@@ -50,7 +50,7 @@ class _SelectedRetainedRuntime:
             request["protocol"] != UPGRADE_PROTOCOL
             or request["implementation"] != RODEX_IMPLEMENTATION_SHA256
             or RODEX_SHARED_TMUX_PROTOCOL != "rodex-isolated-tmux-v5"
-            or RODEX_DAEMON_PROTOCOL != "rodex-daemon-v3"
+            or RODEX_DAEMON_PROTOCOL not in {"rodex-daemon-v3", "rodex-daemon-v4"}
             or PROCESS_RECEIPT_PROTOCOL != "rodex-process-receipt-v3"
         ):
             raise RuntimeError("selected runtime is outside the supported retained-installation contract")

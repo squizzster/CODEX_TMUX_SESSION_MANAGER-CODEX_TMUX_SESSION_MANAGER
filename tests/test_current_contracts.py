@@ -30,7 +30,7 @@ def test_current_release_declares_matching_package_and_process_versions() -> Non
     assert RODEX_DATABASE_SCHEMA_GENERATION == 21
     assert RODEX_DATABASE_FILENAME == "rodex-v21.sqlite3"
     assert RODEX_SHARED_TMUX_PROTOCOL == "rodex-isolated-tmux-v5"
-    assert RODEX_DAEMON_PROTOCOL == "rodex-daemon-v3"
+    assert RODEX_DAEMON_PROTOCOL == "rodex-daemon-v4"
     assert PROCESS_RECEIPT_PROTOCOL == "rodex-process-receipt-v3"
     assert f"{RODEX_IMPLEMENTATION_KEY}.sock" == RODEX_DAEMON_SOCKET_NAME
     assert len(RODEX_IMPLEMENTATION_KEY) == 64

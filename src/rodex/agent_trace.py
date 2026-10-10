@@ -24,7 +24,7 @@ from rodex_registry import (
 
 from .agent_trace_privacy import contains_codex_encrypted_value
 
-AGENT_TRACE_SCHEMA_VERSION = "rodex-agent-trace-v4"
+AGENT_TRACE_SCHEMA_VERSION = "rodex-agent-trace-v5"
 type AgentTraceSource = tuple[CodexThreadId, bytes] | tuple[CodexThreadId, bytes, int | Sequence[int]]
 type SubagentSpawningTurn = tuple[CodexThreadId, str]
 
@@ -600,7 +600,7 @@ def _message_phase(value: object) -> str:
 
 def _message_role(value: object) -> str:
     role = _text(value)
-    return role if role in {"assistant", "user", "system"} else "unknown"
+    return role if role in {"assistant", "developer", "user", "system"} else "unknown"
 
 
 def _optional_thread_id(value: object) -> CodexThreadId | None:

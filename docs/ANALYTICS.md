@@ -46,6 +46,32 @@ facts. Canonical lifecycle turn IDs stay strict UUIDs. Synthetic labels such as
 active canonical turn. Exact spawn facts bind child to parent turn; durable lineage
 is the restart fallback. First-linked timestamps apply only to legacy histories with
 neither fact; contradictory exact evidence fails closed instead of guessing.
+Message roles preserve Codex's `assistant`, `developer`, `user`, and `system`
+identities; `unknown` remains the explicit fallback for absent or unsupported roles.
+
+## Token accounting
+
+Statistics projection v10 adapts Codex's top-level `token_usage_record` into the
+pinned analyzer's cumulative token input. In
+[`_adapt_token_accounting_record`](../src/rodex/analytics_analyzer.py), `response_id`
+is the deduplication identity, `usage` is that response's increment, and
+`thread_token_usage` is the authoritative cumulative total. An identical repeated
+response is idempotent; conflicting values for one response identity fail the
+calculation instead of guessing.
+
+After a canonical response-usage record appears, later `event_msg/token_count` or
+`event_msg/token_usage` snapshots reconcile to its cumulative total and do not add
+the same usage again. Older rollouts with no canonical records retain cumulative
+positive-delta accounting, including reset epochs. Full replay and resident append
+processing share this adapter and are checked for parity in
+[analyzer tests](../tests/test_rodex_analytics_analyzer.py).
+
+Statistics recognition and typed trace recognition are separate contracts. A
+top-level response-usage record can contribute correctly to `_stats` while remaining
+an `unrecognized_record` in `_trace`; that trace count makes the normalization gap
+visible and does not mean token usage was omitted from statistics. Neither path stores
+Codex conversation or hidden-reasoning plaintext in SQLite. See
+[content and privacy](SECURITY.md#content-and-privacy).
 
 ## Publication and recovery
 

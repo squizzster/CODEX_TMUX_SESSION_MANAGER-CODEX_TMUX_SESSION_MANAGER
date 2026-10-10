@@ -631,11 +631,79 @@ def test_normalizer_covers_canonical_message_custom_tool_and_subagent_shapes() -
     )
 
     message, tool, activity = publication.events
-    assert message.detail.message_role == "unknown"  # type: ignore[union-attr]
+    assert message.detail.message_role == "developer"  # type: ignore[union-attr]
     assert message.detail.body_utf8_bytes == 6  # type: ignore[union-attr]
     assert tool.detail.tool_name == "collaboration.spawn_agent"  # type: ignore[union-attr]
     assert tool.detail.request_utf8_bytes == 7  # type: ignore[union-attr]
     assert activity.detail.target_codex_thread_id == CHILD_THREAD_ID  # type: ignore[union-attr]
+
+
+def test_developer_message_role_round_trips_through_contract_and_sql(
+    tmp_path: Path,
+) -> None:
+    publication = normalize_rollout_trace(
+        (
+            (
+                THREAD_ID,
+                _content(
+                    {
+                        "ordinal": 1,
+                        "type": "response_item",
+                        "payload": {
+                            "type": "message",
+                            "role": "developer",
+                            "content": "policy",
+                        },
+                    }
+                ),
+            ),
+        ),
+        based_on_trace_publication_sequence=None,
+        calculated_at_utc="2026-10-10T12:00:00Z",
+    )
+    database = tmp_path / "rodex.sqlite3"
+    create_a_rodex_session(database, codex_session_id=THREAD_ID)
+
+    _publish_trace(database, publication)
+
+    snapshot = read_rodex_agent_trace(1, database)
+    assert snapshot.trace_schema_version == "rodex-agent-trace-v5"
+    assert snapshot.events[0]["detail"]["message_role"] == "developer"
+    with sqlite3.connect(database) as connection:
+        assert connection.execute(
+            "SELECT message_role FROM rodex_sessions_agent_trace_messages"
+        ).fetchall() == [("developer",)]
+
+
+@pytest.mark.parametrize("source_role", [None, "future-role"])
+def test_message_role_unknown_is_reserved_for_absent_or_unsupported_roles(
+    source_role: str | None,
+) -> None:
+    payload: dict[str, object] = {
+        "type": "message",
+        "content": "future",
+    }
+    if source_role is not None:
+        payload["role"] = source_role
+
+    publication = normalize_rollout_trace(
+        (
+            (
+                THREAD_ID,
+                _content(
+                    {
+                        "ordinal": 1,
+                        "type": "response_item",
+                        "payload": payload,
+                    }
+                ),
+            ),
+        ),
+        based_on_trace_publication_sequence=None,
+        calculated_at_utc="2026-10-10T12:00:00Z",
+    )
+
+    assert publication.events[0].detail.message_role == "unknown"  # type: ignore[union-attr]
 
 
 def test_normalizer_retains_empty_tool_request_and_output_activity_kinds(

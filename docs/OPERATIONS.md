@@ -8,7 +8,7 @@ These locations belong to the current Linux user, not to the caller's project.
 | Resource | Default and override |
 | --- | --- |
 | Rodex state | `$XDG_STATE_HOME/rodex`, otherwise `~/.local/state/rodex` |
-| Catalog | `rodex-v21.sqlite3` under the state root; generation authority is [private_database_path.py](../src/rodex_sql/private_database_path.py) |
+| Catalog | `rodex-v22.sqlite3` under the state root; generation authority is [private_database_path.py](../src/rodex_sql/private_database_path.py) |
 | Retained installations | `implementations/<installation-key>` under the state root; absolute `RODEX_INSTALLATIONS_ROOT` overrides the store |
 | Runtime root | suitable `$XDG_RUNTIME_DIR/rodex`, otherwise `/tmp/rodex-<uid>`; `RODEX_RUNTIME_DIR` overrides it |
 | Daemon endpoint | `<runtime-root>/<installation-key>.sock` |

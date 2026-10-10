@@ -56,6 +56,11 @@ normal temporary roots.
   coalescing, the idle reset, and the native elapsed timer.
 - Persistence: [SQLite adversarial boundaries](../tests/adversarial/test_round3_sqlite_boundaries.py)
   and the registry/analytics suites beside the relevant implementation tests.
+- Rollout statistics and token accounting: start with
+  [analyzer parity](../tests/test_rodex_analytics_analyzer.py), then add
+  [worker/publication](../tests/test_rodex_analytics.py) or
+  [trace normalization](../tests/test_rodex_agent_trace.py) only when that boundary
+  is touched.
 - New effect-bearing paths: update the classification in
   [test_interaction_path_ownership.py](../tests/adversarial/test_interaction_path_ownership.py)
   and the [interaction inventory](INTERACTION_PATHS.md#effect-audit).
@@ -87,3 +92,9 @@ For docs-only changes, check relative links/anchors, source paths, documentation
 and `git diff --check`; run relevant existing contract tests. Verify command examples
 against definitions or safe help execution, without launching quota-using tests merely
 to validate prose. State which live or installation checks were not performed.
+
+The smallest existing compatibility check is:
+
+```bash
+uv run pytest tests/test_current_contracts.py tests/test_command_contract.py
+```

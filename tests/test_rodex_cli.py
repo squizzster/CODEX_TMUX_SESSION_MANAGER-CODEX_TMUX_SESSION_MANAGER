@@ -533,7 +533,7 @@ def test_version_reports_compatibility_without_codex_tmux_or_database(
     assert "  daemon protocol: rodex-daemon-v4\n" in output.out
     assert f"  daemon socket: /tmp/rodex-{os.getuid()}/" in output.out
     assert ".sock\n" in output.out
-    assert "  SQLite catalog: generation 21 (rodex-v21.sqlite3)\n" in output.out
+    assert "  SQLite catalog: generation 22 (rodex-v22.sqlite3)\n" in output.out
     assert not database.exists()
 
 
@@ -3834,7 +3834,7 @@ def test_alias_replacement_without_force_is_reported_on_stderr(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     state_home = tmp_path / "state"
-    database = state_home / "rodex" / "rodex-v21.sqlite3"
+    database = state_home / "rodex" / "rodex-v22.sqlite3"
     monkeypatch.setattr(
         "cool_name.functions.coolname.generate_slug",
         lambda _word_count: "black-sawfly",
@@ -3885,7 +3885,7 @@ def test_empty_alias_is_a_concise_stderr_error(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     state_home = tmp_path / "state"
-    database = state_home / "rodex" / "rodex-v21.sqlite3"
+    database = state_home / "rodex" / "rodex-v22.sqlite3"
     monkeypatch.setattr("cool_name.functions.coolname.generate_slug", lambda _word_count: "safe-name")
     monkeypatch.setattr("rodex_registry.lifecycle.current_rodex_sessions_user_identity", lambda: DNA)
     monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)

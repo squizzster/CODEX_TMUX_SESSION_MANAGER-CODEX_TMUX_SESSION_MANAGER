@@ -33,3 +33,24 @@ there is no need to read the whole set.
 
 Release and dependency facts live in [pyproject.toml](pyproject.toml);
 [current-contract tests](tests/test_current_contracts.py) pin compatibility generations.
+
+## Source-of-truth shortcuts
+
+- [`UnifiedRodexApplicationPipeline`](src/rodex/application_pipeline.py) and
+  [`COMMAND_SPECS`](src/rodex/command_contract.py) own invocation routing and the
+  local command grammar.
+- [`ManagedSessionLifecycle`](src/rodex/managed_session_lifecycle.py) and
+  [`DaemonRuntimeManager`](src/rodex/daemon.py) own session and live-runtime state
+  transitions.
+- [`SharedAnalyticsCoordinator`](src/rodex/analytics.py),
+  [`StatefulCodexProtocolAnalyticsAdapter`](src/rodex/analytics_analyzer.py), and
+  [`rodex_registry`](src/rodex_registry/__init__.py) own rollout processing and
+  durable projections.
+- [`rodex_registry.schema`](src/rodex_registry/schema.py) generates the current SQL
+  catalog; do not copy its table definitions into prose.
+- [`CODEX_APP_SERVER`](src/rodex/app_server_contract.py), the constants in
+  [`rodex_sql`](src/rodex_sql/private_database_path.py), and
+  [current-contract tests](tests/test_current_contracts.py) own minimum compatibility
+  and persisted/wire generation values.
+- [`user_prompt_substitutions.yaml`](conf/hooks/user_prompt_substitutions.yaml) owns
+  the shipped prompt rules. Installation copies that file into each retained build.

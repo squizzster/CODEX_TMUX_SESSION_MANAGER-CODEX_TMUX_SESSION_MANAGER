@@ -518,7 +518,7 @@ def test_round3_observer_view_releases_a_flushed_terminal_turn() -> None:
     view.accept_trace_snapshot(
         RodexAgentTraceSnapshot(
             trace_publication_sequence=1,
-            trace_schema_version="rodex-agent-trace-v4",
+            trace_schema_version="rodex-agent-trace-v5",
             calculated_at_utc="2026-08-29T00:00:01Z",
             coverage_state="complete",
             durable_event_count=2,

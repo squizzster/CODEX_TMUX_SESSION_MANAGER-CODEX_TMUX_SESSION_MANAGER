@@ -13,6 +13,8 @@ repository currently has no Git release tags, so they do not imply a published r
 - A daemon now creates one random 256-bit incarnation capability at each start,
   publishes it privately, and requires it alongside the retained installation identity
   on every request and response.
+- Agent traces now preserve Codex `developer` messages as a first-class role through
+  normalization, contract validation, SQL storage, and trace readback.
 - The README now links every maintained project guide and repository-local agent
   instruction directly.
 
@@ -24,13 +26,20 @@ repository currently has no Git release tags, so they do not imply a published r
 - Daemon protocol v4 and the terminal bridge bind clients to one exact daemon
   incarnation. Retained-runtime handoff continues to admit supported daemon-v3 and
   daemon-v4 installations.
+- The current-only catalog is generation 22 (`rodex-v22.sqlite3`) and the agent-trace
+  contract is v5. Statistics projection v10 counts each canonical response-usage
+  record once while retaining cumulative snapshots as a legacy fallback. Generation
+  21 remains untouched and is not implicitly migrated.
 - Documentation now distinguishes installation routing, daemon-incarnation checks,
-  and the single-user security boundary.
+  the single-user security boundary, statistics token accounting, and typed trace
+  coverage. The design map points contributors to authoritative source owners and
+  focused evidence.
 
 ### Removed
 
 - Routine startup no longer hashes Rodex source, installed dependency contents, or
   shipped configuration to identify itself.
+- Recognized developer messages are no longer collapsed into the `unknown` role.
 - The installed shim no longer recursively scans the checkout and virtual environment
   as an intrusion-detection policy.
 

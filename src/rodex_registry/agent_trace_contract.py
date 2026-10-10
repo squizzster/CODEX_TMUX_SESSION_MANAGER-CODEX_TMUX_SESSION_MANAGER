@@ -369,7 +369,7 @@ def _validate_detail(kind: str, detail: TraceDetail) -> TraceDetail:
             message_role=_one_of(
                 detail.message_role,
                 "message_role",
-                {"assistant", "user", "system", "unknown"},
+                {"assistant", "developer", "user", "system", "unknown"},
             ),
             content_block_count=_nonnegative_integer(detail.content_block_count, "content_block_count"),
             body_utf8_bytes=_nonnegative_integer(detail.body_utf8_bytes, "body_utf8_bytes"),

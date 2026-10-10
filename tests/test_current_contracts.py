@@ -27,8 +27,8 @@ from rodex_sql import RODEX_DATABASE_FILENAME, RODEX_DATABASE_SCHEMA_GENERATION
 def test_current_release_declares_matching_package_and_process_versions() -> None:
     project = tomllib.loads((Path(__file__).parents[1] / "pyproject.toml").read_text())
     assert project["project"]["version"] == RODEX_VERSION == "0.15.0a1"
-    assert RODEX_DATABASE_SCHEMA_GENERATION == 21
-    assert RODEX_DATABASE_FILENAME == "rodex-v21.sqlite3"
+    assert RODEX_DATABASE_SCHEMA_GENERATION == 22
+    assert RODEX_DATABASE_FILENAME == "rodex-v22.sqlite3"
     assert RODEX_SHARED_TMUX_PROTOCOL == "rodex-isolated-tmux-v5"
     assert RODEX_DAEMON_PROTOCOL == "rodex-daemon-v4"
     assert PROCESS_RECEIPT_PROTOCOL == "rodex-process-receipt-v3"
@@ -40,8 +40,8 @@ def test_current_release_declares_matching_package_and_process_versions() -> Non
     assert peer_headers["X-Rodex-Peer-Contract"] == "rodex-runtime-peer-v6"
     assert peer_headers["X-Rodex-Implementation-Id"].startswith("0.15.0a1+installation.")
     assert MACHINE_ENVELOPE_SCHEMA_VERSION == 5
-    assert AGENT_TRACE_SCHEMA_VERSION == "rodex-agent-trace-v4"
-    assert STATISTICS_PROJECTION_SCHEMA_VERSION == "rodex-statistics-v9"
+    assert AGENT_TRACE_SCHEMA_VERSION == "rodex-agent-trace-v5"
+    assert STATISTICS_PROJECTION_SCHEMA_VERSION == "rodex-statistics-v10"
     assert OBSERVER_SCHEMA == "rodex-agent-observer-v4"
 
 

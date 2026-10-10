@@ -78,6 +78,88 @@ def _source(full: bytes, appended: bytes, thread_id: uuid.UUID = THREAD_ID) -> A
     )
 
 
+def _token_vector(
+    input_tokens: int,
+    cached_input_tokens: int,
+    cache_write_input_tokens: int,
+    output_tokens: int,
+    reasoning_output_tokens: int,
+) -> dict[str, int]:
+    return {
+        "input_tokens": input_tokens,
+        "cached_input_tokens": cached_input_tokens,
+        "cache_write_input_tokens": cache_write_input_tokens,
+        "output_tokens": output_tokens,
+        "reasoning_output_tokens": reasoning_output_tokens,
+        "total_tokens": input_tokens + output_tokens,
+    }
+
+
+def _canonical_token_records() -> list[dict[str, object]]:
+    first = _token_vector(10, 4, 1, 2, 1)
+    compaction = _token_vector(20, 8, 2, 3, 2)
+    cumulative = _token_vector(30, 12, 3, 5, 3)
+    return [
+        {
+            "timestamp": "2026-08-16T12:00:00Z",
+            "type": "session_meta",
+            "payload": {"id": str(THREAD_ID), "session_id": str(THREAD_ID)},
+        },
+        {
+            "timestamp": "2026-08-16T12:00:01Z",
+            "type": "event_msg",
+            "payload": {"type": "task_started", "turn_id": TURN_A_ID},
+        },
+        {
+            "timestamp": "2026-08-16T12:00:02Z",
+            "type": "token_usage_record",
+            "payload": {
+                "thread_id": str(THREAD_ID),
+                "turn_id": TURN_A_ID,
+                "response_id": "resp-first",
+                "usage": first,
+                "turn_token_usage": first,
+                "thread_token_usage": first,
+            },
+        },
+        {
+            "timestamp": "2026-08-16T12:00:03Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "token_count",
+                "turn_id": TURN_A_ID,
+                "info": {
+                    "last_token_usage": first,
+                    "total_token_usage": first,
+                    "model_context_window": 100,
+                },
+            },
+        },
+        {
+            "timestamp": "2026-08-16T12:00:04Z",
+            "type": "token_usage_record",
+            "payload": {
+                "thread_id": str(THREAD_ID),
+                "turn_id": TURN_A_ID,
+                "response_id": "resp-compaction",
+                "usage": compaction,
+                "turn_token_usage": cumulative,
+                "thread_token_usage": cumulative,
+            },
+        },
+        {
+            "timestamp": "2026-08-16T12:00:05Z",
+            "type": "compacted",
+            "payload": {"turn_id": TURN_A_ID},
+        },
+        {
+            "timestamp": "2026-08-16T12:00:06Z",
+            "type": "event_msg",
+            "payload": {"type": "task_complete", "turn_id": TURN_A_ID},
+        },
+    ]
+
+
 def test_stateful_analyzer_matches_full_replay_at_every_record_boundary() -> None:
     records = _records()
     full = _content(records)
@@ -91,6 +173,90 @@ def test_stateful_analyzer_matches_full_replay_at_every_record_boundary() -> Non
         stateful.accept_batch()
         final = stateful.analyze_rollouts([_source(full, suffix)], "test-user")
         assert final == oracle
+
+
+def test_canonical_response_usage_counts_mirror_once_and_includes_compaction() -> None:
+    records = _canonical_token_records()
+    content = _content(records)
+
+    full = CodexProtocolAnalyticsAdapter().analyze_rollouts([_source(content, content)], "test-user")
+    stateful = StatefulCodexProtocolAnalyticsAdapter().analyze_rollouts(
+        [_source(content, content)],
+        "test-user",
+    )
+
+    assert stateful == full
+    projection = stateful.statistics_projection
+    assert (
+        projection.input_tokens,
+        projection.cached_input_tokens,
+        projection.cache_write_input_tokens,
+        projection.output_tokens,
+        projection.reasoning_output_tokens,
+        projection.total_tokens,
+    ) == (30, 12, 3, 5, 3, 35)
+    assert projection.turn_statistics[0].total_tokens == 35
+    assert projection.audit_new_event_type_warnings_count == 0
+    assert projection.audit_token_method.startswith("unique response usage")
+
+
+def test_canonical_response_usage_matches_full_replay_across_appends() -> None:
+    records = _canonical_token_records()
+    full_content = _content(records)
+    oracle = CodexProtocolAnalyticsAdapter().analyze_rollouts(
+        [_source(full_content, full_content)],
+        "test-user",
+    )
+
+    for split_at in range(1, len(records)):
+        prefix = _content(records[:split_at])
+        suffix = _content(records[split_at:])
+        stateful = StatefulCodexProtocolAnalyticsAdapter()
+        stateful.analyze_rollouts([_source(prefix, prefix)], "test-user")
+        stateful.accept_batch()
+        assert stateful.analyze_rollouts([_source(full_content, suffix)], "test-user") == oracle
+
+
+def test_duplicate_canonical_response_identity_does_not_add_tokens_twice() -> None:
+    records = _canonical_token_records()
+    records.insert(-1, dict(records[2]))
+    content = _content(records)
+
+    calculation = StatefulCodexProtocolAnalyticsAdapter().analyze_rollouts(
+        [_source(content, content)],
+        "test-user",
+    )
+
+    assert calculation.statistics_projection.total_tokens == 35
+
+
+def test_legacy_cumulative_token_snapshots_remain_supported() -> None:
+    first = _token_vector(10, 4, 1, 2, 1)
+    cumulative = _token_vector(15, 6, 1, 4, 2)
+    records = [
+        {
+            "type": "session_meta",
+            "payload": {"id": str(THREAD_ID), "session_id": str(THREAD_ID)},
+        },
+        {
+            "type": "event_msg",
+            "payload": {"type": "token_count", "info": {"total_token_usage": first}},
+        },
+        {
+            "type": "event_msg",
+            "payload": {"type": "token_count", "info": {"total_token_usage": cumulative}},
+        },
+    ]
+    content = _content(records)
+
+    full = CodexProtocolAnalyticsAdapter().analyze_rollouts([_source(content, content)], "test-user")
+    stateful = StatefulCodexProtocolAnalyticsAdapter().analyze_rollouts(
+        [_source(content, content)],
+        "test-user",
+    )
+
+    assert stateful == full
+    assert stateful.statistics_projection.total_tokens == 19
 
 
 def test_incremental_projection_materializes_only_the_changed_turn(

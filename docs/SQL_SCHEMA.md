@@ -153,6 +153,11 @@ Message detail stores `assistant`, `developer`, `user`, and `system` as distinct
 roles. `unknown` is reserved for a missing or unsupported source role, not for a
 recognized Codex developer instruction.
 
+Trace normalization and statistics analysis have independent recognition contracts.
+An `unrecognized_record` remains a durable trace-coverage fact even when another
+projection understands the same source record; the
+[token-accounting contract](ANALYTICS.md#token-accounting) is the current example.
+
 `rodex_sessions_agent_requests` represents only turn-producing spawn/follow-up
 requests. Each joins the exact collaboration tool request, activity, scope, target,
 and latest parent user-message reference preceding the tool request in that same

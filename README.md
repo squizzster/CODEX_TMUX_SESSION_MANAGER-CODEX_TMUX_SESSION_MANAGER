@@ -18,6 +18,8 @@ installations keep already-running sessions on the implementation that started t
   sends `Continue...` for you. Repeated overloads back off; typing cancels a pending retry.
 - **Take the controls.** Start, steer, interrupt, and collect exact-turn results
   from another shell or agent.
+- **Understand the work.** Inspect durable local statistics, agent relationships,
+  and metadata-only traces without creating a second conversation store.
 - **Make it yours.** Change prompts, presentation, and session behaviour in Python,
   without rebuilding Codex. Simple prompt rules live in YAML.
 

@@ -31,7 +31,9 @@ repository currently has no Git release tags, so they do not imply a published r
   record once while retaining cumulative snapshots as a legacy fallback. Generation
   21 remains untouched and is not implicitly migrated.
 - Documentation now distinguishes installation routing, daemon-incarnation checks,
-  and the single-user security boundary.
+  the single-user security boundary, statistics token accounting, and typed trace
+  coverage. The design map points contributors to authoritative source owners and
+  focused evidence.
 
 ### Removed
 

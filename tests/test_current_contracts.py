@@ -12,7 +12,7 @@ from rodex.agent_trace import AGENT_TRACE_SCHEMA_VERSION, _canonical_record_turn
 from rodex.analytics import STATISTICS_PROJECTION_SCHEMA_VERSION
 from rodex.control import RodexControlError, _started_turn_id, _steered_turn_id
 from rodex.daemon_client import RODEX_DAEMON_PROTOCOL, RODEX_DAEMON_SOCKET_NAME
-from rodex.implementation_identity import RODEX_IMPLEMENTATION_SHA256
+from rodex.implementation_identity import RODEX_IMPLEMENTATION_KEY
 from rodex.machine_commands import MACHINE_ENVELOPE_SCHEMA_VERSION
 from rodex.observer_contract import OBSERVER_SCHEMA
 from rodex.process_receipts import PROCESS_RECEIPT_PROTOCOL
@@ -32,13 +32,13 @@ def test_current_release_declares_matching_package_and_process_versions() -> Non
     assert RODEX_SHARED_TMUX_PROTOCOL == "rodex-isolated-tmux-v5"
     assert RODEX_DAEMON_PROTOCOL == "rodex-daemon-v3"
     assert PROCESS_RECEIPT_PROTOCOL == "rodex-process-receipt-v3"
-    assert f"{RODEX_IMPLEMENTATION_SHA256}.sock" == RODEX_DAEMON_SOCKET_NAME
-    assert len(RODEX_IMPLEMENTATION_SHA256) == 64
-    assert set(RODEX_IMPLEMENTATION_SHA256) <= set("0123456789abcdef")
+    assert f"{RODEX_IMPLEMENTATION_KEY}.sock" == RODEX_DAEMON_SOCKET_NAME
+    assert len(RODEX_IMPLEMENTATION_KEY) == 64
+    assert set(RODEX_IMPLEMENTATION_KEY) <= set("0123456789abcdef")
     assert runtime_tmux_socket_name(RodexRuntimeId(1)) == "tmux-v5-0000000000000001.sock"
     peer_headers = RuntimePeerIdentity(RodexRuntimeId(1), "a" * 32).headers()
     assert peer_headers["X-Rodex-Peer-Contract"] == "rodex-runtime-peer-v6"
-    assert peer_headers["X-Rodex-Implementation-Id"].startswith("0.15.0a1+sha256.")
+    assert peer_headers["X-Rodex-Implementation-Id"].startswith("0.15.0a1+installation.")
     assert MACHINE_ENVELOPE_SCHEMA_VERSION == 5
     assert AGENT_TRACE_SCHEMA_VERSION == "rodex-agent-trace-v4"
     assert STATISTICS_PROJECTION_SCHEMA_VERSION == "rodex-statistics-v9"

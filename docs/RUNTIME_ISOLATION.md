@@ -8,7 +8,7 @@ address or observation, not sufficient authority to act on a runtime.
 [Current-contract tests](../tests/test_current_contracts.py) pin release, catalog,
 tmux, daemon, process-receipt, peer, observer, machine, trace, and statistics versions.
 Do not replicate that manifest in callers. Live handshakes also require the exact
-loaded fingerprint; [retained installations](../INSTALL.md#retained-installations-and-compatibility)
+loaded installation key; [retained installations](../INSTALL.md#retained-installations-and-compatibility)
 keep helpers on that implementation across checkout updates.
 
 Earlier catalogs and unknown wire formats are not adopted or translated. A selected
@@ -25,7 +25,7 @@ an old catalog, or send model input. Unknown generations and foreign hooks remai
 `rodex NAME`, `rodex resume NAME`, and `_detach NAME` use the same selected-session
 pipeline. When its coordinator belongs to another retained installation,
 [`RetainedRuntimeUpgrade`](../src/rodex/runtime_upgrade.py) parses the known hook,
-regenerates it for the exact server, and verifies its private fingerprint manifest.
+regenerates it for the exact server, and verifies its private installation manifest.
 It never executes the stored shell text or overwrites old helpers.
 
 The [handoff adapter](../src/rodex/retained_runtime_handoff.py) runs with the owning
@@ -89,7 +89,7 @@ The creation/admission sequence is:
    then confirm registration and UI identity before releasing the lock. New runtimes
    advertise `pending`; an exact durable/pending pair can finish interrupted confirmation.
    Unconfirmed runtimes expire rather than becoming implicitly registered.
-5. Admit protocol traffic only after both ends verify the runtime/server/fingerprint.
+5. Admit protocol traffic only after both ends verify the runtime/server/installation key.
    [`RuntimePeerIdentity`](../src/rodex/runtime_peer.py) also pins native peers to the
    retained child process tree; a matching thread ID alone is insufficient.
 

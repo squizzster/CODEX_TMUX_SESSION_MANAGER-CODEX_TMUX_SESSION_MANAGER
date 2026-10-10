@@ -14,7 +14,7 @@ def _write_sealed_entrypoint(project: Path) -> Path:
     return entrypoint
 
 
-def test_round2_installed_shim_prunes_only_nonexecuting_tool_caches(
+def test_round2_installed_shim_ignores_non_entrypoint_project_content(
     tmp_path: Path,
 ) -> None:
     project = tmp_path / "project"
@@ -48,18 +48,17 @@ def test_round2_installed_shim_prunes_only_nonexecuting_tool_caches(
     assert result.stdout == "sealed-environment\n"
 
 
-def test_round2_installed_shim_uses_one_complete_execution_boundary_scan() -> None:
+def test_round2_installed_shim_uses_a_direct_entrypoint_boundary() -> None:
     repository = Path(__file__).resolve().parents[2]
     contents = (repository / "usr" / "local" / "bin" / "rodex").read_text(encoding="utf-8")
 
-    assert contents.count('/usr/bin/find "$RODEX_PROJECT_DIR"') == 1
-    for generated_tree in (".venv", ".pytest_cache", ".ruff_cache"):
-        assert generated_tree in contents
-    assert '-path "$RODEX_PROJECT_DIR/.venv/*" -prune' not in contents
-    assert "-path '*/__pycache__/*' -prune" not in contents
+    assert "/usr/bin/find" not in contents
+    assert "/usr/bin/stat" not in contents
+    assert "/usr/bin/readlink" not in contents
+    assert 'exec "$RODEX_ENTRYPOINT" "$@"' in contents
 
 
-def test_round2_installed_shim_rejects_writable_site_or_bytecode(
+def test_round2_installed_shim_does_not_inspect_site_or_bytecode(
     tmp_path: Path,
 ) -> None:
     repository = Path(__file__).resolve().parents[2]
@@ -87,12 +86,12 @@ def test_round2_installed_shim_rejects_writable_site_or_bytecode(
             capture_output=True,
         )
 
-        assert result.returncode == 1
-        assert "refusing group/world-writable project path" in result.stderr
-        assert str(insecure) in result.stderr
+        assert result.returncode == 0
+        assert result.stdout == "sealed-environment\n"
+        assert result.stderr == ""
 
 
-def test_round2_installed_shim_rejects_a_writable_interpreter(
+def test_round2_installed_shim_leaves_interpreter_admission_to_exec(
     tmp_path: Path,
 ) -> None:
     project = tmp_path / "project"
@@ -117,5 +116,5 @@ def test_round2_installed_shim_rejects_a_writable_interpreter(
         capture_output=True,
     )
 
-    assert result.returncode == 1
-    assert str(interpreter) in result.stderr
+    assert result.returncode == 0
+    assert result.stderr == ""

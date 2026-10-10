@@ -27,7 +27,7 @@ from rodex.daemon_client import (
     encode_daemon_message,
     receive_daemon_message,
 )
-from rodex.implementation_identity import RODEX_IMPLEMENTATION_ID, RODEX_IMPLEMENTATION_SHA256
+from rodex.implementation_identity import RODEX_IMPLEMENTATION_ID, RODEX_IMPLEMENTATION_KEY
 from rodex.process_contracts import AnalyticsRuntimeConfig, RuntimeServiceConfig
 from rodex.process_guard import set_current_linux_task_name
 from rodex.process_receipts import PROCESS_RECEIPT_PATTERN, RuntimeProcessReceipts
@@ -550,7 +550,7 @@ def test_current_client_starts_its_exact_daemon_alongside_an_older_daemon_socket
     daemon_pids: list[int] = []
     try:
         client.ensure_running()
-        assert client.socket_path == short_runtime_root / f"{RODEX_IMPLEMENTATION_SHA256}.sock"
+        assert client.socket_path == short_runtime_root / f"{RODEX_IMPLEMENTATION_KEY}.sock"
         assert client.socket_path != legacy_path
         assert client.socket_path.is_socket()
         assert legacy_path.is_socket()
@@ -622,7 +622,7 @@ def test_current_client_rejects_same_protocol_daemon_with_different_loaded_code(
         diagnostic = str(raised.value)
         assert f"incompatible at {socket_path}" in diagnostic
         assert "running daemon implementation: 'different-loaded-code'" in diagnostic
-        assert "current client: Rodex 0.15.0a1 (0.15.0a1+sha256." in diagnostic
+        assert "current client: Rodex 0.15.0a1 (0.15.0a1+installation." in diagnostic
         assert "daemon protocol: rodex-daemon-v3" in diagnostic
         assert "SQL catalog: not checked; this client expects generation 21 (rodex-v21.sqlite3)" in diagnostic
         assert "does not migrate earlier runtimes or catalogs" in diagnostic
@@ -646,7 +646,7 @@ def test_current_client_reports_both_sides_of_a_daemon_protocol_mismatch(short_r
                 encode_daemon_message(
                     {
                         "protocol": "rodex-daemon-v1",
-                        RODEX_DAEMON_IMPLEMENTATION_FIELD: "0.13.0+sha256.previous",
+                        RODEX_DAEMON_IMPLEMENTATION_FIELD: "0.13.0+installation.previous",
                         "ok": True,
                     }
                 )

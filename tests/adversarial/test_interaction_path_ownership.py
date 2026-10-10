@@ -93,6 +93,7 @@ EFFECT_OWNERS = {
         "rodex/runtime.py:_RuntimeDiagnosticRelay._run:os.write",
         "rodex/runtime.py:_RuntimeDiagnosticRelay.write:.write",
         "rodex/process_receipts.py:RuntimeProcessReceipts.record:os.write",
+        "rodex/installation.py:_write_bootstrap_cache:.write",
     },
 }
 

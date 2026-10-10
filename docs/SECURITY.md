@@ -4,9 +4,9 @@
 
 Rodex is a local, single-Linux-user tool. Processes sharing its uid are not hostile
 tenants; use separate OS accounts for that boundary. Rodex exposes no TCP/network
-listener: control and protocol endpoints are private Unix sockets. Its checks prevent
-misaddressing, stale ownership, and accidental executable drift, not deliberate edits
-by the owning user. It is not an IDS or filesystem/tmux surveillance service.
+listener: control and protocol endpoints are private Unix sockets. Runtime checks
+prevent misaddressing and stale ownership; bootstrap trusts the user's ordinary
+checkout and environment. Rodex is not an IDS or filesystem/tmux surveillance service.
 
 [Runtime isolation](RUNTIME_ISOLATION.md) is authoritative for capability tuples,
 connected peer/process checks, destructive topology guards, endpoint cleanup, and
@@ -14,23 +14,19 @@ compatibility. Names, compact IDs, inherited tmux context, or matching thread ID
 alone never authorize an operation. An orphan is safer than attaching to or deleting
 the wrong runtime; unverifiable sessions are reported, not auto-adopted or removed.
 
-## Executable admission
+## Launcher boundary
 
-The [installed shim](../usr/local/bin/rodex) scans the checkout, complete virtualenv,
-site packages, and bytecode before executing the preinstalled entrypoint. It rejects
-untrusted ownership and group/world-write access. Symlinks are rejected except the
-specific environment interpreter aliases and `lib64` case handled by the shim;
-merely pointing inside the environment is not sufficient. `.git`, `.venv/.lock`, and
-nonexecuting pytest/Ruff cache contents have explicit exemptions. Ignored scratch
-directories are otherwise included. The absolute interpreter is separately resolved
-and checked as a root/current-user-owned regular file without group/world write access.
+The [installed shim](../usr/local/bin/rodex) checks the configured checkout marker and
+executable entrypoint, clears Python bootstrap overrides, and executes it. It does not
+walk source, virtualenv, cache, or bytecode trees and does not impose a second ownership
+policy on normal user-managed files. The kernel and ordinary filesystem permissions
+own executable admission. The shim never syncs dependencies.
 
-The shim never syncs dependencies. Root execution against a user-owned checkout is
-rejected; shared system commands need a root-owned installation. The repository-local
-[launcher](../rodex) is a direct development entrypoint, not the installed shim's scan.
-[`enter_fixed_installation`](../src/rodex/installation.py) then pins code/dependencies/
-defaults before helpers start. [Installation](../INSTALL.md) owns update, retention,
-and relocation procedures; do not bypass admission by rewriting manifests or markers.
+[`enter_fixed_installation`](../src/rodex/installation.py) uses lightweight metadata
+to notice normal source/environment changes. It copies a changed environment once and
+otherwise reuses the cached retained interpreter without content fingerprinting. The
+opaque installation key separates retained helper generations; it is not proof that
+files are untampered. [Installation](../INSTALL.md) owns update, retention, and relocation.
 
 ## Files, sockets, and child environment
 

@@ -8,8 +8,10 @@ their interpreter paths remain usable by older daemons, hooks and observers.
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import json
 import os
+import secrets
 import shlex
 import shutil
 import stat
@@ -21,16 +23,15 @@ from pathlib import Path
 
 from rodex_sql import default_rodex_state_root
 
-from .implementation_identity import (
+from .installation_contract import (
     FIRST_PARTY_PACKAGES,
-    RODEX_IMPLEMENTATION_SHA256,
-    implementation_digest,
-    shipped_configuration,
+    INSTALLATION_MANIFEST,
+    INSTALLATION_SCHEMA,
+    is_installation_key,
 )
 from .process_environment import user_process_environment
 
-INSTALLATION_MANIFEST = "rodex-installation.json"
-INSTALLATION_SCHEMA = "rodex-installation-v1"
+BOOTSTRAP_CACHE_SCHEMA = "rodex-bootstrap-state-v1"
 
 
 class RodexInstallationError(RuntimeError):
@@ -49,8 +50,10 @@ def _private_directory(path: Path) -> None:
 
 
 def _validate(root: Path, identity: str) -> Path:
-    _private_directory(root)
     try:
+        observed = root.lstat()
+        if not stat.S_ISDIR(observed.st_mode) or observed.st_uid != os.getuid() or observed.st_mode & 0o022:
+            raise RodexInstallationError(f"installation directory is not privately owned: {root}")
         manifest = json.loads((root / INSTALLATION_MANIFEST).read_text())
     except (OSError, ValueError) as error:
         raise RodexInstallationError(f"installation is incomplete: {root}") from error
@@ -75,6 +78,82 @@ def _require_installed_dependencies(site_packages: Path) -> None:
                     raise RodexInstallationError(f"external dependency paths cannot be pinned: {path}")
 
 
+def _shipped_configuration(source_root: Path) -> Path:
+    configuration = source_root.parent / "conf/hooks/user_prompt_substitutions.yaml"
+    return configuration if configuration.is_file() else Path(sys.prefix) / "hooks/user_prompt_substitutions.yaml"
+
+
+def _path_state(path: Path, name: str) -> list[str | int]:
+    observed = path.lstat()
+    return [name, stat.S_IFMT(observed.st_mode), observed.st_size, observed.st_mtime_ns]
+
+
+def _bootstrap_state(source_root: Path, site_packages: Path, configuration: Path) -> dict[str, object]:
+    """Observe ordinary package-manager and editable-source changes without reading contents."""
+    sources: list[list[str | int]] = []
+    for package_name in FIRST_PARTY_PACKAGES:
+        package_root = source_root / package_name
+        source_files = sorted(package_root.rglob("*.py"))
+        if not source_files:
+            raise RodexInstallationError(f"Rodex implementation package is unavailable: {package_name}")
+        sources.extend(_path_state(path, path.relative_to(source_root).as_posix()) for path in source_files)
+    dependencies = [
+        _path_state(path, path.name)
+        for path in sorted(site_packages.iterdir(), key=lambda candidate: candidate.name)
+        if path.name != "__pycache__" and path.name not in FIRST_PARTY_PACKAGES
+    ]
+    return {
+        "python": sys.version,
+        "sources": sources,
+        "dependencies": dependencies,
+        "configuration": _path_state(configuration, configuration.name),
+    }
+
+
+def _bootstrap_namespace(source_root: Path, site_packages: Path, configuration: Path) -> str:
+    locations = "\0".join(
+        str(path.resolve()) for path in (source_root, site_packages, configuration, Path(sys.executable))
+    )
+    return hashlib.sha256(locations.encode()).hexdigest()
+
+
+def _cached_interpreter(cache_path: Path, store: Path, state: dict[str, object]) -> Path | None:
+    try:
+        cached = json.loads(cache_path.read_text())
+        identity = cached.get("implementation")
+    except (OSError, ValueError, AttributeError):
+        return None
+    if (
+        cached.get("schema") != BOOTSTRAP_CACHE_SCHEMA
+        or cached.get("state") != state
+        or not is_installation_key(identity)
+    ):
+        return None
+    try:
+        return _validate(store / identity, identity)
+    except RodexInstallationError:
+        return None
+
+
+def _write_bootstrap_cache(cache_path: Path, state: dict[str, object], identity: str) -> None:
+    descriptor, temporary_name = tempfile.mkstemp(prefix=".bootstrap-state-", dir=cache_path.parent)
+    temporary = Path(temporary_name)
+    try:
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            json.dump(
+                {"schema": BOOTSTRAP_CACHE_SCHEMA, "state": state, "implementation": identity},
+                stream,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+            stream.write("\n")
+        temporary.replace(cache_path)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+
+
 def prepare_installation(
     store: Path,
     *,
@@ -82,24 +161,36 @@ def prepare_installation(
     site_packages: Path | None = None,
     configuration_root: Path | None = None,
 ) -> Path:
-    """Atomically publish one source/environment identity and return its interpreter."""
+    """Publish changed bootstrap state once, then reuse its retained interpreter."""
     source_root = source_root or Path(__file__).resolve().parents[1]
     site_packages = site_packages or Path(sysconfig.get_path("purelib"))
-    _require_installed_dependencies(site_packages)
     configuration = (
         configuration_root / "hooks/user_prompt_substitutions.yaml"
         if configuration_root is not None
-        else shipped_configuration(source_root)
+        else _shipped_configuration(source_root)
     )
-    identity = implementation_digest(source_root, site_packages, configuration)
     _private_directory(store)
     store = store.resolve()
-    destination = store / identity
-    descriptor = os.open(store / f"{identity}.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    namespace = _bootstrap_namespace(source_root, site_packages, configuration)
+    cache_path = store / f".bootstrap-{namespace}.json"
+    lock_path = store / f".bootstrap-{namespace}.lock"
+    state = _bootstrap_state(source_root, site_packages, configuration)
+    cached = _cached_interpreter(cache_path, store, state)
+    if cached is not None:
+        return cached
+    descriptor = os.open(lock_path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
     try:
         fcntl.flock(descriptor, fcntl.LOCK_EX)
-        if destination.exists():
-            return _validate(destination, identity)
+        # Another first launcher may have published while this process waited.
+        state = _bootstrap_state(source_root, site_packages, configuration)
+        cached = _cached_interpreter(cache_path, store, state)
+        if cached is not None:
+            return cached
+        _require_installed_dependencies(site_packages)
+        identity = secrets.token_hex(32)
+        while (store / identity).exists():  # pragma: no cover - a 256-bit collision is not operationally reproducible.
+            identity = secrets.token_hex(32)
+        destination = store / identity
         stage = Path(tempfile.mkdtemp(prefix=".preparing-", dir=store))
         try:
             for package in FIRST_PARTY_PACKAGES:
@@ -120,8 +211,6 @@ def prepare_installation(
                 else:
                     shutil.copy2(entry, target)
             (library / "codex_tmux_session_manager.pth").write_text(str(destination / "src") + "\n")
-            if implementation_digest(stage / "src", library) != identity:
-                raise RodexInstallationError("source or dependencies changed while preparing installation; retry")
             (stage / INSTALLATION_MANIFEST).write_text(
                 json.dumps({"schema": INSTALLATION_SCHEMA, "implementation": identity}) + "\n"
             )
@@ -137,7 +226,9 @@ def prepare_installation(
         finally:
             if stage.exists():
                 shutil.rmtree(stage)
-        return _validate(destination, identity)
+        interpreter = _validate(destination, identity)
+        _write_bootstrap_cache(cache_path, state, identity)
+        return interpreter
     finally:
         os.close(descriptor)
 
@@ -146,7 +237,9 @@ def retained_installation_interpreter() -> Path:
     """Publish or validate this implementation's immutable interpreter."""
     project = _project_directory()
     if (project / INSTALLATION_MANIFEST).exists():
-        interpreter = _validate(project, RODEX_IMPLEMENTATION_SHA256)
+        if not is_installation_key(project.name):
+            raise RodexInstallationError(f"installation identity is invalid: {project}")
+        interpreter = _validate(project, project.name)
         if Path(sys.prefix).resolve() != interpreter.parent.parent:
             raise RodexInstallationError("installation was loaded by a different Python environment")
         return interpreter

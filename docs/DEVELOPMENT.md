@@ -34,9 +34,8 @@ Choose the gate deliberately:
   ordinary/Ultra/multiline prompts and can consume model quota. The marker is not
   synonymous with a no-model smoke test.
 
-Do not put a temporary virtualenv inside the checkout: its extra symlinks can make
-the installed shim's trust scan reject the project. Long in-project `--basetemp`
-paths can also overflow Unix-socket limits; use pytest's normal temporary roots.
+Long in-project `--basetemp` paths can overflow Unix-socket limits; use pytest's
+normal temporary roots.
 
 ## Test selection
 

@@ -14,12 +14,12 @@ from typing import Any, Final
 
 from rodex_registry.identity import RodexRuntimeId, parse_rodex_runtime_id
 
-from .implementation_identity import RODEX_IMPLEMENTATION_SHA256
+from .implementation_identity import RODEX_IMPLEMENTATION_KEY
 
 PROCESS_RECEIPT_PROTOCOL: Final = "rodex-process-receipt-v3"
 PROCESS_KINDS: Final = frozenset({"app-server", "native-tui"})
 _OPERATION_ID = re.compile(r"[0-9a-f]{32}")
-PROCESS_RECEIPT_PATTERN: Final = f"{RODEX_IMPLEMENTATION_SHA256}.process-*.json"
+PROCESS_RECEIPT_PATTERN: Final = f"{RODEX_IMPLEMENTATION_KEY}.process-*.json"
 
 
 class ProcessReceiptError(RuntimeError):
@@ -120,7 +120,7 @@ class RuntimeProcessReceipts:
         if kind not in PROCESS_KINDS:
             raise ValueError("unknown daemon child process kind")
         return self._runtime_root / (
-            f"{RODEX_IMPLEMENTATION_SHA256}.process-{parse_rodex_runtime_id(runtime_id)}-{kind}.json"
+            f"{RODEX_IMPLEMENTATION_KEY}.process-{parse_rodex_runtime_id(runtime_id)}-{kind}.json"
         )
 
     def _read(self, path: Path) -> dict[str, Any]:

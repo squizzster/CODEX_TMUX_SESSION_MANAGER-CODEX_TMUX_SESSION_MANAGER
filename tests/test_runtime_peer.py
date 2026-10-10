@@ -32,6 +32,7 @@ from rodex_registry import RodexRegistryId, RodexRuntimeId, RodexSessionId
 
 OTHER_RUNTIME = replace(TEST_PEER, runtime_id=RodexRuntimeId.parse("c" * 16))
 OTHER_SERVER = replace(TEST_PEER, tmux_server_id="d" * 32)
+OTHER_IMPLEMENTATION = replace(TEST_PEER, implementation_id="0.15.0a1+installation.different-loaded-code")
 
 
 def _control(path: Path) -> LiveRodexControl:
@@ -64,7 +65,7 @@ def _server(path: Path, handler):
 
 
 @pytest.mark.parametrize("path", ["/rodex-control", "/rodex-interaction"])
-@pytest.mark.parametrize("claimed", [None, OTHER_RUNTIME, OTHER_SERVER])
+@pytest.mark.parametrize("claimed", [None, OTHER_RUNTIME, OTHER_SERVER, OTHER_IMPLEMENTATION])
 def test_wrong_proxy_identity_is_rejected_before_opening_upstream(tmp_path: Path, path: str, claimed) -> None:
     upstream_frames = []
 
@@ -97,7 +98,7 @@ def test_wrong_proxy_identity_is_rejected_before_opening_upstream(tmp_path: Path
     assert upstream_frames == []
 
 
-@pytest.mark.parametrize("claimed", [None, OTHER_RUNTIME, OTHER_SERVER])
+@pytest.mark.parametrize("claimed", [None, OTHER_RUNTIME, OTHER_SERVER, OTHER_IMPLEMENTATION])
 def test_event_tap_does_not_publish_ready_to_an_unverified_subscriber(tmp_path: Path, claimed) -> None:
     path = tmp_path / "events.sock"
     tap = CodexProtocolEventTap(path, peer_identity=TEST_PEER)
@@ -119,7 +120,7 @@ def test_event_tap_does_not_publish_ready_to_an_unverified_subscriber(tmp_path: 
     ("header", "value"),
     [
         ("X-Rodex-Peer-Contract", "rodex-runtime-peer-v5"),
-        ("X-Rodex-Implementation-Id", "0.15.0a1+sha256.different-loaded-code"),
+        ("X-Rodex-Implementation-Id", "0.15.0a1+installation.different-loaded-code"),
     ],
 )
 def test_event_tap_rejects_prior_contract_or_different_loaded_implementation(

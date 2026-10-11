@@ -61,6 +61,8 @@ Detach with `Ctrl-D` or `Ctrl-b d`. Return with `./rodex NAME`.
 - [Architecture](docs/ARCHITECTURE.md) — system shape and domain owners.
 - [Interaction paths](docs/INTERACTION_PATHS.md) — input/output, views, observers,
   overload recovery, and the effect audit.
+- [Interaction pipeline report](docs/INTERACTION_PIPELINE_REPORT.md) — verified
+  interception, model injection, native hooks, and display-only notice behavior.
 - [Prompt submission flow](docs/PROMPT_SUBMISSION_FLOW.md) — prompt rules, interception,
   validation, and submission.
 - [Runtime isolation](docs/RUNTIME_ISOLATION.md) — identity, capabilities, lifecycle,

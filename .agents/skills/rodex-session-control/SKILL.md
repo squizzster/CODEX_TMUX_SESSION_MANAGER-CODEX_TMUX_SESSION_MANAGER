@@ -45,6 +45,31 @@ commands as structured argv only within existing authority; they are not shell t
 or automatic permission. A wait timeout does not interrupt: wait again with the same
 turn ID or read `_result`.
 
+## Model input and local display
+
+`_start` and `_steer` submit real model input through the exact-control pipeline;
+[prompt rules](../../../docs/PROMPT_SUBMISSION_FLOW.md) apply. An effective live
+`_alias` change also attempts a `RODEX_AUTO_INFO` start/steer. Choose these routes
+only when that model interaction is intended.
+
+For an authorized display-only notice, use the existing runtime's
+`SessionInteractionPipeline.send_message(target="main", text=..., start_model_turn=False)`.
+An external caller uses `publish_session_interaction` or `publish_tui_notice` with
+the verified proxy endpoint and `RuntimePeerIdentity`; there is no `_notice` CLI.
+The existing route sends a downstream native `warning`, outside model context.
+`delivered` means transport accepted, not confirmed rendering or durable history.
+On the tested Codex 0.162.1 idle screen, both `warning` and `deprecationNotice`
+required F2; neither provided inline chat text. Do not promise inline placement
+or implement a notice by submitting a model prompt.
+
+`/rodex light` and `/rodex dark` select presentation only; `dusk` is a placeholder.
+Agent shell-command interception uses the separate native `PreToolUse(Bash)`
+broker. Its current policy allows all commands, and its tmux status is an allow
+decision, not execution/completion evidence. Read the
+[interaction pipeline report](../../../docs/INTERACTION_PIPELINE_REPORT.md) when
+working with notices, interception, configuration, or recovery; it identifies the
+existing owners, native UI evidence, and changes needed for inline notices.
+
 ## Uncertain outcomes
 
 - On `dispatch_indeterminate`, reconcile through `_dispatch-status` for start/steer,
@@ -57,6 +82,9 @@ turn ID or read `_result`.
   Neither grants permission to stop/relocate another worker.
 - Approval and user-input requests go to the subscribed primary connection, normally
   the managed TUI, where an authorized user handles them.
+- After a terminal `serverOverloaded` failure, Rodex can start a new `Continue...`
+  turn automatically. Check exact turn/dispatch evidence before adding a manual
+  retry. A wait or result for the failed turn does not follow that new recovery turn.
 
 See [CLI workflows](../../../docs/CLI.md) for selector/alias pitfalls and
 [runtime isolation](../../../docs/RUNTIME_ISOLATION.md) for identity fences.

@@ -23,11 +23,13 @@ from .command_contract import (
     FORCE_OLD_FLAG,
     HELP_COMMAND,
     HELP_TEXT,
+    POLICY_SETUP_COMMAND,
     VERSION_COMMAND,
     ClassifiedRodexCommand,
     CommandRoute,
     classify_rodex_command,
 )
+from .command_policy_configuration import policy_hook_override
 from .control import CodexControlClient
 from .daemon_client import RODEX_DAEMON_PROTOCOL, daemon_socket_path
 from .errors import RodexExecutableNotFoundError, RodexLaunchError
@@ -59,6 +61,7 @@ class PipelinePreparation(StrEnum):
 ROUTE_PREPARATIONS: Final = {
     CommandRoute.HELP: PipelinePreparation.DIRECT,
     CommandRoute.VERSION: PipelinePreparation.DIRECT,
+    CommandRoute.POLICY_SETUP: PipelinePreparation.DIRECT,
     CommandRoute.CODEX: PipelinePreparation.DIRECT,
     CommandRoute.STATISTICS: PipelinePreparation.DIRECT,
     CommandRoute.AGENT_TRACE: PipelinePreparation.DIRECT,
@@ -234,6 +237,10 @@ class UnifiedRodexApplicationPipeline:
             return self._execute_help(argv)
         if invocation.route is CommandRoute.VERSION:
             return self._execute_version(argv)
+        if invocation.route is CommandRoute.POLICY_SETUP:
+            if argv != [POLICY_SETUP_COMMAND]:
+                raise RodexLaunchError("usage: rodex _policy-setup")
+            return self._execute_codex(["--config", policy_hook_override()])
         if invocation.route is CommandRoute.CODEX:
             return self._execute_codex(argv)
         if invocation.route is CommandRoute.STATISTICS:

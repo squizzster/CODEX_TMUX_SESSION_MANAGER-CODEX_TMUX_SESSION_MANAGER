@@ -40,6 +40,14 @@ from .app_server_contract import (
     RODEX_RUNTIME_APP_SERVER_CLIENT,
     RODEX_SESSION_CATALOG_APP_SERVER_CLIENT,
 )
+from .command_policy import POLICY_SOCKET_ENV, CommandPolicyBroker
+from .command_policy_configuration import POLICY_INACTIVE_REASONS, policy_hook_inactive_reason, policy_hook_override
+from .command_policy_status import (
+    POLICY_INACTIVE_OPTION,
+    POLICY_STATUS_PUBLISHER,
+    CommandPolicyStatus,
+    policy_status_format,
+)
 from .control import CodexControlClient, LiveRodexControl
 from .daemon_client import (
     RODEX_DAEMON_SOCKET_NAME,
@@ -125,7 +133,9 @@ from .tmux_sharing_coordinator import (
     sharing_coordinator_hook_command,
 )
 from .tmux_status import (
+    StatusPriority,
     TmuxStatusPipeline,
+    TmuxStatusPresentation,
     TmuxWorkingStatus,
 )
 from .user_prompt_hook import load_user_prompt_hook
@@ -788,6 +798,8 @@ class RodexRuntimeLauncher:
         _require_short_unix_socket_path(runtime.protocol_proxy_socket_path)
         _require_short_unix_socket_path(runtime.protocol_event_socket_path)
         _require_short_unix_socket_path(observer_control_socket_path(runtime.protocol_event_socket_path))
+        command_policy_socket_path = runtime_root / f"policy-{token}.sock"
+        _require_short_unix_socket_path(command_policy_socket_path)
 
         session_environment = self._user_process_environment.copy()
         session_environment["PWD"] = str(resolved_workspace)
@@ -821,6 +833,7 @@ class RodexRuntimeLauncher:
                 tmux_binary=self._tmux_binary,
                 tmux_server_socket_path=runtime.tmux_server_socket_path,
                 tmux_pane_target=capability.pane_target,
+                command_policy_socket_path=command_policy_socket_path,
                 runtime_id=runtime_id,
                 codex_arguments=tuple(codex_arguments),
                 analytics=analytics_config,
@@ -1564,6 +1577,24 @@ class RodexRuntimeLauncher:
         status.configure_base_status(
             reset_transient_claims=publish_base_status,
         )
+        inactive = self._capability_tmux(
+            runtime,
+            capability,
+            "show-options",
+            "-q",
+            "-v",
+            "-t",
+            capability.pane_target,
+            POLICY_INACTIVE_OPTION,
+        )
+        reason = inactive.stdout.strip()
+        if reason in POLICY_INACTIVE_REASONS:
+            status.publish_transient(
+                publisher=POLICY_STATUS_PUBLISHER,
+                token=secrets.token_hex(16),
+                priority=StatusPriority.COMMAND_POLICY,
+                presentation=TmuxStatusPresentation(status_format=policy_status_format(reason)),
+            )
 
     def _install_terminal_key_contracts(
         self,
@@ -2592,6 +2623,13 @@ def _run_runtime_service(
     )
     registered_interaction_context: AnalyticsRuntimeConfig | None = None
     registration_deadline = time.monotonic() + RODEX_REGISTRATION_TIMEOUT_SECONDS
+    command_policy_status = CommandPolicyStatus(tmux_binary, tmux_runtime_capability, tmux_pane_target)
+    command_policy = CommandPolicyBroker(
+        config.command_policy_socket_path,
+        str(config.runtime_id),
+        command_policy_status.allowed,
+    )
+    policy_inactive_reason: str | None = None
     try:
         app_endpoint.acquire()
         with _open_private_runtime_log(app_server_log_path) as log:
@@ -2605,33 +2643,64 @@ def _run_runtime_service(
             if not config.workspace.is_dir():
                 raise RodexRuntimeError(f"runtime workspace is no longer a directory: {config.workspace}")
             user_environment["PWD"] = os.fspath(config.workspace)
-            app_server = subprocess.Popen(
-                (
-                    sys.executable,
-                    "-I",
-                    "-m",
-                    "rodex.process_guard",
-                    "--parent-pid",
-                    str(os.getpid()),
-                    "--",
-                    *CODEX_APP_SERVER.command(codex_binary, app_server_socket_path),
-                ),
-                stdin=subprocess.DEVNULL,
-                stdout=diagnostic_relay,
-                stderr=subprocess.STDOUT,
-                env=user_environment,
-                cwd=config.workspace,
-                # Own shutdown independently of pane hangups, including bounded
-                # escalation to the wrapper's native App Server child.
-                start_new_session=True,
-            )
-            on_process_started("app-server", app_server)
-            app_server_announced = True
-            _wait_for_app_server_socket(app_server, app_server_socket_path, stop)
-            _require_runtime_not_stopped(stop)
-            app_endpoint.retain_bound_path()
-            if app_endpoint.bound_alias is not None:
-                require_unix_listener_process(app_server_socket_path, app_server)
+            command_policy.start()
+            # The reserved endpoint is App Server state, never TUI environment.
+            app_server_environment = {**user_environment, POLICY_SOCKET_ENV: str(config.command_policy_socket_path)}
+            user_environment.pop(POLICY_SOCKET_ENV, None)
+            for inject_policy in (True, False):
+                app_server = subprocess.Popen(
+                    (
+                        sys.executable,
+                        "-I",
+                        "-m",
+                        "rodex.process_guard",
+                        "--parent-pid",
+                        str(os.getpid()),
+                        "--",
+                        *CODEX_APP_SERVER.command(
+                            codex_binary,
+                            app_server_socket_path,
+                            command_policy_hook=policy_hook_override() if inject_policy else None,
+                        ),
+                    ),
+                    stdin=subprocess.DEVNULL,
+                    stdout=diagnostic_relay,
+                    stderr=subprocess.STDOUT,
+                    env=app_server_environment,
+                    cwd=config.workspace,
+                    # Own shutdown independently of pane hangups, including bounded
+                    # escalation to the wrapper's native App Server child.
+                    start_new_session=True,
+                )
+                on_process_started("app-server", app_server)
+                app_server_announced = True
+                command_policy.bind_app_server(app_server)
+                _wait_for_app_server_socket(app_server, app_server_socket_path, stop)
+                _require_runtime_not_stopped(stop)
+                app_endpoint.retain_bound_path()
+                if app_endpoint.bound_alias is not None:
+                    require_unix_listener_process(app_server_socket_path, app_server)
+                if not inject_policy:
+                    break
+                policy_inactive_reason = policy_hook_inactive_reason(
+                    app_server_socket_path,
+                    app_server,
+                    config.workspace,
+                    tuple(codex_arguments),
+                )
+                if policy_inactive_reason is None:
+                    break
+                # Only the provisional pre-TUI server is replaced. Untrusted native
+                # onboarding otherwise prevents Rodex's thread-before-attach gate.
+                _stop_child_process(app_server, owns_process_group=True)
+                on_process_stopped("app-server", app_server)
+                app_server_announced = False
+                app_server = None
+                app_endpoint.close()
+                app_endpoint.acquire()
+                _require_runtime_not_stopped(stop)
+            if policy_inactive_reason is not None:
+                command_policy_status.inactive(policy_inactive_reason)
             agent_observer_controller = AgentObserverCoordinator(
                 tmux_binary,
                 tmux_runtime_capability,
@@ -2759,6 +2828,7 @@ def _run_runtime_service(
                     app_server_log_path,
                     protocol_proxy_socket_path,
                     protocol_event_socket_path,
+                    config.command_policy_socket_path,
                 )
             )
 
@@ -2968,10 +3038,16 @@ def _run_runtime_service(
                                             on_process_stopped("app-server", app_server)
                                 finally:
                                     try:
-                                        if diagnostic_relay is not None:
-                                            diagnostic_relay.close()
+                                        command_policy.close()
                                     finally:
-                                        app_endpoint.close()
+                                        try:
+                                            command_policy_status.close()
+                                        finally:
+                                            try:
+                                                if diagnostic_relay is not None:
+                                                    diagnostic_relay.close()
+                                            finally:
+                                                app_endpoint.close()
 
 
 def _record_runtime_path_keepalive_failure(log: BinaryIO, error: RodexRuntimeError) -> None:

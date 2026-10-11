@@ -31,7 +31,7 @@ It never executes the stored shell text or overwrites old helpers.
 The [handoff adapter](../src/rodex/retained_runtime_handoff.py) runs with the owning
 interpreter and `-I`, importing that installation's existing control/daemon APIs.
 Supported admission requires the shared catalog contract, tmux-v5,
-process-receipt-v3, and either daemon-v3 or daemon-v4. The parent retains the session
+process-receipt-v3, and daemon-v3, daemon-v4, or daemon-v5. The parent retains the session
 transition lock throughout.
 The adapter rechecks durable/full tmux identity and whole-runtime topology, inspects
 the exact thread, verifies saved history and both live child receipts, then rechecks

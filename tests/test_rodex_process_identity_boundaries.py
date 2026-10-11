@@ -34,6 +34,7 @@ def _service(root: Path) -> RuntimeServiceConfig:
         codex_binary="/opt/Codex CLI/codex",
         app_server_socket_path=root / "app-0000000000000001.sock",
         app_server_log_path=root / "app-0000000000000001.log",
+        command_policy_socket_path=root / "policy-0000000000000001.sock",
         protocol_proxy_socket_path=root / "proxy-0000000000000001.sock",
         protocol_event_socket_path=root / "events-0000000000000001.sock",
         tmux_binary="/opt/tmux bin/tmux",

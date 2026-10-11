@@ -27,6 +27,7 @@ CREATE_COMMAND: Final = "_create"
 DETACH_COMMAND: Final = "_detach"
 HELP_COMMAND: Final = "_help"
 VERSION_COMMAND: Final = "_version"
+POLICY_SETUP_COMMAND: Final = "_policy-setup"
 STATS_COMMAND: Final = "_stats"
 STATS_STATUS_COMMAND: Final = "_stats-status"
 AGENTS_COMMAND: Final = "_agents"
@@ -39,6 +40,7 @@ FORCE_OLD_FLAG: Final = "--force-old"
 class CommandRoute(StrEnum):
     HELP = "help"
     VERSION = "version"
+    POLICY_SETUP = "policy_setup"
     LAUNCH = "launch"
     SESSION = "session"
     MACHINE = "machine"
@@ -58,6 +60,11 @@ class CommandSpec:
 
 COMMAND_SPECS: Final = (
     CommandSpec(HELP_COMMAND, CommandRoute.HELP, ("_help", "Show this help and exit.")),
+    CommandSpec(
+        POLICY_SETUP_COMMAND,
+        CommandRoute.POLICY_SETUP,
+        ("_policy-setup", "Open native Codex to review and trust the Rodex command hook."),
+    ),
     CommandSpec(
         VERSION_COMMAND,
         CommandRoute.VERSION,

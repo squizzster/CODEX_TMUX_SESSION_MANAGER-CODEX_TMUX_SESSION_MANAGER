@@ -408,6 +408,7 @@ class DaemonRuntimeManager:
             config.app_server_log_path: root / f"app-{runtime_id}.log",
             config.protocol_proxy_socket_path: root / f"proxy-{runtime_id}.sock",
             config.protocol_event_socket_path: root / f"events-{runtime_id}.sock",
+            config.command_policy_socket_path: root / f"policy-{runtime_id}.sock",
         }
         if any(actual != wanted for actual, wanted in expected.items()):
             raise RodexDaemonServerError("runtime endpoints are outside their canonical daemon root")

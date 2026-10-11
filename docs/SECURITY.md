@@ -63,6 +63,36 @@ connection, subscriber event, thread content, or model turn. Version checking is
 read-only and fail-open; a nonblocking file claim chooses one refresh owner. Future
 cache timestamps are stale, not a way to extend the 24-hour lifetime.
 
+## Native command policy
+
+[`command_policy.py`](../src/rodex/command_policy.py) is composed beside the App
+Server in `_run_runtime_service`, not in the byte-preserving proxy or interaction
+pipeline. A private per-runtime socket admits only that App Server's process tree
+and runtime identity. The broker starts before App Server; native children stop
+before broker workers and endpoint cleanup. The retained helper uses `-I` and the
+originating installation. Its socket environment value is not passed to the TUI.
+
+The versioned contract carries session/turn/cwd, permission mode, original tool
+input, and normalized command text. The current policy is always allow. Typed
+deny/rewrite-command decisions are scaffolding for future policies, not enabled
+rules. The [helper](../src/rodex/command_policy_hook.py) returns empty stdout on
+unchanged allow, native denial JSON on deny, or native `updatedInput` on rewrite.
+Only `command` can change; all other input fields remain intact. Rodex executes
+none of these commands and does not modify thread/turn approval, sandbox, or named
+permissions selections. Native Codex remains the execution/security authority.
+
+Trust uses Codex's own verdict and persisted hash; Rodex writes no trust records.
+If admission is unavailable, only Rodex's hook injection is removed before the
+remote TUI starts. Existing user/project hooks remain composed by Codex. Hook
+failures are advisory/fail-open, not an independent hard-security boundary.
+The native contract is documented in [OpenAI Hooks](https://developers.openai.com/codex/hooks/).
+
+Command status is bounded, control-stripped, literal tmux text, published only
+after the broker response through the existing atomic status-claim owner. It has
+lower priority than warnings and exact-token restoration. No command bodies are
+added to SQL, diagnostics, receipts, analytics, observer traffic, or model context.
+Codex's own normal command transcripts are unchanged.
+
 ## Content and privacy
 
 Codex owns message, command, tool, reasoning, and output bodies. Rodex SQLite retains

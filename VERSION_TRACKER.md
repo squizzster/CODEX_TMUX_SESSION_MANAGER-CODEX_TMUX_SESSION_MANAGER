@@ -10,6 +10,10 @@ repository currently has no Git release tags, so they do not imply a published r
 
 ### Added
 
+- Native managed-session command-policy hook, currently allow-all, with volatile
+  tmux-only command status and a typed allow/deny/rewrite-command extension point.
+  `_policy-setup` exposes native one-time hook trust; untrusted sessions start with
+  the policy inactive instead of implicitly bypassing trust.
 - A daemon now creates one random 256-bit incarnation capability at each start,
   publishes it privately, and requires it alongside the retained installation identity
   on every request and response.
@@ -23,9 +27,10 @@ repository currently has no Git release tags, so they do not imply a published r
 - Ordinary startup recognizes an unchanged checkout and environment from lightweight
   metadata, returns a valid cached retained interpreter before taking the publication
   lock, and uses a new opaque key when it must publish a changed installation.
-- Daemon protocol v4 and the terminal bridge bind clients to one exact daemon
+- Daemon protocol v5 carries the per-runtime policy endpoint; the terminal bridge
+  and daemon bind clients to one exact daemon
   incarnation. Retained-runtime handoff continues to admit supported daemon-v3 and
-  daemon-v4 installations.
+  daemon-v4 installations, alongside daemon-v5.
 - The current-only catalog is generation 22 (`rodex-v22.sqlite3`) and the agent-trace
   contract is v5. Statistics projection v10 counts each canonical response-usage
   record once while retaining cumulative snapshots as a legacy fallback. Generation

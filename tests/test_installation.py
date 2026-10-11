@@ -235,9 +235,9 @@ def test_published_installation_keeps_code_dependencies_and_defaults_after_repla
     before = info(first)
     edits = (
         (source / "rodex/version.py", "0.15.0a1", "0.16.0a1"),
-        (source / "rodex/daemon_client.py", "rodex-daemon-v4", "rodex-daemon-v5"),
+        (source / "rodex/daemon_client.py", "rodex-daemon-v5", "rodex-daemon-v6"),
         (source / "rodex/tmux_session_capability.py", "PROTOCOL_GENERATION: Final = 5", "PROTOCOL_GENERATION: Final = 6"),
-        (source / "rodex_sql/private_database_path.py", "Final = 21", "Final = 22"),
+        (source / "rodex_sql/private_database_path.py", "Final = 22", "Final = 23"),
         (library / "installation_probe_dependency.py", "'A'", "'B'"),
     )
     for path, old, new in edits:
@@ -250,8 +250,8 @@ def test_published_installation_keeps_code_dependencies_and_defaults_after_repla
     after = info(second)
     assert first != second
     assert after["dependency"] == "B"
-    assert after["database"] == "rodex-v22.sqlite3"
-    assert after["daemon"] == "rodex-daemon-v5"
+    assert after["database"] == "rodex-v23.sqlite3"
+    assert after["daemon"] == "rodex-daemon-v6"
     assert after["tmux"] == "rodex-isolated-tmux-v6"
     assert after["configuration"].endswith("# replacement defaults\n")
     assert info(first, cwd=source, environment={**os.environ, "PYTHONPATH": str(source)}) == before

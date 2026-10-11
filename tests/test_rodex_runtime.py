@@ -16,7 +16,7 @@ from dataclasses import replace
 from pathlib import Path
 from threading import Event, Lock, Thread
 from types import SimpleNamespace
-from typing import BinaryIO, cast
+from typing import BinaryIO, ClassVar, cast
 
 import pytest
 
@@ -104,6 +104,27 @@ def _mock_terminal_gateway(monkeypatch: pytest.MonkeyPatch) -> list:
     """Host composition tests inject the terminal boundary; real PTYs have their own suite."""
     gateways = []
 
+    class FakePolicyBroker:
+        instances: ClassVar[list] = []
+
+        def __init__(self, path, runtime_id, publish):
+            self.path, self.runtime_id, self.publish = path, runtime_id, publish
+            self.started = self.closed = False
+            self.process = None
+            self.instances.append(self)
+
+        def start(self):
+            self.started = True
+
+        def bind_app_server(self, process):
+            assert self.started and not self.closed
+            assert self.process is None or self.process.poll() is not None
+            self.process = process
+
+        def close(self):
+            assert self.process is None or self.process.poll() is not None
+            self.closed = True
+
     class FakeGateway:
         def __init__(
             self,
@@ -166,9 +187,25 @@ def _mock_terminal_gateway(monkeypatch: pytest.MonkeyPatch) -> list:
         def update(self, _working):
             return None
 
+    class FakePolicyStatus:
+        def __init__(self, *_args):
+            self.reason = None
+
+        def allowed(self, _command):
+            pass
+
+        def inactive(self, reason):
+            self.reason = reason
+
+        def close(self):
+            pass
+
     monkeypatch.setattr(runtime_module, "TerminalSessionGateway", FakeGateway)
     monkeypatch.setattr(runtime_module, "InputInterceptorPresentation", FakePresentation)
     monkeypatch.setattr(runtime_module, "TmuxWorkingStatus", FakeWorkingStatus)
+    monkeypatch.setattr(runtime_module, "CommandPolicyBroker", FakePolicyBroker)
+    monkeypatch.setattr(runtime_module, "CommandPolicyStatus", FakePolicyStatus)
+    monkeypatch.setattr(runtime_module, "policy_hook_inactive_reason", lambda *_args: None)
     return gateways
 
 
@@ -1951,6 +1988,7 @@ config = RuntimeServiceConfig(
     codex_binary=str(fake_codex),
     app_server_socket_path=database.parent / "app.sock",
     app_server_log_path=database.parent / "app.log",
+    command_policy_socket_path=database.parent / "policy-0c01ee2ead7240e1.sock",
     protocol_proxy_socket_path=database.parent / "proxy.sock",
     protocol_event_socket_path=event_socket,
     tmux_binary=str(fake_tmux),
@@ -4430,6 +4468,7 @@ def test_runtime_path_keepalives_share_runtime_paths_independently(
 )
 @pytest.mark.parametrize("bootstrap_virtualenv", [True, False])
 @pytest.mark.parametrize("analytics_start_fails", [False, True])
+@pytest.mark.parametrize("policy_inactive", [False, True])
 def test_runtime_service_skips_updater_and_connects_tui_through_protocol_proxy(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -4437,8 +4476,12 @@ def test_runtime_service_skips_updater_and_connects_tui_through_protocol_proxy(
     captures_stderr: bool,
     bootstrap_virtualenv: bool,
     analytics_start_fails: bool,
+    policy_inactive: bool,
 ) -> None:
     gateways = _mock_terminal_gateway(monkeypatch)
+    monkeypatch.setattr(
+        runtime_module, "policy_hook_inactive_reason", lambda *_args: "inactive" if policy_inactive else None
+    )
     initialise_rodex_database(tmp_path / "rodex.sqlite3")
     app_socket = tmp_path / "app.sock"
     proxy_socket = tmp_path / f"proxy-{RUNTIME_ID}.sock"
@@ -4632,6 +4675,7 @@ def test_runtime_service_skips_updater_and_connects_tui_through_protocol_proxy(
                 codex_binary="/usr/bin/codex",
                 app_server_socket_path=app_socket,
                 app_server_log_path=tmp_path / "app.log",
+                command_policy_socket_path=tmp_path / f"policy-{RUNTIME_ID}.sock",
                 protocol_proxy_socket_path=proxy_socket,
                 protocol_event_socket_path=event_socket,
                 tmux_binary="/usr/bin/tmux",
@@ -4682,6 +4726,7 @@ def test_runtime_service_skips_updater_and_connects_tui_through_protocol_proxy(
         tmp_path / "app.log",
         proxy_socket,
         event_socket,
+        tmp_path / f"policy-{RUNTIME_ID}.sock",
     )
     expected_codex_arguments = ["Hello!"] if codex_arguments == ["Hello"] else codex_arguments
     assert tui_commands == [
@@ -4699,7 +4744,10 @@ def test_runtime_service_skips_updater_and_connects_tui_through_protocol_proxy(
     ]
     assert len(tui_options) == 1
     assert tui_options[0]["cwd"] == tmp_path
-    assert len(spawned_environments) == 2
+    assert len(spawned_environments) == (3 if policy_inactive else 2)
+    assert spawned_environments[0]["RODEX_COMMAND_POLICY_SOCKET"] == str(tmp_path / f"policy-{RUNTIME_ID}.sock")
+    assert "RODEX_COMMAND_POLICY_SOCKET" not in spawned_environments[-1]
+    assert all(broker.closed for broker in runtime_module.CommandPolicyBroker.instances)
     for process_environment in spawned_environments:
         assert process_environment["USER_SETTING"] == "preserved"
         if bootstrap_virtualenv:
@@ -4858,6 +4906,7 @@ def test_runtime_service_retries_exact_resume_during_active_writer_handoff(
                 codex_binary="/usr/bin/codex",
                 app_server_socket_path=app_socket,
                 app_server_log_path=tmp_path / "app.log",
+                command_policy_socket_path=tmp_path / f"policy-{RUNTIME_ID}.sock",
                 protocol_proxy_socket_path=tmp_path / f"proxy-{RUNTIME_ID}.sock",
                 protocol_event_socket_path=tmp_path / f"events-{RUNTIME_ID}.sock",
                 tmux_binary="/usr/bin/tmux",
@@ -5042,6 +5091,7 @@ def test_runtime_service_terminates_the_tui_when_runtime_keepalive_fails(
                 codex_binary="/usr/bin/codex",
                 app_server_socket_path=tmp_path / "app.sock",
                 app_server_log_path=tmp_path / "app.log",
+                command_policy_socket_path=tmp_path / f"policy-{RUNTIME_ID}.sock",
                 protocol_proxy_socket_path=tmp_path / f"proxy-{RUNTIME_ID}.sock",
                 protocol_event_socket_path=tmp_path / f"events-{RUNTIME_ID}.sock",
                 tmux_binary="/usr/bin/tmux",

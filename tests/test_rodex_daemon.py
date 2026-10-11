@@ -53,6 +53,7 @@ def _config(root: Path, value: int) -> RuntimeServiceConfig:
         codex_binary="/usr/bin/codex",
         app_server_socket_path=root / f"app-{token}.sock",
         app_server_log_path=root / f"app-{token}.log",
+        command_policy_socket_path=root / f"policy-{token}.sock",
         protocol_proxy_socket_path=root / f"proxy-{token}.sock",
         protocol_event_socket_path=event_socket,
         tmux_binary="/usr/bin/tmux",
@@ -663,7 +664,7 @@ def test_current_client_rejects_same_protocol_daemon_with_different_loaded_code(
         assert f"incompatible at {socket_path}" in diagnostic
         assert "running daemon implementation: 'different-loaded-code'" in diagnostic
         assert "current client: Rodex 0.15.0a1 (0.15.0a1+installation." in diagnostic
-        assert "daemon protocol: rodex-daemon-v4" in diagnostic
+        assert "daemon protocol: rodex-daemon-v5" in diagnostic
         assert "SQL catalog: not checked; this client expects generation 22 (rodex-v22.sqlite3)" in diagnostic
         assert "does not migrate earlier runtimes or catalogs" in diagnostic
         assert spawns == []
@@ -747,7 +748,7 @@ def test_current_client_reports_both_sides_of_a_daemon_protocol_mismatch(short_r
         diagnostic = str(raised.value)
         assert f"protocol is incompatible at {socket_path}" in diagnostic
         assert "running daemon protocol: 'rodex-daemon-v1'" in diagnostic
-        assert "current client protocol: 'rodex-daemon-v4' (Rodex 0.15.0a1)" in diagnostic
+        assert "current client protocol: 'rodex-daemon-v5' (Rodex 0.15.0a1)" in diagnostic
         assert "SQL catalog: not checked; this client expects generation 22 (rodex-v22.sqlite3)" in diagnostic
         assert "does not translate earlier wire protocols or migrate earlier catalogs" in diagnostic
     finally:

@@ -22,6 +22,8 @@ installations keep already-running sessions on the implementation that started t
   and metadata-only traces without creating a second conversation store.
 - **Make it yours.** Change prompts, presentation, and session behaviour in Python,
   without rebuilding Codex. Simple prompt rules live in YAML.
+- **Check command interception.** After [native hook trust](docs/CLI.md#command-policy-check),
+  see a private `Rodex policy allowed: …` status while Codex still owns execution.
 
 Rodex is an **ALPHA** in-house Linux pre-release; interfaces may change.
 

@@ -146,6 +146,11 @@ def test_installed_newer_cli_preserves_the_characterized_forward_contract(
     )
     fixture_path = Path(__file__).parent / "fixtures" / "codex_app_server_0_151_contract.json"
     expected = json.loads(fixture_path.read_text(encoding="utf-8"))
+    if installed_release >= (0, 162, 1):
+        # Characterized from 0.162.1's generated schema: a partial answer is not
+        # terminal. Control/presentation/trace tests pin the existing safe handling.
+        # Keep the minimum-version fixture exact and reject any further drift.
+        expected["agent_message_phases"] = ["commentary", "final_answer", "partial_answer"]
     actual = _characterize_schema(schema_root)
     actual["codex_cli_version"] = CODEX_APP_SERVER.minimum_version
     assert actual == expected

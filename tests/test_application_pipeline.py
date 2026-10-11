@@ -110,6 +110,17 @@ def test_every_declared_route_has_one_preparation_and_every_command_uses_it() ->
     assert exact_wait.preparation is PipelinePreparation.RUNTIME
 
 
+def test_policy_setup_delegates_only_the_stable_hook_definition(tmp_path):
+    from rodex.command_policy_configuration import policy_hook_override
+
+    trace = []
+    _pipeline(tmp_path, trace).execute(["_policy-setup"])
+    assert trace == [
+        ("resolve_executable", "codex"),
+        ("codex", "/bin/codex", ("--config", policy_hook_override())),
+    ]
+
+
 @pytest.mark.parametrize(
     "arguments",
     [

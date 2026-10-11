@@ -31,6 +31,7 @@ Accepted fan-out does not apply the same hook twice.
 | Native typing/output | decoder/interceptor → [gateway](../src/rodex/terminal_gateway.py) → child PTY / terminal surface |
 | Managed initial prompt, verified Enter, queued or control text | [prompt admission](PROMPT_SUBMISSION_FLOW.md) → primary receipt or structured fallback |
 | App Server frames | [proxy](../src/rodex/protocol_proxy.py) protocol input/output → original destination, then bounded projections |
+| Native shell command policy | App Server `PreToolUse(Bash)` → [retained helper](../src/rodex/command_policy_hook.py) → [private broker](../src/rodex/command_policy.py) → native Codex enforcement; then asynchronous [tmux-only status](../src/rodex/command_policy_status.py) |
 | `_start`, `_steer`, `_interrupt`, alias, mouse | [exact mutation coordinator](../src/rodex/exact_turn_mutation.py) → fenced adapter |
 | `_cat`, `_tail`, `_events` | [live read pipeline](../src/rodex/session_read_pipeline.py); terminal text and protocol events remain distinct |
 | `_stats`, `_stats-status`, `_agents`, `_trace` | [statistics](../src/rodex/statistics_commands.py) / [trace commands](../src/rodex/agent_trace_commands.py) → owned durable reads |
@@ -155,8 +156,12 @@ classifications there when a route changes, and update the route-level map above
 It also checks subprocess entrypoints, mutation owners, and read-only bootstrap probes;
 it is not a proof against arbitrary Python reflection or a runtime monitor.
 
-Status-bar and outer terminal-title configuration remain under [`TmuxStatusPipeline`](../src/rodex/tmux_status.py);
-sharing animations have their own [admission owner](../src/rodex/status_animation_admission.py).
+Status-bar and outer terminal-title configuration remain under [`TmuxStatusPipeline`](../src/rodex/tmux_status.py).
+Command-policy status uses its lower-priority, exact-token transient claim, never
+the protocol, observer, terminal-input, or analytics publication paths. Hook trust
+admission is a read-only App Server probe; its decision response belongs solely to
+Codex's native hook stdout contract.
+Sharing animations have their own [admission owner](../src/rodex/status_animation_admission.py).
 [`CodexWorkingStatusObserver`](../src/rodex/protocol_proxy.py) projects main-thread
 activity into transitions; [`TmuxWorkingStatus`](../src/rodex/tmux_status.py) atomically
 publishes the activity option and redraw cadence through the existing status publisher.

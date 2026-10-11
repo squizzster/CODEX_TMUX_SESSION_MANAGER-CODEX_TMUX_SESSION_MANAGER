@@ -670,9 +670,9 @@ def test_developer_message_role_round_trips_through_contract_and_sql(
     assert snapshot.trace_schema_version == "rodex-agent-trace-v5"
     assert snapshot.events[0]["detail"]["message_role"] == "developer"
     with sqlite3.connect(database) as connection:
-        assert connection.execute(
-            "SELECT message_role FROM rodex_sessions_agent_trace_messages"
-        ).fetchall() == [("developer",)]
+        assert connection.execute("SELECT message_role FROM rodex_sessions_agent_trace_messages").fetchall() == [
+            ("developer",)
+        ]
 
 
 @pytest.mark.parametrize("source_role", [None, "future-role"])
@@ -704,6 +704,40 @@ def test_message_role_unknown_is_reserved_for_absent_or_unsupported_roles(
     )
 
     assert publication.events[0].detail.message_role == "unknown"  # type: ignore[union-attr]
+
+
+def test_partial_answer_phase_uses_unknown_trace_metadata_without_rejecting_publication(
+    tmp_path: Path,
+) -> None:
+    publication = normalize_rollout_trace(
+        (
+            (
+                THREAD_ID,
+                _content(
+                    {
+                        "ordinal": 1,
+                        "type": "response_item",
+                        "payload": {
+                            "type": "message",
+                            "role": "assistant",
+                            "phase": "partial_answer",
+                            "content": "more may follow",
+                        },
+                    }
+                ),
+            ),
+        ),
+        based_on_trace_publication_sequence=None,
+        calculated_at_utc="2026-10-11T12:00:00Z",
+    )
+    database = tmp_path / "rodex.sqlite3"
+    create_a_rodex_session(database, codex_session_id=THREAD_ID)
+
+    _publish_trace(database, publication)
+
+    snapshot = read_rodex_agent_trace(1, database)
+    assert snapshot.events[0]["detail"]["message_phase"] == "unknown"
+    assert snapshot.events[0]["detail"]["message_role"] == "assistant"
 
 
 def test_normalizer_retains_empty_tool_request_and_output_activity_kinds(

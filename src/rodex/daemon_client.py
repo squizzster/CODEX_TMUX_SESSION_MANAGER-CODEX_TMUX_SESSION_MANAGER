@@ -20,7 +20,7 @@ from .implementation_identity import RODEX_IMPLEMENTATION_ID, RODEX_IMPLEMENTATI
 from .process_contracts import RuntimeServiceConfig
 from .version import RODEX_VERSION
 
-RODEX_DAEMON_PROTOCOL: Final = "rodex-daemon-v4"
+RODEX_DAEMON_PROTOCOL: Final = "rodex-daemon-v5"
 RODEX_DAEMON_SOCKET_NAME: Final = f"{RODEX_IMPLEMENTATION_KEY}.sock"
 RODEX_DAEMON_LOG_NAME: Final = f"{RODEX_IMPLEMENTATION_KEY}.log"
 RODEX_DAEMON_START_LOCK_NAME: Final = f"{RODEX_IMPLEMENTATION_KEY}.start.lock"

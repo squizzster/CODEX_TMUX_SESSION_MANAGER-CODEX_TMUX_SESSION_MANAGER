@@ -64,6 +64,13 @@ normal temporary roots.
 - New effect-bearing paths: update the classification in
   [test_interaction_path_ownership.py](../tests/adversarial/test_interaction_path_ownership.py)
   and the [interaction inventory](INTERACTION_PATHS.md#effect-audit).
+- Native command policy: [contract/helper tests](../tests/test_command_policy.py),
+  [trust admission](../tests/test_command_policy_configuration.py),
+  [tmux status](../tests/test_command_policy_status.py), and
+  [native checks](../tests/test_command_policy_native.py). The native checks use
+  installed Codex/tmux with an offline deterministic model fixture, no account or
+  model quota. They cover native trust reuse, bypass transport, command security,
+  future deny/rewrite decisions, concurrent managed sessions, and content privacy.
 
 ## CPU regressions
 

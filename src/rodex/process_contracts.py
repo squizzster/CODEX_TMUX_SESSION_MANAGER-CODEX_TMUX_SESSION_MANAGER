@@ -156,6 +156,7 @@ class RuntimeServiceConfig:
     protocol_proxy_socket_path: Path
     protocol_event_socket_path: Path
     tmux_binary: str
+    command_policy_socket_path: Path
     tmux_server_socket_path: Path
     tmux_pane_target: str
     runtime_id: RodexRuntimeId
@@ -180,6 +181,7 @@ class RuntimeServiceConfig:
             "app_server_log_path",
             "protocol_proxy_socket_path",
             "protocol_event_socket_path",
+            "command_policy_socket_path",
             "tmux_server_socket_path",
         ):
             object.__setattr__(self, field_name, _absolute_path(getattr(self, field_name)))
@@ -190,6 +192,8 @@ class RuntimeServiceConfig:
             raise ValueError("analytics must use the runtime service identity")
         if self.tmux_server_socket_path.parent != self.protocol_event_socket_path.parent:
             raise ValueError("runtime service endpoints must share one runtime root")
+        if self.command_policy_socket_path.parent != self.protocol_event_socket_path.parent:
+            raise ValueError("command policy endpoint must share the runtime root")
         environment_names: set[str] = set()
         for entry in self.user_environment:
             if (
@@ -225,6 +229,7 @@ class RuntimeServiceConfig:
             "protocol_proxy_socket_path": os.fspath(self.protocol_proxy_socket_path),
             "protocol_event_socket_path": os.fspath(self.protocol_event_socket_path),
             "tmux_binary": self.tmux_binary,
+            "command_policy_socket_path": os.fspath(self.command_policy_socket_path),
             "tmux_server_socket_path": os.fspath(self.tmux_server_socket_path),
             "tmux_pane_target": self.tmux_pane_target,
             "runtime_id": str(self.runtime_id),
@@ -243,6 +248,7 @@ class RuntimeServiceConfig:
             "protocol_proxy_socket_path",
             "protocol_event_socket_path",
             "tmux_binary",
+            "command_policy_socket_path",
             "tmux_server_socket_path",
             "tmux_pane_target",
             "runtime_id",
@@ -272,6 +278,7 @@ class RuntimeServiceConfig:
             protocol_proxy_socket_path=Path(_required_text(payload, "protocol_proxy_socket_path")),
             protocol_event_socket_path=Path(_required_text(payload, "protocol_event_socket_path")),
             tmux_binary=_required_text(payload, "tmux_binary"),
+            command_policy_socket_path=Path(_required_text(payload, "command_policy_socket_path")),
             tmux_server_socket_path=Path(_required_text(payload, "tmux_server_socket_path")),
             tmux_pane_target=_required_text(payload, "tmux_pane_target"),
             runtime_id=parse_rodex_runtime_id(_required_text(payload, "runtime_id")),

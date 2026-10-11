@@ -45,6 +45,32 @@ rodex _detach SESSION
 
 Routing authority: [`UnifiedRodexApplicationPipeline`](../src/rodex/application_pipeline.py).
 
+## Command-policy check
+
+Managed runtimes offer a native `PreToolUse` hook for all shell/unified-exec
+commands. The current policy allows every command and shows
+`Rodex policy allowed: COMMAND` in that session's tmux status bar for five seconds
+from interception, not from command completion. A command such as `sleep 5` can
+finish just as its status disappears. This text is not a model message, observer
+message, or persistent command log. Busy status
+updates coalesce; safety warnings take priority. "Allowed" does not mean executed:
+Codex approvals, sandbox restrictions, and other hooks still apply.
+
+For first-use trust, run `rodex _policy-setup`. In the native Codex UI, review the
+Rodex `PreToolUse` hook through `/hooks`, trust that individual hook, and exit.
+Start a new managed session. Trust persists in the same Codex home while its exact
+definition/hash is unchanged; a retained-installation upgrade can require review
+again because the helper path changes. Rodex never trusts it automatically.
+Without verified trust/support, startup proceeds with the policy inactive and a
+tmux setup notice. It does not hang waiting for a pre-attachment trust prompt.
+
+An explicitly supplied native `--dangerously-bypass-hook-trust` remains on the
+remote TUI: characterized Codex 0.161.0 forwards it in `thread/start.config` to the
+App Server. Rodex never adds that flag or enables disabled hooks. Native hook and
+managed-only restrictions remain authoritative. Unmanaged Codex is unaffected.
+`write_stdin` continuations and hosted tools such as web search are outside this
+shell-command hook. See [security](SECURITY.md#native-command-policy).
+
 ## Open, detach, and resume
 
 A live selector reattaches only after exact identity verification. An ended runtime

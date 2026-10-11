@@ -68,7 +68,7 @@ EFFECT_OWNERS = {
         "rodex/interaction_transport.py:publish_session_interaction:.send",
         "rodex/interaction_transport.py:serve_session_interaction:.send",
         "rodex/daemon.py:RodexDaemonServer._handle_connection:.sendall",
-        "rodex/daemon_client.py:RodexDaemonClient._request:.sendall",
+        "rodex/daemon_client.py:RodexDaemonClient._exchange:.sendall",
         "rodex/terminal_presentation.py:_write_observer_terminal:.write",
         "rodex/terminal_gateway.py:TerminalSessionGateway._flush:os.write",
         "rodex/terminal_gateway.py:TerminalSessionGateway._notify_relay:os.write",
@@ -80,6 +80,13 @@ EFFECT_OWNERS = {
     "read-only transient app server probes": {
         "rodex/runtime.py:RodexRuntimeLauncher._list_loaded_codex_threads:.send",
         "rodex/runtime.py:RodexRuntimeLauncher._read_persisted_codex_session:.send",
+        "rodex/command_policy_configuration.py:policy_hook_inactive_reason:.send",
+        "rodex/command_policy_configuration.py:policy_hook_inactive_reason.request:.send",
+    },
+    "private native command policy": {
+        "rodex/command_policy.py:CommandPolicyBroker._serve:.sendall",
+        "rodex/command_policy_hook.py:run_hook:.sendall",
+        "rodex/command_policy_hook.py:main:.write",
     },
     "legacy runtime compatibility transport": {
         "rodex/legacy_runtime_compat.py:_request:.sendall",
@@ -94,6 +101,7 @@ EFFECT_OWNERS = {
         "rodex/runtime.py:_RuntimeDiagnosticRelay.write:.write",
         "rodex/process_receipts.py:RuntimeProcessReceipts.record:os.write",
         "rodex/installation.py:_write_bootstrap_cache:.write",
+        "rodex/daemon.py:RodexDaemonServer._publish_instance_capability:.write",
     },
 }
 
@@ -212,6 +220,7 @@ def test_all_subprocess_entrypoints_are_classified():
         "rodex/tmux_sharing_coordinator.py",
         "rodex/status_animation_admission.py",
         "rodex/retained_runtime_handoff.py",
+        "rodex/command_policy_hook.py",
     }
 
 

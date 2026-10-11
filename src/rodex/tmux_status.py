@@ -209,6 +209,7 @@ BoundTmuxCommand = Callable[..., subprocess.CompletedProcess[str]]
 class StatusPriority(IntEnum):
     """Stable precedence for every competing Rodex status presentation."""
 
+    COMMAND_POLICY = 5
     COMPLETION = 10
     SHARING_ANIMATION = 20
     SAFETY_WARNING = 100

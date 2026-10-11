@@ -174,6 +174,7 @@ def test_host_retires_only_exact_unregistered_writer_conflicts_within_its_retry_
             codex_binary="/usr/bin/codex",
             app_server_socket_path=app_socket,
             app_server_log_path=tmp_path / "app.log",
+            command_policy_socket_path=tmp_path / f"policy-{RUNTIME_ID}.sock",
             protocol_proxy_socket_path=tmp_path / f"proxy-{RUNTIME_ID}.sock",
             protocol_event_socket_path=analytics.protocol_event_socket_path,
             tmux_binary="/usr/bin/tmux",

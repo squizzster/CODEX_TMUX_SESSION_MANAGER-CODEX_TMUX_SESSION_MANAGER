@@ -14,7 +14,7 @@ These locations belong to the current Linux user, not to the caller's project.
 | Daemon endpoint | `<runtime-root>/<installation-key>.sock` |
 | Daemon coordination | `<installation-key>.start.lock`, `<installation-key>.log`, and the mode-`0600` `<installation-key>.daemon-instance` capability under the runtime root; the capability is replaced for each daemon start |
 | tmux endpoint | `<runtime-root>/tmux-v5-<runtime-id>.sock` |
-| Service sockets | `<runtime-root>/{app,proxy,events}-<runtime-id>.sock` |
+| Service sockets | `<runtime-root>/{app,proxy,events,policy}-<runtime-id>.sock` |
 | Codex rollouts | `RODEX_CODEX_SESSIONS_ROOT`, otherwise `$CODEX_HOME/sessions`, otherwise `~/.codex/sessions` |
 
 Path authorities: [`default_runtime_root_path`](../src/rodex/runtime.py),
@@ -40,6 +40,14 @@ are in [terminal presentation](INTERACTION_PATHS.md#terminal-and-presentation).
 Managed Codex defaults to `tui.animations=false` to avoid decorative spinner/shimmer
 redraw work. `rodex --config tui.animations=true` explicitly restores it. The source
 of launch defaults is [`runtime.py`](../src/rodex/runtime.py), not a second Codex config.
+
+The optional [command-policy check](CLI.md#command-policy-check) temporarily replaces
+the tmux bar with `Rodex policy allowed: COMMAND` for five seconds after interception.
+Its lifetime does not follow the command's runtime. Rapid commands coalesce to the
+latest status; higher-priority warnings and sharing notices can hide it. This is
+an allow decision, not execution/completion evidence, and it creates no command log.
+An inactive notice directs first-use trust to `rodex _policy-setup`; start a fresh
+managed session afterwards. Rodex does not bypass trust or force disabled hooks on.
 
 The Rodex bar shows `Working.` through `Working....` while the main Codex thread is
 active. tmux advances the fixed-width dots once per second; Rodex publishes only

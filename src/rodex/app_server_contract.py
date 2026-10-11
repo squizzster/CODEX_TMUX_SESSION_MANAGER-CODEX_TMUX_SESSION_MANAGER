@@ -30,6 +30,8 @@ class CodexAppServerContract:
     rpc_connection_path: str = "/rpc"
     initialize_method: str = "initialize"
     initialized_method: str = "initialized"
+    hooks_list_method: str = "hooks/list"
+    config_read_method: str = "config/read"
     thread_started_method: str = "thread/started"
     thread_loaded_list_method: str = "thread/loaded/list"
     thread_read_method: str = "thread/read"
@@ -43,10 +45,17 @@ class CodexAppServerContract:
     turn_completed_method: str = "turn/completed"
     warning_method: str = "warning"
 
-    def command(self, codex_binary: str, socket_path: Path) -> tuple[str, ...]:
+    def command(
+        self,
+        codex_binary: str,
+        socket_path: Path,
+        *,
+        command_policy_hook: str | None = None,
+    ) -> tuple[str, ...]:
         return (
             codex_binary,
             "app-server",
+            *(("--config", command_policy_hook) if command_policy_hook is not None else ()),
             "--listen",
             f"unix://{socket_path}",
         )

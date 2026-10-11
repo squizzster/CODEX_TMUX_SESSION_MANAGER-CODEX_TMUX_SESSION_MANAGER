@@ -17,10 +17,14 @@ repository currently has no Git release tags, so they do not imply a published r
 - Native managed-session command-policy hook with volatile tmux-only command status,
   a typed allow/deny/rewrite-command extension point, and a first capability rule
   denying exact integer sleeps below 10 seconds with model-visible feedback.
-  An exact Rodex-only hook inventory gets Codex's invocation-local trust bypass;
+  An exact Rodex-only hook inventory gets temporary native key/hash trust in its private App Server;
   another enabled hook retains `_policy-setup`. Decision and inactive-reminder rows
   last five seconds, expose tmux prefix mode, and restore the normal bar by exact
   claim token; successful admission clears stale inactive state.
+- Saved-session resume no longer waits behind Codex 0.162.1's hidden hook-review
+  prompt. Automatic admission verifies native trust after a provisional App Server
+  restart instead of relying on the TUI bypass flag. Native start/resume/fork and
+  same-name runtime replacement tests preserve UUIDs, permissions, and user hook state.
 - A daemon now creates one random 256-bit incarnation capability at each start,
   publishes it privately, and requires it alongside the retained installation identity
   on every request and response.

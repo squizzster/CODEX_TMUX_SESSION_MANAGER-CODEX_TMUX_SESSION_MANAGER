@@ -67,8 +67,9 @@ Agent shell-command interception uses the separate native `PreToolUse(Bash)`
 broker. Its capability-test policy denies exact integer `sleep N` commands below
 10 seconds with model-visible feedback and allows other commands. An allow status is
 an interception decision, not execution/completion evidence. Fresh managed startup
-automatically bypasses native hook trust only when the exact Rodex hook is the sole
-enabled hook; another enabled hook requires `_policy-setup`. Read the
+automatically admits the sole enabled Rodex hook through temporary exact-hash trust
+in its private App Server, revalidated by native inventory before start/resume/fork.
+No user trust record is written; another enabled hook requires `_policy-setup`. Read the
 [interaction pipeline report](../../../docs/INTERACTION_PIPELINE_REPORT.md) when
 working with notices, interception, configuration, or recovery; it identifies the
 existing owners, native UI evidence, and changes needed for inline notices.

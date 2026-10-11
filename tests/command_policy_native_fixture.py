@@ -31,7 +31,13 @@ class FixtureModel(BaseHTTPRequestHandler):
     def do_POST(self):
         request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         self.server.requests.append(request)
-        completed = any(item.get("type") == "function_call_output" for item in request.get("input", []))
+        turn_input = request.get("input", [])
+        current_turn_start = 0
+        for index, item in enumerate(turn_input):
+            if item.get("role") == "user":
+                current_turn_start = index + 1
+        turn_input = turn_input[current_turn_start:]
+        completed = any(item.get("type") == "function_call_output" for item in turn_input)
         if completed:
             item = {
                 "id": "msg_1",

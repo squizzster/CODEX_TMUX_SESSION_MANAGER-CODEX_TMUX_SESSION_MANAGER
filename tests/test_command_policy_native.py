@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import threading
 import time
+import tomllib
 import uuid
 from contextlib import ExitStack
 from pathlib import Path
@@ -91,7 +92,7 @@ def test_native_allow_uses_original_security_and_no_model_context(native, sandbo
     with native.app_server() as (client, observed, process, path):
         admission = policy_hook_admission(path, process, native.workspace, ())
         assert admission.inactive_reason is None
-        assert admission.add_hook_trust_bypass
+        assert admission.temporary_trust is not None
         first = trust_fixture_hook(client, native.workspace)
     # A distinct App Server/socket/runtime must reuse native trust with no bypass.
     with native.app_server() as (client, observed, process, path):
@@ -141,7 +142,7 @@ def test_native_extra_enabled_user_hook_keeps_manual_policy_setup(native, prior_
         admission = policy_hook_admission(path, process, native.workspace, ())
 
     assert admission.inactive_reason == POLICY_INACTIVE_SETUP
-    assert not admission.add_hook_trust_bypass
+    assert admission.temporary_trust is None
 
 
 @pytest.mark.live_startup
@@ -445,7 +446,7 @@ def test_managed_trust_once_two_isolated_sessions_and_private_status(native):
 
 @pytest.mark.live_startup
 @pytest.mark.parametrize("prior_installation_trusted", [False, True])
-def test_fresh_managed_session_auto_bypasses_only_rodex_hook_and_denies_short_sleep(native, prior_installation_trusted):
+def test_managed_automatic_hook_admission_survives_saved_session_resume(native, prior_installation_trusted):
     if not shutil.which("tmux"):
         pytest.skip("tmux is required")
     if prior_installation_trusted:
@@ -456,57 +457,108 @@ def test_fresh_managed_session_auto_bypasses_only_rodex_hook_and_denies_short_sl
     rodex = str(Path(__file__).parents[1] / "rodex")
     runtime_root = Path(native.environment["RODEX_RUNTIME_DIR"])
     native.model.tool_input = {"cmd": "sleep 5"}
+    original_state = tomllib.loads((native.codex_home / "config.toml").read_text()).get("hooks", {}).get("state", {})
+    previous_identity = None
+    name = None
     try:
-        with RodexTerminalClient([rodex], native.environment, native.workspace) as client:
-            name = client.wait_for_attach()
-            await_screen(client, "OpenAI Codex")
-            inspected = subprocess.run(
-                [rodex, "_inspect", name, "--json"],
-                env=native.environment,
-                capture_output=True,
-                text=True,
-                check=True,
-                timeout=15,
-            )
-            identity = json.loads(inspected.stdout)
-            assert identity["ok"]
-            dispatched = subprocess.run(
-                [rodex, "_start", name, "--dispatch", f"rodex:dispatch:{uuid.uuid4()}", "--stdin", "--json"],
-                input="Run the fixture command.",
-                env=native.environment,
-                capture_output=True,
-                text=True,
-                check=True,
-                timeout=15,
-            )
-            dispatch = json.loads(dispatched.stdout)
-            assert dispatch["ok"], dispatch
-            completed = subprocess.run(
-                [rodex, "_wait", name, "--turn", dispatch["codex"]["turn_id"], "--timeout", "4s", "--json"],
-                env=native.environment,
-                capture_output=True,
-                text=True,
-                check=True,
-                timeout=10,
-            )
-            assert json.loads(completed.stdout)["ok"]
-            assert SHORT_SLEEP_DENIAL_REASON in json.dumps(native.model.requests)
-            socket_path = runtime_root / f"tmux-v5-{identity['runtime']['runtime_id']}.sock"
-            inactive = subprocess.run(
-                ["tmux", "-S", str(socket_path), "show-options", "-q", "-v", "-t", "%0", POLICY_INACTIVE_OPTION],
-                capture_output=True,
-                text=True,
-                timeout=3,
-            )
-            assert inactive.stdout == ""
+        for resumed in (False, True):
+            command = [rodex, name] if resumed else [rodex]
+            with RodexTerminalClient(command, native.environment, native.workspace) as client:
+                opened_name = client.wait_for_attach()
+                if resumed:
+                    assert opened_name == name
+                name = opened_name
+                await_screen(client, "OpenAI Codex")
+                inspected = subprocess.run(
+                    [rodex, "_inspect", name, "--json"],
+                    env=native.environment,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                    timeout=15,
+                )
+                identity = json.loads(inspected.stdout)
+                assert identity["ok"]
+                if resumed:
+                    assert identity["codex"]["session_id"] == previous_identity["codex"]["session_id"]
+                    assert identity["runtime"]["runtime_id"] != previous_identity["runtime"]["runtime_id"]
+                previous_identity = identity
+                requests_before_turn = len(native.model.requests)
+                dispatched = subprocess.run(
+                    [rodex, "_start", name, "--dispatch", f"rodex:dispatch:{uuid.uuid4()}", "--stdin", "--json"],
+                    input="Run the fixture command.",
+                    env=native.environment,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                    timeout=15,
+                )
+                dispatch = json.loads(dispatched.stdout)
+                assert dispatch["ok"], dispatch
+                completed = subprocess.run(
+                    [rodex, "_wait", name, "--turn", dispatch["codex"]["turn_id"], "--timeout", "4s", "--json"],
+                    env=native.environment,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                    timeout=10,
+                )
+                assert json.loads(completed.stdout)["ok"]
+                current_requests = native.model.requests[requests_before_turn:]
+                assert len(current_requests) >= 2
+                final_input = current_requests[-1]["input"]
+                last_user = max(index for index, item in enumerate(final_input) if item.get("role") == "user")
+                current_tool_outputs = [
+                    item for item in final_input[last_user + 1 :] if item.get("type") == "function_call_output"
+                ]
+                assert SHORT_SLEEP_DENIAL_REASON in json.dumps(current_tool_outputs)
+                socket_path = runtime_root / f"tmux-v5-{identity['runtime']['runtime_id']}.sock"
+                inactive = subprocess.run(
+                    ["tmux", "-S", str(socket_path), "show-options", "-q", "-v", "-t", "%0", POLICY_INACTIVE_OPTION],
+                    capture_output=True,
+                    text=True,
+                    timeout=3,
+                )
+                assert inactive.stdout == ""
+                client.detach()
+            _stop_fixture_daemon(runtime_root)
+        assert tomllib.loads((native.codex_home / "config.toml").read_text()).get("hooks", {}).get("state", {}) == (
+            original_state
+        )
     finally:
         _stop_fixture_daemon(runtime_root)
 
 
 @pytest.mark.live_startup
-def test_remote_tui_transports_explicit_hook_bypass_without_an_argv_adapter(native):
+@pytest.mark.parametrize("lifecycle", ["start", "resume", "fork"])
+@pytest.mark.parametrize("prior_installation_trusted", [False, True])
+def test_remote_tui_uses_exact_temporary_hook_trust_for_every_lifecycle(native, lifecycle, prior_installation_trusted):
+    if prior_installation_trusted:
+        trust_previous_rodex_installation(native)
+    with (native.codex_home / "config.toml").open("a") as config:
+        config.write('\n[hooks.state.unrelated]\nenabled=false\ntrusted_hash="sha256:sentinel"\n')
+    original_state = tomllib.loads((native.codex_home / "config.toml").read_text())["hooks"]["state"]
+    thread_id = None
+    if lifecycle != "start":
+        native.model.tool_input = {"cmd": "pwd"}
+        with native.app_server(injection=False) as (client, _observed, _process, _path):
+            thread_id = client.rpc("thread/start", {"cwd": str(native.workspace)})["thread"]["id"]
+            client.rpc(
+                "turn/start", {"threadId": thread_id, "input": [{"type": "text", "text": "Run the fixture command."}]}
+            )
+            client.complete_turn()
+    with native.app_server() as (client, _observed, process, path):
+        admission = policy_hook_admission(path, process, native.workspace, ())
+        trust = admission.temporary_trust
+        assert trust is not None
     captured = []
-    with native.app_server() as (_client, _observed, _process, app):
+    responses = []
+    with native.app_server(extra=("-c", trust.configuration_override())) as (client, _observed, process, app):
+        verified = policy_hook_admission(app, process, native.workspace, (), expected_trust=trust)
+        assert verified.inactive_reason is None and verified.temporary_trust is None
+        effective_state = client.rpc("config/read", {"cwd": str(native.workspace)})["config"]["hooks"]["state"]
+        assert effective_state["unrelated"] == original_state["unrelated"]
+        assert effective_state[trust.key]["trusted_hash"] == trust.current_hash
 
         def relay(downstream):
             with unix_connect(str(app), uri="ws://localhost/rpc", close_timeout=1) as upstream:
@@ -514,6 +566,7 @@ def test_remote_tui_transports_explicit_hook_bypass_without_an_argv_adapter(nati
                 def receive():
                     try:
                         for frame in upstream:
+                            responses.append(json.loads(frame))
                             downstream.send(frame)
                     except ConnectionClosed:
                         pass
@@ -541,24 +594,43 @@ def test_remote_tui_transports_explicit_hook_bypass_without_an_argv_adapter(nati
                     native.environment["RODEX_CODEX_BINARY"],
                     "--remote",
                     f"unix://{proxy}",
-                    "--dangerously-bypass-hook-trust",
-                    "--sandbox",
-                    "workspace-write",
-                    "--ask-for-approval",
-                    "on-request",
+                    *(
+                        ["--sandbox", "workspace-write", "--ask-for-approval", "on-request"]
+                        if lifecycle == "start"
+                        else [lifecycle, thread_id]
+                    ),
                 ]
                 with RodexTerminalClient(command, native.environment, native.workspace) as tui:
                     deadline = time.monotonic() + 15
-                    while not any(frame.get("method") == "thread/start" for frame in captured):
+                    method = f"thread/{lifecycle}"
+                    while not any(frame.get("method") == method for frame in captured):
+                        tui.poll()
+                        assert tui.exit_code is None, tui.output.decode(errors="replace")
+                        assert time.monotonic() < deadline, tui.output.decode(errors="replace")
+                    request = next(frame for frame in captured if frame.get("method") == method)
+                    params = request["params"]
+                    assert not (params.get("config") or {}).get("bypass_hook_trust")
+                    assert params["sandbox"] == ("workspace-write" if lifecycle == "start" else None)
+                    assert params["approvalPolicy"] == ("on-request" if lifecycle == "start" else None)
+                    while not any(frame.get("id") == request["id"] for frame in responses):
                         tui.poll()
                         assert time.monotonic() < deadline, tui.output.decode(errors="replace")
-                    params = next(frame["params"] for frame in captured if frame.get("method") == "thread/start")
-                    assert params["config"]["bypass_hook_trust"] is True
-                    assert params["sandbox"] == "workspace-write"
-                    assert params["approvalPolicy"] == "on-request"
+                    response = next(frame for frame in responses if frame.get("id") == request["id"])
+                    assert "error" not in response, response
+                    # Remote resume/fork reject TUI permission overrides and use
+                    # native server configuration; trust must not broaden it.
+                    assert response["result"]["sandbox"]["type"] == (
+                        "workspaceWrite" if lifecycle == "start" else "readOnly"
+                    )
+                    assert response["result"]["approvalPolicy"] == ("on-request" if lifecycle == "start" else "never")
+                    if lifecycle == "resume":
+                        assert response["result"]["thread"]["id"] == thread_id
+                    elif lifecycle == "fork":
+                        assert response["result"]["thread"]["id"] != thread_id
             finally:
                 server.shutdown()
                 worker.join(timeout=3)
+    assert tomllib.loads((native.codex_home / "config.toml").read_text())["hooks"]["state"] == original_state
 
 
 @pytest.mark.live_startup

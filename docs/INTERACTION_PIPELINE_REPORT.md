@@ -342,13 +342,17 @@ only the current silent allow and separate status display are context-neutral.
 
 Startup probes `hooks/list` and effective configuration. A trusted exact Rodex hook
 runs normally. When that exact hook has `untrusted` or `modified` native trust and is
-the sole enabled hook, Rodex adds Codex's invocation-local trust bypass to the remote TUI; it does not persist
-trust. Any other enabled hook retains `rodex _policy-setup` as the route for reviewing
+the sole enabled hook, Rodex supplies its native key/hash as temporary private App
+Server trust and verifies the restarted server's native verdict before TUI startup.
+It does not persist trust. Any other enabled hook retains `rodex _policy-setup` as the route for reviewing
 and trusting Rodex through `/hooks`. Explicit caller/effective bypass remains native
-intent, while explicit false prevents automatic bypass. If support or the exact
+intent, while explicit false prevents automatic admission. If support or the exact
 definition cannot be verified, Rodex restarts only its provisional App Server without
-its own hook injection and continues with inactive status. The pre-thread inventory
-is not locked against a same-user hook-file change before `thread/start`. Existing
+hook injection and temporary trust and continues with inactive status. The pre-thread
+inventory is not locked against a same-user hook-file change; its trust entry remains
+specific to the verified hash. Codex 0.162.1 remote resume shows hook review before
+`thread/resume` despite the CLI bypass accepted by fresh startup. Native exact trust
+covers start/resume/fork without that bypass or protocol-response rewriting. Existing
 native hooks remain under Codex composition. Hook failures are advisory/fail-open,
 whereas invalid prompt YAML fails closed for submission.
 [Trust admission](../src/rodex/command_policy_configuration.py),
@@ -460,7 +464,7 @@ route and update the existing effect inventory rather than bypassing its owners.
 | User prompt overrides | `$XDG_STATE_HOME/rodex/conf/hooks/user_prompt_substitutions.yaml`, otherwise `~/.local/state/rodex/conf/hooks/user_prompt_substitutions.yaml` | Path frozen from launch environment; changed file metadata reloads on submission. |
 | General content hooks | `SessionInteractionPipeline(hooks=...)` | Python composition. Production runtime explicitly composes the prompt hook, not a user-configured generic hook list. |
 | Overload retry text/timing | Constants in `server_overloaded_recovery.py` | Implementation change; no exposed runtime setting. |
-| Shell-command policy | `evaluate_command_policy`, injected `PreToolUse(^Bash$)`, exact inventory and native trust/configuration | Fresh managed runtime; Rodex-only untrusted inventory gets invocation-local bypass. |
+| Shell-command policy | `evaluate_command_policy`, injected `PreToolUse(^Bash$)`, exact inventory and native trust/configuration | Fresh/resumed/forked runtime; the sole Rodex hook gets temporary exact-hash trust and native revalidation. |
 | Command-policy bar | Policy adapter plus launcher handoff; shared `TmuxStatusPresentation.message`, `TimedStatusPublisher`, and `TmuxStatusPipeline.publish_timed` own rendering and five-second expiry | Lower-priority tmux claim; every expiry restores only its exact token, prefix mode remains visible, and active admission clears stale inactive state. |
 | Native animations and other Codex options | Codex configuration/argv, with Rodex launch defaults | Native configuration semantics; animations can be explicitly restored. |
 | Catalog, runtime endpoints, retained builds | `XDG_STATE_HOME`, `RODEX_RUNTIME_DIR`, `RODEX_INSTALLATIONS_ROOT` | Separate state/runtime/implementation domains; identity must match the selected session. |

@@ -9,6 +9,8 @@ import pytest
 
 from rodex import command_policy_configuration as configuration
 
+HOOK_TRUST = configuration.NativePolicyHookTrust("/<session-flags>/config.toml:pre_tool_use:0:0", "sha256:" + "a" * 64)
+
 
 class NativeTrustConnection:
     def __init__(self, hooks, inherited_bypass=False, *, errors=None, warnings=None):
@@ -80,11 +82,13 @@ def user_hook(*, enabled=True):
     }
 
 
-def admit(monkeypatch, hooks, arguments=(), inherited=False, **connection_options):
+def admit(monkeypatch, hooks, arguments=(), inherited=False, *, expected_trust=None, **connection_options):
     connection = NativeTrustConnection(hooks, inherited, **connection_options)
     monkeypatch.setattr(configuration, "unix_connect", lambda *_args, **_kwargs: connection)
     monkeypatch.setattr(configuration, "require_unix_peer_process", lambda *_args: None)
-    admission = configuration.policy_hook_admission(Path("/app.sock"), object(), Path("/workspace"), arguments)
+    admission = configuration.policy_hook_admission(
+        Path("/app.sock"), object(), Path("/workspace"), arguments, expected_trust=expected_trust
+    )
     return admission, connection
 
 
@@ -96,21 +100,21 @@ def admit(monkeypatch, hooks, arguments=(), inherited=False, **connection_option
             rodex_hook(),
             (),
             False,
-            configuration.PolicyHookAdmission(add_hook_trust_bypass=True),
+            configuration.PolicyHookAdmission(temporary_trust=HOOK_TRUST),
         ),
         (
             rodex_hook(trustStatus="modified"),
             (),
             False,
-            configuration.PolicyHookAdmission(add_hook_trust_bypass=True),
+            configuration.PolicyHookAdmission(temporary_trust=HOOK_TRUST),
         ),
         (
             rodex_hook(),
             (configuration.POLICY_HOOK_TRUST_BYPASS_ARGUMENT,),
             False,
-            configuration.PolicyHookAdmission(),
+            configuration.PolicyHookAdmission(temporary_trust=HOOK_TRUST),
         ),
-        (rodex_hook(), (), True, configuration.PolicyHookAdmission()),
+        (rodex_hook(), (), True, configuration.PolicyHookAdmission(temporary_trust=HOOK_TRUST)),
         (
             rodex_hook(),
             ("-c", "bypass_hook_trust=false"),
@@ -145,7 +149,7 @@ def admit(monkeypatch, hooks, arguments=(), inherited=False, **connection_option
             [rodex_hook(), user_hook(enabled=False)],
             (),
             False,
-            configuration.PolicyHookAdmission(add_hook_trust_bypass=True),
+            configuration.PolicyHookAdmission(temporary_trust=HOOK_TRUST),
         ),
         (
             [rodex_hook(trusted=True), user_hook()],
@@ -167,7 +171,7 @@ def admit(monkeypatch, hooks, arguments=(), inherited=False, **connection_option
         ),
     ],
 )
-def test_native_verdicts_only_auto_bypass_the_sole_enabled_rodex_hook(
+def test_native_verdicts_only_temporarily_trust_the_sole_enabled_rodex_hook(
     monkeypatch,
     hooks,
     arguments,
@@ -198,12 +202,46 @@ def test_native_verdicts_only_auto_bypass_the_sole_enabled_rodex_hook(
         {"statusMessage": "Checking"},
         {"additionalContextLimit": 100},
         {"trustStatus": "future-native-status"},
+        {"currentHash": "sha256:invalid"},
     ],
 )
-def test_changed_or_unknown_rodex_hook_is_never_auto_bypassed(monkeypatch, changes, trust_status):
+def test_changed_or_unknown_rodex_hook_is_never_automatically_trusted(monkeypatch, changes, trust_status):
     admission, _connection = admit(monkeypatch, [rodex_hook(**{"trustStatus": trust_status, **changes})])
 
     assert admission == configuration.PolicyHookAdmission(configuration.POLICY_INACTIVE_CONFIG)
+
+
+@pytest.mark.parametrize(
+    ("hooks", "expected"),
+    [
+        ([rodex_hook(trusted=True)], configuration.PolicyHookAdmission()),
+        ([rodex_hook()], configuration.PolicyHookAdmission(configuration.POLICY_INACTIVE_CONFIG)),
+        (
+            [rodex_hook(trusted=True, key="changed-native-key")],
+            configuration.PolicyHookAdmission(configuration.POLICY_INACTIVE_CONFIG),
+        ),
+        (
+            [rodex_hook(trusted=True, currentHash="sha256:" + "b" * 64)],
+            configuration.PolicyHookAdmission(configuration.POLICY_INACTIVE_CONFIG),
+        ),
+        (
+            [rodex_hook(trusted=True, enabled=False)],
+            configuration.PolicyHookAdmission(configuration.POLICY_INACTIVE_CONFIG),
+        ),
+        (
+            [rodex_hook(trusted=True, command="/tmp/replaced-helper")],
+            configuration.PolicyHookAdmission(configuration.POLICY_INACTIVE_CONFIG),
+        ),
+        (
+            [rodex_hook(trusted=True), user_hook()],
+            configuration.PolicyHookAdmission(configuration.POLICY_INACTIVE_SETUP),
+        ),
+    ],
+)
+def test_temporary_admission_requires_native_confirmation_of_the_same_hook(monkeypatch, hooks, expected):
+    admission, _connection = admit(monkeypatch, hooks, expected_trust=HOOK_TRUST)
+
+    assert admission == expected
 
 
 def test_inventory_diagnostics_are_inactive_not_implicitly_trusted(monkeypatch):

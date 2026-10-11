@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shlex
 import sys
 import time
@@ -25,15 +26,28 @@ POLICY_HOOK_TRUST_BYPASS_ARGUMENT: Final = "--dangerously-bypass-hook-trust"
 
 
 @dataclass(frozen=True, slots=True)
+class NativePolicyHookTrust:
+    """One native-reported hook identity admitted for this private App Server."""
+
+    key: str
+    current_hash: str
+
+    def configuration_override(self) -> str:
+        # Override paths split on dots, even inside quotes. Put the native key in
+        # the TOML value instead; Codex merges this entry with existing hook state.
+        return "hooks.state={" + json.dumps(self.key) + "={trusted_hash=" + json.dumps(self.current_hash) + "}}"
+
+
+@dataclass(frozen=True, slots=True)
 class PolicyHookAdmission:
-    """The native policy verdict and any Rodex-owned TUI trust adaptation."""
+    """The native policy verdict and any exact private-server trust request."""
 
     inactive_reason: str | None = None
-    add_hook_trust_bypass: bool = False
+    temporary_trust: NativePolicyHookTrust | None = None
 
     def __post_init__(self) -> None:
-        if self.inactive_reason is not None and self.add_hook_trust_bypass:
-            raise ValueError("an inactive policy cannot request a hook trust bypass")
+        if self.inactive_reason is not None and self.temporary_trust is not None:
+            raise ValueError("an inactive policy cannot request temporary hook trust")
 
 
 def policy_helper_command(python_executable: str | None = None) -> str:
@@ -107,7 +121,7 @@ def _is_exact_rodex_policy_hook(hook: dict[str, Any]) -> bool:
         and isinstance(hook.get("key"), str)
         and bool(hook["key"])
         and isinstance(hook.get("currentHash"), str)
-        and hook["currentHash"].startswith("sha256:")
+        and re.fullmatch(r"sha256:[0-9a-f]{64}", hook["currentHash"]) is not None
         and isinstance(display_order, int)
         and not isinstance(display_order, bool)
     )
@@ -118,11 +132,14 @@ def policy_hook_admission(
     process: Any,
     workspace: Path,
     arguments: tuple[str, ...],
+    *,
+    expected_trust: NativePolicyHookTrust | None = None,
 ) -> PolicyHookAdmission:
     """Admit the exact Rodex hook and narrowly adapt native trust when safe.
 
-    Rodex never computes or persists native trust. It may request invocation-local
-    bypass only when its exact hook is the sole enabled hook in Codex's inventory.
+    Rodex never computes or persists native trust. It may supply the native key
+    and hash as private App Server configuration for its sole enabled hook, then
+    require a second native inventory to verify that exact admission before TUI.
     """
     try:
         with unix_connect(
@@ -160,11 +177,20 @@ def policy_hook_admission(
                 return PolicyHookAdmission(POLICY_INACTIVE_CONFIG)
             policy_hook = policy_hooks[0]
             trust_status = policy_hook.get("trustStatus")
+            native_trust = NativePolicyHookTrust(policy_hook["key"], policy_hook["currentHash"])
+            enabled_hooks = tuple(hook for hook in hooks if hook["enabled"])
+            sole_policy_hook = len(enabled_hooks) == 1 and enabled_hooks[0] is policy_hook
+            if expected_trust is not None:
+                if native_trust != expected_trust or trust_status != "trusted":
+                    return PolicyHookAdmission(POLICY_INACTIVE_CONFIG)
+                if not sole_policy_hook:
+                    return PolicyHookAdmission(POLICY_INACTIVE_SETUP)
+                return PolicyHookAdmission()
             if trust_status == "trusted":
                 return PolicyHookAdmission()
             explicit_bypass = caller_bypasses_hook_trust(arguments)
-            if explicit_bypass is not None:
-                return PolicyHookAdmission(None if explicit_bypass else POLICY_INACTIVE_SETUP)
+            if explicit_bypass is False:
+                return PolicyHookAdmission(POLICY_INACTIVE_SETUP)
             # A retained-installation upgrade changes the helper path/hash. Native
             # "modified" means old trust no longer matches, not that the current
             # hook failed the exact Rodex definition check above.
@@ -175,14 +201,13 @@ def policy_hook_admission(
             if not isinstance(effective_config, dict):
                 raise ValueError("native effective configuration is malformed")
             configured_bypass = effective_config.get("bypass_hook_trust")
-            if configured_bypass is True:
-                return PolicyHookAdmission()
-            if configured_bypass not in (None, False):
+            if configured_bypass not in (None, False, True):
                 raise ValueError("native hook trust configuration is malformed")
-            enabled_hooks = tuple(hook for hook in hooks if hook["enabled"])
-            if len(enabled_hooks) != 1 or enabled_hooks[0] is not policy_hook:
+            if not sole_policy_hook:
+                if explicit_bypass is True or configured_bypass is True:
+                    return PolicyHookAdmission()
                 return PolicyHookAdmission(POLICY_INACTIVE_SETUP)
-            return PolicyHookAdmission(add_hook_trust_bypass=True)
+            return PolicyHookAdmission(temporary_trust=native_trust)
     except Exception:
         return PolicyHookAdmission(POLICY_INACTIVE_UNAVAILABLE)
 

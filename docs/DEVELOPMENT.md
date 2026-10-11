@@ -71,10 +71,12 @@ normal temporary roots.
   [tmux status](../tests/test_command_policy_status.py), and
   [native checks](../tests/test_command_policy_native.py). The native checks use
   installed Codex/tmux with an offline deterministic model fixture, no account or
-  model quota. They cover native trust reuse, bypass transport, command security,
+  model quota. They cover native trust reuse, start/resume/fork protocol admission, command security,
   future deny/rewrite decisions, concurrent managed sessions, and content privacy.
   They also verify Rodex-only automatic hook admission, extra enabled-hook fallback,
-  and a fresh managed `sleep 5` denial without persisted hook trust.
+  and fresh and resumed managed `sleep 5` denial without persisted hook trust.
+  Saved-session tests require the same UUID after runtime replacement and inspect
+  current-turn tool output so replayed historical denials cannot satisfy the check.
 
 ## CPU regressions
 

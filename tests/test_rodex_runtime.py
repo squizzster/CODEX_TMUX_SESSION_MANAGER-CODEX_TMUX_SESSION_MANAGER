@@ -23,8 +23,8 @@ import pytest
 import rodex.runtime as runtime_module
 from rodex.app_server_contract import RodexAppServerVersionError
 from rodex.command_policy_configuration import (
-    POLICY_HOOK_TRUST_BYPASS_ARGUMENT,
     POLICY_INACTIVE_SETUP,
+    NativePolicyHookTrust,
     PolicyHookAdmission,
 )
 from rodex.control import LiveRodexControl
@@ -213,7 +213,7 @@ def _mock_terminal_gateway(monkeypatch: pytest.MonkeyPatch) -> list:
     monkeypatch.setattr(runtime_module, "TmuxWorkingStatus", FakeWorkingStatus)
     monkeypatch.setattr(runtime_module, "CommandPolicyBroker", FakePolicyBroker)
     monkeypatch.setattr(runtime_module, "CommandPolicyStatus", FakePolicyStatus)
-    monkeypatch.setattr(runtime_module, "policy_hook_admission", lambda *_args: PolicyHookAdmission())
+    monkeypatch.setattr(runtime_module, "policy_hook_admission", lambda *_args, **_kwargs: PolicyHookAdmission())
     return gateways
 
 
@@ -4477,11 +4477,24 @@ def test_runtime_path_keepalives_share_runtime_paths_independently(
 @pytest.mark.parametrize("bootstrap_virtualenv", [True, False])
 @pytest.mark.parametrize("analytics_start_fails", [False, True])
 @pytest.mark.parametrize(
-    ("policy_admission", "expected_process_count"),
+    ("policy_admissions", "expected_process_count"),
     [
-        (PolicyHookAdmission(), 2),
-        (PolicyHookAdmission(add_hook_trust_bypass=True), 2),
-        (PolicyHookAdmission(POLICY_INACTIVE_SETUP), 3),
+        ((PolicyHookAdmission(),), 2),
+        (
+            (
+                PolicyHookAdmission(temporary_trust=NativePolicyHookTrust("fixture-native-key", "sha256:" + "a" * 64)),
+                PolicyHookAdmission(),
+            ),
+            3,
+        ),
+        ((PolicyHookAdmission(POLICY_INACTIVE_SETUP),), 3),
+        (
+            (
+                PolicyHookAdmission(temporary_trust=NativePolicyHookTrust("fixture-native-key", "sha256:" + "a" * 64)),
+                PolicyHookAdmission(POLICY_INACTIVE_SETUP),
+            ),
+            4,
+        ),
     ],
 )
 def test_runtime_service_skips_updater_and_connects_tui_through_protocol_proxy(
@@ -4491,17 +4504,25 @@ def test_runtime_service_skips_updater_and_connects_tui_through_protocol_proxy(
     captures_stderr: bool,
     bootstrap_virtualenv: bool,
     analytics_start_fails: bool,
-    policy_admission: PolicyHookAdmission,
+    policy_admissions: tuple[PolicyHookAdmission, ...],
     expected_process_count: int,
 ) -> None:
     gateways = _mock_terminal_gateway(monkeypatch)
-    monkeypatch.setattr(runtime_module, "policy_hook_admission", lambda *_args: policy_admission)
+    remaining_admissions = iter(policy_admissions)
+    verified_trust = []
+
+    def admit_policy(*_args, expected_trust=None):
+        verified_trust.append(expected_trust)
+        return next(remaining_admissions)
+
+    monkeypatch.setattr(runtime_module, "policy_hook_admission", admit_policy)
     initialise_rodex_database(tmp_path / "rodex.sqlite3")
     app_socket = tmp_path / "app.sock"
     proxy_socket = tmp_path / f"proxy-{RUNTIME_ID}.sock"
     event_socket = tmp_path / f"events-{RUNTIME_ID}.sock"
     tmux_socket = tmp_path / "tmux.sock"
     tui_commands: list[list[str]] = []
+    app_commands: list[list[str]] = []
     tui_options: list[dict[str, object]] = []
     spawned_environments: list[dict[str, str]] = []
     status_updates: list[int] = []
@@ -4629,6 +4650,8 @@ def test_runtime_service_skips_updater_and_connects_tui_through_protocol_proxy(
         if "app-server" not in command:
             tui_commands.append(command)
             tui_options.append(options)
+        else:
+            app_commands.append(command)
         return FakeProcess(command)
 
     if bootstrap_virtualenv:
@@ -4753,11 +4776,16 @@ def test_runtime_service_skips_updater_and_connects_tui_through_protocol_proxy(
             "--no-alt-screen",
             "--remote",
             f"unix://{proxy_socket}",
-            *([POLICY_HOOK_TRUST_BYPASS_ARGUMENT] if policy_admission.add_hook_trust_bypass else []),
             *expected_codex_arguments,
         ]
     ]
     assert len(tui_options) == 1
+    requested_trust = policy_admissions[0].temporary_trust
+    assert verified_trust == ([None, requested_trust] if requested_trust is not None else [None])
+    if requested_trust is not None:
+        assert requested_trust.configuration_override() in app_commands[1]
+    if policy_admissions[-1].inactive_reason is not None:
+        assert not any(argument.startswith(("hooks.PreToolUse=", "hooks.state=")) for argument in app_commands[-1])
     assert tui_options[0]["cwd"] == tmp_path
     assert len(spawned_environments) == expected_process_count
     assert spawned_environments[0]["RODEX_COMMAND_POLICY_SOCKET"] == str(tmp_path / f"policy-{RUNTIME_ID}.sock")

@@ -58,25 +58,31 @@ updates coalesce; safety warnings take priority. "Allowed" does not mean execute
 Codex approvals, sandbox restrictions, and other hooks still apply.
 
 Before starting the remote TUI, Rodex reads Codex's native hook inventory. When the
-exact injected Rodex hook is enabled, needs trust, and is the sole enabled hook, Rodex adds
-`--dangerously-bypass-hook-trust` for that managed TUI invocation only. It writes no
-trust record. This covers both `untrusted` and `modified` native states: an older
-retained helper path may have been trusted before an installation upgrade. A
-previously trusted exact Rodex hook needs no bypass.
+exact injected Rodex hook is enabled, needs trust, and is the sole enabled hook,
+Rodex supplies its native key/hash as temporary trust in the private App Server.
+A second inventory must confirm the same definition, key, hash, and native `trusted`
+verdict. Rodex writes no user trust record. This covers both `untrusted` and `modified`
+states: an older retained helper path may have been trusted before an upgrade.
+A previously trusted exact Rodex hook needs no temporary entry.
 
 If another enabled user, project, managed, or plugin hook is present, Rodex does not
-add the bypass. Run `rodex _policy-setup`, review the Rodex `PreToolUse` hook through
+add temporary trust. Run `rodex _policy-setup`, review the Rodex `PreToolUse` hook through
 `/hooks`, trust that individual hook, exit, and start a new managed session. An
 explicit caller bypass or effective native bypass configuration retains its native
-meaning; an explicit `-c bypass_hook_trust=false` prevents Rodex's automatic bypass.
+meaning; an explicit `-c bypass_hook_trust=false` prevents Rodex's automatic admission.
 Disabled hooks stay disabled. A missing, unexpected, duplicated, malformed, or
 unverifiable Rodex hook starts with policy inactive and a five-second tmux notice
 instead of waiting on a pre-attachment trust prompt. The normal bar then returns;
 the inactive metadata remains available so a later attach can present the reminder.
 
-The inventory decision is the startup snapshot immediately before the TUI creates
-its thread. As accepted for this ALPHA path, Rodex does not lock Codex hook files
-across that interval. Every policy decision status lasts five seconds, policy rows
+Codex 0.162.1 remote resume can stop at hook review before `thread/resume`, even with
+the CLI hook-trust bypass that works for fresh startup. Exact native trust avoids
+that hidden prompt behind Rodex's thread-before-attach gate. Other enabled hooks
+still require their native review; an explicit bypass does not guarantee remote resume.
+
+The inventory decision is a startup snapshot. Rodex does not lock Codex hook files
+across startup; temporary trust applies only to the verified key/hash. Every policy
+decision status lasts five seconds, policy rows
 preserve tmux's `CTRL-B MODE` indicator, and successful admission clears retained
 inactive metadata. Native hook and
 managed-only restrictions remain authoritative. Unmanaged Codex is unaffected.

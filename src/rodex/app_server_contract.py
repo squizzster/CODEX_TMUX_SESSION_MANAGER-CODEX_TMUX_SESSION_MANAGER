@@ -51,11 +51,13 @@ class CodexAppServerContract:
         socket_path: Path,
         *,
         command_policy_hook: str | None = None,
+        command_policy_trust: str | None = None,
     ) -> tuple[str, ...]:
         return (
             codex_binary,
             "app-server",
             *(("--config", command_policy_hook) if command_policy_hook is not None else ()),
+            *(("--config", command_policy_trust) if command_policy_trust is not None else ()),
             "--listen",
             f"unix://{socket_path}",
         )

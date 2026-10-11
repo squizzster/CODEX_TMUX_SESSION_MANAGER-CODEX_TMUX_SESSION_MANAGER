@@ -42,8 +42,8 @@ from .app_server_contract import (
 )
 from .command_policy import POLICY_SOCKET_ENV, CommandPolicyBroker
 from .command_policy_configuration import (
-    POLICY_HOOK_TRUST_BYPASS_ARGUMENT,
     POLICY_INACTIVE_REASONS,
+    NativePolicyHookTrust,
     policy_hook_admission,
     policy_hook_override,
 )
@@ -2636,7 +2636,7 @@ def _run_runtime_service(
         command_policy_status.allowed,
     )
     policy_inactive_reason: str | None = None
-    add_policy_hook_trust_bypass = False
+    temporary_policy_trust: NativePolicyHookTrust | None = None
     try:
         app_endpoint.acquire()
         with _open_private_runtime_log(app_server_log_path) as log:
@@ -2654,7 +2654,10 @@ def _run_runtime_service(
             # The reserved endpoint is App Server state, never TUI environment.
             app_server_environment = {**user_environment, POLICY_SOCKET_ENV: str(config.command_policy_socket_path)}
             user_environment.pop(POLICY_SOCKET_ENV, None)
-            for inject_policy in (True, False):
+            inject_policy = True
+            # Probe native inventory, optionally restart with exact temporary
+            # trust, then fall back without our hook if verification fails.
+            for _policy_attempt in range(3):
                 app_server = subprocess.Popen(
                     (
                         sys.executable,
@@ -2668,6 +2671,11 @@ def _run_runtime_service(
                             codex_binary,
                             app_server_socket_path,
                             command_policy_hook=policy_hook_override() if inject_policy else None,
+                            command_policy_trust=(
+                                temporary_policy_trust.configuration_override()
+                                if temporary_policy_trust is not None
+                                else None
+                            ),
                         ),
                     ),
                     stdin=subprocess.DEVNULL,
@@ -2694,10 +2702,10 @@ def _run_runtime_service(
                     app_server,
                     config.workspace,
                     tuple(codex_arguments),
+                    expected_trust=temporary_policy_trust,
                 )
                 policy_inactive_reason = policy_admission.inactive_reason
-                add_policy_hook_trust_bypass = policy_admission.add_hook_trust_bypass
-                if policy_inactive_reason is None:
+                if policy_inactive_reason is None and policy_admission.temporary_trust is None:
                     break
                 # Only the provisional pre-TUI server is replaced. Untrusted native
                 # onboarding otherwise prevents Rodex's thread-before-attach gate.
@@ -2708,6 +2716,10 @@ def _run_runtime_service(
                 app_endpoint.close()
                 app_endpoint.acquire()
                 _require_runtime_not_stopped(stop)
+                inject_policy = policy_inactive_reason is None
+                temporary_policy_trust = policy_admission.temporary_trust if inject_policy else None
+            else:
+                raise RodexRuntimeError("native command policy admission did not converge")
             if policy_inactive_reason is not None:
                 command_policy_status.inactive(policy_inactive_reason)
             else:
@@ -2868,7 +2880,6 @@ def _run_runtime_service(
                 "--no-alt-screen",
                 "--remote",
                 f"unix://{protocol_proxy_socket_path}",
-                *((POLICY_HOOK_TRUST_BYPASS_ARGUMENT,) if add_policy_hook_trust_bypass else ()),
                 *codex_arguments,
             ]
             tui_options: dict[str, object] = {"env": user_environment, "cwd": config.workspace}

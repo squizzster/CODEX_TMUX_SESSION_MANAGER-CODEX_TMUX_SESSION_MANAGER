@@ -12,6 +12,7 @@ from threading import Condition, Thread
 
 from wcwidth import wcwidth
 
+from .status_bar import prefix_indicated_status_format
 from .tmux_executor import SyncTmuxExecutor, TmuxCommandResult
 from .tmux_session_capability import TmuxRuntimeCapability, primary_pane_capability_if_shell_condition
 from .tmux_status import StatusPriority, TmuxStatusPipeline, TmuxStatusPresentation
@@ -41,6 +42,11 @@ def policy_status_format(message: str) -> str:
         cells += width
     literal = "".join(bounded).replace("#", "##")
     return f" {literal} "
+
+
+def policy_status_presentation(message: str) -> str:
+    """Keep tmux's prefix indicator reachable while policy status owns the row."""
+    return prefix_indicated_status_format(policy_status_format(message))
 
 
 class CommandPolicyStatus:
@@ -83,9 +89,14 @@ class CommandPolicyStatus:
         """Retain fixed setup metadata until the registered UI can present it."""
         self._tmux("set-option", "-t", self._pane_target, POLICY_INACTIVE_OPTION, reason)
 
+    def active(self) -> None:
+        """Clear stale inactive metadata and only this subsystem's presentation."""
+        self._tmux("set-option", "-u", "-t", self._pane_target, POLICY_INACTIVE_OPTION)
+        self._pipeline.restore_if_publisher_matches(POLICY_STATUS_PUBLISHER)
+
     def publish(self, message: str) -> None:
         # Sanitize before retaining the pending value: no hidden full-command queue.
-        formatted = policy_status_format(message)
+        formatted = policy_status_presentation(message)
         with self._condition:
             if self._closed:
                 return

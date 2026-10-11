@@ -22,6 +22,11 @@ import pytest
 
 import rodex.runtime as runtime_module
 from rodex.app_server_contract import RodexAppServerVersionError
+from rodex.command_policy_configuration import (
+    POLICY_HOOK_TRUST_BYPASS_ARGUMENT,
+    POLICY_INACTIVE_SETUP,
+    PolicyHookAdmission,
+)
 from rodex.control import LiveRodexControl
 from rodex.daemon_client import daemon_socket_path
 from rodex.process_contracts import AnalyticsRuntimeConfig, RuntimeServiceConfig
@@ -197,6 +202,9 @@ def _mock_terminal_gateway(monkeypatch: pytest.MonkeyPatch) -> list:
         def inactive(self, reason):
             self.reason = reason
 
+        def active(self):
+            self.reason = None
+
         def close(self):
             pass
 
@@ -205,7 +213,7 @@ def _mock_terminal_gateway(monkeypatch: pytest.MonkeyPatch) -> list:
     monkeypatch.setattr(runtime_module, "TmuxWorkingStatus", FakeWorkingStatus)
     monkeypatch.setattr(runtime_module, "CommandPolicyBroker", FakePolicyBroker)
     monkeypatch.setattr(runtime_module, "CommandPolicyStatus", FakePolicyStatus)
-    monkeypatch.setattr(runtime_module, "policy_hook_inactive_reason", lambda *_args: None)
+    monkeypatch.setattr(runtime_module, "policy_hook_admission", lambda *_args: PolicyHookAdmission())
     return gateways
 
 
@@ -4468,7 +4476,14 @@ def test_runtime_path_keepalives_share_runtime_paths_independently(
 )
 @pytest.mark.parametrize("bootstrap_virtualenv", [True, False])
 @pytest.mark.parametrize("analytics_start_fails", [False, True])
-@pytest.mark.parametrize("policy_inactive", [False, True])
+@pytest.mark.parametrize(
+    ("policy_admission", "expected_process_count"),
+    [
+        (PolicyHookAdmission(), 2),
+        (PolicyHookAdmission(add_hook_trust_bypass=True), 2),
+        (PolicyHookAdmission(POLICY_INACTIVE_SETUP), 3),
+    ],
+)
 def test_runtime_service_skips_updater_and_connects_tui_through_protocol_proxy(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -4476,12 +4491,11 @@ def test_runtime_service_skips_updater_and_connects_tui_through_protocol_proxy(
     captures_stderr: bool,
     bootstrap_virtualenv: bool,
     analytics_start_fails: bool,
-    policy_inactive: bool,
+    policy_admission: PolicyHookAdmission,
+    expected_process_count: int,
 ) -> None:
     gateways = _mock_terminal_gateway(monkeypatch)
-    monkeypatch.setattr(
-        runtime_module, "policy_hook_inactive_reason", lambda *_args: "inactive" if policy_inactive else None
-    )
+    monkeypatch.setattr(runtime_module, "policy_hook_admission", lambda *_args: policy_admission)
     initialise_rodex_database(tmp_path / "rodex.sqlite3")
     app_socket = tmp_path / "app.sock"
     proxy_socket = tmp_path / f"proxy-{RUNTIME_ID}.sock"
@@ -4739,12 +4753,13 @@ def test_runtime_service_skips_updater_and_connects_tui_through_protocol_proxy(
             "--no-alt-screen",
             "--remote",
             f"unix://{proxy_socket}",
+            *([POLICY_HOOK_TRUST_BYPASS_ARGUMENT] if policy_admission.add_hook_trust_bypass else []),
             *expected_codex_arguments,
         ]
     ]
     assert len(tui_options) == 1
     assert tui_options[0]["cwd"] == tmp_path
-    assert len(spawned_environments) == (3 if policy_inactive else 2)
+    assert len(spawned_environments) == expected_process_count
     assert spawned_environments[0]["RODEX_COMMAND_POLICY_SOCKET"] == str(tmp_path / f"policy-{RUNTIME_ID}.sock")
     assert "RODEX_COMMAND_POLICY_SOCKET" not in spawned_environments[-1]
     assert all(broker.closed for broker in runtime_module.CommandPolicyBroker.instances)

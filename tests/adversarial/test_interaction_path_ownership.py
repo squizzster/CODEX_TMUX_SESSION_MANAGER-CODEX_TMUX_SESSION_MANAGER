@@ -80,8 +80,8 @@ EFFECT_OWNERS = {
     "read-only transient app server probes": {
         "rodex/runtime.py:RodexRuntimeLauncher._list_loaded_codex_threads:.send",
         "rodex/runtime.py:RodexRuntimeLauncher._read_persisted_codex_session:.send",
-        "rodex/command_policy_configuration.py:policy_hook_inactive_reason:.send",
-        "rodex/command_policy_configuration.py:policy_hook_inactive_reason.request:.send",
+        "rodex/command_policy_configuration.py:policy_hook_admission:.send",
+        "rodex/command_policy_configuration.py:policy_hook_admission.request:.send",
     },
     "private native command policy": {
         "rodex/command_policy.py:CommandPolicyBroker._serve:.sendall",

@@ -21,7 +21,16 @@ from websockets.sync.client import unix_connect
 from websockets.sync.server import unix_serve
 
 from rodex.command_policy import SHORT_SLEEP_DENIAL_REASON, CommandPolicyDecision
-from rodex.command_policy_configuration import POLICY_INACTIVE_SETUP, policy_hook_inactive_reason
+from rodex.command_policy_configuration import (
+    POLICY_INACTIVE_SETUP,
+    policy_hook_admission,
+    policy_hook_inactive_reason,
+)
+from rodex.command_policy_status import POLICY_INACTIVE_OPTION, POLICY_STATUS_SECONDS
+
+USER_HOOK_CONFIGURATION = (
+    '\n[hooks]\nPreToolUse=[{matcher="^Bash$",hooks=[{type="command",command="/bin/true",timeout=3}]}]\n'
+)
 
 
 @pytest.fixture
@@ -34,8 +43,7 @@ def native(request):
         yield fixture
 
 
-def trust_fixture_hook(client, workspace):
-    hook = client.rpc("hooks/list", {"cwds": [str(workspace)]})["data"][0]["hooks"][0]
+def trust_hook(client, hook):
     client.rpc(
         "config/batchWrite",
         {
@@ -52,6 +60,16 @@ def trust_fixture_hook(client, workspace):
     return hook
 
 
+def trust_fixture_hook(client, workspace):
+    hooks = client.rpc("hooks/list", {"cwds": [str(workspace)]})["data"][0]["hooks"]
+    return trust_hook(client, next(hook for hook in hooks if hook["source"] == "sessionFlags"))
+
+
+def install_user_hook(native):
+    config_path = native.codex_home / "config.toml"
+    config_path.write_text(config_path.read_text() + USER_HOOK_CONFIGURATION)
+
+
 @pytest.mark.live_startup
 @pytest.mark.parametrize(
     "sandbox,approval",
@@ -63,7 +81,9 @@ def trust_fixture_hook(client, workspace):
 )
 def test_native_allow_uses_original_security_and_no_model_context(native, sandbox, approval):
     with native.app_server() as (client, observed, process, path):
-        assert policy_hook_inactive_reason(path, process, native.workspace, ()) == POLICY_INACTIVE_SETUP
+        admission = policy_hook_admission(path, process, native.workspace, ())
+        assert admission.inactive_reason is None
+        assert admission.add_hook_trust_bypass
         first = trust_fixture_hook(client, native.workspace)
     # A distinct App Server/socket/runtime must reuse native trust with no bypass.
     with native.app_server() as (client, observed, process, path):
@@ -96,6 +116,75 @@ def test_native_allow_uses_original_security_and_no_model_context(native, sandbo
         hooks = [e["params"]["run"] for e in client.events if e.get("method") == "hook/completed"]
         assert len(hooks) == 1 and hooks[0]["entries"] == [] and hooks[0]["status"] == "completed"
         assert "Rodex policy allowed" not in json.dumps(native.model.requests)
+
+
+@pytest.mark.live_startup
+def test_native_extra_enabled_user_hook_keeps_manual_policy_setup(native):
+    install_user_hook(native)
+
+    with native.app_server() as (client, _observed, process, path):
+        hooks = client.rpc("hooks/list", {"cwds": [str(native.workspace)]})["data"][0]["hooks"]
+        assert {hook["source"] for hook in hooks} == {"sessionFlags", "user"}
+        admission = policy_hook_admission(path, process, native.workspace, ())
+
+    assert admission.inactive_reason == POLICY_INACTIVE_SETUP
+    assert not admission.add_hook_trust_bypass
+
+
+@pytest.mark.live_startup
+def test_extra_user_hook_without_rodex_trust_shows_bounded_prefix_aware_notice(native):
+    if not shutil.which("tmux"):
+        pytest.skip("tmux is required")
+    install_user_hook(native)
+    with native.app_server() as (client, _observed, _process, _path):
+        hooks = client.rpc("hooks/list", {"cwds": [str(native.workspace)]})["data"][0]["hooks"]
+        trust_hook(client, next(hook for hook in hooks if hook["source"] == "user"))
+        assert next(hook for hook in hooks if hook["source"] == "sessionFlags")["trustStatus"] == "untrusted"
+
+    rodex = str(Path(__file__).parents[1] / "rodex")
+    runtime_root = Path(native.environment["RODEX_RUNTIME_DIR"])
+    try:
+        with RodexTerminalClient([rodex], native.environment, native.workspace) as terminal:
+            name = terminal.wait_for_attach()
+            await_screen(terminal, POLICY_INACTIVE_SETUP)
+            inspected = subprocess.run(
+                [rodex, "_inspect", name, "--json"],
+                env=native.environment,
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=15,
+            )
+            identity = json.loads(inspected.stdout)
+            socket_path = runtime_root / f"tmux-v5-{identity['runtime']['runtime_id']}.sock"
+
+            native_key(terminal, b"\x02")
+            await_screen(terminal, "CTRL-B MODE")
+            native_key(terminal, b"\x1b")
+
+            deadline = time.monotonic() + POLICY_STATUS_SECONDS + 3
+            status_format = POLICY_INACTIVE_SETUP
+            while POLICY_INACTIVE_SETUP in status_format and time.monotonic() < deadline:
+                terminal.poll()
+                status_format = subprocess.run(
+                    ["tmux", "-S", str(socket_path), "show-options", "-v", "-t", "%0", "status-format[0]"],
+                    capture_output=True,
+                    text=True,
+                    timeout=3,
+                ).stdout
+                if POLICY_INACTIVE_SETUP in status_format:
+                    time.sleep(0.05)
+            assert POLICY_INACTIVE_SETUP not in status_format
+            await_screen(terminal, f"Rodex: {name}")
+            inactive = subprocess.run(
+                ["tmux", "-S", str(socket_path), "show-options", "-q", "-v", "-t", "%0", POLICY_INACTIVE_OPTION],
+                capture_output=True,
+                text=True,
+                timeout=3,
+            )
+            assert inactive.stdout.strip() == POLICY_INACTIVE_SETUP
+    finally:
+        _stop_fixture_daemon(runtime_root)
 
 
 @pytest.mark.live_startup
@@ -341,17 +430,57 @@ def test_managed_trust_once_two_isolated_sessions_and_private_status(native):
 
 
 @pytest.mark.live_startup
-def test_untrusted_managed_session_attaches_with_visible_inactive_status(native):
+def test_fresh_managed_session_auto_bypasses_only_rodex_hook_and_denies_short_sleep(native):
     if not shutil.which("tmux"):
         pytest.skip("tmux is required")
     rodex = str(Path(__file__).parents[1] / "rodex")
+    runtime_root = Path(native.environment["RODEX_RUNTIME_DIR"])
+    native.model.tool_input = {"cmd": "sleep 5"}
     try:
         with RodexTerminalClient([rodex], native.environment, native.workspace) as client:
-            client.wait_for_attach()
-            await_screen(client, "Rodex policy inactive:")
-            await_screen(client, "rodex _policy-setup")
+            name = client.wait_for_attach()
+            await_screen(client, "OpenAI Codex")
+            inspected = subprocess.run(
+                [rodex, "_inspect", name, "--json"],
+                env=native.environment,
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=15,
+            )
+            identity = json.loads(inspected.stdout)
+            assert identity["ok"]
+            dispatched = subprocess.run(
+                [rodex, "_start", name, "--dispatch", f"rodex:dispatch:{uuid.uuid4()}", "--stdin", "--json"],
+                input="Run the fixture command.",
+                env=native.environment,
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=15,
+            )
+            dispatch = json.loads(dispatched.stdout)
+            assert dispatch["ok"], dispatch
+            completed = subprocess.run(
+                [rodex, "_wait", name, "--turn", dispatch["codex"]["turn_id"], "--timeout", "4s", "--json"],
+                env=native.environment,
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=10,
+            )
+            assert json.loads(completed.stdout)["ok"]
+            assert SHORT_SLEEP_DENIAL_REASON in json.dumps(native.model.requests)
+            socket_path = runtime_root / f"tmux-v5-{identity['runtime']['runtime_id']}.sock"
+            inactive = subprocess.run(
+                ["tmux", "-S", str(socket_path), "show-options", "-q", "-v", "-t", "%0", POLICY_INACTIVE_OPTION],
+                capture_output=True,
+                text=True,
+                timeout=3,
+            )
+            assert inactive.stdout == ""
     finally:
-        _stop_fixture_daemon(Path(native.environment["RODEX_RUNTIME_DIR"]))
+        _stop_fixture_daemon(runtime_root)
 
 
 @pytest.mark.live_startup

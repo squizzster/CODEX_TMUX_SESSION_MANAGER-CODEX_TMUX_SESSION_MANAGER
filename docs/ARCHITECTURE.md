@@ -57,6 +57,8 @@ caller → retained installation → CLI → implementation-scoped daemon
   approval/sandbox enforcement. Only after responding does the broker queue
   [tmux-only status](../src/rodex/command_policy_status.py). The capability-test policy
   denies exact integer sleeps below 10 and otherwise allows;
+  startup adds invocation-local hook-trust bypass only when that exact Rodex hook is
+  the sole enabled native hook. Other enabled hooks retain manual native trust;
   [security](SECURITY.md#native-command-policy) owns trust, bounds, and future
   deny/rewrite-command constraints.
 

@@ -71,6 +71,8 @@ normal temporary roots.
   installed Codex/tmux with an offline deterministic model fixture, no account or
   model quota. They cover native trust reuse, bypass transport, command security,
   future deny/rewrite decisions, concurrent managed sessions, and content privacy.
+  They also verify Rodex-only automatic hook admission, extra enabled-hook fallback,
+  and a fresh managed `sleep 5` denial without persisted hook trust.
 
 ## CPU regressions
 

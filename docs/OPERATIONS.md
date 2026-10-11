@@ -47,7 +47,12 @@ Its lifetime does not follow the command's runtime. Rapid commands coalesce to t
 latest status; higher-priority warnings and sharing notices can hide it. This is
 an allow decision, not execution/completion evidence, and it creates no command log.
 An inactive notice directs first-use trust to `rodex _policy-setup`; start a fresh
-managed session afterwards. Rodex does not bypass trust or force disabled hooks on.
+managed session afterwards. It appears when another enabled native hook prevents
+Rodex-only automatic admission, or when the Rodex hook cannot be verified. The notice
+restores the normal bar after five seconds while retaining inactive metadata for a
+later attach. Policy rows preserve the `CTRL-B MODE` indicator, and active admission
+clears stale inactive metadata and its owned status claim. Rodex never enables a
+disabled hook.
 
 The Rodex bar shows `Working.` through `Working....` while the main Codex thread is
 active. tmux advances the fixed-width dots once per second; Rodex publishes only

@@ -17,8 +17,10 @@ repository currently has no Git release tags, so they do not imply a published r
 - Native managed-session command-policy hook with volatile tmux-only command status,
   a typed allow/deny/rewrite-command extension point, and a first capability rule
   denying exact integer sleeps below 10 seconds with model-visible feedback.
-  `_policy-setup` exposes native one-time hook trust; untrusted sessions start with
-  the policy inactive instead of implicitly bypassing trust.
+  An exact Rodex-only hook inventory gets Codex's invocation-local trust bypass;
+  another enabled hook retains `_policy-setup`. Decision and inactive-reminder rows
+  last five seconds, expose tmux prefix mode, and restore the normal bar by exact
+  claim token; successful admission clears stale inactive state.
 - A daemon now creates one random 256-bit incarnation capability at each start,
   publishes it privately, and requires it alongside the retained installation identity
   on every request and response.

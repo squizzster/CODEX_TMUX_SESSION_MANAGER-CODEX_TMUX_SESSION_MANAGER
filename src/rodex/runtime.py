@@ -41,12 +41,18 @@ from .app_server_contract import (
     RODEX_SESSION_CATALOG_APP_SERVER_CLIENT,
 )
 from .command_policy import POLICY_SOCKET_ENV, CommandPolicyBroker
-from .command_policy_configuration import POLICY_INACTIVE_REASONS, policy_hook_inactive_reason, policy_hook_override
+from .command_policy_configuration import (
+    POLICY_HOOK_TRUST_BYPASS_ARGUMENT,
+    POLICY_INACTIVE_REASONS,
+    policy_hook_admission,
+    policy_hook_override,
+)
 from .command_policy_status import (
     POLICY_INACTIVE_OPTION,
     POLICY_STATUS_PUBLISHER,
+    POLICY_STATUS_SECONDS,
     CommandPolicyStatus,
-    policy_status_format,
+    policy_status_presentation,
 )
 from .control import CodexControlClient, LiveRodexControl
 from .daemon_client import (
@@ -124,6 +130,7 @@ from .tmux_session_capability import (
     runtime_destruction_if_shell_condition,
     runtime_tmux_socket_name,
     server_identity_if_shell_condition,
+    tmux_format_literal,
 )
 from .tmux_shared_ctrl_c import shared_ctrl_c_binding_command
 from .tmux_sharing_coordinator import (
@@ -134,6 +141,7 @@ from .tmux_sharing_coordinator import (
 )
 from .tmux_status import (
     StatusPriority,
+    TmuxStatusClaimCommands,
     TmuxStatusPipeline,
     TmuxStatusPresentation,
     TmuxWorkingStatus,
@@ -1589,12 +1597,41 @@ class RodexRuntimeLauncher:
         )
         reason = inactive.stdout.strip()
         if reason in POLICY_INACTIVE_REASONS:
-            status.publish_transient(
+            token = secrets.token_hex(16)
+            published = status.publish_transient(
                 publisher=POLICY_STATUS_PUBLISHER,
-                token=secrets.token_hex(16),
+                token=token,
                 priority=StatusPriority.COMMAND_POLICY,
-                presentation=TmuxStatusPresentation(status_format=policy_status_format(reason)),
+                presentation=TmuxStatusPresentation(status_format=policy_status_presentation(reason)),
             )
+            if published:
+                status_commands = TmuxStatusClaimCommands(capability.pane_target)
+                expiry_condition = combine_tmux_if_shell_conditions(
+                    registered_primary_pane_if_shell_condition(capability),
+                    status_commands.token_matches(token),
+                )
+                expiry_command = shlex.join(
+                    (
+                        tmux_format_literal(self._tmux_binary),
+                        "-S",
+                        tmux_format_literal(str(runtime.tmux_server_socket_path)),
+                        "if-shell",
+                        "-t",
+                        capability.pane_target,
+                        "-F",
+                        tmux_format_literal(expiry_condition),
+                        tmux_format_literal(status_commands.restore_base()),
+                    )
+                )
+                self._capability_tmux(
+                    runtime,
+                    capability,
+                    "run-shell",
+                    "-b",
+                    "-d",
+                    f"{POLICY_STATUS_SECONDS:g}",
+                    f"exec {expiry_command} >/dev/null 2>&1",
+                )
 
     def _install_terminal_key_contracts(
         self,
@@ -2630,6 +2667,7 @@ def _run_runtime_service(
         command_policy_status.allowed,
     )
     policy_inactive_reason: str | None = None
+    add_policy_hook_trust_bypass = False
     try:
         app_endpoint.acquire()
         with _open_private_runtime_log(app_server_log_path) as log:
@@ -2682,12 +2720,14 @@ def _run_runtime_service(
                     require_unix_listener_process(app_server_socket_path, app_server)
                 if not inject_policy:
                     break
-                policy_inactive_reason = policy_hook_inactive_reason(
+                policy_admission = policy_hook_admission(
                     app_server_socket_path,
                     app_server,
                     config.workspace,
                     tuple(codex_arguments),
                 )
+                policy_inactive_reason = policy_admission.inactive_reason
+                add_policy_hook_trust_bypass = policy_admission.add_hook_trust_bypass
                 if policy_inactive_reason is None:
                     break
                 # Only the provisional pre-TUI server is replaced. Untrusted native
@@ -2701,6 +2741,8 @@ def _run_runtime_service(
                 _require_runtime_not_stopped(stop)
             if policy_inactive_reason is not None:
                 command_policy_status.inactive(policy_inactive_reason)
+            else:
+                command_policy_status.active()
             agent_observer_controller = AgentObserverCoordinator(
                 tmux_binary,
                 tmux_runtime_capability,
@@ -2857,6 +2899,7 @@ def _run_runtime_service(
                 "--no-alt-screen",
                 "--remote",
                 f"unix://{protocol_proxy_socket_path}",
+                *((POLICY_HOOK_TRUST_BYPASS_ARGUMENT,) if add_policy_hook_trust_bypass else ()),
                 *codex_arguments,
             ]
             tui_options: dict[str, object] = {"env": user_environment, "cwd": config.workspace}

@@ -340,16 +340,19 @@ only the current silent allow and separate status display are context-neutral.
 [native response mapping](../src/rodex/command_policy_hook.py#L24),
 [native behavioral tests](../tests/test_command_policy_native.py#L64).
 
-Trust is native: `rodex _policy-setup` opens Codex so the user can review the exact
-hook in `/hooks`; a fresh managed session then uses that trust. Startup probes
-`hooks/list` and effective configuration. If support/trust cannot be verified,
-Rodex restarts only its provisional App Server without its own hook injection and
-continues with an inactive status. An explicitly supplied bypass flag remains
-native user intent; Rodex does not add it. Existing native hooks remain under Codex
-composition. Retained helper changes can require a new trust decision. Hook failures
-are advisory/fail-open, whereas invalid prompt YAML fails closed for submission.
-[Trust admission](../src/rodex/command_policy_configuration.py#L61),
-[startup fallback](../src/rodex/runtime.py#L2646).
+Startup probes `hooks/list` and effective configuration. A trusted exact Rodex hook
+runs normally. When that exact hook is untrusted and is the sole enabled hook, Rodex
+adds Codex's invocation-local trust bypass to the remote TUI; it does not persist
+trust. Any other enabled hook retains `rodex _policy-setup` as the route for reviewing
+and trusting Rodex through `/hooks`. Explicit caller/effective bypass remains native
+intent, while explicit false prevents automatic bypass. If support or the exact
+definition cannot be verified, Rodex restarts only its provisional App Server without
+its own hook injection and continues with inactive status. The pre-thread inventory
+is not locked against a same-user hook-file change before `thread/start`. Existing
+native hooks remain under Codex composition. Hook failures are advisory/fail-open,
+whereas invalid prompt YAML fails closed for submission.
+[Trust admission](../src/rodex/command_policy_configuration.py),
+[startup fallback](../src/rodex/runtime.py).
 
 The `Bash` matcher covers shell and unified-exec command initiation. It does not
 make `write_stdin` a new command interception, cover hosted web tools, or add Rodex
@@ -457,8 +460,8 @@ route and update the existing effect inventory rather than bypassing its owners.
 | User prompt overrides | `$XDG_STATE_HOME/rodex/conf/hooks/user_prompt_substitutions.yaml`, otherwise `~/.local/state/rodex/conf/hooks/user_prompt_substitutions.yaml` | Path frozen from launch environment; changed file metadata reloads on submission. |
 | General content hooks | `SessionInteractionPipeline(hooks=...)` | Python composition. Production runtime explicitly composes the prompt hook, not a user-configured generic hook list. |
 | Overload retry text/timing | Constants in `server_overloaded_recovery.py` | Implementation change; no exposed runtime setting. |
-| Shell-command policy | `evaluate_command_policy`, injected `PreToolUse(^Bash$)`, native trust/configuration | Fresh managed runtime and verified native admission. |
-| Command-policy bar | `CommandPolicyStatus`; five seconds, bounded/sanitized literal text | Transient lower-priority tmux claim; rapid updates coalesce. |
+| Shell-command policy | `evaluate_command_policy`, injected `PreToolUse(^Bash$)`, exact inventory and native trust/configuration | Fresh managed runtime; Rodex-only untrusted inventory gets invocation-local bypass. |
+| Command-policy bar | `CommandPolicyStatus` plus launcher handoff for inactive reminders; five seconds, bounded/sanitized literal text | Lower-priority tmux claim; every expiry restores only its exact token, prefix mode remains visible, and active admission clears stale inactive state. |
 | Native animations and other Codex options | Codex configuration/argv, with Rodex launch defaults | Native configuration semantics; animations can be explicitly restored. |
 | Catalog, runtime endpoints, retained builds | `XDG_STATE_HOME`, `RODEX_RUNTIME_DIR`, `RODEX_INSTALLATIONS_ROOT` | Separate state/runtime/implementation domains; identity must match the selected session. |
 | Update notice | `CodexUpdateNotice` and attach callback | Read-only lookup cached for 24 hours; display failure does not block attachment. |

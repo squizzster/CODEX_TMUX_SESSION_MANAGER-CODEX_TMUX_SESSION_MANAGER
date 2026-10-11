@@ -341,12 +341,24 @@ PREFIX_MODE_STATUS_FORMAT: Final = (
     f"#[fg={RODEX_STATUS_COLOURS.prefix_foreground}]"
     "#[bold] CTRL-B MODE #[default]"
 )
-RODEX_STATUS_LEFT_FORMAT: Final = (
-    "#{?#{&&:#{client_prefix},#{==:#{prefix},C-b}},"
-    f"{PREFIX_MODE_STATUS_FORMAT},"
-    f"{RODEX_BASE_STATUS_LEFT_FORMAT}"
-    "}"
-)
+RODEX_PREFIX_MODE_CONDITION: Final = "#{&&:#{client_prefix},#{==:#{prefix},C-b}}"
+
+
+def prefix_aware_status_format(default_format: str) -> str:
+    """Let tmux's active default prefix replace the normal left status."""
+    if not default_format:
+        raise ValueError("default status format must be non-empty")
+    return f"#{{?{RODEX_PREFIX_MODE_CONDITION},{PREFIX_MODE_STATUS_FORMAT},{default_format}}}"
+
+
+def prefix_indicated_status_format(default_format: str) -> str:
+    """Prepend the prefix indicator without nesting arbitrary status text."""
+    if not default_format:
+        raise ValueError("default status format must be non-empty")
+    return f"#{{?{RODEX_PREFIX_MODE_CONDITION},{PREFIX_MODE_STATUS_FORMAT},}}{default_format}"
+
+
+RODEX_STATUS_LEFT_FORMAT: Final = prefix_aware_status_format(RODEX_BASE_STATUS_LEFT_FORMAT)
 RODEX_STATUS_LEFT_LENGTH: Final = "160"
 RODEX_WINDOW_STATUS_FORMAT: Final = ""
 RODEX_STATUS_RIGHT_FORMAT: Final = (

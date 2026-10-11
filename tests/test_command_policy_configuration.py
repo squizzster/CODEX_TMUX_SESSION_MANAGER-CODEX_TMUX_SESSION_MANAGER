@@ -1,4 +1,4 @@
-"""Native trust admission is read-only and never invents a bypass."""
+"""Narrow native hook admission and invocation-local trust adaptation."""
 
 from __future__ import annotations
 
@@ -11,9 +11,11 @@ from rodex import command_policy_configuration as configuration
 
 
 class NativeTrustConnection:
-    def __init__(self, hooks, inherited_bypass=False):
+    def __init__(self, hooks, inherited_bypass=False, *, errors=None, warnings=None):
         self.hooks = hooks
         self.inherited_bypass = inherited_bypass
+        self.errors = [] if errors is None else errors
+        self.warnings = [] if warnings is None else warnings
         self.sent = []
 
     def __enter__(self):
@@ -29,45 +31,135 @@ class NativeTrustConnection:
         request = self.sent[-1]
         result = {}
         if request["method"] == "hooks/list":
-            result = {"data": [{"cwd": "/workspace", "hooks": self.hooks}]}
+            result = {
+                "data": [
+                    {
+                        "cwd": "/workspace",
+                        "errors": self.errors,
+                        "hooks": self.hooks,
+                        "warnings": self.warnings,
+                    }
+                ]
+            }
         elif request["method"] == "config/read":
             result = {"config": {"bypass_hook_trust": self.inherited_bypass}}
         return json.dumps({"id": request["id"], "result": result})
 
 
+def rodex_hook(*, trusted=False, enabled=True, **changes):
+    hook = {
+        "additionalContextLimit": None,
+        "async": False,
+        "command": configuration.policy_helper_command(),
+        "currentHash": "sha256:" + "a" * 64,
+        "displayOrder": 0,
+        "enabled": enabled,
+        "eventName": "preToolUse",
+        "handlerType": "command",
+        "isManaged": False,
+        "key": "/<session-flags>/config.toml:pre_tool_use:0:0",
+        "matcher": "^Bash$",
+        "pluginId": None,
+        "source": "sessionFlags",
+        "sourcePath": "/<session-flags>/config.toml",
+        "statusMessage": None,
+        "timeoutSec": 3,
+        "trustStatus": "trusted" if trusted else "untrusted",
+    }
+    hook.update(changes)
+    return hook
+
+
+def user_hook(*, enabled=True):
+    return {
+        "command": "/home/user/check-command",
+        "enabled": enabled,
+        "eventName": "preToolUse",
+        "matcher": "^Bash$",
+        "source": "user",
+    }
+
+
+def admit(monkeypatch, hooks, arguments=(), inherited=False, **connection_options):
+    connection = NativeTrustConnection(hooks, inherited, **connection_options)
+    monkeypatch.setattr(configuration, "unix_connect", lambda *_args, **_kwargs: connection)
+    monkeypatch.setattr(configuration, "require_unix_peer_process", lambda *_args: None)
+    admission = configuration.policy_hook_admission(Path("/app.sock"), object(), Path("/workspace"), arguments)
+    return admission, connection
+
+
 @pytest.mark.parametrize(
-    "trusted,enabled,arguments,inherited,expected",
+    ("hooks", "arguments", "inherited", "expected"),
     [
-        (True, True, (), False, None),
-        (False, True, (), False, configuration.POLICY_INACTIVE_SETUP),
-        (False, True, ("--dangerously-bypass-hook-trust",), False, None),
-        (False, True, (), True, None),
-        (False, True, ("-c", "bypass_hook_trust=false"), True, configuration.POLICY_INACTIVE_SETUP),
-        (True, False, ("--dangerously-bypass-hook-trust",), True, configuration.POLICY_INACTIVE_CONFIG),
+        (rodex_hook(trusted=True), (), False, configuration.PolicyHookAdmission()),
+        (
+            rodex_hook(),
+            (),
+            False,
+            configuration.PolicyHookAdmission(add_hook_trust_bypass=True),
+        ),
+        (
+            rodex_hook(),
+            (configuration.POLICY_HOOK_TRUST_BYPASS_ARGUMENT,),
+            False,
+            configuration.PolicyHookAdmission(),
+        ),
+        (rodex_hook(), (), True, configuration.PolicyHookAdmission()),
+        (
+            rodex_hook(),
+            ("-c", "bypass_hook_trust=false"),
+            True,
+            configuration.PolicyHookAdmission(configuration.POLICY_INACTIVE_SETUP),
+        ),
+        (
+            rodex_hook(enabled=False),
+            (configuration.POLICY_HOOK_TRUST_BYPASS_ARGUMENT,),
+            True,
+            configuration.PolicyHookAdmission(configuration.POLICY_INACTIVE_CONFIG),
+        ),
+        (
+            [rodex_hook(), user_hook()],
+            (),
+            False,
+            configuration.PolicyHookAdmission(configuration.POLICY_INACTIVE_SETUP),
+        ),
+        (
+            [rodex_hook(), user_hook(enabled=False)],
+            (),
+            False,
+            configuration.PolicyHookAdmission(add_hook_trust_bypass=True),
+        ),
+        (
+            [rodex_hook(trusted=True), user_hook()],
+            (),
+            False,
+            configuration.PolicyHookAdmission(),
+        ),
+        (
+            [rodex_hook(), user_hook()],
+            (configuration.POLICY_HOOK_TRUST_BYPASS_ARGUMENT,),
+            False,
+            configuration.PolicyHookAdmission(),
+        ),
+        (
+            [rodex_hook(), user_hook()],
+            (),
+            True,
+            configuration.PolicyHookAdmission(),
+        ),
     ],
 )
-def test_native_verdicts_and_explicit_false_override_inheritance(
+def test_native_verdicts_only_auto_bypass_the_sole_enabled_rodex_hook(
     monkeypatch,
-    trusted,
-    enabled,
+    hooks,
     arguments,
     inherited,
     expected,
 ):
-    hook = {
-        "command": configuration.policy_helper_command(),
-        "source": "sessionFlags",
-        "eventName": "preToolUse",
-        "matcher": "^Bash$",
-        "enabled": enabled,
-        "trustStatus": "trusted" if trusted else "untrusted",
-    }
-    connection = NativeTrustConnection([hook], inherited)
-    monkeypatch.setattr(configuration, "unix_connect", lambda *_args, **_kwargs: connection)
-    monkeypatch.setattr(configuration, "require_unix_peer_process", lambda *_args: None)
-    assert (
-        configuration.policy_hook_inactive_reason(Path("/app.sock"), object(), Path("/workspace"), arguments) == expected
-    )
+    hook_list = hooks if isinstance(hooks, list) else [hooks]
+    admission, connection = admit(monkeypatch, hook_list, arguments, inherited)
+
+    assert admission == expected
     assert {request["method"] for request in connection.sent} <= {
         "initialize",
         "initialized",
@@ -76,11 +168,45 @@ def test_native_verdicts_and_explicit_false_override_inheritance(
     }
 
 
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"sourcePath": "/home/user/.codex/hooks.json"},
+        {"handlerType": "prompt"},
+        {"timeoutSec": 30},
+        {"async": True},
+        {"statusMessage": "Checking"},
+        {"additionalContextLimit": 100},
+        {"trustStatus": "future-native-status"},
+    ],
+)
+def test_changed_or_unknown_rodex_hook_is_never_auto_bypassed(monkeypatch, changes):
+    admission, _connection = admit(monkeypatch, [rodex_hook(**changes)])
+
+    assert admission == configuration.PolicyHookAdmission(configuration.POLICY_INACTIVE_CONFIG)
+
+
+def test_inventory_diagnostics_are_inactive_not_implicitly_trusted(monkeypatch):
+    admission, _connection = admit(monkeypatch, [rodex_hook()], warnings=[{"message": "fixture warning"}])
+
+    assert admission == configuration.PolicyHookAdmission(configuration.POLICY_INACTIVE_UNAVAILABLE)
+
+
+def test_compatibility_inactive_reason_projects_the_admission(monkeypatch):
+    connection = NativeTrustConnection([rodex_hook(), user_hook()])
+    monkeypatch.setattr(configuration, "unix_connect", lambda *_args, **_kwargs: connection)
+    monkeypatch.setattr(configuration, "require_unix_peer_process", lambda *_args: None)
+
+    assert configuration.policy_hook_inactive_reason(Path("/app.sock"), object(), Path("/workspace"), ()) == (
+        configuration.POLICY_INACTIVE_SETUP
+    )
+
+
 def test_unavailable_native_trust_is_inactive_not_implicitly_trusted(monkeypatch):
     def unavailable(*_args, **_kwargs):
         raise OSError("unavailable")
 
     monkeypatch.setattr(configuration, "unix_connect", unavailable)
-    assert configuration.policy_hook_inactive_reason(Path("/app.sock"), object(), Path("/workspace"), ()) == (
-        configuration.POLICY_INACTIVE_UNAVAILABLE
+    assert configuration.policy_hook_admission(Path("/app.sock"), object(), Path("/workspace"), ()) == (
+        configuration.PolicyHookAdmission(configuration.POLICY_INACTIVE_UNAVAILABLE)
     )

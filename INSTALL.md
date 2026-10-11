@@ -62,6 +62,13 @@ a different caller-activated project virtualenv. The authority is
 [`user_process_environment`](src/rodex/process_environment.py), shared with direct
 Codex passthrough and transient App Server probes.
 
+For the optional native command-policy status, use
+[`rodex _policy-setup`](docs/CLI.md#command-policy-check) to review and trust the
+retained hook, then start a fresh managed session. Unsupported, disabled, or
+untrusted hooks remain inactive; Rodex does not enable or bypass them automatically.
+An installation update can change the retained helper path and require new native
+trust even when earlier sessions had already trusted their own helper.
+
 ## Retained installations and compatibility
 
 Rodex records first-party source-file metadata, top-level environment entries, the

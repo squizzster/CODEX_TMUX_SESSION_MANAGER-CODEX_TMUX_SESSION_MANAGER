@@ -51,6 +51,13 @@ caller → retained installation → CLI → implementation-scoped daemon
 - [`PrimaryConnectionLifecycleCoordinator`](../src/rodex/primary_connection_lifecycle.py)
   resets every participant even if one fails. Observer epoch ownership remains in
   the reducer, not in reset callers or transport.
+- [`CommandPolicyBroker`](../src/rodex/command_policy.py) is composed beside App
+  Server in the runtime, outside the proxy and interaction pipeline. Native
+  `PreToolUse(Bash)` invokes the retained helper; its decision returns to Codex for
+  approval/sandbox enforcement. Only after responding does the broker queue
+  [tmux-only status](../src/rodex/command_policy_status.py). The default is allow-all;
+  [security](SECURITY.md#native-command-policy) owns trust, bounds, and future
+  deny/rewrite-command constraints.
 
 ## Persistence and resources
 

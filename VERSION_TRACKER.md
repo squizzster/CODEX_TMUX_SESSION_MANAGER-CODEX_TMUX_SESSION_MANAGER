@@ -10,6 +10,10 @@ repository currently has no Git release tags, so they do not imply a published r
 
 ### Added
 
+- An [interaction pipeline report](docs/INTERACTION_PIPELINE_REPORT.md) connects
+  terminal presentation, command interception, prompt/model input, native hooks,
+  and overload recovery. An isolated Codex 0.162.1 idle-screen probe places both
+  tested display-only notice types in F2, documenting the gap for inline chat notices.
 - Native managed-session command-policy hook, currently allow-all, with volatile
   tmux-only command status and a typed allow/deny/rewrite-command extension point.
   `_policy-setup` exposes native one-time hook trust; untrusted sessions start with
@@ -24,6 +28,9 @@ repository currently has no Git release tags, so they do not imply a published r
 
 ### Modified
 
+- The [session-control skill](.agents/skills/rodex-session-control/SKILL.md) now
+  distinguishes model input from local notices, clarifies native command-policy
+  status, and accounts for overload recovery starting a separate turn.
 - Forward-contract checks characterize Codex 0.162.1's `partial_answer` phase
   without changing the 0.151.0 minimum: it is not a final result or light-view
   commentary, and trace metadata uses the existing `unknown` phase fallback.

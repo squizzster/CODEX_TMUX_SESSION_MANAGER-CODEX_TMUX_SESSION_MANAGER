@@ -16,6 +16,7 @@ there is no need to read the whole set.
 | --- | --- |
 | System shape and domain owners | [Architecture](docs/ARCHITECTURE.md) |
 | Input/output, views, observer, and overload recovery | [Interaction paths](docs/INTERACTION_PATHS.md) |
+| Interception, model injection, and display-only notices | [Interaction pipeline report](docs/INTERACTION_PIPELINE_REPORT.md) |
 | Prompt rules and submission | [Prompt flow](docs/PROMPT_SUBMISSION_FLOW.md) |
 | Native shell-command policy and trust | [Security](docs/SECURITY.md#native-command-policy), [setup](docs/CLI.md#command-policy-check) |
 | Runtime identity, lifecycle, and upgrades | [Runtime isolation](docs/RUNTIME_ISOLATION.md) |

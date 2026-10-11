@@ -157,6 +157,10 @@ It also checks subprocess entrypoints, mutation owners, and read-only bootstrap 
 it is not a proof against arbitrary Python reflection or a runtime monitor.
 
 Status-bar and outer terminal-title configuration remain under [`TmuxStatusPipeline`](../src/rodex/tmux_status.py).
+Its timed-notice API owns delayed restoration; `TimedStatusPublisher` owns the
+coalescing runtime worker. Plain-text messages use `TmuxStatusPresentation.message`
+and the shared renderer, including control stripping, literal escaping, and prefix
+indication. Runtime launchers and policy adapters supply content and duration.
 Command-policy status uses its lower-priority, exact-token transient claim, never
 the protocol, observer, terminal-input, or analytics publication paths. Hook trust
 admission is a read-only App Server probe; its decision response belongs solely to

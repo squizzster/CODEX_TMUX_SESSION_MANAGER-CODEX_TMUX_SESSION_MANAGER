@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import math
+import unicodedata
 from dataclasses import dataclass, replace
 from enum import StrEnum
 from typing import Final
+
+from wcwidth import wcwidth
 
 from .terminal_title import TERMINAL_TITLE_IDLE_FIELD
 
@@ -356,6 +359,29 @@ def prefix_indicated_status_format(default_format: str) -> str:
     if not default_format:
         raise ValueError("default status format must be non-empty")
     return f"#{{?{RODEX_PREFIX_MODE_CONDITION},{PREFIX_MODE_STATUS_FORMAT},}}{default_format}"
+
+
+def literal_status_text(message: str, *, width: int = 140) -> str:
+    """Bound plain text by cell width and prevent tmux control/format execution."""
+    if width < 2:
+        raise ValueError("status text width must be at least two cells")
+    text = "".join(
+        " " if char.isspace() else char
+        for char in message
+        if char.isspace() or not unicodedata.category(char).startswith("C")
+    )
+    text = " ".join(text.split())
+    cells = 0
+    bounded: list[str] = []
+    for char in text:
+        cell_width = max(0, wcwidth(char))
+        if cells + cell_width > width - 1 or len(bounded) >= width * 2:
+            bounded.append("…")
+            break
+        bounded.append(char)
+        cells += cell_width
+    literal = "".join(bounded).replace("#", "##")
+    return f" {literal} "
 
 
 RODEX_STATUS_LEFT_FORMAT: Final = prefix_aware_status_format(RODEX_BASE_STATUS_LEFT_FORMAT)

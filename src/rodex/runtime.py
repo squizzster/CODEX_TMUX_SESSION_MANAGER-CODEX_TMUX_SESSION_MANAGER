@@ -52,7 +52,6 @@ from .command_policy_status import (
     POLICY_STATUS_PUBLISHER,
     POLICY_STATUS_SECONDS,
     CommandPolicyStatus,
-    policy_status_presentation,
 )
 from .control import CodexControlClient, LiveRodexControl
 from .daemon_client import (
@@ -130,7 +129,6 @@ from .tmux_session_capability import (
     runtime_destruction_if_shell_condition,
     runtime_tmux_socket_name,
     server_identity_if_shell_condition,
-    tmux_format_literal,
 )
 from .tmux_shared_ctrl_c import shared_ctrl_c_binding_command
 from .tmux_sharing_coordinator import (
@@ -141,7 +139,6 @@ from .tmux_sharing_coordinator import (
 )
 from .tmux_status import (
     StatusPriority,
-    TmuxStatusClaimCommands,
     TmuxStatusPipeline,
     TmuxStatusPresentation,
     TmuxWorkingStatus,
@@ -1597,41 +1594,13 @@ class RodexRuntimeLauncher:
         )
         reason = inactive.stdout.strip()
         if reason in POLICY_INACTIVE_REASONS:
-            token = secrets.token_hex(16)
-            published = status.publish_transient(
+            status.publish_timed(
                 publisher=POLICY_STATUS_PUBLISHER,
-                token=token,
                 priority=StatusPriority.COMMAND_POLICY,
-                presentation=TmuxStatusPresentation(status_format=policy_status_presentation(reason)),
+                presentation=TmuxStatusPresentation.message(reason),
+                duration=POLICY_STATUS_SECONDS,
+                capability=capability,
             )
-            if published:
-                status_commands = TmuxStatusClaimCommands(capability.pane_target)
-                expiry_condition = combine_tmux_if_shell_conditions(
-                    registered_primary_pane_if_shell_condition(capability),
-                    status_commands.token_matches(token),
-                )
-                expiry_command = shlex.join(
-                    (
-                        tmux_format_literal(self._tmux_binary),
-                        "-S",
-                        tmux_format_literal(str(runtime.tmux_server_socket_path)),
-                        "if-shell",
-                        "-t",
-                        capability.pane_target,
-                        "-F",
-                        tmux_format_literal(expiry_condition),
-                        tmux_format_literal(status_commands.restore_base()),
-                    )
-                )
-                self._capability_tmux(
-                    runtime,
-                    capability,
-                    "run-shell",
-                    "-b",
-                    "-d",
-                    f"{POLICY_STATUS_SECONDS:g}",
-                    f"exec {expiry_command} >/dev/null 2>&1",
-                )
 
     def _install_terminal_key_contracts(
         self,

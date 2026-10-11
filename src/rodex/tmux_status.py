@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import math
 import shlex
 import subprocess
 import time
+import uuid
 from collections.abc import Callable
+from contextlib import suppress
 from dataclasses import dataclass
 from enum import IntEnum
 from threading import Condition, Thread
@@ -23,11 +26,16 @@ from .status_bar import (
     RODEX_WINDOW_STATUS_FORMAT,
     RODEX_WORKING_STATUS_INTERVAL_SECONDS,
     RODEX_WORKING_STATUS_OPTION,
+    literal_status_text,
+    prefix_indicated_status_format,
 )
 from .tmux_executor import SyncTmuxExecutor, SyncTmuxRunner
 from .tmux_session_capability import (
     TmuxRuntimeCapability,
+    TmuxSessionCapability,
+    combine_tmux_if_shell_conditions,
     primary_pane_capability_if_shell_condition,
+    registered_primary_pane_if_shell_condition,
 )
 
 TMUX_STATUS_COMMAND_TIMEOUT_SECONDS: Final = 1.0
@@ -228,6 +236,11 @@ class TmuxStatusPresentation:
         if not any(values) or any(value is not None and not value for value in values):
             raise ValueError("status presentation requires non-empty configured surfaces")
 
+    @classmethod
+    def message(cls, text: str, *, width: int = 140) -> TmuxStatusPresentation:
+        """Present bounded literal text while retaining the native prefix indicator."""
+        return cls(status_format=prefix_indicated_status_format(literal_status_text(text, width=width)))
+
 
 RODEX_BASE_STATUS_PRESENTATION: Final = TmuxStatusPresentation(
     status_left=RODEX_STATUS_LEFT_FORMAT,
@@ -425,6 +438,50 @@ class TmuxStatusPipeline:
             self._commands.restore_base(),
         )
 
+    def publish_timed(
+        self,
+        *,
+        publisher: str,
+        priority: StatusPriority,
+        presentation: TmuxStatusPresentation,
+        duration: float,
+        capability: TmuxSessionCapability,
+    ) -> str | None:
+        """Show a notice that expires even after its launching Python process exits.
+
+        tmux schedules its own command list. The literal wrapper preserves styles
+        and dynamic fields through run-shell's early format expansion; no shell
+        command, escaping adaptation, or independent restorer lives in the caller.
+        """
+        if not math.isfinite(duration) or duration <= 0:
+            raise ValueError("status duration must be finite and positive")
+        if capability.pane_target != self._pane_target:
+            raise ValueError("status expiry must own the pipeline's pane")
+        token = uuid.uuid4().hex
+        if not self.publish_transient(publisher=publisher, token=token, priority=priority, presentation=presentation):
+            self.restore_if_token_matches(token)
+            return None
+        expiry = shlex.join(
+            (
+                "if-shell",
+                "-t",
+                self._pane_target,
+                "-F",
+                combine_tmux_if_shell_conditions(
+                    registered_primary_pane_if_shell_condition(capability),
+                    self._commands.token_matches(token),
+                ),
+                self._commands.restore_base(),
+            )
+        )
+        scheduled = self._tmux(
+            "run-shell", "-b", "-C", "-d", f"{duration:g}", "-t", self._pane_target, f"#{{l:{expiry}}}"
+        )
+        if scheduled.returncode != 0:
+            self.restore_if_token_matches(token)
+            return None
+        return token
+
     def restore_if_publisher_matches(self, publisher: str) -> None:
         """Atomically restore only when the named subsystem still publishes."""
         self._tmux(
@@ -462,6 +519,83 @@ class TmuxStatusPipeline:
 
 def _tmux_command_sequence(*commands: tuple[str, ...]) -> str:
     return " ; ".join(shlex.join(command) for command in commands)
+
+
+class TimedStatusPublisher:
+    """Coalesce frequent notices in one volatile worker with exact-token expiry."""
+
+    def __init__(
+        self,
+        pipeline: TmuxStatusPipeline,
+        *,
+        publisher: str,
+        priority: StatusPriority,
+        duration: float,
+    ) -> None:
+        if not math.isfinite(duration) or duration <= 0:
+            raise ValueError("status duration must be finite and positive")
+        self._pipeline = pipeline
+        self._publisher = publisher
+        self._priority = priority
+        self._duration = duration
+        self._condition = Condition()
+        self._pending: TmuxStatusPresentation | None = None
+        self._closed = False
+        self._thread: Thread | None = None
+
+    def publish(self, presentation: TmuxStatusPresentation) -> None:
+        with self._condition:
+            if self._closed:
+                return
+            self._pending = presentation
+            if self._thread is None:
+                self._thread = Thread(target=self._run, name=f"rodex-status-{self._publisher}", daemon=True)
+                self._thread.start()
+            self._condition.notify_all()
+
+    def _run(self) -> None:
+        token: str | None = None
+        expires = 0.0
+        try:
+            while True:
+                with self._condition:
+                    while not self._closed and self._pending is None:
+                        remaining = expires - time.monotonic() if token else None
+                        if remaining is not None and remaining <= 0:
+                            break
+                        self._condition.wait(remaining)
+                    if self._closed:
+                        return
+                    pending, self._pending = self._pending, None
+                if token:
+                    with suppress(Exception):
+                        self._pipeline.restore_if_token_matches(token)
+                    token = None
+                if pending is not None:
+                    candidate = uuid.uuid4().hex
+                    with suppress(Exception):
+                        # Keep the token after ambiguous publication so cleanup
+                        # can restore only this exact owned presentation.
+                        token = candidate
+                        self._pipeline.publish_transient(
+                            publisher=self._publisher,
+                            token=candidate,
+                            priority=self._priority,
+                            presentation=pending,
+                        )
+                    expires = time.monotonic() + self._duration
+        finally:
+            if token:
+                with suppress(Exception):
+                    self._pipeline.restore_if_token_matches(token)
+
+    def close(self) -> None:
+        with self._condition:
+            self._closed = True
+            self._pending = None
+            self._condition.notify_all()
+        if self._thread is not None:
+            self._thread.join(timeout=5)
 
 
 def completion_status_left_format(message: str) -> str:

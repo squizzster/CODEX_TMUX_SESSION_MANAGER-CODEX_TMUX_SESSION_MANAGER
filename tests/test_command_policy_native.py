@@ -175,7 +175,8 @@ def test_extra_user_hook_without_rodex_trust_shows_bounded_prefix_aware_notice(n
                 if POLICY_INACTIVE_SETUP in status_format:
                     time.sleep(0.05)
             assert POLICY_INACTIVE_SETUP not in status_format
-            await_screen(terminal, f"Rodex: {name}")
+            rendered = await_screen(terminal, f"Rodex: {name}")
+            assert "#[" not in rendered.splitlines()[-1]
             inactive = subprocess.run(
                 ["tmux", "-S", str(socket_path), "show-options", "-q", "-v", "-t", "%0", POLICY_INACTIVE_OPTION],
                 capture_output=True,

@@ -51,6 +51,14 @@ caller → retained installation → CLI → implementation-scoped daemon
 - [`PrimaryConnectionLifecycleCoordinator`](../src/rodex/primary_connection_lifecycle.py)
   resets every participant even if one fails. Observer epoch ownership remains in
   the reducer, not in reset callers or transport.
+- [`TmuxStatusPipeline`](../src/rodex/tmux_status.py) is the shared Python API for
+  status ownership, priority, restoration, and timed notices. Use
+  `TmuxStatusPresentation.message(text)` for literal text with the prefix indicator,
+  and `pipeline.publish_timed(..., duration=5, capability=capability)` for a notice
+  that outlives its launcher. `TimedStatusPublisher` coalesces frequent notices in a
+  runtime worker. Both expiry paths restore through the same claim commands;
+  callers must not assemble delayed tmux commands or escape the restored bar.
+  [`status_bar`](../src/rodex/status_bar.py) owns colours, segments, and text rendering.
 - [`CommandPolicyBroker`](../src/rodex/command_policy.py) is composed beside App
   Server in the runtime, outside the proxy and interaction pipeline. Native
   `PreToolUse(Bash)` invokes the retained helper; its decision returns to Codex for

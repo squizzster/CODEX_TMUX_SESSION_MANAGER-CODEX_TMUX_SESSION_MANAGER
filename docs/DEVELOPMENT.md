@@ -50,6 +50,8 @@ normal temporary roots.
 - Input and display: [terminal input](../tests/test_terminal_input.py),
   [gateway](../tests/test_terminal_gateway.py), [native composer](../tests/test_native_composer.py),
   [observer safety](../tests/test_observer_runtime_safety.py).
+  [Status messages](../tests/test_tmux_status_messages.py) checks actual terminal
+  colours, literal text, Ctrl-B, live fields after both expiry paths, and stale timers.
   [Working status](../tests/test_working_status.py) checks root activity, tmux-owned
   bar dots, and outer-title projection. [Terminal-title tests](../tests/test_terminal_title.py)
   pin timing and elapsed formats; gateway and live prompt-handoff tests cover

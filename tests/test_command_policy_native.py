@@ -20,7 +20,7 @@ from websockets.exceptions import ConnectionClosed
 from websockets.sync.client import unix_connect
 from websockets.sync.server import unix_serve
 
-from rodex.command_policy import CommandPolicyDecision
+from rodex.command_policy import SHORT_SLEEP_DENIAL_REASON, CommandPolicyDecision
 from rodex.command_policy_configuration import POLICY_INACTIVE_SETUP, policy_hook_inactive_reason
 
 
@@ -96,6 +96,29 @@ def test_native_allow_uses_original_security_and_no_model_context(native, sandbo
         hooks = [e["params"]["run"] for e in client.events if e.get("method") == "hook/completed"]
         assert len(hooks) == 1 and hooks[0]["entries"] == [] and hooks[0]["status"] == "completed"
         assert "Rodex policy allowed" not in json.dumps(native.model.requests)
+
+
+@pytest.mark.live_startup
+def test_native_short_sleep_policy_denies_with_model_visible_feedback(native):
+    native.model.tool_input = {"cmd": "sleep 9"}
+    with native.app_server() as (client, observed, _process, _path):
+        started = client.rpc(
+            "thread/start",
+            {
+                "cwd": str(native.workspace),
+                "sandbox": "danger-full-access",
+                "approvalPolicy": "never",
+                "config": {"bypass_hook_trust": True},
+            },
+        )
+        client.rpc(
+            "turn/start",
+            {"threadId": started["thread"]["id"], "input": [{"type": "text", "text": "Run the fixture command."}]},
+        )
+        client.complete_turn()
+
+        assert observed == []
+        assert SHORT_SLEEP_DENIAL_REASON in json.dumps(native.model.requests)
 
 
 @pytest.mark.live_startup

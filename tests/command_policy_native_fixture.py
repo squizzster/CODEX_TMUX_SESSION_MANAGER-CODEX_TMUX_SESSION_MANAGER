@@ -15,7 +15,7 @@ from pathlib import Path
 
 from websockets.sync.client import unix_connect
 
-from rodex.command_policy import POLICY_SOCKET_ENV, CommandPolicyBroker, allow_all_commands
+from rodex.command_policy import POLICY_SOCKET_ENV, CommandPolicyBroker, evaluate_command_policy
 from rodex.command_policy_configuration import policy_hook_override
 
 
@@ -111,7 +111,7 @@ class NativePolicyFixture:
         self.worker.join(timeout=2)
 
     @contextmanager
-    def app_server(self, *, injection=True, extra=(), policy=allow_all_commands):
+    def app_server(self, *, injection=True, extra=(), policy=evaluate_command_policy):
         self.sequence += 1
         runtime_id = f"{self.sequence:016x}"
         app = self.root / f"app-{self.sequence}.sock"

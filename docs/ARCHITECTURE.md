@@ -55,7 +55,8 @@ caller → retained installation → CLI → implementation-scoped daemon
   Server in the runtime, outside the proxy and interaction pipeline. Native
   `PreToolUse(Bash)` invokes the retained helper; its decision returns to Codex for
   approval/sandbox enforcement. Only after responding does the broker queue
-  [tmux-only status](../src/rodex/command_policy_status.py). The default is allow-all;
+  [tmux-only status](../src/rodex/command_policy_status.py). The capability-test policy
+  denies exact integer sleeps below 10 and otherwise allows;
   [security](SECURITY.md#native-command-policy) owns trust, bounds, and future
   deny/rewrite-command constraints.
 

@@ -14,8 +14,9 @@ repository currently has no Git release tags, so they do not imply a published r
   terminal presentation, command interception, prompt/model input, native hooks,
   and overload recovery. An isolated Codex 0.162.1 idle-screen probe places both
   tested display-only notice types in F2, documenting the gap for inline chat notices.
-- Native managed-session command-policy hook, currently allow-all, with volatile
-  tmux-only command status and a typed allow/deny/rewrite-command extension point.
+- Native managed-session command-policy hook with volatile tmux-only command status,
+  a typed allow/deny/rewrite-command extension point, and a first capability rule
+  denying exact integer sleeps below 10 seconds with model-visible feedback.
   `_policy-setup` exposes native one-time hook trust; untrusted sessions start with
   the policy inactive instead of implicitly bypassing trust.
 - A daemon now creates one random 256-bit incarnation capability at each start,

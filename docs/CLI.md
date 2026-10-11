@@ -48,11 +48,12 @@ Routing authority: [`UnifiedRodexApplicationPipeline`](../src/rodex/application_
 ## Command-policy check
 
 Managed runtimes offer a native `PreToolUse` hook for all shell/unified-exec
-commands. The current policy allows every command and shows
-`Rodex policy allowed: COMMAND` in that session's tmux status bar for five seconds
-from interception, not from command completion. A command such as `sleep 5` can
-finish just as its status disappears. This text is not a model message, observer
-message, or persistent command log. Busy status
+commands. The current capability-test policy denies an exact integer `sleep N` when
+`N` is below 10, returning `Only sleeping 10 or more seconds is accepted.` to Codex.
+It allows other commands and shows `Rodex policy allowed: COMMAND` in that session's
+tmux status bar for five seconds from interception, not from command completion. A
+command such as `sleep 10` can finish after its status disappears. This text is not a
+model message, observer message, or persistent command log. Busy status
 updates coalesce; safety warnings take priority. "Allowed" does not mean executed:
 Codex approvals, sandbox restrictions, and other hooks still apply.
 

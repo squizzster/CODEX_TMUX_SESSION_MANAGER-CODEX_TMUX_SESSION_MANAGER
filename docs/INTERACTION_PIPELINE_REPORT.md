@@ -78,7 +78,7 @@ It does not rewrite tool requests in the protocol proxy.
 | Type another native slash command or `!` shell escape | Native TUI handling | Depends on that native command; Rodex prompt rewriting does not own it. |
 | Rewrite submitted prompt text | `UserPromptHook` and `protocol_input_text` | Changes model input. |
 | Start or steer work programmatically | Exact mutation coordinator → `turn/start` or `turn/steer` | Real user input to a new or active turn. |
-| Intercept an agent's shell command | Native `PreToolUse(Bash)` → helper → broker | Current unchanged allow adds no Rodex feedback; native tool results still enter the conversation. |
+| Intercept an agent's shell command | Native `PreToolUse(Bash)` → helper → broker | Unchanged allow adds no Rodex feedback; a denial reason enters the native tool result and can reach model context. |
 | Show a local notice | `main` MESSAGE with `start_model_turn=False` → downstream `warning` | No upstream model input. Native UI decides placement. |
 | Show command-policy status | Broker → `CommandPolicyStatus` → tmux status owner | Display only; outside chat. |
 | Rename a live session | Alias transition → `RODEX_AUTO_INFO` start/steer | An effective live rename attempts a real model message. |
@@ -325,17 +325,18 @@ The request includes runtime/session/turn/cwd, permission mode, original tool in
 and normalized command text. The broker is bound to the exact App Server process
 tree. The helper socket is passed to App Server, not the remote TUI. The broker
 responds before queuing the transient tmux status.
-[Broker contract](../src/rodex/command_policy.py#L67),
-[decision delivery](../src/rodex/command_policy.py#L243).
+[Broker contract](../src/rodex/command_policy.py#L71),
+[decision delivery](../src/rodex/command_policy.py#L256).
 
-Current production policy is `allow_all_commands`. Unchanged allow writes no hook
-stdout. Typed deny and command-rewrite decisions exist and have native tests, but
-no deny/rewrite rules are enabled in production. Deny returns native denial JSON;
-rewrite supplies `updatedInput`, preserving every original tool field except
-`command`. Rodex does not execute the command itself or override native permission
-selection. Future denial reasons and changed tool results can be model-visible;
+Current production policy denies an exact integer `sleep N` when `N` is below 10;
+other commands receive an unchanged allow, which writes no hook stdout. Typed deny
+and command-rewrite decisions have native tests, while no rewrite rule is enabled in
+production. Deny returns native denial JSON; rewrite supplies `updatedInput`,
+preserving every original tool field except `command`. Rodex does not execute the
+command itself or override native permission selection. Denial reasons and changed
+tool results can be model-visible;
 only the current silent allow and separate status display are context-neutral.
-[Policy default](../src/rodex/command_policy.py#L176),
+[Policy default](../src/rodex/command_policy.py#L180),
 [native response mapping](../src/rodex/command_policy_hook.py#L24),
 [native behavioral tests](../tests/test_command_policy_native.py#L64).
 
@@ -456,7 +457,7 @@ route and update the existing effect inventory rather than bypassing its owners.
 | User prompt overrides | `$XDG_STATE_HOME/rodex/conf/hooks/user_prompt_substitutions.yaml`, otherwise `~/.local/state/rodex/conf/hooks/user_prompt_substitutions.yaml` | Path frozen from launch environment; changed file metadata reloads on submission. |
 | General content hooks | `SessionInteractionPipeline(hooks=...)` | Python composition. Production runtime explicitly composes the prompt hook, not a user-configured generic hook list. |
 | Overload retry text/timing | Constants in `server_overloaded_recovery.py` | Implementation change; no exposed runtime setting. |
-| Shell-command policy | `allow_all_commands`, injected `PreToolUse(^Bash$)`, native trust/configuration | Fresh managed runtime and verified native admission. |
+| Shell-command policy | `evaluate_command_policy`, injected `PreToolUse(^Bash$)`, native trust/configuration | Fresh managed runtime and verified native admission. |
 | Command-policy bar | `CommandPolicyStatus`; five seconds, bounded/sanitized literal text | Transient lower-priority tmux claim; rapid updates coalesce. |
 | Native animations and other Codex options | Codex configuration/argv, with Rodex launch defaults | Native configuration semantics; animations can be explicitly restored. |
 | Catalog, runtime endpoints, retained builds | `XDG_STATE_HOME`, `RODEX_RUNTIME_DIR`, `RODEX_INSTALLATIONS_ROOT` | Separate state/runtime/implementation domains; identity must match the selected session. |

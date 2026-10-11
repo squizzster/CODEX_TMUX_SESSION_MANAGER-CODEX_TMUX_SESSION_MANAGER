@@ -73,9 +73,10 @@ before broker workers and endpoint cleanup. The retained helper uses `-I` and th
 originating installation. Its socket environment value is not passed to the TUI.
 
 The versioned contract carries session/turn/cwd, permission mode, original tool
-input, and normalized command text. The current policy is always allow. Typed
-deny/rewrite-command decisions are scaffolding for future policies, not enabled
-rules. The [helper](../src/rodex/command_policy_hook.py) returns empty stdout on
+input, and normalized command text. The current capability-test policy denies an
+exact integer `sleep N` when `N` is below 10 and allows other commands. Typed
+rewrite-command decisions remain scaffolding for future policies. The
+[helper](../src/rodex/command_policy_hook.py) returns empty stdout on
 unchanged allow, native denial JSON on deny, or native `updatedInput` on rewrite.
 Only `command` can change; all other input fields remain intact. Rodex executes
 none of these commands and does not modify thread/turn approval, sandbox, or named

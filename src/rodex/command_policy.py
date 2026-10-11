@@ -1,4 +1,4 @@
-"""Private, bounded allow-all command policy beside the native App Server.
+"""Private, bounded command policy beside the native App Server.
 
 The broker never executes commands or publishes their content outside its volatile
 status callback. Codex retains hook trust, approvals, and sandbox enforcement.
@@ -7,6 +7,7 @@ status callback. Codex retains hook trust, approvals, and sandbox enforcement.
 from __future__ import annotations
 
 import json
+import re
 import select
 import socket
 import time
@@ -27,6 +28,9 @@ POLICY_SOCKET_ENV: Final = "RODEX_COMMAND_POLICY_SOCKET"
 POLICY_MESSAGE_LIMIT: Final = 256 * 1024
 POLICY_TIMEOUT_SECONDS: Final = 1.0
 POLICY_MAX_WORKERS: Final = 16
+MINIMUM_INTEGER_SLEEP_SECONDS: Final = 10
+SHORT_SLEEP_DENIAL_REASON: Final = "Only sleeping 10 or more seconds is accepted."
+_INTEGER_SLEEP_COMMAND: Final = re.compile(r"sleep (?P<seconds>[0-9]+)")
 
 
 def encode_policy_message(payload: Mapping[str, Any]) -> bytes:
@@ -173,8 +177,17 @@ class CommandPolicyDecision:
         return decision
 
 
-def allow_all_commands(_request: CommandPolicyRequest) -> CommandPolicyDecision:
-    """The current policy; future rules plug in here without changing execution."""
+def evaluate_command_policy(request: CommandPolicyRequest) -> CommandPolicyDecision:
+    """Apply the current capability-test rules to one exact command."""
+    match = _INTEGER_SLEEP_COMMAND.fullmatch(request.command)
+    if match is not None:
+        significant_seconds = match.group("seconds").lstrip("0") or "0"
+        minimum_seconds = str(MINIMUM_INTEGER_SLEEP_SECONDS)
+        below_minimum = len(significant_seconds) < len(minimum_seconds) or (
+            len(significant_seconds) == len(minimum_seconds) and significant_seconds < minimum_seconds
+        )
+        if below_minimum:
+            return CommandPolicyDecision("deny", reason=SHORT_SLEEP_DENIAL_REASON)
     return CommandPolicyDecision("allow")
 
 
@@ -191,7 +204,7 @@ class CommandPolicyBroker:
         runtime_id: str,
         publish_allowed: Callable[[str], None],
         *,
-        policy: Callable[[CommandPolicyRequest], CommandPolicyDecision] = allow_all_commands,
+        policy: Callable[[CommandPolicyRequest], CommandPolicyDecision] = evaluate_command_policy,
     ) -> None:
         self._endpoint = ExclusiveUnixEndpoint(path)
         self._runtime_id = str(parse_rodex_runtime_id(runtime_id))

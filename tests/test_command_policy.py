@@ -1,4 +1,4 @@
-"""The private allow-all path cannot execute, log, or approve native commands."""
+"""The private policy path cannot execute, log, or approve native commands."""
 
 from __future__ import annotations
 
@@ -20,11 +20,13 @@ from rodex.command_policy import (
     POLICY_MESSAGE_LIMIT,
     POLICY_PROTOCOL,
     POLICY_SOCKET_ENV,
+    SHORT_SLEEP_DENIAL_REASON,
     CommandPolicyBroker,
     CommandPolicyDecision,
     CommandPolicyRequest,
     allow_response,
     encode_policy_message,
+    evaluate_command_policy,
     receive_policy_message,
 )
 from rodex.command_policy_configuration import caller_bypasses_hook_trust, policy_helper_command, policy_hook_override
@@ -73,6 +75,46 @@ def test_request_preserves_all_input_and_context_without_shell_parsing():
     assert CommandPolicyRequest.from_payload(request.to_payload()) == request
     assert request.tool_input == event["tool_input"]
     assert request.to_payload()["command"] == {"kind": "shell", "text": event["tool_input"]["command"]}
+
+
+@pytest.mark.parametrize("command", ["sleep 0", "sleep 00", "sleep 1", "sleep 09", "sleep 9"])
+def test_policy_denies_exact_integer_sleeps_below_ten_with_feedback(command):
+    request = CommandPolicyRequest.from_hook(RUNTIME, hook_event(command))
+
+    assert evaluate_command_policy(request) == CommandPolicyDecision("deny", reason=SHORT_SLEEP_DENIAL_REASON)
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "sleep 10",
+        "sleep 010",
+        "sleep 9999999999999999999999999999999999999999",
+        "sleep 9.0",
+        "sleep 9s",
+        "sleep 9 ",
+        " sleep 9",
+        "sleep 9 && printf done",
+        "printf before; sleep 9",
+    ],
+)
+def test_policy_allows_ten_or_more_and_commands_outside_the_exact_integer_sleep_shape(command):
+    request = CommandPolicyRequest.from_hook(RUNTIME, hook_event(command))
+
+    assert evaluate_command_policy(request) == CommandPolicyDecision("allow")
+
+
+def test_default_broker_returns_short_sleep_denial_without_an_allowed_status(policy_root):
+    path = policy_root / f"policy-{RUNTIME}.sock"
+    broker = CommandPolicyBroker(path, RUNTIME, lambda _command: pytest.fail("denied command published as allowed"))
+    broker.start()
+    broker.bind_app_server(CurrentProcessOwner())
+    try:
+        assert exchange(path, command="sleep 9") == CommandPolicyDecision(
+            "deny", reason=SHORT_SLEEP_DENIAL_REASON
+        ).to_payload(RUNTIME)
+    finally:
+        broker.close()
 
 
 @pytest.mark.parametrize(

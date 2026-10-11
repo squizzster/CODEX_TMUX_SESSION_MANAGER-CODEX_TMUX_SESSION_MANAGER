@@ -66,9 +66,10 @@ For the native command policy, a fresh managed runtime automatically uses Codex'
 invocation-local hook-trust bypass only when the exact injected Rodex hook is the
 sole enabled hook. If another enabled native hook is present, use
 [`rodex _policy-setup`](docs/CLI.md#command-policy-check) to review and trust the
-Rodex hook, then start a fresh managed session. Unsupported, disabled, changed, or
+Rodex hook, then start a fresh managed session. Unsupported, disabled, unexpected, or
 unverifiable Rodex hooks remain inactive. An installation update can change the
-retained helper path and therefore its exact admission identity.
+retained helper path: native `modified` trust still qualifies for automatic admission
+when the hook exactly matches the current Rodex installation and is the sole enabled hook.
 
 ## Retained installations and compatibility
 

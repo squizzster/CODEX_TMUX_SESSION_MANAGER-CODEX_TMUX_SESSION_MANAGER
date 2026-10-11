@@ -99,6 +99,12 @@ def admit(monkeypatch, hooks, arguments=(), inherited=False, **connection_option
             configuration.PolicyHookAdmission(add_hook_trust_bypass=True),
         ),
         (
+            rodex_hook(trustStatus="modified"),
+            (),
+            False,
+            configuration.PolicyHookAdmission(add_hook_trust_bypass=True),
+        ),
+        (
             rodex_hook(),
             (configuration.POLICY_HOOK_TRUST_BYPASS_ARGUMENT,),
             False,
@@ -120,6 +126,18 @@ def admit(monkeypatch, hooks, arguments=(), inherited=False, **connection_option
         (
             [rodex_hook(), user_hook()],
             (),
+            False,
+            configuration.PolicyHookAdmission(configuration.POLICY_INACTIVE_SETUP),
+        ),
+        (
+            [rodex_hook(trustStatus="modified"), user_hook()],
+            (),
+            False,
+            configuration.PolicyHookAdmission(configuration.POLICY_INACTIVE_SETUP),
+        ),
+        (
+            rodex_hook(trustStatus="modified"),
+            ("-c", "bypass_hook_trust=false"),
             False,
             configuration.PolicyHookAdmission(configuration.POLICY_INACTIVE_SETUP),
         ),
@@ -168,9 +186,11 @@ def test_native_verdicts_only_auto_bypass_the_sole_enabled_rodex_hook(
     }
 
 
+@pytest.mark.parametrize("trust_status", ["untrusted", "modified"])
 @pytest.mark.parametrize(
     "changes",
     [
+        {"command": "/tmp/unexpected-hook"},
         {"sourcePath": "/home/user/.codex/hooks.json"},
         {"handlerType": "prompt"},
         {"timeoutSec": 30},
@@ -180,8 +200,8 @@ def test_native_verdicts_only_auto_bypass_the_sole_enabled_rodex_hook(
         {"trustStatus": "future-native-status"},
     ],
 )
-def test_changed_or_unknown_rodex_hook_is_never_auto_bypassed(monkeypatch, changes):
-    admission, _connection = admit(monkeypatch, [rodex_hook(**changes)])
+def test_changed_or_unknown_rodex_hook_is_never_auto_bypassed(monkeypatch, changes, trust_status):
+    admission, _connection = admit(monkeypatch, [rodex_hook(**{"trustStatus": trust_status, **changes})])
 
     assert admission == configuration.PolicyHookAdmission(configuration.POLICY_INACTIVE_CONFIG)
 

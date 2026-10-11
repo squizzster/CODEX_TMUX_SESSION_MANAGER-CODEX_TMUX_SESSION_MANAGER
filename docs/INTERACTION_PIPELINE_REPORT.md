@@ -341,8 +341,8 @@ only the current silent allow and separate status display are context-neutral.
 [native behavioral tests](../tests/test_command_policy_native.py#L64).
 
 Startup probes `hooks/list` and effective configuration. A trusted exact Rodex hook
-runs normally. When that exact hook is untrusted and is the sole enabled hook, Rodex
-adds Codex's invocation-local trust bypass to the remote TUI; it does not persist
+runs normally. When that exact hook has `untrusted` or `modified` native trust and is
+the sole enabled hook, Rodex adds Codex's invocation-local trust bypass to the remote TUI; it does not persist
 trust. Any other enabled hook retains `rodex _policy-setup` as the route for reviewing
 and trusting Rodex through `/hooks`. Explicit caller/effective bypass remains native
 intent, while explicit false prevents automatic bypass. If support or the exact

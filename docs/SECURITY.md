@@ -85,6 +85,9 @@ permissions selections. Native Codex remains the execution/security authority.
 Trust uses Codex's own verdict and persisted hash; Rodex writes no trust records.
 For one managed invocation, Rodex supplies Codex's hook-trust bypass only after
 `hooks/list` reports the exact injected Rodex definition as the sole enabled hook.
+Both `untrusted` and `modified` trust states can qualify; `modified` may reflect a
+previously trusted retained helper path. The current hook must still exactly match
+the current installation's definition before that trust state is considered.
 Any other enabled hook prevents that automatic bypass and leaves `_policy-setup` as
 the trust route. Explicit caller/effective bypass configuration remains native user
 intent, and explicit false prevents automatic bypass. Disabled hooks stay disabled.
@@ -93,8 +96,8 @@ The inventory is a pre-thread snapshot rather than a lock on Codex hook files. A
 same-user hook change between that check and `thread/start` can therefore join an
 invocation whose bypass was admitted from the earlier Rodex-only snapshot. This is
 an accepted ALPHA limitation. If inventory admission is unavailable or the Rodex
-definition changes, only Rodex's hook injection is removed before the remote TUI
-starts. Existing user/project hooks remain composed by Codex. Hook failures are
+definition does not match the current installation, only Rodex's hook injection is
+removed before the remote TUI starts. Existing user/project hooks remain composed by Codex. Hook failures are
 advisory/fail-open, not an independent hard-security boundary.
 The native contract is documented in [OpenAI Hooks](https://developers.openai.com/codex/hooks/).
 

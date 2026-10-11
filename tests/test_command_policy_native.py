@@ -25,6 +25,7 @@ from rodex.command_policy_configuration import (
     POLICY_INACTIVE_SETUP,
     policy_hook_admission,
     policy_hook_inactive_reason,
+    policy_hook_override,
 )
 from rodex.command_policy_status import POLICY_INACTIVE_OPTION, POLICY_STATUS_SECONDS
 
@@ -68,6 +69,13 @@ def trust_fixture_hook(client, workspace):
 def install_user_hook(native):
     config_path = native.codex_home / "config.toml"
     config_path.write_text(config_path.read_text() + USER_HOOK_CONFIGURATION)
+
+
+def trust_previous_rodex_installation(native):
+    # Review only: the previous helper path is never executed by this fixture.
+    previous = policy_hook_override(str(native.root / "previous-installation" / "bin" / "python"))
+    with native.app_server(injection=False, extra=("-c", previous)) as (client, _observed, _process, _path):
+        trust_fixture_hook(client, native.workspace)
 
 
 @pytest.mark.live_startup
@@ -119,12 +127,17 @@ def test_native_allow_uses_original_security_and_no_model_context(native, sandbo
 
 
 @pytest.mark.live_startup
-def test_native_extra_enabled_user_hook_keeps_manual_policy_setup(native):
+@pytest.mark.parametrize("prior_installation_trusted", [False, True])
+def test_native_extra_enabled_user_hook_keeps_manual_policy_setup(native, prior_installation_trusted):
     install_user_hook(native)
+    if prior_installation_trusted:
+        trust_previous_rodex_installation(native)
 
     with native.app_server() as (client, _observed, process, path):
         hooks = client.rpc("hooks/list", {"cwds": [str(native.workspace)]})["data"][0]["hooks"]
         assert {hook["source"] for hook in hooks} == {"sessionFlags", "user"}
+        rodex_hook = next(hook for hook in hooks if hook["source"] == "sessionFlags")
+        assert rodex_hook["trustStatus"] == ("modified" if prior_installation_trusted else "untrusted")
         admission = policy_hook_admission(path, process, native.workspace, ())
 
     assert admission.inactive_reason == POLICY_INACTIVE_SETUP
@@ -431,9 +444,15 @@ def test_managed_trust_once_two_isolated_sessions_and_private_status(native):
 
 
 @pytest.mark.live_startup
-def test_fresh_managed_session_auto_bypasses_only_rodex_hook_and_denies_short_sleep(native):
+@pytest.mark.parametrize("prior_installation_trusted", [False, True])
+def test_fresh_managed_session_auto_bypasses_only_rodex_hook_and_denies_short_sleep(native, prior_installation_trusted):
     if not shutil.which("tmux"):
         pytest.skip("tmux is required")
+    if prior_installation_trusted:
+        trust_previous_rodex_installation(native)
+    with native.app_server() as (client, _observed, _process, _path):
+        hook = client.rpc("hooks/list", {"cwds": [str(native.workspace)]})["data"][0]["hooks"][0]
+        assert hook["trustStatus"] == ("modified" if prior_installation_trusted else "untrusted")
     rodex = str(Path(__file__).parents[1] / "rodex")
     runtime_root = Path(native.environment["RODEX_RUNTIME_DIR"])
     native.model.tool_input = {"cmd": "sleep 5"}

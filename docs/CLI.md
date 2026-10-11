@@ -58,16 +58,18 @@ updates coalesce; safety warnings take priority. "Allowed" does not mean execute
 Codex approvals, sandbox restrictions, and other hooks still apply.
 
 Before starting the remote TUI, Rodex reads Codex's native hook inventory. When the
-exact injected Rodex hook is enabled, untrusted, and the sole enabled hook, Rodex adds
+exact injected Rodex hook is enabled, needs trust, and is the sole enabled hook, Rodex adds
 `--dangerously-bypass-hook-trust` for that managed TUI invocation only. It writes no
-trust record. A previously trusted exact Rodex hook needs no bypass.
+trust record. This covers both `untrusted` and `modified` native states: an older
+retained helper path may have been trusted before an installation upgrade. A
+previously trusted exact Rodex hook needs no bypass.
 
 If another enabled user, project, managed, or plugin hook is present, Rodex does not
 add the bypass. Run `rodex _policy-setup`, review the Rodex `PreToolUse` hook through
 `/hooks`, trust that individual hook, exit, and start a new managed session. An
 explicit caller bypass or effective native bypass configuration retains its native
 meaning; an explicit `-c bypass_hook_trust=false` prevents Rodex's automatic bypass.
-Disabled hooks stay disabled. A missing, changed, duplicated, malformed, or
+Disabled hooks stay disabled. A missing, unexpected, duplicated, malformed, or
 unverifiable Rodex hook starts with policy inactive and a five-second tmux notice
 instead of waiting on a pre-attachment trust prompt. The normal bar then returns;
 the inactive metadata remains available so a later attach can present the reminder.

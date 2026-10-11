@@ -165,7 +165,10 @@ def policy_hook_admission(
             explicit_bypass = caller_bypasses_hook_trust(arguments)
             if explicit_bypass is not None:
                 return PolicyHookAdmission(None if explicit_bypass else POLICY_INACTIVE_SETUP)
-            if trust_status != "untrusted":
+            # A retained-installation upgrade changes the helper path/hash. Native
+            # "modified" means old trust no longer matches, not that the current
+            # hook failed the exact Rodex definition check above.
+            if trust_status not in {"untrusted", "modified"}:
                 return PolicyHookAdmission(POLICY_INACTIVE_CONFIG)
             effective = request(CODEX_APP_SERVER.config_read_method, {"cwd": str(workspace), "includeLayers": False})
             effective_config = effective.get("config")

@@ -24,6 +24,9 @@ repository currently has no Git release tags, so they do not imply a published r
 
 ### Modified
 
+- Forward-contract checks characterize Codex 0.162.1's `partial_answer` phase
+  without changing the 0.151.0 minimum: it is not a final result or light-view
+  commentary, and trace metadata uses the existing `unknown` phase fallback.
 - Ordinary startup recognizes an unchanged checkout and environment from lightweight
   metadata, returns a valid cached retained interpreter before taking the publication
   lock, and uses a new opaque key when it must publish a changed installation.

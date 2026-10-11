@@ -82,6 +82,7 @@ def test_light_projects_only_exact_root_commentary_while_dark_remains_native():
     presentation.observe_protocol_output(message_delta("Checking "))
     presentation.observe_protocol_output(message_delta("the boundary."))
     presentation.observe_protocol_output(message_completed("Checking the boundary."))
+    presentation.observe_protocol_output(message_completed("Partial answer", "partial-1", phase="partial_answer"))
     presentation.observe_protocol_output(message_completed("Secret final", "final-1", phase="final_answer"))
     presentation.observe_protocol_output(message_completed("Child update", "child-1", thread_id=CHILD))
 

@@ -577,17 +577,19 @@ def test_dispatch_status_keeps_absence_and_duplicate_observations_explicit(
 
 
 @pytest.mark.evolutionary_regression
+@pytest.mark.parametrize("nonterminal_phase", ["commentary", "partial_answer"])
 def test_result_reports_only_final_answer_and_completed_file_changes(
     tmp_path: Path,
+    nonterminal_phase: str,
 ) -> None:
     turn = {
         "id": "turn-1",
         "status": "completed",
         "items": [
             {
-                "id": "commentary",
+                "id": "nonterminal-message",
                 "type": "agentMessage",
-                "phase": "commentary",
+                "phase": nonterminal_phase,
                 "text": "still working",
             },
             {

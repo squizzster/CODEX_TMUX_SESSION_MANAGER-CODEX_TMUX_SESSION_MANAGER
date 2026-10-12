@@ -1,17 +1,47 @@
 # Rodex
 
-Rodex runs the native Codex TUI in durable, named tmux sessions. Work can continue
-after a terminal disconnect and resume by name, with Codex retaining its editor,
-tools, approvals, and conversation.
+**Whenever you type `codex`, try `rodex` instead.**
 
-Rodex adds an agent activity pane, exact-turn automation, overload recovery, prompt
-rules, native shell-command hooks, and local statistics and traces. Retained
-installations keep running sessions bound to their original implementation.
+Rodex wraps the real Codex TUI in a durable, named tmux session. You keep Codex's
+editor, tools, approvals, and conversation while Rodex adds detach/reconnect,
+live agent visibility, resilient overload recovery, and exact local automation.
 
-Development mode is **ALPHA**: this is an internal Linux pre-release with changing
-interfaces. Requirements are Python **3.12+**, Linux `/proc` and `pidfd` support,
-tmux, `uv`, and an authenticated stable Codex App Server **0.151.0+**. Optional hook
-support is probed separately; see [prerequisites and startup](INSTALL.md#prerequisites).
+It is useful when work should survive a terminal disconnect, continue unattended,
+or be inspected and controlled safely from another shell or agent. Retained
+installations keep already-running sessions on the implementation that started them.
+
+- **Let Codex cook.** Detach, leave it running on its host, and come back by a
+  memorable name like `automatic-beluga`.
+- **Watch the crew.** Your agents' progress and replies unfold in a live pane
+  above Codex. Keep working below.
+- **Less babysitting.** When a turn fails from server overload, Rodex waits and
+  sends `Continue...` for you. Repeated overloads back off; typing cancels a pending retry.
+- **Take the controls.** Start, steer, interrupt, and collect exact-turn results
+  from another shell or agent.
+- **Understand the work.** Inspect durable local statistics, agent relationships,
+  and metadata-only traces without creating a second conversation store.
+- **Make it yours.** Change prompts, presentation, and session behaviour in Python,
+  without rebuilding Codex. Simple prompt rules live in YAML.
+- **Check command interception.** With [managed hook admission](docs/CLI.md#command-policy-check),
+  see a private `Rodex policy allowed: …` status while Codex still owns execution.
+
+Rodex is an **ALPHA** in-house Linux pre-release; interfaces may change.
+
+## Requirements and quick start
+
+Rodex requires Linux with `/proc` and `pidfd` support, Python 3.12 or newer, tmux,
+`uv`, and an authenticated stable Codex CLI whose App Server is version 0.151.0 or
+newer. No numeric minimum tmux or `uv` CLI version is currently asserted. See the
+[verified prerequisites](INSTALL.md#prerequisites) for the exact boundary.
+
+From a checkout:
+
+```bash
+uv sync --locked
+./rodex
+```
+
+Detach with `Ctrl-D` or `Ctrl-b d`. Return with `./rodex NAME`.
 
 ## CLI and operations
 
@@ -21,6 +51,7 @@ support is probed separately; see [prerequisites and startup](INSTALL.md#prerequ
   exact-turn control, statistics, and traces.
 - [Operations](docs/OPERATIONS.md) — local state, runtime files, terminal settings,
   CPU diagnosis, and failed-runtime handling.
+
 ## Architecture and technical contracts
 
 - [Change guide](DESIGN.md) — choose the authority and boundary for a proposed change.

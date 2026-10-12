@@ -29,7 +29,7 @@ POLICY_MESSAGE_LIMIT: Final = 256 * 1024
 POLICY_TIMEOUT_SECONDS: Final = 1.0
 POLICY_MAX_WORKERS: Final = 16
 MINIMUM_INTEGER_SLEEP_SECONDS: Final = 10
-SHORT_SLEEP_DENIAL_REASON: Final = "Only sleeping 10 or more seconds is accepted."
+SHORT_SLEEP_DENIAL_REASON: Final = "Re-try your sleep command with 10 seconds."
 _INTEGER_SLEEP_COMMAND: Final = re.compile(r"sleep (?P<seconds>[0-9]+)")
 
 

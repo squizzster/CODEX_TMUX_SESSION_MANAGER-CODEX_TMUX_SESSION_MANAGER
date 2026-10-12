@@ -1,58 +1,37 @@
-# Rodex design
+# Change guide
 
-Codex owns the editor, model interaction, approvals, and conversation. Rodex's Python
-layer adds durable session identity, tmux hosting, presentation, and local automation.
+Use the [README index](README.md) to select a topic; use this guide when a change
+could belong to more than one boundary. [Architecture](docs/ARCHITECTURE.md) maps
+the composed system to its owners.
 
-Each runtime has its own tmux server; retained installations keep running sessions
-on their original implementation. Equivalent operations share an authoritative
-pipeline, with identity checked before effects.
+## Choose the authority
 
-Pick the topic relevant to your task. Each guide links to its source and tests;
-there is no need to read the whole set.
+- **Invocation or option meaning:** start at `COMMAND_SPECS` in
+  [command_contract.py](src/rodex/command_contract.py) and
+  `UnifiedRodexApplicationPipeline` in [application_pipeline.py](src/rodex/application_pipeline.py).
+  [CLI routing](docs/CLI.md#invocation-routing) explains selector/prompt ambiguity
+  and native delegation; a new Codex option is not automatically managed syntax.
+- **Visible text or model input:** identify the intended effect in
+  [interaction paths](docs/INTERACTION_PATHS.md). A local notice, composer rewrite,
+  model submission, native tool decision, and tmux status have different authorities.
+  Use the [prompt contract](docs/PROMPT_SUBMISSION_FLOW.md) for text transformations
+  and [native policy contract](docs/SECURITY.md#native-command-policy) for shell hooks.
+- **Live identity or lifetime:** use [runtime isolation](docs/RUNTIME_ISOLATION.md)
+  before changing launch, reconnect, replacement, or cleanup. Package compatibility
+  alone does not establish ownership of an existing runtime.
+- **Durable identity or derived data:** [SQL](docs/SQL_SCHEMA.md) owns schema and
+  transaction invariants; [analytics](docs/ANALYTICS.md) owns source admission,
+  accounting, and incomplete coverage. A projection change must preserve canonical
+  identities and authenticated source coordinates.
 
-## Design map
+## Check compatibility and evidence
 
-| Working on | Read |
-| --- | --- |
-| System shape and domain owners | [Architecture](docs/ARCHITECTURE.md) |
-| Input/output, views, observer, and overload recovery | [Interaction paths](docs/INTERACTION_PATHS.md) |
-| Interception, model injection, and display-only notices | [Interaction pipeline report](docs/INTERACTION_PIPELINE_REPORT.md) |
-| Prompt rules and submission | [Prompt flow](docs/PROMPT_SUBMISSION_FLOW.md) |
-| Native shell-command policy and trust | [Security](docs/SECURITY.md#native-command-policy), [setup](docs/CLI.md#command-policy-check) |
-| Runtime identity, lifecycle, and upgrades | [Runtime isolation](docs/RUNTIME_ISOLATION.md) |
-| Rollout statistics, traces, and coverage | [Analytics](docs/ANALYTICS.md) |
-| Persistence, schema, and lineage | [SQL](docs/SQL_SCHEMA.md) |
-| Executable trust and content privacy | [Security](docs/SECURITY.md) |
+[pyproject.toml](pyproject.toml) and [uv.lock](uv.lock) own package/dependency facts;
+`CODEX_APP_SERVER` in [app_server_contract.py](src/rodex/app_server_contract.py)
+owns native version admission. [Current-contract tests](tests/test_current_contracts.py)
+pin persisted and wire generations.
 
-## Using and changing Rodex
-
-- [Install and update](INSTALL.md) — prerequisites and retained installations.
-- [CLI](docs/CLI.md) — invocation, names, detach/resume, and commands.
-- [Automation skill](.agents/skills/rodex-session-control/SKILL.md) — control one verified session and turn.
-- [Operations](docs/OPERATIONS.md) — local state, terminal settings, and diagnosis.
-- [Development](docs/DEVELOPMENT.md) — validation and focused test selection.
-- [Version tracker](VERSION_TRACKER.md) — pending changes and verified package milestones.
-
-Release and dependency facts live in [pyproject.toml](pyproject.toml);
-[current-contract tests](tests/test_current_contracts.py) pin compatibility generations.
-
-## Source-of-truth shortcuts
-
-- [`UnifiedRodexApplicationPipeline`](src/rodex/application_pipeline.py) and
-  [`COMMAND_SPECS`](src/rodex/command_contract.py) own invocation routing and the
-  local command grammar.
-- [`ManagedSessionLifecycle`](src/rodex/managed_session_lifecycle.py) and
-  [`DaemonRuntimeManager`](src/rodex/daemon.py) own session and live-runtime state
-  transitions.
-- [`SharedAnalyticsCoordinator`](src/rodex/analytics.py),
-  [`StatefulCodexProtocolAnalyticsAdapter`](src/rodex/analytics_analyzer.py), and
-  [`rodex_registry`](src/rodex_registry/__init__.py) own rollout processing and
-  durable projections.
-- [`rodex_registry.schema`](src/rodex_registry/schema.py) generates the current SQL
-  catalog; do not copy its table definitions into prose.
-- [`CODEX_APP_SERVER`](src/rodex/app_server_contract.py), the constants in
-  [`rodex_sql`](src/rodex_sql/private_database_path.py), and
-  [current-contract tests](tests/test_current_contracts.py) own minimum compatibility
-  and persisted/wire generation values.
-- [`user_prompt_substitutions.yaml`](conf/hooks/user_prompt_substitutions.yaml) owns
-  the shipped prompt rules. Installation copies that file into each retained build.
+Choose [focused validation](docs/DEVELOPMENT.md#test-selection) for the changed
+boundary. If adding an effect, update the existing
+[effect-owner audit](docs/INTERACTION_PATHS.md#effect-audit). Dated native findings
+are evidence for the stated version and scenario, not compatibility guarantees.

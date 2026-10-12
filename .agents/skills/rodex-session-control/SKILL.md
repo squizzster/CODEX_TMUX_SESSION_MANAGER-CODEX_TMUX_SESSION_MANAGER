@@ -52,27 +52,17 @@ turn ID or read `_result`.
 `_alias` change also attempts a `RODEX_AUTO_INFO` start/steer. Choose these routes
 only when that model interaction is intended.
 
-For an authorized display-only notice, use the existing runtime's
-`SessionInteractionPipeline.send_message(target="main", text=..., start_model_turn=False)`.
-An external caller uses `publish_session_interaction` or `publish_tui_notice` with
-the verified proxy endpoint and `RuntimePeerIdentity`; there is no `_notice` CLI.
-The existing route sends a downstream native `warning`, outside model context.
-`delivered` means transport accepted, not confirmed rendering or durable history.
-On the tested Codex 0.162.1 idle screen, both `warning` and `deprecationNotice`
-required F2; neither provided inline chat text. Do not promise inline placement
-or implement a notice by submitting a model prompt.
+For an authorized display-only notice, use the existing verified runtime's
+[notice API](../../../docs/INTERACTION_PATHS.md#model-input-and-local-notices).
+It keeps text outside model context; `delivered` means transport acceptance, not
+confirmed rendering or durable history. Native placement can require F2. Do not
+promise inline placement or implement a notice by submitting a model prompt.
 
-`/rodex light` and `/rodex dark` select presentation only; `dusk` is a placeholder.
-Agent shell-command interception uses the separate native `PreToolUse(Bash)`
-broker. Its capability-test policy denies exact integer `sleep N` commands below
-10 seconds with model-visible feedback and allows other commands. An allow status is
-an interception decision, not execution/completion evidence. Fresh managed startup
-automatically admits the sole enabled Rodex hook through temporary exact-hash trust
-in its private App Server, revalidated by native inventory before start/resume/fork.
-No user trust record is written; another enabled hook requires `_policy-setup`. Read the
-[interaction pipeline report](../../../docs/INTERACTION_PIPELINE_REPORT.md) when
-working with notices, interception, configuration, or recovery; it identifies the
-existing owners, native UI evidence, and changes needed for inline notices.
+`/rodex` [presentation choices](../../../docs/OPERATIONS.md#terminal-settings)
+affect display only. A [command-policy status](../../../docs/CLI.md#command-policy-check)
+is an interception decision, not execution/completion evidence. Its separate
+[native trust contract](../../../docs/SECURITY.md#hook-admission-and-resume) owns
+startup, resume, and manual-review constraints.
 
 ## Uncertain outcomes
 

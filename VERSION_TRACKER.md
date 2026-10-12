@@ -10,31 +10,30 @@ repository currently has no Git release tags, so they do not imply a published r
 
 ### Added
 
-- An [interaction pipeline report](docs/INTERACTION_PIPELINE_REPORT.md) connects
-  terminal presentation, command interception, prompt/model input, native hooks,
-  and overload recovery. An isolated Codex 0.162.1 idle-screen probe places both
-  tested display-only notice types in F2, documenting the gap for inline chat notices.
+- [Native interaction findings](docs/INTERACTION_PIPELINE_REPORT.md), dated
+  2026-10-11, preserve Codex 0.162.1 notice-placement evidence and its verification limits.
 - Native managed-session command-policy hook with volatile tmux-only command status,
   a typed allow/deny/rewrite-command extension point, and a first capability rule
   denying exact integer sleeps below 10 seconds with model-visible feedback.
-  An exact Rodex-only hook inventory gets temporary native key/hash trust in its private App Server;
+  An exact Rodex-only hook inventory gets temporary native key/hash trust;
   another enabled hook retains `_policy-setup`. Decision and inactive-reminder rows
   last five seconds, expose tmux prefix mode, and restore the normal bar by exact
   claim token; successful admission clears stale inactive state.
-- Saved-session resume no longer waits behind Codex 0.162.1's hidden hook-review
-  prompt. Automatic admission verifies native trust after a provisional App Server
-  restart instead of relying on the TUI bypass flag. Native start/resume/fork and
-  same-name runtime replacement tests preserve UUIDs, permissions, and user hook state.
 - A daemon now creates one random 256-bit incarnation capability at each start,
   publishes it privately, and requires it alongside the retained installation identity
   on every request and response.
 - Agent traces now preserve Codex `developer` messages as a first-class role through
   normalization, contract validation, SQL storage, and trace readback.
-- The README now links every maintained project guide and repository-local agent
-  instruction directly.
 
 ### Modified
 
+- Saved-session resume no longer waits behind Codex 0.162.1's hidden hook-review
+  prompt. Automatic admission verifies native trust after a provisional App Server
+  restart instead of relying on the TUI bypass flag. Native start/resume/fork and
+  same-name runtime replacement tests preserve UUIDs, permissions, and user hook state.
+- Documentation refactor: complete README index, a change-boundary guide, consolidated
+  interaction/hook contracts, and dated native findings. Resume, notice, retry, and
+  model-input gotchas are retained; application behavior is unchanged.
 - The [session-control skill](.agents/skills/rodex-session-control/SKILL.md) now
   distinguishes model input from local notices, clarifies native command-policy
   status, and accounts for overload recovery starting a separate turn.
@@ -52,10 +51,6 @@ repository currently has no Git release tags, so they do not imply a published r
   contract is v5. Statistics projection v10 counts each canonical response-usage
   record once while retaining cumulative snapshots as a legacy fallback. Generation
   21 remains untouched and is not implicitly migrated.
-- Documentation now distinguishes installation routing, daemon-incarnation checks,
-  the single-user security boundary, statistics token accounting, and typed trace
-  coverage. The design map points contributors to authoritative source owners and
-  focused evidence.
 
 ### Removed
 

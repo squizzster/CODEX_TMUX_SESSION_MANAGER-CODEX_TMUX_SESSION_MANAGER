@@ -47,47 +47,31 @@ Routing authority: [`UnifiedRodexApplicationPipeline`](../src/rodex/application_
 
 ## Command-policy check
 
-Managed runtimes offer a native `PreToolUse` hook for all shell/unified-exec
-commands. The current capability-test policy denies an exact integer `sleep N` when
-`N` is below 10, returning `Only sleeping 10 or more seconds is accepted.` to Codex.
-It allows other commands and shows `Rodex policy allowed: COMMAND` in that session's
-tmux status bar for five seconds from interception, not from command completion. A
-command such as `sleep 10` can finish after its status disappears. This text is not a
-model message, observer message, or persistent command log. Busy status
-updates coalesce; safety warnings take priority. "Allowed" does not mean executed:
-Codex approvals, sandbox restrictions, and other hooks still apply.
+Managed runtimes offer an optional native shell-command hook. The current test
+policy denies integer sleeps below 10 seconds; its exact decision and interception
+scope are defined in [native command policy](SECURITY.md#native-command-policy).
 
-Before starting the remote TUI, Rodex reads Codex's native hook inventory. When the
-exact injected Rodex hook is enabled, needs trust, and is the sole enabled hook,
-Rodex supplies its native key/hash as temporary trust in the private App Server.
-A second inventory must confirm the same definition, key, hash, and native `trusted`
-verdict. Rodex writes no user trust record. This covers both `untrusted` and `modified`
-states: an older retained helper path may have been trusted before an upgrade.
-A previously trusted exact Rodex hook needs no temporary entry.
+`Rodex policy allowed: COMMAND` appears in the session's tmux status bar for five
+seconds from interception. A command such as `sleep 10` can finish after the notice
+disappears. "Allowed" is a policy decision, not execution/completion evidence.
+Rapid updates coalesce; safety warnings and sharing notices take priority. Policy
+rows preserve `CTRL-B MODE` and then restore the normal bar. They are not chat
+messages or a persistent command log.
 
-If another enabled user, project, managed, or plugin hook is present, Rodex does not
-add temporary trust. Run `rodex _policy-setup`, review the Rodex `PreToolUse` hook through
-`/hooks`, trust that individual hook, exit, and start a new managed session. An
-explicit caller bypass or effective native bypass configuration retains its native
-meaning; an explicit `-c bypass_hook_trust=false` prevents Rodex's automatic admission.
-Disabled hooks stay disabled. A missing, unexpected, duplicated, malformed, or
-unverifiable Rodex hook starts with policy inactive and a five-second tmux notice
-instead of waiting on a pre-attachment trust prompt. The normal bar then returns;
-the inactive metadata remains available so a later attach can present the reminder.
+The sole enabled Rodex hook normally qualifies for
+[automatic admission](SECURITY.md#hook-admission-and-resume). If it still needs
+trust and another enabled native hook is present:
 
-Codex 0.162.1 remote resume can stop at hook review before `thread/resume`, even with
-the CLI hook-trust bypass that works for fresh startup. Exact native trust avoids
-that hidden prompt behind Rodex's thread-before-attach gate. Other enabled hooks
-still require their native review; an explicit bypass does not guarantee remote resume.
+1. Run `rodex _policy-setup` to open the native review UI.
+2. Use `/hooks`, review and trust the individual Rodex `PreToolUse` hook, then exit.
+3. Start a fresh managed runtime to use the reviewed configuration.
 
-The inventory decision is a startup snapshot. Rodex does not lock Codex hook files
-across startup; temporary trust applies only to the verified key/hash. Every policy
-decision status lasts five seconds, policy rows
-preserve tmux's `CTRL-B MODE` indicator, and successful admission clears retained
-inactive metadata. Native hook and
-managed-only restrictions remain authoritative. Unmanaged Codex is unaffected.
-`write_stdin` continuations and hosted tools such as web search are outside this
-shell-command hook. See [security](SECURITY.md#native-command-policy).
+Unsupported, disabled, unexpected, or unverifiable Rodex hooks remain inactive.
+The inactive notice also lasts five seconds; metadata remains so a later attach can
+repeat the reminder. Successful admission clears that stale state. For a saved
+session that times out before attachment, use the
+[resume diagnosis](OPERATIONS.md#resume-failures); fresh-start success alone does
+not verify native resume preflight.
 
 ## Open, detach, and resume
 
@@ -161,3 +145,6 @@ remain with the subscribed primary connection, normally the managed TUI.
 Machine envelopes are defined by
 [`MACHINE_ENVELOPE_SCHEMA_VERSION`](../src/rodex/machine_commands.py); App Server
 version admission is defined by [`CODEX_APP_SERVER`](../src/rodex/app_server_contract.py).
+There is no managed `_notice` or `_exec` command, or generic API for executing native
+TUI slash commands. [Local notices](INTERACTION_PATHS.md#model-input-and-local-notices)
+use an existing verified runtime's Python interaction API.

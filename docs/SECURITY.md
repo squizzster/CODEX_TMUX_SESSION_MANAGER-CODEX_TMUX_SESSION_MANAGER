@@ -82,7 +82,21 @@ Only `command` can change; all other input fields remain intact. Rodex executes
 none of these commands and does not modify thread/turn approval, sandbox, or named
 permissions selections. Native Codex remains the execution/security authority.
 
-Trust uses Codex's own verdict and persisted hash; Rodex writes no trust records.
+The hook is registered by `policy_hook_override` in
+[command_policy_configuration.py](../src/rodex/command_policy_configuration.py)
+as `PreToolUse(^Bash$)`. It covers shell/unified-exec command initiation, not
+`write_stdin` continuations, hosted web tools, `apply_patch`, or MCP calls. An
+unchanged allow and its separate tmux status add no model context; a denial reason
+or rewritten command result can reach the model. Native `additionalContext` is
+model input, and native hook `systemMessage` is warning output rather than a
+guarantee of inline display. [Native notice findings](INTERACTION_PIPELINE_REPORT.md#native-notice-placement)
+bound the tested UI behavior.
+
+### Hook admission and resume
+
+[`policy_hook_admission`](../src/rodex/command_policy_configuration.py) uses Codex's
+own inventory, key, hash, and trust verdict. An already trusted exact Rodex hook
+needs no adaptation. Rodex writes no user trust records.
 For one private App Server, Rodex supplies a temporary `hooks.state` entry only after
 `hooks/list` reports the exact injected Rodex definition as the sole enabled hook.
 The key and SHA-256 hash come from that native inventory. Rodex restarts its provisional
@@ -93,22 +107,45 @@ and no automatic blanket hook-trust bypass is added to the TUI.
 Both `untrusted` and `modified` trust states can qualify; `modified` may reflect a
 previously trusted retained helper path. The current hook must still exactly match
 the current installation's definition before that trust state is considered.
-Any other enabled hook prevents that automatic admission and leaves `_policy-setup` as
-the trust route. Explicit caller/effective bypass configuration remains native user
-intent, and explicit false prevents automatic admission. Disabled hooks stay disabled.
+Any other enabled hook prevents that automatic trust grant; use the
+[manual review workflow](CLI.md#command-policy-check) when Rodex still needs trust.
+Explicit caller/effective bypass configuration retains its native meaning. An
+explicit `-c bypass_hook_trust=false` prevents automatic admission of an untrusted
+or modified hook. Disabled hooks stay disabled.
+
+Codex **0.162.1 remote resume** can show hook review before `thread/resume`, even
+with the TUI bypass flag accepted by fresh startup. Rodex waits for the thread
+before attaching, so that modal used to cause a hidden prompt and a startup timeout.
+Exact native trust avoids this ordering problem without modifying protocol replies.
+Another enabled hook can still require native review; explicit bypass is not a
+guarantee that remote resume will proceed.
+
+Use `NativePolicyHookTrust.configuration_override` to build the temporary entry.
+Codex's CLI override parser splits dotted paths even inside quotes, including the
+dot in a native `config.toml` hook key. The helper supplies the key inside a whole
+TOML `hooks.state` value; native merging preserves unrelated entries.
 
 The inventory is a pre-thread snapshot rather than a lock on Codex hook files.
 A later hook addition receives no temporary trust; a changed Rodex hash invalidates
 the admitted entry. Such a change can still cause native review during startup.
 If either inventory is unavailable or the exact definition/key/hash cannot be
 verified, both Rodex's hook injection and temporary trust override are removed before
-the remote TUI starts. Existing user/project hooks remain composed by Codex. Hook failures are
-advisory/fail-open, not an independent hard-security boundary.
-The native contract is documented in [OpenAI Hooks](https://developers.openai.com/codex/hooks/).
+the remote TUI starts. Only the provisional server is restarted. Existing native
+hooks remain under Codex control. Hook failures are advisory/fail-open; invalid
+[prompt-rule files](PROMPT_SUBMISSION_FLOW.md#rule-files) instead reject submission.
+
+Evidence: [admission cases](../tests/test_command_policy_configuration.py),
+[runtime restart/fallback](../tests/test_rodex_runtime.py), and
+[native lifecycle and permission checks](../tests/test_command_policy_native.py).
+The native tests cover start/resume/fork, prior-installation trust, saved-name reopen,
+and unchanged persisted hook state. Optional hook support is probed independently
+of the base App Server minimum.
+
+### Command status privacy
 
 Command status is bounded, control-stripped, literal tmux text, published only
-after the broker response through the existing atomic status-claim owner. It has
-lower priority than warnings and exact-token restoration. No command bodies are
+after the broker response through the existing
+[status-claim owner](INTERACTION_PATHS.md#effect-audit). No command bodies are
 added to SQL, diagnostics, receipts, analytics, observer traffic, or model context.
 Codex's own normal command transcripts are unchanged.
 

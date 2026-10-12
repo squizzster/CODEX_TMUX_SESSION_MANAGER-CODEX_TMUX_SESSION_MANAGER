@@ -22,6 +22,11 @@ model permission, or dispatch identity. They run synchronously and should remain
 Protocol edits retain non-text RPC fields; unmodified native frames preserve exact bytes.
 Accepted fan-out does not apply the same hook twice.
 
+Generic content hooks require Python composition through
+`SessionInteractionPipeline(hooks=...)`. Production composes `input_text_hook` from
+the [prompt-rule loader](PROMPT_SUBMISSION_FLOW.md#rule-files); there is no
+user-configured generic content-hook loader.
+
 ## Production routes
 
 | Intent/source | Authoritative path |
@@ -61,14 +66,76 @@ waits. Start accepts the statuses in [`_STARTABLE_THREAD_STATUSES`](../src/rodex
 require exact steer/interrupt intent. See the
 [automation skill](../.agents/skills/rodex-session-control/SKILL.md) for retry semantics.
 
+### Overload recovery
+
 [`ServerOverloadedRecoveryController`](../src/rodex/server_overloaded_recovery.py)
-always watches the registered main thread, not child-thread starts on that connection.
-A terminal `serverOverloaded` failure schedules `Continue...` after 30 seconds.
-Repeats within five minutes double to a 960-second ceiling; a longer gap resets the
-sequence. Terminal keyboard input, disconnect, close, or supersession cancels pending
-work through hooks, lock waits, and transport setup until atomic dispatch admission.
-Cancellation does not undo an admitted request. This is the explicit model-resubmission exception; generic
-indeterminate mutations are not automatically resent.
+watches the registered main thread. It requires `turn/completed`, status `failed`,
+and `error.codexErrorInfo == "serverOverloaded"`; child threads, error prose, and
+nonterminal retry notifications do not qualify.
+
+Recovery submits `Continue...` as real model input through the registered `main`
+adapter, exact control, and prompt rules. Its dispatch identity is
+`rodex:server-overloaded:<thread>:<failed-turn>`. The first delay is 30 seconds;
+failures observed within five minutes double it up to 960 seconds. A longer gap
+resets the sequence. **The gap includes the wait itself:** after a 480-second wait,
+a serial failure resets if no intervening failure was observed. The ceiling does
+not imply monotonically increasing serial retries.
+
+Terminal keyboard input, disconnect, close, root rebinding, or supersession cancels
+pending work through hooks, lock waits, and transport setup until atomic dispatch
+admission. Cancellation cannot undo an admitted request. An external control request
+is not itself a terminal-input cancellation signal; thread state is still checked
+at dispatch. Recovery logs metadata but has no countdown notice or exposed YAML/CLI
+toggle. This is the explicit model-resubmission exception; generic indeterminate
+mutations are not automatically resent.
+
+Evidence: `test_backoff_doubles_within_five_minutes_caps_at_sixteen_minutes_and_then_resets`
+and cancellation/admission cases in
+[test_server_overloaded_recovery.py](../tests/test_server_overloaded_recovery.py).
+
+## Model input and local notices
+
+Within an existing composed runtime, use explicit display intent:
+
+```python
+result = interaction_pipeline.send_message(
+    target="main",
+    text="Rodex: local operation finished.",
+    start_model_turn=False,
+    source="runtime-operation",
+)
+```
+
+For real model input, `start_model_turn=True` and a retained unique `dispatch_id`
+use the registered model adapter and exact mutation coordinator. The
+[automation skill](../.agents/skills/rodex-session-control/SKILL.md) owns external
+start/steer and dispatch reconciliation. An observer pane has no single model-thread
+binding. A live alias change is another
+[explicit model-input side effect](CLI.md#open-detach-and-resume).
+
+For an external display-only caller, `publish_session_interaction` or
+`publish_tui_notice` in [interaction_transport.py](../src/rodex/interaction_transport.py)
+requires the verified proxy endpoint and `RuntimePeerIdentity`. The private
+`/rodex-interaction` endpoint admits typed operations, not arbitrary RPC or PTY bytes.
+These are Python APIs; no `_notice` CLI exists.
+
+The [proxy](../src/rodex/protocol_proxy.py) sends a downstream `warning` with the
+currently observed main-thread ID, which can be null before `thread/started`.
+Display delivery requires the primary connection, not a loaded thread. It opens
+no upstream App Server connection and bypasses
+presentation, observer, and analytics event callbacks. There is no model submission,
+Rodex conversation record, or durable replay queue. `delivered` means transport
+acceptance; missing primary binding fails delivery. Terminal capture can still see
+native notice output. The [proxy isolation tests](../tests/test_rodex_protocol_proxy.py)
+verify this separation.
+
+Update, prompt-error, handoff-timeout, and menu-placeholder notices use that route.
+Native UI decides placement: [Codex 0.162.1 observations](INTERACTION_PIPELINE_REPORT.md#native-notice-placement)
+show F2 warning-center placement, not guaranteed inline chat. In `light`, these
+warnings are not semantic commentary items. Switching notification type does not
+establish inline rendering. Any inline display extension needs an owned local item,
+explicit retention, and native/light, editing, resize, reconnect, and restart behavior;
+fabricated assistant items or model prompts would change the contract.
 
 ## Terminal and presentation
 
@@ -100,18 +167,40 @@ composites without feeding its own frames back into that native screen. Preserve
   Keep hidden semantic history without rebuilding/waking an unused native-policy view;
   invalidate on selected item/event/selector eviction as well as new text.
 
-Menus are configuration-driven, not command-name branches in decoder or renderer.
-[`InputInterceptionMenu`](../src/rodex/input_menu.py) owns cyclic selection,
-Enter, and back/cancel. Empty option lists are configuration errors, never empty
-pickers; actionless options are placeholders. Configured typed and selected commands
-converge on one handler. Unsupported editing restores held input before forwarding.
-Approval/unrecognized modal input stays native. [Operations](OPERATIONS.md#terminal-settings)
-owns available presentation choices.
+Approval/unrecognized modal input stays native.
+[Operations](OPERATIONS.md#terminal-settings) owns available presentation choices.
 
 [`TerminalInputDecoder`](../src/rodex/terminal_input.py) distinguishes lone Escape
 with a 35 ms deadline; complete arrow frames decode immediately. Rodex leaves tmux's
 own `escape-time` unchanged, so it can add latency. This is framing, not a menu delay.
 Production uses neither `tmux send-keys` nor a tmux Enter binding or pane-piping adapter.
+
+## Local commands
+
+[`INPUT_INTERCEPTORS`](../src/rodex/input_interceptor_config.py) is Python
+configuration for whole-input live/submitted matching, headings, options, and actions.
+It is separate from prompt YAML. Decoder and renderer do not branch on command names.
+
+The interceptor verifies the already-forwarded native prefix and end cursor before
+opening completion, for example after `/ro`. `InputInterceptionMenu` in
+[input_menu.py](../src/rodex/input_menu.py) owns cyclic selection, Tab completion,
+Enter, and back/cancel. Typed commands and menu selections converge on
+`InputInterceptorPresentation._deliver` in
+[input_interceptor_presentation.py](../src/rodex/input_interceptor_presentation.py).
+
+Accepted local handling removes only the verified prefix with DEL; it does not
+submit Enter to the model. Unsupported editing during command completion restores
+held text as bracketed paste before forwarding. The argument picker ignores unrelated
+edit/paste keys. Empty option lists, including the current `/rodx` test registration,
+produce configuration-error notices. Actionless or unmatched configured arguments
+produce placeholder notices, never arbitrary command execution.
+
+`ConfiguredInterceptionAction` currently carries `target`, `operation`, and `payload`.
+Adding `MESSAGE` to its option table alone cannot supply `text` or permission to
+start a model turn; that requires an explicit adapter/contract change.
+Evidence: [interceptor presentation](../tests/test_input_interceptor_presentation.py),
+[terminal input](../tests/test_terminal_input.py), and
+[managed startup](../tests/test_managed_startup.py).
 
 ## Observer state
 
@@ -158,13 +247,16 @@ it is not a proof against arbitrary Python reflection or a runtime monitor.
 
 Status-bar and outer terminal-title configuration remain under [`TmuxStatusPipeline`](../src/rodex/tmux_status.py).
 Its timed-notice API owns delayed restoration; `TimedStatusPublisher` owns the
-coalescing runtime worker. Plain-text messages use `TmuxStatusPresentation.message`
-and the shared renderer, including control stripping, literal escaping, and prefix
-indication. Runtime launchers and policy adapters supply content and duration.
+coalescing runtime worker. Use `TmuxStatusPresentation.message(text)` for literal
+text with control stripping and prefix indication. A launcher notice uses
+`pipeline.publish_timed(..., duration=5, capability=capability)` to survive its
+publisher's exit. Both expiry paths restore through the same exact claim commands;
+callers supply content and duration rather than assembling delayed tmux commands or
+escaping the restored bar.
 Command-policy status uses its lower-priority, exact-token transient claim, never
 the protocol, observer, terminal-input, or analytics publication paths. Hook trust
-admission is a read-only App Server probe; its decision response belongs solely to
-Codex's native hook stdout contract.
+admission reads native inventory and requests temporary private-server configuration.
+Command allow/deny/rewrite responses separately use Codex's native hook stdout contract.
 Sharing animations have their own [admission owner](../src/rodex/status_animation_admission.py).
 [`CodexWorkingStatusObserver`](../src/rodex/protocol_proxy.py) projects main-thread
 activity into transitions; [`TmuxWorkingStatus`](../src/rodex/tmux_status.py) atomically

@@ -71,8 +71,8 @@ normal temporary roots.
   [tmux status](../tests/test_command_policy_status.py), and
   [native checks](../tests/test_command_policy_native.py). The native checks use
   installed Codex/tmux with an offline deterministic model fixture, no account or
-  model quota. They cover native trust reuse, start/resume/fork protocol admission, command security,
-  future deny/rewrite decisions, concurrent managed sessions, and content privacy.
+  model quota. They cover native trust reuse, start/resume/fork protocol admission,
+  command security, deny/rewrite decisions, concurrent managed sessions, and content privacy.
   They also verify Rodex-only automatic hook admission, extra enabled-hook fallback,
   and fresh and resumed managed `sleep 5` denial without persisted hook trust.
   Saved-session tests require the same UUID after runtime replacement and inspect
@@ -93,18 +93,23 @@ visible-history invalidation. Pair them with [interval runtime measurements](OPE
 
 ## Documentation changes
 
-[README.md](../README.md) is the compact product introduction, quick start, and
-complete index of maintained project documentation. [DESIGN.md](../DESIGN.md) is the
-task-oriented map for technical guides, while [VERSION_TRACKER.md](../VERSION_TRACKER.md)
-owns concise version history and pending change notes. Keep detailed contracts in
-their topic guides and source/tests, linked rather than repeated. Every maintained
-Markdown guide and repository-local agent instruction must be linked directly from
-the README. Historical investigations remain in Git.
+[README.md](../README.md) is the complete documentation index; [DESIGN.md](../DESIGN.md)
+helps select a change boundary. [VERSION_TRACKER.md](../VERSION_TRACKER.md) owns
+version history. Keep current contracts in topic guides and dated findings in reports.
 
-For docs-only changes, check relative links/anchors, source paths, documentation reachability,
-and `git diff --check`; run relevant existing contract tests. Verify command examples
-against definitions or safe help execution, without launching quota-using tests merely
-to validate prose. State which live or installation checks were not performed.
+For documentation-only changes:
+
+- Inventory maintained Markdown with `git ls-files '*.md'`, excluding fixtures,
+  generated output, and vendored content. Every maintained file, including root guides
+  and the repository-local skill, needs a direct README link.
+- Resolve relative links from their containing document; check paths, heading anchors,
+  and referenced symbols. Prefer source-file links and exact symbols to line anchors.
+- Verify CLI examples against `./rodex _help`, `./rodex _version`, and definitions.
+  Keep model-submitting and destructive examples out of documentation checks.
+- Run relevant existing contract tests and `git diff --check`; confirm the diff is
+  documentation-only. No Markdown/link checker is configured in the repository.
+- Report actual checks and unverified external links/native scenarios. Dated findings
+  are evidence for their stated version and scope, not current compatibility guarantees.
 
 The smallest existing compatibility check is:
 

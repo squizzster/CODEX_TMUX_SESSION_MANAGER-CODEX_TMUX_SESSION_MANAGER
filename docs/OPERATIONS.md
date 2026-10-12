@@ -32,27 +32,21 @@ unaddressable detached session. Storage relocation is an
 
 ## Terminal settings
 
-The `/rodex` menu selects `light` (root commentary) or `dark` (native screen);
-`dusk` is a reserved placeholder. This changes presentation, not execution, logging,
-or model input. Native modal controls remain native. Selection and parsing constraints
-are in [terminal presentation](INTERACTION_PATHS.md#terminal-and-presentation).
+The `/rodex` menu selects `dark` (the default native screen) or `light` (root-thread
+`agentMessage` commentary only); `dusk` is a reserved placeholder. `light` is a
+content filter: final answers, `partial_answer`, tool bodies, and child messages are
+not its transcript items. The native composer/control region stays available, and
+unknown modal states, including approvals, fall back to native rendering. Selection
+changes presentation, not execution, logging, or model input.
+[`PRESENTATION_POLICIES`](../src/rodex/presentation_policy.py) owns the selectors;
+[local-command handling](INTERACTION_PATHS.md#local-commands) owns menu admission.
 
 Managed Codex defaults to `tui.animations=false` to avoid decorative spinner/shimmer
 redraw work. `rodex --config tui.animations=true` explicitly restores it. The source
 of launch defaults is [`runtime.py`](../src/rodex/runtime.py), not a second Codex config.
 
-The optional [command-policy check](CLI.md#command-policy-check) temporarily replaces
-the tmux bar with `Rodex policy allowed: COMMAND` for five seconds after interception.
-Its lifetime does not follow the command's runtime. Rapid commands coalesce to the
-latest status; higher-priority warnings and sharing notices can hide it. This is
-an allow decision, not execution/completion evidence, and it creates no command log.
-An inactive notice directs first-use trust to `rodex _policy-setup`; start a fresh
-managed session afterwards. It appears when another enabled native hook prevents
-Rodex-only automatic admission, or when the Rodex hook cannot be verified. The notice
-restores the normal bar after five seconds while retaining inactive metadata for a
-later attach. Policy rows preserve the `CTRL-B MODE` indicator, and active admission
-clears stale inactive metadata and its owned status claim. Rodex never enables a
-disabled hook.
+The optional [command-policy check](CLI.md#command-policy-check) uses a transient
+tmux status row. That guide owns notice timing, priority, inactivity, and setup.
 
 The Rodex bar shows `Working.` through `Working....` while the main Codex thread is
 active. tmux advances the fixed-width dots once per second; Rodex publishes only
@@ -80,7 +74,8 @@ independent of Codex's `tui.animations` setting. See
 [`TmuxStatusPipeline`](../src/rodex/tmux_status.py) for status ownership.
 
 Rodex's update notice is display-only and may appear in Codex's F2 warning center.
-A bounded read-only version lookup caches for 24 hours; lookup or notice failures do
+A managed TUI starts with `check_for_update_on_startup=false`; Rodex's bounded
+read-only version lookup caches for 24 hours. Lookup or notice failures do
 not block attachment. Rodex never installs updates. Run `codex update` outside Rodex
 when choosing to update Codex. [Installation](../INSTALL.md) covers Rodex updates.
 
@@ -122,3 +117,30 @@ retry normally once idle, or use `rodex NAME --force-old` to reconnect through t
 retained installation while its current work continues.
 Never overwrite ownership markers, replace live SQL files, or infer
 destruction authority from a display name or PID alone.
+
+## Resume failures
+
+Separate saved-thread admission from fresh startup. Record the exact Rodex name,
+Codex UUID, runtime/installation identity, App Server version, and failing stage.
+A timeout is not a native missing-thread result and does not authorize replacing
+history. Use [lifecycle admission](RUNTIME_ISOLATION.md#liveness-and-replacement)
+and existing-only [SQL reads](SQL_SCHEMA.md#storage-and-transactions) to reconcile
+identities without mutating the catalog.
+
+- **Rodex waits for the Codex session before attachment:** inspect the owned
+  runtime log and native startup protocol. A TUI modal can precede thread loading
+  and leave stderr quiet. The known 0.162.1
+  [hook-review boundary](SECURITY.md#hook-admission-and-resume) explains why a
+  successful fresh session did not prove saved-session resume would work.
+- **Direct Codex reports its shared App Server is not ready:** inspect the exact
+  socket and daemon log named in that error. This is a different server from the
+  private App Server that Rodex launches. A live PID does not prove its socket path
+  is reachable. In the investigated 0.162.1 case, `codex --no-daemon resume UUID`
+  isolated the failed background-server route and opened the saved conversation.
+  Check that the UUID has no active writer before using that diagnostic.
+
+Preserve the distinction between an observed missing socket and its unknown removal
+cause. Diagnose the owning server before restarting processes; a broad daemon restart
+can affect other sessions. Startup owners are `ManagedSessionLifecycle` in
+[managed_session_lifecycle.py](../src/rodex/managed_session_lifecycle.py) and
+`_run_runtime_service` in [runtime.py](../src/rodex/runtime.py).

@@ -52,23 +52,18 @@ caller → retained installation → CLI → implementation-scoped daemon
   resets every participant even if one fails. Observer epoch ownership remains in
   the reducer, not in reset callers or transport.
 - [`TmuxStatusPipeline`](../src/rodex/tmux_status.py) is the shared Python API for
-  status ownership, priority, restoration, and timed notices. Use
-  `TmuxStatusPresentation.message(text)` for literal text with the prefix indicator,
-  and `pipeline.publish_timed(..., duration=5, capability=capability)` for a notice
-  that outlives its launcher. `TimedStatusPublisher` coalesces frequent notices in a
-  runtime worker. Both expiry paths restore through the same claim commands;
-  callers must not assemble delayed tmux commands or escape the restored bar.
+  status ownership, priority, restoration, and timed notices. The
+  [effect contract](INTERACTION_PATHS.md#effect-audit) covers its shared rendering
+  and expiry APIs.
   [`status_bar`](../src/rodex/status_bar.py) owns colours, segments, and text rendering.
 - [`CommandPolicyBroker`](../src/rodex/command_policy.py) is composed beside App
   Server in the runtime, outside the proxy and interaction pipeline. Native
   `PreToolUse(Bash)` invokes the retained helper; its decision returns to Codex for
   approval/sandbox enforcement. Only after responding does the broker queue
-  [tmux-only status](../src/rodex/command_policy_status.py). The capability-test policy
-  denies exact integer sleeps below 10 and otherwise allows;
-  startup adds invocation-local hook-trust bypass only when that exact Rodex hook is
-  the sole enabled native hook. Other enabled hooks retain manual native trust;
-  [security](SECURITY.md#native-command-policy) owns trust, bounds, and future
-  deny/rewrite-command constraints.
+  [tmux-only status](../src/rodex/command_policy_status.py).
+  [`policy_hook_admission`](../src/rodex/command_policy_configuration.py) checks
+  native inventory before TUI startup; [security](SECURITY.md#native-command-policy)
+  owns the policy, exact temporary trust, resume gotcha, and decision boundaries.
 
 ## Persistence and resources
 

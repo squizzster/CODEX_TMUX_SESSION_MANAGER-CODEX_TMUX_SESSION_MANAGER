@@ -11,6 +11,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import TypeVar
 
 from cool_name.functions import (
     allocate_unique_cool_name,
@@ -64,6 +65,8 @@ from .validation import (
     _validate_positive_id,
     _validate_session_id,
 )
+
+GeneratedRodexId = TypeVar("GeneratedRodexId", RodexSessionId, RodexRuntimeId)
 
 
 @dataclass(frozen=True, slots=True)
@@ -343,7 +346,7 @@ def generate_an_unregistered_rodex_runtime_id_candidate(
     )
 
 
-def _generate_an_unregistered_rodex_id_candidate[GeneratedRodexId: (RodexSessionId, RodexRuntimeId)](
+def _generate_an_unregistered_rodex_id_candidate(
     database_path: str | os.PathLike[str] | None,
     *,
     id_type: type[GeneratedRodexId],

@@ -8,6 +8,7 @@ from dataclasses import dataclass, replace
 from enum import StrEnum
 from functools import partial
 from pathlib import Path
+from typing import TypeAlias
 
 from cool_name import (
     CoolNameError,
@@ -76,7 +77,7 @@ class UnregisteredCodexSessionSelection:
     codex_session_id: CodexSessionId
 
 
-type SessionSelection = OwnedSessionSelection | UnregisteredCodexSessionSelection
+SessionSelection: TypeAlias = OwnedSessionSelection | UnregisteredCodexSessionSelection
 
 
 class SelectorExecution(StrEnum):

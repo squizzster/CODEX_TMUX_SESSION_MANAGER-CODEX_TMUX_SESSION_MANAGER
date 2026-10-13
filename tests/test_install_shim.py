@@ -58,6 +58,24 @@ def _write_importable_python(python: Path, label: str) -> Path:
     return python
 
 
+def _write_python_without_rodex(python: Path) -> Path:
+    python.parent.mkdir(parents=True, exist_ok=True)
+    python.write_text(
+        "#!/bin/sh\n"
+        'case "${4-}" in\n'
+        "    *'sys.argv[0] = \"rodex\"'*)\n"
+        "        printf \"ModuleNotFoundError: No module named 'rodex'\\n\" >&2\n"
+        "        exit 1\n"
+        "        ;;\n"
+        "    *'from rodex import main'*) exit 1 ;;\n"
+        "    *) exit 0 ;;\n"
+        "esac\n",
+        encoding="utf-8",
+    )
+    python.chmod(0o755)
+    return python
+
+
 def test_project_root_launcher_does_not_create_a_rodex_virtualenv_context(
     tmp_path: Path,
 ) -> None:
@@ -255,17 +273,19 @@ def test_launchers_print_rodex_help_without_codex_tmux_or_database(
     assert not database.exists()
 
 
-def test_usr_local_bin_shim_reports_unsupported_when_checkout_is_missing(
+def test_usr_local_bin_shim_surfaces_missing_rodex_module_when_checkout_is_missing(
     tmp_path: Path,
 ) -> None:
     project_root = Path(__file__).parents[1]
     shim = project_root / "usr" / "local" / "bin" / "rodex"
     missing_project = tmp_path / "missing-rodex"
+    executable_directory = tmp_path / "bin"
+    _write_python_without_rodex(executable_directory / "python3.11")
     environment = os.environ.copy()
     environment.update(
         {
             "HOME": str(tmp_path / "empty-home"),
-            "PATH": "/usr/bin:/bin",
+            "PATH": str(executable_directory),
             "RODEX_PROJECT_DIR": str(missing_project),
             "RODEX_UV": str(tmp_path / "missing-uv"),
         }
@@ -286,9 +306,8 @@ def test_usr_local_bin_shim_reports_unsupported_when_checkout_is_missing(
     )
 
     assert result.returncode == 1
-    assert "no existing Rodex environment is usable by this user" in result.stderr
-    assert str(missing_project) in result.stderr
-    assert "no environment was installed, created, synchronized, or modified" in result.stderr
+    assert result.stdout == ""
+    assert result.stderr == "ModuleNotFoundError: No module named 'rodex'\n"
 
 
 def test_usr_local_bin_shim_does_not_scan_unrelated_project_content(
@@ -437,7 +456,7 @@ def test_usr_local_bin_shim_uses_an_existing_explicit_python(
     assert result.stderr == ""
 
 
-def test_usr_local_bin_shim_reports_unsupported_without_modifying_user_files(
+def test_usr_local_bin_shim_surfaces_module_failure_without_modifying_user_files(
     tmp_path: Path,
 ) -> None:
     project_root = tmp_path / "shared-project"
@@ -447,6 +466,8 @@ def test_usr_local_bin_shim_reports_unsupported_without_modifying_user_files(
     tool_root = tmp_path / "empty-uv-tools"
     uv_calls = tmp_path / "uv-calls"
     _write_fake_uv(home / ".local/bin/uv", tool_root)
+    executable_directory = tmp_path / "bin"
+    _write_python_without_rodex(executable_directory / "python3.11")
     sentinel = home / "sentinel"
     sentinel.write_text("unchanged\n", encoding="utf-8")
 
@@ -466,7 +487,7 @@ def test_usr_local_bin_shim_reports_unsupported_without_modifying_user_files(
     environment.update(
         {
             "HOME": str(home),
-            "PATH": "/usr/bin:/bin",
+            "PATH": str(executable_directory),
             "RODEX_PROJECT_DIR": str(project_root),
             "RODEX_TEST_UV_CALLS": str(uv_calls),
         }
@@ -486,7 +507,6 @@ def test_usr_local_bin_shim_reports_unsupported_without_modifying_user_files(
 
     assert result.returncode == 1
     assert result.stdout == ""
-    assert "no existing Rodex environment is usable by this user" in result.stderr
-    assert "no environment was installed, created, synchronized, or modified" in result.stderr
+    assert result.stderr == "ModuleNotFoundError: No module named 'rodex'\n"
     assert home_snapshot() == before
     assert uv_calls.read_text(encoding="utf-8").splitlines() == ["--version", "tool dir"]

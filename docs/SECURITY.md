@@ -22,10 +22,12 @@ The [installed shim](../usr/local/bin/rodex) treats the configured checkout as o
 candidate, then probes only named, already-existing executable capabilities: explicit,
 checkout, and active environments; exact uv-tool directories; and explicit or fixed
 system Python locations. A missing or inaccessible checkout does not block an
-independent candidate. A candidate is accepted only when its Python starts at version
-3.12 or newer and imports Rodex. The shim may ask an existing `uv` for `uv tool dir`,
-which is read-only. It never calls `uv sync`, `uv run`, a package/Python installer,
-`find`, `rg`, or recursive traversal.
+independent candidate. An environment candidate is accepted when its Python starts at
+version 3.11 or newer; Rodex then owns any dependency failure. Standalone-Python
+discovery prefers an interpreter that imports Rodex, but otherwise executes the first
+compatible interpreter so its module error remains visible. The shim may ask an
+existing `uv` for `uv tool dir`, which is read-only. It never calls `uv sync`, `uv run`,
+a package/Python installer, `find`, `rg`, or recursive traversal.
 
 Failure is also read-only: the shim reports that no usable environment exists and
 exits. It does not create a per-user fallback, change the checkout, or download

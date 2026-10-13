@@ -13,7 +13,7 @@ from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from statistics import median
-from typing import Any, Protocol
+from typing import Any, Protocol, TypeVar
 
 from codex_protocol_log_analyzer import (
     CodexProtocolLibrary,
@@ -54,6 +54,8 @@ from .analytics_contracts import (
 from .analytics_contracts import (
     RodexAnalyticsError as RodexAnalyticsError,
 )
+
+OperationValue = TypeVar("OperationValue")
 
 
 class _AnalyzerLibrary(Protocol):
@@ -940,7 +942,7 @@ def _parse_projection(stats: Mapping[str, Any]) -> SessionStatisticsProjection:
         raise RodexAnalyticsError(f"analyzer statistics contract mismatch: {error}") from error
 
 
-def _operation_value[OperationValue](
+def _operation_value(
     result: OperationResult[OperationValue],
     operation: str,
     *,

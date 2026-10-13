@@ -3,7 +3,7 @@
 ## Prerequisites
 
 - Linux with `/proc` and `pidfd` support.
-- Python 3.12 or newer and tmux on `PATH`.
+- Python 3.11 or newer and tmux on `PATH`.
 - `uv` to prepare or update a checkout. An installed shim does not require `uv` for a
   user who already has another usable Rodex environment.
 - Installed, authenticated stable Codex CLI at or above the minimum enforced by
@@ -57,14 +57,16 @@ sequence of already-existing capabilities:
 5. Exact uv-tool environment names (`codex-tmux-session-manager` and `rodex`) beneath
    `UV_TOOL_DIR`, the user's normal uv tool directory, or the directory reported by an
    existing `uv tool dir` command. `RODEX_UV` selects an exact uv executable.
-6. Fixed Python 3.12-or-newer candidates under `/usr/local/bin` and `/usr/bin`, only
-   when that Python can already import Rodex.
+6. Python 3.11-or-newer candidates on `PATH` and at fixed locations under
+   `/usr/local/bin` and `/usr/bin`.
 
-Each candidate is verified by executing a bounded import probe. The first working
-candidate runs the command. If none works, the shim reports that the user's environment
-is unsupported and exits without changing anything. It does not invoke `uv sync`,
-`uv run`, installation commands, `find`, `rg`, or recursive inspection. See the
-[launcher boundary](docs/SECURITY.md#launcher-boundary).
+Environment candidates are verified with a bounded Python-version probe. Automatic
+standalone-Python discovery first prefers a candidate that can import Rodex. If none
+can, the first compatible interpreter runs the command so its missing-package or
+module error remains visible. If no compatible interpreter or environment exists, the
+shim reports that the user's environment is unsupported and exits without changing
+anything. It does not invoke `uv sync`, `uv run`, installation commands, `find`, `rg`,
+or recursive inspection. See the [launcher boundary](docs/SECURITY.md#launcher-boundary).
 
 A successful Rodex startup still creates or updates its documented private runtime,
 state, and retained-installation data. The no-modification guarantee above applies to
@@ -138,7 +140,7 @@ Pre-0.15 runtimes did not pin helpers. Prefer a separate checkout/environment du
 that upgrade and leave the old bootstrap untouched until its sessions end.
 
 After moving a bootstrap checkout, update `RODEX_PROJECT_DIR`, recreate its `.venv`
-with `uv venv --clear --python 3.12 .venv`, then run `uv sync --locked`. Virtualenvs
+with `uv venv --clear --python 3.11 .venv`, then run `uv sync --locked`. Virtualenvs
 contain absolute paths; this operation replaces the bootstrap environment, not retained
 installations. Retained installations contain absolute source/interpreter paths and
 are not relocatable, even offline; do not copy them to a new store expecting reuse.
@@ -166,7 +168,7 @@ sudo install -m 0755 "$(pwd -P)/usr/local/bin/rodex" /usr/local/bin/rodex
 
 Each invoking OS user must already have one usable candidate: access to the maintained
 checkout environment, an active/explicit Rodex environment, a Rodex uv-tool
-environment, or a Python 3.12-or-newer installation that can import Rodex. A shared
+environment, or a Python 3.11-or-newer installation that can import Rodex. A shared
 checkout `.venv` that points into a maintainer's private home is rejected by execution,
 not repaired. The shim never provisions missing capability. The maintained checkout
 supplies executable source only when its environment is selected; otherwise the

@@ -129,8 +129,7 @@ def _insert_agent_request_from_activity(
             "parent_rodex_sessions_agent_trace_messages_id, "
             "rodex_sessions_agent_trace_tool_call_activities_id, "
             "rodex_sessions_agent_trace_subagent_activities_id, "
-            "target_codex_threads_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
-            "RETURNING id",
+            "target_codex_threads_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 *split_codex_thread_id_into_signed_bigints(public_id),
                 session_id,
@@ -140,8 +139,8 @@ def _insert_agent_request_from_activity(
                 subagent_activity_id,
                 target_codex_threads_id,
             ),
-        ).fetchone()
-        if inserted is not None:
+        )
+        if inserted.rowcount == 1:
             return True
         stored = connection.execute(
             f"SELECT id FROM {RODEX_SESSIONS_AGENT_REQUESTS_TABLE} "

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping, Sequence
-from typing import Any
+from typing import Any, TypeAlias
 
 from rodex_registry import (
     CodexThreadId,
@@ -25,8 +25,8 @@ from rodex_registry import (
 from .agent_trace_privacy import contains_codex_encrypted_value
 
 AGENT_TRACE_SCHEMA_VERSION = "rodex-agent-trace-v5"
-type AgentTraceSource = tuple[CodexThreadId, bytes] | tuple[CodexThreadId, bytes, int | Sequence[int]]
-type SubagentSpawningTurn = tuple[CodexThreadId, str]
+AgentTraceSource: TypeAlias = tuple[CodexThreadId, bytes] | tuple[CodexThreadId, bytes, int | Sequence[int]]
+SubagentSpawningTurn: TypeAlias = tuple[CodexThreadId, str]
 
 
 class StatefulAgentTraceNormalizer:

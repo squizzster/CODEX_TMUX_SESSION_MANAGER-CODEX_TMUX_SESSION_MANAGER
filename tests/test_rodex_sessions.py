@@ -201,10 +201,13 @@ def test_canonical_trace_vocabulary_rows_are_append_only(tmp_path: Path) -> None
             ("tool_names", "tool_name", "test_tool", "tool name"),
         )
         for table_name, column_name, value, diagnostic in dimensions:
-            row_id = connection.execute(
-                f"INSERT INTO {table_name} ({column_name}) VALUES (?) RETURNING id",
+            inserted = connection.execute(
+                f"INSERT INTO {table_name} ({column_name}) VALUES (?)",
                 (value,),
-            ).fetchone()[0]
+            )
+            assert inserted.rowcount == 1
+            assert inserted.lastrowid is not None
+            row_id = inserted.lastrowid
             with pytest.raises(sqlite3.IntegrityError, match=diagnostic):
                 connection.execute(
                     f"UPDATE {table_name} SET {column_name} = ? WHERE id = ?",

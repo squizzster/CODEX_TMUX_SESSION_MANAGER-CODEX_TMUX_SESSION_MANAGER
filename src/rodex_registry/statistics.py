@@ -338,7 +338,8 @@ def publish_rodex_session_statistics(
             "current_ids.codex_thread_public_id_signed_bigint_1, "
             "current_ids.codex_thread_public_id_signed_bigint_2, "
             "runtimes.runtime_id_signed_bigint, "
-            "statistics.statistics_publication_sequence "
+            "statistics.statistics_publication_sequence, "
+            "statistics.id "
             f"FROM {RODEX_SESSIONS_TABLE} AS sessions "
             f"JOIN {RODEX_REGISTRIES_TABLE} AS registries ON registries.id = 1 "
             f"JOIN {RODEX_SESSIONS_CURRENT_CODEX_THREADS_TABLE} AS current "
@@ -443,16 +444,15 @@ def publish_rodex_session_statistics(
                     raise RodexSessionStatisticsConflictError(
                         "Codex thread identity already belongs to another membership"
                     )
-                row = connection.execute(
+                inserted = connection.execute(
                     f"INSERT INTO {RODEX_SESSIONS_CODEX_THREADS_TABLE} "
                     "(rodex_sessions_id, codex_threads_id, first_linked_at_utc) "
-                    "VALUES (?, ?, ?) "
-                    "RETURNING id",
+                    "VALUES (?, ?, ?)",
                     (session_id, codex_threads_id, item.first_linked_at_utc),
-                ).fetchone()
-                if row is None:
+                )
+                if inserted.rowcount != 1 or inserted.lastrowid is None:
                     raise RodexSessionError("Codex thread insertion returned no identity")
-                source_ids[thread_halves] = int(row[0])
+                source_ids[thread_halves] = int(inserted.lastrowid)
                 new_source_threads.add(item.codex_thread_id)
                 continue
             stored_metadata = (
@@ -482,15 +482,16 @@ def publish_rodex_session_statistics(
             *SESSION_STATISTICS_SCALARS.write_values(statistics_projection),
         )
         if previous_publication_sequence is None:
-            statistics_row = connection.execute(
+            inserted = connection.execute(
                 f"INSERT INTO {RODEX_SESSIONS_STATISTICS_TABLE} "
                 "(rodex_sessions_id, statistics_publication_sequence, "
                 "statistics_projection_schema_version, calculated_at_utc, "
                 f"coverage_state, {SESSION_STATISTICS_SCALARS.columns_sql}) "
                 f"VALUES (?, ?, ?, ?, ?, "
-                f"{SESSION_STATISTICS_SCALARS.placeholders_sql}) RETURNING id",
+                f"{SESSION_STATISTICS_SCALARS.placeholders_sql})",
                 (session_id, *aggregate_values),
-            ).fetchone()
+            )
+            statistics_row = (inserted.lastrowid,) if inserted.rowcount == 1 and inserted.lastrowid is not None else None
         else:
             aggregate_assignments = ", ".join(
                 f"{column} = ?"
@@ -502,11 +503,11 @@ def publish_rodex_session_statistics(
                     *SESSION_STATISTICS_SCALARS.columns,
                 )
             )
-            statistics_row = connection.execute(
-                f"UPDATE {RODEX_SESSIONS_STATISTICS_TABLE} "
-                f"SET {aggregate_assignments} WHERE rodex_sessions_id = ? RETURNING id",
+            updated = connection.execute(
+                f"UPDATE {RODEX_SESSIONS_STATISTICS_TABLE} SET {aggregate_assignments} WHERE rodex_sessions_id = ?",
                 (*aggregate_values, session_id),
-            ).fetchone()
+            )
+            statistics_row = (int(identity_row[6]),) if updated.rowcount == 1 and identity_row[6] is not None else None
         if statistics_row is None:
             raise RodexSessionError("statistics upsert returned no identity")
         _sync_session_projection_children(connection, session_id, statistics_projection)
@@ -531,20 +532,20 @@ def publish_rodex_session_statistics(
                 (source_id,),
             ).fetchone()
             if rollout_row is None:
-                rollout_row = connection.execute(
+                inserted = connection.execute(
                     f"INSERT INTO {RODEX_SESSIONS_CODEX_ROLLOUT_SOURCES_TABLE} "
                     "(rodex_sessions_id, rodex_sessions_codex_threads_id, "
-                    "rollout_file_path, first_observed_at_utc) VALUES (?, ?, ?, ?) "
-                    "RETURNING id, rollout_file_path",
+                    "rollout_file_path, first_observed_at_utc) VALUES (?, ?, ?, ?)",
                     (
                         session_id,
                         source_id,
                         str(item.rollout_file_path),
                         item.verified_at_utc,
                     ),
-                ).fetchone()
-                if rollout_row is None:
+                )
+                if inserted.rowcount != 1 or inserted.lastrowid is None:
                     raise RodexSessionError("rollout source insertion returned no identity")
+                rollout_row = (inserted.lastrowid, str(item.rollout_file_path))
             elif str(rollout_row[1]) != str(item.rollout_file_path):
                 raise RodexSessionStatisticsConflictError("registered Codex rollout path changed during publication")
             checkpoint_values = (
@@ -627,23 +628,23 @@ def publish_rodex_session_statistics(
                 row = None
                 for _attempt_number in index_re_try_attempt_numbers():
                     public_id = uuid.uuid4()
-                    row = connection.execute(
+                    inserted = connection.execute(
                         f"INSERT OR IGNORE INTO {RODEX_SESSIONS_CODEX_TURNS_TABLE} "
                         "(rodex_sessions_id, rodex_sessions_codex_threads_id, "
                         "turn_public_id_signed_bigint_1, "
                         "turn_public_id_signed_bigint_2, "
                         "codex_turn_id_signed_bigint_1, "
                         "codex_turn_id_signed_bigint_2) "
-                        "VALUES (?, ?, ?, ?, ?, ?) "
-                        "RETURNING id",
+                        "VALUES (?, ?, ?, ?, ?, ?)",
                         (
                             session_id,
                             source_id,
                             *split_codex_thread_id_into_signed_bigints(public_id),
                             *turn_identity,
                         ),
-                    ).fetchone()
-                    if row is not None:
+                    )
+                    if inserted.rowcount == 1 and inserted.lastrowid is not None:
+                        row = (inserted.lastrowid,)
                         break
                 if row is None:
                     raise RodexSessionError("turn statistics insertion returned no identity")
@@ -1737,31 +1738,30 @@ def _upsert_analytics_worker(
         consecutive_failures,
         next_retry_at_utc,
     )
-    row = connection.execute(
+    updated = connection.execute(
         f"UPDATE {RODEX_SESSIONS_ANALYTICS_WORKERS_TABLE} SET "
         "worker_state = ?, diagnostic_code = ?, last_attempted_at_utc = ?, "
         "consecutive_failures = ?, next_retry_at_utc = ? "
-        "WHERE rodex_sessions_id = ? RETURNING id, rodex_sessions_id, worker_state, "
-        "diagnostic_code, last_attempted_at_utc, consecutive_failures, "
-        "next_retry_at_utc",
+        "WHERE rodex_sessions_id = ?",
         (*values, session_id),
-    ).fetchone()
-    if row is not None:
+    )
+    if updated.rowcount == 1:
+        row = _select_analytics_worker(connection, session_id)
+        if row is None:
+            raise RodexSessionError(f"analytics worker disappeared: {session_id}")
         return row
     inserted = connection.execute(
         f"INSERT INTO {RODEX_SESSIONS_ANALYTICS_WORKERS_TABLE} "
         "(rodex_sessions_id, worker_state, diagnostic_code, last_attempted_at_utc, "
-        "consecutive_failures, next_retry_at_utc) VALUES (?, ?, ?, ?, ?, ?) "
-        "RETURNING id, rodex_sessions_id, worker_state, diagnostic_code, "
-        "last_attempted_at_utc, consecutive_failures, next_retry_at_utc",
+        "consecutive_failures, next_retry_at_utc) VALUES (?, ?, ?, ?, ?, ?)",
         (
             session_id,
             *values,
         ),
-    ).fetchone()
-    if inserted is None:
+    )
+    if inserted.rowcount != 1 or inserted.lastrowid is None:
         raise RodexSessionError(f"analytics worker disappeared: {session_id}")
-    return inserted
+    return (inserted.lastrowid, session_id, *values)
 
 
 def _session_statistics_from_rows(

@@ -9,10 +9,17 @@ RODEX_PROJECT_DIR=${RODEX_PROJECT_DIR:-/data2/business_genome_classification_sys
 
 unset PYTHONHOME PYTHONPATH PYTHONSTARTUP
 
+rodex_python_is_supported() {
+    [ -n "$1" ] && [ -x "$1" ] && \
+        "$1" -I -B -c \
+            'import sys; raise SystemExit(sys.version_info < (3, 11))' \
+            >/dev/null 2>&1
+}
+
 rodex_python_imports_rodex() {
     [ -n "$1" ] && [ -x "$1" ] && \
         "$1" -I -B -c \
-            'import sys; from rodex import main; raise SystemExit(sys.version_info < (3, 12))' \
+            'import sys; sys.version_info >= (3, 11) or sys.exit(1); from rodex import main' \
             >/dev/null 2>&1
 }
 
@@ -25,7 +32,7 @@ rodex_environment_works() {
         "$candidate_environment/bin/python3" \
         "$candidate_environment/bin/python"
     do
-        if rodex_python_imports_rodex "$candidate_python"; then
+        if rodex_python_is_supported "$candidate_python"; then
             rodex_selected_entrypoint=$candidate_entrypoint
             rodex_selected_python=$candidate_python
             return 0
@@ -59,7 +66,7 @@ rodex_resolve_python_command() {
         */*) resolved_python=$requested_python ;;
         *) resolved_python=$(command -v "$requested_python" 2>/dev/null) || return 1 ;;
     esac
-    if rodex_python_imports_rodex "$resolved_python"; then
+    if rodex_python_is_supported "$resolved_python"; then
         rodex_selected_python=$resolved_python
         return 0
     fi
@@ -125,22 +132,47 @@ if [ -n "$rodex_uv_binary" ]; then
     rodex_try_uv_tool_root "$rodex_uv_tool_root" "$@"
 fi
 
-for rodex_system_python in \
-    /usr/local/bin/python3 \
-    /usr/bin/python3 \
-    /usr/local/bin/python3.12 \
-    /usr/bin/python3.12 \
-    /usr/local/bin/python3.13 \
-    /usr/bin/python3.13 \
-    /usr/local/bin/python3.14 \
-    /usr/bin/python3.14 \
-    /usr/local/bin/python3.15 \
-    /usr/bin/python3.15
-do
-    if rodex_resolve_python_command "$rodex_system_python"; then
-        rodex_run_python "$@"
-    fi
-done
+rodex_python_candidates='python3.15
+python3.14
+python3.13
+python3.12
+python3.11
+python3
+python
+/usr/local/bin/python3.15
+/usr/bin/python3.15
+/usr/local/bin/python3.14
+/usr/bin/python3.14
+/usr/local/bin/python3.13
+/usr/bin/python3.13
+/usr/local/bin/python3.12
+/usr/bin/python3.12
+/usr/local/bin/python3.11
+/usr/bin/python3.11
+/usr/local/bin/python3
+/usr/bin/python3
+/usr/local/bin/python
+/usr/bin/python'
+
+rodex_select_python_candidate() {
+    rodex_selection_mode=$1
+    for rodex_python_candidate in $rodex_python_candidates; do
+        if rodex_resolve_python_command "$rodex_python_candidate"; then
+            if [ "$rodex_selection_mode" = supported ] || \
+                    rodex_python_imports_rodex "$rodex_selected_python"; then
+                return 0
+            fi
+        fi
+    done
+    return 1
+}
+
+if rodex_select_python_candidate importable; then
+    rodex_run_python "$@"
+fi
+if rodex_select_python_candidate supported; then
+    rodex_run_python "$@"
+fi
 
 printf 'rodex: no existing Rodex environment is usable by this user\n' >&2
 printf 'rodex: checked checkout %s, active/explicit environments, local uv tools, and system Python\n' \

@@ -37,23 +37,31 @@ def fetch_all(database: Path, query: str) -> list[tuple[object, ...]]:
         return connection.execute(query).fetchall()
 
 
+def _inserted_row_id(cursor: sqlite3.Cursor) -> int:
+    assert cursor.rowcount == 1
+    assert cursor.lastrowid is not None
+    return int(cursor.lastrowid)
+
+
 def _insert_codex_thread_membership(
     connection: sqlite3.Connection,
     thread_id: uuid.UUID,
 ) -> int:
-    identity_id = connection.execute(
-        "INSERT INTO codex_threads "
-        "(codex_thread_public_id_signed_bigint_1, "
-        "codex_thread_public_id_signed_bigint_2) VALUES (?, ?) RETURNING id",
-        split_codex_thread_id_into_signed_bigints(thread_id),
-    ).fetchone()[0]
-    return int(
+    identity_id = _inserted_row_id(
+        connection.execute(
+            "INSERT INTO codex_threads "
+            "(codex_thread_public_id_signed_bigint_1, "
+            "codex_thread_public_id_signed_bigint_2) VALUES (?, ?)",
+            split_codex_thread_id_into_signed_bigints(thread_id),
+        )
+    )
+    return _inserted_row_id(
         connection.execute(
             "INSERT INTO rodex_sessions_codex_threads "
             "(rodex_sessions_id, codex_threads_id, first_linked_at_utc) "
-            "VALUES (1, ?, '2026-08-26T12:00:00Z') RETURNING id",
+            "VALUES (1, ?, '2026-08-26T12:00:00Z')",
             (identity_id,),
-        ).fetchone()[0]
+        )
     )
 
 
@@ -62,19 +70,19 @@ def _insert_codex_turn(
     thread_membership_id: int,
     turn_id: uuid.UUID,
 ) -> int:
-    return int(
+    return _inserted_row_id(
         connection.execute(
             "INSERT INTO rodex_sessions_codex_turns "
             "(rodex_sessions_id, rodex_sessions_codex_threads_id, "
             "turn_public_id_signed_bigint_1, turn_public_id_signed_bigint_2, "
             "codex_turn_id_signed_bigint_1, codex_turn_id_signed_bigint_2) "
-            "VALUES (1, ?, ?, ?, ?, ?) RETURNING id",
+            "VALUES (1, ?, ?, ?, ?, ?)",
             (
                 thread_membership_id,
                 *split_codex_turn_id_into_signed_bigints(uuid.uuid4()),
                 *split_codex_turn_id_into_signed_bigints(turn_id),
             ),
-        ).fetchone()[0]
+        )
     )
 
 

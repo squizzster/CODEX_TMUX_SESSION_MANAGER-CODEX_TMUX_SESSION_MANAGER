@@ -11,13 +11,15 @@ import time
 from collections.abc import Callable
 from contextlib import suppress
 from pathlib import Path
+from typing import TypeVar
 
 import pytest
 
 PROJECT_ROOT = Path(__file__).parents[1]
+T = TypeVar("T")
 
 
-def _wait_for[T](
+def _wait_for(
     description: str,
     probe: Callable[[], T | None],
     *,

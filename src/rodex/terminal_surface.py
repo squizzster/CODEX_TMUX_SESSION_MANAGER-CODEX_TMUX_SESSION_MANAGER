@@ -329,7 +329,8 @@ def _menu_lines(state: InputMenuView, draft: str, available_rows: int) -> list[t
         row = state.rows[index]
         selected = index == state.selected_index
         label = row.label + " " * (label_width - wcswidth(row.label))
-        prefix = f"{'\u203a' if selected else ' '} {index + 1}. " if state.stage == InputMenuStage.ARGUMENTS else "  "
+        selection_marker = "\u203a" if selected else " "
+        prefix = f"{selection_marker} {index + 1}. " if state.stage == InputMenuStage.ARGUMENTS else "  "
         lines.append((f"{prefix}{label}   {row.helper_text}", selected))
     if not state.rows:
         lines.append(("  no matches", False))

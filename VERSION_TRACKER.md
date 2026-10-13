@@ -14,7 +14,8 @@ repository currently has no Git release tags, so they do not imply a published r
   2026-10-11, preserve Codex 0.162.1 notice-placement evidence and its verification limits.
 - Native managed-session command-policy hook with volatile tmux-only command status,
   a typed allow/deny/rewrite-command extension point, and a first capability rule
-  denying exact integer sleeps below 10 seconds with model-visible feedback.
+  denying standalone integer sleeps below 10 seconds with model-visible feedback.
+  The matcher accepts surrounding horizontal whitespace and one terminal semicolon.
   An exact Rodex-only hook inventory gets temporary native key/hash trust;
   another enabled hook retains `_policy-setup`. Decision and inactive-reminder rows
   last five seconds, expose tmux prefix mode, and restore the normal bar by exact

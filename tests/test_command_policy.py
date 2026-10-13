@@ -77,8 +77,20 @@ def test_request_preserves_all_input_and_context_without_shell_parsing():
     assert request.to_payload()["command"] == {"kind": "shell", "text": event["tool_input"]["command"]}
 
 
-@pytest.mark.parametrize("command", ["sleep 0", "sleep 00", "sleep 1", "sleep 09", "sleep 9"])
-def test_policy_denies_exact_integer_sleeps_below_ten_with_feedback(command):
+@pytest.mark.parametrize(
+    "command",
+    [
+        "sleep 0",
+        "sleep 00",
+        "sleep 1",
+        "sleep 09",
+        "sleep 9",
+        "sleep 5;",
+        "  sleep 5  ;",
+        "\tsleep\t5\t;\t",
+    ],
+)
+def test_policy_denies_standalone_integer_sleeps_below_ten_with_feedback(command):
     request = CommandPolicyRequest.from_hook(RUNTIME, hook_event(command))
 
     assert evaluate_command_policy(request) == CommandPolicyDecision("deny", reason=SHORT_SLEEP_DENIAL_REASON)
@@ -89,16 +101,19 @@ def test_policy_denies_exact_integer_sleeps_below_ten_with_feedback(command):
     [
         "sleep 10",
         "sleep 010",
+        " sleep 10 ; ",
+        "sleep 232;",
         "sleep 9999999999999999999999999999999999999999",
         "sleep 9.0",
         "sleep 9s",
-        "sleep 9 ",
-        " sleep 9",
         "sleep 9 && printf done",
         "printf before; sleep 9",
+        "/bin/sleep 9;",
+        "sleep 9;;",
+        "sleep 9; # comment",
     ],
 )
-def test_policy_allows_ten_or_more_and_commands_outside_the_exact_integer_sleep_shape(command):
+def test_policy_allows_ten_or_more_and_commands_outside_the_standalone_integer_sleep_shape(command):
     request = CommandPolicyRequest.from_hook(RUNTIME, hook_event(command))
 
     assert evaluate_command_policy(request) == CommandPolicyDecision("allow")

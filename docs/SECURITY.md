@@ -18,14 +18,18 @@ the wrong runtime; unverifiable sessions are reported, not auto-adopted or remov
 
 ## Launcher boundary
 
-The [installed shim](../usr/local/bin/rodex) treats the configured checkout as one
+The [installation guide](../INSTALL.md#command-and-environment-are-separate) owns
+environment-preparation routes and the exact resolver order. The
+[installed shim](../usr/local/bin/rodex) treats the configured checkout as one
 candidate, then probes only named, already-existing executable capabilities: explicit,
 checkout, and active environments; exact uv-tool directories; and explicit or fixed
 system Python locations. A missing or inaccessible checkout does not block an
 independent candidate. An environment candidate is accepted when its Python starts at
-version 3.11 or newer; Rodex then owns any dependency failure. Standalone-Python
-discovery prefers an interpreter that imports Rodex, but otherwise executes the first
-compatible interpreter so its module error remains visible. The shim may ask an
+version 3.11 or newer; package/dependency failure remains the selected environment's
+visible result. Standalone-Python discovery prefers an interpreter that imports Rodex,
+but otherwise executes the first compatible interpreter so its module error remains
+visible. Standalone execution uses `-I` and cleared Python path/startup variables, so
+user-site packages and `PYTHONPATH` are not implicit capabilities. The shim may ask an
 existing `uv` for `uv tool dir`, which is read-only. It never calls `uv sync`, `uv run`,
 a package/Python installer, `find`, `rg`, or recursive traversal.
 

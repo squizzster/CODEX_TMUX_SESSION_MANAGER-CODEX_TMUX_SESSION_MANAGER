@@ -6,6 +6,12 @@ the composed system to its owners.
 
 ## Choose the authority
 
+- **Bootstrap, launcher, or update:** [installation](INSTALL.md) owns the distinction
+  between command shims, selectable Python environments, and retained installations.
+  The [system shim](usr/local/bin/rodex) performs bounded read-only discovery;
+  [`enter_fixed_installation`](src/rodex/installation.py) owns publication into the
+  private retained store after package startup. Keep discovery behavior covered by
+  [shim tests](tests/test_install_shim.py), not by another environment search path.
 - **Invocation or option meaning:** start at `COMMAND_SPECS` in
   [command_contract.py](src/rodex/command_contract.py) and
   `UnifiedRodexApplicationPipeline` in [application_pipeline.py](src/rodex/application_pipeline.py).

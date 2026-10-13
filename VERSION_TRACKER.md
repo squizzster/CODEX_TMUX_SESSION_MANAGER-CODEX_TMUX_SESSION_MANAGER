@@ -39,7 +39,9 @@ repository currently has no Git release tags, so they do not imply a published r
   restart instead of relying on the TUI bypass flag. Native start/resume/fork and
   same-name runtime replacement tests preserve UUIDs, permissions, and user hook state.
 - Documentation refactor: complete README index, a change-boundary guide, consolidated
-  interaction/hook contracts, and dated native findings. Resume, notice, retry, and
+  interaction/hook contracts, dated native findings, and explicit separation of the
+  launch shim from owner-provisioned checkout, uv-tool, virtualenv, or system
+  environments. Missing-package, isolated-user-site, resume, notice, retry, and
   model-input gotchas are retained; application behavior is unchanged.
 - The [session-control skill](.agents/skills/rodex-session-control/SKILL.md) now
   distinguishes model input from local notices, clarifies native command-policy

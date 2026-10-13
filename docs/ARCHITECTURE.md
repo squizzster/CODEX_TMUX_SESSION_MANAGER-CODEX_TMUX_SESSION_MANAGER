@@ -5,12 +5,18 @@ local control. It is more than a protocol relay: terminal projection, lifecycle
 admission, observer state, and rollout analytics have separate owners.
 
 ```text
-caller → retained installation → CLI → implementation-scoped daemon
-                                  │     ├─ runtime A: tmux A → TUI ↔ proxy ↔ App Server
-                                  │     ├─ runtime B: tmux B → TUI ↔ proxy ↔ App Server
-                                  │     └─ one analytics coordinator → SQLite
-                                  └─ registry / verified reads / native passthrough
+caller → selected bootstrap environment → retained installation → CLI
+                                                              │
+                                                              ├─ implementation-scoped daemon
+                                                              │  ├─ runtime A: tmux A → TUI ↔ proxy ↔ App Server
+                                                              │  ├─ runtime B: tmux B → TUI ↔ proxy ↔ App Server
+                                                              │  └─ one analytics coordinator → SQLite
+                                                              └─ registry / verified reads / native passthrough
 ```
+
+[Installation](../INSTALL.md#command-and-environment-are-separate) owns bootstrap
+selection and preparation. The command shim does not provision that environment;
+package startup publishes or reuses the retained installation before CLI composition.
 
 ## Application and lifecycle
 

@@ -9,7 +9,7 @@ import uuid
 import weakref
 from dataclasses import asdict, dataclass, field, replace
 from threading import Lock
-from typing import Any
+from typing import Any, TypeAlias
 
 from .identity import (
     CodexThreadId,
@@ -119,7 +119,7 @@ class TraceSubagentActivity:
     collaboration_call_id: str | None = None
 
 
-type TraceDetail = (
+TraceDetail: TypeAlias = (
     TraceMessage
     | TraceToolCall
     | TraceCommandExecution

@@ -27,12 +27,21 @@ repository currently has no Git release tags, so they do not imply a published r
 
 ### Modified
 
+- Rodex now targets Python 3.11 or newer using equivalent pre-PEP-695 typing syntax.
+  Launcher discovery includes PATH interpreters and leaves missing-package or module
+  failures visible after selecting a compatible Python.
+- The installed shim now resolves only existing, executable Rodex environments for the
+  invoking user: explicit, checkout, active-virtualenv, uv-tool, and system-Python
+  candidates. It performs no installation, synchronization, download, or recursive
+  scan and reports an unsupported environment without modifying it.
 - Saved-session resume no longer waits behind Codex 0.162.1's hidden hook-review
   prompt. Automatic admission verifies native trust after a provisional App Server
   restart instead of relying on the TUI bypass flag. Native start/resume/fork and
   same-name runtime replacement tests preserve UUIDs, permissions, and user hook state.
 - Documentation refactor: complete README index, a change-boundary guide, consolidated
-  interaction/hook contracts, and dated native findings. Resume, notice, retry, and
+  interaction/hook contracts, dated native findings, and explicit separation of the
+  launch shim from owner-provisioned checkout, uv-tool, virtualenv, or system
+  environments. Missing-package, isolated-user-site, resume, notice, retry, and
   model-input gotchas are retained; application behavior is unchanged.
 - The [session-control skill](.agents/skills/rodex-session-control/SKILL.md) now
   distinguishes model input from local notices, clarifies native command-policy

@@ -4,6 +4,7 @@ import json
 import shlex
 import shutil
 import socket
+import sqlite3
 import subprocess
 import sys
 import time
@@ -58,6 +59,12 @@ OTHER_THREAD_ID = uuid.UUID("01a00654-f2bc-7a30-834a-a5f886a65f84")
 TRACE_CURSOR = uuid.UUID("10000000-0000-4000-8000-000000000001")
 RUNTIME_ID = RodexRuntimeId.parse("0123456789abcdef")
 PEER_IDENTITY = RuntimePeerIdentity(RUNTIME_ID, "0123456789abcdef0123456789abcdef")
+
+
+def _inserted_row_id(cursor: sqlite3.Cursor) -> int:
+    assert cursor.rowcount == 1
+    assert cursor.lastrowid is not None
+    return int(cursor.lastrowid)
 
 
 def _runtime_capability(socket_path: Path) -> TmuxRuntimeCapability:
@@ -2004,41 +2011,49 @@ def test_agent_observer_evidence_reader_uses_exact_thread_and_turn(tmp_path: Pat
         metric_overrides.get(field.name, None if field.nullable else 0) for field in TURN_STATISTICS_SCALARS.fields
     ]
     with open_rodex_transaction(database) as connection:
-        root_turn_row = connection.execute(
-            "INSERT INTO rodex_sessions_codex_turns "
-            "(rodex_sessions_id, rodex_sessions_codex_threads_id, "
-            "turn_public_id_signed_bigint_1, turn_public_id_signed_bigint_2, "
-            "codex_turn_id_signed_bigint_1, codex_turn_id_signed_bigint_2) "
-            "VALUES (1, 1, ?, ?, ?, ?) RETURNING id",
-            (
-                *split_codex_turn_id_into_signed_bigints(root_turn_public_id),
-                *split_codex_turn_id_into_signed_bigints(root_turn_id),
-            ),
-        ).fetchone()[0]
-        child_identity_row = connection.execute(
-            "INSERT INTO codex_threads "
-            "(codex_thread_public_id_signed_bigint_1, "
-            "codex_thread_public_id_signed_bigint_2) VALUES (?, ?) RETURNING id",
-            split_codex_thread_id_into_signed_bigints(CHILD_THREAD_ID),
-        ).fetchone()[0]
-        child_membership_row = connection.execute(
-            "INSERT INTO rodex_sessions_codex_threads "
-            "(rodex_sessions_id, codex_threads_id, first_linked_at_utc) "
-            "VALUES (1, ?, ?) RETURNING id",
-            (child_identity_row, "2026-08-27T00:00:00Z"),
-        ).fetchone()[0]
-        child_turn_row = connection.execute(
-            "INSERT INTO rodex_sessions_codex_turns "
-            "(rodex_sessions_id, rodex_sessions_codex_threads_id, "
-            "turn_public_id_signed_bigint_1, turn_public_id_signed_bigint_2, "
-            "codex_turn_id_signed_bigint_1, codex_turn_id_signed_bigint_2) "
-            "VALUES (1, ?, ?, ?, ?, ?) RETURNING id",
-            (
-                child_membership_row,
-                *split_codex_turn_id_into_signed_bigints(child_turn_public_id),
-                *split_codex_turn_id_into_signed_bigints(child_turn_id),
-            ),
-        ).fetchone()[0]
+        root_turn_row = _inserted_row_id(
+            connection.execute(
+                "INSERT INTO rodex_sessions_codex_turns "
+                "(rodex_sessions_id, rodex_sessions_codex_threads_id, "
+                "turn_public_id_signed_bigint_1, turn_public_id_signed_bigint_2, "
+                "codex_turn_id_signed_bigint_1, codex_turn_id_signed_bigint_2) "
+                "VALUES (1, 1, ?, ?, ?, ?)",
+                (
+                    *split_codex_turn_id_into_signed_bigints(root_turn_public_id),
+                    *split_codex_turn_id_into_signed_bigints(root_turn_id),
+                ),
+            )
+        )
+        child_identity_row = _inserted_row_id(
+            connection.execute(
+                "INSERT INTO codex_threads "
+                "(codex_thread_public_id_signed_bigint_1, "
+                "codex_thread_public_id_signed_bigint_2) VALUES (?, ?)",
+                split_codex_thread_id_into_signed_bigints(CHILD_THREAD_ID),
+            )
+        )
+        child_membership_row = _inserted_row_id(
+            connection.execute(
+                "INSERT INTO rodex_sessions_codex_threads "
+                "(rodex_sessions_id, codex_threads_id, first_linked_at_utc) "
+                "VALUES (1, ?, ?)",
+                (child_identity_row, "2026-08-27T00:00:00Z"),
+            )
+        )
+        child_turn_row = _inserted_row_id(
+            connection.execute(
+                "INSERT INTO rodex_sessions_codex_turns "
+                "(rodex_sessions_id, rodex_sessions_codex_threads_id, "
+                "turn_public_id_signed_bigint_1, turn_public_id_signed_bigint_2, "
+                "codex_turn_id_signed_bigint_1, codex_turn_id_signed_bigint_2) "
+                "VALUES (1, ?, ?, ?, ?, ?)",
+                (
+                    child_membership_row,
+                    *split_codex_turn_id_into_signed_bigints(child_turn_public_id),
+                    *split_codex_turn_id_into_signed_bigints(child_turn_id),
+                ),
+            )
+        )
         connection.execute(
             "INSERT INTO rodex_sessions_codex_turn_states "
             "(rodex_sessions_id, rodex_sessions_codex_turns_id, "
@@ -2307,12 +2322,14 @@ def test_real_tmux_observer_renders_request_and_exits_with_its_runtime(
     database = tmp_path / "r.sqlite3"
     create_a_rodex_session(database, codex_session_id=ROOT_THREAD_ID)
     with open_rodex_transaction(database) as connection:
-        child_identity_id = connection.execute(
-            "INSERT INTO codex_threads "
-            "(codex_thread_public_id_signed_bigint_1, "
-            "codex_thread_public_id_signed_bigint_2) VALUES (?, ?) RETURNING id",
-            split_codex_thread_id_into_signed_bigints(CHILD_THREAD_ID),
-        ).fetchone()[0]
+        child_identity_id = _inserted_row_id(
+            connection.execute(
+                "INSERT INTO codex_threads "
+                "(codex_thread_public_id_signed_bigint_1, "
+                "codex_thread_public_id_signed_bigint_2) VALUES (?, ?)",
+                split_codex_thread_id_into_signed_bigints(CHILD_THREAD_ID),
+            )
+        )
         connection.execute(
             "INSERT INTO rodex_sessions_codex_threads "
             "(rodex_sessions_id, codex_threads_id, first_linked_at_utc) "

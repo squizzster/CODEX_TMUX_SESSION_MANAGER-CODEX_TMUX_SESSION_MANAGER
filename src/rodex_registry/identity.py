@@ -6,7 +6,7 @@ import re
 import secrets
 import uuid
 from dataclasses import dataclass
-from typing import ClassVar, Final, Self
+from typing import ClassVar, Final, Self, TypeAlias
 
 RODEX_ID_BITS: Final = 64
 RODEX_ID_HEX_CHARACTERS: Final = 16
@@ -16,10 +16,10 @@ _SIGNED_64_MIN: Final = -_SIGNED_64_SIGN_BIT
 _SIGNED_64_MAX: Final = _SIGNED_64_SIGN_BIT - 1
 _CANONICAL_RODEX_ID = re.compile(r"^[0-9a-f]{16}$")
 
-type CodexSessionId = uuid.UUID
-type CodexThreadId = uuid.UUID
-type CodexTurnId = uuid.UUID
-type CodexItemId = uuid.UUID
+CodexSessionId: TypeAlias = uuid.UUID
+CodexThreadId: TypeAlias = uuid.UUID
+CodexTurnId: TypeAlias = uuid.UUID
+CodexItemId: TypeAlias = uuid.UUID
 
 
 class RodexIdError(ValueError):

@@ -45,6 +45,12 @@ def _content(*records: dict[str, object]) -> bytes:
     return b"".join(json.dumps(record).encode() + b"\n" for record in records)
 
 
+def _inserted_row_id(cursor: sqlite3.Cursor) -> int:
+    assert cursor.rowcount == 1
+    assert cursor.lastrowid is not None
+    return int(cursor.lastrowid)
+
+
 @pytest.mark.parametrize("label", ["auto-compact-1", "auto-compact-4", "future-internal-label"])
 def test_internal_response_label_is_thread_scoped_without_replacing_active_turn(label: str) -> None:
     prefix = _content(
@@ -1014,9 +1020,9 @@ def test_tool_request_and_output_share_one_canonical_public_tool_call(
             "request-item",
         )
         assert connection.execute("SELECT COUNT(*) FROM rodex_sessions_codex_tool_call_aliases").fetchone() == (2,)
-        replacement_name_id = connection.execute(
-            "INSERT INTO tool_names (tool_name) VALUES ('replacement.tool') RETURNING id"
-        ).fetchone()[0]
+        replacement_name_id = _inserted_row_id(
+            connection.execute("INSERT INTO tool_names (tool_name) VALUES ('replacement.tool')")
+        )
         with pytest.raises(sqlite3.IntegrityError, match="identity is immutable"):
             connection.execute(
                 "UPDATE rodex_sessions_codex_tool_calls SET tool_names_id = ?",
@@ -1427,18 +1433,22 @@ def test_initial_and_followup_requests_are_distinct_and_link_distinct_agent_turn
         uuid.UUID("00000000-0000-7000-8000-0000000000c2"),
     )
     with open_rodex_transaction(database) as connection:
-        child_identity_id = connection.execute(
-            "INSERT INTO codex_threads "
-            "(codex_thread_public_id_signed_bigint_1, "
-            "codex_thread_public_id_signed_bigint_2) VALUES (?, ?) RETURNING id",
-            split_codex_thread_id_into_signed_bigints(CHILD_THREAD_ID),
-        ).fetchone()[0]
-        child_membership_id = connection.execute(
-            "INSERT INTO rodex_sessions_codex_threads "
-            "(rodex_sessions_id, codex_threads_id, first_linked_at_utc) "
-            "VALUES (1, ?, '2026-08-27T03:25:30Z') RETURNING id",
-            (child_identity_id,),
-        ).fetchone()[0]
+        child_identity_id = _inserted_row_id(
+            connection.execute(
+                "INSERT INTO codex_threads "
+                "(codex_thread_public_id_signed_bigint_1, "
+                "codex_thread_public_id_signed_bigint_2) VALUES (?, ?)",
+                split_codex_thread_id_into_signed_bigints(CHILD_THREAD_ID),
+            )
+        )
+        child_membership_id = _inserted_row_id(
+            connection.execute(
+                "INSERT INTO rodex_sessions_codex_threads "
+                "(rodex_sessions_id, codex_threads_id, first_linked_at_utc) "
+                "VALUES (1, ?, '2026-08-27T03:25:30Z')",
+                (child_identity_id,),
+            )
+        )
         for ordinal, (turn_id, started, terminal, outcome) in enumerate(
             (
                 (
@@ -1457,18 +1467,20 @@ def test_initial_and_followup_requests_are_distinct_and_link_distinct_agent_turn
             start=1,
         ):
             public_id = uuid.UUID(int=0x100 + ordinal)
-            turn_row_id = connection.execute(
-                "INSERT INTO rodex_sessions_codex_turns "
-                "(rodex_sessions_id, rodex_sessions_codex_threads_id, "
-                "turn_public_id_signed_bigint_1, turn_public_id_signed_bigint_2, "
-                "codex_turn_id_signed_bigint_1, codex_turn_id_signed_bigint_2) "
-                "VALUES (1, ?, ?, ?, ?, ?) RETURNING id",
-                (
-                    child_membership_id,
-                    *split_codex_thread_id_into_signed_bigints(public_id),
-                    *split_codex_turn_id_into_signed_bigints(turn_id),
-                ),
-            ).fetchone()[0]
+            turn_row_id = _inserted_row_id(
+                connection.execute(
+                    "INSERT INTO rodex_sessions_codex_turns "
+                    "(rodex_sessions_id, rodex_sessions_codex_threads_id, "
+                    "turn_public_id_signed_bigint_1, turn_public_id_signed_bigint_2, "
+                    "codex_turn_id_signed_bigint_1, codex_turn_id_signed_bigint_2) "
+                    "VALUES (1, ?, ?, ?, ?, ?)",
+                    (
+                        child_membership_id,
+                        *split_codex_thread_id_into_signed_bigints(public_id),
+                        *split_codex_turn_id_into_signed_bigints(turn_id),
+                    ),
+                )
+            )
             connection.execute(
                 "INSERT INTO rodex_sessions_codex_turn_states "
                 "(rodex_sessions_id, rodex_sessions_codex_turns_id, "
@@ -1804,26 +1816,32 @@ def test_request_commits_before_target_registration_then_links_only_its_target_t
         assert request_row is not None
         assert connection.execute("SELECT COUNT(*) FROM rodex_sessions_agent_request_target_turns").fetchone()[0] == 0
     with open_rodex_transaction(database) as connection:
-        wrong_identity_id = connection.execute(
-            "INSERT INTO codex_threads "
-            "(codex_thread_public_id_signed_bigint_1, "
-            "codex_thread_public_id_signed_bigint_2) VALUES (?, ?) RETURNING id",
-            split_codex_thread_id_into_signed_bigints(REPLACEMENT_THREAD_ID),
-        ).fetchone()[0]
-        wrong_membership_id = connection.execute(
-            "INSERT INTO rodex_sessions_codex_threads "
-            "(rodex_sessions_id, codex_threads_id, first_linked_at_utc) "
-            "VALUES (1, ?, '2026-08-27T03:25:31Z') RETURNING id",
-            (wrong_identity_id,),
-        ).fetchone()[0]
-        wrong_turn_row = connection.execute(
-            "INSERT INTO rodex_sessions_codex_turns "
-            "(rodex_sessions_id, rodex_sessions_codex_threads_id, "
-            "turn_public_id_signed_bigint_1, turn_public_id_signed_bigint_2, "
-            "codex_turn_id_signed_bigint_1, codex_turn_id_signed_bigint_2) "
-            "VALUES (1, ?, 0, 900, 0, 901) RETURNING id",
-            (wrong_membership_id,),
-        ).fetchone()[0]
+        wrong_identity_id = _inserted_row_id(
+            connection.execute(
+                "INSERT INTO codex_threads "
+                "(codex_thread_public_id_signed_bigint_1, "
+                "codex_thread_public_id_signed_bigint_2) VALUES (?, ?)",
+                split_codex_thread_id_into_signed_bigints(REPLACEMENT_THREAD_ID),
+            )
+        )
+        wrong_membership_id = _inserted_row_id(
+            connection.execute(
+                "INSERT INTO rodex_sessions_codex_threads "
+                "(rodex_sessions_id, codex_threads_id, first_linked_at_utc) "
+                "VALUES (1, ?, '2026-08-27T03:25:31Z')",
+                (wrong_identity_id,),
+            )
+        )
+        wrong_turn_row = _inserted_row_id(
+            connection.execute(
+                "INSERT INTO rodex_sessions_codex_turns "
+                "(rodex_sessions_id, rodex_sessions_codex_threads_id, "
+                "turn_public_id_signed_bigint_1, turn_public_id_signed_bigint_2, "
+                "codex_turn_id_signed_bigint_1, codex_turn_id_signed_bigint_2) "
+                "VALUES (1, ?, 0, 900, 0, 901)",
+                (wrong_membership_id,),
+            )
+        )
         connection.execute(
             "INSERT INTO rodex_sessions_codex_turn_states "
             "(rodex_sessions_id, rodex_sessions_codex_turns_id, "
@@ -1844,12 +1862,14 @@ def test_request_commits_before_target_registration_then_links_only_its_target_t
             "codex_thread_public_id_signed_bigint_2 = ?",
             split_codex_thread_id_into_signed_bigints(CHILD_THREAD_ID),
         ).fetchone()[0]
-        child_membership_id = connection.execute(
-            "INSERT INTO rodex_sessions_codex_threads "
-            "(rodex_sessions_id, codex_threads_id, first_linked_at_utc) "
-            "VALUES (1, ?, '2026-08-27T03:25:31Z') RETURNING id",
-            (child_identity_id,),
-        ).fetchone()[0]
+        child_membership_id = _inserted_row_id(
+            connection.execute(
+                "INSERT INTO rodex_sessions_codex_threads "
+                "(rodex_sessions_id, codex_threads_id, first_linked_at_utc) "
+                "VALUES (1, ?, '2026-08-27T03:25:31Z')",
+                (child_identity_id,),
+            )
+        )
         target_turn_rows = []
         for public_id, codex_turn_id, started_at in (
             (
@@ -1863,18 +1883,20 @@ def test_request_commits_before_target_registration_then_links_only_its_target_t
                 "2026-08-27T03:25:31.200Z",
             ),
         ):
-            turn_row = connection.execute(
-                "INSERT INTO rodex_sessions_codex_turns "
-                "(rodex_sessions_id, rodex_sessions_codex_threads_id, "
-                "turn_public_id_signed_bigint_1, turn_public_id_signed_bigint_2, "
-                "codex_turn_id_signed_bigint_1, codex_turn_id_signed_bigint_2) "
-                "VALUES (1, ?, ?, ?, ?, ?) RETURNING id",
-                (
-                    child_membership_id,
-                    *split_codex_thread_id_into_signed_bigints(public_id),
-                    *split_codex_turn_id_into_signed_bigints(codex_turn_id),
-                ),
-            ).fetchone()[0]
+            turn_row = _inserted_row_id(
+                connection.execute(
+                    "INSERT INTO rodex_sessions_codex_turns "
+                    "(rodex_sessions_id, rodex_sessions_codex_threads_id, "
+                    "turn_public_id_signed_bigint_1, turn_public_id_signed_bigint_2, "
+                    "codex_turn_id_signed_bigint_1, codex_turn_id_signed_bigint_2) "
+                    "VALUES (1, ?, ?, ?, ?, ?)",
+                    (
+                        child_membership_id,
+                        *split_codex_thread_id_into_signed_bigints(public_id),
+                        *split_codex_turn_id_into_signed_bigints(codex_turn_id),
+                    ),
+                )
+            )
             connection.execute(
                 "INSERT INTO rodex_sessions_codex_turn_states "
                 "(rodex_sessions_id, rodex_sessions_codex_turns_id, "
@@ -2095,19 +2117,22 @@ def test_include_bodies_resolves_an_authenticated_historical_root(
     )
     rollout.write_bytes(content)
     with open_rodex_transaction(database) as connection:
-        worker_id = connection.execute(
-            "INSERT INTO rodex_sessions_analytics_workers "
-            "(rodex_sessions_id, worker_state, last_attempted_at_utc, "
-            "consecutive_failures) VALUES (1, 'up_to_date', ?, 0) RETURNING id",
-            ("2026-08-26T12:00:00Z",),
-        ).fetchone()[0]
-        source_id = connection.execute(
-            "INSERT INTO rodex_sessions_codex_rollout_sources "
-            "(rodex_sessions_id, rodex_sessions_codex_threads_id, "
-            "rollout_file_path, first_observed_at_utc) VALUES (1, 1, ?, ?) "
-            "RETURNING id",
-            (str(rollout), "2026-08-26T12:00:00Z"),
-        ).fetchone()[0]
+        worker_id = _inserted_row_id(
+            connection.execute(
+                "INSERT INTO rodex_sessions_analytics_workers "
+                "(rodex_sessions_id, worker_state, last_attempted_at_utc, "
+                "consecutive_failures) VALUES (1, 'up_to_date', ?, 0)",
+                ("2026-08-26T12:00:00Z",),
+            )
+        )
+        source_id = _inserted_row_id(
+            connection.execute(
+                "INSERT INTO rodex_sessions_codex_rollout_sources "
+                "(rodex_sessions_id, rodex_sessions_codex_threads_id, "
+                "rollout_file_path, first_observed_at_utc) VALUES (1, 1, ?, ?)",
+                (str(rollout), "2026-08-26T12:00:00Z"),
+            )
+        )
         stat = rollout.stat()
         connection.execute(
             "INSERT INTO rodex_sessions_analytics_worker_thread_checkpoints "
@@ -2177,32 +2202,38 @@ def test_agent_trace_commands_render_lineage_and_snapshot(tmp_path: Path, capsys
     assert agents["agents"][0]["codex_thread_id"] == str(THREAD_ID)
 
     with open_rodex_transaction(database) as connection:
-        identity_id = connection.execute(
-            "INSERT INTO codex_threads "
-            "(codex_thread_public_id_signed_bigint_1, "
-            "codex_thread_public_id_signed_bigint_2) VALUES (?, ?) RETURNING id",
-            split_codex_thread_id_into_signed_bigints(CHILD_THREAD_ID),
-        ).fetchone()[0]
-        child_membership_id = connection.execute(
-            "INSERT INTO rodex_sessions_codex_threads "
-            "(rodex_sessions_id, codex_threads_id, first_linked_at_utc) "
-            "VALUES (?, ?, ?) RETURNING id",
-            (1, identity_id, "2026-08-26T12:00:00Z"),
-        ).fetchone()[0]
-        spawning_turn_id = connection.execute(
-            "INSERT INTO rodex_sessions_codex_turns "
-            "(rodex_sessions_id, rodex_sessions_codex_threads_id, "
-            "turn_public_id_signed_bigint_1, turn_public_id_signed_bigint_2, "
-            "codex_turn_id_signed_bigint_1, codex_turn_id_signed_bigint_2) "
-            "VALUES (?, ?, ?, ?, ?, ?) RETURNING id",
-            (
-                1,
-                1,
-                101,
-                102,
-                *split_codex_thread_id_into_signed_bigints(uuid.UUID("00000000-0000-7000-8000-00000000000b")),
-            ),
-        ).fetchone()[0]
+        identity_id = _inserted_row_id(
+            connection.execute(
+                "INSERT INTO codex_threads "
+                "(codex_thread_public_id_signed_bigint_1, "
+                "codex_thread_public_id_signed_bigint_2) VALUES (?, ?)",
+                split_codex_thread_id_into_signed_bigints(CHILD_THREAD_ID),
+            )
+        )
+        child_membership_id = _inserted_row_id(
+            connection.execute(
+                "INSERT INTO rodex_sessions_codex_threads "
+                "(rodex_sessions_id, codex_threads_id, first_linked_at_utc) "
+                "VALUES (?, ?, ?)",
+                (1, identity_id, "2026-08-26T12:00:00Z"),
+            )
+        )
+        spawning_turn_id = _inserted_row_id(
+            connection.execute(
+                "INSERT INTO rodex_sessions_codex_turns "
+                "(rodex_sessions_id, rodex_sessions_codex_threads_id, "
+                "turn_public_id_signed_bigint_1, turn_public_id_signed_bigint_2, "
+                "codex_turn_id_signed_bigint_1, codex_turn_id_signed_bigint_2) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    1,
+                    1,
+                    101,
+                    102,
+                    *split_codex_thread_id_into_signed_bigints(uuid.UUID("00000000-0000-7000-8000-00000000000b")),
+                ),
+            )
+        )
         connection.execute(
             "INSERT INTO rodex_sessions_codex_turn_states "
             "(rodex_sessions_id, rodex_sessions_codex_turns_id, outcome) "

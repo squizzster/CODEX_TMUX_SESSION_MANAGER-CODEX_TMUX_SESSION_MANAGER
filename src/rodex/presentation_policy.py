@@ -14,7 +14,7 @@ from contextlib import suppress
 from dataclasses import dataclass, field
 from enum import StrEnum
 from threading import RLock
-from typing import Final, Protocol
+from typing import Final, Protocol, TypeAlias
 
 from .app_server_contract import CODEX_APP_SERVER
 from .interaction_pipeline import (
@@ -37,7 +37,7 @@ PRESENTATION_HYDRATED_TURN_LIMIT: Final = 128
 PRESENTATION_HYDRATED_ITEM_LIMIT: Final = 256
 PRESENTATION_REQUEST_LIMIT: Final = 256
 
-type ProtocolRequestIdentity = tuple[str, int | str]
+ProtocolRequestIdentity: TypeAlias = tuple[str, int | str]
 
 
 class PresentationSurface(StrEnum):

@@ -10,6 +10,72 @@ import pytest
 LAUNCHERS = ["rodex", "usr/local/bin/rodex"]
 
 
+def _write_successful_python(environment_root: Path) -> Path:
+    python = environment_root / "bin" / "python3"
+    python.parent.mkdir(parents=True, exist_ok=True)
+    python.write_text(
+        '#!/bin/sh\nif [ "${1-}" = -I ]; then\n    exit 0\nfi\nexec /bin/sh "$@"\n',
+        encoding="utf-8",
+    )
+    python.chmod(0o755)
+    return python
+
+
+def _write_fake_uv(uv: Path, tool_root: Path) -> Path:
+    uv.parent.mkdir(parents=True, exist_ok=True)
+    uv.write_text(
+        "#!/bin/sh\n"
+        'printf \'%s\\n\' "$*" >> "$RODEX_TEST_UV_CALLS"\n'
+        'if [ "${1-}" = --version ]; then\n'
+        "    printf 'uv 1.0.0-test\\n'\n"
+        "    exit 0\n"
+        "fi\n"
+        'if [ "${1-} ${2-}" = "tool dir" ]; then\n'
+        f"    printf '%s\\n' '{tool_root}'\n"
+        "    exit 0\n"
+        "fi\n"
+        "exit 1\n",
+        encoding="utf-8",
+    )
+    uv.chmod(0o755)
+    return uv
+
+
+def _write_importable_python(python: Path, label: str) -> Path:
+    python.parent.mkdir(parents=True, exist_ok=True)
+    python.write_text(
+        "#!/bin/sh\n"
+        'case "${4-}" in\n'
+        "    *'sys.argv[0] = \"rodex\"'*)\n"
+        "        shift 4\n"
+        f"        printf '{label}:%s\\n' \"$*\"\n"
+        "        ;;\n"
+        "    *) exit 0 ;;\n"
+        "esac\n",
+        encoding="utf-8",
+    )
+    python.chmod(0o755)
+    return python
+
+
+def _write_python_without_rodex(python: Path) -> Path:
+    python.parent.mkdir(parents=True, exist_ok=True)
+    python.write_text(
+        "#!/bin/sh\n"
+        'case "${4-}" in\n'
+        "    *'sys.argv[0] = \"rodex\"'*)\n"
+        "        printf \"ModuleNotFoundError: No module named 'rodex'\\n\" >&2\n"
+        "        exit 1\n"
+        "        ;;\n"
+        "    *'from rodex import main'*) exit 1 ;;\n"
+        "    *) exit 0 ;;\n"
+        "esac\n",
+        encoding="utf-8",
+    )
+    python.chmod(0o755)
+    return python
+
+
 def test_project_root_launcher_does_not_create_a_rodex_virtualenv_context(
     tmp_path: Path,
 ) -> None:
@@ -67,6 +133,7 @@ def test_usr_local_bin_shim_runs_rodex_from_the_project_after_copy(
         encoding="utf-8",
     )
     entrypoint.chmod(0o755)
+    _write_successful_python(project / ".venv")
 
     environment = os.environ.copy()
     environment["RODEX_PROJECT_DIR"] = str(project)
@@ -206,12 +273,29 @@ def test_launchers_print_rodex_help_without_codex_tmux_or_database(
     assert not database.exists()
 
 
-def test_usr_local_bin_shim_reports_a_missing_project(tmp_path: Path) -> None:
+def test_usr_local_bin_shim_surfaces_missing_rodex_module_when_checkout_is_missing(
+    tmp_path: Path,
+) -> None:
     project_root = Path(__file__).parents[1]
     shim = project_root / "usr" / "local" / "bin" / "rodex"
     missing_project = tmp_path / "missing-rodex"
+    executable_directory = tmp_path / "bin"
+    _write_python_without_rodex(executable_directory / "python3.11")
     environment = os.environ.copy()
-    environment["RODEX_PROJECT_DIR"] = str(missing_project)
+    environment.update(
+        {
+            "HOME": str(tmp_path / "empty-home"),
+            "PATH": str(executable_directory),
+            "RODEX_PROJECT_DIR": str(missing_project),
+            "RODEX_UV": str(tmp_path / "missing-uv"),
+        }
+    )
+    environment.pop("RODEX_ENVIRONMENT", None)
+    environment.pop("RODEX_PYTHON", None)
+    environment.pop("UV_TOOL_DIR", None)
+    environment.pop("VIRTUAL_ENV", None)
+    environment.pop("VIRTUAL_ENV_PROMPT", None)
+    environment.pop("XDG_DATA_HOME", None)
 
     result = subprocess.run(
         [shim],
@@ -222,8 +306,8 @@ def test_usr_local_bin_shim_reports_a_missing_project(tmp_path: Path) -> None:
     )
 
     assert result.returncode == 1
-    assert f"project not found at {missing_project}" in result.stderr
-    assert "set RODEX_PROJECT_DIR" in result.stderr
+    assert result.stdout == ""
+    assert result.stderr == "ModuleNotFoundError: No module named 'rodex'\n"
 
 
 def test_usr_local_bin_shim_does_not_scan_unrelated_project_content(
@@ -239,6 +323,7 @@ def test_usr_local_bin_shim_does_not_scan_unrelated_project_content(
     entrypoint.parent.mkdir(parents=True)
     entrypoint.write_text('#!/bin/sh\nprintf "direct-entrypoint\\n"\n', encoding="utf-8")
     entrypoint.chmod(0o755)
+    _write_successful_python(project_root / ".venv")
     shim = Path(__file__).parents[1] / "usr" / "local" / "bin" / "rodex"
     environment = os.environ.copy()
     environment["RODEX_PROJECT_DIR"] = str(project_root)
@@ -256,18 +341,164 @@ def test_usr_local_bin_shim_does_not_scan_unrelated_project_content(
     assert result.stderr == ""
 
 
-def test_usr_local_bin_shim_reports_a_missing_project_entrypoint(
+def test_usr_local_bin_shim_uses_an_existing_uv_tool_environment(
     tmp_path: Path,
 ) -> None:
-    project_root = tmp_path / "project"
+    project_root = tmp_path / "shared-project"
     project_root.mkdir()
-    (project_root / "pyproject.toml").write_text("[project]\nname='probe'\n")
-    shim = Path(__file__).parents[1] / "usr" / "local" / "bin" / "rodex"
+    (project_root / "pyproject.toml").write_text("[project]\nname='probe'\n", encoding="utf-8")
+    checkout_entrypoint = project_root / ".venv/bin/rodex"
+    checkout_entrypoint.parent.mkdir(parents=True)
+    checkout_entrypoint.write_text('#!/bin/sh\nprintf "wrong-environment\\n"\n', encoding="utf-8")
+    checkout_entrypoint.chmod(0o755)
+    checkout_python = project_root / ".venv/bin/python3"
+    checkout_python.write_text("#!/bin/sh\nexit 126\n", encoding="utf-8")
+    checkout_python.chmod(0o755)
+
+    tool_root = tmp_path / "uv-tools"
+    tool_environment = tool_root / "codex-tmux-session-manager"
+    tool_entrypoint = tool_environment / "bin/rodex"
+    tool_entrypoint.parent.mkdir(parents=True)
+    tool_entrypoint.write_text('#!/bin/sh\nprintf "uv-tool:%s\\n" "$*"\n', encoding="utf-8")
+    tool_entrypoint.chmod(0o755)
+    _write_successful_python(tool_environment)
+    home = tmp_path / "home"
+    _write_fake_uv(home / ".local/bin/uv", tool_root)
+    uv_calls = tmp_path / "uv-calls"
+    shim = Path(__file__).parents[1] / "usr/local/bin/rodex"
     environment = os.environ.copy()
-    environment["RODEX_PROJECT_DIR"] = str(project_root)
+    environment.update(
+        {
+            "HOME": str(home),
+            "RODEX_PROJECT_DIR": str(project_root),
+            "RODEX_TEST_UV_CALLS": str(uv_calls),
+        }
+    )
+    environment.pop("VIRTUAL_ENV", None)
+    environment.pop("VIRTUAL_ENV_PROMPT", None)
 
     result = subprocess.run(
-        [shim, "_running"],
+        [shim, "named-session"],
+        check=False,
+        env=environment,
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "uv-tool:named-session\n"
+    assert result.stderr == ""
+    assert uv_calls.read_text(encoding="utf-8").splitlines() == ["--version", "tool dir"]
+
+
+def test_usr_local_bin_shim_uses_an_explicit_existing_environment_without_uv(
+    tmp_path: Path,
+) -> None:
+    missing_project = tmp_path / "missing-shared-project"
+
+    user_environment = tmp_path / "user-environment"
+    user_entrypoint = user_environment / "bin/rodex"
+    user_entrypoint.parent.mkdir(parents=True)
+    user_entrypoint.write_text('#!/bin/sh\nprintf "reused:%s\\n" "$*"\n', encoding="utf-8")
+    user_entrypoint.chmod(0o755)
+    _write_successful_python(user_environment)
+
+    shim = Path(__file__).parents[1] / "usr/local/bin/rodex"
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "RODEX_PROJECT_DIR": str(missing_project),
+            "RODEX_UV": str(tmp_path / "must-not-run-uv"),
+            "RODEX_ENVIRONMENT": str(user_environment),
+        }
+    )
+
+    result = subprocess.run(
+        [shim, "existing-session"],
+        check=False,
+        env=environment,
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "reused:existing-session\n"
+    assert result.stderr == ""
+
+
+def test_usr_local_bin_shim_uses_an_existing_explicit_python(
+    tmp_path: Path,
+) -> None:
+    missing_project = tmp_path / "missing-shared-project"
+    python = _write_importable_python(tmp_path / "system-python/python3.12", "python")
+    shim = Path(__file__).parents[1] / "usr/local/bin/rodex"
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "RODEX_PROJECT_DIR": str(missing_project),
+            "RODEX_PYTHON": str(python),
+            "RODEX_UV": str(tmp_path / "must-not-run-uv"),
+        }
+    )
+    environment.pop("VIRTUAL_ENV", None)
+    environment.pop("VIRTUAL_ENV_PROMPT", None)
+
+    result = subprocess.run(
+        [shim, "system-session"],
+        check=False,
+        env=environment,
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "python:system-session\n"
+    assert result.stderr == ""
+
+
+def test_usr_local_bin_shim_surfaces_module_failure_without_modifying_user_files(
+    tmp_path: Path,
+) -> None:
+    project_root = tmp_path / "shared-project"
+    project_root.mkdir()
+    (project_root / "pyproject.toml").write_text("[project]\nname='probe'\n", encoding="utf-8")
+    home = tmp_path / "home"
+    tool_root = tmp_path / "empty-uv-tools"
+    uv_calls = tmp_path / "uv-calls"
+    _write_fake_uv(home / ".local/bin/uv", tool_root)
+    executable_directory = tmp_path / "bin"
+    _write_python_without_rodex(executable_directory / "python3.11")
+    sentinel = home / "sentinel"
+    sentinel.write_text("unchanged\n", encoding="utf-8")
+
+    def home_snapshot() -> list[tuple[str, int, bytes | None]]:
+        return [
+            (
+                str(path.relative_to(home)),
+                path.lstat().st_mode,
+                path.read_bytes() if path.is_file() else None,
+            )
+            for path in sorted(home.rglob("*"))
+        ]
+
+    before = home_snapshot()
+    shim = Path(__file__).parents[1] / "usr/local/bin/rodex"
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "HOME": str(home),
+            "PATH": str(executable_directory),
+            "RODEX_PROJECT_DIR": str(project_root),
+            "RODEX_TEST_UV_CALLS": str(uv_calls),
+        }
+    )
+    environment.pop("RODEX_ENVIRONMENT", None)
+    environment.pop("RODEX_PYTHON", None)
+    environment.pop("VIRTUAL_ENV", None)
+    environment.pop("VIRTUAL_ENV_PROMPT", None)
+
+    result = subprocess.run(
+        [shim, "unsupported-session"],
         check=False,
         env=environment,
         text=True,
@@ -275,5 +506,7 @@ def test_usr_local_bin_shim_reports_a_missing_project_entrypoint(
     )
 
     assert result.returncode == 1
-    assert "project entrypoint is missing or not executable" in result.stderr
-    assert str(project_root / ".venv/bin/rodex") in result.stderr
+    assert result.stdout == ""
+    assert result.stderr == "ModuleNotFoundError: No module named 'rodex'\n"
+    assert home_snapshot() == before
+    assert uv_calls.read_text(encoding="utf-8").splitlines() == ["--version", "tool dir"]

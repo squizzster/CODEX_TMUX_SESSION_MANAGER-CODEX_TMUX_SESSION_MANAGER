@@ -238,12 +238,13 @@ def register_codex_root_thread_in_transaction(
         (codex_threads_id,),
     ).fetchone()
     if row is None:
-        row = connection.execute(
+        cursor = connection.execute(
             f"INSERT INTO {RODEX_SESSIONS_CODEX_THREADS_TABLE} "
             "(rodex_sessions_id, codex_threads_id, first_linked_at_utc) "
-            "VALUES (?, ?, ?) RETURNING id, rodex_sessions_id",
+            "VALUES (?, ?, ?)",
             (session_id, codex_threads_id, first_linked_at_utc),
-        ).fetchone()
+        )
+        row = None if cursor.lastrowid is None else (cursor.lastrowid, session_id)
     if row is None:
         raise RodexSessionError("Codex thread membership insertion returned no identity")
     if int(row[1]) != session_id:
@@ -281,12 +282,13 @@ def resolve_codex_thread_identity_in_transaction(
         stored_codex_thread_id,
     ).fetchone()
     if identity_row is None:
-        identity_row = connection.execute(
+        cursor = connection.execute(
             f"INSERT INTO {CODEX_THREADS_TABLE} "
             "(codex_thread_public_id_signed_bigint_1, "
-            "codex_thread_public_id_signed_bigint_2) VALUES (?, ?) RETURNING id",
+            "codex_thread_public_id_signed_bigint_2) VALUES (?, ?)",
             stored_codex_thread_id,
-        ).fetchone()
+        )
+        identity_row = None if cursor.lastrowid is None else (cursor.lastrowid,)
     if identity_row is None:
         raise RodexSessionError("Codex thread identity insertion returned no identity")
     return int(identity_row[0])

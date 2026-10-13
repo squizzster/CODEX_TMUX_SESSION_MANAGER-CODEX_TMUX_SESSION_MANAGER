@@ -41,9 +41,10 @@ normal temporary roots.
 
 - CLI routing and compatibility: [command contract](../tests/test_command_contract.py),
   [current contracts](../tests/test_current_contracts.py).
-- Installation and lifecycle: [retained installations](../tests/test_installation.py),
+- Installation and lifecycle: [shim discovery](../tests/test_install_shim.py),
+  [retained installations](../tests/test_installation.py),
   [daemon](../tests/test_rodex_daemon.py), [runtime isolation](../tests/test_runtime_isolation.py),
-  [runtime adoption](../tests/test_runtime_registration_adoption.py).
+  and [runtime adoption](../tests/test_runtime_registration_adoption.py).
   [Retained handoff admission](../tests/test_runtime_upgrade.py) checks idle-only
   upgrades and attachment without replacement; installation tests verify a busy turn
   completes across `--force-old` reconnect before its idle runtime is upgraded.

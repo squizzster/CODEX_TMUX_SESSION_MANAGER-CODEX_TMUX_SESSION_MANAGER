@@ -2,11 +2,13 @@
 
 ## Trust boundary
 
-Rodex is a local, single-Linux-user tool. Processes sharing its uid are not hostile
-tenants; use separate OS accounts for that boundary. Rodex exposes no TCP/network
-listener: control and protocol endpoints are private Unix sockets. Runtime checks
-prevent misaddressing and stale ownership; bootstrap trusts the user's ordinary
-checkout and environment. Rodex is not an IDS or filesystem/tmux surveillance service.
+Each Rodex runtime is a local, single-Linux-user security domain. Processes sharing
+its uid are not hostile tenants; separate OS accounts create separate runtime, state,
+and bootstrap domains even when they use one system-installed shim. Rodex exposes no
+TCP/network listener: control and protocol endpoints are private Unix sockets. Runtime
+checks prevent misaddressing and stale ownership; bootstrap trusts the selected
+maintained checkout and environment. Rodex is not an IDS or filesystem/tmux
+surveillance service.
 
 [Runtime isolation](RUNTIME_ISOLATION.md) is authoritative for capability tuples,
 connected peer/process checks, destructive topology guards, endpoint cleanup, and
@@ -16,11 +18,26 @@ the wrong runtime; unverifiable sessions are reported, not auto-adopted or remov
 
 ## Launcher boundary
 
-The [installed shim](../usr/local/bin/rodex) checks the configured checkout marker and
-executable entrypoint, clears Python bootstrap overrides, and executes it. It does not
-walk source, virtualenv, cache, or bytecode trees and does not impose a second ownership
-policy on normal user-managed files. The kernel and ordinary filesystem permissions
-own executable admission. The shim never syncs dependencies.
+The [installation guide](../INSTALL.md#command-and-environment-are-separate) owns
+environment-preparation routes and the exact resolver order. The
+[installed shim](../usr/local/bin/rodex) treats the configured checkout as one
+candidate, then probes only named, already-existing executable capabilities: explicit,
+checkout, and active environments; exact uv-tool directories; and explicit or fixed
+system Python locations. A missing or inaccessible checkout does not block an
+independent candidate. An environment candidate is accepted when its Python starts at
+version 3.11 or newer; package/dependency failure remains the selected environment's
+visible result. Standalone-Python discovery prefers an interpreter that imports Rodex,
+but otherwise executes the first compatible interpreter so its module error remains
+visible. Standalone execution uses `-I` and cleared Python path/startup variables, so
+user-site packages and `PYTHONPATH` are not implicit capabilities. The shim may ask an
+existing `uv` for `uv tool dir`, which is read-only. It never calls `uv sync`, `uv run`,
+a package/Python installer, `find`, `rg`, or recursive traversal.
+
+Failure is also read-only: the shim reports that no usable environment exists and
+exits. It does not create a per-user fallback, change the checkout, or download
+anything. Environment preparation remains an explicit administrator/owner action.
+The maintained checkout and any selected environment remain trusted executable input;
+ordinary ownership and permissions govern who may change them.
 
 [`enter_fixed_installation`](../src/rodex/installation.py) uses lightweight metadata
 to notice normal source/environment changes. It copies a changed environment once and

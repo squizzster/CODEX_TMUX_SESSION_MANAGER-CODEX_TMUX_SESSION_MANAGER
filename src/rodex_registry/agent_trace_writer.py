@@ -137,7 +137,7 @@ def publish_agent_trace_in_transaction(
         for _attempt_number in index_re_try_attempt_numbers():
             trace_event_public_id = uuid.uuid4()
             public_halves = split_codex_thread_id_into_signed_bigints(trace_event_public_id)
-            inserted = connection.execute(
+            insert_cursor = connection.execute(
                 f"INSERT OR IGNORE INTO {RODEX_SESSIONS_AGENT_TRACE_EVENTS_TABLE} "
                 "(trace_event_public_id_signed_bigint_1, "
                 "trace_event_public_id_signed_bigint_2, rodex_sessions_id, "
@@ -145,8 +145,7 @@ def publish_agent_trace_in_transaction(
                 "rodex_sessions_codex_activity_scopes_id, "
                 "source_record_ordinal, derived_event_ordinal, "
                 "first_trace_publication_sequence, event_kind, event_time_utc, "
-                "detail_sha256) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
-                "RETURNING id",
+                "detail_sha256) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     *public_halves,
                     session_id,
@@ -159,7 +158,12 @@ def publish_agent_trace_in_transaction(
                     event.event_time_utc,
                     detail_sha256,
                 ),
-            ).fetchone()
+            )
+            inserted = (
+                (insert_cursor.lastrowid,)
+                if insert_cursor.rowcount == 1 and insert_cursor.lastrowid is not None
+                else None
+            )
             if inserted is not None:
                 break
             stored = connection.execute(
@@ -256,21 +260,21 @@ def _resolve_optional_trace_turn_id(
     if row is None:
         for _attempt_number in index_re_try_attempt_numbers():
             public_id = uuid.uuid4()
-            inserted = connection.execute(
+            insert_cursor = connection.execute(
                 f"INSERT OR IGNORE INTO {RODEX_SESSIONS_CODEX_TURNS_TABLE} "
                 "(rodex_sessions_id, rodex_sessions_codex_threads_id, "
                 "turn_public_id_signed_bigint_1, turn_public_id_signed_bigint_2, "
                 "codex_turn_id_signed_bigint_1, codex_turn_id_signed_bigint_2) "
-                "VALUES (?, ?, ?, ?, ?, ?) RETURNING id",
+                "VALUES (?, ?, ?, ?, ?, ?)",
                 (
                     session_id,
                     thread_row_id,
                     *split_codex_thread_id_into_signed_bigints(public_id),
                     *turn_identity,
                 ),
-            ).fetchone()
-            if inserted is not None:
-                row = (inserted[0],)
+            )
+            if insert_cursor.rowcount == 1 and insert_cursor.lastrowid is not None:
+                row = (insert_cursor.lastrowid,)
                 break
             row = connection.execute(
                 f"SELECT id FROM {RODEX_SESSIONS_CODEX_TURNS_TABLE} "
@@ -341,12 +345,13 @@ def _resolve_or_insert_activity_scope(
         parameters,
     ).fetchone()
     if row is None:
-        row = connection.execute(
+        insert_cursor = connection.execute(
             f"INSERT INTO {RODEX_SESSIONS_CODEX_ACTIVITY_SCOPES_TABLE} "
             "(rodex_sessions_id, rodex_sessions_codex_threads_id, "
-            "rodex_sessions_codex_turns_id) VALUES (?, ?, ?) RETURNING id",
+            "rodex_sessions_codex_turns_id) VALUES (?, ?, ?)",
             (session_id, thread_row_id, turn_row_id),
-        ).fetchone()
+        )
+        row = (insert_cursor.lastrowid,) if insert_cursor.rowcount == 1 and insert_cursor.lastrowid is not None else None
     if row is None:
         raise RodexSessionStatisticsConflictError("Codex activity scope insertion returned no identity")
     scope_id = int(row[0])
@@ -529,12 +534,12 @@ def _insert_trace_detail(
             scope_id=scope_id,
             call_id=detail.collaboration_call_id,
         )
-        inserted_activity = connection.execute(
+        insert_cursor = connection.execute(
             f"INSERT INTO {RODEX_SESSIONS_AGENT_TRACE_SUBAGENT_ACTIVITIES_TABLE} "
             "(rodex_sessions_agent_trace_events_id, rodex_sessions_id, "
             "rodex_sessions_codex_activity_scopes_id, target_codex_threads_id, "
             "rodex_sessions_codex_tool_calls_id, activity_kind, agent_path) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id",
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
             (
                 event_id,
                 session_id,
@@ -544,7 +549,10 @@ def _insert_trace_detail(
                 detail.activity_kind,
                 detail.agent_path,
             ),
-        ).fetchone()
+        )
+        inserted_activity = (
+            (insert_cursor.lastrowid,) if insert_cursor.rowcount == 1 and insert_cursor.lastrowid is not None else None
+        )
         if inserted_activity is None:
             raise RodexSessionStatisticsConflictError("sub-agent trace activity insertion returned no identity")
         if target_codex_threads_id is None or collaboration_tool_call_id is None:
@@ -661,13 +669,13 @@ def _resolve_or_insert_codex_item(
             "" if item_identity is None else ", codex_item_id_signed_bigint_1, codex_item_id_signed_bigint_2"
         )
         identity_placeholders = "" if item_identity is None else ", ?, ?"
-        inserted = connection.execute(
+        insert_cursor = connection.execute(
             f"INSERT OR IGNORE INTO {RODEX_SESSIONS_CODEX_ITEMS_TABLE} "
             "(rodex_sessions_id, rodex_sessions_codex_threads_id, "
             "rodex_sessions_codex_activity_scopes_id, "
             "item_public_id_signed_bigint_1, "
             f"item_public_id_signed_bigint_2{identity_columns}) "
-            f"VALUES (?, ?, ?, ?, ?{identity_placeholders}) RETURNING id",
+            f"VALUES (?, ?, ?, ?, ?{identity_placeholders})",
             (
                 session_id,
                 thread_row_id,
@@ -675,9 +683,9 @@ def _resolve_or_insert_codex_item(
                 *split_codex_thread_id_into_signed_bigints(public_id),
                 *(() if item_identity is None else item_identity),
             ),
-        ).fetchone()
-        if inserted is not None:
-            item_row_id = int(inserted[0])
+        )
+        if insert_cursor.rowcount == 1 and insert_cursor.lastrowid is not None:
+            item_row_id = int(insert_cursor.lastrowid)
             if alias_digest is not None:
                 connection.execute(
                     f"INSERT INTO {RODEX_SESSIONS_CODEX_ITEM_ALIASES_TABLE} "
@@ -775,13 +783,12 @@ def _resolve_or_insert_tool_call(
     else:
         for _attempt_number in index_re_try_attempt_numbers():
             public_id = uuid.uuid4()
-            inserted = connection.execute(
+            insert_cursor = connection.execute(
                 f"INSERT OR IGNORE INTO {RODEX_SESSIONS_CODEX_TOOL_CALLS_TABLE} "
                 "(rodex_sessions_id, rodex_sessions_codex_threads_id, "
                 "rodex_sessions_codex_activity_scopes_id, tool_names_id, "
                 "tool_call_public_id_signed_bigint_1, "
-                "tool_call_public_id_signed_bigint_2) VALUES (?, ?, ?, ?, ?, ?) "
-                "RETURNING id",
+                "tool_call_public_id_signed_bigint_2) VALUES (?, ?, ?, ?, ?, ?)",
                 (
                     session_id,
                     thread_row_id,
@@ -789,9 +796,9 @@ def _resolve_or_insert_tool_call(
                     tool_names_id,
                     *split_codex_thread_id_into_signed_bigints(public_id),
                 ),
-            ).fetchone()
-            if inserted is not None:
-                tool_call_id = int(inserted[0])
+            )
+            if insert_cursor.rowcount == 1 and insert_cursor.lastrowid is not None:
+                tool_call_id = int(insert_cursor.lastrowid)
                 break
         else:
             raise RodexSessionStatisticsConflictError("could not allocate a tool-call public ID")

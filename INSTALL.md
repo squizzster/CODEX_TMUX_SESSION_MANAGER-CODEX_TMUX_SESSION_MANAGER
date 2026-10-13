@@ -3,7 +3,9 @@
 ## Prerequisites
 
 - Linux with `/proc` and `pidfd` support.
-- Python 3.12 or newer, `uv`, and tmux on `PATH`.
+- Python 3.12 or newer and tmux on `PATH`.
+- `uv` to prepare or update a checkout. An installed shim does not require `uv` for a
+  user who already has another usable Rodex environment.
 - Installed, authenticated stable Codex CLI at or above the minimum enforced by
   [`CODEX_APP_SERVER`](src/rodex/app_server_contract.py).
 
@@ -20,8 +22,13 @@ uv sync --locked
 ./rodex
 ```
 
-The [checkout launcher](rodex) executes `.venv/bin/rodex` directly. Startup never
-syncs dependencies or downloads code. Before CLI composition,
+The [checkout launcher](rodex) executes `.venv/bin/rodex` directly. The
+[installed shim](usr/local/bin/rodex) resolves the first existing Rodex environment
+that the invoking user can actually execute; a missing or inaccessible configured
+checkout does not prevent a usable per-user environment from being selected. Launcher
+discovery never installs Python, creates an environment, syncs dependencies, or
+downloads code. Once a usable Rodex has been selected, its normal startup begins.
+Before CLI composition,
 [`enter_fixed_installation`](src/rodex/installation.py) publishes/reuses a private
 copy of code, installed dependencies, and shipped defaults, then re-executes there.
 An unchanged bootstrap is recognized from lightweight file metadata; routine startup
@@ -39,11 +46,29 @@ mkdir -p "$HOME/.local/bin"
 install -m 0755 usr/local/bin/rodex "$HOME/.local/bin/rodex"
 ```
 
-Ensure `$HOME/.local/bin` is on `PATH`. Only the shim is copied; the checkout and
-its `.venv` remain the bootstrap for new invocations. The shim checks only that the
-configured project and executable entrypoint exist, then delegates normal executable
-admission to the operating system. It does not recursively inspect the checkout.
-See the [launcher boundary](docs/SECURITY.md#launcher-boundary).
+Ensure `$HOME/.local/bin` is on `PATH`. Only the shim is copied. It checks a bounded
+sequence of already-existing capabilities:
+
+1. An explicit `RODEX_ENVIRONMENT` containing `bin/rodex` and a Python that can import
+   Rodex.
+2. The configured checkout `.venv`.
+3. The caller's active `VIRTUAL_ENV`.
+4. An explicit existing `RODEX_PYTHON`.
+5. Exact uv-tool environment names (`codex-tmux-session-manager` and `rodex`) beneath
+   `UV_TOOL_DIR`, the user's normal uv tool directory, or the directory reported by an
+   existing `uv tool dir` command. `RODEX_UV` selects an exact uv executable.
+6. Fixed Python 3.12-or-newer candidates under `/usr/local/bin` and `/usr/bin`, only
+   when that Python can already import Rodex.
+
+Each candidate is verified by executing a bounded import probe. The first working
+candidate runs the command. If none works, the shim reports that the user's environment
+is unsupported and exits without changing anything. It does not invoke `uv sync`,
+`uv run`, installation commands, `find`, `rg`, or recursive inspection. See the
+[launcher boundary](docs/SECURITY.md#launcher-boundary).
+
+A successful Rodex startup still creates or updates its documented private runtime,
+state, and retained-installation data. The no-modification guarantee above applies to
+launcher discovery and unsupported-environment failure, not normal application use.
 
 ```bash
 command -v rodex
@@ -129,16 +154,31 @@ next transaction boundary and require a fresh process.
 
 ## System installation and removal
 
-A shared `/usr/local/bin/rodex` should point to a separately maintained checkout and
-environment rather than a user's changing development tree. Set that stable absolute
-path as the shim's default before installing it:
+A shared `/usr/local/bin/rodex` should default to one separately maintained checkout
+rather than a changing development tree. Users who cannot read or execute its
+environment can still use one of their own existing candidates. Set the stable
+checkout's absolute path as the shim's default. From that checkout, install or update
+the command with:
 
 ```bash
-sudo install -m 0755 usr/local/bin/rodex /usr/local/bin/rodex
+sudo install -m 0755 "$(pwd -P)/usr/local/bin/rodex" /usr/local/bin/rodex
 ```
 
-Prefer the per-user installation. The shim does not attempt to enforce a multi-user
-trust policy; use ordinary filesystem ownership and OS accounts for that boundary.
+Each invoking OS user must already have one usable candidate: access to the maintained
+checkout environment, an active/explicit Rodex environment, a Rodex uv-tool
+environment, or a Python 3.12-or-newer installation that can import Rodex. A shared
+checkout `.venv` that points into a maintainer's private home is rejected by execution,
+not repaired. The shim never provisions missing capability. The maintained checkout
+supplies executable source only when its environment is selected; otherwise the
+selected user or system environment supplies it. Use ordinary filesystem ownership for
+those trust boundaries.
+
+After replacing the command, verify both the selected shim and a real target user:
+
+```bash
+command -v rodex
+sudo -iu TARGET_USER rodex _help
+```
 
 Removing `$HOME/.local/bin/rodex` (or `/usr/local/bin/rodex` for the system route)
 removes only that command. It does not remove the checkout, retained installations,

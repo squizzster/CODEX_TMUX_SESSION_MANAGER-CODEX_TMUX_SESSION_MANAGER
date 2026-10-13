@@ -27,6 +27,10 @@ repository currently has no Git release tags, so they do not imply a published r
 
 ### Modified
 
+- The installed shim now resolves only existing, executable Rodex environments for the
+  invoking user: explicit, checkout, active-virtualenv, uv-tool, and system-Python
+  candidates. It performs no installation, synchronization, download, or recursive
+  scan and reports an unsupported environment without modifying it.
 - Saved-session resume no longer waits behind Codex 0.162.1's hidden hook-review
   prompt. Automatic admission verifies native trust after a provisional App Server
   restart instead of relying on the TUI bypass flag. Native start/resume/fork and

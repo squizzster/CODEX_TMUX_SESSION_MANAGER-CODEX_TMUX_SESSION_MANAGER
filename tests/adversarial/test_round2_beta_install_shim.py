@@ -10,6 +10,12 @@ def _write_sealed_entrypoint(project: Path) -> Path:
     entrypoint.parent.mkdir(parents=True)
     entrypoint.write_text('#!/bin/sh\nprintf "sealed-environment\\n"\n', encoding="utf-8")
     entrypoint.chmod(0o755)
+    python = project / ".venv" / "bin" / "python3"
+    python.write_text(
+        '#!/bin/sh\nif [ "${1-}" = -I ]; then exit 0; fi\nexec /bin/sh "$@"\n',
+        encoding="utf-8",
+    )
+    python.chmod(0o755)
     (project / ".venv" / "lib" / "python3.12" / "site-packages").mkdir(parents=True)
     return entrypoint
 
@@ -55,7 +61,12 @@ def test_round2_installed_shim_uses_a_direct_entrypoint_boundary() -> None:
     assert "/usr/bin/find" not in contents
     assert "/usr/bin/stat" not in contents
     assert "/usr/bin/readlink" not in contents
-    assert 'exec "$RODEX_ENTRYPOINT" "$@"' in contents
+    assert "rg " not in contents
+    assert '"$rodex_uv_binary" sync' not in contents
+    assert '"$rodex_uv_binary" run' not in contents
+    assert '"$rodex_uv_binary" tool install' not in contents
+    assert '"$rodex_uv_binary" python install' not in contents
+    assert 'exec "$rodex_selected_python" "$rodex_selected_entrypoint" "$@"' in contents
 
 
 def test_round2_installed_shim_does_not_inspect_site_or_bytecode(
@@ -104,6 +115,12 @@ def test_round2_installed_shim_leaves_interpreter_admission_to_exec(
     entrypoint.parent.mkdir(parents=True)
     entrypoint.write_text(f"#!{interpreter}\n", encoding="utf-8")
     entrypoint.chmod(0o755)
+    environment_python = project / ".venv/bin/python3"
+    environment_python.write_text(
+        '#!/bin/sh\nif [ "${1-}" = -I ]; then exit 0; fi\nexec /bin/sh "$@"\n',
+        encoding="utf-8",
+    )
+    environment_python.chmod(0o777)
     shim = Path(__file__).resolve().parents[2] / "usr" / "local" / "bin" / "rodex"
     environment = os.environ.copy()
     environment["RODEX_PROJECT_DIR"] = str(project)

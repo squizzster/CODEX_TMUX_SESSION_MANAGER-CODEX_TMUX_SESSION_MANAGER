@@ -29,10 +29,12 @@ Rodex is an **ALPHA** in-house Linux pre-release; interfaces may change.
 
 ## Requirements and quick start
 
-Rodex requires Linux with `/proc` and `pidfd` support, Python 3.12 or newer, tmux,
-`uv`, and an authenticated stable Codex CLI whose App Server is version 0.151.0 or
-newer. No numeric minimum tmux or `uv` CLI version is currently asserted. See the
-[verified prerequisites](INSTALL.md#prerequisites) for the exact boundary.
+Rodex requires Linux with `/proc` and `pidfd` support, Python 3.12 or newer, tmux, and
+an authenticated stable Codex CLI whose App Server is version 0.151.0 or newer.
+Checkout setup additionally requires `uv`; an installed shim can use another existing
+Rodex environment without it. No numeric minimum tmux or `uv` CLI version is currently
+asserted. See the [verified prerequisites](INSTALL.md#prerequisites) for the exact
+boundary.
 
 From a checkout:
 

@@ -3,22 +3,148 @@ set -eu
 
 # Recommended: install -m 0755 usr/local/bin/rodex "$HOME/.local/bin/rodex"
 
-# This checkout is the default target wherever the shim is copied.
+# This maintained checkout is the default source wherever the shim is copied.
 # Override it when the Rodex checkout lives elsewhere.
-RODEX_PROJECT_DIR=${RODEX_PROJECT_DIR:-/external_data/data/work_flow_dna/business_genome_classification_system/CODEX_TMUX_SESSION_MANAGER}
-
-if [ ! -f "$RODEX_PROJECT_DIR/pyproject.toml" ]; then
-    printf 'rodex: project not found at %s\n' "$RODEX_PROJECT_DIR" >&2
-    printf 'rodex: set RODEX_PROJECT_DIR to the Rodex checkout\n' >&2
-    exit 1
-fi
-
-RODEX_ENTRYPOINT=$RODEX_PROJECT_DIR/.venv/bin/rodex
-if [ ! -f "$RODEX_ENTRYPOINT" ] || [ ! -x "$RODEX_ENTRYPOINT" ]; then
-    printf 'rodex: project entrypoint is missing or not executable: %s\n' \
-        "$RODEX_ENTRYPOINT" >&2
-    exit 1
-fi
+RODEX_PROJECT_DIR=${RODEX_PROJECT_DIR:-/data2/business_genome_classification_system/CODEX_TMUX_SESSION_MANAGER}
 
 unset PYTHONHOME PYTHONPATH PYTHONSTARTUP
-exec "$RODEX_ENTRYPOINT" "$@"
+
+rodex_python_imports_rodex() {
+    [ -n "$1" ] && [ -x "$1" ] && \
+        "$1" -I -B -c \
+            'import sys; from rodex import main; raise SystemExit(sys.version_info < (3, 12))' \
+            >/dev/null 2>&1
+}
+
+rodex_environment_works() {
+    candidate_environment=$1
+    [ -n "$candidate_environment" ] || return 1
+    candidate_entrypoint=$candidate_environment/bin/rodex
+    [ -f "$candidate_entrypoint" ] && [ -x "$candidate_entrypoint" ] || return 1
+    for candidate_python in \
+        "$candidate_environment/bin/python3" \
+        "$candidate_environment/bin/python"
+    do
+        if rodex_python_imports_rodex "$candidate_python"; then
+            rodex_selected_entrypoint=$candidate_entrypoint
+            rodex_selected_python=$candidate_python
+            return 0
+        fi
+    done
+    return 1
+}
+
+rodex_run_environment() {
+    exec "$rodex_selected_python" "$rodex_selected_entrypoint" "$@"
+}
+
+if [ "${RODEX_ENVIRONMENT+x}" = x ] && \
+        rodex_environment_works "$RODEX_ENVIRONMENT"; then
+    rodex_run_environment "$@"
+fi
+
+if [ -f "$RODEX_PROJECT_DIR/pyproject.toml" ] && \
+        rodex_environment_works "$RODEX_PROJECT_DIR/.venv"; then
+    rodex_run_environment "$@"
+fi
+
+if [ -n "${VIRTUAL_ENV-}" ] && rodex_environment_works "$VIRTUAL_ENV"; then
+    rodex_run_environment "$@"
+fi
+
+rodex_resolve_python_command() {
+    requested_python=$1
+    [ -n "$requested_python" ] || return 1
+    case "$requested_python" in
+        */*) resolved_python=$requested_python ;;
+        *) resolved_python=$(command -v "$requested_python" 2>/dev/null) || return 1 ;;
+    esac
+    if rodex_python_imports_rodex "$resolved_python"; then
+        rodex_selected_python=$resolved_python
+        return 0
+    fi
+    return 1
+}
+
+rodex_run_python() {
+    exec "$rodex_selected_python" -I -B -c \
+        'import sys; from rodex import main; sys.argv[0] = "rodex"; main()' "$@"
+}
+
+if [ "${RODEX_PYTHON+x}" = x ] && rodex_resolve_python_command "$RODEX_PYTHON"; then
+    rodex_run_python "$@"
+fi
+
+rodex_uv_works() {
+    [ -n "$1" ] && "$1" --version >/dev/null 2>&1
+}
+
+rodex_try_uv_tool_root() {
+    uv_tool_root=$1
+    shift
+    case "$uv_tool_root" in
+        /*)
+            for uv_tool_name in codex-tmux-session-manager rodex; do
+                if rodex_environment_works "$uv_tool_root/$uv_tool_name"; then
+                    rodex_run_environment "$@"
+                fi
+            done
+            ;;
+    esac
+}
+
+if [ -n "${UV_TOOL_DIR-}" ]; then
+    rodex_try_uv_tool_root "$UV_TOOL_DIR" "$@"
+fi
+if [ -n "${XDG_DATA_HOME-}" ]; then
+    rodex_try_uv_tool_root "$XDG_DATA_HOME/uv/tools" "$@"
+fi
+if [ -n "${HOME-}" ]; then
+    rodex_try_uv_tool_root "$HOME/.local/share/uv/tools" "$@"
+fi
+
+rodex_uv_binary=
+if [ "${RODEX_UV+x}" = x ]; then
+    if rodex_uv_works "$RODEX_UV"; then
+        rodex_uv_binary=$RODEX_UV
+    fi
+elif [ -n "${HOME-}" ] && rodex_uv_works "$HOME/.local/bin/uv"; then
+    rodex_uv_binary=$HOME/.local/bin/uv
+elif rodex_path_uv=$(command -v uv 2>/dev/null) && rodex_uv_works "$rodex_path_uv"; then
+    rodex_uv_binary=$rodex_path_uv
+elif rodex_uv_works /usr/local/bin/uv; then
+    rodex_uv_binary=/usr/local/bin/uv
+elif rodex_uv_works /usr/bin/uv; then
+    rodex_uv_binary=/usr/bin/uv
+fi
+
+if [ -n "$rodex_uv_binary" ]; then
+    rodex_uv_tool_root=$(
+        "$rodex_uv_binary" tool dir 2>/dev/null || true
+    )
+    rodex_try_uv_tool_root "$rodex_uv_tool_root" "$@"
+fi
+
+for rodex_system_python in \
+    /usr/local/bin/python3 \
+    /usr/bin/python3 \
+    /usr/local/bin/python3.12 \
+    /usr/bin/python3.12 \
+    /usr/local/bin/python3.13 \
+    /usr/bin/python3.13 \
+    /usr/local/bin/python3.14 \
+    /usr/bin/python3.14 \
+    /usr/local/bin/python3.15 \
+    /usr/bin/python3.15
+do
+    if rodex_resolve_python_command "$rodex_system_python"; then
+        rodex_run_python "$@"
+    fi
+done
+
+printf 'rodex: no existing Rodex environment is usable by this user\n' >&2
+printf 'rodex: checked checkout %s, active/explicit environments, local uv tools, and system Python\n' \
+    "$RODEX_PROJECT_DIR" >&2
+printf 'rodex: no environment was installed, created, synchronized, or modified\n' >&2
+printf 'rodex: prepare Rodex outside this launcher, or set RODEX_ENVIRONMENT or RODEX_PYTHON\n' >&2
+exit 1

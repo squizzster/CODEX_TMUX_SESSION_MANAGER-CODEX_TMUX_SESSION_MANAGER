@@ -85,6 +85,27 @@ and retype to recover a verifiable candidate.
 A text rule cannot inject terminal controls, empty the whole submission, or acquire
 slash/shell-command authority. Production does not use `tmux send-keys`.
 
+### Unresolved submission ownership (A06)
+
+The current receipt matches text, not a native submission identity. If Enter produces
+no RPC, a later identical submission can consume stale preparation; a mismatching
+request can discard a newer valid preparation and apply its rules twice. The normal
+handoff tests below do not establish exactly-once transformation across these cases.
+
+The intended correction preserves transformed native draft/history and requires a
+causal handoff through editor admission, queue/retry handling, and the outgoing RPC.
+On 14 October 2026, an isolated Codex 0.162.1 TUI with a local deterministic model
+fixture exposed `clientUserMessageId` on an ordinary `turn/start`, but emitted no
+pre-Enter message during draft entry. The inspected generated schema and Rodex
+integration provide no demonstrated pre-Enter token handoff. This is bounded
+capability evidence, not proof that every native extension is unavailable.
+
+Native implementation/capability investigation remains necessary before promising
+this correction. A reconnect reset, expiry, or an ID assigned after receiving the RPC
+cannot establish which earlier Enter caused it. Wire-only transformation changes the
+draft/history contract; indefinitely holding ambiguous submissions changes availability.
+Neither is a transparent replacement for the intended handoff.
+
 ## Other routes and limits
 
 - Managed initial prompt: characterized argv → transform/admit → native TUI;

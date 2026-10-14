@@ -35,6 +35,34 @@ OTHER_SERVER = replace(TEST_PEER, tmux_server_id="d" * 32)
 OTHER_IMPLEMENTATION = replace(TEST_PEER, implementation_id="0.16a+installation.different-loaded-code")
 
 
+@pytest.mark.parametrize("path", ["/unknown", "/rpc/", "/rpc?query=1", "/?query=1", "/rodex-control/"])
+def test_unknown_proxy_route_cannot_open_upstream_or_claim_primary(tmp_path, path):
+    connections = []
+    app = tmp_path / "app.sock"
+    with (
+        _server(app, lambda _connection: connections.append(True)),
+        CodexProtocolProxy(
+            tmp_path / "proxy.sock",
+            app,
+            ToolCallCounter(lambda _: None),
+            peer_identity=TEST_PEER,
+            app_server_process=LiveTestProcess(),
+            native_tui_process=LiveTestProcess(),
+        ) as proxy,
+    ):
+        with (
+            pytest.raises(InvalidHandshake),
+            unix_connect(
+                str(tmp_path / "proxy.sock"), uri=f"ws://localhost{path}", additional_headers=TEST_PEER.headers()
+            ),
+        ):
+            pytest.fail("unknown route admitted")
+        assert not proxy._primary_available()
+        assert not proxy._primary_connection_claimed
+        assert proxy.interactions.records == ()
+    assert connections == []
+
+
 def _control(path: Path) -> LiveRodexControl:
     codex_id = uuid.UUID("01a00654-f2bc-7a30-834a-a5f886a65f82")
     capability = TmuxSessionCapability(

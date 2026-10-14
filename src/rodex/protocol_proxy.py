@@ -63,6 +63,7 @@ TOOL_CALL_ITEM_TYPES: Final = frozenset(
 )
 
 ToolCountCallback = Callable[[int], None]
+NATIVE_CONNECTION_PATHS: Final = frozenset({"/", "/rpc"})
 _WORKING_STATUS_EVENT_METHODS: Final = frozenset(
     {
         CODEX_APP_SERVER.thread_started_method,
@@ -988,8 +989,10 @@ class CodexProtocolProxy:
                 max_size=None,
                 **runtime_peer_server_hooks(
                     self._peer_identity,
-                    native_paths=frozenset({"/", "/rpc"}),
+                    native_paths=NATIVE_CONNECTION_PATHS,
                     native_owner=self._native_tui_process,
+                    allowed_paths=NATIVE_CONNECTION_PATHS
+                    | {CONTROL_CONNECTION_PATH, SESSION_INTERACTION_CONNECTION_PATH},
                 ),
             )
         except OSError as error:
@@ -1031,12 +1034,14 @@ class CodexProtocolProxy:
             raise RodexProtocolProxyError("primary Codex protocol connection did not close before retry")
 
     def _handle_connection(self, tui_connection: Any) -> None:
-        if _connection_path(tui_connection) == SESSION_INTERACTION_CONNECTION_PATH:
+        path = _connection_path(tui_connection)
+        if path == SESSION_INTERACTION_CONNECTION_PATH:
             serve_session_interaction(tui_connection, self.interactions)
             return
-        is_primary_connection = _connection_path(
-            tui_connection
-        ) != CONTROL_CONNECTION_PATH and self._claim_primary_connection(tui_connection)
+        if path not in NATIVE_CONNECTION_PATHS and path != CONTROL_CONNECTION_PATH:
+            tui_connection.close(code=1008, reason="Unknown Rodex route")
+            return
+        is_primary_connection = path in NATIVE_CONNECTION_PATHS and self._claim_primary_connection(tui_connection)
         try:
             with unix_connect(
                 str(self._app_server_socket_path),

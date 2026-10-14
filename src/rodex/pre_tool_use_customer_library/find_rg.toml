@@ -3,6 +3,7 @@ schema_version = 1
 [limits]
 max_depth = 3
 max_roots = 8
+max_workflows = 64
 max_entries = 5000
 max_files = 1000
 max_file_bytes = 8388608
@@ -46,6 +47,8 @@ QUOTING = "The command contains incomplete quoting or escaping."
 DYNAMIC_SHELL = "Shell expansion or substitution is present. Resolve variables and generated arguments first; their scope cannot be certified from this string."
 SHELL_EXPANSION = "Unquoted glob, brace, or tilde expansion makes the actual arguments unknown. Quote tool patterns and pass resolved literal input paths."
 COMMAND_COMPLEXITY = "The command exceeds a configured parser or stage limit. Split the workflow into separate search requests."
+WORKFLOW_BUDGET = "The command contains {count} direct search workflows, exceeding the combined limit of {maximum}. Split them into separate requests."
+EVALUATION_TIMEOUT = "The complete find/rg policy exceeded its {seconds}-second budget. Split the search workflows into separate requests."
 SHELL_CONTROL = "Shell operator {operator} needs manual review; groups, background jobs, substitutions, and unsupported controls are not approved."
 SHELL_SYNTAX = "A shell operator is missing its command."
 EMPTY_COMMAND = "No command was supplied."

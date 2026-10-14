@@ -7,6 +7,7 @@ status callback. Codex retains hook trust, approvals, and sandbox enforcement.
 from __future__ import annotations
 
 import json
+import os
 import re
 import select
 import socket
@@ -20,14 +21,18 @@ from typing import Any, Final, Literal
 
 from rodex_registry.identity import parse_rodex_runtime_id
 
+from .pre_tool_use_customer_library.find_rg import Outcome as FindRgOutcome
+from .pre_tool_use_customer_library.find_rg import evaluate_find_rg_source
 from .runtime_endpoint import ExclusiveUnixEndpoint
 from .runtime_peer import BoundProcessOwner, require_unix_socket_peer_process
 
 POLICY_PROTOCOL: Final = "rodex-command-policy-v1"
 POLICY_SOCKET_ENV: Final = "RODEX_COMMAND_POLICY_SOCKET"
 POLICY_MESSAGE_LIMIT: Final = 256 * 1024
-POLICY_TIMEOUT_SECONDS: Final = 1.0
+POLICY_TIMEOUT_SECONDS: Final = 5.0
 POLICY_MAX_WORKERS: Final = 16
+POLICY_TEXT_LIMIT: Final = 8192
+FIND_RG_POLICY_SECONDS: Final = 0.5
 MINIMUM_INTEGER_SLEEP_SECONDS: Final = 10
 SHORT_SLEEP_DENIAL_REASON: Final = "Re-try your sleep command with 10 seconds."
 # Recognize one standalone shell command without claiming to parse command chains.
@@ -62,7 +67,7 @@ def receive_policy_message(connection: socket.socket) -> dict[str, Any]:
     raise ValueError("incomplete or invalid policy message")
 
 
-def _text(payload: Mapping[str, Any], key: str, limit: int = 8192) -> str:
+def _text(payload: Mapping[str, Any], key: str, limit: int = POLICY_TEXT_LIMIT) -> str:
     value = payload.get(key)
     if not isinstance(value, str) or not value or len(value) > limit or "\x00" in value:
         raise ValueError("invalid policy field")
@@ -178,8 +183,25 @@ class CommandPolicyDecision:
         return decision
 
 
-def evaluate_command_policy(request: CommandPolicyRequest) -> CommandPolicyDecision:
-    """Apply the current capability-test rules to one exact command."""
+def _bounded_policy_reason(reason: str) -> str:
+    if len(reason) <= POLICY_TEXT_LIMIT:
+        return reason
+    return reason[: POLICY_TEXT_LIMIT - 3] + "..."
+
+
+def _evaluate_find_rg_policy(request: CommandPolicyRequest) -> CommandPolicyDecision | None:
+    decision = evaluate_find_rg_source(
+        request.command,
+        cwd=request.cwd,
+        environment=os.environ,
+        evaluation_seconds=FIND_RG_POLICY_SECONDS,
+    )
+    if decision.outcome in {FindRgOutcome.REJECTED, FindRgOutcome.NEEDS_FILESYSTEM}:
+        return CommandPolicyDecision("deny", reason=_bounded_policy_reason(decision.message))
+    return None
+
+
+def _evaluate_short_sleep_policy(request: CommandPolicyRequest) -> CommandPolicyDecision | None:
     match = _INTEGER_SLEEP_COMMAND.fullmatch(request.command)
     if match is not None:
         significant_seconds = match.group("seconds").lstrip("0") or "0"
@@ -189,6 +211,15 @@ def evaluate_command_policy(request: CommandPolicyRequest) -> CommandPolicyDecis
         )
         if below_minimum:
             return CommandPolicyDecision("deny", reason=SHORT_SLEEP_DENIAL_REASON)
+    return None
+
+
+def evaluate_command_policy(request: CommandPolicyRequest) -> CommandPolicyDecision:
+    """Apply ordered customer policies to one exact proposed Bash command."""
+    for policy in (_evaluate_find_rg_policy, _evaluate_short_sleep_policy):
+        decision = policy(request)
+        if decision is not None:
+            return decision
     return CommandPolicyDecision("allow")
 
 

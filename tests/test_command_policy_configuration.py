@@ -65,7 +65,7 @@ def rodex_hook(*, trusted=False, enabled=True, **changes):
         "source": "sessionFlags",
         "sourcePath": "/<session-flags>/config.toml",
         "statusMessage": None,
-        "timeoutSec": 3,
+        "timeoutSec": configuration.POLICY_HOOK_TIMEOUT_SECONDS,
         "trustStatus": "trusted" if trusted else "untrusted",
     }
     hook.update(changes)

@@ -1,7 +1,7 @@
 """Fast, read-only admission policy for direct ``find`` and ``rg`` workflows.
 
-This experiment parses and inspects commands. It never executes the supplied
-command, consults history, or writes runtime state.
+This customer policy parses and inspects commands for the native ``PreToolUse``
+broker. It never executes supplied commands, consults history, or writes state.
 """
 
 from __future__ import annotations
@@ -97,6 +97,7 @@ class WorkflowDecision:
 class Policy:
     max_depth: int
     max_roots: int
+    max_workflows: int
     max_entries: int
     max_files: int
     max_file_bytes: int
@@ -131,6 +132,7 @@ class Policy:
 LIMIT_NAMES = {
     "max_depth",
     "max_roots",
+    "max_workflows",
     "max_entries",
     "max_files",
     "max_file_bytes",
@@ -196,6 +198,10 @@ def load_policy(path: str | Path) -> Policy:
         rg_non_default_engines=_string_set(ripgrep, "non_default_engines"),
         messages=dict(messages),
     )
+
+
+DEFAULT_FIND_RG_POLICY_PATH = Path(__file__).with_name("find_rg.toml")
+DEFAULT_FIND_RG_POLICY = load_policy(DEFAULT_FIND_RG_POLICY_PATH)
 
 
 class PolicyViolation(ValueError):
@@ -1330,7 +1336,12 @@ def _static_plan(
     return requests
 
 
-def _census(requests: list[CensusRequest], policy: Policy) -> dict[str, Any]:
+def _census(
+    requests: list[CensusRequest],
+    policy: Policy,
+    *,
+    deadline: float | None = None,
+) -> dict[str, Any]:
     started = time.monotonic()
     result: dict[str, Any] = {
         "entries": 0,
@@ -1343,7 +1354,8 @@ def _census(requests: list[CensusRequest], policy: Policy) -> dict[str, Any]:
     verified_components: set[str] = set()
 
     def check_deadline(stage: int) -> None:
-        if time.monotonic() - started > policy.census_seconds:
+        current = time.monotonic()
+        if current - started > policy.census_seconds or (deadline is not None and current >= deadline):
             _fail(policy, "CENSUS_TIMEOUT", stage, seconds=policy.census_seconds)
 
     def checked_lstat(path: str, stage: int) -> os.stat_result:
@@ -1425,6 +1437,7 @@ def inspect(
     policy: Policy,
     verify_filesystem: bool = True,
     environment: Mapping[str, str] | None = None,
+    deadline: float | None = None,
 ) -> Decision:
     if not isinstance(command, str):
         raise TypeError("command must be a string")
@@ -1445,7 +1458,7 @@ def inspect(
                 policy.render("FILESYSTEM_REQUIRED"),
                 scope={"requests": len(requests)},
             )
-        scope = _census(requests, policy) if requests else {}
+        scope = _census(requests, policy, deadline=deadline) if requests else {}
     except PolicyViolation as violation:
         prefix = f"Stage {violation.stage}: " if violation.stage is not None else ""
         return Decision(
@@ -1464,6 +1477,7 @@ def inspect_search_workflows(
     policy: Policy,
     verify_filesystem: bool = True,
     environment: Mapping[str, str] | None = None,
+    deadline: float | None = None,
 ) -> tuple[WorkflowDecision, ...]:
     """Extract and inspect every direct top-level search workflow in source order."""
     return tuple(
@@ -1475,7 +1489,83 @@ def inspect_search_workflows(
                 policy=policy,
                 verify_filesystem=verify_filesystem,
                 environment=environment,
+                deadline=deadline,
             ),
         )
         for workflow in extract_search_workflows(source, policy=policy)
+    )
+
+
+def evaluate_find_rg_source(
+    source: str,
+    *,
+    cwd: str | Path,
+    policy: Policy = DEFAULT_FIND_RG_POLICY,
+    verify_filesystem: bool = True,
+    environment: Mapping[str, str] | None = None,
+    evaluation_seconds: float | None = None,
+) -> Decision:
+    """Return one composable decision for every direct search in shell source.
+
+    The first non-successful applicable workflow wins. ``not_applicable`` is
+    returned only when no extracted workflow reaches the find/rg parser.
+    """
+    if evaluation_seconds is not None:
+        if (
+            not isinstance(evaluation_seconds, (int, float))
+            or isinstance(evaluation_seconds, bool)
+            or not math.isfinite(evaluation_seconds)
+            or evaluation_seconds <= 0
+        ):
+            raise ValueError("evaluation_seconds must be finite and positive")
+        evaluation_seconds = float(evaluation_seconds)
+        deadline = time.monotonic() + evaluation_seconds
+    else:
+        deadline = None
+    workflows = extract_search_workflows(source, policy=policy)
+    if not workflows:
+        return Decision(Outcome.NOT_APPLICABLE, "NOT_APPLICABLE", policy.render("not_applicable"))
+    if len(workflows) > policy.max_workflows:
+        return Decision(
+            Outcome.REJECTED,
+            "WORKFLOW_BUDGET",
+            f"Rejected: {policy.render('WORKFLOW_BUDGET', count=len(workflows), maximum=policy.max_workflows)}",
+            scope={"workflows": len(workflows)},
+        )
+    applicable_workflows = 0
+    for workflow in workflows:
+        if deadline is not None and time.monotonic() >= deadline:
+            return Decision(
+                Outcome.REJECTED,
+                "EVALUATION_TIMEOUT",
+                f"Rejected: {policy.render('EVALUATION_TIMEOUT', seconds=evaluation_seconds)}",
+                scope={"workflows": len(workflows)},
+            )
+        decision = inspect(
+            workflow.command,
+            cwd=cwd,
+            policy=policy,
+            verify_filesystem=verify_filesystem,
+            environment=environment,
+            deadline=deadline,
+        )
+        if decision.outcome is Outcome.NOT_APPLICABLE:
+            continue
+        applicable_workflows += 1
+        if not decision.allowed:
+            return decision
+        if deadline is not None and time.monotonic() >= deadline:
+            return Decision(
+                Outcome.REJECTED,
+                "EVALUATION_TIMEOUT",
+                f"Rejected: {policy.render('EVALUATION_TIMEOUT', seconds=evaluation_seconds)}",
+                scope={"workflows": len(workflows)},
+            )
+    if not applicable_workflows:
+        return Decision(Outcome.NOT_APPLICABLE, "NOT_APPLICABLE", policy.render("not_applicable"))
+    return Decision(
+        Outcome.ALLOWED,
+        "ALLOWED",
+        policy.render("allowed"),
+        scope={"workflows": applicable_workflows},
     )

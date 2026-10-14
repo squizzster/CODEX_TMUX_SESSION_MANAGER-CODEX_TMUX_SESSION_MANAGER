@@ -203,8 +203,18 @@ def test_extra_user_hook_without_rodex_trust_shows_bounded_prefix_aware_notice(n
 
 
 @pytest.mark.live_startup
-def test_native_short_sleep_policy_denies_with_model_visible_feedback(native):
-    native.model.tool_input = {"cmd": "sleep 9"}
+@pytest.mark.parametrize(
+    ("command", "reason"),
+    [
+        ("sleep 9", SHORT_SLEEP_DENIAL_REASON),
+        (
+            "find /",
+            "Rejected: Stage 1: Directory input '/' has no maximum depth.",
+        ),
+    ],
+)
+def test_native_command_policy_denies_with_model_visible_feedback(native, command, reason):
+    native.model.tool_input = {"cmd": command}
     with native.app_server() as (client, observed, _process, _path):
         started = client.rpc(
             "thread/start",
@@ -222,7 +232,7 @@ def test_native_short_sleep_policy_denies_with_model_visible_feedback(native):
         client.complete_turn()
 
         assert observed == []
-        assert SHORT_SLEEP_DENIAL_REASON in json.dumps(native.model.requests)
+        assert reason in json.dumps(native.model.requests)
 
 
 @pytest.mark.live_startup

@@ -23,6 +23,7 @@ POLICY_INACTIVE_CONFIG = "Rodex policy inactive: native hook settings do not ena
 POLICY_INACTIVE_UNAVAILABLE = "Rodex policy inactive: native hook trust could not be verified"
 POLICY_INACTIVE_REASONS = frozenset({POLICY_INACTIVE_SETUP, POLICY_INACTIVE_CONFIG, POLICY_INACTIVE_UNAVAILABLE})
 POLICY_HOOK_TRUST_BYPASS_ARGUMENT: Final = "--dangerously-bypass-hook-trust"
+POLICY_HOOK_TIMEOUT_SECONDS: Final = 3
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,7 +58,13 @@ def policy_helper_command(python_executable: str | None = None) -> str:
 
 def policy_hook_override(python_executable: str | None = None) -> str:
     command = json.dumps(policy_helper_command(python_executable), ensure_ascii=True)
-    return 'hooks.PreToolUse=[{matcher="^Bash$",hooks=[{type="command",command=' + command + ",timeout=3}]}]"
+    return (
+        'hooks.PreToolUse=[{matcher="^Bash$",hooks=[{type="command",command='
+        + command
+        + ",timeout="
+        + str(POLICY_HOOK_TIMEOUT_SECONDS)
+        + "}]}]"
+    )
 
 
 def caller_bypasses_hook_trust(arguments: tuple[str, ...]) -> bool | None:
@@ -112,7 +119,7 @@ def _is_exact_rodex_policy_hook(hook: dict[str, Any]) -> bool:
         and hook.get("eventName") == "preToolUse"
         and hook.get("handlerType") == "command"
         and hook.get("matcher") == "^Bash$"
-        and hook.get("timeoutSec") == 3
+        and hook.get("timeoutSec") == POLICY_HOOK_TIMEOUT_SECONDS
         and hook.get("async") is False
         and hook.get("isManaged") is False
         and hook.get("pluginId") is None

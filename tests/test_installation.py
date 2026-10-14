@@ -52,11 +52,13 @@ import json, sys
 import installation_probe_dependency as dependency
 from rodex.implementation_identity import RODEX_IMPLEMENTATION_ID
 from rodex.daemon_client import RODEX_DAEMON_PROTOCOL
+from rodex.pre_tool_use_customer_library.find_rg import DEFAULT_FIND_RG_POLICY
 from rodex.tmux_session_capability import RODEX_SHARED_TMUX_PROTOCOL
 from rodex.user_prompt_hook import USER_PROMPT_SUBSTITUTIONS_PATH
 from rodex_sql import RODEX_DATABASE_FILENAME
 print(json.dumps(dict(identity=RODEX_IMPLEMENTATION_ID, daemon=RODEX_DAEMON_PROTOCOL,
     tmux=RODEX_SHARED_TMUX_PROTOCOL, database=RODEX_DATABASE_FILENAME,
+    find_rg_depth=DEFAULT_FIND_RG_POLICY.max_depth,
     dependency=dependency.VERSION, configuration=USER_PROMPT_SUBSTITUTIONS_PATH.read_text(),
     python=sys.executable)))
 """
@@ -238,6 +240,11 @@ def test_published_installation_keeps_code_dependencies_and_defaults_after_repla
         (source / "rodex/daemon_client.py", "rodex-daemon-v5", "rodex-daemon-v6"),
         (source / "rodex/tmux_session_capability.py", "PROTOCOL_GENERATION: Final = 5", "PROTOCOL_GENERATION: Final = 6"),
         (source / "rodex_sql/private_database_path.py", "Final = 22", "Final = 23"),
+        (
+            source / "rodex/pre_tool_use_customer_library/find_rg.toml",
+            "max_depth = 3",
+            "max_depth = 4",
+        ),
         (library / "installation_probe_dependency.py", "'A'", "'B'"),
     )
     for path, old, new in edits:
@@ -253,6 +260,7 @@ def test_published_installation_keeps_code_dependencies_and_defaults_after_repla
     assert after["database"] == "rodex-v23.sqlite3"
     assert after["daemon"] == "rodex-daemon-v6"
     assert after["tmux"] == "rodex-isolated-tmux-v6"
+    assert after["find_rg_depth"] == 4
     assert after["configuration"].endswith("# replacement defaults\n")
     assert info(first, cwd=source, environment={**os.environ, "PYTHONPATH": str(source)}) == before
     # Removing the mutable bootstrap checkout and dependencies cannot break old helpers.

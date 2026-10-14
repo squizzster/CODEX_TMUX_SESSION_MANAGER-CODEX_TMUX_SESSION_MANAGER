@@ -65,7 +65,9 @@ package startup publishes or reuses the retained installation before CLI composi
 - [`CommandPolicyBroker`](../src/rodex/command_policy.py) is composed beside App
   Server in the runtime, outside the proxy and interaction pipeline. Native
   `PreToolUse(Bash)` invokes the retained helper; its decision returns to Codex for
-  approval/sandbox enforcement. Only after responding does the broker queue
+  approval/sandbox enforcement. The ordered customer library begins with the
+  [find/rg policy](FIND_RG_COMMAND_POLICY.md), then retains the sleep rule. Only after
+  responding does the broker queue
   [tmux-only status](../src/rodex/command_policy_status.py).
   [`policy_hook_admission`](../src/rodex/command_policy_configuration.py) checks
   native inventory before TUI startup; [security](SECURITY.md#native-command-policy)

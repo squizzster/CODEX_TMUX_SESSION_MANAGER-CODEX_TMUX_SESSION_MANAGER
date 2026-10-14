@@ -93,7 +93,7 @@ def _bootstrap_state(source_root: Path, site_packages: Path, configuration: Path
     sources: list[list[str | int]] = []
     for package_name in FIRST_PARTY_PACKAGES:
         package_root = source_root / package_name
-        source_files = sorted(package_root.rglob("*.py"))
+        source_files = sorted((*package_root.rglob("*.py"), *package_root.rglob("*.toml")))
         if not source_files:
             raise RodexInstallationError(f"Rodex implementation package is unavailable: {package_name}")
         sources.extend(_path_state(path, path.relative_to(source_root).as_posix()) for path in source_files)

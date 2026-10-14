@@ -1,27 +1,23 @@
 from __future__ import annotations
 
-import json
-import os
 import random
-import subprocess
-import sys
 from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
-from experiments.find_rg_policy import policy_engine
-from experiments.find_rg_policy.policy_engine import (
+from rodex.pre_tool_use_customer_library import find_rg as policy_engine
+from rodex.pre_tool_use_customer_library.find_rg import (
+    DEFAULT_FIND_RG_POLICY,
     Outcome,
+    evaluate_find_rg_source,
     extract_search_workflows,
     inspect,
     inspect_search_workflows,
     load_policy,
 )
 
-EXPERIMENT_ROOT = Path(__file__).parents[1]
-POLICY_PATH = EXPERIMENT_ROOT / "policy.toml"
-CLI_PATH = EXPERIMENT_ROOT / "cli.py"
+POLICY_PATH = Path(policy_engine.__file__).with_name("find_rg.toml")
 
 
 @pytest.fixture
@@ -341,119 +337,57 @@ def test_metadata_mode_needs_no_filesystem_census(workspace, policy):
     assert decision.scope == {}
 
 
-def test_cli_emits_message_and_machine_distinguishable_exit(workspace):
-    completed = subprocess.run(
-        [sys.executable, str(CLI_PATH), "--cwd", str(workspace), "--bash", "find /"],
-        capture_output=True,
-        text=True,
-        timeout=3,
+def test_shipped_default_policy_is_the_validated_package_resource(policy):
+    assert policy == DEFAULT_FIND_RG_POLICY
+
+
+def test_aggregate_source_returns_first_false_search_decision(workspace, policy):
+    decision = evaluate_find_rg_source(
+        "rg --version\nfind /\nrg needle README.md",
+        cwd=workspace,
+        policy=policy,
+        environment={},
     )
 
-    assert completed.returncode == 2
-    assert completed.stderr == ""
-    assert completed.stdout.startswith("Rejected: Stage 1: Directory input '/'")
+    assert decision.outcome is Outcome.REJECTED
+    assert decision.code == "UNBOUNDED_DEPTH"
 
 
-def test_cli_json_preserves_exact_truth_contract(workspace):
-    completed = subprocess.run(
-        [
-            sys.executable,
-            str(CLI_PATH),
-            "--cwd",
-            str(workspace),
-            "--bash",
-            "rg needle README.md",
-            "--json",
-        ],
-        capture_output=True,
-        text=True,
-        timeout=3,
-        check=True,
-        env={key: value for key, value in os.environ.items() if key != "RIPGREP_CONFIG_PATH"},
-    )
-    payload = json.loads(completed.stdout)
-
-    assert payload["outcome"] == "allowed"
-    assert payload["allowed"] is True
-    assert payload["code"] == "ALLOWED"
-
-
-def test_cli_plain_allowed_result_is_literal_true(workspace):
-    completed = subprocess.run(
-        [sys.executable, str(CLI_PATH), "--cwd", str(workspace), "--bash", "rg needle README.md"],
-        capture_output=True,
-        text=True,
-        timeout=3,
-        env={key: value for key, value in os.environ.items() if key != "RIPGREP_CONFIG_PATH"},
+def test_aggregate_source_allows_only_when_every_search_is_allowed(workspace, policy):
+    decision = evaluate_find_rg_source(
+        "rg --version\nrg needle README.md",
+        cwd=workspace,
+        policy=policy,
+        environment={},
     )
 
-    assert completed.returncode == 0
-    assert completed.stdout == "true\n"
-    assert completed.stderr == ""
+    assert decision.outcome is Outcome.ALLOWED
+    assert decision.scope == {"workflows": 2}
 
 
-def test_cli_static_result_is_false_and_machine_distinguishable(workspace):
-    completed = subprocess.run(
-        [
-            sys.executable,
-            str(CLI_PATH),
-            "--cwd",
-            str(workspace),
-            "--bash",
-            "rg needle README.md",
-            "--static",
-            "--json",
-        ],
-        capture_output=True,
-        text=True,
-        timeout=3,
-        env={key: value for key, value in os.environ.items() if key != "RIPGREP_CONFIG_PATH"},
+def test_aggregate_source_has_a_combined_workflow_budget(workspace, policy):
+    source = "\n".join("rg --version" for _ in range(policy.max_workflows + 1))
+
+    decision = evaluate_find_rg_source(source, cwd=workspace, policy=policy, environment={})
+
+    assert decision.outcome is Outcome.REJECTED
+    assert decision.code == "WORKFLOW_BUDGET"
+
+
+def test_aggregate_source_has_one_overall_evaluation_deadline(monkeypatch, workspace, policy):
+    moments = iter((10.0, 10.6))
+    monkeypatch.setattr(policy_engine.time, "monotonic", lambda: next(moments))
+
+    decision = evaluate_find_rg_source(
+        "rg --version",
+        cwd=workspace,
+        policy=policy,
+        environment={},
+        evaluation_seconds=0.5,
     )
 
-    assert completed.returncode == 2
-    payload = json.loads(completed.stdout)
-    assert payload["outcome"] == "needs_filesystem"
-    assert payload["allowed"] is False
-    assert payload["code"] == "FILESYSTEM_REQUIRED"
-
-
-def test_cli_extracts_multiline_workflows_without_echoing_commands(workspace):
-    source = "find /\nprintf ignored\nrg needle README.md\n"
-    completed = subprocess.run(
-        [
-            sys.executable,
-            str(CLI_PATH),
-            "--cwd",
-            str(workspace),
-            "--bash",
-            source,
-            "--extract",
-            "--static",
-            "--json",
-        ],
-        capture_output=True,
-        text=True,
-        timeout=3,
-        env={key: value for key, value in os.environ.items() if key != "RIPGREP_CONFIG_PATH"},
-    )
-
-    assert completed.returncode == 2
-    payload = json.loads(completed.stdout)
-    assert [item["workflow"]["start_line"] for item in payload] == [1, 3]
-    assert [item["decision"]["outcome"] for item in payload] == ["rejected", "needs_filesystem"]
-    assert all("command" not in item["workflow"] for item in payload)
-
-
-def test_cli_not_applicable_is_not_reported_as_success(workspace):
-    completed = subprocess.run(
-        [sys.executable, str(CLI_PATH), "--cwd", str(workspace), "--bash", "printf hello"],
-        capture_output=True,
-        text=True,
-        timeout=3,
-    )
-
-    assert completed.returncode == 3
-    assert completed.stdout == "Not applicable: no direct find or rg command was found.\n"
+    assert decision.outcome is Outcome.REJECTED
+    assert decision.code == "EVALUATION_TIMEOUT"
 
 
 def test_direct_search_parser_is_total_over_deterministic_noise(policy):

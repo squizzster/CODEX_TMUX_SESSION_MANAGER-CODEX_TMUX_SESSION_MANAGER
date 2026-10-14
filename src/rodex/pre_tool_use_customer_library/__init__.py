@@ -1,11 +1,13 @@
-"""Independent find/rg command-policy experiment."""
+"""Customer policy modules composed by Rodex's native ``PreToolUse`` broker."""
 
-from .policy_engine import (
+from .find_rg import (
+    DEFAULT_FIND_RG_POLICY,
     Decision,
     Outcome,
     Policy,
     SearchWorkflow,
     WorkflowDecision,
+    evaluate_find_rg_source,
     extract_search_workflows,
     inspect,
     inspect_search_workflows,
@@ -13,11 +15,13 @@ from .policy_engine import (
 )
 
 __all__ = [
+    "DEFAULT_FIND_RG_POLICY",
     "Decision",
     "Outcome",
     "Policy",
     "SearchWorkflow",
     "WorkflowDecision",
+    "evaluate_find_rg_source",
     "extract_search_workflows",
     "inspect",
     "inspect_search_workflows",

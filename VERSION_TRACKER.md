@@ -10,6 +10,12 @@ repository currently has no Git release tags, so they do not imply a published r
 
 ### Modified
 
+- Command-policy shutdown shares one two-second join deadline across the accept thread
+  and all request workers (A17 shutdown-budget portion). Admission stops during close;
+  unresolved workers remain owned and are reported with content-free counts. Tests
+  cover saturated stalled workers, abandoned clients, incomplete requests, and eventual
+  release. This does not cancel blocked filesystem calls or establish daemon-wide
+  capacity limits across runtime replacement.
 - Canonical token-accounting response fingerprints now include normalized cumulative
   thread usage (A15 conflict-rejection portion). Both replay and resident append paths
   reject cumulative-only conflicts while identical older duplicates retain the latest

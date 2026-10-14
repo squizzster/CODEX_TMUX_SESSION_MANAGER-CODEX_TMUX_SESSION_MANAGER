@@ -117,6 +117,14 @@ semantics.
 An approval therefore describes the parsed request and observed inputs at inspection
 time, not a runtime guarantee.
 
+Broker shutdown stops admission, interrupts connected clients, and shares one
+two-second join budget across the accept thread and all request workers. `close()`
+returns false and reports only runtime identity and residual counts if work remains.
+Client abandonment or an expired join does not cancel a blocked filesystem call:
+that worker remains charged to its broker's 16-worker limit until it actually exits.
+This bounds shutdown waiting, not worker lifetime or aggregate capacity across retired
+and replacement runtimes; broader isolation and admission budgets are separate work.
+
 This policy is not a complete Bash interpreter or an execution sandbox. Indirect
 searches such as `bash -c 'find ...'`, shell variables, functions, aliases, generated
 arguments, and conditional shell grammar remain outside the direct-workflow contract.

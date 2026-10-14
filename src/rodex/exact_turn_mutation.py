@@ -134,16 +134,30 @@ class ExactTurnMutationCoordinator:
         prompt: str,
         *,
         dispatch_id: str | None,
+        expected_runtime_id: str | None = None,
+        expected_thread_id: str | None = None,
+        before_dispatch: Callable[[], None] | None = None,
     ) -> tuple[ExactTurnTarget, PromptDispatch]:
         with self._locked_selector(selector) as selection:
             target = self._resolve_target(selection)
+            if expected_runtime_id is not None and str(target.control.runtime_id) != expected_runtime_id:
+                raise RodexControlError("model steer runtime changed before dispatch")
+            if expected_thread_id is not None and str(target.control.codex_session_id) != expected_thread_id:
+                raise RodexControlError("model steer thread changed before dispatch")
+            exact_revalidator = self._revalidator(target)
+
+            def revalidate() -> None:
+                exact_revalidator()
+                if before_dispatch is not None:
+                    before_dispatch()
+
             dispatch = self._dispatch_turn_operation(
                 target,
                 InteractionOperation.STEER,
                 prompt=prompt,
                 turn_id=turn_id,
                 dispatch_id=dispatch_id,
-                revalidate=self._revalidator(target),
+                revalidate=revalidate,
             )
             return target, cast(PromptDispatch, dispatch)
 

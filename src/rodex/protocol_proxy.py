@@ -73,6 +73,7 @@ _WORKING_STATUS_EVENT_METHODS: Final = frozenset(
 )
 ProtocolEventCallback = Callable[[str | bytes, dict[str, Any] | None], None]
 ContextStatusCallback = Callable[[str], None]
+ContextPercentCallback = Callable[[str, float], None]
 DisconnectCallback = Callable[[], None]
 ROLLOUT_CONTEXT_POLL_INTERVAL_SECONDS: Final = 0.25
 ROLLOUT_CONTEXT_MAX_IDLE_POLL_INTERVAL_SECONDS: Final = 2.0
@@ -477,6 +478,7 @@ class CodexContextStatusObserver:
         self,
         on_status_changed: ContextStatusCallback,
         *,
+        on_context_percent: ContextPercentCallback = lambda _thread_id, _context_percent: None,
         animation_interval_seconds: float = CONTEXT_COMPACTION_FRAME_INTERVAL_SECONDS,
         compaction_watchdog_seconds: float = CONTEXT_COMPACTION_WATCHDOG_SECONDS,
         codex_sessions_root: Path | None = None,
@@ -496,6 +498,7 @@ class CodexContextStatusObserver:
                 "rollout maximum idle poll interval must be finite and no shorter than the rollout poll interval"
             )
         self._on_status_changed = on_status_changed
+        self._on_context_percent = on_context_percent
         self._animation_interval_seconds = animation_interval_seconds
         self._compaction_watchdog_seconds = compaction_watchdog_seconds
         self._monotonic = time.monotonic
@@ -568,6 +571,7 @@ class CodexContextStatusObserver:
                 self._latest_context_status = rendered_status
                 if not self._active_compaction_item_ids:
                     self._publish_status_locked(rendered_status)
+            self._publish_context_percent(thread_id, context_percent)
             return
         if method == CODEX_APP_SERVER.turn_completed_method:
             thread_id = _event_thread_id(params)
@@ -637,6 +641,7 @@ class CodexContextStatusObserver:
             self._latest_context_status = rendered_status
             if status_changed and not self._active_compaction_item_ids:
                 self._publish_status_locked(rendered_status)
+        self._publish_context_percent(thread_id, context_percent)
 
     def close(self) -> None:
         """Stop any live animation without delaying protocol shutdown."""
@@ -775,6 +780,13 @@ class CodexContextStatusObserver:
             self._on_status_changed(rendered_status)
         except (OSError, subprocess.SubprocessError):
             # Status rendering must never interrupt the Codex protocol stream.
+            return
+
+    def _publish_context_percent(self, thread_id: str, context_percent: float) -> None:
+        try:
+            self._on_context_percent(thread_id, context_percent)
+        except Exception:
+            # Derived policy work cannot interrupt the protocol or rollout follower.
             return
 
     def _follow_rollout_context(
@@ -951,6 +963,7 @@ class CodexProtocolProxy:
                 frozenset(
                     {
                         InteractionOperation.MESSAGE,
+                        InteractionOperation.STEER,
                         InteractionOperation.LOCATE,
                         InteractionOperation.FOCUS,
                         InteractionOperation.RESIZE,
@@ -1132,6 +1145,10 @@ class CodexProtocolProxy:
                 raise InteractionRejected("main conversation changed before model dispatch")
 
     def _deliver_main_interaction(self, request: InteractionRequest) -> InteractionResult:
+        if request.operation == InteractionOperation.STEER:
+            if self._model_message_sender is None:
+                return InteractionResult(DeliveryStatus.REJECTED, "main model steering is unavailable")
+            return self._model_message_sender(request)
         if request.operation == InteractionOperation.MESSAGE:
             if request.start_model_turn:
                 if self._model_message_sender is None:

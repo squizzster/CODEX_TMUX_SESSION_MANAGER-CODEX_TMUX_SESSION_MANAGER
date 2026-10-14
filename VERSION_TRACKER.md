@@ -24,6 +24,9 @@ repository currently has no Git release tags, so they do not imply a published r
   with boundary-aware multiline extraction, declarative installed TOML rules,
   deterministic static outcomes, bounded live metadata census, exact rejection
   feedback, and no command execution, history, or persistence.
+- Exact main-turn context stewardship at a 70% structured-usage crossing, with one
+  asynchronous fixed steer per armed crossing, compaction suppression, final
+  exact-turn admission, and no automatic retry after uncertain delivery.
 - A daemon now creates one random 256-bit incarnation capability at each start,
   publishes it privately, and requires it alongside the retained installation identity
   on every request and response.

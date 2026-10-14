@@ -16,7 +16,9 @@ session lifecycle, not pane presentation. Missing targets reject unless explicit
 
 [`publish_session_interaction`](../src/rodex/interaction_transport.py) exposes these
 operations on a private endpoint. It cannot accept arbitrary protocol frames, terminal
-bytes, snapshots, launch commands, or hooks. `publish_tui_notice` uses this same path.
+bytes, snapshots, launch commands, hooks, or exact-turn steer/interrupt operations.
+Those mutations remain internal or use the separately fenced exact-control route.
+`publish_tui_notice` uses this same path.
 Hooks may transform/reject content, never change source, target, operation, turn/thread,
 model permission, or dispatch identity. They run synchronously and should remain short.
 Protocol edits retain non-text RPC fields; unmodified native frames preserve exact bytes.
@@ -36,6 +38,7 @@ user-configured generic content-hook loader.
 | Native typing/output | decoder/interceptor → [gateway](../src/rodex/terminal_gateway.py) → child PTY / terminal surface |
 | Managed initial prompt, verified Enter, queued or control text | [prompt admission](PROMPT_SUBMISSION_FLOW.md) → primary receipt or structured fallback |
 | App Server frames | [proxy](../src/rodex/protocol_proxy.py) protocol input/output → original destination, then bounded projections |
+| Main context reaches 70% | exact numeric usage projection → [context threshold controller](../src/rodex/context_threshold_steering.py) → shared interaction pipeline → exact active-turn steer |
 | Native shell command policy | App Server `PreToolUse(Bash)` → [retained helper](../src/rodex/command_policy_hook.py) → [private broker](../src/rodex/command_policy.py) → ordered [find/rg and later policies](FIND_RG_COMMAND_POLICY.md) → native Codex enforcement; then asynchronous [tmux-only status](../src/rodex/command_policy_status.py) |
 | `_start`, `_steer`, `_interrupt`, alias, mouse | [exact mutation coordinator](../src/rodex/exact_turn_mutation.py) → fenced adapter |
 | `_cat`, `_tail`, `_events` | [live read pipeline](../src/rodex/session_read_pipeline.py); terminal text and protocol events remain distinct |
@@ -92,6 +95,41 @@ mutations are not automatically resent.
 Evidence: `test_backoff_doubles_within_five_minutes_caps_at_sixteen_minutes_and_then_resets`
 and cancellation/admission cases in
 [test_server_overloaded_recovery.py](../tests/test_server_overloaded_recovery.py).
+
+### Context threshold steering
+
+[`ContextThresholdSteeringController`](../src/rodex/context_threshold_steering.py)
+observes the registered main thread's numeric context percentage. The value comes
+directly from structured App Server token usage or the authenticated exact-thread
+rollout follower: `100 * totalTokens / modelContextWindow`. It does not scrape or
+parse the rendered `Context: N%` status, and display rounding cannot trigger it.
+Exactly `70.0` qualifies; every lower value does not.
+
+A qualifying below-to-`>=70%` crossing schedules one asynchronous `STEER` for the
+exact active main turn with this fixed text:
+
+```text
+What's the most relevant objectives currently?, where/why? Compact insights, correctly finish whatever your're currently doing...no rush....
+```
+
+High usage observed before registration or before a turn becomes active waits for
+both authorities. Child-thread usage is ignored. Scheduling consumes the crossing;
+it stays disarmed regardless of outcome until an exact observation falls below 70%.
+Compaction cancels pending work, ignores its usage snapshots, and requires a fresh
+post-compaction below-to-threshold crossing. Turn completion, disconnect, root
+rebinding, and close also cancel pending work.
+
+The deferred request enters `SessionInteractionPipeline`, where hooks and exact target
+checks still apply. After session-lock and transport waits, the exact mutation adapter
+revalidates connection, runtime, thread, turn, context percentage, compaction state,
+dispatch identity, and fixed text immediately before `turn/steer`. Only an admitted
+`completed` result records success. Rejection, failure, and indeterminate delivery are
+not retried automatically. Protocol forwarding never waits for this work, and the
+external `/rodex-interaction` decoder does not expose `STEER`.
+
+Evidence: [controller and race cases](../tests/test_context_threshold_steering.py),
+[raw usage projection](../tests/test_rodex_protocol_proxy.py), and
+[pipeline/exact-control integration](../tests/test_interaction_integration.py).
 
 ## Model input and local notices
 

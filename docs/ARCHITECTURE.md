@@ -57,6 +57,11 @@ package startup publishes or reuses the retained installation before CLI composi
 - [`PrimaryConnectionLifecycleCoordinator`](../src/rodex/primary_connection_lifecycle.py)
   resets every participant even if one fails. Observer epoch ownership remains in
   the reducer, not in reset callers or transport.
+- [`ContextThresholdSteeringController`](../src/rodex/context_threshold_steering.py)
+  converts exact main-thread usage into one guarded steer at a 70% crossing. It
+  schedules outside protocol forwarding, then returns through the shared interaction
+  pipeline and exact-turn mutation boundary; [interaction paths](INTERACTION_PATHS.md#context-threshold-steering)
+  owns the crossing, compaction, and retry contract.
 - [`TmuxStatusPipeline`](../src/rodex/tmux_status.py) is the shared Python API for
   status ownership, priority, restoration, and timed notices. The
   [effect contract](INTERACTION_PATHS.md#effect-audit) covers its shared rendering

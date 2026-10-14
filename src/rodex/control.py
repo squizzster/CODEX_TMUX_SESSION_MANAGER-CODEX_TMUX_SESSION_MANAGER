@@ -174,6 +174,15 @@ class _MutationDispatchContext:
     thread_id: str
     turn_id: str | None = None
 
+    def invalid_acknowledgement(self, method: str, diagnostic: str) -> RodexDispatchIndeterminateError:
+        return RodexDispatchIndeterminateError(
+            f"{method} was sent but its acknowledgement is invalid: {diagnostic}; acceptance is unknown",
+            method=method,
+            dispatch_id=self.dispatch_id,
+            thread_id=self.thread_id,
+            turn_id=self.turn_id,
+        )
+
 
 class CodexControlClient:
     """Verify, inspect, steer, wait for, and tail one loaded Codex thread."""
@@ -288,6 +297,7 @@ class CodexControlClient:
                     if state.can_accept_direct_input is False:
                         raise RodexControlError("Codex thread does not accept direct input")
                     revalidate()
+                    dispatch_context = _MutationDispatchContext(resolved_dispatch_id, state.thread_id)
                     result = _request(
                         websocket,
                         self._request_id_factory(),
@@ -297,16 +307,19 @@ class CodexControlClient:
                             "input": [{"type": "text", "text": prompt}],
                             "clientUserMessageId": resolved_dispatch_id,
                         },
-                        indeterminate_context=_MutationDispatchContext(
-                            resolved_dispatch_id,
-                            state.thread_id,
-                        ),
+                        indeterminate_context=dispatch_context,
                         deadline=deadline,
                         monotonic=self._monotonic,
                     )
+                    try:
+                        accepted_turn_id = _started_turn_id(result)
+                    except RodexControlError as error:
+                        raise dispatch_context.invalid_acknowledgement(
+                            CODEX_APP_SERVER.turn_start_method, str(error)
+                        ) from error
                     return PromptDispatch(
                         "started",
-                        _started_turn_id(result),
+                        accepted_turn_id,
                         resolved_dispatch_id,
                         state.thread_id,
                         state.session_id,
@@ -357,6 +370,7 @@ class CodexControlClient:
                     if state.can_accept_direct_input is False:
                         raise RodexControlError("Codex thread does not accept direct input")
                     revalidate()
+                    dispatch_context = _MutationDispatchContext(resolved_dispatch_id, state.thread_id, turn_id)
                     result = _request(
                         websocket,
                         self._request_id_factory(),
@@ -367,17 +381,19 @@ class CodexControlClient:
                             "input": [{"type": "text", "text": prompt}],
                             "clientUserMessageId": resolved_dispatch_id,
                         },
-                        indeterminate_context=_MutationDispatchContext(
-                            resolved_dispatch_id,
-                            state.thread_id,
-                            turn_id,
-                        ),
+                        indeterminate_context=dispatch_context,
                         deadline=deadline,
                         monotonic=self._monotonic,
                     )
+                    try:
+                        accepted_turn_id = _steered_turn_id(result)
+                    except RodexControlError as error:
+                        raise dispatch_context.invalid_acknowledgement(
+                            CODEX_APP_SERVER.turn_steer_method, str(error)
+                        ) from error
                     return PromptDispatch(
                         "steered",
-                        _steered_turn_id(result),
+                        accepted_turn_id,
                         resolved_dispatch_id,
                         state.thread_id,
                         state.session_id,
@@ -880,12 +896,29 @@ def _request(
                 ) from error
             raise RodexControlError(f"timed out waiting for {method}") from error
         payload = _protocol_payload(message)
-        if payload is None or payload.get("id") != request_id:
+        if (
+            payload is None
+            or type(payload.get("id")) not in {int, str}
+            or type(payload["id"]) is not type(request_id)
+            or payload["id"] != request_id
+        ):
             continue
         if "error" in payload:
-            raise RodexControlError(f"{method} failed: {payload['error']}")
+            rejection = payload["error"]
+            if (
+                "result" in payload
+                or not isinstance(rejection, dict)
+                or type(rejection.get("code")) is not int
+                or not isinstance(rejection.get("message"), str)
+            ):
+                if indeterminate_context is not None:
+                    raise indeterminate_context.invalid_acknowledgement(method, "invalid error envelope")
+                raise RodexControlError(f"{method} returned an invalid error envelope")
+            raise RodexControlError(f"{method} failed: {rejection}")
         result = payload.get("result")
         if not isinstance(result, dict):
+            if indeterminate_context is not None:
+                raise indeterminate_context.invalid_acknowledgement(method, "result must be an object")
             raise RodexControlError(f"{method} returned an invalid result")
         return result
 

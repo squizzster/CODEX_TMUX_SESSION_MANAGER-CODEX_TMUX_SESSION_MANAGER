@@ -121,6 +121,9 @@ idle, or steer the observed active turn. Offline/unchanged names send none. Noti
 failure does not roll back the committed name. This is a model-input side effect,
 not merely a display rename; see
 [`ExactTurnMutationCoordinator.alias_transition`](../src/rodex/exact_turn_mutation.py).
+Post-commit refresh errors identify the committed name. An uncertain announcement
+retains its dispatch identity and reports an exact `_dispatch-status` command.
+Repeating the same alias does not retry the announcement.
 
 ## Observe without guessing completion
 
@@ -147,6 +150,10 @@ inspection, stdin prompts, dispatch reconciliation, waiting, and interruption.
 `_wait SESSION` is a human idle wait; exact automation supplies `--turn TURN_ID`.
 Terminal output alone never proves completion. Approval and user-input requests
 remain with the subscribed primary connection, normally the managed TUI.
+An invalid success acknowledgement after a mutation was sent is indeterminate,
+including a missing turn ID or a non-object result. The error retains the method,
+dispatch ID, thread and expected turn where known. Reconcile that dispatch before
+deciding whether to submit again; native rejections remain definitive errors.
 
 Machine envelopes are defined by
 [`MACHINE_ENVELOPE_SCHEMA_VERSION`](../src/rodex/machine_commands.py); App Server

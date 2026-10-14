@@ -12,7 +12,7 @@ import pytest
 
 import rodex.exact_turn_mutation as mutation_module
 import rodex.live_runtime as live_runtime_module
-from rodex.control import LiveRodexControl
+from rodex.control import LiveRodexControl, RodexControlError, RodexDispatchIndeterminateError
 from rodex.errors import RodexLaunchError
 from rodex.exact_turn_mutation import ExactTurnMutationCoordinator
 from rodex.runtime import LiveTmuxSession
@@ -416,9 +416,11 @@ def test_start_revalidates_runtime_after_transport_wait_before_first_frame(
     assert control.frames == 0
 
 
-def test_alias_transition_holds_the_lock_and_steers_the_observed_active_turn(
+@pytest.mark.parametrize("failure_phase", [None, "refresh", "indeterminate", "rejected"])
+def test_alias_transition_holds_the_lock_and_preserves_committed_announcement_evidence(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    failure_phase: str | None,
 ) -> None:
     database = tmp_path / "registry.sqlite3"
     runtime = LiveTmuxSession(tmp_path / "tmux.sock", "worker")
@@ -432,6 +434,7 @@ def test_alias_transition_holds_the_lock_and_steers_the_observed_active_turn(
         runtime_id="runtime",
     )
     lock_was_held = False
+    committed_names = ["worker"]
 
     @contextmanager
     def assignment(*_args: object, **_kwargs: object):
@@ -455,6 +458,7 @@ def test_alias_transition_holds_the_lock_and_steers_the_observed_active_turn(
                 tmux_session=object(),
                 renamed_tmux_session_name=None,
             )
+            committed_names.append("renamed")
         finally:
             os.close(descriptor)
 
@@ -471,6 +475,8 @@ def test_alias_transition_holds_the_lock_and_steers_the_observed_active_turn(
             return None
 
         def refresh_shared_tmux_coordination(self, _runtime: LiveTmuxSession) -> None:
+            if failure_phase == "refresh":
+                raise RuntimeError("injected refresh failure")
             return None
 
     class ActiveControlClient:
@@ -498,6 +504,16 @@ def test_alias_transition_holds_the_lock_and_steers_the_observed_active_turn(
             assert dispatch_id is None
             revalidate()
             self.steered.append((observed, turn_id, prompt))
+            if failure_phase == "indeterminate":
+                raise RodexDispatchIndeterminateError(
+                    "invalid acknowledgement",
+                    method="turn/steer",
+                    dispatch_id="announcement:dispatch",
+                    thread_id="thread",
+                    turn_id=turn_id,
+                )
+            if failure_phase == "rejected":
+                raise RodexControlError("native rejection")
             return object()
 
     monkeypatch.setattr(
@@ -526,7 +542,7 @@ def test_alias_transition_holds_the_lock_and_steers_the_observed_active_turn(
     monkeypatch.setattr(
         mutation_module,
         "lookup_rodex_session_names",
-        lambda *_args: SimpleNamespace(display_name="worker"),
+        lambda *_args: SimpleNamespace(display_name=committed_names[-1]),
     )
     monkeypatch.setattr(
         live_runtime_module,
@@ -535,19 +551,43 @@ def test_alias_transition_holds_the_lock_and_steers_the_observed_active_turn(
     )
     monkeypatch.setattr(mutation_module, "revalidate_live_control", lambda *_args: None)
     client = ActiveControlClient()
-    display_name = ExactTurnMutationCoordinator(
+    coordinator = ExactTurnMutationCoordinator(
         database,
         Launcher(),  # type: ignore[arg-type]
         client,  # type: ignore[arg-type]
-    ).alias_transition("worker", "renamed", force=False)
+    )
 
-    assert display_name == "renamed"
+    if failure_phase == "indeterminate":
+        with pytest.raises(RodexDispatchIndeterminateError, match="name committed as 'renamed'") as caught:
+            coordinator.alias_transition("worker", "renamed", force=False)
+        assert caught.value.dispatch_id == "announcement:dispatch"
+        assert caught.value.method == "turn/steer"
+        assert caught.value.thread_id == "thread"
+        assert caught.value.turn_id == "turn-active"
+        assert "rodex _dispatch-status renamed --dispatch announcement:dispatch --json" in str(caught.value)
+    elif failure_phase == "refresh":
+        with pytest.raises(RodexLaunchError, match=r"name committed as 'renamed'.*refresh failed"):
+            coordinator.alias_transition("worker", "renamed", force=False)
+    elif failure_phase == "rejected":
+        with pytest.raises(RodexLaunchError, match=r"name changed to 'renamed'.*native rejection"):
+            coordinator.alias_transition("worker", "renamed", force=False)
+    else:
+        assert coordinator.alias_transition("worker", "renamed", force=False) == "renamed"
+
+    assert committed_names[-1] == "renamed"
     assert lock_was_held
     assert client.started == 0
-    assert client.steered == [
-        (
-            live_control,
-            "turn-active",
-            "RODEX_AUTO_INFO: Rodex session rodex-session is now named 'renamed'.",
-        )
-    ]
+    assert client.steered == (
+        []
+        if failure_phase == "refresh"
+        else [
+            (
+                live_control,
+                "turn-active",
+                "RODEX_AUTO_INFO: Rodex session rodex-session is now named 'renamed'.",
+            )
+        ]
+    )
+    announcement_count = len(client.steered)
+    assert coordinator.alias_transition("worker", "renamed", force=False) == "renamed"
+    assert len(client.steered) == announcement_count

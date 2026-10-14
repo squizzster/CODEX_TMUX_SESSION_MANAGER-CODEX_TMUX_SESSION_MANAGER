@@ -22,6 +22,7 @@ from rodex_registry import (
     lookup_rodex_runtime_registration,
     lookup_rodex_session_id_from_a_rodex_sessions_id,
     record_a_rodex_session_runtime_resume,
+    repair_rodex_runtime_tmux_session_name,
 )
 
 from .control import LiveRodexControl
@@ -127,8 +128,10 @@ def _resolve_live_control_locked(
         raise RodexLaunchError("live runtime did not advertise registered tmux authority")
     runtime = replace(
         runtime,
+        tmux_session_name=control.tmux_session_name or runtime.tmux_session_name,
         runtime_id=control.runtime_id,
         tmux_capability=control.tmux_capability,
+        tmux_runtime_capability=control.tmux_runtime_capability,
     )
     return session_id, runtime, control
 
@@ -175,17 +178,51 @@ def _verify_live_runtime_identity_locked(
     ):
         raise RodexRuntimeRegistrationRejectedError("live discovery no longer matches its durable runtime endpoint")
     control = launcher.discover_runtime_control(runtime)
-    if (
-        control.registration_state == RODEX_REGISTRATION_PENDING
-        and control.rodex_session_id == expected_rodex_session_id
-        and control.rodex_registry_id == expected_registry_id
-        and control.codex_session_id == expected_codex_session_id
-    ):
-        if control.runtime_id is None:
-            raise RodexLaunchError("pending live runtime did not advertise its exact runtime identity")
-        if control.runtime_id != registration.runtime_id:
+    require_live_runtime_identity(
+        control,
+        expected_rodex_session_id=expected_rodex_session_id,
+        expected_registry_id=expected_registry_id,
+        expected_codex_session_id=expected_codex_session_id,
+        allow_pending=True,
+    )
+    if registration.runtime_id is None:
+        raise ExactRuntimeIdentityRequiredError("live runtime lacks its required durable incarnation")
+    if control.runtime_id != registration.runtime_id:
+        if control.registration_state == RODEX_REGISTRATION_PENDING:
             raise RodexRuntimeRegistrationRejectedError("a pending reader cannot replace the durable runtime incarnation")
-        identified_runtime = replace(runtime, runtime_id=control.runtime_id)
+        raise RodexLaunchError("live runtime advertised an unexpected durable runtime incarnation")
+    if control.registration_state == RODEX_REGISTRATION_REGISTERED and (
+        control.tmux_capability is None or control.tmux_capability.internal_session_id != session_id
+    ):
+        raise RodexLaunchError("live runtime advertised an unexpected internal session identity")
+    primary = control.tmux_runtime_capability
+    if runtime.tmux_runtime_capability is not None and primary != runtime.tmux_runtime_capability:
+        raise RodexLaunchError("live runtime primary authority changed during verification")
+    if primary is not None and (
+        primary.tmux_server_socket_path != runtime.tmux_server_socket_path
+        or primary.runtime_id != control.runtime_id
+        or (control.tmux_capability is not None and control.tmux_capability.runtime_capability != primary)
+    ):
+        raise RodexLaunchError("live runtime primary authority disagrees with registration")
+    identified_runtime = replace(
+        runtime,
+        tmux_session_name=control.tmux_session_name or runtime.tmux_session_name,
+        runtime_id=control.runtime_id,
+        tmux_capability=control.tmux_capability,
+        tmux_runtime_capability=primary,
+    )
+    if identified_runtime.tmux_session_name != runtime.tmux_session_name:
+        if primary is None:
+            raise RodexLaunchError("runtime name repair requires exact primary tmux authority")
+        if launcher.discover_runtime_control(identified_runtime) != control:
+            raise RodexLaunchError("live runtime changed before name repair")
+        repaired_tmux = repair_rodex_runtime_tmux_session_name(
+            registration, identified_runtime.tmux_session_name, database_path
+        )
+        registration = replace(registration, tmux_session=repaired_tmux)
+        if launcher.discover_runtime_control(identified_runtime) != control:
+            raise RodexLaunchError("live runtime changed after name repair")
+    if control.registration_state == RODEX_REGISTRATION_PENDING:
         record_a_rodex_session_runtime_resume(
             session_id,
             identified_runtime.tmux_server_socket_path,
@@ -212,7 +249,13 @@ def _verify_live_runtime_identity_locked(
     capability = control.tmux_capability
     if capability is None or capability.internal_session_id != session_id:
         raise RodexLaunchError("live runtime advertised an unexpected internal session identity")
+    if primary is not None and (control.tmux_runtime_capability != primary or capability.runtime_capability != primary):
+        raise RodexLaunchError("live runtime primary authority changed during registration")
+    if control.tmux_session_name is not None and control.tmux_session_name != registration.tmux_session.tmux_session_name:
+        raise RodexLaunchError("live runtime name changed during verification")
     require_durable_runtime_instance(session_id, database_path, control)
+    if lookup_rodex_runtime_registration(session_id, database_path) != registration:
+        raise RodexRuntimeRegistrationRejectedError("durable runtime registration changed during verification")
     return control
 
 
@@ -235,8 +278,11 @@ def require_live_runtime_identity(
     expected_rodex_session_id: RodexSessionId,
     expected_registry_id: RodexRegistryId,
     expected_codex_session_id: CodexSessionId,
+    allow_pending: bool = False,
 ) -> None:
-    if control.registration_state != RODEX_REGISTRATION_REGISTERED:
+    if control.registration_state != RODEX_REGISTRATION_REGISTERED and not (
+        allow_pending and control.registration_state == RODEX_REGISTRATION_PENDING
+    ):
         raise RodexLaunchError(
             "live runtime is not durably registered: "
             f"expected {RODEX_REGISTRATION_REGISTERED}, "

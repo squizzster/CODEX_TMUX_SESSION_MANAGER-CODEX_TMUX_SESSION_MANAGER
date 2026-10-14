@@ -130,6 +130,8 @@ def test_outcome_subscription_observes_shared_pipeline_until_exact_unsubscribe()
     "changed",
     [
         {"id": 2},
+        {"id": True},
+        {"id": 1.0},
         {"method": "turn/start"},
         {"params": {"threadId": "other", "input": [{"type": "text", "text": "hello"}]}},
         {"params": {"threadId": "thread", "input": [{"type": "text", "text": "hello"}], "decision": "accept"}},
@@ -171,6 +173,20 @@ def test_protocol_text_changes_preserve_envelope_and_no_hook_preserves_exact_byt
         InteractionRequest("wire", InteractionOperation.PROTOCOL_INPUT, "tui", payload=frame)
     ).accepted
     assert b"world" in delivered[-1].payload
+
+
+@pytest.mark.parametrize("before,after", [(0, False), (1, True), (1, 1.0), (False, 0), (1.0, 1)])
+def test_protocol_hooks_preserve_nested_scalar_types(before, after):
+    frame = {"id": "request", "params": {"controls": [{"value": before}]}}
+    changed = {"id": "request", "params": {"controls": [{"value": after}]}}
+    delivered = []
+    pipeline = SessionInteractionPipeline(hooks=(lambda request: replace(request, payload=json.dumps(changed)),))
+    pipeline.register(target_binding("wire", delivered))
+    result = pipeline.execute(
+        InteractionRequest("wire", InteractionOperation.PROTOCOL_INPUT, "tui", payload=json.dumps(frame))
+    )
+    assert result.status == DeliveryStatus.REJECTED
+    assert delivered == []
 
 
 def test_unknown_and_missing_targets_never_create_implicitly():

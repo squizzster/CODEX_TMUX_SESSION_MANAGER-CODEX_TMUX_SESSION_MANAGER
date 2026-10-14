@@ -1,7 +1,7 @@
 # Prompt configuration and submission
 
 Codex owns its editor, turns, and transcript. Rodex owns ordered text transformations
-and one-use preparation receipts; the gateway owns the child PTY and release of Enter.
+at structured submission; the gateway owns the child PTY and local interception.
 This is not terminal scrollback surgery or a replacement editor API.
 
 ## Rule files
@@ -52,67 +52,74 @@ successful delivery; stat failures share a notice until accessibility changes. F
 the user file and submit again: changed valid rules replace the cached failure without
 a runtime restart. Hooks are synchronous; avoid expensive regexes on the input path.
 
-## Enter handoff
+## One structured submission boundary
+
+Native draft text and managed initial-prompt arguments reach Codex unchanged.
+Codex owns editing, local commands, history recall, queuing, and whether an Enter
+actually produces an RPC. Rodex transforms supported structured submissions only:
 
 ```text
-verified native draft → transform → edit child PTY → confirm native composer
-                                                      ↓
-App Server ← structured input ← consume receipt ← admit receipt + release Enter
+native editor / initial argv / exact control
+                  ↓
+        structured input RPC → transform text once → App Server
 ```
 
-[`TerminalInputInterceptor`](../src/rodex/terminal_input.py) holds Enter before Codex
-receives it. The ordered contract is verify original → transform → edit → confirm
-canonical output → admit receipt → release Enter. DEL and bracketed paste edit the
-same native composer through the child PTY. Queuing replacement and Enter together
-would establish byte order, not proof that Codex accepted the edit.
+[`SessionInteractionPipeline`](../src/rodex/interaction_pipeline.py) applies one
+rule snapshot per `turn/start`, `turn/steer`, `thread/queue/add`, or
+`thread/queue/update` request, including all text items in a multipart submission.
+Primary and control connections use the same boundary. There is no preparation
+cache, text-match exemption, prefix exemption, or state to expire on reconnect.
+An Enter without an RPC performs no transformation and leaves no permission for
+a later submission. Each subsequent RPC is independently transformed; this is not
+deduplication of native retries or a guarantee of exactly-once turn execution.
 
-[`native_composer`](../src/rodex/native_composer.py) verifies ordinary `›` and Ultra
-`»`, complete continuation rows, wrapping, dimensions, and end cursor in a
-capability-fenced tmux snapshot. Changed cursor/width, copy mode, partial drafts, or
-collapsed pastes cannot authorize the handoff. The gateway drains child output and
-its display queue before confirming; this proves native rendered state, not that
-every remote client has painted pixels.
+**Intentional ALPHA behavior change:** the native draft and local recall history
+retain the user's original input, while App Server/model input contains transformed
+text. Optimistic native display can therefore differ from persisted server history.
+Rodex does not rewrite the composer or reconcile these two displays. Recalling the
+original input and resubmitting applies the current rules to that original again.
+Rules match the actual submitted text, including any native-added IDE context;
+they do not match an inferred draft stripped of that context.
 
-The handoff has a 300 ms deadline with rechecks at up to 10 ms relay-wait intervals;
-individual tmux calls retain their own deadlines. This runs only after Enter, not
-while an idle draft waits. Other keyboard input is held during handoff. A timeout
-keeps canonical text unsubmitted and admits no receipt; Enter retries confirmation
-without applying transformations again. Keys alone cannot revoke preparation: only
-positive verification of a different tracked draft permits normal admission again.
-An unavailable snapshot proves neither state. After untracked editor changes, clear
-and retype to recover a verifiable candidate.
+Invalid rules refuse the structured request before upstream delivery. Enter may
+already have changed native editor/history state; Rodex does not promise draft
+restoration. Correct the rules and explicitly resubmit. The correlated failure and
+display-only notice remain separate from model dispatch; Rodex never auto-resends.
 
-A text rule cannot inject terminal controls, empty the whole submission, or acquire
-slash/shell-command authority. Production does not use `tmux send-keys`.
+Configured local commands still use the terminal interceptor's verified takeover
+and release contract. [`native_composer`](../src/rodex/native_composer.py) and the
+gateway's bounded confirmation are needed for those commands, not prompt rewriting.
+Terminal framing treats CRLF as one Enter, preserving paired-LF suppression without
+coupling it to prompt transformation or local-command takeover. Other native input
+bytes pass through unchanged.
 
-## Other routes and limits
+## Content authority and limits
 
-- Managed initial prompt: characterized argv → transform/admit → native TUI;
-  the primary protocol request consumes that receipt. Initial whitespace is preserved.
-- Verified unchanged draft: admit without unnecessary editing. Changed drafts use
-  the two-confirmation path; receipt matching follows Codex's submission trimming.
-- Unverified native draft: forward Enter, then transform the structured protocol
-  input. This fallback cannot guarantee matching optimistic TUI history.
-- `_start`, `_steer`, and queued/control input: structured admission; these routes
-  cannot consume the primary TUI's receipt.
-- Configured local commands are handled by the interceptor before prompt admission.
-  Native commands, specialized review/goal fields, internal agent traffic, approvals,
-  attachments, routing, settings, and other RPC fields remain outside text rewriting.
+[`protocol_input_text`](../src/rodex/protocol_input_text.py) owns exact text edits
+and UTF-8 annotation rebasing. Annotations overlapping rewritten spans are removed.
+Other RPC fields, request IDs, routing, settings, attachments, and control intent
+remain unchanged. Unknown frames pass through without interpreting new text fields.
+Native commands, specialized review/goal fields, internal agent traffic, approvals,
+and tool output remain outside this user-input transformation contract.
 
-[`protocol_input_text`](../src/rodex/protocol_input_text.py) preserves RPC intent and
-rebases annotations over unchanged text to UTF-8 byte offsets; annotations overlapping
-rewritten spans are removed. [Interaction ownership](INTERACTION_PATHS.md) governs
-delivery, not a second prompt-transform implementation.
+A replacement is JSON text, never terminal input: slash commands, shell escapes,
+and terminal-control-looking text cannot gain editor or command authority through
+this hook. Invalid UTF-8 or malformed edits refuse the submission.
+[Interaction ownership](INTERACTION_PATHS.md) governs delivery, not a second
+prompt-transform implementation.
 
 ## Regression evidence
 
-- [Terminal input](../tests/test_terminal_input.py): ordering, exact-once retry,
-  intent/control-byte refusal, and route-specific whitespace.
-- [Native composer](../tests/test_native_composer.py) and
-  [interceptor presentation](../tests/test_input_interceptor_presentation.py): glyphs,
-  wrapping, cursor/dimensions, and snapshot fences.
-- [Gateway](../tests/test_terminal_gateway.py): canonical output reaches a real
-  outer PTY before Enter or receipt admission.
-- [Live handoff](../tests/test_prompt_handoff_live.py): installed Codex/tmux ordinary,
-  Ultra, and wrapped multiline cases with a non-idempotent rule. These submit model
-  prompts; see [test gates](DEVELOPMENT.md#validation-gates).
+- [Terminal input](../tests/test_terminal_input.py): no-RPC Enter, rapid/repeated
+  requests, history edits, prefixes, paired CRLF, and unchanged local takeover.
+- [Gateway](../tests/test_terminal_gateway.py): real PTY/editor fixtures preserve
+  the native draft without executing the prompt hook.
+- [Proxy integration](../tests/test_interaction_integration.py): non-idempotent rules
+  across all four RPC methods, native/control connections, reconnect and multipart
+  input; correlated rejection without upstream delivery.
+- [Offline native submission](../tests/test_prompt_submission_native.py): installed
+  Codex/tmux with an isolated local model, terminal/initial-argv submission and native
+  recall. No credentials or model quota.
+- [Live submission](../tests/test_prompt_handoff_live.py): ordinary/Ultra/multiline
+  model-input and recall checks. These submit authenticated model prompts; see
+  [test gates](DEVELOPMENT.md#validation-gates).

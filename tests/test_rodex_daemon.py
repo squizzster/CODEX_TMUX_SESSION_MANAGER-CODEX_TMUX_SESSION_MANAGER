@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import fcntl
 import os
 import signal
 import socket
@@ -133,6 +134,7 @@ def test_linux_task_name_contract_rejects_ambiguous_or_truncated_names(name: str
         ("0.14.0a1", "rodexd_v0_14a1"),
         ("0.15.0b2", "rodexd_v0_15b2"),
         ("0.16a", "rodexd_v0_16a"),
+        ("0.17a", "rodexd_v0_17a"),
         ("1.2.3", "rodexd_v1_2_3"),
         ("0.14.1a1", "rodexd_v0141a1"),
     ],
@@ -148,7 +150,7 @@ def test_daemon_process_name_rejects_invalid_or_truncated_versions(version: str)
 
 
 def test_current_daemon_process_name_includes_current_release() -> None:
-    assert RODEX_DAEMON_PROCESS_NAME == "rodexd_v0_16a"
+    assert RODEX_DAEMON_PROCESS_NAME == "rodexd_v0_17a"
 
 
 def test_server_claims_single_socket_before_constructing_multi_runtime_manager(
@@ -180,10 +182,10 @@ def test_idle_server_blocks_on_control_event_until_stop(
     short_runtime_root: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    select_entered = Event()
-    select_timeouts: list[float | None] = []
+    poll_entered = Event()
+    poll_timeouts: list[int | None] = []
     failures: list[BaseException] = []
-    real_select = daemon_module.select.select
+    real_poll = daemon_module.select.poll
 
     class EmptyManager:
         def __init__(self, _runtime_root: Path) -> None:
@@ -192,14 +194,25 @@ def test_idle_server_blocks_on_control_event_until_stop(
         def close(self) -> None:
             return None
 
-    def observed_select(reads, writes, exceptional, timeout=None):
-        select_timeouts.append(timeout)
-        select_entered.set()
-        return real_select(reads, writes, exceptional, timeout)
+    class ObservedPoll:
+        def __init__(self):
+            self._poller = real_poll()
+
+        def register(self, *args):
+            self._poller.register(*args)
+
+        def poll(self, timeout=None):
+            poll_timeouts.append(timeout)
+            poll_entered.set()
+            return self._poller.poll(timeout)
 
     server = daemon_module.RodexDaemonServer(short_runtime_root)
+    original_wake = server._wake_fd
+    server._wake_fd = fcntl.fcntl(original_wake, fcntl.F_DUPFD_CLOEXEC, 1100)
+    os.close(original_wake)
+    retained_wake = server._wake_fd
     monkeypatch.setattr(daemon_module, "DaemonRuntimeManager", EmptyManager)
-    monkeypatch.setattr(daemon_module.select, "select", observed_select)
+    monkeypatch.setattr(daemon_module.select, "poll", ObservedPoll)
 
     def run_server() -> None:
         try:
@@ -209,16 +222,19 @@ def test_idle_server_blocks_on_control_event_until_stop(
 
     thread = Thread(target=run_server)
     thread.start()
-    assert select_entered.wait(1)
-    time.sleep(0.1)
-    assert select_timeouts == [None]
-
-    server.stop()
-    thread.join(timeout=1)
+    try:
+        assert poll_entered.wait(1)
+        time.sleep(0.1)
+        assert poll_timeouts == [None]
+    finally:
+        server.stop()
+        thread.join(timeout=1)
 
     assert not thread.is_alive()
     assert failures == []
-    assert select_timeouts == [None]
+    assert poll_timeouts == [None]
+    with pytest.raises(OSError):
+        os.fstat(retained_wake)
 
 
 @pytest.mark.parametrize(
@@ -434,58 +450,42 @@ def test_shared_coordinator_has_one_worker_thread_for_all_reserved_runtimes(tmp_
 
 
 def test_process_receipt_reconciliation_terminates_exact_orphan_group(tmp_path: Path) -> None:
-    process = subprocess.Popen(["/usr/bin/sleep", "30"], start_new_session=True)
-    receipts = RuntimeProcessReceipts(tmp_path)
-    receipts.record("app-server", RodexRuntimeId(1), "1" * 32, process)
-
-    RuntimeProcessReceipts(tmp_path).reconcile()
-    process.wait(timeout=3)
-
-    assert process.returncode == -15
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            str(Path(__file__).with_name("process_receipt_group_fixture.py")),
+            str(tmp_path),
+            "graceful",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+    if completed.returncode == 77:
+        pytest.skip("kernel lacks group-scoped pidfd signalling")
+    assert completed.returncode == 0, completed.stderr
     assert list(tmp_path.glob(PROCESS_RECEIPT_PATTERN)) == []
 
 
 def test_process_receipt_reconciliation_escalates_for_a_surviving_group_child(tmp_path: Path) -> None:
-    child_ready = tmp_path / "child-ready"
-    parent_source = """
-import os
-import subprocess
-import sys
-import time
-child_source = '''
-import pathlib
-import signal
-import sys
-import time
-signal.signal(signal.SIGTERM, signal.SIG_IGN)
-pathlib.Path(sys.argv[1]).write_text('ready')
-time.sleep(30)
-'''
-child = subprocess.Popen([sys.executable, '-c', child_source, sys.argv[1]])
-while not os.path.exists(sys.argv[1]):
-    time.sleep(0.01)
-print(child.pid, flush=True)
-time.sleep(30)
-"""
-    leader = subprocess.Popen(
-        [sys.executable, "-c", parent_source, os.fspath(child_ready)],
-        stdout=subprocess.PIPE,
+    # The separate subreaper fixture owns and reaps the orphaned child, rather
+    # than relying on the host/container init to collect test-created zombies.
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            str(Path(__file__).with_name("process_receipt_group_fixture.py")),
+            str(tmp_path),
+            "escalation",
+        ],
+        capture_output=True,
         text=True,
-        start_new_session=True,
+        timeout=20,
     )
-    assert leader.stdout is not None
-    child_pid = int(leader.stdout.readline())
-    receipts = RuntimeProcessReceipts(tmp_path)
-    receipts.record("app-server", RodexRuntimeId(1), "1" * 32, leader)
-
-    RuntimeProcessReceipts(tmp_path).reconcile()
-    leader.wait(timeout=3)
-
-    try:
-        child_state = Path(f"/proc/{child_pid}/stat").read_text().rsplit(")", 1)[1].split()[0]
-    except FileNotFoundError:
-        child_state = "gone"
-    assert child_state in {"gone", "Z"}
+    if completed.returncode == 77:
+        pytest.skip("kernel lacks group-scoped pidfd signalling")
+    assert completed.returncode == 0, completed.stderr
     assert list(tmp_path.glob(PROCESS_RECEIPT_PATTERN)) == []
 
 
@@ -664,7 +664,7 @@ def test_current_client_rejects_same_protocol_daemon_with_different_loaded_code(
         diagnostic = str(raised.value)
         assert f"incompatible at {socket_path}" in diagnostic
         assert "running daemon implementation: 'different-loaded-code'" in diagnostic
-        assert "current client: Rodex 0.16a (0.16a+installation." in diagnostic
+        assert "current client: Rodex 0.17a (0.17a+installation." in diagnostic
         assert "daemon protocol: rodex-daemon-v5" in diagnostic
         assert "SQL catalog: not checked; this client expects generation 22 (rodex-v22.sqlite3)" in diagnostic
         assert "does not migrate earlier runtimes or catalogs" in diagnostic
@@ -749,7 +749,7 @@ def test_current_client_reports_both_sides_of_a_daemon_protocol_mismatch(short_r
         diagnostic = str(raised.value)
         assert f"protocol is incompatible at {socket_path}" in diagnostic
         assert "running daemon protocol: 'rodex-daemon-v1'" in diagnostic
-        assert "current client protocol: 'rodex-daemon-v5' (Rodex 0.16a)" in diagnostic
+        assert "current client protocol: 'rodex-daemon-v5' (Rodex 0.17a)" in diagnostic
         assert "SQL catalog: not checked; this client expects generation 22 (rodex-v22.sqlite3)" in diagnostic
         assert "does not translate earlier wire protocols or migrate earlier catalogs" in diagnostic
     finally:

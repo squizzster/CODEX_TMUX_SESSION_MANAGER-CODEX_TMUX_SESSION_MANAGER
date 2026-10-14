@@ -67,6 +67,89 @@ class RoutingConnector:
         return self.protocol
 
 
+@pytest.mark.parametrize("malformed_id", [True, 1.0, "1", None, [1]])
+@pytest.mark.parametrize("reader", ["control", "startup"])
+def test_response_correlation_requires_exact_integer_identity(malformed_id, reader):
+    from rodex.control import _request
+    from rodex.runtime import _receive_message_for_request
+
+    socket = FakeWebSocket([{"id": malformed_id, "result": {"wrong": True}}, {"id": 1, "result": {"correct": True}}])
+    if reader == "control":
+        assert _request(socket, 1, "test/read", {}) == {"correct": True}
+    else:
+        assert _receive_message_for_request(socket, 1)["result"] == {"correct": True}
+
+
+def test_response_correlation_retains_string_request_ids():
+    from rodex.control import _request
+
+    socket = FakeWebSocket([{"id": "dispatch-1", "result": {"correct": True}}])
+    assert _request(socket, "dispatch-1", "test/read", {}) == {"correct": True}
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        {"error": None},
+        {"error": "bad"},
+        {"error": {"code": True, "message": "bad"}},
+        {"error": {"code": -1}},
+        {"error": {"code": -1, "message": "bad"}, "result": {}},
+    ],
+)
+def test_malformed_rejection_preserves_mutation_evidence(tmp_path, response):
+    protocol = FakeWebSocket([*verified_responses(status="idle"), {"id": "request", **response}])
+    events = FakeWebSocket(responses=[json.loads(EVENT_STREAM_READY_MESSAGE)])
+    client = CodexControlClient(
+        connector=RoutingConnector(protocol, events),
+        request_id_factory=lambda: "request",
+    )
+    with pytest.raises(RodexDispatchIndeterminateError, match="invalid error envelope") as caught:
+        client._start_turn(control(tmp_path), "work", dispatch_id="dispatch", revalidate=lambda: None)
+    assert caught.value.dispatch_id == "dispatch"
+    assert caught.value.method == "turn/start"
+    assert caught.value.thread_id == str(CODEX_SESSION_ID)
+
+
+def test_valid_native_rejection_is_definitive(tmp_path):
+    protocol = FakeWebSocket(
+        [*verified_responses(status="idle"), {"id": "request", "error": {"code": -32602, "message": "rejected"}}]
+    )
+    events = FakeWebSocket(responses=[json.loads(EVENT_STREAM_READY_MESSAGE)])
+    client = CodexControlClient(connector=RoutingConnector(protocol, events), request_id_factory=lambda: "request")
+    with pytest.raises(RodexControlError, match="rejected") as caught:
+        client._start_turn(control(tmp_path), "work", dispatch_id="dispatch", revalidate=lambda: None)
+    assert not isinstance(caught.value, RodexDispatchIndeterminateError)
+
+
+@pytest.mark.parametrize("method", ["start", "steer"])
+@pytest.mark.parametrize("dispatch_id", [None, "caller:dispatch"])
+@pytest.mark.parametrize("invalid_result", [None, [], True, {}, {"turn": {}}, {"turnId": 1}])
+def test_invalid_mutation_acknowledgement_preserves_dispatch_evidence(tmp_path, method, dispatch_id, invalid_result):
+    protocol = FakeWebSocket(
+        [
+            *verified_responses(status="idle" if method == "start" else "active"),
+            {"id": "request", "result": invalid_result},
+        ]
+    )
+    events = FakeWebSocket(responses=[json.loads(EVENT_STREAM_READY_MESSAGE)])
+    client = CodexControlClient(
+        connector=RoutingConnector(protocol, events),
+        request_id_factory=lambda: "request",
+        dispatch_id_factory=lambda: "generated:dispatch",
+    )
+    with pytest.raises(RodexDispatchIndeterminateError, match="acknowledgement is invalid") as caught:
+        if method == "start":
+            client._start_turn(control(tmp_path), "work", dispatch_id=dispatch_id, revalidate=lambda: None)
+        else:
+            client._steer_turn(control(tmp_path), "turn-target", "work", dispatch_id=dispatch_id, revalidate=lambda: None)
+    assert caught.value.method == f"turn/{method}"
+    assert caught.value.dispatch_id == (dispatch_id or "generated:dispatch")
+    assert caught.value.thread_id == str(CODEX_SESSION_ID)
+    assert caught.value.turn_id == (None if method == "start" else "turn-target")
+    assert sum(frame.get("method") == f"turn/{method}" for frame in protocol.sent) == 1
+
+
 def control(tmp_path: Path) -> LiveRodexControl:
     return LiveRodexControl(
         tmp_path / "proxy.sock",

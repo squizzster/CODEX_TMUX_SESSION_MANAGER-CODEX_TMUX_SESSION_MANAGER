@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fcntl
 import io
 import json
 import os
@@ -12,10 +13,11 @@ import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from threading import Event, Thread
+from threading import Event, Lock, Thread
 
 import pytest
 
+import rodex.command_policy as policy_module
 from rodex.command_policy import (
     POLICY_MESSAGE_LIMIT,
     POLICY_PROTOCOL,
@@ -180,6 +182,58 @@ def test_default_broker_returns_short_sleep_denial_without_an_allowed_status(pol
         broker.close()
 
 
+def test_broker_accepts_and_stops_with_high_numbered_listener(policy_root, monkeypatch):
+    path = policy_root / "high-fd.sock"
+    broker = CommandPolicyBroker(path, RUNTIME, lambda _command: None, environment={})
+    open_endpoint = broker._endpoint.open
+    retained = []
+
+    def open_high_listener():
+        listener = open_endpoint()
+        high_listener = socket.socket(fileno=fcntl.fcntl(listener.fileno(), fcntl.F_DUPFD_CLOEXEC, 1100))
+        retained.append(high_listener)
+        return high_listener
+
+    monkeypatch.setattr(broker._endpoint, "open", open_high_listener)
+    try:
+        broker.start()
+        broker.bind_app_server(CurrentProcessOwner())
+        assert exchange(path, command="sleep 9")["decision"] == "deny"
+    finally:
+        broker.close()
+        for listener in retained:
+            listener.close()
+    assert broker._thread is not None and not broker._thread.is_alive()
+
+
+@pytest.mark.parametrize("config", [None, "", "/private/config"])
+@pytest.mark.parametrize("no_config", [False, True])
+def test_brokers_keep_independent_reservation_environments(policy_root, monkeypatch, config, no_config):
+    monkeypatch.setenv("RIPGREP_CONFIG_PATH", "/daemon/config")
+    (policy_root / "input.txt").write_text("needle\n")
+    environment = {} if config is None else {"RIPGREP_CONFIG_PATH": config}
+    paths = [policy_root / "first.sock", policy_root / "second.sock"]
+    brokers = [
+        CommandPolicyBroker(paths[0], RUNTIME, lambda _command: None, environment=environment),
+        CommandPolicyBroker(paths[1], RUNTIME, lambda _command: None, environment={}),
+    ]
+    # A caller's later mutation cannot alter either runtime's baseline.
+    environment["RIPGREP_CONFIG_PATH"] = "/changed/config"
+    command = "rg " + ("--no-config " if no_config else "") + "needle input.txt"
+    try:
+        for broker in brokers:
+            broker.start()
+            broker.bind_app_server(CurrentProcessOwner())
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = [executor.submit(exchange, path, command=command, cwd=str(policy_root)) for path in paths]
+            results = [future.result() for future in futures]
+        assert results[0]["decision"] == ("deny" if config and not no_config else "allow")
+        assert results[1]["decision"] == "allow"
+    finally:
+        for broker in brokers:
+            broker.close()
+
+
 @pytest.mark.parametrize(
     "field,value",
     [
@@ -277,6 +331,129 @@ def test_concurrent_brokers_reject_other_runtime_and_stop_workers(policy_root):
         for broker in brokers:
             broker.close()
     assert all(not broker._workers for broker in brokers)
+
+
+def test_broker_close_shares_one_deadline_across_listener_and_all_workers(policy_root, monkeypatch, caplog):
+    clock = [100.0]
+    joins = []
+
+    class StalledThread:
+        ident = 1
+
+        def __init__(self, *, exit_after=None):
+            self.exit_after = exit_after
+
+        def join(self, timeout):
+            joins.append(timeout)
+            clock[0] += timeout if self.exit_after is None else min(timeout, self.exit_after)
+
+        def is_alive(self):
+            return self.exit_after is None
+
+    broker = CommandPolicyBroker(policy_root / "deadline.sock", RUNTIME, lambda _command: None)
+    broker._thread = StalledThread(exit_after=0.4)
+    broker._workers = {StalledThread() for _ in range(policy_module.POLICY_MAX_WORKERS)}
+    monkeypatch.setattr(policy_module.time, "monotonic", lambda: clock[0])
+    stopped = broker.close()
+
+    assert clock[0] == pytest.approx(102.0)
+    assert len(joins) == policy_module.POLICY_MAX_WORKERS + 1
+    assert all(timeout >= 0 for timeout in joins)
+    assert stopped is False
+    assert len(broker._workers) == policy_module.POLICY_MAX_WORKERS
+    assert "remaining_workers=16" in caplog.text
+
+
+def test_broker_close_bounds_wait_but_retains_all_blocked_workers_until_release(policy_root, monkeypatch, caplog):
+    entered, release = Event(), Event()
+    admission_lock = Lock()
+    admissions = []
+    statuses = []
+
+    def stalled_policy(request):
+        with admission_lock:
+            admissions.append(request)
+            if len(admissions) == policy_module.POLICY_MAX_WORKERS:
+                entered.set()
+        assert release.wait(5)
+        return CommandPolicyDecision("allow")
+
+    monkeypatch.setattr(policy_module, "POLICY_CLOSE_WAIT_SECONDS", 0.1)
+    path = policy_root / "stalled.sock"
+    broker = CommandPolicyBroker(path, RUNTIME, statuses.append, policy=stalled_policy)
+    clients = []
+    workers = ()
+    broker.start()
+    broker.bind_app_server(CurrentProcessOwner())
+    try:
+        request = CommandPolicyRequest.from_hook(RUNTIME, hook_event("private-command-must-not-be-logged"))
+        for _ in range(policy_module.POLICY_MAX_WORKERS):
+            connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            clients.append(connection)
+            connection.settimeout(2)
+            connection.connect(str(path))
+            connection.sendall(encode_policy_message(request.to_payload()))
+        assert entered.wait(2)
+        # Client abandonment does not cancel an in-process policy/filesystem call.
+        for connection in clients:
+            connection.close()
+        with broker._lock:
+            workers = tuple(broker._workers)
+        assert len(workers) == policy_module.POLICY_MAX_WORKERS
+        with pytest.raises((ValueError, OSError)):
+            exchange(path)
+        started = time.monotonic()
+        assert broker.close() is False
+        assert time.monotonic() - started < 1.0
+        assert not path.exists()
+        assert broker._thread is not None and not broker._thread.is_alive()
+        assert all(worker.is_alive() for worker in workers)
+        assert len(broker._workers) == policy_module.POLICY_MAX_WORKERS
+        assert "remaining_workers=16" in caplog.text
+        assert "private-command-must-not-be-logged" not in caplog.text
+    finally:
+        release.set()
+        for connection in clients:
+            connection.close()
+        for worker in workers:
+            worker.join(timeout=2)
+        assert broker.close() is True
+    assert not broker._workers
+    assert statuses == []
+    replacement = CommandPolicyBroker(path, RUNTIME, lambda _command: None, environment={})
+    try:
+        replacement.start()
+        replacement.bind_app_server(CurrentProcessOwner())
+        assert exchange(path) == allow_response(RUNTIME)
+    finally:
+        assert replacement.close() is True
+
+
+def test_broker_close_wakes_incomplete_requests_within_shared_budget(policy_root, monkeypatch):
+    monkeypatch.setattr(policy_module, "POLICY_CLOSE_WAIT_SECONDS", 0.1)
+    path = policy_root / "incomplete.sock"
+    broker = CommandPolicyBroker(path, RUNTIME, lambda _command: pytest.fail("incomplete request must not publish"))
+    admitted = Event()
+    original_serve = broker._serve
+
+    def serve(connection):
+        admitted.set()
+        original_serve(connection)
+
+    monkeypatch.setattr(broker, "_serve", serve)
+    broker.start()
+    broker.bind_app_server(CurrentProcessOwner())
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+            connection.connect(str(path))
+            connection.sendall(b'{"incomplete":')
+            assert admitted.wait(2)
+            started = time.monotonic()
+            assert broker.close() is True
+            assert time.monotonic() - started < 1.0
+    finally:
+        broker.close()
+    assert not broker._workers
 
 
 def test_broker_requires_exact_app_server_descendant(policy_root):

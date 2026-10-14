@@ -56,8 +56,11 @@ pinned analyzer's cumulative token input. In
 [`_adapt_token_accounting_record`](../src/rodex/analytics_analyzer.py), `response_id`
 is the deduplication identity, `usage` is that response's increment, and
 `thread_token_usage` is the authoritative cumulative total. An identical repeated
-response is idempotent; conflicting values for one response identity fail the
-calculation instead of guessing.
+response is idempotent. For one source thread, response identity must agree on its
+turn, normalized `usage` vector, and normalized `thread_token_usage` vector; a
+conflict in any consumed field fails calculation instead of guessing. Missing optional
+zero counters and explicit zeros are equivalent. Repeating an earlier response after
+a later one retains the latest canonical total rather than replaying the old total.
 
 After a canonical response-usage record appears, later `event_msg/token_count` or
 `event_msg/token_usage` snapshots reconcile to its cumulative total and do not add
@@ -65,6 +68,14 @@ the same usage again. Older rollouts with no canonical records retain cumulative
 positive-delta accounting, including reset epochs. Full replay and resident append
 processing share this adapter and are checked for parity in
 [analyzer tests](../tests/test_rodex_analytics_analyzer.py).
+
+Cumulative-conflict validation does not change valid-input totals or the projection
+generation. It does not rewrite existing publications. A previously accepted conflicting
+baseline is detected when a worker replays it and reports degraded source processing;
+statistics, trace facts, and accepted checkpoints remain intact. Preserving that old
+publication does not attest its correctness. [Conflict tests](../tests/test_analytics_token_conflicts.py)
+cover this boundary and recovery from a corrected, never-accepted suffix. Broader
+canonical ordering/reset rules and historical reconstruction remain separate work.
 
 Statistics recognition and typed trace recognition are separate contracts. A
 top-level response-usage record can contribute correctly to `_stats` while remaining
@@ -86,7 +97,21 @@ A publication-sequence race discards the in-memory cursor and reloads SQL before
 accepting more bytes. Deterministic failures park by authenticated source fingerprint;
 I/O and SQLite operational errors remain eligible for delayed retry. Health-only
 publication retries use the same coordinator without replaying rollouts. Failure
-logging records exception type/code locations, not bodies or frame locals.
+logging records the attempt phase, acknowledged publication sequence when known,
+and exception type/code locations, not bodies or frame locals.
+
+Database publication and resident acceptance are separate phases. An exception while
+accepting analyzer, trace or source-cursor state reports `analytics_acceptance_failed`;
+it does not declare the unchanged source invalid. The worker discards partial resident
+state and retries from the latest durable checkpoint within the failure budget below.
+This also applies when restoring an existing checkpoint without a new publication.
+After a publication error, recovery also rebuilds source cursors from SQL: a lost
+acknowledgement may leave an older cursor behind a committed prefix. Cold recovery
+authenticates that full durable prefix before analysis; later appends cannot hide a
+rewrite of the newly committed suffix. Pre-commit lock retries still reuse the
+prepared publication, and deterministic source/calculation conflicts still park.
+Source changes during capture remain subject to the existing failed-work backoff;
+bounded capture-instability retries are separate, unimplemented work.
 
 [`AnalyticsRecoveryBudget`](../src/rodex/analytics_recovery.py) owns a separate
 failed-work deadline. Events, source growth, or retirement cannot reset it. Delay is
@@ -133,5 +158,6 @@ Evidence: [coordinator](../tests/test_rodex_analytics.py),
 [source catalog](../tests/test_rodex_analytics_source_catalog.py),
 [source reader](../tests/test_rodex_analytics_source_reader.py),
 [analyzer parity](../tests/test_rodex_analytics_analyzer.py),
-[recovery](../tests/test_rodex_analytics_recovery.py), and
+[recovery](../tests/test_rodex_analytics_recovery.py),
+[publication acceptance](../tests/test_analytics_publication_acceptance.py), and
 [retirement](../tests/test_analytics_retirement.py).

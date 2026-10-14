@@ -26,11 +26,13 @@ Live tests isolate SQL, tmux, and Codex history from user sessions.
 Choose the gate deliberately:
 
 - `uv run pytest -m 'not live_startup'` excludes live-startup cases, not every
-  external-process integration test. Real tmux tests can still run.
+  external-process integration test. Real tmux tests and
+  [offline native submissions](../tests/test_prompt_submission_native.py) can still
+  run; the latter use an isolated local model without credentials or model quota.
 - `uv run pytest tests/test_managed_startup.py --require-live-startup` exercises
   actual TUI startup, detach/reopen, and isolated-runtime reuse without model prompts.
 - `uv run pytest -m live_startup --require-live-startup` also includes
-  [prompt-handoff tests](../tests/test_prompt_handoff_live.py). Those submit real
+  [prompt-submission tests](../tests/test_prompt_handoff_live.py). Those submit real
   ordinary/Ultra/multiline prompts and can consume model quota. The marker is not
   synonymous with a no-model smoke test.
 

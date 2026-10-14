@@ -36,8 +36,8 @@ user-configured generic content-hook loader.
 | Create, selector open, resume, detach | [application pipeline](../src/rodex/application_pipeline.py) → [managed lifecycle](../src/rodex/managed_session_lifecycle.py) → runtime |
 | Native delegation | [`cli._exec_codex`](../src/rodex/cli.py); outside managed interaction |
 | Native typing/output | decoder/interceptor → [gateway](../src/rodex/terminal_gateway.py) → child PTY / terminal surface |
-| Managed initial prompt, verified Enter, queued or control text | [prompt admission](PROMPT_SUBMISSION_FLOW.md) → primary receipt or structured fallback |
-| App Server frames | [proxy](../src/rodex/protocol_proxy.py) protocol input/output → original destination, then bounded projections |
+| Managed initial prompt, native Enter, queued or control text | native submission → [structured prompt transformation](PROMPT_SUBMISSION_FLOW.md) → App Server |
+| App Server frames | [proxy](../src/rodex/protocol_proxy.py) protocol input/output → original destination; primary output → mandatory event tap → auxiliary projections |
 | Main context reaches 70% | exact numeric usage projection → [context threshold controller](../src/rodex/context_threshold_steering.py) → shared interaction pipeline → exact active-turn steer |
 | Native shell command policy | App Server `PreToolUse(Bash)` → [retained helper](../src/rodex/command_policy_hook.py) → [private broker](../src/rodex/command_policy.py) → ordered [find/rg and later policies](FIND_RG_COMMAND_POLICY.md) → native Codex enforcement; then asynchronous [tmux-only status](../src/rodex/command_policy_status.py) |
 | `_start`, `_steer`, `_interrupt`, alias, mouse | [exact mutation coordinator](../src/rodex/exact_turn_mutation.py) → fenced adapter |
@@ -53,6 +53,31 @@ The proxy forwards accepted primary output to Codex before its presentation/cont
 observer projections. Control-client output goes only to its destination, never into
 the primary presentation. Ordinary clients use separate upstream connections; reading
 or mutating does not make a control client the subscribed primary.
+
+The event tap admits subscriptions only after primary upstream peer verification.
+Its source epoch fences publication and loss under the same registration lock.
+Primary loss clears snapshots, drains queued events, and interrupts subscribers;
+no connection remains subscribed across a source gap. Input-transport exit also
+invalidates the source before waiting for upstream close or output projections.
+The proxy owns mandatory publication and invalidation, outside auxiliary resets.
+This is explicit loss, not transparent reconnect or recovery of missing history.
+Blocking auxiliary callbacks can still delay forwarding (A05 queued dispatch remains
+open); an input callback blocked before the next read can also delay observing EOF.
+
+Auxiliary input/output callbacks, tool counts, presentation, context/working status,
+steering/recovery observation, observer panes and analytics wakes have independent
+exception boundaries. A failing participant does not skip later participants or
+abort forwarded traffic. `CodexProtocolProxy.projection_failures` exposes immutable
+participant/count/exception-type records, without payloads, exception messages or
+tracebacks. These counters indicate degradation, not proven projection completeness.
+Context status rendering is guarded separately so a display error cannot suppress
+the percentage update that revokes stale steering. Failed control-producing
+observations reset pending steering/recovery authority; later fresh lifecycle
+evidence is required to admit new automatic work. Reset failures are counted too;
+these controllers clear admission evidence before calling external cancellation.
+Prompt-hook rejection, native transport failures and mandatory identity/event
+observation stay outside that guard. The guard is synchronous, not a scheduling or
+execution-time guarantee.
 
 ## Outcomes and recovery
 
@@ -168,7 +193,7 @@ acceptance; missing primary binding fails delivery. Terminal capture can still s
 native notice output. The [proxy isolation tests](../tests/test_rodex_protocol_proxy.py)
 verify this separation.
 
-Update, prompt-error, handoff-timeout, and menu-placeholder notices use that route.
+Update, prompt-error, and menu-placeholder notices use that route.
 Native UI decides placement: [Codex 0.162.1 observations](INTERACTION_PIPELINE_REPORT.md#native-notice-placement)
 show F2 warning-center placement, not guaranteed inline chat. In `light`, these
 warnings are not semantic commentary items. Switching notification type does not
@@ -179,10 +204,11 @@ fabricated assistant items or model prompts would change the contract.
 ## Terminal and presentation
 
 [`TerminalSessionGateway`](../src/rodex/terminal_gateway.py) blocks on outer/child PTY
-readiness, a wake pipe, child `pidfd`, and explicit input/handoff deadlines. Registration,
+readiness, a wake pipe, child `pidfd`, and explicit input/confirmation deadlines. Registration,
 stop, persisted diagnostics, selected-view revisions, and resize wake it without a
-fixed idle relay timer. [Prompt handoff](PROMPT_SUBMISSION_FLOW.md#enter-handoff)
-uses bounded event-specific rechecks, not idle screen polling.
+fixed idle relay timer. [Local-command composer confirmation](#local-commands)
+uses bounded event-specific rechecks, not idle screen polling. Prompt rules do not
+rewrite the composer.
 
 Main-thread working transitions enable a three-second native elapsed-counter refresh
 deadline in the gateway. A due refresh sends the existing native resize signal without
@@ -266,8 +292,9 @@ The top-third, input-disabled pane stays open while any tracked agent is working
 closes at zero, and reopens with current reducer state, not the first spawn's cached
 prompt. Exact request/turn identity prevents old completion from clearing newer work.
 Only relevant lifecycle events reconcile panes; unrelated deltas do not query tmux.
-Primary disconnect resets all participants even if one fails; only the reducer
-advances epoch. Pane closure removes its tmux history, not the durable trace.
+Primary disconnect resets all participants even if one fails; only the observer reducer
+advances its observer epoch. The tap's separate source epoch fences subscriptions.
+Pane closure removes its tmux history, not the durable trace.
 
 Correlation requires the exact collaboration call ID: `spawn_agent` creates a thread
 and turn, `followup_task` another turn on that thread, `send_message` no new turn.

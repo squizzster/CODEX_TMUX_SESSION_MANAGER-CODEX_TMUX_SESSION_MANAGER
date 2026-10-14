@@ -54,15 +54,6 @@ class PromptTextEdit:
 InputTextHook = Callable[[tuple[str, ...]], tuple[tuple[PromptTextEdit, ...], ...]]
 
 
-def apply_user_prompt_text(text: str, hook: InputTextHook) -> str:
-    """Apply one submission snapshot to authoritative terminal-composer text."""
-    edits_by_item = hook((text,))
-    if len(edits_by_item) != 1:
-        raise UserPromptHookError("user prompt hook returned the wrong number of text items")
-    transformed, _elements = _apply_text_edits(text, None, edits_by_item[0])
-    return transformed
-
-
 def is_user_input_submission(frame: object) -> bool:
     """Recognize submitted input, including image-only messages, but not tool output."""
     if not isinstance(frame, dict):

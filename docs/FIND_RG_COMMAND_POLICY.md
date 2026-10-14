@@ -30,8 +30,10 @@ Codex PreToolUse(Bash)
 [`evaluate_command_policy`](../src/rodex/command_policy.py) owns rule ordering and
 native allow/deny adaptation. The production search rule calls
 [`evaluate_find_rg_source`](../src/rodex/pre_tool_use_customer_library/find_rg.py)
-with the hook request's exact command, working directory, and environment. Only a
-native `allow` means the complete ordered pipeline admitted the proposed command.
+with the hook request's exact command and working directory, plus the broker's
+immutable reservation environment. Native request fields do not supply that policy
+baseline. Only a native `allow` means the complete ordered pipeline admitted the
+proposed command.
 
 Internally, the search library retains four precise outcomes:
 
@@ -116,6 +118,14 @@ state can also change after inspection, and installed tool versions can change o
 semantics.
 An approval therefore describes the parsed request and observed inputs at inspection
 time, not a runtime guarantee.
+
+Broker shutdown stops admission, interrupts connected clients, and shares one
+two-second join budget across the accept thread and all request workers. `close()`
+returns false and reports only runtime identity and residual counts if work remains.
+Client abandonment or an expired join does not cancel a blocked filesystem call:
+that worker remains charged to its broker's 16-worker limit until it actually exits.
+This bounds shutdown waiting, not worker lifetime or aggregate capacity across retired
+and replacement runtimes; broader isolation and admission budgets are separate work.
 
 This policy is not a complete Bash interpreter or an execution sandbox. Indirect
 searches such as `bash -c 'find ...'`, shell variables, functions, aliases, generated

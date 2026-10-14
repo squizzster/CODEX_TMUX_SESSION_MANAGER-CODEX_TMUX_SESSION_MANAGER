@@ -14,6 +14,15 @@ The `uv_build` version range is a build-backend requirement, not a minimum `uv` 
 version. Rodex does not enforce numeric SQLite or tmux version floors. Use the
 [live gate](docs/DEVELOPMENT.md#validation-gates) to verify the installed combination.
 
+Crash reconciliation additionally needs group-scoped pidfd signalling:
+[`PIDFD_SIGNAL_PROCESS_GROUP`](https://man7.org/linux/man-pages/man2/pidfd_send_signal.2.html)
+is upstream since Linux 6.9 and is also present in some enterprise backports.
+Rodex uses the capability, not a kernel-version string. An unsupported/denied
+operation, unverifiable surviving group, or unconfirmed exit retains its receipt and
+refuses that implementation's daemon startup; there is no numeric termination fallback.
+Ordinary help/native delegation and startup without outstanding receipts do not probe
+this capability. See [receipt lifetime and verification limits](docs/RUNTIME_ISOLATION.md#resource-lifetime).
+
 From the checkout root:
 
 ```bash
@@ -66,7 +75,7 @@ target user. That user then deliberately installs the tool with an existing Pyth
 
 ```bash
 uv tool install --python python3.11 --no-python-downloads \
-  /readable/path/to/codex_tmux_session_manager-0.16a0-py3-none-any.whl
+  /readable/path/to/codex_tmux_session_manager-0.17a0-py3-none-any.whl
 "$(uv tool dir --bin)/rodex" _help
 "$(uv tool dir --bin)/rodex" _version
 ```
@@ -92,7 +101,7 @@ provides `venv` and `pip`:
 ```bash
 python3.11 -m venv "$HOME/.local/share/rodex/bootstrap"
 "$HOME/.local/share/rodex/bootstrap/bin/python" -m pip install \
-  /readable/path/to/codex_tmux_session_manager-0.16a0-py3-none-any.whl
+  /readable/path/to/codex_tmux_session_manager-0.17a0-py3-none-any.whl
 export RODEX_ENVIRONMENT="$HOME/.local/share/rodex/bootstrap"
 "$RODEX_ENVIRONMENT/bin/rodex" _help
 ```

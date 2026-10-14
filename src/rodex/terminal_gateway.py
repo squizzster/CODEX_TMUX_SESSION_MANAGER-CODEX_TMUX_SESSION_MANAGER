@@ -11,7 +11,7 @@ import fcntl
 import math
 import os
 import pty
-import select
+import selectors
 import signal
 import struct
 import subprocess
@@ -408,7 +408,13 @@ class TerminalSessionGateway:
             writes.append(self._output_fd)
         if self._native_queue and not self._native_eof:
             writes.append(self._master)
-        readable, writable, _ = select.select(reads, writes, [], timeout)
+        with selectors.PollSelector() as poller:
+            for fd in dict.fromkeys((*reads, *writes)):
+                events = (selectors.EVENT_READ if fd in reads else 0) | (selectors.EVENT_WRITE if fd in writes else 0)
+                poller.register(fd, events)
+            ready = poller.select(timeout)
+        readable = [key.fd for key, events in ready if events & selectors.EVENT_READ]
+        writable = [key.fd for key, events in ready if events & selectors.EVENT_WRITE]
         process_exited = self._process_pidfd >= 0 and self._process_pidfd in readable
         if self._wake_read >= 0 and self._wake_read in readable:
             self._drain_relay_wake()

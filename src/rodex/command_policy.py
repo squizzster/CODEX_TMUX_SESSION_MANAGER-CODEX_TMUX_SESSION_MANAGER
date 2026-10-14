@@ -7,6 +7,7 @@ status callback. Codex retains hook trust, approvals, and sandbox enforcement.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import select
@@ -15,8 +16,10 @@ import time
 from collections.abc import Callable, Mapping
 from contextlib import suppress
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from threading import Event, Lock, Thread, current_thread
+from types import MappingProxyType
 from typing import Any, Final, Literal
 
 from rodex_registry.identity import parse_rodex_runtime_id
@@ -31,12 +34,14 @@ POLICY_SOCKET_ENV: Final = "RODEX_COMMAND_POLICY_SOCKET"
 POLICY_MESSAGE_LIMIT: Final = 256 * 1024
 POLICY_TIMEOUT_SECONDS: Final = 5.0
 POLICY_MAX_WORKERS: Final = 16
+POLICY_CLOSE_WAIT_SECONDS: Final = 2.0
 POLICY_TEXT_LIMIT: Final = 8192
 FIND_RG_POLICY_SECONDS: Final = 0.5
 MINIMUM_INTEGER_SLEEP_SECONDS: Final = 10
 SHORT_SLEEP_DENIAL_REASON: Final = "Re-try your sleep command with 10 seconds."
 # Recognize one standalone shell command without claiming to parse command chains.
 _INTEGER_SLEEP_COMMAND: Final = re.compile(r"[ \t]*sleep[ \t]+(?P<seconds>[0-9]+)[ \t]*;?[ \t]*")
+_LOGGER = logging.getLogger(__name__)
 
 
 def encode_policy_message(payload: Mapping[str, Any]) -> bytes:
@@ -189,11 +194,13 @@ def _bounded_policy_reason(reason: str) -> str:
     return reason[: POLICY_TEXT_LIMIT - 3] + "..."
 
 
-def _evaluate_find_rg_policy(request: CommandPolicyRequest) -> CommandPolicyDecision | None:
+def _evaluate_find_rg_policy(
+    request: CommandPolicyRequest, *, environment: Mapping[str, str]
+) -> CommandPolicyDecision | None:
     decision = evaluate_find_rg_source(
         request.command,
         cwd=request.cwd,
-        environment=os.environ,
+        environment=environment,
         evaluation_seconds=FIND_RG_POLICY_SECONDS,
     )
     if decision.outcome in {FindRgOutcome.REJECTED, FindRgOutcome.NEEDS_FILESYSTEM}:
@@ -214,9 +221,14 @@ def _evaluate_short_sleep_policy(request: CommandPolicyRequest) -> CommandPolicy
     return None
 
 
-def evaluate_command_policy(request: CommandPolicyRequest) -> CommandPolicyDecision:
+def evaluate_command_policy(
+    request: CommandPolicyRequest, *, environment: Mapping[str, str] | None = None
+) -> CommandPolicyDecision:
     """Apply ordered customer policies to one exact proposed Bash command."""
-    for policy in (_evaluate_find_rg_policy, _evaluate_short_sleep_policy):
+    for policy in (
+        partial(_evaluate_find_rg_policy, environment=os.environ if environment is None else environment),
+        _evaluate_short_sleep_policy,
+    ):
         decision = policy(request)
         if decision is not None:
             return decision
@@ -236,12 +248,16 @@ class CommandPolicyBroker:
         runtime_id: str,
         publish_allowed: Callable[[str], None],
         *,
-        policy: Callable[[CommandPolicyRequest], CommandPolicyDecision] = evaluate_command_policy,
+        policy: Callable[[CommandPolicyRequest], CommandPolicyDecision] | None = None,
+        environment: Mapping[str, str] | None = None,
     ) -> None:
         self._endpoint = ExclusiveUnixEndpoint(path)
         self._runtime_id = str(parse_rodex_runtime_id(runtime_id))
         self._publish_allowed = publish_allowed
-        self._policy = policy
+        reservation_environment = MappingProxyType(dict(os.environ if environment is None else environment))
+        self._policy = (
+            policy if policy is not None else partial(evaluate_command_policy, environment=reservation_environment)
+        )
         self._owner = BoundProcessOwner()
         self._stop = Event()
         self._lock = Lock()
@@ -265,13 +281,16 @@ class CommandPolicyBroker:
 
     def _accept(self, listener: socket.socket) -> None:
         assert self._wake is not None
+        poller = select.poll()
+        poller.register(listener, select.POLLIN)
+        poller.register(self._wake[0], select.POLLIN)
         while not self._stop.is_set():
-            readable, _, _ = select.select((listener, self._wake[0]), (), ())
-            if self._stop.is_set() or self._wake[0] in readable:
+            readable = dict(poller.poll())
+            if self._stop.is_set() or self._wake[0].fileno() in readable:
                 return
             connection, _ = listener.accept()
             with self._lock:
-                if len(self._workers) >= POLICY_MAX_WORKERS:
+                if self._stop.is_set() or len(self._workers) >= POLICY_MAX_WORKERS:
                     connection.close()
                     continue
                 worker = Thread(target=self._serve, args=(connection,), name="rodex-policy-request", daemon=True)
@@ -290,7 +309,7 @@ class CommandPolicyBroker:
             with connection:
                 require_unix_socket_peer_process(connection, self._owner)
                 request = CommandPolicyRequest.from_payload(receive_policy_message(connection))
-                if request.runtime_id != self._runtime_id:
+                if self._stop.is_set() or request.runtime_id != self._runtime_id:
                     return
                 decision = self._policy(request)
                 connection.sendall(encode_policy_message(decision.to_payload(self._runtime_id)))
@@ -309,22 +328,37 @@ class CommandPolicyBroker:
                 self._workers.discard(current_thread())
                 self._connections.discard(connection)
 
-    def close(self) -> None:
+    def close(self) -> bool:
+        """Stop admission and share one join budget; blocked work remains owned."""
+        deadline = time.monotonic() + POLICY_CLOSE_WAIT_SECONDS
         self._stop.set()
         if self._wake is not None:
             with suppress(OSError):
                 self._wake[1].shutdown(socket.SHUT_RDWR)
-        if self._thread is not None and self._thread.ident is not None:
-            self._thread.join(timeout=2)
+        if self._thread is not None and self._thread.ident is not None and self._thread is not current_thread():
+            self._thread.join(timeout=max(0.0, deadline - time.monotonic()))
         with self._lock:
             for connection in self._connections:
                 with suppress(OSError):
                     connection.shutdown(socket.SHUT_RDWR)
             workers = tuple(self._workers)
         for worker in workers:
-            worker.join(timeout=2)
+            if worker.ident is not None and worker is not current_thread():
+                worker.join(timeout=max(0.0, deadline - time.monotonic()))
         self._endpoint.close()
         if self._wake is not None:
             for endpoint in self._wake:
                 endpoint.close()
             self._wake = None
+        with self._lock:
+            remaining_workers = len(self._workers)
+        accept_thread_alive = self._thread is not None and self._thread.is_alive()
+        if remaining_workers or accept_thread_alive:
+            _LOGGER.warning(
+                "command policy shutdown incomplete runtime=%s remaining_workers=%d accept_thread_alive=%s",
+                self._runtime_id,
+                remaining_workers,
+                accept_thread_alive,
+            )
+            return False
+        return True

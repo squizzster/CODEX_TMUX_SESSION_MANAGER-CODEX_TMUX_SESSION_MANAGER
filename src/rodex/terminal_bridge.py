@@ -40,6 +40,9 @@ def wait_for_runtime(connection: socket.socket, notify_resize: Callable[[], obje
     previous_handler = signal.signal(signal.SIGWINCH, lambda *_: None)
     previous_wakeup = signal.set_wakeup_fd(wake_write, warn_on_full_buffer=False)
     try:
+        poller = select.poll()
+        poller.register(connection, select.POLLIN)
+        poller.register(wake_read, select.POLLIN)
         pending_resize = True  # Cover a size change during the initial handoff.
         while True:
             if pending_resize:
@@ -48,8 +51,8 @@ def wait_for_runtime(connection: socket.socket, notify_resize: Callable[[], obje
                 with suppress(OSError, TimeoutError, RodexDaemonError):
                     notify_resize()
                 pending_resize = False
-            readable, _, _ = select.select((connection, wake_read), (), ())
-            if connection in readable:
+            readable = dict(poller.poll())
+            if connection.fileno() in readable:
                 if connection.recv(1):
                     raise RuntimeError("terminal bridge received unexpected data after handoff")
                 return

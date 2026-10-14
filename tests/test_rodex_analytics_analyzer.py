@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from copy import deepcopy
 from dataclasses import replace
 
 import pytest
@@ -17,6 +18,14 @@ THREAD_ID = uuid.UUID("01a00654-f2bc-7a30-834a-a5f886a65f82")
 TURN_A_ID = "00000000-0000-7000-8000-000000000001"
 TURN_B_ID = "00000000-0000-7000-8000-000000000002"
 CHILD_TURN_ID = "00000000-0000-7000-8000-000000000003"
+ACCOUNTING_TOKEN_FIELDS = (
+    "input_tokens",
+    "cached_input_tokens",
+    "cache_write_input_tokens",
+    "output_tokens",
+    "reasoning_output_tokens",
+    "total_tokens",
+)
 
 
 def _content(records: list[dict[str, object]]) -> bytes:
@@ -217,20 +226,149 @@ def test_canonical_response_usage_matches_full_replay_across_appends() -> None:
         assert stateful.analyze_rollouts([_source(full_content, suffix)], "test-user") == oracle
 
 
-def test_duplicate_canonical_response_identity_does_not_add_tokens_twice() -> None:
+@pytest.mark.parametrize("repeated_record", [2, 4])
+@pytest.mark.parametrize("mirror_type", ["token_count", "token_usage"])
+def test_duplicate_canonical_response_identity_does_not_add_tokens_twice(repeated_record: int, mirror_type: str) -> None:
     records = _canonical_token_records()
-    records.insert(-1, dict(records[2]))
+    records.append(deepcopy(records[repeated_record]))
+    mirror = deepcopy(records[3])
+    mirror["payload"]["type"] = mirror_type
+    records.append(mirror)
     content = _content(records)
+    oracle = CodexProtocolAnalyticsAdapter().analyze_rollouts([_source(content, content)], "test-user")
+    for projection in (oracle.statistics_projection, oracle.statistics_projection.turn_statistics[0]):
+        assert tuple(getattr(projection, name) for name in ACCOUNTING_TOKEN_FIELDS) == (30, 12, 3, 5, 3, 35)
+    for split_at in range(len(records)):
+        stateful = StatefulCodexProtocolAnalyticsAdapter()
+        if split_at:
+            prefix = _content(records[:split_at])
+            stateful.analyze_rollouts([_source(prefix, prefix)], "test-user")
+            stateful.accept_batch()
+        calculation = stateful.analyze_rollouts([_source(content, _content(records[split_at:]))], "test-user")
+        assert calculation == oracle
 
-    calculation = StatefulCodexProtocolAnalyticsAdapter().analyze_rollouts(
-        [_source(content, content)],
+
+def _canonical_records_with_conflicting_duplicate(component: str, token_field: str | None) -> list[dict[str, object]]:
+    records = _canonical_token_records()
+    duplicate = deepcopy(records[2])
+    payload = duplicate["payload"]
+    if component == "turn_id":
+        payload[component] = TURN_B_ID
+    else:
+        # The in-memory fixture shares equal vector dictionaries. Replace just
+        # one vector so a cumulative-only conflict cannot also change usage.
+        payload[component] = {**payload[component], token_field: payload[component][token_field] + 1}
+    for unchanged in {"turn_id", "usage", "thread_token_usage"} - {component}:
+        assert payload[unchanged] == records[2]["payload"][unchanged]
+    # Repeat the older response after a later canonical total. The conflict must
+    # be checked against that response, not only against the current total.
+    return [*records, duplicate]
+
+
+def _require_accounting_conflict(adapter, full: bytes, appended: bytes) -> None:
+    with pytest.raises(RodexAnalyticsError) as caught:
+        adapter.analyze_rollouts([_source(full, appended)], "test-user")
+    error = caught.value.__cause__ or caught.value
+    assert isinstance(error, RodexAnalyticsError)
+    assert str(error) == "token usage response identity has conflicting values"
+
+
+@pytest.mark.parametrize(
+    ("component", "token_field"),
+    [("turn_id", None)]
+    + [(component, name) for component in ("usage", "thread_token_usage") for name in ACCOUNTING_TOKEN_FIELDS],
+)
+def test_conflicting_canonical_response_is_rejected_in_replay_and_every_append_split(
+    component: str, token_field: str | None
+) -> None:
+    records = _canonical_records_with_conflicting_duplicate(component, token_field)
+    full = _content(records)
+    _require_accounting_conflict(CodexProtocolAnalyticsAdapter(), full, full)
+    _require_accounting_conflict(StatefulCodexProtocolAnalyticsAdapter(), full, full)
+    for split_at in range(1, len(records)):
+        prefix = _content(records[:split_at])
+        for accepted in (False, True):
+            stateful = StatefulCodexProtocolAnalyticsAdapter()
+            stateful.analyze_rollouts([_source(prefix, prefix)], "test-user")
+            if accepted:
+                stateful.accept_batch()
+            offered = _content(records[split_at:]) if accepted else full
+            _require_accounting_conflict(stateful, full, offered)
+            with pytest.raises(RodexAnalyticsError, match="requires clean restart"):
+                stateful.analyze_rollouts([_source(full, b"")], "test-user")
+
+
+def test_canonical_duplicate_compares_normalized_vectors_not_optional_zero_spelling() -> None:
+    records = _canonical_token_records()[:3]
+    payload = records[2]["payload"]
+    for component in ("usage", "turn_token_usage", "thread_token_usage"):
+        payload[component] = _token_vector(10, 0, 0, 2, 0)
+    duplicate = deepcopy(records[2])
+    for component in ("usage", "thread_token_usage"):
+        duplicate["payload"][component] = {"input_tokens": 10, "output_tokens": 2, "total_tokens": 12}
+    prefix = _content(records)
+    full = prefix + _content([duplicate])
+    oracle = CodexProtocolAnalyticsAdapter().analyze_rollouts([_source(full, full)], "test-user")
+    assert tuple(getattr(oracle.statistics_projection, name) for name in ACCOUNTING_TOKEN_FIELDS) == (10, 0, 0, 2, 0, 12)
+    for split in (False, True):
+        stateful = StatefulCodexProtocolAnalyticsAdapter()
+        if split:
+            stateful.analyze_rollouts([_source(prefix, prefix)], "test-user")
+            stateful.accept_batch()
+        assert stateful.analyze_rollouts([_source(full, _content([duplicate]) if split else full)], "test-user") == oracle
+
+
+def test_canonical_response_identity_is_local_to_its_source_thread() -> None:
+    records = _canonical_token_records()
+    records.append(deepcopy(records[2]))
+    other_thread = uuid.UUID(int=THREAD_ID.int + 100)
+    other_records = deepcopy(records)
+    other_records[0]["payload"] = {"id": str(other_thread), "session_id": str(other_thread)}
+    for record in other_records:
+        if record["type"] == "token_usage_record":
+            payload = record["payload"]
+            payload["thread_id"] = str(other_thread)
+            for component in ("usage", "turn_token_usage", "thread_token_usage"):
+                payload[component] = {name: value * 2 for name, value in payload[component].items()}
+    sources = [
+        _source(_content(records), _content(records)),
+        _source(_content(other_records), _content(other_records), other_thread),
+    ]
+    oracle = CodexProtocolAnalyticsAdapter().analyze_rollouts(sources, "test-user")
+    assert tuple(getattr(oracle.statistics_projection, name) for name in ACCOUNTING_TOKEN_FIELDS) == (
+        90,
+        36,
+        9,
+        15,
+        9,
+        105,
+    )
+    assert sorted(turn.total_tokens for turn in oracle.statistics_projection.turn_statistics) == [35, 70]
+    assert StatefulCodexProtocolAnalyticsAdapter().analyze_rollouts(sources, "test-user") == oracle
+    stateful = StatefulCodexProtocolAnalyticsAdapter()
+    stateful.analyze_rollouts(
+        [
+            _source(_content(records[:3]), _content(records[:3])),
+            _source(_content(other_records[:3]), _content(other_records[:3]), other_thread),
+        ],
         "test-user",
     )
+    stateful.accept_batch()
+    assert (
+        stateful.analyze_rollouts(
+            [
+                _source(_content(records), _content(records[3:])),
+                _source(_content(other_records), _content(other_records[3:]), other_thread),
+            ],
+            "test-user",
+        )
+        == oracle
+    )
 
-    assert calculation.statistics_projection.total_tokens == 35
 
-
-def test_legacy_cumulative_token_snapshots_remain_supported() -> None:
+@pytest.mark.parametrize("reset", [False, True])
+@pytest.mark.parametrize("snapshot_type", ["token_count", "token_usage"])
+def test_legacy_cumulative_token_snapshots_remain_supported(reset: bool, snapshot_type: str) -> None:
     first = _token_vector(10, 4, 1, 2, 1)
     cumulative = _token_vector(15, 6, 1, 4, 2)
     records = [
@@ -240,13 +378,20 @@ def test_legacy_cumulative_token_snapshots_remain_supported() -> None:
         },
         {
             "type": "event_msg",
-            "payload": {"type": "token_count", "info": {"total_token_usage": first}},
+            "payload": {"type": snapshot_type, "info": {"total_token_usage": first}},
         },
         {
             "type": "event_msg",
-            "payload": {"type": "token_count", "info": {"total_token_usage": cumulative}},
+            "payload": {"type": snapshot_type, "info": {"total_token_usage": cumulative}},
         },
     ]
+    if reset:
+        records.append(
+            {
+                "type": "event_msg",
+                "payload": {"type": snapshot_type, "info": {"total_token_usage": _token_vector(5, 1, 0, 1, 0)}},
+            }
+        )
     content = _content(records)
 
     full = CodexProtocolAnalyticsAdapter().analyze_rollouts([_source(content, content)], "test-user")
@@ -256,7 +401,14 @@ def test_legacy_cumulative_token_snapshots_remain_supported() -> None:
     )
 
     assert stateful == full
-    assert stateful.statistics_projection.total_tokens == 19
+    expected = (20, 7, 1, 5, 2, 25) if reset else (15, 6, 1, 4, 2, 19)
+    assert tuple(getattr(stateful.statistics_projection, name) for name in ACCOUNTING_TOKEN_FIELDS) == expected
+    for split_at in range(1, len(records)):
+        prefix = _content(records[:split_at])
+        adapter = StatefulCodexProtocolAnalyticsAdapter()
+        adapter.analyze_rollouts([_source(prefix, prefix)], "test-user")
+        adapter.accept_batch()
+        assert adapter.analyze_rollouts([_source(content, _content(records[split_at:]))], "test-user") == full
 
 
 def test_incremental_projection_materializes_only_the_changed_turn(

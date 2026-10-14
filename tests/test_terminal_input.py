@@ -152,43 +152,70 @@ def greeting_hook(calls):
 
 def deliver_primary_submission(harness, text):
     delivered = []
-    harness.pipeline.register(
-        InteractionTarget(
-            "wire",
-            "test-runtime",
-            frozenset({InteractionOperation.PROTOCOL_INPUT}),
-            exists=lambda: True,
-            deliver=lambda request: delivered.append(request) or InteractionResult(DeliveryStatus.DELIVERED),
-        )
+    target = InteractionTarget(
+        "wire",
+        "test-runtime",
+        frozenset({InteractionOperation.PROTOCOL_INPUT}),
+        exists=lambda: True,
+        deliver=lambda request: delivered.append(request) or InteractionResult(DeliveryStatus.DELIVERED),
     )
+    harness.pipeline.register(target)
     frame = {
         "id": 1,
         "method": "turn/start",
         "params": {"threadId": "thread-1", "input": [{"type": "text", "text": text}]},
     }
-    result = harness.pipeline.execute(
-        InteractionRequest(
-            "wire",
-            InteractionOperation.PROTOCOL_INPUT,
-            "codex-client",
-            payload=json.dumps(frame),
-            consumes_prepared_prompt=True,
+    try:
+        result = harness.pipeline.execute(
+            InteractionRequest("wire", InteractionOperation.PROTOCOL_INPUT, "codex-client", payload=json.dumps(frame))
         )
-    )
-    assert result.accepted
-    return json.loads(delivered[0].payload)
+        assert result.accepted
+        return json.loads(delivered[0].payload)
+    finally:
+        harness.pipeline.unregister(target)
 
 
-def test_verified_prompt_is_transformed_before_native_enter_and_only_once():
+def non_idempotent_hook(calls):
+    def hook(texts):
+        calls.append(texts)
+        return tuple((PromptTextEdit(len(text), len(text), "!"),) for text in texts)
+
+    return hook
+
+
+@pytest.mark.parametrize("confirm", [False, True])
+@pytest.mark.parametrize("ending", [b"\r", b"\n", b"\r\n", b"\x1b[13u"])
+def test_native_prompt_passes_without_preparation_and_crlf_remains_one_enter(confirm, ending):
     calls = []
-    harness = InputHarness(registrations=(), input_text_hook=greeting_hook(calls))
+    harness = InputHarness(confirm=confirm, registrations=(), input_text_hook=non_idempotent_hook(calls))
 
-    harness.feed(b"Hello\r")
+    harness.feed(b"Hello" + ending)
 
-    assert harness.forwarded == b"Hello" + b"\x7f" * 5 + PASTE_START + b"Hello!" + PASTE_END + b"\r"
-    assert deliver_primary_submission(harness, "Hello!")["params"]["input"][0]["text"] == "Hello!"
+    assert harness.forwarded == b"Hello" + (b"\r" if ending == b"\r\n" else ending)
+    assert harness.prefix_checks == []
+    assert calls == []
+    assert deliver_primary_submission(harness, "Hello")["params"]["input"][0]["text"] == "Hello!"
     assert calls == [("Hello",)]
-    assert harness.prefix_checks == ["Hello", "Hello!"]
+
+
+@pytest.mark.parametrize("submitted", ["Hello", "Hello!", "IDE context\nHello!", "edited draft"])
+def test_enter_without_rpc_cannot_exempt_a_later_submission(submitted):
+    calls = []
+    harness = InputHarness(registrations=(), input_text_hook=non_idempotent_hook(calls))
+    harness.feed(b"Hello\r")  # Native rejected/queued Enter: no corresponding RPC.
+    assert calls == []
+    harness.feed(b"\x1b[A\x15" + submitted.encode() + b"\r")
+    assert deliver_primary_submission(harness, submitted)["params"]["input"][0]["text"] == submitted + "!"
+    assert calls == [(submitted,)]
+
+
+def test_stale_enter_cannot_discard_fresh_rapid_or_repeated_submissions():
+    calls = []
+    harness = InputHarness(registrations=(), input_text_hook=non_idempotent_hook(calls))
+    harness.feed(b"stale\rHello\rHello\rnext\r")
+    for submitted in ("Hello", "Hello", "next"):
+        assert deliver_primary_submission(harness, submitted)["params"]["input"][0]["text"] == submitted + "!"
+    assert calls == [("Hello",), ("Hello",), ("next",)]
 
 
 def test_complete_draft_does_not_expire_before_enter_three_days_later():
@@ -196,180 +223,27 @@ def test_complete_draft_does_not_expire_before_enter_three_days_later():
     harness = InputHarness(registrations=(), input_text_hook=greeting_hook(calls))
     for event in harness.decoder.feed(b"Hello", now=0):
         harness.interceptor.accept(event)
-    assert calls == [] and harness.prefix_checks == []
     three_days = 3 * 24 * 60 * 60
     assert harness.decoder.expire_incomplete(three_days) == []
     assert harness.decoder.incomplete_deadline() is None
     for event in harness.decoder.feed(b"\r", now=three_days):
         harness.interceptor.accept(event)
-    assert harness.forwarded.endswith(PASTE_START + b"Hello!" + PASTE_END + b"\r")
-    assert deliver_primary_submission(harness, "Hello!")["params"]["input"][0]["text"] == "Hello!"
+    assert harness.forwarded == b"Hello\r"
+    assert calls == []
+    assert deliver_primary_submission(harness, "Hello")["params"]["input"][0]["text"] == "Hello!"
     assert calls == [("Hello",)]
 
 
-def test_replacement_is_confirmed_before_receipt_admission_and_enter():
-    calls = []
-    harness = InputHarness(registrations=(), input_text_hook=greeting_hook(calls))
-
-    def confirm(text):
-        assert b"\r" not in harness.forwarded
-        assert not harness.pipeline._prepared_prompts
-        if text == "Hello!":
-            assert harness.forwarded.endswith(PASTE_START + b"Hello!" + PASTE_END)
-        return True
-
-    harness.interceptor._confirm_native_prefix = confirm
-    harness.feed(b"Hello\r\nnext")
-    assert harness.forwarded.endswith(PASTE_END + b"\rnext")
-    assert list(harness.pipeline._prepared_prompts) == [("Hello!",)]
-
-
-def test_failed_replacement_confirmation_retries_without_rewriting_or_reapplying_hook():
-    calls = []
-
-    def non_idempotent(texts):
-        calls.append(texts)
-        return tuple((PromptTextEdit(len(text), len(text), "!"),) for text in texts)
-
-    harness = InputHarness(registrations=(), input_text_hook=non_idempotent)
-    harness.interceptor._confirm_native_prefix = lambda text: text == "Hello"
-    harness.feed(b"Hello\r\n")
-    rewritten = bytes(harness.forwarded)
-    assert rewritten.endswith(PASTE_END) and b"\r" not in rewritten
-    assert not harness.pipeline._prepared_prompts
-    harness.feed(b"\r")
-    assert bytes(harness.forwarded) == rewritten
-    harness.interceptor._confirm_native_prefix = lambda text: text == "Hello!"
-    harness.feed(b"\r")
-    assert bytes(harness.forwarded) == rewritten + b"\r"
-    assert calls == [("Hello",)]
-    assert deliver_primary_submission(harness, "Hello!")["params"]["input"][0]["text"] == "Hello!"
-    assert calls == [("Hello",)]
-
-
-def test_editing_after_failed_confirmation_is_new_submission():
-    calls = []
-    harness = InputHarness(registrations=(), input_text_hook=greeting_hook(calls))
-    harness.interceptor._confirm_native_prefix = lambda text: text == "Hello"
-    harness.feed(b"Hello\r")
-    harness.feed(b" there")
-    harness.interceptor._confirm_native_prefix = lambda text: text == "Hello! there"
-    harness.feed(b"\r")
-    assert calls == [("Hello",), ("Hello! there",)]
-    assert list(harness.pipeline._prepared_prompts) == [("Hello! there",)]
-
-
-@pytest.mark.parametrize("event", [b"\x1b[C", b"\x1b[I", b"\x1b[O", b"\x05", b"\x1b[<0;1;1M", b"\x1b[A", b"\x1b[3~"])
-@pytest.mark.parametrize("reject_notice", [False, True])
-def test_nonediting_events_preserve_timed_out_preparation(event, reject_notice):
-    calls = []
-
-    def hook(texts):
-        calls.append(texts)
-        return tuple((PromptTextEdit(len(text), len(text), "!"),) for text in texts)
-
-    harness = InputHarness(registrations=(), input_text_hook=hook, reject=reject_notice)
-    harness.interceptor._confirm_native_prefix = lambda text: text == "Hello"
-    harness.feed(b"Hello\r")
-    harness.feed(event)
-    held = bytes(harness.forwarded)
-    harness.interceptor._confirm_native_prefix = lambda _text: False
-    harness.feed(b"\r\n")
-    assert bytes(harness.forwarded) == held
-    assert harness.interceptor._pending_prompt == "Hello!"
-    assert not harness.pipeline._prepared_prompts
-    harness.interceptor._confirm_native_prefix = lambda text: text == "Hello!"
-    harness.feed(b"\r")
-    assert deliver_primary_submission(harness, "Hello!")["params"]["input"][0]["text"] == "Hello!"
-    assert calls == [("Hello",)]
-
-
-@pytest.mark.parametrize("editing", [b"\x1b[H\x1b[3~\x1b[F", b"\x19", b"\x1b[13;2u", b"\x1b[A", b"\x1b[B"])
-def test_unknown_native_edit_after_timeout_needs_positive_draft_confirmation(editing):
-    calls = []
-    harness = InputHarness(registrations=(), input_text_hook=greeting_hook(calls))
-    harness.interceptor._confirm_native_prefix = lambda text: text == "Hello"
-    harness.feed(b"Hello\r")
-    harness.feed(editing)
-    harness.interceptor._confirm_native_prefix = lambda _text: False
-    harness.feed(b"\r")
-    assert harness.forwarded.endswith(editing)
-    assert harness.interceptor._pending_prompt == "Hello!"
-    assert not harness.pipeline._prepared_prompts
-    # Clear/retype recovers a tracked candidate without guessing Codex's editor.
-    harness.feed(b"\x15edited draft")
-    harness.interceptor._confirm_native_prefix = lambda text: text == "edited draft"
-    harness.feed(b"\r")
-    assert harness.interceptor._pending_prompt is None
-    assert deliver_primary_submission(harness, "edited draft")["params"]["input"][0]["text"] == "edited draft"
-    assert calls == [("Hello",), ("edited draft",)]
-
-
-def test_tracked_edit_cannot_relinquish_preparation_while_confirmation_is_unavailable():
-    calls = []
-    harness = InputHarness(registrations=(), input_text_hook=greeting_hook(calls))
-    harness.interceptor._confirm_native_prefix = lambda text: text == "Hello"
-    harness.feed(b"Hello\r there")
-    held = bytes(harness.forwarded)
-    harness.interceptor._confirm_native_prefix = lambda _text: False
-    harness.feed(b"\r")
-    assert bytes(harness.forwarded) == held
-    assert harness.interceptor._pending_prompt == "Hello!"
-    assert calls == [("Hello",)]
-    harness.interceptor._confirm_native_prefix = lambda text: text == "Hello! there"
-    harness.feed(b"\r")
-    assert calls == [("Hello",), ("Hello! there",)]
-    assert list(harness.pipeline._prepared_prompts) == [("Hello! there",)]
-
-
-def test_positive_empty_composer_confirmation_can_cancel_pending_preparation():
-    harness = InputHarness(registrations=(), input_text_hook=greeting_hook([]))
-    harness.interceptor._confirm_native_prefix = lambda text: text == "Hello"
-    harness.feed(b"Hello\r\x15")
-    harness.interceptor._confirm_native_prefix = lambda text: text == ""
-    harness.feed(b"\r")
-    assert harness.interceptor._pending_prompt is None
-    assert not harness.pipeline._prepared_prompts
-
-
-@pytest.mark.parametrize("replacement", ["/quit", " !pwd", "", "   ", "x\x1b[201~\r", "x\r", "x\x00", "x\x7f", "\ud800"])
-@pytest.mark.parametrize("reject_notice", [False, True])
-def test_replacement_cannot_gain_control_or_native_command_authority(replacement, reject_notice):
+@pytest.mark.parametrize("replacement", ["/quit", " !pwd", "", "   ", "x\x1b[201~\r", "x\r", "x\x00", "x\x7f"])
+def test_structured_replacement_never_becomes_terminal_input(replacement):
     def hook(texts):
         return tuple((PromptTextEdit(0, len(text), replacement),) for text in texts)
 
-    harness = InputHarness(registrations=(), input_text_hook=hook, reject=reject_notice)
-    harness.feed(b"Hello\r")
-    assert harness.forwarded == b"Hello"
-    assert not harness.pipeline._prepared_prompts
-    assert "Rodex prompt was not submitted" in harness.events[-1].text
-
-
-def test_initial_argv_preparation_preserves_surrounding_whitespace():
-    calls = []
-
-    def hook(texts):
-        calls.append(texts)
-        return tuple((PromptTextEdit(0, 0, " "),) for text in texts)
-
-    harness = InputHarness(registrations=(), input_text_hook=hook)
-    text = harness.pipeline.prepare_primary_prompt("Hello ")
-    assert text == " Hello "
-    assert deliver_primary_submission(harness, text)["params"]["input"][0]["text"] == text
-    assert calls == [("Hello ",)]
-
-
-def test_receipt_matches_native_submission_whitespace_normalization():
-    calls = []
-
-    def hook(texts):
-        calls.append(texts)
-        return tuple((PromptTextEdit(0, len(text), f" {text}! "),) for text in texts)
-
     harness = InputHarness(registrations=(), input_text_hook=hook)
     harness.feed(b"Hello\r")
-    assert deliver_primary_submission(harness, "Hello!")["params"]["input"][0]["text"] == "Hello!"
-    assert calls == [("Hello",)]
+    assert deliver_primary_submission(harness, "Hello")["params"]["input"][0]["text"] == replacement
+    assert harness.forwarded == b"Hello\r"
+    assert harness.events == []
 
 
 @pytest.mark.parametrize(
@@ -383,64 +257,21 @@ def test_receipt_matches_native_submission_whitespace_normalization():
         ),
     ],
 )
-def test_supplied_yaml_rules_rewrite_the_native_editor_before_enter(entered, canonical):
-    harness = InputHarness(
-        registrations=(),
-        input_text_hook=load_user_prompt_hook(USER_PROMPT_SUBSTITUTIONS_PATH),
-    )
-
+def test_supplied_yaml_rules_transform_only_structured_submission(entered, canonical):
+    harness = InputHarness(registrations=(), input_text_hook=load_user_prompt_hook(USER_PROMPT_SUBSTITUTIONS_PATH))
     harness.feed(entered.encode() + b"\r")
-
-    assert harness.forwarded == (
-        entered.encode() + b"\x7f" * len(entered) + PASTE_START + canonical.encode() + PASTE_END + b"\r"
-    )
+    assert harness.forwarded == entered.encode() + b"\r"
+    assert deliver_primary_submission(harness, entered)["params"]["input"][0]["text"] == canonical
 
 
-def test_unchanged_verified_prompt_still_uses_one_hook_snapshot():
-    calls = []
-    harness = InputHarness(registrations=(), input_text_hook=greeting_hook(calls))
-
-    harness.feed(b"Already canonical\r")
-
-    assert harness.forwarded == b"Already canonical\r"
-    assert deliver_primary_submission(harness, "Already canonical")["params"]["input"][0]["text"] == "Already canonical"
-    assert calls == [("Already canonical",)]
-
-
-def test_codex_ide_context_prefix_consumes_the_same_early_admission():
-    calls = []
-    harness = InputHarness(registrations=(), input_text_hook=greeting_hook(calls))
-
-    harness.feed(b"Hello\r")
-
-    submitted = "## IDE context\n## My request for Codex:\nHello!"
-    assert deliver_primary_submission(harness, submitted)["params"]["input"][0]["text"] == submitted
-    assert calls == [("Hello",)]
-
-
-def test_unverified_native_draft_falls_back_to_protocol_admission():
-    calls = []
-    harness = InputHarness(confirm=False, registrations=(), input_text_hook=greeting_hook(calls))
-
-    harness.feed(b"Hello\r")
-
-    assert harness.forwarded == b"Hello\r"
-    assert deliver_primary_submission(harness, "Hello")["params"]["input"][0]["text"] == "Hello!"
-    assert calls == [("Hello",)]
-
-
-def test_invalid_hook_blocks_enter_before_codex_and_preserves_editable_draft():
+def test_invalid_hook_does_not_take_ownership_of_native_editor():
     def invalid(_texts):
         raise UserPromptHookError("bad YAML")
 
     harness = InputHarness(registrations=(), input_text_hook=invalid)
-
     harness.feed(b"Hello\r")
-
-    assert harness.forwarded == b"Hello"
-    assert harness.interceptor._candidate == "Hello"
-    notices = [event for event in harness.events if event.target == "main"]
-    assert [event.text for event in notices] == ["Rodex prompt was not submitted: bad YAML"]
+    assert harness.forwarded == b"Hello\r"
+    assert harness.events == []
 
 
 @pytest.mark.parametrize("draft", [b"/model", b"!pwd", b" /model", b" !pwd", b"   "])

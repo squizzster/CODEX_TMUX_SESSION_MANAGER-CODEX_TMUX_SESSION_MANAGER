@@ -36,6 +36,7 @@ from .interaction_pipeline import (
 from .interaction_transport import SESSION_INTERACTION_CONNECTION_PATH, serve_session_interaction
 from .pane_control import TmuxPaneController
 from .protocol_input_text import UserPromptHookError
+from .protocol_projection import ProtocolProjectionFailure, ProtocolProjectionGuard
 from .runtime_endpoint import ExclusiveUnixEndpoint
 from .runtime_peer import RuntimePeerIdentity, require_unix_peer_process, runtime_peer_server_hooks
 from .status_bar import (
@@ -63,6 +64,7 @@ TOOL_CALL_ITEM_TYPES: Final = frozenset(
 )
 
 ToolCountCallback = Callable[[int], None]
+NATIVE_CONNECTION_PATHS: Final = frozenset({"/", "/rpc"})
 _WORKING_STATUS_EVENT_METHODS: Final = frozenset(
     {
         CODEX_APP_SERVER.thread_started_method,
@@ -133,6 +135,8 @@ class CodexProtocolEventTap:
         self._subscribers: dict[queue.Queue[str | bytes | object], tuple[bool, Any]] = {}
         self._subscribers_lock = Lock()
         self._closed = False
+        self._source_epoch = 0
+        self._source_available = False
         self._active_turns: dict[str, str] = {}
         self._known_threads: dict[str, dict[str, object]] = {}
         self._server: Any | None = None
@@ -165,36 +169,52 @@ class CodexProtocolEventTap:
             self._server_thread = server_thread
             server_thread.start()
 
-    def publish(self, message: str | bytes) -> None:
+    def activate_primary_source(self) -> int:
+        """Admit subscriptions only after the proxy verifies its primary upstream."""
+        with self._subscribers_lock:
+            if self._closed or self._source_available:
+                raise RodexProtocolProxyError("event tap cannot activate another primary source")
+            self._source_epoch += 1
+            self._source_available = True
+            return self._source_epoch
+
+    def publish(self, message: str | bytes, *, source_epoch: int) -> None:
         """Offer one event to every live subscriber without delaying the TUI."""
-        self.publish_protocol_event(message, _json_object(message))
+        self.publish_protocol_event(message, _json_object(message), source_epoch=source_epoch)
 
     def publish_protocol_event(
         self,
         message: str | bytes,
         event: dict[str, Any] | None,
+        *,
+        source_epoch: int,
     ) -> None:
         """Publish raw transport bytes using the proxy's single decoded value."""
+        slow_subscribers = []
+        is_analytics_event = event is not None and event.get("method") in ANALYTICS_WAKE_EVENT_METHODS
         with self._subscribers_lock:
-            if self._closed:
+            if self._closed or not self._source_available or source_epoch != self._source_epoch:
                 return
             if event is not None:
                 _update_active_turns(self._active_turns, event)
                 _update_known_threads(self._known_threads, self._active_turns, event)
-            subscribers = tuple(self._subscribers.items())
-        is_analytics_event = event is not None and event.get("method") in ANALYTICS_WAKE_EVENT_METHODS
-        for subscriber, (analytics_only, _connection) in subscribers:
-            if analytics_only and not is_analytics_event:
-                continue
-            try:
-                subscriber.put_nowait(message)
-            except queue.Full:
-                self._disconnect_slow_subscriber(subscriber)
+            # Registration, publication and source loss share one ordering point.
+            # Never enqueue an old frame after invalidation drained its queue.
+            for subscriber, (analytics_only, _connection) in self._subscribers.items():
+                if analytics_only and not is_analytics_event:
+                    continue
+                try:
+                    subscriber.put_nowait(message)
+                except queue.Full:
+                    slow_subscribers.append(subscriber)
+        for subscriber in slow_subscribers:
+            self._disconnect_slow_subscriber(subscriber)
 
     def close(self) -> None:
         """Close subscribers, stop the event server, and remove its socket."""
         with self._subscribers_lock:
             self._closed = True
+            self._source_available = False
             server = self._server
             server_thread = self._server_thread
             self._server = None
@@ -214,11 +234,19 @@ class CodexProtocolEventTap:
                 raise RodexProtocolProxyError("Codex protocol event tap did not stop")
         self._endpoint.close()
 
-    def reset_after_disconnect(self) -> None:
-        """Forget identities scoped to the released primary connection."""
+    def reset_after_disconnect(self, *, source_epoch: int | None = None) -> None:
+        """Invalidate continuity, including blocked subscribers, before any projection reset."""
         with self._subscribers_lock:
+            if source_epoch is not None and source_epoch != self._source_epoch:
+                return
+            self._source_available = False
+            subscribers = tuple(self._subscribers.items())
+            self._subscribers.clear()
             self._active_turns.clear()
             self._known_threads.clear()
+        for subscriber, (_semantic_only, connection) in subscribers:
+            _close_subscriber_queue(subscriber)
+            _interrupt_subscriber_connection(connection)
 
     def _handle_subscriber(self, connection: Any) -> None:
         subscriber: queue.Queue[str | bytes | object] = queue.Queue(self._queue_size)
@@ -227,7 +255,7 @@ class CodexProtocolEventTap:
             AGENT_OBSERVER_EVENT_STREAM_PATH,
         }
         with self._subscribers_lock:
-            if self._closed:
+            if self._closed or not self._source_available:
                 admitted = False
                 ready_message = ""
             else:
@@ -930,6 +958,8 @@ class CodexProtocolProxy:
         native_tui_process: Any,
         primary_pane: TmuxPaneController | None = None,
         model_message_sender: Callable[[InteractionRequest], InteractionResult] | None = None,
+        event_tap: CodexProtocolEventTap | None = None,
+        projection_guard: ProtocolProjectionGuard | None = None,
     ) -> None:
         self._proxy_socket_path = proxy_socket_path
         self._app_server_socket_path = app_server_socket_path
@@ -941,6 +971,9 @@ class CodexProtocolProxy:
         self._on_primary_server_message = on_primary_server_message
         self._on_primary_client_message = on_primary_client_message
         self._on_primary_disconnect = on_primary_disconnect
+        self._event_tap = event_tap
+        self._projection_guard = projection_guard if projection_guard is not None else ProtocolProjectionGuard()
+        self._primary_source_epoch: int | None = None
         self.interactions = interaction_pipeline if interaction_pipeline is not None else SessionInteractionPipeline()
         self._runtime_identity = f"{peer_identity.runtime_id}:{peer_identity.tmux_server_id}"
         self._primary_pane = primary_pane
@@ -988,8 +1021,10 @@ class CodexProtocolProxy:
                 max_size=None,
                 **runtime_peer_server_hooks(
                     self._peer_identity,
-                    native_paths=frozenset({"/", "/rpc"}),
+                    native_paths=NATIVE_CONNECTION_PATHS,
                     native_owner=self._native_tui_process,
+                    allowed_paths=NATIVE_CONNECTION_PATHS
+                    | {CONTROL_CONNECTION_PATH, SESSION_INTERACTION_CONNECTION_PATH},
                 ),
             )
         except OSError as error:
@@ -1030,13 +1065,20 @@ class CodexProtocolProxy:
         if not self._primary_connection_released.wait(timeout_seconds):
             raise RodexProtocolProxyError("primary Codex protocol connection did not close before retry")
 
+    @property
+    def projection_failures(self) -> tuple[ProtocolProjectionFailure, ...]:
+        """Inspect auxiliary degradation without retaining conversation or error bodies."""
+        return self._projection_guard.failures
+
     def _handle_connection(self, tui_connection: Any) -> None:
-        if _connection_path(tui_connection) == SESSION_INTERACTION_CONNECTION_PATH:
+        path = _connection_path(tui_connection)
+        if path == SESSION_INTERACTION_CONNECTION_PATH:
             serve_session_interaction(tui_connection, self.interactions)
             return
-        is_primary_connection = _connection_path(
-            tui_connection
-        ) != CONTROL_CONNECTION_PATH and self._claim_primary_connection(tui_connection)
+        if path not in NATIVE_CONNECTION_PATHS and path != CONTROL_CONNECTION_PATH:
+            tui_connection.close(code=1008, reason="Unknown Rodex route")
+            return
+        is_primary_connection = path in NATIVE_CONNECTION_PATHS and self._claim_primary_connection(tui_connection)
         try:
             with unix_connect(
                 str(self._app_server_socket_path),
@@ -1047,6 +1089,7 @@ class CodexProtocolProxy:
                 max_size=None,
             ) as app_server_connection:
                 require_unix_peer_process(app_server_connection, self._app_server_process)
+                source_epoch = self._activate_primary_source(tui_connection) if is_primary_connection else None
                 connection_live = Event()
                 connection_live.set()
                 connection_id = uuid.uuid4().hex
@@ -1055,7 +1098,9 @@ class CodexProtocolProxy:
                     message = request.payload
                     assert isinstance(message, (str, bytes))
                     if is_primary_connection and self._on_primary_client_message is not None:
-                        self._on_primary_client_message(message, _json_object(message))
+                        self._projection_guard.observe(
+                            "primary-input", self._on_primary_client_message, message, _json_object(message)
+                        )
                     app_server_connection.send(request.payload)
                     return InteractionResult(DeliveryStatus.DELIVERED)
 
@@ -1067,9 +1112,21 @@ class CodexProtocolProxy:
                             return InteractionResult(DeliveryStatus.FAILED, "primary connection is unavailable")
                         event = _json_object(message)
                         self._observe_primary_thread(event)
-                        self._tool_call_counter.observe_protocol_event(event)
+                        if self._event_tap is not None and source_epoch is not None:
+                            try:
+                                self._event_tap.publish_protocol_event(message, event, source_epoch=source_epoch)
+                            except Exception:
+                                # Forwarding already happened; incomplete observation
+                                # must end continuity, never strand exact waiters.
+                                self._event_tap.reset_after_disconnect(source_epoch=source_epoch)
+                                raise
+                        self._projection_guard.observe(
+                            "tool-count", self._tool_call_counter.observe_protocol_event, event
+                        )
                         if self._on_primary_server_message is not None:
-                            self._on_primary_server_message(message, event)
+                            self._projection_guard.observe(
+                                "primary-output", self._on_primary_server_message, message, event
+                            )
                     else:
                         tui_connection.send(message)
                     return InteractionResult(DeliveryStatus.DELIVERED)
@@ -1090,6 +1147,11 @@ class CodexProtocolProxy:
                 )
                 self.interactions.register(input_target)
                 self.interactions.register(output_target)
+
+                def invalidate_primary_source() -> None:
+                    if self._event_tap is not None and source_epoch is not None:
+                        self._event_tap.reset_after_disconnect(source_epoch=source_epoch)
+
                 tui_to_server = Thread(
                     target=_forward_messages,
                     args=(
@@ -1098,7 +1160,7 @@ class CodexProtocolProxy:
                         self.interactions,
                         input_target.name,
                         output_target.name,
-                        is_primary_connection,
+                        invalidate_primary_source,
                     ),
                     name="rodex-codex-protocol-client-forwarder",
                     daemon=True,
@@ -1231,16 +1293,29 @@ class CodexProtocolProxy:
             self._primary_connection_released.clear()
             return True
 
+    def _activate_primary_source(self, tui_connection: Any) -> int | None:
+        with self._primary_lifecycle_lock, self._connection_lock:
+            if self._primary_tui_connection is not tui_connection:
+                raise RodexProtocolProxyError("primary connection changed during upstream verification")
+            if self._event_tap is not None:
+                self._primary_source_epoch = self._event_tap.activate_primary_source()
+            return self._primary_source_epoch
+
     def _release_primary_connection(self, tui_connection: Any) -> None:
         with self._primary_lifecycle_lock:
             released = False
+            source_epoch = None
             with self._primary_send_lock, self._connection_lock:
                 if self._primary_tui_connection is tui_connection:
+                    source_epoch = self._primary_source_epoch
+                    self._primary_source_epoch = None
                     self._primary_connection_claimed = False
                     self._primary_tui_connection = None
                     self._primary_thread_id = None
                     self._primary_binding = None
                     released = True
+            if source_epoch is not None and self._event_tap is not None:
+                self._event_tap.reset_after_disconnect(source_epoch=source_epoch)
             if released and self._on_primary_disconnect is not None:
                 with suppress(Exception):
                     self._on_primary_disconnect()
@@ -1254,7 +1329,7 @@ def _forward_messages(
     pipeline: SessionInteractionPipeline,
     target: str,
     output_target: str,
-    consumes_prepared_prompt: bool,
+    on_source_end: DisconnectCallback | None = None,
 ) -> None:
     try:
         for message in source:
@@ -1264,7 +1339,6 @@ def _forward_messages(
                     InteractionOperation.PROTOCOL_INPUT,
                     "codex-client",
                     payload=message,
-                    consumes_prepared_prompt=consumes_prepared_prompt,
                 )
             )
             if not result.accepted:
@@ -1315,7 +1389,13 @@ def _forward_messages(
     except (ConnectionClosed, OSError):
         pass
     finally:
-        destination.close()
+        try:
+            # The output thread may be inside a projection. Loss of the input
+            # transport already disproves continuity; don't wait for that thread.
+            if on_source_end is not None:
+                on_source_end()
+        finally:
+            destination.close()
 
 
 def _connection_path(connection: ServerConnection) -> str | None:

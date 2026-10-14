@@ -10,8 +10,9 @@ rodex _running
 ```
 
 `_help` is Rodex's command reference and does not resolve Codex, tmux, or the database.
-`_version` reports Rodex's active contracts. Native `--help` and `--version` belong
-to Codex. The authoritative grammar is
+`_version` reports the invoked Rodex CLI installation's contracts, not the retained
+implementation of an already-running session. Its installation identifier is not a
+Git commit. Native `--help` and `--version` belong to Codex. The authoritative grammar is
 [`COMMAND_SPECS`](../src/rodex/command_contract.py), not a copied option table.
 
 ## Invocation routing
@@ -121,6 +122,9 @@ idle, or steer the observed active turn. Offline/unchanged names send none. Noti
 failure does not roll back the committed name. This is a model-input side effect,
 not merely a display rename; see
 [`ExactTurnMutationCoordinator.alias_transition`](../src/rodex/exact_turn_mutation.py).
+Post-commit refresh errors identify the committed name. An uncertain announcement
+retains its dispatch identity and reports an exact `_dispatch-status` command.
+Repeating the same alias does not retry the announcement.
 
 ## Observe without guessing completion
 
@@ -147,6 +151,13 @@ inspection, stdin prompts, dispatch reconciliation, waiting, and interruption.
 `_wait SESSION` is a human idle wait; exact automation supplies `--turn TURN_ID`.
 Terminal output alone never proves completion. Approval and user-input requests
 remain with the subscribed primary connection, normally the managed TUI.
+An unavailable primary event source or lost stream continuity ends a wait explicitly,
+including a wait without a timeout. Query the exact turn result or start a new wait
+after reconnecting; an observation failure is not a reason to resubmit model work.
+An invalid success acknowledgement after a mutation was sent is indeterminate,
+including a missing turn ID or a non-object result. The error retains the method,
+dispatch ID, thread and expected turn where known. Reconcile that dispatch before
+deciding whether to submit again; native rejections remain definitive errors.
 
 Machine envelopes are defined by
 [`MACHINE_ENVELOPE_SCHEMA_VERSION`](../src/rodex/machine_commands.py); App Server

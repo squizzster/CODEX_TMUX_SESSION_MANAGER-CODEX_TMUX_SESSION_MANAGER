@@ -32,7 +32,35 @@ from rodex_registry import RodexRegistryId, RodexRuntimeId, RodexSessionId
 
 OTHER_RUNTIME = replace(TEST_PEER, runtime_id=RodexRuntimeId.parse("c" * 16))
 OTHER_SERVER = replace(TEST_PEER, tmux_server_id="d" * 32)
-OTHER_IMPLEMENTATION = replace(TEST_PEER, implementation_id="0.16a+installation.different-loaded-code")
+OTHER_IMPLEMENTATION = replace(TEST_PEER, implementation_id="0.17a+installation.different-loaded-code")
+
+
+@pytest.mark.parametrize("path", ["/unknown", "/rpc/", "/rpc?query=1", "/?query=1", "/rodex-control/"])
+def test_unknown_proxy_route_cannot_open_upstream_or_claim_primary(tmp_path, path):
+    connections = []
+    app = tmp_path / "app.sock"
+    with (
+        _server(app, lambda _connection: connections.append(True)),
+        CodexProtocolProxy(
+            tmp_path / "proxy.sock",
+            app,
+            ToolCallCounter(lambda _: None),
+            peer_identity=TEST_PEER,
+            app_server_process=LiveTestProcess(),
+            native_tui_process=LiveTestProcess(),
+        ) as proxy,
+    ):
+        with (
+            pytest.raises(InvalidHandshake),
+            unix_connect(
+                str(tmp_path / "proxy.sock"), uri=f"ws://localhost{path}", additional_headers=TEST_PEER.headers()
+            ),
+        ):
+            pytest.fail("unknown route admitted")
+        assert not proxy._primary_available()
+        assert not proxy._primary_connection_claimed
+        assert proxy.interactions.records == ()
+    assert connections == []
 
 
 def _control(path: Path) -> LiveRodexControl:
@@ -102,6 +130,7 @@ def test_wrong_proxy_identity_is_rejected_before_opening_upstream(tmp_path: Path
 def test_event_tap_does_not_publish_ready_to_an_unverified_subscriber(tmp_path: Path, claimed) -> None:
     path = tmp_path / "events.sock"
     tap = CodexProtocolEventTap(path, peer_identity=TEST_PEER)
+    tap.activate_primary_source()
     tap.start()
     try:
         with (
@@ -120,7 +149,7 @@ def test_event_tap_does_not_publish_ready_to_an_unverified_subscriber(tmp_path: 
     ("header", "value"),
     [
         ("X-Rodex-Peer-Contract", "rodex-runtime-peer-v5"),
-        ("X-Rodex-Implementation-Id", "0.16a+installation.different-loaded-code"),
+        ("X-Rodex-Implementation-Id", "0.17a+installation.different-loaded-code"),
     ],
 )
 def test_event_tap_rejects_prior_contract_or_different_loaded_implementation(
@@ -132,6 +161,7 @@ def test_event_tap_rejects_prior_contract_or_different_loaded_implementation(
     headers = TEST_PEER.headers()
     headers[header] = value
     tap = CodexProtocolEventTap(path, peer_identity=TEST_PEER)
+    tap.activate_primary_source()
     tap.start()
     try:
         with (
@@ -200,6 +230,7 @@ def test_duplicate_listener_and_its_cleanup_preserve_the_original_endpoint(tmp_p
     path = tmp_path / "events.sock"
     owner = CodexProtocolEventTap(path, peer_identity=TEST_PEER)
     duplicate = CodexProtocolEventTap(path, peer_identity=OTHER_SERVER)
+    owner.activate_primary_source()
     owner.start()
     try:
         with pytest.raises(RuntimeError, match="could not bind"):

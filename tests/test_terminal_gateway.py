@@ -4,6 +4,7 @@ import fcntl
 import os
 import pty
 import select
+import selectors
 import signal
 import struct
 import subprocess
@@ -14,7 +15,6 @@ import time
 from contextlib import contextmanager, suppress
 from pathlib import Path
 
-import pyte
 import pytest
 
 from rodex.input_interceptor_config import INPUT_INTERCEPTORS
@@ -95,6 +95,39 @@ def start_gateway(slave, pipeline, registrations=(), presentation=None):
         input_fd=slave,
         output_fd=slave,
     )
+
+
+def test_gateway_relays_resizes_wakes_and_exits_with_high_numbered_descriptors():
+    with outer_terminal() as (master, slave):
+        high_terminal = fcntl.fcntl(slave, fcntl.F_DUPFD_CLOEXEC, 1100)
+        owned_descriptors = []
+        try:
+            gateway = start_gateway(high_terminal, SessionInteractionPipeline())
+            try:
+                for field in ("_master", "_wake_read", "_wake_write", "_process_pidfd"):
+                    original = getattr(gateway, field)
+                    high = fcntl.fcntl(original, fcntl.F_DUPFD_CLOEXEC, 1100)
+                    setattr(gateway, field, high)
+                    os.close(original)
+                    owned_descriptors.append(high)
+                read_until(gateway, master, b"READY")
+                os.write(master, b"high-fd-echo")
+                read_until(gateway, master, b"high-fd-echo")
+                fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 100, 0, 0))
+                gateway.resize()
+                read_until(gateway, master, b"RESIZED")
+                gateway.request_supervisor_check()
+                assert gateway.wait(timeout=1) is None
+                os.write(master, b"\x04")
+                read_until(gateway, master, b"FINAL-OUTPUT")
+                assert gateway.wait(timeout=1) == 23
+            finally:
+                gateway.close()
+            for descriptor in owned_descriptors:
+                with pytest.raises(OSError):
+                    os.fstat(descriptor)
+        finally:
+            os.close(high_terminal)
 
 
 class MutablePresentationSource:
@@ -234,12 +267,12 @@ def test_unread_child_replies_apply_backpressure_to_native_queries(monkeypatch):
     gateway._display_queue = bytearray()
     gateway._native_queue = bytearray(b"\x1b[0n" * (QUEUE_LIMIT_BYTES // 4))
 
-    def select_ready(reads, writes, errors, timeout):
-        assert reads == []  # A query-only child cannot grow the reply queue forever.
-        assert writes == [gateway._master]
-        return [], [], []
+    def select_ready(poller, timeout):
+        # A query-only child cannot grow the reply queue forever.
+        assert [(key.fd, key.events) for key in poller.get_map().values()] == [(gateway._master, selectors.EVENT_WRITE)]
+        return []
 
-    monkeypatch.setattr(select, "select", select_ready)
+    monkeypatch.setattr(selectors.PollSelector, "select", select_ready)
     gateway._relay_once(allow_input=False, timeout=0)
 
 
@@ -269,7 +302,7 @@ def test_real_child_terminal_pass_through_resize_signal_exit_and_outer_restorati
             gateway.close()
 
 
-def test_real_pty_rewrites_verified_prompt_before_native_enter():
+def test_real_pty_passes_prompt_and_enter_without_running_text_hook():
     calls = []
 
     def hook(texts):
@@ -282,16 +315,14 @@ def test_real_pty_rewrites_verified_prompt_before_native_enter():
         try:
             read_until(gateway, master, b"READY")
             os.write(master, b"Hello\r")
-            rewritten = b"\x7f" * 5 + b"\x1b[200~Hello!\x1b[201~\r"
-            output = read_until(gateway, master, rewritten)
-
-            assert output.index(rewritten) >= output.index(b"Hello") + len(b"Hello")
-            assert calls == [("Hello",)]
+            output = read_until(gateway, master, b"Hello\r")
+            assert b"Hello!" not in output
+            assert calls == []
         finally:
             gateway.close()
 
 
-def test_canonical_editor_output_reaches_outer_pty_before_enter_and_receipt():
+def test_native_editor_keeps_original_prompt_without_composer_confirmation():
     # A native editor fixture, not an echo process: it consumes edit events and
     # emits a new ANSI frame. The assertion reads that actual outer PTY output.
     child = r"""
@@ -321,22 +352,16 @@ while True:
     render()
 """
     calls = []
-    pipeline = SessionInteractionPipeline(
-        input_text_hook=lambda texts: tuple((PromptTextEdit(0, len(text), "Hello!"),) for text in texts)
-    )
-    visible = pyte.Screen(120, 36)
-    stream = pyte.ByteStream(visible)
+
+    def hook(texts):
+        calls.append(texts)
+        return tuple((PromptTextEdit(0, len(text), "Hello!"),) for text in texts)
+
+    pipeline = SessionInteractionPipeline(input_text_hook=hook)
     with outer_terminal() as (master, slave):
 
         def confirm(text):
-            while select.select([master], [], [], 0)[0]:
-                stream.feed(os.read(master, 65536))
-            matches = visible.display[visible.cursor.y].rstrip() == f"\u203a {text}"
-            if matches:
-                assert not pipeline._prepared_prompts
-                assert not any("SUBMITTED" in line for line in visible.display)
-                calls.append(text)
-            return matches
+            pytest.fail(f"native prompt must not require composer confirmation: {text!r}")
 
         gateway = TerminalSessionGateway(
             [sys.executable, "-I", "-c", child],
@@ -352,10 +377,9 @@ while True:
         try:
             read_until(gateway, master, b"READY")
             os.write(master, b"Hello\r")
-            output = read_until(gateway, master, b"SUBMITTED[Hello!]")
-            assert b"SUBMITTED[Hello]" not in output
-            assert calls == ["Hello", "Hello!"]
-            assert list(pipeline._prepared_prompts) == [("Hello!",)]
+            output = read_until(gateway, master, b"SUBMITTED[Hello]")
+            assert b"Hello!" not in output
+            assert calls == []
         finally:
             gateway.close()
 
@@ -448,19 +472,19 @@ def test_idle_gateway_blocks_once_until_supervisor_deadline(monkeypatch):
             read_until(gateway, master, b"READY")
             select_calls = []
             size_probes = []
-            real_select = select.select
+            real_select = selectors.PollSelector.select
             real_ioctl = fcntl.ioctl
 
-            def counted_select(reads, writes, errors, timeout):
+            def counted_select(poller, timeout):
                 select_calls.append(timeout)
-                return real_select(reads, writes, errors, timeout)
+                return real_select(poller, timeout)
 
             def counted_ioctl(fd, request, argument=0, mutate_flag=True):
                 if request == termios.TIOCGWINSZ:
                     size_probes.append(fd)
                 return real_ioctl(fd, request, argument, mutate_flag)
 
-            monkeypatch.setattr("rodex.terminal_gateway.select.select", counted_select)
+            monkeypatch.setattr(selectors.PollSelector, "select", counted_select)
             monkeypatch.setattr("rodex.terminal_gateway.fcntl.ioctl", counted_ioctl)
             with pytest.raises(subprocess.TimeoutExpired):
                 gateway.wait(timeout=0.12)
@@ -560,14 +584,14 @@ def test_supervisor_control_event_wakes_an_indefinite_idle_gateway(monkeypatch):
             read_until(gateway, master, b"READY")
             relay_blocked = threading.Event()
             select_calls = []
-            real_select = select.select
+            real_select = selectors.PollSelector.select
 
-            def observed_select(reads, writes, errors, timeout):
+            def observed_select(poller, timeout):
                 select_calls.append(timeout)
                 relay_blocked.set()
-                return real_select(reads, writes, errors, timeout)
+                return real_select(poller, timeout)
 
-            monkeypatch.setattr("rodex.terminal_gateway.select.select", observed_select)
+            monkeypatch.setattr(selectors.PollSelector, "select", observed_select)
 
             def wake_supervisor():
                 assert relay_blocked.wait(1)
@@ -597,13 +621,13 @@ def test_presentation_change_wakes_blocked_gateway_without_polling(monkeypatch):
             read_until(gateway, master, b"READY")
             initial_snapshot_calls = presentation.snapshot_calls
             relay_blocked = threading.Event()
-            real_select = select.select
+            real_select = selectors.PollSelector.select
 
-            def observed_select(reads, writes, errors, timeout):
+            def observed_select(poller, timeout):
                 relay_blocked.set()
-                return real_select(reads, writes, errors, timeout)
+                return real_select(poller, timeout)
 
-            monkeypatch.setattr("rodex.terminal_gateway.select.select", observed_select)
+            monkeypatch.setattr(selectors.PollSelector, "select", observed_select)
 
             def publish_and_exit():
                 try:

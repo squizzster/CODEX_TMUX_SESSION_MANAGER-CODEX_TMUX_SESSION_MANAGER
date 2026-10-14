@@ -106,10 +106,26 @@ The creation/admission sequence is:
    retained child process tree; a matching thread ID alone is insufficient.
 
 Locks span identity-sensitive transitions, not terminal attachment. Attachment uses
-immutable `$session_id`, so a concurrent alias cannot redirect it. An unambiguous
-full-capability match can repair an externally renamed endpoint; ambiguous or foreign
-matches cannot. Alias finalization uses compare-and-swap and compensates its own tmux
-rename on failure. See [SQL incarnation rules](SQL_SCHEMA.md#identity-and-lineage).
+immutable `$session_id`, so a concurrent alias cannot redirect it. Discovery retains
+the coherently observed name and exact primary capability, including while registration
+is pending. Shared live verification can repair an externally renamed incumbent under
+the transition lock: it rechecks live authority around a name-only SQL compare-and-swap
+against the complete old registration. Socket, runtime, Codex root, and runtime-start
+provenance do not change. Pending confirmation uses the retained exact pane rather than
+the stale human name. Ambiguous or changed authority is refused, not adopted.
+
+Reopening then restores the intended display name through the normal guarded rename.
+Failures during repair, confirmation, rename, or UI refresh leave this discovered
+incumbent running; another open can reconcile the reached phase. Name collisions must
+be resolved before that rename can finish. Native changes between checks may require
+another retry; this is not atomic exclusion of external tmux mutations. It does not
+change cleanup policy for newly launched candidates or decide post-commit setup retention.
+
+Alias finalization uses compare-and-swap and compensates its own tmux rename on failure.
+Its subsequent announcement advances only the committed name in its expected control
+snapshot, retaining exact authority. The alias command's initial name-only liveness
+check is unchanged: reopen an externally renamed runtime before aliasing it.
+See [SQL incarnation rules](SQL_SCHEMA.md#identity-and-lineage).
 
 ## Liveness and replacement
 
@@ -142,8 +158,25 @@ unrelated failures and completed registrations cannot enter that path.
   expire and cannot replay as new work.
 - [`RuntimeProcessReceipts`](../src/rodex/process_receipts.py) bind native process
   groups to operation/runtime, PID, Linux start time, and uid. Parent-death guards
-  protect daemon-owned children. Reconciliation verifies every field before signalling;
-  termination escalates after three seconds only for the creation-owned group.
+  protect daemon-owned children. Reconciliation validates `/proc` identity against
+  the same retained, live pidfd used for all subsequent group signals. Nonblocking
+  pidfd readiness works for non-children too; a second numeric PID lookup is not
+  substituted for that descriptor.
+  TERM, CONT (for already-stopped members), KILL and exit probes use
+  `PIDFD_SIGNAL_PROCESS_GROUP`. The [Linux implementation](https://github.com/torvalds/linux/commit/e1fb1dc08e73466830612bcf2f9f72180965c9ba.patch)
+  addresses the retained kernel PID object, including after leader reap, without
+  resolving a new group number. No preparatory STOP or numeric termination fallback
+  remains. Unsupported or denied group-scoped signals leave the receipt unreconciled.
+  Reconciliation waits two seconds after TERM/CONT, then up to two more after KILL.
+  Only confirmed group absence retires the receipt: successful signal delivery is
+  not proof of exit, and unreaped zombies or uninterruptible members can prevent
+  confirmation. If the leader cannot be verified/acquired, a numeric signal-zero
+  probe can prove absence only; it cannot authorize termination of an existing group.
+  An unresolved receipt refuses startup of that implementation-scoped daemon.
+  The [isolated group tests](../tests/test_process_receipts.py) cover leader loss,
+  reaping, surviving children, stopped groups, extinction and untouched sentinels.
+  They do not force actual PID/PGID number reuse or establish support for every kernel
+  backport. Descendants that leave the owned process group remain outside this contract.
 - Runtime cwd is an explicit reservation field passed to App Server and TUI.
   Setting `PWD` is not `chdir`; native directory options must not be applied twice.
 

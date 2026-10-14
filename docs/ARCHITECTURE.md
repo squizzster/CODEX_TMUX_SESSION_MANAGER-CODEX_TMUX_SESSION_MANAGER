@@ -56,7 +56,8 @@ package startup publishes or reuses the retained installation before CLI composi
   notifications without consuming native input.
 - [Interaction paths](INTERACTION_PATHS.md) maps terminal, protocol, menu, observer,
   and background effects to owners. [Prompt submission](PROMPT_SUBMISSION_FLOW.md)
-  owns the pre-Enter and structured-input contract; Codex still owns the editor.
+  owns the single structured-input transformation boundary; Codex owns original
+  draft/history and submission admission.
 - [`PrimaryConnectionLifecycleCoordinator`](../src/rodex/primary_connection_lifecycle.py)
   resets every participant even if one fails. Observer epoch ownership remains in
   the reducer, not in reset callers or transport.

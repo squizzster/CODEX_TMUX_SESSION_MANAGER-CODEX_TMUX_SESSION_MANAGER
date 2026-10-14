@@ -6,14 +6,85 @@ owns the active package version, while
 generations. Package milestones below are verified from repository history; this
 repository currently has no Git release tags, so they do not imply a published release.
 
-## Unreleased
+## 0.17a — 2026-10-14 — current package identifier
+
+Build metadata and wheel filenames normalize this PEP 440 spelling to `0.17a0`.
+Daemon protocol v5, SQLite catalog generation 22, and other wire/storage generations
+are unchanged. Retained running sessions keep their original implementation.
 
 ### Modified
 
+- Prompt rules now run only on structured submissions (A06). Terminal drafts and
+  initial argv are not transformed early; text-matching receipts are removed.
+  Native recall retains original input while model/server input is transformed.
+  Repeated, no-RPC, prefix, reconnect and multipart cases cannot reuse preparation;
+  strict rejection and local-command composer verification remain intact.
+  This intentionally changes draft/history display semantics, not native retry
+  deduplication or dispatch guarantees.
+- Command-policy shutdown shares one two-second join deadline across the accept thread
+  and all request workers (A17 shutdown-budget portion). Admission stops during close;
+  unresolved workers remain owned and are reported with content-free counts. Tests
+  cover saturated stalled workers, abandoned clients, incomplete requests, and eventual
+  release. This does not cancel blocked filesystem calls or establish daemon-wide
+  capacity limits across runtime replacement.
+- Canonical token-accounting response fingerprints now include normalized cumulative
+  thread usage (A15 conflict-rejection portion). Both replay and resident append paths
+  reject cumulative-only conflicts while identical older duplicates retain the latest
+  total. Fixed-expectation, append-split, source-local identity, and real-SQL worker
+  tests preserve published statistics, trace facts, and checkpoints on rejection.
+  Previously accepted conflicts degrade on replay without automatic catalog repair;
+  projection generation, broader ordering/reset rules, and tied-statistic semantics
+  are unchanged.
+- Same-incarnation reopen repairs only a verified incumbent's tmux name (A12 name
+  recovery portion), with complete-registration SQL compare-and-swap and exact primary
+  authority retained through pending confirmation. Normal display-name restoration
+  follows; failed repair or presentation leaves the discovered incumbent running.
+  Adoption retry immutability remains unchanged. Alias announcements advance only
+  their committed expected name, preserving all runtime authority. Real-tmux tests
+  cover pending/registered reopen, collisions and alias revalidation; injected faults
+  cover acknowledgement loss and competing identities. New-candidate setup-retention
+  policy and real process-death cuts remain separate work.
+- Crash-receipt reconciliation carries one verified pidfd through group-scoped
+  TERM/CONT/KILL and exit probes (A02), replacing numeric termination and the STOP
+  workaround. Unsupported capabilities, surviving unverified groups and unconfirmed
+  exits retain receipts and refuse daemon startup. Graceful and escalation waits are
+  two seconds each; signal delivery alone no longer retires a receipt. Isolated
+  subreaper tests cover leader reap, descendants, stopped groups and untouched sentinels;
+  forced PID/PGID reuse and a broad kernel matrix remain untested.
+- Analytics distinguishes committed publication from resident acceptance (A14 recovery
+  portion). Partial analyzer/trace/cursor acceptance retries unchanged bytes within
+  the existing cost budget instead of parking them as invalid source data. Publication
+  errors and acceptance failures rebuild cursors from SQL's authenticated checkpoint,
+  including when an acknowledgement was lost. Phase diagnostics remain content-free;
+  capture-instability retry handling is still open.
+- Primary event subscriptions require a verified upstream and end on source loss
+  (A04). Publication and invalidation carry the source epoch; stale callbacks cannot
+  populate or close a replacement stream. Exact waits report continuity loss without
+  retrying model work. Mandatory publication precedes auxiliary projections, and
+  input EOF invalidates subscribers even while an output projection is blocked.
+- Auxiliary protocol participants contain exceptions independently and expose
+  content-free failure counts (A05 first stage). Intentional prompt rejection and
+  mandatory event observation remain authoritative. Context rendering cannot suppress
+  lower-usage steering evidence; failed control observations revoke pending work.
+  Bounded asynchronous dispatch, overflow/reset ordering and blocked-input isolation
+  remain open.
 - A retained-runtime upgrade blocked by a never-saved Codex thread now gives the
   exact `rodex NAME --force-old` command for reconnecting without an upgrade.
+- First correctness tranche from the 2026-10-14 integrated architecture assessment:
+  acquired process descriptors close on read/parse failures (A01); failed exact
+  STOP retained an unreconciled receipt without numeric group signals (initial A02
+  gate, superseded by the group-scoped pidfd correction above).
+- Invalid mutation acknowledgements preserve dispatch reconciliation evidence;
+  alias errors distinguish committed names from refresh failure or uncertain
+  announcements, with an exact status-query command (A03).
+- Exact proxy route admission (A07), type-exact protected JSON scalars and RPC
+  response IDs (A08), and immutable per-reservation policy environments (A09).
+- tmux environment source queues carry command boundaries separately from string
+  data, including semicolon names/values (A10). Gateway, daemon, policy broker and
+  terminal bridge readiness use poll without `select`'s descriptor-number ceiling
+  (A11); this does not establish aggregate capacity limits.
 
-## 0.16a — 2026-10-14 — current package identifier
+## 0.16a — 2026-10-14
 
 Build metadata and wheel filenames normalize this PEP 440 spelling to `0.16a0`.
 

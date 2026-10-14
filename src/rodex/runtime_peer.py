@@ -185,12 +185,15 @@ def runtime_peer_server_hooks(
     *,
     native_paths: frozenset[str] = frozenset(),
     native_owner: Any | None = None,
+    allowed_paths: frozenset[str] | None = None,
 ) -> dict[str, Callable[..., Any]]:
     """Require peer identity during HTTP admission, before any handler can run."""
     if native_paths and native_owner is None:
         raise ValueError("native protocol paths require their owning host process")
 
     def process_request(connection: Any, request: Any) -> Any:
+        if allowed_paths is not None and request.path not in allowed_paths:
+            return connection.respond(HTTPStatus.NOT_FOUND, "Unknown Rodex route\n")
         try:
             if request.path in native_paths:
                 require_unix_peer_process(connection, native_owner)

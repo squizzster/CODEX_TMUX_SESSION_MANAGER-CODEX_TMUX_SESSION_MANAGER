@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shlex
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
@@ -17,6 +18,7 @@ from rodex_registry import (
     open_a_user_defined_cool_name_assignment,
 )
 
+from .command_contract import DISPATCH_STATUS_COMMAND
 from .control import (
     CodexControlClient,
     CodexThreadState,
@@ -24,6 +26,7 @@ from .control import (
     PromptDispatch,
     RodexControlError,
     RodexControlRejectedError,
+    RodexDispatchIndeterminateError,
 )
 from .errors import ExactRuntimeIdentityRequiredError, RodexLaunchError
 from .interaction_pipeline import (
@@ -250,14 +253,56 @@ class ExactTurnMutationCoordinator:
                 restore_tmux_identity(self._launcher, active_tmux, recorded_tmux)
             raise
         if active_tmux is not None:
-            self._launcher.refresh_shared_tmux_coordination(active_tmux)
+            try:
+                self._launcher.refresh_shared_tmux_coordination(active_tmux)
+            except Exception as error:
+                raise RodexLaunchError(
+                    f"Rodex name committed as {assignment.names.display_name!r}, but coordination refresh failed: {error}"
+                ) from error
         if active_tmux is not None and target is not None and previous_display_name != assignment.names.display_name:
+            # Only this operation's committed rename advances the expected name;
+            # all server/session/pane and transport authority remains unchanged.
+            target = replace(
+                target,
+                runtime=active_tmux,
+                display_name=assignment.names.display_name,
+                control=replace(
+                    target.control,
+                    tmux_session_name=(
+                        active_tmux.tmux_session_name if target.control.tmux_session_name is not None else None
+                    ),
+                ),
+            )
             auto_info = (
                 f"RODEX_AUTO_INFO: Rodex session {target.control.rodex_session_id} "
                 f"is now named {assignment.names.display_name!r}."
             )
             try:
                 self._deliver_information(target, active_tmux, auto_info)
+            except RodexDispatchIndeterminateError as error:
+                reconciliation = (
+                    " Reconcile with: "
+                    + shlex.join(
+                        (
+                            "rodex",
+                            DISPATCH_STATUS_COMMAND,
+                            assignment.names.display_name,
+                            "--dispatch",
+                            error.dispatch_id,
+                            "--json",
+                        )
+                    )
+                    if error.dispatch_id is not None
+                    else " Query the exact thread before deciding whether to resend."
+                )
+                raise RodexDispatchIndeterminateError(
+                    f"Rodex name committed as {assignment.names.display_name!r}, but "
+                    f"RODEX_AUTO_INFO acceptance is unknown: {error}.{reconciliation}",
+                    method=error.method,
+                    dispatch_id=error.dispatch_id,
+                    thread_id=error.thread_id,
+                    turn_id=error.turn_id,
+                ) from error
             except (RodexControlError, RodexLaunchError, RodexRuntimeError) as error:
                 raise RodexLaunchError(
                     f"Rodex name changed to {assignment.names.display_name!r}, but "

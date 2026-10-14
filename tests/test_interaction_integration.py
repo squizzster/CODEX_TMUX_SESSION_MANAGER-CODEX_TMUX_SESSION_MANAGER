@@ -197,7 +197,11 @@ def test_configured_prompt_hook_transforms_once_at_real_proxy_boundary(
         "params": {
             "threadId": "thread-1",
             "clientUserMessageId": "dispatch-1",
-            "input": [{"type": "text", "text": "Hello", "text_elements": []}],
+            "input": [
+                {"type": "text", "text": "Hello", "text_elements": []},
+                {"type": "image", "url": "data:image/png;base64,fixture"},
+                {"type": "text", "text": "IDE context\nHello", "text_elements": []},
+            ],
         },
     }
     if method == "turn/steer":
@@ -206,16 +210,21 @@ def test_configured_prompt_hook_transforms_once_at_real_proxy_boundary(
         frame["params"]["queuedSubmissionId"] = "queued-1"
     try:
         proxy.start()
-        with unix_connect(
-            str(proxy_socket),
-            uri=f"ws://localhost{connection_path}",
-            close_timeout=1,
-            additional_headers=TEST_PEER.headers(),
-        ) as client:
-            client.send(json.dumps(frame))
-            assert json.loads(client.recv(timeout=2))["result"]["text"] == "Hello"
+        for _connection in range(2):
+            with unix_connect(
+                str(proxy_socket),
+                uri=f"ws://localhost{connection_path}",
+                close_timeout=1,
+                additional_headers=TEST_PEER.headers(),
+            ) as client:
+                for _submission in range(2):
+                    client.send(json.dumps(frame))
+                    assert json.loads(client.recv(timeout=2))["result"]["text"] == "Hello"
+            if connection_path == "/":
+                assert proxy._primary_connection_released.wait(timeout=2)
         frame["params"]["input"][0]["text"] = "Hello!"
-        assert received == [frame]
+        frame["params"]["input"][2]["text"] = "IDE context\nHello!"
+        assert received == [frame] * 4
     finally:
         proxy.close()
         server.shutdown(close_connections=True)

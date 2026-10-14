@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fcntl
 import io
 import json
 import os
@@ -178,6 +179,58 @@ def test_default_broker_returns_short_sleep_denial_without_an_allowed_status(pol
         ).to_payload(RUNTIME)
     finally:
         broker.close()
+
+
+def test_broker_accepts_and_stops_with_high_numbered_listener(policy_root, monkeypatch):
+    path = policy_root / "high-fd.sock"
+    broker = CommandPolicyBroker(path, RUNTIME, lambda _command: None, environment={})
+    open_endpoint = broker._endpoint.open
+    retained = []
+
+    def open_high_listener():
+        listener = open_endpoint()
+        high_listener = socket.socket(fileno=fcntl.fcntl(listener.fileno(), fcntl.F_DUPFD_CLOEXEC, 1100))
+        retained.append(high_listener)
+        return high_listener
+
+    monkeypatch.setattr(broker._endpoint, "open", open_high_listener)
+    try:
+        broker.start()
+        broker.bind_app_server(CurrentProcessOwner())
+        assert exchange(path, command="sleep 9")["decision"] == "deny"
+    finally:
+        broker.close()
+        for listener in retained:
+            listener.close()
+    assert broker._thread is not None and not broker._thread.is_alive()
+
+
+@pytest.mark.parametrize("config", [None, "", "/private/config"])
+@pytest.mark.parametrize("no_config", [False, True])
+def test_brokers_keep_independent_reservation_environments(policy_root, monkeypatch, config, no_config):
+    monkeypatch.setenv("RIPGREP_CONFIG_PATH", "/daemon/config")
+    (policy_root / "input.txt").write_text("needle\n")
+    environment = {} if config is None else {"RIPGREP_CONFIG_PATH": config}
+    paths = [policy_root / "first.sock", policy_root / "second.sock"]
+    brokers = [
+        CommandPolicyBroker(paths[0], RUNTIME, lambda _command: None, environment=environment),
+        CommandPolicyBroker(paths[1], RUNTIME, lambda _command: None, environment={}),
+    ]
+    # A caller's later mutation cannot alter either runtime's baseline.
+    environment["RIPGREP_CONFIG_PATH"] = "/changed/config"
+    command = "rg " + ("--no-config " if no_config else "") + "needle input.txt"
+    try:
+        for broker in brokers:
+            broker.start()
+            broker.bind_app_server(CurrentProcessOwner())
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = [executor.submit(exchange, path, command=command, cwd=str(policy_root)) for path in paths]
+            results = [future.result() for future in futures]
+        assert results[0]["decision"] == ("deny" if config and not no_config else "allow")
+        assert results[1]["decision"] == "allow"
+    finally:
+        for broker in brokers:
+            broker.close()
 
 
 @pytest.mark.parametrize(

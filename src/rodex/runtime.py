@@ -585,20 +585,12 @@ def _tmux_command_queue(arguments: Sequence[str]) -> str:
     return " ; ".join(shlex.join(command) for command in commands)
 
 
-def _tmux_source_command_queue(arguments: Sequence[str]) -> str:
+def _tmux_source_command_queue(commands: Sequence[Sequence[str]]) -> str:
     """Serialize a tmux source queue as ASCII with every argument byte escaped."""
-    commands: list[list[str]] = [[]]
-    for argument in arguments:
-        if argument == ";":
-            if not commands[-1]:
-                raise ValueError("tmux source queue contains an empty command")
-            commands.append([])
-        elif not isinstance(argument, str) or "\x00" in argument:
-            raise ValueError("tmux source queue contains invalid command text")
-        else:
-            commands[-1].append(argument)
-    if not commands[-1]:
-        raise ValueError("tmux source queue ends with an empty command")
+    if not commands or any(not command or isinstance(command, str) for command in commands):
+        raise ValueError("tmux source queue requires nonempty argument sequences")
+    if any(not isinstance(argument, str) or "\x00" in argument for command in commands for argument in command):
+        raise ValueError("tmux source queue contains invalid command text")
     return " ; ".join(" ".join(_tmux_source_byte_string(argument) for argument in command) for command in commands)
 
 
@@ -1812,9 +1804,9 @@ class RodexRuntimeLauncher:
         stale_global_environment_names = tuple(
             sorted(global_environment_names - caller_environment_names - TMUX_OWNED_CHILD_ENVIRONMENT_VARIABLES)
         )
-        environment_action: list[str] = []
+        environment_action: list[tuple[str, ...]] = []
         for name, value in environment_entries:
-            environment_action.extend(
+            environment_action.append(
                 (
                     "set-environment",
                     "-t",
@@ -1822,11 +1814,10 @@ class RodexRuntimeLauncher:
                     "--",
                     name,
                     value,
-                    ";",
                 )
             )
         for name in stale_global_environment_names:
-            environment_action.extend(
+            environment_action.append(
                 (
                     "set-environment",
                     "-r",
@@ -1834,10 +1825,9 @@ class RodexRuntimeLauncher:
                     capability.session_target,
                     "--",
                     name,
-                    ";",
                 )
             )
-        environment_action.extend(
+        environment_action.append(
             (
                 "set-option",
                 "-t",
@@ -1849,13 +1839,15 @@ class RodexRuntimeLauncher:
         install_action = _tmux_source_command_queue(environment_action)
         source = _tmux_source_command_queue(
             (
-                "if-shell",
-                "-t",
-                capability.pane_target,
-                "-F",
-                primary_pane_capability_if_shell_condition(capability),
-                install_action,
-                shlex.join(("run-shell", "false")),
+                (
+                    "if-shell",
+                    "-t",
+                    capability.pane_target,
+                    "-F",
+                    primary_pane_capability_if_shell_condition(capability),
+                    install_action,
+                    shlex.join(("run-shell", "false")),
+                ),
             )
         )
         self._tmux(
@@ -2679,6 +2671,9 @@ def _run_runtime_service(
     if unexpected_terminal_names:
         raise RodexRuntimeError("terminal bridge environment contains caller-owned names")
     user_environment.update(terminal_environment)
+    # The policy socket belongs to this reservation's App Server, never to the
+    # caller baseline inherited from another managed runtime.
+    user_environment.pop(POLICY_SOCKET_ENV, None)
     codex_binary = config.codex_binary
     app_server_socket_path = config.app_server_socket_path
     app_server_log_path = config.app_server_log_path
@@ -2732,6 +2727,7 @@ def _run_runtime_service(
         config.command_policy_socket_path,
         str(config.runtime_id),
         command_policy_status.allowed,
+        environment={**user_environment, "PWD": os.fspath(config.workspace)},
     )
     policy_inactive_reason: str | None = None
     temporary_policy_trust: NativePolicyHookTrust | None = None
@@ -3425,7 +3421,7 @@ def _receive_message_for_request(websocket: Any, request_id: int) -> dict[str, A
         message = json.loads(websocket.recv(timeout=max(0.01, deadline - time.monotonic())))
         if not isinstance(message, dict):
             raise RodexRuntimeError("app-server response was not an object")
-        if message.get("id") != request_id:
+        if type(message.get("id")) is not int or message["id"] != request_id:
             continue
         return message
     raise TimeoutError(f"timed out waiting for app-server response {request_id}")

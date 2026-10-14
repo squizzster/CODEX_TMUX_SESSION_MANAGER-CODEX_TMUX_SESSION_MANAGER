@@ -112,8 +112,9 @@ def _mock_terminal_gateway(monkeypatch: pytest.MonkeyPatch) -> list:
     class FakePolicyBroker:
         instances: ClassVar[list] = []
 
-        def __init__(self, path, runtime_id, publish):
+        def __init__(self, path, runtime_id, publish, *, environment):
             self.path, self.runtime_id, self.publish = path, runtime_id, publish
+            self.environment = dict(environment)
             self.started = self.closed = False
             self.process = None
             self.instances.append(self)
@@ -555,14 +556,21 @@ def _stage_test_tmux_command(
     capability, caller_environment_names = launcher._stage_tmux_session(runtime, workspace, environment)
     launcher._tmux(
         runtime,
-        "respawn-pane",
-        "-k",
-        "-t",
-        capability.pane_target,
-        *exact_environment_exec_command(
-            launcher._python_executable,
-            tuple(caller_environment_names),
-            command,
+        "if-shell",
+        "-F",
+        "1",
+        shlex.join(
+            (
+                "respawn-pane",
+                "-k",
+                "-t",
+                capability.pane_target,
+                *exact_environment_exec_command(
+                    launcher._python_executable,
+                    tuple(caller_environment_names),
+                    command,
+                ),
+            )
         ),
         environment=environment,
     )
@@ -3064,6 +3072,9 @@ def test_real_tmux_session_replaces_stale_rodex_environment_with_caller_state(
         "CALLER SPACE": "caller-space-value",
         "CALLER_ONLY": 'line one\n\'"quotes"; \\$HOME = #{literal} ✓\tend',
         "NON_UTF8": os.fsdecode(b"caller-\xff-value"),
+        ";": "semicolon-name-value",
+        "SEMICOLON_VALUE": ";",
+        "EMPTY_VALUE": "",
     }
     expected_virtual_environment: str | None = None
     if user_virtualenv_is_active:
@@ -3082,7 +3093,7 @@ def test_real_tmux_session_replaces_stale_rodex_environment_with_caller_state(
         "import json, os, sys, time; from pathlib import Path; "
         "names = ('PATH', 'VIRTUAL_ENV', 'VIRTUAL_ENV_PROMPT', "
         "'UV_RUN_RECURSION_DEPTH', 'USER_SETTING', '-OPTION_SHAPED', "
-        "'CALLER SPACE', 'CALLER_ONLY', 'NON_UTF8', "
+        "'CALLER SPACE', 'CALLER_ONLY', 'NON_UTF8', ';', 'SEMICOLON_VALUE', 'EMPTY_VALUE', "
         "'STALE_ONLY', 'STALE_MULTILINE', 'BASH_ENV', 'ENV', "
         "'LD_LIBRARY_PATH', 'PYTHONHOME', 'PYTHONPATH', 'STALE SPACE', "
         "'LATE_GLOBAL', "
@@ -3135,15 +3146,22 @@ def test_real_tmux_session_replaces_stale_rodex_environment_with_caller_state(
                 tmux_binary,
                 "-S",
                 str(socket_path),
-                "new-window",
-                "-d",
-                "-t",
-                "=caller-environment:",
-                "-c",
-                str(tmp_path),
-                "-e",
-                f"PWD={tmp_path}",
-                *later_command,
+                "if-shell",
+                "-F",
+                "1",
+                shlex.join(
+                    (
+                        "new-window",
+                        "-d",
+                        "-t",
+                        "=caller-environment:",
+                        "-c",
+                        str(tmp_path),
+                        "-e",
+                        f"PWD={tmp_path}",
+                        *later_command,
+                    )
+                ),
             ],
             check=True,
             env=caller_environment,
@@ -3165,6 +3183,9 @@ def test_real_tmux_session_replaces_stale_rodex_environment_with_caller_state(
             assert observed["EMPTY_ARG"] == ""
             assert observed["CALLER_ONLY"] == caller_environment["CALLER_ONLY"]
             assert observed["NON_UTF8"] == caller_environment["NON_UTF8"]
+            assert observed[";"] == "semicolon-name-value"
+            assert observed["SEMICOLON_VALUE"] == ";"
+            assert observed["EMPTY_VALUE"] == ""
             assert observed["STALE_ONLY"] is None
             assert observed["STALE_MULTILINE"] is None
             assert observed["BASH_ENV"] is None
@@ -4997,6 +5018,11 @@ def test_runtime_service_skips_updater_and_connects_tui_through_protocol_proxy(
     assert spawned_environments[0]["RODEX_COMMAND_POLICY_SOCKET"] == str(tmp_path / f"policy-{RUNTIME_ID}.sock")
     assert "RODEX_COMMAND_POLICY_SOCKET" not in spawned_environments[-1]
     assert all(broker.closed for broker in runtime_module.CommandPolicyBroker.instances)
+    assert all(
+        broker.environment
+        == {key: value for key, value in spawned_environments[0].items() if key != "RODEX_COMMAND_POLICY_SOCKET"}
+        for broker in runtime_module.CommandPolicyBroker.instances
+    )
     for process_environment in spawned_environments:
         assert process_environment["USER_SETTING"] == "preserved"
         if bootstrap_virtualenv:

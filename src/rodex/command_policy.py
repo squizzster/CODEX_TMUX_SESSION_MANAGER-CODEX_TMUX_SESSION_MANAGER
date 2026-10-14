@@ -15,8 +15,10 @@ import time
 from collections.abc import Callable, Mapping
 from contextlib import suppress
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from threading import Event, Lock, Thread, current_thread
+from types import MappingProxyType
 from typing import Any, Final, Literal
 
 from rodex_registry.identity import parse_rodex_runtime_id
@@ -189,11 +191,13 @@ def _bounded_policy_reason(reason: str) -> str:
     return reason[: POLICY_TEXT_LIMIT - 3] + "..."
 
 
-def _evaluate_find_rg_policy(request: CommandPolicyRequest) -> CommandPolicyDecision | None:
+def _evaluate_find_rg_policy(
+    request: CommandPolicyRequest, *, environment: Mapping[str, str]
+) -> CommandPolicyDecision | None:
     decision = evaluate_find_rg_source(
         request.command,
         cwd=request.cwd,
-        environment=os.environ,
+        environment=environment,
         evaluation_seconds=FIND_RG_POLICY_SECONDS,
     )
     if decision.outcome in {FindRgOutcome.REJECTED, FindRgOutcome.NEEDS_FILESYSTEM}:
@@ -214,9 +218,14 @@ def _evaluate_short_sleep_policy(request: CommandPolicyRequest) -> CommandPolicy
     return None
 
 
-def evaluate_command_policy(request: CommandPolicyRequest) -> CommandPolicyDecision:
+def evaluate_command_policy(
+    request: CommandPolicyRequest, *, environment: Mapping[str, str] | None = None
+) -> CommandPolicyDecision:
     """Apply ordered customer policies to one exact proposed Bash command."""
-    for policy in (_evaluate_find_rg_policy, _evaluate_short_sleep_policy):
+    for policy in (
+        partial(_evaluate_find_rg_policy, environment=os.environ if environment is None else environment),
+        _evaluate_short_sleep_policy,
+    ):
         decision = policy(request)
         if decision is not None:
             return decision
@@ -236,12 +245,16 @@ class CommandPolicyBroker:
         runtime_id: str,
         publish_allowed: Callable[[str], None],
         *,
-        policy: Callable[[CommandPolicyRequest], CommandPolicyDecision] = evaluate_command_policy,
+        policy: Callable[[CommandPolicyRequest], CommandPolicyDecision] | None = None,
+        environment: Mapping[str, str] | None = None,
     ) -> None:
         self._endpoint = ExclusiveUnixEndpoint(path)
         self._runtime_id = str(parse_rodex_runtime_id(runtime_id))
         self._publish_allowed = publish_allowed
-        self._policy = policy
+        reservation_environment = MappingProxyType(dict(os.environ if environment is None else environment))
+        self._policy = (
+            policy if policy is not None else partial(evaluate_command_policy, environment=reservation_environment)
+        )
         self._owner = BoundProcessOwner()
         self._stop = Event()
         self._lock = Lock()
@@ -265,9 +278,12 @@ class CommandPolicyBroker:
 
     def _accept(self, listener: socket.socket) -> None:
         assert self._wake is not None
+        poller = select.poll()
+        poller.register(listener, select.POLLIN)
+        poller.register(self._wake[0], select.POLLIN)
         while not self._stop.is_set():
-            readable, _, _ = select.select((listener, self._wake[0]), (), ())
-            if self._stop.is_set() or self._wake[0] in readable:
+            readable = dict(poller.poll())
+            if self._stop.is_set() or self._wake[0].fileno() in readable:
                 return
             connection, _ = listener.accept()
             with self._lock:

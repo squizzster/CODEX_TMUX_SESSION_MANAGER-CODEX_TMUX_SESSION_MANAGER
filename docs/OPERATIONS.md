@@ -67,10 +67,13 @@ active work, preserving terminal size and composer input while advancing Codex's
 
 tmux's 50,000-line history limit is installed before pane creation; it is not retroactive.
 Managed Codex uses `--no-alt-screen` so rendered rows enter that history. Mouse behavior
-inherits tmux's global value unless `_mouse` sets a session override. With the default
-prefix, status shows `CTRL-B MODE` while tmux awaits the next key; custom prefix/root
-bindings are not replaced. Sharing transitions have their own bounded status animation,
-independent of Codex's `tui.animations` setting. See
+inherits tmux's global value until `Ctrl-b m` (with the default prefix) toggles a session
+override or `_mouse` sets one explicitly; `_mouse SESSION inherit` removes that override.
+During UI initialization and reconciliation, Rodex replaces an unbound `prefix/m` or
+tmux's stock `select-pane -m` action with this fallback. Any other effective user binding
+is preserved. Status shows `CTRL-B MODE` while tmux awaits the next key; custom prefix/root
+bindings are otherwise not replaced. Sharing transitions have their own bounded status
+animation, independent of Codex's `tui.animations` setting. See
 [`TmuxStatusPipeline`](../src/rodex/tmux_status.py) for status ownership.
 
 Rodex's update notice is display-only and may appear in Codex's F2 warning center.

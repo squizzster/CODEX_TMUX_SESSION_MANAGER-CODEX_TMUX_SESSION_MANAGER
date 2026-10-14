@@ -41,6 +41,7 @@ user-configured generic content-hook loader.
 | Main context reaches 70% | exact numeric usage projection → [context threshold controller](../src/rodex/context_threshold_steering.py) → shared interaction pipeline → exact active-turn steer |
 | Native shell command policy | App Server `PreToolUse(Bash)` → [retained helper](../src/rodex/command_policy_hook.py) → [private broker](../src/rodex/command_policy.py) → ordered [find/rg and later policies](FIND_RG_COMMAND_POLICY.md) → native Codex enforcement; then asynchronous [tmux-only status](../src/rodex/command_policy_status.py) |
 | `_start`, `_steer`, `_interrupt`, alias, mouse | [exact mutation coordinator](../src/rodex/exact_turn_mutation.py) → fenced adapter |
+| Active-prefix `m` | user binding when non-stock; otherwise runtime-installed fallback → current tmux session's `mouse` option |
 | `_cat`, `_tail`, `_events` | [live read pipeline](../src/rodex/session_read_pipeline.py); terminal text and protocol events remain distinct |
 | `_stats`, `_stats-status`, `_agents`, `_trace` | [statistics](../src/rodex/statistics_commands.py) / [trace commands](../src/rodex/agent_trace_commands.py) → owned durable reads |
 | Local menu selection | [configuration](../src/rodex/input_interceptor_config.py) → submitted-command handler → typed target/operation |
@@ -212,6 +213,12 @@ Approval/unrecognized modal input stays native.
 with a 35 ms deadline; complete arrow frames decode immediately. Rodex leaves tmux's
 own `escape-time` unchanged, so it can add latency. This is framing, not a menu delay.
 Production uses neither `tmux send-keys` nor a tmux Enter binding or pane-piping adapter.
+
+tmux handles the active-prefix `m` shortcut before terminal input reaches the gateway.
+Runtime UI initialization replaces only an unbound entry or tmux's stock
+`select-pane -m` command with `set-option mouse`, which toggles the current session.
+Any other effective `prefix/m` binding is a user override and remains authoritative;
+reconciliation does not reclaim it.
 
 ## Local commands
 

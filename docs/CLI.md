@@ -103,6 +103,9 @@ not silently adopt or delete them. [Lifecycle authority](RUNTIME_ISOLATION.md) e
 why a timeout cannot be treated as a dead runtime.
 
 - `Ctrl-D` and `Ctrl-b d` detach only the invoking client and leave the runtime alive.
+- With the default prefix, `Ctrl-b m` toggles mouse mode for the current managed
+  session. Rodex installs that fallback only when `prefix/m` is unbound or still
+  tmux's stock pane-mark action; any other user binding wins.
 - Shared `Ctrl-C` detaches that client. Private `Ctrl-C` ends the exact runtime only
   after the ownership/topology guard passes. It is not a normal Codex interrupt key.
 - Exiting the Codex TUI ends its runtime; opening the name can resume later.

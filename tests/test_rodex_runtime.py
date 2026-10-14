@@ -298,6 +298,17 @@ def _mock_registered_ui_capability(
 
     monkeypatch.setattr(launcher, "_read_tmux_global_hook_command", read_hook)
     monkeypatch.setattr(launcher, "_read_tmux_root_key_command", read_key)
+
+    def read_prefix_key(_runtime: LiveTmuxSession, key: str, **_options: object) -> str:
+        assert key == "m"
+        for command in reversed(runner.calls):
+            action = command[-2] if command[3:4] == ["if-shell"] else ""
+            fields = shlex.split(action)
+            if fields[:4] == ["bind-key", "-T", "prefix", key]:
+                return shlex.join(fields[4:])
+        return runtime_module.TMUX_STOCK_PREFIX_M_COMMAND
+
+    monkeypatch.setattr(launcher, "_read_tmux_prefix_key_command", read_prefix_key)
     return capability
 
 
@@ -1819,6 +1830,17 @@ def test_rename_and_session_ui_initialisation_use_the_real_tmux_session_name(
     monkeypatch.setattr(launcher, "_read_tmux_global_hook_command", read_hook)
     monkeypatch.setattr(launcher, "_read_tmux_root_key_command", read_key)
 
+    def read_prefix_key(_runtime: LiveTmuxSession, key: str, **_options: object) -> str:
+        assert key == "m"
+        for command in reversed(runner.calls):
+            action = command[-2] if command[3:4] == ["if-shell"] else ""
+            fields = shlex.split(action)
+            if fields[:4] == ["bind-key", "-T", "prefix", key]:
+                return shlex.join(fields[4:])
+        return runtime_module.TMUX_STOCK_PREFIX_M_COMMAND
+
+    monkeypatch.setattr(launcher, "_read_tmux_prefix_key_command", read_prefix_key)
+
     renamed = launcher.rename(original, "automatic-beluga")
     launcher.initialise_session_ui(renamed)
 
@@ -2724,7 +2746,168 @@ def test_real_tmux_ctrl_b_banner_tracks_the_waiting_prefix_state(
             os.close(terminal_master)
 
 
-def test_rodex_does_not_override_user_mouse_preferences(
+def test_real_tmux_ctrl_b_m_fallback_toggles_session_mouse(
+    tmp_path: Path,
+) -> None:
+    tmux_binary = shutil.which("tmux")
+    if tmux_binary is None:
+        pytest.skip("tmux is not installed")
+    socket_path = tmp_path / "tmux.sock"
+    session_name = "mouse-toggle-fallback"
+    client_pid: int | None = None
+    terminal_master: int | None = None
+
+    def tmux(*arguments: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [tmux_binary, "-f", "/dev/null", "-S", str(socket_path), *arguments],
+            check=check,
+            text=True,
+            capture_output=True,
+        )
+
+    def wait_for_mouse(expected: str) -> None:
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            observed = tmux(
+                "show-options",
+                "-A",
+                "-v",
+                "-t",
+                f"={session_name}:",
+                "mouse",
+            ).stdout.strip()
+            if observed == expected:
+                return
+            time.sleep(0.01)
+        pytest.fail(f"tmux mouse mode did not become {expected}")
+
+    tmux("new-session", "-d", "-s", session_name, "sleep 30")
+    try:
+        launcher = RodexRuntimeLauncher("codex", tmux_binary, python_executable=sys.executable)
+        runtime = _register_real_tmux_session(tmux, socket_path, session_name)
+        launcher.initialise_session_ui(runtime)
+        binding = tmux("list-keys", "-T", "prefix", "m").stdout
+        assert "set-option mouse" in binding
+        wait_for_mouse("off")
+
+        client_pid, terminal_master = pty.fork()
+        if client_pid == 0:
+            environment = os.environ.copy()
+            environment["TERM"] = "xterm-256color"
+            os.execve(
+                tmux_binary,
+                [
+                    tmux_binary,
+                    "-S",
+                    str(socket_path),
+                    "-T",
+                    RODEX_TMUX_REQUIRED_CLIENT_FEATURES,
+                    "attach-session",
+                    "-t",
+                    f"={session_name}",
+                ],
+                environment,
+            )
+
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            if tmux("list-clients", "-t", f"={session_name}", "-F", "#{client_name}").stdout.strip():
+                break
+            time.sleep(0.01)
+        else:
+            pytest.fail("tmux client did not attach")
+
+        os.write(terminal_master, b"\x02m")
+        wait_for_mouse("on")
+        os.write(terminal_master, b"\x02m")
+        wait_for_mouse("off")
+
+        tmux("bind-key", "-T", "prefix", "m", "display-message", "user-mouse-command")
+        launcher.reconcile_session_ui(runtime)
+        assert "display-message user-mouse-command" in tmux("list-keys", "-T", "prefix", "m").stdout
+    finally:
+        tmux("kill-server", check=False)
+        if client_pid is not None:
+            waited_pid, _status = os.waitpid(client_pid, os.WNOHANG)
+            if waited_pid == 0:
+                os.kill(client_pid, signal.SIGTERM)
+                os.waitpid(client_pid, 0)
+        if terminal_master is not None:
+            os.close(terminal_master)
+
+
+@pytest.mark.parametrize(
+    "initial_binding",
+    (runtime_module.TMUX_STOCK_PREFIX_M_COMMAND, ""),
+)
+def test_mouse_toggle_fallback_replaces_only_the_stock_or_missing_tmux_binding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    initial_binding: str,
+) -> None:
+    launcher = RodexRuntimeLauncher("codex", "tmux")
+    runtime = LiveTmuxSession(
+        tmp_path / "tmux.sock",
+        "automatic-beluga",
+        runtime_id=RUNTIME_ID,
+    )
+    capability = _registered_capability(tmp_path / "tmux.sock")
+    binding = initial_binding
+    writes: list[tuple[str, ...]] = []
+
+    def read_binding(*_args: object, **_options: object) -> str:
+        return binding
+
+    def write_binding(
+        _runtime: LiveTmuxSession,
+        _server_id: str,
+        *arguments: str,
+        **_options: object,
+    ) -> None:
+        nonlocal binding
+        writes.append(arguments)
+        assert arguments[:4] == ("bind-key", "-T", "prefix", "m")
+        binding = shlex.join(arguments[4:])
+
+    monkeypatch.setattr(launcher, "_read_tmux_prefix_key_command", read_binding)
+    monkeypatch.setattr(launcher, "_server_capability_tmux", write_binding)
+
+    launcher._install_mouse_toggle_fallback(runtime, capability)
+    launcher._install_mouse_toggle_fallback(runtime, capability)
+
+    assert binding == runtime_module.RODEX_TMUX_MOUSE_TOGGLE_COMMAND
+    assert writes == [("bind-key", "-T", "prefix", "m", "set-option", "mouse")]
+
+
+def test_mouse_toggle_fallback_preserves_a_user_binding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    launcher = RodexRuntimeLauncher("codex", "tmux")
+    runtime = LiveTmuxSession(
+        tmp_path / "tmux.sock",
+        "automatic-beluga",
+        runtime_id=RUNTIME_ID,
+    )
+    capability = _registered_capability(tmp_path / "tmux.sock")
+    writes: list[tuple[str, ...]] = []
+    monkeypatch.setattr(
+        launcher,
+        "_read_tmux_prefix_key_command",
+        lambda *_args, **_options: "display-message user-mouse-command",
+    )
+    monkeypatch.setattr(
+        launcher,
+        "_server_capability_tmux",
+        lambda _runtime, _server_id, *arguments, **_options: writes.append(arguments),
+    )
+
+    launcher._install_mouse_toggle_fallback(runtime, capability)
+
+    assert writes == []
+
+
+def test_rodex_preserves_user_mouse_value_while_installing_fallback(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2745,7 +2928,9 @@ def test_rodex_does_not_override_user_mouse_preferences(
     launcher._stage_tmux_session(runtime, tmp_path, {"PATH": "/usr/bin", "PWD": str(tmp_path)})
     launcher.initialise_session_ui(runtime)
 
-    assert not any("mouse" in command for command in runner.calls)
+    actions = [shlex.split(command[-2]) for command in runner.calls if command[3:4] == ["if-shell"]]
+    assert ["bind-key", "-T", "prefix", "m", "set-option", "mouse"] in actions
+    assert not any(action[:1] == ["set-option"] and "mouse" in action for action in actions)
 
 
 def test_real_tmux_creation_refuses_an_unmarked_nonempty_server_without_mutation(

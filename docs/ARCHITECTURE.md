@@ -37,7 +37,10 @@ package startup publishes or reuses the retained installation before CLI composi
 - [`ExactTurnMutationCoordinator`](../src/rodex/exact_turn_mutation.py) owns start,
   steer, interrupt, mouse, and alias transitions. It resolves, locks, re-resolves,
   then revalidates immediately before mutation. Transport is not a public unfenced
-  prompt API. [Runtime isolation](RUNTIME_ISOLATION.md) owns identity/lifetime rules.
+  prompt API. The interactive active-prefix `m` fallback is instead scoped by tmux
+  to its current attached session and is installed only over the stock pane-mark
+  binding; a non-stock user binding wins. [Runtime isolation](RUNTIME_ISOLATION.md)
+  owns identity/lifetime rules.
 - Cross-system transitions do external work outside SQLite writer transactions and
   compensate only resources changed by that operation. Post-success access telemetry
   is best-effort; its failure must not make successful model work retryable.

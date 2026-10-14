@@ -46,7 +46,9 @@ uv sync --locked
 ./rodex
 ```
 
-Detach with `Ctrl-D` or `Ctrl-b d`. Return with `./rodex NAME`.
+Detach with `Ctrl-D` or `Ctrl-b d`. With the default tmux prefix, `Ctrl-b m`
+toggles mouse mode unless the user's tmux configuration defines another `m` action.
+Return with `./rodex NAME`.
 
 ## CLI and operations
 

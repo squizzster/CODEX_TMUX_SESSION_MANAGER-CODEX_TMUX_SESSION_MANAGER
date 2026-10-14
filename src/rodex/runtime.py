@@ -167,6 +167,8 @@ _POLL_INTERVAL_SECONDS: Final = 0.05
 RODEX_TMUX_REQUIRED_CLIENT_FEATURES: Final = "RGB"
 RODEX_SHARED_TMUX_CTRL_C_COMMAND_OPTION: Final = "@rodex_shared_tmux_ctrl_c_command"
 RODEX_SHARED_TMUX_CTRL_D_COMMAND_OPTION: Final = "@rodex_shared_tmux_ctrl_d_command"
+RODEX_TMUX_MOUSE_TOGGLE_COMMAND: Final = "set-option mouse"
+TMUX_STOCK_PREFIX_M_COMMAND: Final = "select-pane -m"
 RODEX_SHARED_TMUX_COORDINATION_HOOKS: Final = (
     "client-attached",
     "client-detached",
@@ -1291,7 +1293,36 @@ class RodexRuntimeLauncher:
         *,
         expected_server_id: str | None = None,
     ) -> str:
-        arguments = ("list-keys", "-T", "root", key)
+        return self._read_tmux_key_command(
+            runtime,
+            table="root",
+            key=key,
+            expected_server_id=expected_server_id,
+        )
+
+    def _read_tmux_prefix_key_command(
+        self,
+        runtime: LiveTmuxSession,
+        key: str,
+        *,
+        expected_server_id: str | None = None,
+    ) -> str:
+        return self._read_tmux_key_command(
+            runtime,
+            table="prefix",
+            key=key,
+            expected_server_id=expected_server_id,
+        )
+
+    def _read_tmux_key_command(
+        self,
+        runtime: LiveTmuxSession,
+        *,
+        table: str,
+        key: str,
+        expected_server_id: str | None = None,
+    ) -> str:
+        arguments = ("list-keys", "-T", table, key)
         result = (
             self._tmux(runtime, *arguments, check=False)
             if expected_server_id is None
@@ -1308,7 +1339,7 @@ class RodexRuntimeLauncher:
             fields = shlex.split(result.stdout.strip())
         except ValueError:
             return ""
-        if fields[:4] != ["bind-key", "-T", "root", key] or len(fields) < 5:
+        if fields[:4] != ["bind-key", "-T", table, key] or len(fields) < 5:
             return ""
         return shlex.join(fields[4:])
 
@@ -1617,6 +1648,7 @@ class RodexRuntimeLauncher:
         self._configure_detached_runtime_persistence(runtime, capability)
         self._install_shared_ctrl_c_guard(runtime, capability)
         self._install_ctrl_d_detach_binding(runtime, capability)
+        self._install_mouse_toggle_fallback(runtime, capability)
 
     def _configure_detached_runtime_persistence(
         self,
@@ -2379,6 +2411,47 @@ class RodexRuntimeLauncher:
             owner_option=RODEX_SHARED_TMUX_CTRL_D_COMMAND_OPTION,
             contract_name="Ctrl-D detach contract",
         )
+
+    def _install_mouse_toggle_fallback(
+        self,
+        runtime: LiveTmuxSession,
+        capability: TmuxSessionCapability,
+    ) -> None:
+        """Replace only tmux's stock prefix-m action with the Rodex mouse toggle."""
+        existing_command = self._read_tmux_prefix_key_command(
+            runtime,
+            "m",
+            expected_server_id=capability.tmux_server_id,
+        )
+        if _shell_commands_are_equivalent(existing_command, RODEX_TMUX_MOUSE_TOGGLE_COMMAND):
+            return
+        if existing_command and not _shell_commands_are_equivalent(
+            existing_command,
+            TMUX_STOCK_PREFIX_M_COMMAND,
+        ):
+            return
+        self._server_capability_tmux(
+            runtime,
+            capability.tmux_server_id,
+            "bind-key",
+            "-T",
+            "prefix",
+            "m",
+            *shlex.split(RODEX_TMUX_MOUSE_TOGGLE_COMMAND),
+        )
+        installed_command = self._read_tmux_prefix_key_command(
+            runtime,
+            "m",
+            expected_server_id=capability.tmux_server_id,
+        )
+        if _shell_commands_are_equivalent(installed_command, RODEX_TMUX_MOUSE_TOGGLE_COMMAND):
+            return
+        if installed_command and not _shell_commands_are_equivalent(
+            installed_command,
+            TMUX_STOCK_PREFIX_M_COMMAND,
+        ):
+            return
+        raise RodexRuntimeError("Ctrl-b m mouse fallback was not installed exactly")
 
     def _install_owned_root_key_binding(
         self,

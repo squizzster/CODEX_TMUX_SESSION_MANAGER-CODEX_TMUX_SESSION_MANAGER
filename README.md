@@ -16,6 +16,8 @@ installations keep already-running sessions on the implementation that started t
   above Codex. Keep working below.
 - **Less babysitting.** When a turn fails from server overload, Rodex waits and
   sends `Continue...` for you. Repeated overloads back off; typing cancels a pending retry.
+- **Keep long turns oriented.** When the registered main turn crosses 70% exact
+  context usage, Rodex steers it once to preserve the most relevant objectives.
 - **Take the controls.** Start, steer, interrupt, and collect exact-turn results
   from another shell or agent.
 - **Understand the work.** Inspect durable local statistics, agent relationships,

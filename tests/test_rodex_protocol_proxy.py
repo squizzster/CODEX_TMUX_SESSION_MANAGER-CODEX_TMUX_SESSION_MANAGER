@@ -204,7 +204,11 @@ def test_tmux_context_status_uses_the_same_stable_pane_boundary(tmp_path: Path) 
 
 def test_context_observer_projects_last_usage_for_only_the_primary_thread() -> None:
     observed: list[str] = []
-    observer = CodexContextStatusObserver(observed.append)
+    context_observations: list[tuple[str, float]] = []
+    observer = CodexContextStatusObserver(
+        observed.append,
+        on_context_percent=lambda thread_id, percent: context_observations.append((thread_id, percent)),
+    )
     observer.observe_server_message(
         json.dumps(
             {
@@ -222,6 +226,7 @@ def test_context_observer_projects_last_usage_for_only_the_primary_thread() -> N
     assert len(observed) == 1
     assert RODEX_STATUS_COLOURS.context_warning in observed[0]
     assert "Context: 70% |" in observed[0]
+    assert context_observations == [("thread-1", 70.0)]
 
 
 def test_context_observer_follows_primary_rollout_during_a_live_turn(
@@ -232,6 +237,7 @@ def test_context_observer_follows_primary_rollout_during_a_live_turn(
     rollout_path.parent.mkdir(parents=True)
     rollout_path.write_text(rollout_token_count(25_840) + "\n", encoding="utf-8")
     observed: list[str] = []
+    context_observations: list[tuple[str, float]] = []
     restored = Event()
     advanced = Event()
 
@@ -244,6 +250,7 @@ def test_context_observer_follows_primary_rollout_during_a_live_turn(
 
     observer = CodexContextStatusObserver(
         record_status,
+        on_context_percent=lambda thread_id, percent: context_observations.append((thread_id, percent)),
         codex_sessions_root=sessions_root,
         rollout_poll_interval_seconds=0.005,
     )
@@ -266,6 +273,8 @@ def test_context_observer_follows_primary_rollout_during_a_live_turn(
 
     assert any("Context: 10% |" in status for status in observed)
     assert any("Context: 70% |" in status for status in observed)
+    assert ("thread-1", 10.0) in context_observations
+    assert ("thread-1", 70.0) in context_observations
 
 
 def test_context_observer_rejects_a_rollout_outside_the_codex_sessions_root(

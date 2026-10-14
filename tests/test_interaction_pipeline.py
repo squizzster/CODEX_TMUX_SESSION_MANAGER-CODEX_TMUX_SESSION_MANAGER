@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import nullcontext
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -316,6 +317,38 @@ def test_exact_turn_and_alias_adapters_enter_common_pipeline(operation, source):
     assert hooks[0].source == source
     assert hooks[0].start_model_turn is (operation == InteractionOperation.MESSAGE)
     assert calls[0][2]["revalidate"] is not None
+
+
+def test_exact_steer_rechecks_identity_and_admission_immediately_before_rpc(monkeypatch):
+    events = []
+    dispatch = PromptDispatch("steered", "turn-1", "dispatch-1", "thread-1")
+
+    def steer(_control, _turn_id, _prompt, **kwargs):
+        events.append("transport-ready")
+        kwargs["revalidate"]()
+        events.append("rpc")
+        return dispatch
+
+    client = SimpleNamespace(_steer_turn=steer)
+    coordinator = ExactTurnMutationCoordinator(None, None, client)
+    target = SimpleNamespace(control=SimpleNamespace(runtime_id="runtime-1", codex_session_id="thread-1"))
+    monkeypatch.setattr(coordinator, "_locked_selector", lambda _selector: nullcontext(object()))
+    monkeypatch.setattr(coordinator, "_resolve_target", lambda _selection: target)
+    monkeypatch.setattr(coordinator, "_revalidator", lambda _target: lambda: events.append("identity-current"))
+
+    resolved_target, resolved_dispatch = coordinator.steer(
+        "worker",
+        "turn-1",
+        "compact current objectives",
+        dispatch_id="dispatch-1",
+        expected_runtime_id="runtime-1",
+        expected_thread_id="thread-1",
+        before_dispatch=lambda: events.append("admitted"),
+    )
+
+    assert resolved_target is target
+    assert resolved_dispatch is dispatch
+    assert events == ["transport-ready", "identity-current", "admitted", "rpc"]
 
 
 def test_rejected_exact_message_never_reaches_model_rpc():

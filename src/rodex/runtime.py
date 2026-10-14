@@ -53,6 +53,7 @@ from .command_policy_status import (
     POLICY_STATUS_SECONDS,
     CommandPolicyStatus,
 )
+from .context_threshold_steering import ContextThresholdSteeringController
 from .control import CodexControlClient, LiveRodexControl
 from .daemon_client import (
     RODEX_DAEMON_SOCKET_NAME,
@@ -62,7 +63,13 @@ from .daemon_client import (
 )
 from .input_interceptor_config import INPUT_INTERCEPTORS
 from .input_interceptor_presentation import InputInterceptorPresentation
-from .interaction_pipeline import DeliveryStatus, InteractionRequest, InteractionResult, SessionInteractionPipeline
+from .interaction_pipeline import (
+    DeliveryStatus,
+    InteractionOperation,
+    InteractionRequest,
+    InteractionResult,
+    SessionInteractionPipeline,
+)
 from .interaction_transport import publish_tui_notice
 from .pane_control import TmuxPaneController
 from .presentation_policy import PresentationPolicyInteractionAdapter, SessionPresentationPipeline
@@ -2479,12 +2486,13 @@ def default_runtime_root() -> Path:
     return _prepare_runtime_root(default_runtime_root_path())
 
 
-def _start_registered_main_model_message(
+def _dispatch_registered_main_model_interaction(
     request: InteractionRequest,
     context: AnalyticsRuntimeConfig | None,
     config: RuntimeServiceConfig,
     protocol_proxy: CodexProtocolProxy | None,
     recovery: ServerOverloadedRecoveryController | None = None,
+    context_steering: ContextThresholdSteeringController | None = None,
 ) -> InteractionResult:
     # Composition occurs here to keep the runtime/control dependency acyclic.
     from rodex_registry import lookup_rodex_session_names
@@ -2507,6 +2515,8 @@ def _start_registered_main_model_message(
         revalidate_main_binding()
         if recovery is not None:
             recovery.admit_dispatch(request)
+        if context_steering is not None:
+            context_steering.admit_dispatch(request)
 
     names = lookup_rodex_session_names(context.rodex_sessions_id, context.rodex_database_path)
     if names is None:
@@ -2516,16 +2526,30 @@ def _start_registered_main_model_message(
         RodexRuntimeLauncher(config.codex_binary, config.tmux_binary),
         CodexControlClient(),
     )
-    assert request.text is not None
-    _target, dispatch = coordinator.start(
-        names.display_name,
-        request.text,
-        dispatch_id=request.dispatch_id,
-        expected_runtime_id=str(config.runtime_id),
-        expected_thread_id=str(context.codex_session_id),
-        before_dispatch=admit_dispatch,
-    )
-    return InteractionResult(DeliveryStatus.MODEL_TURN_STARTED, value=asdict(dispatch))
+    if request.operation == InteractionOperation.MESSAGE and request.start_model_turn:
+        assert request.text is not None
+        _target, dispatch = coordinator.start(
+            names.display_name,
+            request.text,
+            dispatch_id=request.dispatch_id,
+            expected_runtime_id=str(config.runtime_id),
+            expected_thread_id=str(context.codex_session_id),
+            before_dispatch=admit_dispatch,
+        )
+        return InteractionResult(DeliveryStatus.MODEL_TURN_STARTED, value=asdict(dispatch))
+    if request.operation == InteractionOperation.STEER:
+        assert request.text is not None and request.expected_turn_id is not None
+        _target, dispatch = coordinator.steer(
+            names.display_name,
+            request.expected_turn_id,
+            request.text,
+            dispatch_id=request.dispatch_id,
+            expected_runtime_id=str(config.runtime_id),
+            expected_thread_id=str(context.codex_session_id),
+            before_dispatch=admit_dispatch,
+        )
+        return InteractionResult(DeliveryStatus.COMPLETED, value=asdict(dispatch))
+    return InteractionResult(DeliveryStatus.REJECTED, "unsupported main model interaction")
 
 
 def run_runtime_service(
@@ -2614,6 +2638,7 @@ def _run_runtime_service(
     diagnostic_relay: _RuntimeDiagnosticRelay | None = None
     agent_observer_controller: AgentObserverCoordinator | None = None
     server_overloaded_recovery: ServerOverloadedRecoveryController | None = None
+    context_threshold_steering: ContextThresholdSteeringController | None = None
     interaction_pipeline = SessionInteractionPipeline(input_text_hook=load_user_prompt_hook(environment=user_environment))
     codex_invocation = CODEX_CLI_0_151_0.classify(tuple(codex_arguments))
     if codex_invocation.route is CodexCliRoute.MANAGED_INTERACTIVE and codex_invocation.prompt_index is not None:
@@ -2643,6 +2668,10 @@ def _run_runtime_service(
             diagnostic_relay = _RuntimeDiagnosticRelay(log)
             diagnostic_relay.start()
             server_overloaded_recovery = ServerOverloadedRecoveryController(
+                interaction_pipeline,
+                logger=lambda message: diagnostic_relay.write(f"{message}\n".encode()),
+            )
+            context_threshold_steering = ContextThresholdSteeringController(
                 interaction_pipeline,
                 logger=lambda message: diagnostic_relay.write(f"{message}\n".encode()),
             )
@@ -2745,6 +2774,7 @@ def _run_runtime_service(
             context_status.update(context_status_segment(None))
             live_context_observer = CodexContextStatusObserver(
                 context_status.update,
+                on_context_percent=context_threshold_steering.observe_context_percent,
                 codex_sessions_root=config.analytics.codex_sessions_root,
             )
             context_status_observer = live_context_observer
@@ -2763,7 +2793,9 @@ def _run_runtime_service(
             live_working_observer = CodexWorkingStatusObserver(publish_working_state)
             working_status_observer = live_working_observer
             if config.analytics.codex_session_id is not None:
-                live_working_observer.bind_root_thread(str(config.analytics.codex_session_id))
+                configured_root_thread_id = str(config.analytics.codex_session_id)
+                live_working_observer.bind_root_thread(configured_root_thread_id)
+                context_threshold_steering.bind_root_thread(configured_root_thread_id)
             live_event_tap = CodexProtocolEventTap(protocol_event_socket_path, peer_identity=peer_identity)
             protocol_event_tap = live_event_tap
             live_event_tap.start()
@@ -2773,6 +2805,8 @@ def _run_runtime_service(
                 event: dict[str, Any] | None,
             ) -> None:
                 presentation_pipeline.observe_protocol_output(event)
+                with suppress(Exception):
+                    context_threshold_steering.observe_protocol_event(event)
                 live_context_observer.observe_protocol_event(event)
                 live_working_observer.observe_protocol_event(event)
                 if server_overloaded_recovery is not None:
@@ -2796,6 +2830,7 @@ def _run_runtime_service(
                 presentation_pipeline,
                 live_context_observer,
                 live_working_observer,
+                context_threshold_steering,
                 live_event_tap,
             ]
             if server_overloaded_recovery is not None:
@@ -2804,13 +2839,14 @@ def _run_runtime_service(
                 lifecycle_participants.append(agent_observer_controller)
             primary_connection_lifecycle = PrimaryConnectionLifecycleCoordinator(lifecycle_participants)
 
-            def start_model_message(request: InteractionRequest) -> InteractionResult:
-                return _start_registered_main_model_message(
+            def dispatch_model_interaction(request: InteractionRequest) -> InteractionResult:
+                return _dispatch_registered_main_model_interaction(
                     request,
                     registered_interaction_context,
                     config,
                     protocol_proxy,
                     server_overloaded_recovery,
+                    context_threshold_steering,
                 )
 
             primary_pane = TmuxPaneController(
@@ -2833,7 +2869,7 @@ def _run_runtime_service(
                 interaction_pipeline=interaction_pipeline,
                 peer_identity=peer_identity,
                 primary_pane=primary_pane,
-                model_message_sender=start_model_message,
+                model_message_sender=dispatch_model_interaction,
             )
             protocol_proxy.start()
             input_presentation = InputInterceptorPresentation(
@@ -2935,6 +2971,7 @@ def _run_runtime_service(
                                 root_thread_id = str(activated_analytics.codex_session_id)
                                 presentation_pipeline.bind_root_thread(root_thread_id)
                                 live_working_observer.bind_root_thread(root_thread_id)
+                                context_threshold_steering.bind_root_thread(root_thread_id)
                                 if server_overloaded_recovery is not None:
                                     server_overloaded_recovery.bind_root_thread(root_thread_id)
                                 if agent_observer_controller is not None:
@@ -3035,6 +3072,9 @@ def _run_runtime_service(
                 if server_overloaded_recovery is not None:
                     with suppress(Exception):
                         server_overloaded_recovery.close()
+                if context_threshold_steering is not None:
+                    with suppress(Exception):
+                        context_threshold_steering.close()
                 if working_status_observer is not None:
                     with suppress(Exception):
                         working_status_observer.close()

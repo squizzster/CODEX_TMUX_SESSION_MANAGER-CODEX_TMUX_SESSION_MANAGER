@@ -213,3 +213,7 @@ conversation log. `_events` is a verified live protocol surface, not the restric
 observer view; do not assume all observation commands share the observer's filter.
 Interaction outcome buffers contain metadata, not prompt bodies. Analytics failure
 logs retain exception type/code locations, never exception bodies or frame locals.
+The [context-threshold controller](INTERACTION_PATHS.md#context-threshold-steering)
+retains only numeric usage and exact runtime identifiers in memory, logs bounded
+metadata, and injects one source-defined fixed steer. It adds no history, SQL row,
+rollout body, or duplicate conversation store.

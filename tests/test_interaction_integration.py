@@ -376,18 +376,22 @@ def test_one_remote_interface_routes_display_and_explicit_model_intent_without_d
     displayed = []
     model_inputs = []
     pipeline = SessionInteractionPipeline()
+
+    def send_model_input(request):
+        model_inputs.append(request)
+        return InteractionResult(
+            DeliveryStatus.COMPLETED
+            if request.operation is InteractionOperation.STEER
+            else DeliveryStatus.MODEL_TURN_STARTED,
+            value={"turn_id": "turn-1"},
+        )
+
     proxy = CodexProtocolProxy(
         tmp_path / "proxy.sock",
         tmp_path / "unused.sock",
         ToolCallCounter(lambda _: None),
         interaction_pipeline=pipeline,
-        model_message_sender=lambda request: (
-            model_inputs.append(request)
-            or InteractionResult(
-                DeliveryStatus.MODEL_TURN_STARTED,
-                value={"turn_id": "turn-1"},
-            )
-        ),
+        model_message_sender=send_model_input,
         peer_identity=TEST_PEER,
         app_server_process=LiveTestProcess(),
         native_tui_process=LiveTestProcess(),
@@ -417,6 +421,19 @@ def test_one_remote_interface_routes_display_and_explicit_model_intent_without_d
         assert [message["params"]["message"] for message in displayed] == ["display"]
         assert [request.text for request in model_inputs] == ["input"]
         assert model_inputs[0].dispatch_id.startswith("rodex:dispatch:")
+        steer_result = pipeline.execute(
+            InteractionRequest(
+                "main",
+                InteractionOperation.STEER,
+                "context-threshold-steer",
+                text="steer",
+                expected_turn_id="turn-1",
+                expected_thread_id="thread-1",
+                dispatch_id="steer-1",
+            )
+        )
+        assert steer_result.status is DeliveryStatus.COMPLETED
+        assert [request.text for request in model_inputs] == ["input", "steer"]
         stale = publish_session_interaction(
             tmp_path / "proxy.sock",
             InteractionRequest(
@@ -443,6 +460,39 @@ def test_one_remote_interface_routes_display_and_explicit_model_intent_without_d
     finally:
         proxy._release_primary_connection(primary)
         proxy.close()
+
+
+@pytest.mark.parametrize("operation", [InteractionOperation.STEER, InteractionOperation.INTERRUPT])
+def test_external_interaction_endpoint_cannot_invoke_private_exact_turn_operations(operation):
+    class Connection:
+        response = None
+
+        def recv(self, **_options):
+            return json.dumps(
+                {
+                    "id": 1,
+                    "method": SESSION_INTERACTION_METHOD,
+                    "params": {
+                        "target": "main",
+                        "operation": operation.value,
+                        "text": "private exact-turn mutation",
+                        "expected_turn_id": "turn-1",
+                    },
+                }
+            )
+
+        def send(self, data):
+            self.response = json.loads(data)
+
+        def close(self):
+            return None
+
+    pipeline = SessionInteractionPipeline()
+    connection = Connection()
+    serve_session_interaction(connection, pipeline)
+
+    assert connection.response["result"]["status"] == "rejected"
+    assert pipeline.records == ()
 
 
 def test_closed_observer_dispatcher_rejects_admission():
@@ -634,12 +684,75 @@ def test_registered_main_adapter_preserves_displayed_thread_and_rechecks_after_w
     proxy = SimpleNamespace(validate_primary_model_binding=validate_binding)
     if changes_during_wait:
         with pytest.raises(InteractionRejected, match="changed"):
-            runtime_module._start_registered_main_model_message(request, context, config, proxy)
+            runtime_module._dispatch_registered_main_model_interaction(request, context, config, proxy)
         assert sent == []
     else:
-        result = runtime_module._start_registered_main_model_message(request, context, config, proxy)
+        result = runtime_module._dispatch_registered_main_model_interaction(request, context, config, proxy)
         assert result.accepted is (selected_thread == "registered")
         assert sent == (["hello"] if selected_thread == "registered" else [])
+
+
+def test_registered_main_adapter_routes_steer_to_the_exact_registered_turn(tmp_path, monkeypatch):
+    import rodex.exact_turn_mutation as mutation_module
+    import rodex.runtime as runtime_module
+    import rodex_registry
+    from rodex.control import PromptDispatch
+
+    admitted = []
+    validated = []
+    request = InteractionRequest(
+        "main",
+        InteractionOperation.STEER,
+        "context-threshold-steer",
+        text="compact current objectives",
+        expected_turn_id="turn-1",
+        expected_thread_id="registered",
+        expected_binding="connection-1",
+        dispatch_id="dispatch-1",
+    )
+    context = SimpleNamespace(rodex_sessions_id=1, codex_session_id="registered", rodex_database_path=tmp_path / "db")
+    config = SimpleNamespace(codex_binary="codex", tmux_binary="tmux", runtime_id="runtime-1")
+
+    def validate_binding(observed):
+        assert observed is request
+        validated.append(observed)
+
+    def steer(selector, turn_id, text, **kwargs):
+        assert selector == "worker"
+        assert turn_id == "turn-1"
+        assert text == "compact current objectives"
+        assert kwargs["dispatch_id"] == "dispatch-1"
+        assert kwargs["expected_runtime_id"] == "runtime-1"
+        assert kwargs["expected_thread_id"] == "registered"
+        kwargs["before_dispatch"]()
+        return object(), PromptDispatch("steered", "turn-1", "dispatch-1", "registered")
+
+    monkeypatch.setattr(
+        rodex_registry, "lookup_rodex_session_names", lambda *_args: SimpleNamespace(display_name="worker")
+    )
+    monkeypatch.setattr(runtime_module, "RodexRuntimeLauncher", lambda *_args: object())
+    monkeypatch.setattr(mutation_module, "ExactTurnMutationCoordinator", lambda *_args: SimpleNamespace(steer=steer))
+    proxy = SimpleNamespace(validate_primary_model_binding=validate_binding)
+    context_steering = SimpleNamespace(admit_dispatch=admitted.append)
+
+    result = runtime_module._dispatch_registered_main_model_interaction(
+        request,
+        context,
+        config,
+        proxy,
+        context_steering=context_steering,
+    )
+
+    assert result.status is DeliveryStatus.COMPLETED
+    assert result.value == {
+        "action": "steered",
+        "turn_id": "turn-1",
+        "dispatch_id": "dispatch-1",
+        "thread_id": "registered",
+        "session_id": None,
+    }
+    assert validated == [request, request]
+    assert admitted == [request]
 
 
 def test_reopen_publishes_current_state_after_creation_not_a_preopen_snapshot(tmp_path):

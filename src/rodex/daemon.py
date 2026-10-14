@@ -50,8 +50,9 @@ REQUEST_TIMEOUT_SECONDS: Final = 5.0
 SHUTDOWN_WAIT_SECONDS: Final = 10.0
 COMPLETION_RECORD_LIMIT: Final = 1024
 _RODEX_RELEASE_VERSION: Final = re.compile(
-    r"(?P<major>0|[1-9][0-9]*)\.(?P<minor>0|[1-9][0-9]*)\.(?P<patch>0|[1-9][0-9]*)"
-    r"(?:(?P<prerelease>a|b|rc)(?P<prerelease_number>0|[1-9][0-9]*))?"
+    r"(?P<major>0|[1-9][0-9]*)\.(?P<minor>0|[1-9][0-9]*)"
+    r"(?:\.(?P<patch>0|[1-9][0-9]*))?"
+    r"(?:(?P<prerelease>a|b|rc)(?P<prerelease_number>0|[1-9][0-9]*)?)?"
 )
 
 
@@ -65,6 +66,9 @@ def _versioned_daemon_process_name(version: str) -> str:
     minor = match["minor"]
     patch = match["patch"]
     prerelease = match["prerelease"] or ""
+    if patch is None and not prerelease:
+        raise ValueError(f"Rodex version cannot form a Linux daemon task name: {version!r}")
+    patch = patch or "0"
     prerelease_number = match["prerelease_number"] or ""
     prerelease_suffix = f"{prerelease}{prerelease_number}"
     readable_release = f"{major}_{minor}"

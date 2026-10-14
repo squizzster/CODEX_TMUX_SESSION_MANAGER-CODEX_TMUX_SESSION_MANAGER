@@ -93,8 +93,9 @@ rodex resume SESSION --force-old
 
 This attaches through the retained installation, including during a busy turn,
 without stopping, restarting, or sending model input. It also skips an available
-idle upgrade. Ended runtimes require normal resume, and missing history remains an
-error. [Retained-runtime handoff](RUNTIME_ISOLATION.md#retained-runtime-upgrade)
+idle upgrade. When missing history prevents an idle live-runtime upgrade, the refusal
+includes this reconnect command. Ended runtimes require normal resume, where missing
+history remains an error. [Retained-runtime handoff](RUNTIME_ISOLATION.md#retained-runtime-upgrade)
 defines admission and ownership.
 
 `_detach` follows the create/open/resume flow without attaching and reports identities

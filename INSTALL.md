@@ -66,7 +66,7 @@ target user. That user then deliberately installs the tool with an existing Pyth
 
 ```bash
 uv tool install --python python3.11 --no-python-downloads \
-  /readable/path/to/codex_tmux_session_manager-0.15.0a1-py3-none-any.whl
+  /readable/path/to/codex_tmux_session_manager-0.16a0-py3-none-any.whl
 "$(uv tool dir --bin)/rodex" _help
 "$(uv tool dir --bin)/rodex" _version
 ```
@@ -92,7 +92,7 @@ provides `venv` and `pip`:
 ```bash
 python3.11 -m venv "$HOME/.local/share/rodex/bootstrap"
 "$HOME/.local/share/rodex/bootstrap/bin/python" -m pip install \
-  /readable/path/to/codex_tmux_session_manager-0.15.0a1-py3-none-any.whl
+  /readable/path/to/codex_tmux_session_manager-0.16a0-py3-none-any.whl
 export RODEX_ENVIRONMENT="$HOME/.local/share/rodex/bootstrap"
 "$RODEX_ENVIRONMENT/bin/rodex" _help
 ```
@@ -189,9 +189,10 @@ is a routing namespace, not a security attestation or content digest.
 Retained implementations can coexist. A retained installation's
 `.venv/bin/rodex` entrypoint accesses its exact implementation's sessions. Opening
 a supported older session through the current entrypoint upgrades that selected
-runtime when its Codex thread is idle. Busy turns fail on stderr with commands to
-retry when idle or reconnect using `rodex NAME --force-old`. The flag attaches
-through the retained installation without upgrading or interrupting its work.
+runtime when its Codex thread is idle. Refusals that leave an older live runtime
+running include a command to reconnect using `rodex NAME --force-old`; busy turns
+also explain how to retry the upgrade when idle. The flag attaches through the
+retained installation without upgrading or interrupting its work.
 Other sessions remain on their owning daemon. Catalogs are schema-generation scoped:
 builds within one generation share the catalog, while live handshakes require the
 exact implementation. Earlier catalogs are not migrated; Codex owns its transcripts.

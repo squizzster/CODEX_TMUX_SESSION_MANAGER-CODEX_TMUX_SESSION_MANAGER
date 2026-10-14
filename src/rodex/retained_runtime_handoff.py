@@ -139,9 +139,13 @@ def attach_selected_runtime(request: dict) -> str:
     return str(outcome)
 
 
-def _busy_upgrade_message(selected: _SelectedRetainedRuntime, status: str) -> str:
+def _selected_runtime_name(selected: _SelectedRetainedRuntime) -> str:
     names = lookup_rodex_session_names(selected.capability.internal_session_id, selected.database_path)
-    name = names.display_name if names is not None else selected.runtime.tmux_session_name
+    return names.display_name if names is not None else selected.runtime.tmux_session_name
+
+
+def _busy_upgrade_message(selected: _SelectedRetainedRuntime, status: str) -> str:
+    name = _selected_runtime_name(selected)
     resume = shlex.join(("rodex", name))
     reconnect = shlex.join(("rodex", name, "--force-old"))
     activity = "still working" if status == "active" else "not idle"
@@ -149,6 +153,14 @@ def _busy_upgrade_message(selected: _SelectedRetainedRuntime, status: str) -> st
         f"Session {name!r} is {activity} on an older Rodex version.\n"
         f"Upgrading would interrupt its work. Wait until it is idle, then run: {resume}\n"
         f"Reconnect without upgrading: {reconnect}"
+    )
+
+
+def _missing_history_upgrade_message(selected: _SelectedRetainedRuntime) -> str:
+    name = _selected_runtime_name(selected)
+    reconnect = shlex.join(("rodex", name, "--force-old"))
+    return (
+        f"selected Codex thread has no saved history; runtime was left running\nReconnect without upgrading: {reconnect}"
     )
 
 
@@ -170,7 +182,7 @@ def stop_selected_idle_runtime(request: dict) -> dict:
     if not workspace.is_absolute() or not workspace.is_dir():
         raise RuntimeError("selected session working directory is unavailable; runtime was left running")
     if not launcher.codex_session_is_persisted(control.codex_session_id):
-        raise RuntimeError("selected Codex thread has no saved history; runtime was left running")
+        raise RuntimeError(_missing_history_upgrade_message(selected))
 
     receipts = RuntimeProcessReceipts(runtime.tmux_server_socket_path.parent)
     receipt = receipts._read(receipts._path("app-server", capability.runtime_id))

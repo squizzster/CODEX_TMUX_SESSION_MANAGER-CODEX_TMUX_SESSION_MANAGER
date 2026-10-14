@@ -8,6 +8,15 @@ repository currently has no Git release tags, so they do not imply a published r
 
 ## Unreleased
 
+### Modified
+
+- A retained-runtime upgrade blocked by a never-saved Codex thread now gives the
+  exact `rodex NAME --force-old` command for reconnecting without an upgrade.
+
+## 0.16a — 2026-10-14 — current package identifier
+
+Build metadata and wheel filenames normalize this PEP 440 spelling to `0.16a0`.
+
 ### Added
 
 - Managed runtimes provide an active-prefix `m` fallback that toggles session mouse
@@ -84,19 +93,6 @@ repository currently has no Git release tags, so they do not imply a published r
 - Recognized developer messages are no longer collapsed into the `unknown` role.
 - The installed shim no longer recursively scans the checkout and virtual environment
   as an intrusion-detection policy.
-
-## 0.15.0a1 — 2026-09-20 — current package identifier
-
-### Added
-
-- Private retained installations pin code, installed dependencies, configuration,
-  and interpreter paths for running sessions.
-
-### Modified
-
-- Terminal resize delivery and retained helper boundaries were strengthened, and the
-  owned runtime, daemon, process-receipt, peer, observer, machine, trace, statistics,
-  and catalog contracts advanced together.
 
 ## 0.14.0a2 — 2026-09-18 — historical package identifier
 

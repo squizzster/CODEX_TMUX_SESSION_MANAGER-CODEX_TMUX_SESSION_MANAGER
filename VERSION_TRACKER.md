@@ -6,7 +6,11 @@ owns the active package version, while
 generations. Package milestones below are verified from repository history; this
 repository currently has no Git release tags, so they do not imply a published release.
 
-## Unreleased
+## 0.17a — 2026-10-14 — current package identifier
+
+Build metadata and wheel filenames normalize this PEP 440 spelling to `0.17a0`.
+Daemon protocol v5, SQLite catalog generation 22, and other wire/storage generations
+are unchanged. Retained running sessions keep their original implementation.
 
 ### Modified
 
@@ -80,7 +84,7 @@ repository currently has no Git release tags, so they do not imply a published r
   terminal bridge readiness use poll without `select`'s descriptor-number ceiling
   (A11); this does not establish aggregate capacity limits.
 
-## 0.16a — 2026-10-14 — current package identifier
+## 0.16a — 2026-10-14
 
 Build metadata and wheel filenames normalize this PEP 440 spelling to `0.16a0`.
 

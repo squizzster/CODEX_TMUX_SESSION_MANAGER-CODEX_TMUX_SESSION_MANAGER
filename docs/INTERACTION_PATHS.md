@@ -204,10 +204,11 @@ fabricated assistant items or model prompts would change the contract.
 ## Terminal and presentation
 
 [`TerminalSessionGateway`](../src/rodex/terminal_gateway.py) blocks on outer/child PTY
-readiness, a wake pipe, child `pidfd`, and explicit input/handoff deadlines. Registration,
+readiness, a wake pipe, child `pidfd`, and explicit input/confirmation deadlines. Registration,
 stop, persisted diagnostics, selected-view revisions, and resize wake it without a
-fixed idle relay timer. [Prompt handoff](PROMPT_SUBMISSION_FLOW.md#enter-handoff)
-uses bounded event-specific rechecks, not idle screen polling.
+fixed idle relay timer. [Local-command composer confirmation](#local-commands)
+uses bounded event-specific rechecks, not idle screen polling. Prompt rules do not
+rewrite the composer.
 
 Main-thread working transitions enable a three-second native elapsed-counter refresh
 deadline in the gateway. A due refresh sends the existing native resize signal without

@@ -27,7 +27,10 @@ installations keep already-running sessions on the implementation that started t
 - **Bound expensive searches.** A native pre-tool policy explains unsafe direct
   `find`/`rg` requests before execution while preserving Codex approvals and sandboxing.
 
-Rodex is an **ALPHA** in-house Linux pre-release; interfaces may change.
+Rodex **0.17a** is an **ALPHA** in-house Linux pre-release; interfaces may change.
+Prompt rules transform structured submissions; native drafts and recall retain the
+original input. See the [submission contract](docs/PROMPT_SUBMISSION_FLOW.md) and
+[release changes](VERSION_TRACKER.md#017a--2026-10-14--current-package-identifier).
 
 ## Requirements and quick start
 

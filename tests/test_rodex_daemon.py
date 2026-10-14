@@ -134,6 +134,7 @@ def test_linux_task_name_contract_rejects_ambiguous_or_truncated_names(name: str
         ("0.14.0a1", "rodexd_v0_14a1"),
         ("0.15.0b2", "rodexd_v0_15b2"),
         ("0.16a", "rodexd_v0_16a"),
+        ("0.17a", "rodexd_v0_17a"),
         ("1.2.3", "rodexd_v1_2_3"),
         ("0.14.1a1", "rodexd_v0141a1"),
     ],
@@ -149,7 +150,7 @@ def test_daemon_process_name_rejects_invalid_or_truncated_versions(version: str)
 
 
 def test_current_daemon_process_name_includes_current_release() -> None:
-    assert RODEX_DAEMON_PROCESS_NAME == "rodexd_v0_16a"
+    assert RODEX_DAEMON_PROCESS_NAME == "rodexd_v0_17a"
 
 
 def test_server_claims_single_socket_before_constructing_multi_runtime_manager(
@@ -663,7 +664,7 @@ def test_current_client_rejects_same_protocol_daemon_with_different_loaded_code(
         diagnostic = str(raised.value)
         assert f"incompatible at {socket_path}" in diagnostic
         assert "running daemon implementation: 'different-loaded-code'" in diagnostic
-        assert "current client: Rodex 0.16a (0.16a+installation." in diagnostic
+        assert "current client: Rodex 0.17a (0.17a+installation." in diagnostic
         assert "daemon protocol: rodex-daemon-v5" in diagnostic
         assert "SQL catalog: not checked; this client expects generation 22 (rodex-v22.sqlite3)" in diagnostic
         assert "does not migrate earlier runtimes or catalogs" in diagnostic
@@ -748,7 +749,7 @@ def test_current_client_reports_both_sides_of_a_daemon_protocol_mismatch(short_r
         diagnostic = str(raised.value)
         assert f"protocol is incompatible at {socket_path}" in diagnostic
         assert "running daemon protocol: 'rodex-daemon-v1'" in diagnostic
-        assert "current client protocol: 'rodex-daemon-v5' (Rodex 0.16a)" in diagnostic
+        assert "current client protocol: 'rodex-daemon-v5' (Rodex 0.17a)" in diagnostic
         assert "SQL catalog: not checked; this client expects generation 22 (rodex-v22.sqlite3)" in diagnostic
         assert "does not translate earlier wire protocols or migrate earlier catalogs" in diagnostic
     finally:

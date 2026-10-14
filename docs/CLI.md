@@ -10,8 +10,9 @@ rodex _running
 ```
 
 `_help` is Rodex's command reference and does not resolve Codex, tmux, or the database.
-`_version` reports Rodex's active contracts. Native `--help` and `--version` belong
-to Codex. The authoritative grammar is
+`_version` reports the invoked Rodex CLI installation's contracts, not the retained
+implementation of an already-running session. Its installation identifier is not a
+Git commit. Native `--help` and `--version` belong to Codex. The authoritative grammar is
 [`COMMAND_SPECS`](../src/rodex/command_contract.py), not a copied option table.
 
 ## Invocation routing

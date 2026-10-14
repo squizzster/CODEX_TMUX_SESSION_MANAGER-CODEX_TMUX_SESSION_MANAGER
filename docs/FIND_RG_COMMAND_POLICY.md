@@ -30,8 +30,10 @@ Codex PreToolUse(Bash)
 [`evaluate_command_policy`](../src/rodex/command_policy.py) owns rule ordering and
 native allow/deny adaptation. The production search rule calls
 [`evaluate_find_rg_source`](../src/rodex/pre_tool_use_customer_library/find_rg.py)
-with the hook request's exact command, working directory, and environment. Only a
-native `allow` means the complete ordered pipeline admitted the proposed command.
+with the hook request's exact command and working directory, plus the broker's
+immutable reservation environment. Native request fields do not supply that policy
+baseline. Only a native `allow` means the complete ordered pipeline admitted the
+proposed command.
 
 Internally, the search library retains four precise outcomes:
 

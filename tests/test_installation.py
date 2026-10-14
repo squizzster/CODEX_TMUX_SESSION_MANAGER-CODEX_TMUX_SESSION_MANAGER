@@ -236,7 +236,7 @@ def test_published_installation_keeps_code_dependencies_and_defaults_after_repla
     first = publish(tmp_path, development_installation)
     before = info(first)
     edits = (
-        (source / "rodex/version.py", "0.16a", "0.17a"),
+        (source / "rodex/version.py", "0.17a", "0.18a"),
         (source / "rodex/daemon_client.py", "rodex-daemon-v5", "rodex-daemon-v6"),
         (source / "rodex/tmux_session_capability.py", "PROTOCOL_GENERATION: Final = 5", "PROTOCOL_GENERATION: Final = 6"),
         (source / "rodex_sql/private_database_path.py", "Final = 22", "Final = 23"),
@@ -345,7 +345,7 @@ print(sharing_coordinator_hook_command(sys.executable, '/usr/bin/tmux', Path(sys
             ).strip()
             source, library = development_installation
             for path, old_text, new_text in (
-                (source / "rodex/version.py", "0.16a", "0.17a"),
+                (source / "rodex/version.py", "0.17a", "0.18a"),
                 (
                     source / "rodex/tmux_session_capability.py",
                     "PROTOCOL_GENERATION: Final = 5",

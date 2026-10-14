@@ -32,7 +32,7 @@ from rodex_registry import RodexRegistryId, RodexRuntimeId, RodexSessionId
 
 OTHER_RUNTIME = replace(TEST_PEER, runtime_id=RodexRuntimeId.parse("c" * 16))
 OTHER_SERVER = replace(TEST_PEER, tmux_server_id="d" * 32)
-OTHER_IMPLEMENTATION = replace(TEST_PEER, implementation_id="0.16a+installation.different-loaded-code")
+OTHER_IMPLEMENTATION = replace(TEST_PEER, implementation_id="0.17a+installation.different-loaded-code")
 
 
 @pytest.mark.parametrize("path", ["/unknown", "/rpc/", "/rpc?query=1", "/?query=1", "/rodex-control/"])
@@ -149,7 +149,7 @@ def test_event_tap_does_not_publish_ready_to_an_unverified_subscriber(tmp_path: 
     ("header", "value"),
     [
         ("X-Rodex-Peer-Contract", "rodex-runtime-peer-v5"),
-        ("X-Rodex-Implementation-Id", "0.16a+installation.different-loaded-code"),
+        ("X-Rodex-Implementation-Id", "0.17a+installation.different-loaded-code"),
     ],
 )
 def test_event_tap_rejects_prior_contract_or_different_loaded_implementation(

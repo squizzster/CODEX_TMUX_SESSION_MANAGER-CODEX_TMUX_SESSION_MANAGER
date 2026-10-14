@@ -75,7 +75,7 @@ target user. That user then deliberately installs the tool with an existing Pyth
 
 ```bash
 uv tool install --python python3.11 --no-python-downloads \
-  /readable/path/to/codex_tmux_session_manager-0.16a0-py3-none-any.whl
+  /readable/path/to/codex_tmux_session_manager-0.17a0-py3-none-any.whl
 "$(uv tool dir --bin)/rodex" _help
 "$(uv tool dir --bin)/rodex" _version
 ```
@@ -101,7 +101,7 @@ provides `venv` and `pip`:
 ```bash
 python3.11 -m venv "$HOME/.local/share/rodex/bootstrap"
 "$HOME/.local/share/rodex/bootstrap/bin/python" -m pip install \
-  /readable/path/to/codex_tmux_session_manager-0.16a0-py3-none-any.whl
+  /readable/path/to/codex_tmux_session_manager-0.17a0-py3-none-any.whl
 export RODEX_ENVIRONMENT="$HOME/.local/share/rodex/bootstrap"
 "$RODEX_ENVIRONMENT/bin/rodex" _help
 ```

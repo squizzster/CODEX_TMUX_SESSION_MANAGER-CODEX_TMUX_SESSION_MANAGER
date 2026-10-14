@@ -12,6 +12,19 @@ repository currently has no Git release tags, so they do not imply a published r
 
 - A retained-runtime upgrade blocked by a never-saved Codex thread now gives the
   exact `rodex NAME --force-old` command for reconnecting without an upgrade.
+- First correctness tranche from the 2026-10-14 integrated architecture assessment:
+  acquired process descriptors close on read/parse failures (A01); failed exact
+  STOP retains an unreconciled receipt without numeric group signals (A02 gate).
+  Stable group authority through successful STOP/resume/escalation remains unresolved.
+- Invalid mutation acknowledgements preserve dispatch reconciliation evidence;
+  alias errors distinguish committed names from refresh failure or uncertain
+  announcements, with an exact status-query command (A03).
+- Exact proxy route admission (A07), type-exact protected JSON scalars and RPC
+  response IDs (A08), and immutable per-reservation policy environments (A09).
+- tmux environment source queues carry command boundaries separately from string
+  data, including semicolon names/values (A10). Gateway, daemon, policy broker and
+  terminal bridge readiness use poll without `select`'s descriptor-number ceiling
+  (A11); this does not establish aggregate capacity limits.
 
 ## 0.16a — 2026-10-14 — current package identifier
 

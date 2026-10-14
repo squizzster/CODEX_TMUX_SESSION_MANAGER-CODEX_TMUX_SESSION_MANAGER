@@ -10,6 +10,11 @@ checks prevent misaddressing and stale ownership; bootstrap trusts the selected
 maintained checkout and environment. Rodex is not an IDS or filesystem/tmux
 surveillance service.
 
+The protocol proxy admits exact `/` and `/rpc` native paths with process ancestry
+checks, and exact `/rodex-control` and `/rodex-interaction` internal paths with
+runtime identity checks. Unknown paths, trailing-slash variants and query-bearing
+variants are rejected before upstream connection or primary assignment.
+
 [Runtime isolation](RUNTIME_ISOLATION.md) is authoritative for capability tuples,
 connected peer/process checks, destructive topology guards, endpoint cleanup, and
 compatibility. Names, compact IDs, inherited tmux context, or matching thread IDs
@@ -60,7 +65,7 @@ ordinary requests. The explicit
 [idle upgrade handoff](RUNTIME_ISOLATION.md#retained-runtime-upgrade) runs through the
 owner's retained interpreter before the current build starts a replacement incarnation.
 [Runtime lifetimes](RUNTIME_ISOLATION.md#resource-lifetime)
-cover descriptor transfer, endpoint aliases, receipts, and PID-reuse protection.
+cover descriptor transfer, endpoint aliases, receipts, and process-reconciliation limits.
 
 [SQLite storage admission](SQL_SCHEMA.md#storage-and-transactions) owns no-follow
 opens, retained descriptors, cooperative locks, and synchronous identity checks.
@@ -91,7 +96,11 @@ originating installation. Its socket environment value is not passed to the TUI.
 
 The versioned contract carries session/turn/cwd, permission mode, original tool
 input, and normalized command text. `evaluate_command_policy` runs an ordered
-customer-policy library. Direct top-level `find`/`rg` workflows are checked first;
+customer-policy library. Each broker snapshots its reservation's finalized
+caller/terminal environment for policy evaluation. It never consults a different
+runtime's daemon-global values.
+This baseline does not attest later shell startup or native environment filtering.
+Direct top-level `find`/`rg` workflows are checked first;
 their parser, live metadata budgets, precise outcomes, and known shell/filesystem
 limits are defined in the [find/rg policy](FIND_RG_COMMAND_POLICY.md). A rejection
 stops the pipeline. Approval or non-applicability continues to the standalone

@@ -10,6 +10,14 @@ repository currently has no Git release tags, so they do not imply a published r
 
 ### Modified
 
+- Canonical token-accounting response fingerprints now include normalized cumulative
+  thread usage (A15 conflict-rejection portion). Both replay and resident append paths
+  reject cumulative-only conflicts while identical older duplicates retain the latest
+  total. Fixed-expectation, append-split, source-local identity, and real-SQL worker
+  tests preserve published statistics, trace facts, and checkpoints on rejection.
+  Previously accepted conflicts degrade on replay without automatic catalog repair;
+  projection generation, broader ordering/reset rules, and tied-statistic semantics
+  are unchanged.
 - Same-incarnation reopen repairs only a verified incumbent's tmux name (A12 name
   recovery portion), with complete-registration SQL compare-and-swap and exact primary
   authority retained through pending confirmation. Normal display-name restoration

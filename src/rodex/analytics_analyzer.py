@@ -146,7 +146,7 @@ _RODEX_TOKEN_METHOD = (
 class _TokenAccountingState:
     canonical_seen: bool = False
     latest_canonical_total: dict[str, int] | None = None
-    response_fingerprints: dict[str, tuple[str | None, tuple[int, ...]]] = field(default_factory=dict)
+    response_fingerprints: dict[str, tuple[str | None, tuple[int, ...], tuple[int, ...]]] = field(default_factory=dict)
 
 
 def _adapt_token_accounting_content(content: bytes, thread_id: CodexThreadId) -> bytes:
@@ -196,7 +196,11 @@ def _adapt_token_accounting_record(
         thread_total = _token_vector(payload.get("thread_token_usage"), "thread token usage")
         turn_id_value = payload.get("turn_id")
         turn_id = turn_id_value if isinstance(turn_id_value, str) and turn_id_value else None
-        fingerprint = (turn_id, tuple(usage[name] for name in _TOKEN_FIELDS))
+        fingerprint = (
+            turn_id,
+            tuple(usage[name] for name in _TOKEN_FIELDS),
+            tuple(thread_total[name] for name in _TOKEN_FIELDS),
+        )
         previous = state.response_fingerprints.get(response_id)
         if previous is not None and previous != fingerprint:
             raise RodexAnalyticsError("token usage response identity has conflicting values")

@@ -56,8 +56,11 @@ pinned analyzer's cumulative token input. In
 [`_adapt_token_accounting_record`](../src/rodex/analytics_analyzer.py), `response_id`
 is the deduplication identity, `usage` is that response's increment, and
 `thread_token_usage` is the authoritative cumulative total. An identical repeated
-response is idempotent; conflicting values for one response identity fail the
-calculation instead of guessing.
+response is idempotent. For one source thread, response identity must agree on its
+turn, normalized `usage` vector, and normalized `thread_token_usage` vector; a
+conflict in any consumed field fails calculation instead of guessing. Missing optional
+zero counters and explicit zeros are equivalent. Repeating an earlier response after
+a later one retains the latest canonical total rather than replaying the old total.
 
 After a canonical response-usage record appears, later `event_msg/token_count` or
 `event_msg/token_usage` snapshots reconcile to its cumulative total and do not add
@@ -65,6 +68,14 @@ the same usage again. Older rollouts with no canonical records retain cumulative
 positive-delta accounting, including reset epochs. Full replay and resident append
 processing share this adapter and are checked for parity in
 [analyzer tests](../tests/test_rodex_analytics_analyzer.py).
+
+Cumulative-conflict validation does not change valid-input totals or the projection
+generation. It does not rewrite existing publications. A previously accepted conflicting
+baseline is detected when a worker replays it and reports degraded source processing;
+statistics, trace facts, and accepted checkpoints remain intact. Preserving that old
+publication does not attest its correctness. [Conflict tests](../tests/test_analytics_token_conflicts.py)
+cover this boundary and recovery from a corrected, never-accepted suffix. Broader
+canonical ordering/reset rules and historical reconstruction remain separate work.
 
 Statistics recognition and typed trace recognition are separate contracts. A
 top-level response-usage record can contribute correctly to `_stats` while remaining

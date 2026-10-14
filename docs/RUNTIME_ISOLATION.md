@@ -142,8 +142,12 @@ unrelated failures and completed registrations cannot enter that path.
   expire and cannot replay as new work.
 - [`RuntimeProcessReceipts`](../src/rodex/process_receipts.py) bind native process
   groups to operation/runtime, PID, Linux start time, and uid. Parent-death guards
-  protect daemon-owned children. Reconciliation verifies every field before signalling;
-  termination escalates after three seconds only for the creation-owned group.
+  protect daemon-owned children. Reconciliation verifies every field before signalling.
+  A failed pidfd STOP refuses all numeric group signals and leaves the receipt
+  explicitly unreconciled. This is a limited safety gate: successful STOP does not
+  prove the leader remains stopped/alive through TERM, CONT, and escalation.
+  Stable group authority through that interval remains unresolved; current crash
+  reconciliation must not be described as verified against process-group reuse.
 - Runtime cwd is an explicit reservation field passed to App Server and TUI.
   Setting `PWD` is not `chdir`; native directory options must not be applied twice.
 

@@ -173,18 +173,17 @@ def _validated_operation_id(operation_id: str) -> str:
 
 
 def _read_process_state(pid: int) -> dict[str, int]:
+    descriptor = os.pidfd_open(pid)
     try:
-        descriptor = os.pidfd_open(pid)
         stat_text = Path(f"/proc/{pid}/stat").read_text()
         uid = Path(f"/proc/{pid}").stat().st_uid
-    except FileNotFoundError as error:
-        raise ProcessLookupError(pid) from error
-    try:
         fields = stat_text.rsplit(")", 1)[1].split()
         process_group_id = int(fields[2])
         start_time_ticks = int(fields[19])
         if os.waitid(os.P_PIDFD, descriptor, os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None:
             raise ProcessLookupError(pid)
+    except FileNotFoundError as error:
+        raise ProcessLookupError(pid) from error
     except (IndexError, ValueError) as error:
         raise ProcessReceiptError("could not parse daemon child process identity") from error
     except ChildProcessError:
@@ -202,10 +201,12 @@ def _read_process_state(pid: int) -> dict[str, int]:
 
 def _terminate_exact_process_group(receipt: dict[str, Any], process_descriptor: int) -> None:
     process_group_id = receipt["process_group_id"]
-    # Stop the exact retained leader before addressing its numeric process group.
-    # This pins the verified group against exit/reuse while group-wide shutdown runs.
-    with suppress(ProcessLookupError):
+    # A lost leader cannot authorize numeric group signals. This gate does not
+    # establish stable group authority through CONT or the later escalation.
+    try:
         signal.pidfd_send_signal(process_descriptor, signal.SIGSTOP)
+    except OSError as error:
+        raise ProcessReceiptError("process group remains unreconciled: exact leader could not be stopped") from error
     with suppress(ProcessLookupError):
         os.killpg(process_group_id, signal.SIGTERM)
     with suppress(ProcessLookupError):

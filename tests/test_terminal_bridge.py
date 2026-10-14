@@ -13,6 +13,9 @@ import termios
 import time
 import tty
 from contextlib import suppress
+from threading import Event, Thread
+
+import pytest
 
 from rodex.daemon_client import (
     RODEX_DAEMON_INSTANCE_FIELD,
@@ -23,6 +26,73 @@ from rodex.daemon_client import (
     receive_daemon_message,
 )
 from rodex.implementation_identity import RODEX_IMPLEMENTATION_ID
+from rodex.terminal_bridge import wait_for_runtime
+
+
+def test_bridge_resizes_and_observes_eof_with_high_connection_and_wake_fds(monkeypatch):
+    original_pipe = os.pipe2
+    previous_handler = signal.getsignal(signal.SIGWINCH)
+    set_wakeup_fd = signal.set_wakeup_fd
+    wakeup_changes = []
+    retained_wake_descriptors = []
+
+    def observed_wakeup_fd(fd, **options):
+        previous = set_wakeup_fd(fd, **options)
+        wakeup_changes.append((fd, previous))
+        return previous
+
+    def high_pipe(flags):
+        originals = original_pipe(flags)
+        high = []
+        try:
+            for fd in originals:
+                high.append(fcntl.fcntl(fd, fcntl.F_DUPFD_CLOEXEC, 1100))
+        except BaseException:
+            for fd in high:
+                os.close(fd)
+            raise
+        finally:
+            for fd in originals:
+                os.close(fd)
+        retained_wake_descriptors.extend(high)
+        return high
+
+    monkeypatch.setattr("rodex.terminal_bridge.os.pipe2", high_pipe)
+    monkeypatch.setattr("rodex.terminal_bridge.signal.set_wakeup_fd", observed_wakeup_fd)
+    initial, resized = Event(), Event()
+
+    def notify_resize():
+        (resized if initial.is_set() else initial).set()
+
+    sender, receiver = socket.socketpair()
+    with (
+        sender,
+        receiver,
+        socket.socket(fileno=fcntl.fcntl(receiver.fileno(), fcntl.F_DUPFD_CLOEXEC, 1100)) as high_connection,
+    ):
+
+        def resize_then_close():
+            try:
+                if initial.wait(1):
+                    os.kill(os.getpid(), signal.SIGWINCH)
+                    resized.wait(1)
+            finally:
+                sender.shutdown(socket.SHUT_WR)
+
+        thread = Thread(target=resize_then_close)
+        thread.start()
+        try:
+            wait_for_runtime(high_connection, notify_resize)
+        finally:
+            thread.join(2)
+        assert resized.is_set()
+        assert not thread.is_alive()
+    assert signal.getsignal(signal.SIGWINCH) is previous_handler
+    assert len(wakeup_changes) == 2
+    assert wakeup_changes[1] == (wakeup_changes[0][1], wakeup_changes[0][0])
+    for fd in retained_wake_descriptors:
+        with pytest.raises(OSError):
+            os.fstat(fd)
 
 
 def test_bridge_forwards_real_sigwinch_and_never_consumes_native_input(tmp_path):

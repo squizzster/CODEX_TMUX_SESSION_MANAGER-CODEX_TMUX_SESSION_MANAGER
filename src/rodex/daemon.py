@@ -451,14 +451,17 @@ class RodexDaemonServer:
             # The implementation-scoped endpoint is this daemon's ownership claim.
             # Reconcile only equally namespaced process receipts after it is exclusive.
             self._manager = DaemonRuntimeManager(self._runtime_root)
+            poller = select.poll()
+            poller.register(listener, select.POLLIN)
+            poller.register(self._wake_fd, select.POLLIN)
             while not self._stop.is_set():
-                readable, _writable, _exceptional = select.select((listener, self._wake_fd), (), ())
+                readable = dict(poller.poll())
                 if self._wake_fd in readable:
                     with suppress(BlockingIOError, OSError):
                         os.eventfd_read(self._wake_fd)
                     if self._stop.is_set():
                         break
-                if listener not in readable:
+                if listener.fileno() not in readable:
                     continue
                 connection, _address = listener.accept()
                 worker = Thread(target=self._handle_connection, args=(connection,), daemon=True)

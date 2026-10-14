@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import fcntl
 import os
 import signal
 import socket
@@ -180,10 +181,10 @@ def test_idle_server_blocks_on_control_event_until_stop(
     short_runtime_root: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    select_entered = Event()
-    select_timeouts: list[float | None] = []
+    poll_entered = Event()
+    poll_timeouts: list[int | None] = []
     failures: list[BaseException] = []
-    real_select = daemon_module.select.select
+    real_poll = daemon_module.select.poll
 
     class EmptyManager:
         def __init__(self, _runtime_root: Path) -> None:
@@ -192,14 +193,25 @@ def test_idle_server_blocks_on_control_event_until_stop(
         def close(self) -> None:
             return None
 
-    def observed_select(reads, writes, exceptional, timeout=None):
-        select_timeouts.append(timeout)
-        select_entered.set()
-        return real_select(reads, writes, exceptional, timeout)
+    class ObservedPoll:
+        def __init__(self):
+            self._poller = real_poll()
+
+        def register(self, *args):
+            self._poller.register(*args)
+
+        def poll(self, timeout=None):
+            poll_timeouts.append(timeout)
+            poll_entered.set()
+            return self._poller.poll(timeout)
 
     server = daemon_module.RodexDaemonServer(short_runtime_root)
+    original_wake = server._wake_fd
+    server._wake_fd = fcntl.fcntl(original_wake, fcntl.F_DUPFD_CLOEXEC, 1100)
+    os.close(original_wake)
+    retained_wake = server._wake_fd
     monkeypatch.setattr(daemon_module, "DaemonRuntimeManager", EmptyManager)
-    monkeypatch.setattr(daemon_module.select, "select", observed_select)
+    monkeypatch.setattr(daemon_module.select, "poll", ObservedPoll)
 
     def run_server() -> None:
         try:
@@ -209,16 +221,19 @@ def test_idle_server_blocks_on_control_event_until_stop(
 
     thread = Thread(target=run_server)
     thread.start()
-    assert select_entered.wait(1)
-    time.sleep(0.1)
-    assert select_timeouts == [None]
-
-    server.stop()
-    thread.join(timeout=1)
+    try:
+        assert poll_entered.wait(1)
+        time.sleep(0.1)
+        assert poll_timeouts == [None]
+    finally:
+        server.stop()
+        thread.join(timeout=1)
 
     assert not thread.is_alive()
     assert failures == []
-    assert select_timeouts == [None]
+    assert poll_timeouts == [None]
+    with pytest.raises(OSError):
+        os.fstat(retained_wake)
 
 
 @pytest.mark.parametrize(

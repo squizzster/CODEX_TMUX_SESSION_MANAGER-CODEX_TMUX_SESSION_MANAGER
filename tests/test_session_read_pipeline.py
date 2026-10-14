@@ -6,10 +6,12 @@ from typing import Any
 
 import pytest
 
+import rodex.session_commands as session_commands_module
 import rodex.session_read_pipeline as pipeline_module
 from rodex.control import LiveRodexControl
 from rodex.runtime import LiveTmuxSession
 from rodex.session_read_pipeline import LiveSessionReadPipeline
+from rodex_sql import RodexDatabaseMovedError
 
 
 def _resolved_read(tmp_path: Path) -> tuple[int, LiveTmuxSession, LiveRodexControl]:
@@ -43,8 +45,7 @@ def test_snapshot_pipeline_has_one_authoritative_success_order(tmp_path: Path, m
 
     monkeypatch.setattr(pipeline_module, "resolve_live_control", resolve)
     monkeypatch.setattr(pipeline_module, "revalidate_live_control", revalidate)
-    monkeypatch.setattr(pipeline_module, "record_a_rodex_session_access", record)
-    pipeline = LiveSessionReadPipeline(database, launcher)  # type: ignore[arg-type]
+    pipeline = LiveSessionReadPipeline(database, launcher, record)  # type: ignore[arg-type]
 
     result = pipeline.snapshot(
         "automatic-beluga",
@@ -76,12 +77,11 @@ def test_snapshot_pipeline_does_not_record_a_failed_read(tmp_path: Path, monkeyp
         "revalidate_live_control",
         lambda *_args: observed.append("unexpected_revalidate"),
     )
-    monkeypatch.setattr(
-        pipeline_module,
-        "record_a_rodex_session_access",
+    pipeline = LiveSessionReadPipeline(
+        database,
+        object(),  # type: ignore[arg-type]
         lambda *_args: observed.append("unexpected_access"),
     )
-    pipeline = LiveSessionReadPipeline(database, object())  # type: ignore[arg-type]
 
     def fail(_runtime: LiveTmuxSession) -> tuple[str, ...]:
         observed.append("read")
@@ -110,12 +110,11 @@ def test_snapshot_pipeline_does_not_return_or_record_after_failed_revalidation(
         raise RuntimeError("runtime changed")
 
     monkeypatch.setattr(pipeline_module, "revalidate_live_control", reject)
-    monkeypatch.setattr(
-        pipeline_module,
-        "record_a_rodex_session_access",
+    pipeline = LiveSessionReadPipeline(
+        database,
+        object(),  # type: ignore[arg-type]
         lambda *_args: observed.append("unexpected_access"),
     )
-    pipeline = LiveSessionReadPipeline(database, object())  # type: ignore[arg-type]
 
     with pytest.raises(RuntimeError, match="runtime changed"):
         pipeline.snapshot(
@@ -133,6 +132,8 @@ def test_event_pipeline_records_access_before_its_unbounded_stream(
     session_id, runtime, control = _resolved_read(tmp_path)
     observed: list[str] = []
     launcher = object()
+    monkeypatch.delenv("TMUX", raising=False)
+    monkeypatch.delenv("TMUX_PANE", raising=False)
     monkeypatch.setattr(
         pipeline_module,
         "resolve_live_control",
@@ -143,12 +144,11 @@ def test_event_pipeline_records_access_before_its_unbounded_stream(
         "revalidate_live_control",
         lambda *_args: observed.append("revalidate"),
     )
-    monkeypatch.setattr(
-        pipeline_module,
-        "record_a_rodex_session_access",
+    pipeline = LiveSessionReadPipeline(
+        database,
+        launcher,  # type: ignore[arg-type]
         lambda *_args: observed.append("record_access"),
     )
-    pipeline = LiveSessionReadPipeline(database, launcher)  # type: ignore[arg-type]
 
     def stream(observed_control: LiveRodexControl, revalidate: Any) -> None:
         assert observed_control == control
@@ -186,12 +186,11 @@ def test_scrollback_pipeline_records_access_before_its_unbounded_stream(
         "revalidate_live_control",
         lambda *_args: observed.append("revalidate"),
     )
-    monkeypatch.setattr(
-        pipeline_module,
-        "record_a_rodex_session_access",
+    pipeline = LiveSessionReadPipeline(
+        database,
+        launcher,  # type: ignore[arg-type]
         lambda *_args: observed.append("record_access"),
     )
-    pipeline = LiveSessionReadPipeline(database, launcher)  # type: ignore[arg-type]
 
     def stream(observed_runtime: LiveTmuxSession, revalidate: Any) -> None:
         assert observed_runtime == runtime
@@ -209,3 +208,109 @@ def test_scrollback_pipeline_records_access_before_its_unbounded_stream(
         "terminal-1",
         "terminal-2",
     ]
+
+
+def test_snapshot_pipeline_returns_verified_data_when_access_telemetry_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    database = tmp_path / "rodex.sqlite3"
+    resolved = _resolved_read(tmp_path)
+    monkeypatch.setattr(pipeline_module, "resolve_live_control", lambda *_args: resolved)
+    monkeypatch.setattr(pipeline_module, "revalidate_live_control", lambda *_args: None)
+    monkeypatch.setattr(
+        session_commands_module,
+        "record_a_rodex_session_access",
+        lambda *_args: (_ for _ in ()).throw(OSError("telemetry unavailable")),
+    )
+    pipeline = LiveSessionReadPipeline(
+        database,
+        object(),  # type: ignore[arg-type]
+        session_commands_module._record_access_best_effort,
+    )
+
+    result = pipeline.snapshot("automatic-beluga", lambda _runtime: ("verified",))
+
+    assert result == ("verified",)
+    assert capsys.readouterr().err == "rodex: warning: access telemetry was not recorded: telemetry unavailable\n"
+
+
+def test_event_pipeline_starts_stream_when_access_telemetry_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    database = tmp_path / "rodex.sqlite3"
+    resolved = _resolved_read(tmp_path)
+    observed: list[str] = []
+    monkeypatch.delenv("TMUX", raising=False)
+    monkeypatch.delenv("TMUX_PANE", raising=False)
+    monkeypatch.setattr(pipeline_module, "resolve_live_control", lambda *_args: resolved)
+    monkeypatch.setattr(
+        session_commands_module,
+        "record_a_rodex_session_access",
+        lambda *_args: (_ for _ in ()).throw(OSError("telemetry unavailable")),
+    )
+    pipeline = LiveSessionReadPipeline(
+        database,
+        object(),  # type: ignore[arg-type]
+        session_commands_module._record_access_best_effort,
+    )
+
+    pipeline.stream_events("automatic-beluga", lambda _control, _revalidate: observed.append("stream"))
+
+    assert observed == ["stream"]
+    assert capsys.readouterr().err == "rodex: warning: access telemetry was not recorded: telemetry unavailable\n"
+
+
+def test_scrollback_pipeline_starts_stream_when_access_telemetry_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    database = tmp_path / "rodex.sqlite3"
+    resolved = _resolved_read(tmp_path)
+    observed: list[str] = []
+    monkeypatch.setattr(pipeline_module, "resolve_live_control", lambda *_args: resolved)
+    monkeypatch.setattr(
+        session_commands_module,
+        "record_a_rodex_session_access",
+        lambda *_args: (_ for _ in ()).throw(OSError("telemetry unavailable")),
+    )
+    pipeline = LiveSessionReadPipeline(
+        database,
+        object(),  # type: ignore[arg-type]
+        session_commands_module._record_access_best_effort,
+    )
+
+    pipeline.stream_scrollback("automatic-beluga", lambda _runtime, _revalidate: observed.append("stream"))
+
+    assert observed == ["stream"]
+    assert capsys.readouterr().err == "rodex: warning: access telemetry was not recorded: telemetry unavailable\n"
+
+
+def test_snapshot_pipeline_keeps_database_relocation_fatal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database = tmp_path / "rodex.sqlite3"
+    resolved = _resolved_read(tmp_path)
+    moved = RodexDatabaseMovedError(database, "test replacement")
+    monkeypatch.setattr(pipeline_module, "resolve_live_control", lambda *_args: resolved)
+    monkeypatch.setattr(pipeline_module, "revalidate_live_control", lambda *_args: None)
+    monkeypatch.setattr(
+        session_commands_module,
+        "record_a_rodex_session_access",
+        lambda *_args: (_ for _ in ()).throw(moved),
+    )
+    pipeline = LiveSessionReadPipeline(
+        database,
+        object(),  # type: ignore[arg-type]
+        session_commands_module._record_access_best_effort,
+    )
+
+    with pytest.raises(RodexDatabaseMovedError) as raised:
+        pipeline.snapshot("automatic-beluga", lambda _runtime: ("verified",))
+
+    assert raised.value is moved

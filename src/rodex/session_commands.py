@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 import sqlite3
 import sys
 from collections.abc import Callable
@@ -13,11 +12,9 @@ from rodex_registry import (
     RodexRuntimeRegistrationRejectedError,
     RodexSessionError,
     list_rodex_session_runtimes_for_a_user,
-    lookup_owned_rodex_sessions_id_from_a_cool_name,
     lookup_rodex_registry_id,
     lookup_rodex_session_id_from_a_rodex_sessions_id,
     lookup_rodex_sessions_id_from_a_rodex_session_id,
-    lookup_rodex_tmux_session,
     record_a_rodex_session_access,
 )
 from rodex_sql import RodexDatabaseMovedError, RodexSQLError
@@ -109,14 +106,16 @@ def execute_session_command(
     if command == CAT_COMMAND:
         if len(arguments) != 2:
             raise RodexLaunchError("usage: rodex _cat SESSION_NAME")
-        scrollback = LiveSessionReadPipeline(database_path, launcher).snapshot(arguments[1], launcher.capture_scrollback)
+        scrollback = LiveSessionReadPipeline(database_path, launcher, _record_access_best_effort).snapshot(
+            arguments[1], launcher.capture_scrollback
+        )
         if scrollback:
             sys.stdout.write("\n".join(scrollback) + "\n")
             sys.stdout.flush()
         return
     if command == TAIL_COMMAND:
         request = parse_session_tail_request(arguments)
-        LiveSessionReadPipeline(database_path, launcher).stream_scrollback(
+        LiveSessionReadPipeline(database_path, launcher, _record_access_best_effort).stream_scrollback(
             request.session_name,
             lambda runtime, revalidate: follow_session_tail(
                 request,
@@ -130,8 +129,7 @@ def execute_session_command(
     if command == EVENTS_COMMAND:
         if len(arguments) != 2:
             raise RodexLaunchError("usage: rodex _events SESSION_NAME")
-        _refuse_same_session_event_sink(arguments[1], database_path, launcher)
-        LiveSessionReadPipeline(database_path, launcher).stream_events(
+        LiveSessionReadPipeline(database_path, launcher, _record_access_best_effort).stream_events(
             arguments[1],
             lambda control, revalidate: _stream_protocol_events(
                 arguments[1],
@@ -287,37 +285,6 @@ def _print_current_rodex_context(
         ),
         flush=True,
     )
-
-
-def _refuse_same_session_event_sink(
-    session_name: str,
-    database_path: Path,
-    launcher: RodexRuntimeLauncher,
-) -> None:
-    """Prevent protocol-event output from feeding the pane it observes."""
-    if not os.environ.get("TMUX") or not os.environ.get("TMUX_PANE"):
-        return
-    session_id = lookup_owned_rodex_sessions_id_from_a_cool_name(session_name, database_path)
-    if session_id is None:
-        return
-    tmux = lookup_rodex_tmux_session(session_id, database_path)
-    if tmux is None:
-        return
-    try:
-        current = launcher.discover_current_tmux_pane_context()
-    except (OSError, RodexRuntimeError, ValueError) as error:
-        raise RodexLaunchError(
-            "cannot safely open _events from this tmux pane because its session "
-            "identity could not be verified; use another terminal or _trace --follow"
-        ) from error
-    if (
-        current.tmux_session.tmux_session_name == tmux.tmux_session_name
-        and current.tmux_session.tmux_server_socket_path == Path(tmux.tmux_server_socket_path)
-    ):
-        raise RodexLaunchError(
-            "_events output cannot use the same Rodex session it observes; "
-            "run it from another terminal or use _trace --follow"
-        )
 
 
 def _print_running_sessions(

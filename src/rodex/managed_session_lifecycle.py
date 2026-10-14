@@ -94,7 +94,7 @@ class ManagedSessionLaunchRequest:
     codex_arguments: tuple[str, ...]
     requested_name: str | None
     detach: bool
-    resolve_codex_arguments_as_session: bool = True
+    resolve_codex_arguments_as_session: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -604,18 +604,35 @@ def _parse_launch_arguments(
 ) -> ManagedSessionLaunchRequest:
     command = arguments[0]
     command_arguments = tuple(arguments[1:])
+    codex_arguments, follows_separator = _split_leading_separator(command_arguments)
     if command == DETACH_COMMAND:
-        return ManagedSessionLaunchRequest(_without_separator(command_arguments), None, True)
+        return ManagedSessionLaunchRequest(
+            codex_arguments,
+            requested_name=None,
+            detach=True,
+            resolve_codex_arguments_as_session=not follows_separator,
+        )
     if command != CREATE_COMMAND:
         raise AssertionError(f"lifecycle received unexpected launch command: {command}")
     if not command_arguments or command_arguments[0].startswith("-"):
-        return ManagedSessionLaunchRequest(_without_separator(command_arguments), None, False)
+        return ManagedSessionLaunchRequest(
+            codex_arguments,
+            requested_name=None,
+            detach=False,
+            resolve_codex_arguments_as_session=False,
+        )
     requested_name = command_arguments[0]
-    return ManagedSessionLaunchRequest(_without_separator(command_arguments[1:]), requested_name, False)
+    codex_arguments, _follows_separator = _split_leading_separator(command_arguments[1:])
+    return ManagedSessionLaunchRequest(
+        codex_arguments,
+        requested_name=requested_name,
+        detach=False,
+        resolve_codex_arguments_as_session=False,
+    )
 
 
-def _without_separator(arguments: tuple[str, ...]) -> tuple[str, ...]:
-    return arguments[1:] if arguments[:1] == ("--",) else arguments
+def _split_leading_separator(arguments: tuple[str, ...]) -> tuple[tuple[str, ...], bool]:
+    return (arguments[1:], True) if arguments[:1] == ("--",) else (arguments, False)
 
 
 def _resolve_session_arguments(

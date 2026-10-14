@@ -10,6 +10,11 @@ repository currently has no Git release tags, so they do not imply a published r
 
 ### Modified
 
+- Primary event subscriptions require a verified upstream and end on source loss
+  (A04). Publication and invalidation carry the source epoch; stale callbacks cannot
+  populate or close a replacement stream. Exact waits report continuity loss without
+  retrying model work. Mandatory publication precedes auxiliary projections, and
+  input EOF invalidates subscribers even while an output projection is blocked.
 - A retained-runtime upgrade blocked by a never-saved Codex thread now gives the
   exact `rodex NAME --force-old` command for reconnecting without an upgrade.
 - First correctness tranche from the 2026-10-14 integrated architecture assessment:

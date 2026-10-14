@@ -2887,7 +2887,6 @@ def _run_runtime_service(
                 if event is not None:
                     with suppress(Exception):
                         on_analytics_event(event)
-                live_event_tap.publish_protocol_event(message, event)
 
             def observe_primary_client_message(
                 _message: str | bytes,
@@ -2900,7 +2899,6 @@ def _run_runtime_service(
                 live_context_observer,
                 live_working_observer,
                 context_threshold_steering,
-                live_event_tap,
             ]
             if server_overloaded_recovery is not None:
                 lifecycle_participants.append(server_overloaded_recovery)
@@ -2939,6 +2937,7 @@ def _run_runtime_service(
                 peer_identity=peer_identity,
                 primary_pane=primary_pane,
                 model_message_sender=dispatch_model_interaction,
+                event_tap=live_event_tap,
             )
             protocol_proxy.start()
             input_presentation = InputInterceptorPresentation(

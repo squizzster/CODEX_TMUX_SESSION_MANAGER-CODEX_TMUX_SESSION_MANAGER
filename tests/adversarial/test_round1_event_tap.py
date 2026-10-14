@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from threading import Event, Lock, Thread
 
+import pytest
 from runtime_peer_fixtures import TEST_PEER
 
 from rodex.protocol_proxy import CodexProtocolEventTap
@@ -81,6 +82,7 @@ def test_round1_slow_event_subscriber_is_closed_and_reclaimed_on_overflow(
 ) -> None:
     tap = CodexProtocolEventTap(tmp_path / "events.sock", queue_size=1, peer_identity=TEST_PEER)
     connection = ReadyThenBlockingConnection()
+    source_epoch = tap.activate_primary_source()
     done = Event()
 
     def handle() -> None:
@@ -90,10 +92,10 @@ def test_round1_slow_event_subscriber_is_closed_and_reclaimed_on_overflow(
     handler = Thread(target=handle)
     handler.start()
     assert connection.ready_sent.wait(1)
-    tap.publish("first")
+    tap.publish("first", source_epoch=source_epoch)
     assert connection.blocked_send_entered.wait(1)
-    tap.publish("queued")
-    tap.publish("overflow")
+    tap.publish("queued", source_epoch=source_epoch)
+    tap.publish("overflow", source_epoch=source_epoch)
 
     reclaimed_on_overflow = done.wait(0.2) and connection.closed.is_set()
     if not reclaimed_on_overflow:
@@ -103,3 +105,32 @@ def test_round1_slow_event_subscriber_is_closed_and_reclaimed_on_overflow(
 
     assert not handler.is_alive()
     assert reclaimed_on_overflow
+
+
+@pytest.mark.parametrize("shutdown", [False, True])
+def test_primary_source_loss_drains_queued_events_and_interrupts_blocked_writer(tmp_path, shutdown):
+    tap = CodexProtocolEventTap(tmp_path / "events.sock", queue_size=2, peer_identity=TEST_PEER)
+    source_epoch = tap.activate_primary_source()
+    connection = ReadyThenBlockingConnection()
+    handler = Thread(target=tap._handle_subscriber, args=(connection,), daemon=True)
+    handler.start()
+    try:
+        assert connection.ready_sent.wait(1)
+        subscriber_queue = next(iter(tap._subscribers))
+        tap.publish("in-flight", source_epoch=source_epoch)
+        assert connection.blocked_send_entered.wait(1)
+        tap.publish("queued-old-completion", source_epoch=source_epoch)
+        if shutdown:
+            tap.close()
+        else:
+            tap.reset_after_disconnect(source_epoch=source_epoch)
+        handler.join(1)
+        assert not handler.is_alive()
+        assert connection.closed.is_set()
+        assert not tap._subscribers
+        assert subscriber_queue.empty()
+        assert connection._send_count == 2  # Ready and in-flight; queued completion was discarded.
+    finally:
+        connection.release_send.set()
+        tap.close()
+        handler.join(1)

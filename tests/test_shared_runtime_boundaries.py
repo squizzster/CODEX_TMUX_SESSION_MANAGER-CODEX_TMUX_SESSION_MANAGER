@@ -87,6 +87,7 @@ def test_schema_normalization_preserves_quoted_bytes(literal):
 
 def test_idle_websocket_disconnect_releases_all_subscribers(tmp_path):
     tap = CodexProtocolEventTap(tmp_path / "events.sock", peer_identity=TEST_PEER)
+    tap.activate_primary_source()
     tap.start()
     try:
         for _ in range(8):

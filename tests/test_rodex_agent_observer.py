@@ -2337,6 +2337,7 @@ def test_real_tmux_observer_renders_request_and_exits_with_its_runtime(
             (child_identity_id, "2026-08-27T00:00:00Z"),
         )
     tap = CodexProtocolEventTap(event_socket, peer_identity=PEER_IDENTITY)
+    tap.activate_primary_source()
     pipeline = SessionInteractionPipeline()
     controller: AgentObserverCoordinator | None = None
     tap.start()

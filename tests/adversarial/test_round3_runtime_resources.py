@@ -265,6 +265,7 @@ def test_round3_blocked_renderer_and_protocol_churn_stay_bounded() -> None:
         )
         await asyncio.sleep(0)
         tap = CodexProtocolEventTap(Path("/isolated/round3/events.sock"), peer_identity=TEST_PEER)
+        source_epoch = tap.activate_primary_source()
         counter = ToolCallCounter(lambda _count: None)
         for index in range(128):
             thread_id = f"burst-thread-{index}"
@@ -274,6 +275,7 @@ def test_round3_blocked_renderer_and_protocol_churn_stay_bounded() -> None:
                     "method": "turn/started",
                     "params": {"threadId": thread_id, "turn": {"id": "turn"}},
                 },
+                source_epoch=source_epoch,
             )
             tap.publish_protocol_event(
                 "{}",
@@ -281,6 +283,7 @@ def test_round3_blocked_renderer_and_protocol_churn_stay_bounded() -> None:
                     "method": "turn/completed",
                     "params": {"threadId": thread_id, "turn": {"id": "turn"}},
                 },
+                source_epoch=source_epoch,
             )
             for method in ("item/started", "item/completed"):
                 counter.observe_protocol_event(
@@ -375,6 +378,7 @@ def test_round3_runtime_identity_state_is_bounded_after_terminal_events(
     """Terminal runtime state is pruned; the durable source catalog remains complete."""
     event_count = 128
     tap = CodexProtocolEventTap(tmp_path / "unused-events.sock", peer_identity=TEST_PEER)
+    source_epoch = tap.activate_primary_source()
     catalog = AnalyticsSourceCatalog(tmp_path / "sessions")
     counter = ToolCallCounter(lambda _count: None)
 
@@ -384,7 +388,7 @@ def test_round3_runtime_identity_state_is_bounded_after_terminal_events(
             "method": "thread/started",
             "params": {"thread": {"id": thread_id}},
         }
-        tap.publish_protocol_event("{}", thread_event)
+        tap.publish_protocol_event("{}", thread_event, source_epoch=source_epoch)
         catalog.observe_protocol_event(thread_event)
         tap.publish_protocol_event(
             "{}",
@@ -395,6 +399,7 @@ def test_round3_runtime_identity_state_is_bounded_after_terminal_events(
                     "turn": {"id": f"turn-{index}"},
                 },
             },
+            source_epoch=source_epoch,
         )
         tap.publish_protocol_event(
             "{}",
@@ -405,6 +410,7 @@ def test_round3_runtime_identity_state_is_bounded_after_terminal_events(
                     "turn": {"id": f"turn-{index}"},
                 },
             },
+            source_epoch=source_epoch,
         )
         counter.observe_protocol_event(
             {
@@ -430,12 +436,14 @@ def test_round3_primary_disconnect_prunes_connection_scoped_event_state(
     tmp_path: Path,
 ) -> None:
     tap = CodexProtocolEventTap(tmp_path / "unused-events.sock", peer_identity=TEST_PEER)
+    source_epoch = tap.activate_primary_source()
     tap.publish_protocol_event(
         "{}",
         {
             "method": "thread/started",
             "params": {"thread": {"id": str(ROOT_THREAD_ID), "createdAt": 17}},
         },
+        source_epoch=source_epoch,
     )
     tap.publish_protocol_event(
         "{}",
@@ -446,6 +454,7 @@ def test_round3_primary_disconnect_prunes_connection_scoped_event_state(
                 "turn": {"id": "turn-live"},
             },
         },
+        source_epoch=source_epoch,
     )
 
     tap.reset_after_disconnect()

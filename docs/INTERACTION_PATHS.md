@@ -37,7 +37,7 @@ user-configured generic content-hook loader.
 | Native delegation | [`cli._exec_codex`](../src/rodex/cli.py); outside managed interaction |
 | Native typing/output | decoder/interceptor → [gateway](../src/rodex/terminal_gateway.py) → child PTY / terminal surface |
 | Managed initial prompt, verified Enter, queued or control text | [prompt admission](PROMPT_SUBMISSION_FLOW.md) → primary receipt or structured fallback |
-| App Server frames | [proxy](../src/rodex/protocol_proxy.py) protocol input/output → original destination, then bounded projections |
+| App Server frames | [proxy](../src/rodex/protocol_proxy.py) protocol input/output → original destination; primary output → mandatory event tap → auxiliary projections |
 | Main context reaches 70% | exact numeric usage projection → [context threshold controller](../src/rodex/context_threshold_steering.py) → shared interaction pipeline → exact active-turn steer |
 | Native shell command policy | App Server `PreToolUse(Bash)` → [retained helper](../src/rodex/command_policy_hook.py) → [private broker](../src/rodex/command_policy.py) → ordered [find/rg and later policies](FIND_RG_COMMAND_POLICY.md) → native Codex enforcement; then asynchronous [tmux-only status](../src/rodex/command_policy_status.py) |
 | `_start`, `_steer`, `_interrupt`, alias, mouse | [exact mutation coordinator](../src/rodex/exact_turn_mutation.py) → fenced adapter |
@@ -53,6 +53,16 @@ The proxy forwards accepted primary output to Codex before its presentation/cont
 observer projections. Control-client output goes only to its destination, never into
 the primary presentation. Ordinary clients use separate upstream connections; reading
 or mutating does not make a control client the subscribed primary.
+
+The event tap admits subscriptions only after primary upstream peer verification.
+Its source epoch fences publication and loss under the same registration lock.
+Primary loss clears snapshots, drains queued events, and interrupts subscribers;
+no connection remains subscribed across a source gap. Input-transport exit also
+invalidates the source before waiting for upstream close or output projections.
+The proxy owns mandatory publication and invalidation, outside auxiliary resets.
+This is explicit loss, not transparent reconnect or recovery of missing history.
+Blocking auxiliary callbacks can still delay forwarding (A05 queued dispatch remains
+open); an input callback blocked before the next read can also delay observing EOF.
 
 ## Outcomes and recovery
 
@@ -266,8 +276,9 @@ The top-third, input-disabled pane stays open while any tracked agent is working
 closes at zero, and reopens with current reducer state, not the first spawn's cached
 prompt. Exact request/turn identity prevents old completion from clearing newer work.
 Only relevant lifecycle events reconcile panes; unrelated deltas do not query tmux.
-Primary disconnect resets all participants even if one fails; only the reducer
-advances epoch. Pane closure removes its tmux history, not the durable trace.
+Primary disconnect resets all participants even if one fails; only the observer reducer
+advances its observer epoch. The tap's separate source epoch fences subscriptions.
+Pane closure removes its tmux history, not the durable trace.
 
 Correlation requires the exact collaboration call ID: `spawn_agent` creates a thread
 and turn, `followup_task` another turn on that thread, `send_message` no new turn.

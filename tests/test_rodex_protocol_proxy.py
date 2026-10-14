@@ -585,6 +585,7 @@ def test_proxy_hands_primary_event_ownership_to_a_reconnecting_tui(tmp_path: Pat
 def test_event_tap_streams_runtime_events_and_removes_its_socket(tmp_path: Path) -> None:
     event_socket = tmp_path / "events.sock"
     tap = CodexProtocolEventTap(event_socket, peer_identity=TEST_PEER)
+    source_epoch = tap.activate_primary_source()
     message = item_started("collabAgentToolCall", "collab-1")
 
     try:
@@ -594,7 +595,7 @@ def test_event_tap_streams_runtime_events_and_removes_its_socket(tmp_path: Path)
             str(event_socket), uri="ws://localhost/events", compression=None, additional_headers=TEST_PEER.headers()
         ) as subscriber:
             assert subscriber.recv(timeout=1) == EVENT_STREAM_READY_MESSAGE
-            tap.publish(message)
+            tap.publish(message, source_epoch=source_epoch)
             assert subscriber.recv(timeout=1) == message
     finally:
         tap.close()
@@ -607,6 +608,7 @@ def test_event_tap_sends_only_semantic_wake_events_to_internal_workers(
 ) -> None:
     event_socket = tmp_path / "events.sock"
     tap = CodexProtocolEventTap(event_socket, peer_identity=TEST_PEER)
+    source_epoch = tap.activate_primary_source()
     thread_started = json.dumps({"method": "thread/started", "params": {"thread": {"id": "thread-1"}}})
     token_delta = json.dumps({"method": "item/agentMessage/delta", "params": {"delta": "noise"}})
     turn_completed = json.dumps({"method": "turn/completed", "params": {"threadId": "thread-1"}})
@@ -635,10 +637,10 @@ def test_event_tap_sends_only_semantic_wake_events_to_internal_workers(
             assert observer.recv(timeout=1) == EVENT_STREAM_READY_MESSAGE
             assert external.recv(timeout=1) == EVENT_STREAM_READY_MESSAGE
 
-            tap.publish(thread_started)
-            tap.publish(token_delta)
-            tap.publish(item_completed)
-            tap.publish(turn_completed)
+            tap.publish(thread_started, source_epoch=source_epoch)
+            tap.publish(token_delta, source_epoch=source_epoch)
+            tap.publish(item_completed, source_epoch=source_epoch)
+            tap.publish(turn_completed, source_epoch=source_epoch)
 
             assert analytics.recv(timeout=1) == thread_started
             assert analytics.recv(timeout=1) == item_completed
@@ -663,6 +665,7 @@ def test_event_tap_sends_only_semantic_wake_events_to_internal_workers(
 def test_event_tap_ready_signal_reports_the_current_active_turn(tmp_path: Path) -> None:
     event_socket = tmp_path / "events.sock"
     tap = CodexProtocolEventTap(event_socket, peer_identity=TEST_PEER)
+    source_epoch = tap.activate_primary_source()
     started = json.dumps(
         {
             "method": "turn/started",
@@ -695,8 +698,8 @@ def test_event_tap_ready_signal_reports_the_current_active_turn(tmp_path: Path) 
 
     try:
         tap.start()
-        tap.publish(thread_started)
-        tap.publish(started)
+        tap.publish(thread_started, source_epoch=source_epoch)
+        tap.publish(started, source_epoch=source_epoch)
         with unix_connect(
             str(event_socket), uri="ws://localhost/events", compression=None, additional_headers=TEST_PEER.headers()
         ) as subscriber:
@@ -707,7 +710,7 @@ def test_event_tap_ready_signal_reports_the_current_active_turn(tmp_path: Path) 
                     "knownThreads": [{"id": "thread-1", "createdAt": 1_787_692_800}],
                 },
             }
-        tap.publish(completed)
+        tap.publish(completed, source_epoch=source_epoch)
         with unix_connect(
             str(event_socket), uri="ws://localhost/events", compression=None, additional_headers=TEST_PEER.headers()
         ) as subscriber:

@@ -150,6 +150,9 @@ inspection, stdin prompts, dispatch reconciliation, waiting, and interruption.
 `_wait SESSION` is a human idle wait; exact automation supplies `--turn TURN_ID`.
 Terminal output alone never proves completion. Approval and user-input requests
 remain with the subscribed primary connection, normally the managed TUI.
+An unavailable primary event source or lost stream continuity ends a wait explicitly,
+including a wait without a timeout. Query the exact turn result or start a new wait
+after reconnecting; an observation failure is not a reason to resubmit model work.
 An invalid success acknowledgement after a mutation was sent is indeterminate,
 including a missing turn ID or a non-object result. The error retains the method,
 dispatch ID, thread and expected turn where known. Reconcile that dispatch before

@@ -130,6 +130,7 @@ def test_wrong_proxy_identity_is_rejected_before_opening_upstream(tmp_path: Path
 def test_event_tap_does_not_publish_ready_to_an_unverified_subscriber(tmp_path: Path, claimed) -> None:
     path = tmp_path / "events.sock"
     tap = CodexProtocolEventTap(path, peer_identity=TEST_PEER)
+    tap.activate_primary_source()
     tap.start()
     try:
         with (
@@ -160,6 +161,7 @@ def test_event_tap_rejects_prior_contract_or_different_loaded_implementation(
     headers = TEST_PEER.headers()
     headers[header] = value
     tap = CodexProtocolEventTap(path, peer_identity=TEST_PEER)
+    tap.activate_primary_source()
     tap.start()
     try:
         with (
@@ -228,6 +230,7 @@ def test_duplicate_listener_and_its_cleanup_preserve_the_original_endpoint(tmp_p
     path = tmp_path / "events.sock"
     owner = CodexProtocolEventTap(path, peer_identity=TEST_PEER)
     duplicate = CodexProtocolEventTap(path, peer_identity=OTHER_SERVER)
+    owner.activate_primary_source()
     owner.start()
     try:
         with pytest.raises(RuntimeError, match="could not bind"):

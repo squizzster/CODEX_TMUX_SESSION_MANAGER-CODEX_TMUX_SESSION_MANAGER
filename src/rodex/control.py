@@ -69,6 +69,16 @@ class RodexWaitTimeoutError(RodexControlError):
     """An exact wait timed out without interrupting its target turn."""
 
 
+class RodexEventStreamContinuityError(RodexControlError):
+    """An observation failed; no model work should be retried on its account."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            "Codex event source is unavailable or continuity was lost; "
+            "query the exact turn result or start a new wait; do not resubmit the turn"
+        )
+
+
 class _RodexRequestDeadlineError(RodexControlError):
     """An internal App Server request exhausted its caller's total deadline."""
 
@@ -614,8 +624,8 @@ class CodexControlClient:
                 raise RodexWaitTimeoutError(f"timed out waiting for exact Codex turn {turn_id}") from error
             raise RodexControlError("timed out opening Codex event stream") from error
         except (ConnectionClosed, InvalidHandshake, OSError) as error:
-            raise RodexControlError(f"Codex event stream ended: {error}") from error
-        raise RodexControlError("Codex event stream ended before the turn completed")
+            raise RodexEventStreamContinuityError() from error
+        raise RodexEventStreamContinuityError()
 
     def wait_until_idle(
         self,
@@ -650,8 +660,8 @@ class CodexControlClient:
                             detail = "Codex thread entered an unexpected wait state"
                             raise RodexControlError(f"{detail}: {current.status}")
         except (ConnectionClosed, InvalidHandshake, OSError) as error:
-            raise RodexControlError(f"Codex event stream ended: {error}") from error
-        raise RodexControlError("Codex event stream ended before the turn completed")
+            raise RodexEventStreamContinuityError() from error
+        raise RodexEventStreamContinuityError()
 
     def stream_events(
         self,
@@ -674,7 +684,7 @@ class CodexControlClient:
                     if formatted is not None:
                         write_event(formatted)
         except (ConnectionClosed, InvalidHandshake, OSError) as error:
-            raise RodexControlError(f"Codex event stream ended: {error}") from error
+            raise RodexEventStreamContinuityError() from error
 
     def _open_protocol(self, control: LiveRodexControl, *, open_timeout: float = 2) -> Any:
         return verified_runtime_connection(
@@ -1172,6 +1182,8 @@ def _expect_event_stream_ready(
         if preserve_timeout:
             raise
         raise RodexControlError("timed out opening Codex event stream") from error
+    except (ConnectionClosed, OSError) as error:
+        raise RodexEventStreamContinuityError() from error
     payload = _protocol_payload(message)
     if payload is None or payload.get("method") != EVENT_STREAM_READY_METHOD:
         raise RodexControlError("Codex event stream did not send its ready signal")

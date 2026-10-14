@@ -14,6 +14,15 @@ The `uv_build` version range is a build-backend requirement, not a minimum `uv` 
 version. Rodex does not enforce numeric SQLite or tmux version floors. Use the
 [live gate](docs/DEVELOPMENT.md#validation-gates) to verify the installed combination.
 
+Crash reconciliation additionally needs group-scoped pidfd signalling:
+[`PIDFD_SIGNAL_PROCESS_GROUP`](https://man7.org/linux/man-pages/man2/pidfd_send_signal.2.html)
+is upstream since Linux 6.9 and is also present in some enterprise backports.
+Rodex uses the capability, not a kernel-version string. An unsupported/denied
+operation, unverifiable surviving group, or unconfirmed exit retains its receipt and
+refuses that implementation's daemon startup; there is no numeric termination fallback.
+Ordinary help/native delegation and startup without outstanding receipts do not probe
+this capability. See [receipt lifetime and verification limits](docs/RUNTIME_ISOLATION.md#resource-lifetime).
+
 From the checkout root:
 
 ```bash

@@ -449,58 +449,42 @@ def test_shared_coordinator_has_one_worker_thread_for_all_reserved_runtimes(tmp_
 
 
 def test_process_receipt_reconciliation_terminates_exact_orphan_group(tmp_path: Path) -> None:
-    process = subprocess.Popen(["/usr/bin/sleep", "30"], start_new_session=True)
-    receipts = RuntimeProcessReceipts(tmp_path)
-    receipts.record("app-server", RodexRuntimeId(1), "1" * 32, process)
-
-    RuntimeProcessReceipts(tmp_path).reconcile()
-    process.wait(timeout=3)
-
-    assert process.returncode == -15
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            str(Path(__file__).with_name("process_receipt_group_fixture.py")),
+            str(tmp_path),
+            "graceful",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+    if completed.returncode == 77:
+        pytest.skip("kernel lacks group-scoped pidfd signalling")
+    assert completed.returncode == 0, completed.stderr
     assert list(tmp_path.glob(PROCESS_RECEIPT_PATTERN)) == []
 
 
 def test_process_receipt_reconciliation_escalates_for_a_surviving_group_child(tmp_path: Path) -> None:
-    child_ready = tmp_path / "child-ready"
-    parent_source = """
-import os
-import subprocess
-import sys
-import time
-child_source = '''
-import pathlib
-import signal
-import sys
-import time
-signal.signal(signal.SIGTERM, signal.SIG_IGN)
-pathlib.Path(sys.argv[1]).write_text('ready')
-time.sleep(30)
-'''
-child = subprocess.Popen([sys.executable, '-c', child_source, sys.argv[1]])
-while not os.path.exists(sys.argv[1]):
-    time.sleep(0.01)
-print(child.pid, flush=True)
-time.sleep(30)
-"""
-    leader = subprocess.Popen(
-        [sys.executable, "-c", parent_source, os.fspath(child_ready)],
-        stdout=subprocess.PIPE,
+    # The separate subreaper fixture owns and reaps the orphaned child, rather
+    # than relying on the host/container init to collect test-created zombies.
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            str(Path(__file__).with_name("process_receipt_group_fixture.py")),
+            str(tmp_path),
+            "escalation",
+        ],
+        capture_output=True,
         text=True,
-        start_new_session=True,
+        timeout=20,
     )
-    assert leader.stdout is not None
-    child_pid = int(leader.stdout.readline())
-    receipts = RuntimeProcessReceipts(tmp_path)
-    receipts.record("app-server", RodexRuntimeId(1), "1" * 32, leader)
-
-    RuntimeProcessReceipts(tmp_path).reconcile()
-    leader.wait(timeout=3)
-
-    try:
-        child_state = Path(f"/proc/{child_pid}/stat").read_text().rsplit(")", 1)[1].split()[0]
-    except FileNotFoundError:
-        child_state = "gone"
-    assert child_state in {"gone", "Z"}
+    if completed.returncode == 77:
+        pytest.skip("kernel lacks group-scoped pidfd signalling")
+    assert completed.returncode == 0, completed.stderr
     assert list(tmp_path.glob(PROCESS_RECEIPT_PATTERN)) == []
 
 

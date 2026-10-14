@@ -10,6 +10,13 @@ repository currently has no Git release tags, so they do not imply a published r
 
 ### Modified
 
+- Crash-receipt reconciliation carries one verified pidfd through group-scoped
+  TERM/CONT/KILL and exit probes (A02), replacing numeric termination and the STOP
+  workaround. Unsupported capabilities, surviving unverified groups and unconfirmed
+  exits retain receipts and refuse daemon startup. Graceful and escalation waits are
+  two seconds each; signal delivery alone no longer retires a receipt. Isolated
+  subreaper tests cover leader reap, descendants, stopped groups and untouched sentinels;
+  forced PID/PGID reuse and a broad kernel matrix remain untested.
 - Analytics distinguishes committed publication from resident acceptance (A14 recovery
   portion). Partial analyzer/trace/cursor acceptance retries unchanged bytes within
   the existing cost budget instead of parking them as invalid source data. Publication
@@ -31,8 +38,8 @@ repository currently has no Git release tags, so they do not imply a published r
   exact `rodex NAME --force-old` command for reconnecting without an upgrade.
 - First correctness tranche from the 2026-10-14 integrated architecture assessment:
   acquired process descriptors close on read/parse failures (A01); failed exact
-  STOP retains an unreconciled receipt without numeric group signals (A02 gate).
-  Stable group authority through successful STOP/resume/escalation remains unresolved.
+  STOP retained an unreconciled receipt without numeric group signals (initial A02
+  gate, superseded by the group-scoped pidfd correction above).
 - Invalid mutation acknowledgements preserve dispatch reconciliation evidence;
   alias errors distinguish committed names from refresh failure or uncertain
   announcements, with an exact status-query command (A03).

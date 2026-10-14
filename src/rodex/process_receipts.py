@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import re
+import select
 import signal
 import stat
 import time
-from contextlib import suppress
 from pathlib import Path
 from typing import Any, Final
 
@@ -20,6 +21,11 @@ PROCESS_RECEIPT_PROTOCOL: Final = "rodex-process-receipt-v3"
 PROCESS_KINDS: Final = frozenset({"app-server", "native-tui"})
 _OPERATION_ID = re.compile(r"[0-9a-f]{32}")
 PROCESS_RECEIPT_PATTERN: Final = f"{RODEX_IMPLEMENTATION_KEY}.process-*.json"
+# Linux UAPI since 6.9 (also available in some enterprise backports). Python
+# 3.11 can pass the flag even though it does not expose a named constant.
+PIDFD_SIGNAL_PROCESS_GROUP: Final = 1 << 2
+PROCESS_GROUP_TERM_GRACE_SECONDS: Final = 2.0
+PROCESS_GROUP_EXIT_CONFIRM_SECONDS: Final = 2.0
 
 
 class ProcessReceiptError(RuntimeError):
@@ -94,13 +100,21 @@ class RuntimeProcessReceipts:
                 raise ProcessReceiptError("process receipt points at the current daemon")
             try:
                 process_descriptor = os.pidfd_open(pid)
-            except ProcessLookupError:
+            except OSError as error:
+                # Some kernels return EINVAL when only the process-group PID
+                # remains after leader reap. That is not proof of group exit.
+                if not isinstance(error, ProcessLookupError) and error.errno != errno.EINVAL:
+                    raise ProcessReceiptError(
+                        "process group remains unreconciled: leader pidfd could not be acquired"
+                    ) from error
+                _require_unowned_group_absent(receipt["process_group_id"])
                 path.unlink()
                 continue
             try:
                 try:
-                    state = _read_process_state(pid)
+                    state = _read_process_state_from_descriptor(pid, process_descriptor)
                 except ProcessLookupError:
+                    _require_unowned_group_absent(receipt["process_group_id"])
                     path.unlink()
                     continue
                 if (
@@ -108,9 +122,10 @@ class RuntimeProcessReceipts:
                     or state["start_time_ticks"] != receipt["start_time_ticks"]
                     or state["process_group_id"] != receipt["process_group_id"]
                 ):
+                    _require_unowned_group_absent(receipt["process_group_id"])
                     path.unlink()
                     continue
-                _terminate_exact_process_group(receipt, process_descriptor)
+                _terminate_exact_process_group(process_descriptor)
             finally:
                 os.close(process_descriptor)
             path.unlink()
@@ -175,23 +190,33 @@ def _validated_operation_id(operation_id: str) -> str:
 def _read_process_state(pid: int) -> dict[str, int]:
     descriptor = os.pidfd_open(pid)
     try:
+        return _read_process_state_from_descriptor(pid, descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _read_process_state_from_descriptor(pid: int, descriptor: int) -> dict[str, int]:
+    """Authenticate the numeric /proc sample against the retained live pidfd."""
+    try:
         stat_text = Path(f"/proc/{pid}/stat").read_text()
         uid = Path(f"/proc/{pid}").stat().st_uid
         fields = stat_text.rsplit(")", 1)[1].split()
         process_group_id = int(fields[2])
         start_time_ticks = int(fields[19])
-        if os.waitid(os.P_PIDFD, descriptor, os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None:
+        readiness = select.poll()
+        readiness.register(descriptor, select.POLLIN)
+        events = readiness.poll(0)
+        if any(mask & select.POLLNVAL for _fd, mask in events):
+            raise ProcessReceiptError("daemon child pidfd is invalid")
+        if events:
+            # Unlike waitid, readiness also works for non-children. If the
+            # retained process exited during /proc reads, that numeric sample
+            # cannot authorize signals to a replacement process/group.
             raise ProcessLookupError(pid)
     except FileNotFoundError as error:
         raise ProcessLookupError(pid) from error
     except (IndexError, ValueError) as error:
         raise ProcessReceiptError("could not parse daemon child process identity") from error
-    except ChildProcessError:
-        # waitid(P_PIDFD) is permitted only for children; a live non-child is
-        # still pinned by the pidfd and verified through /proc.
-        pass
-    finally:
-        os.close(descriptor)
     return {
         "uid": uid,
         "process_group_id": process_group_id,
@@ -199,37 +224,58 @@ def _read_process_state(pid: int) -> dict[str, int]:
     }
 
 
-def _terminate_exact_process_group(receipt: dict[str, Any], process_descriptor: int) -> None:
-    process_group_id = receipt["process_group_id"]
-    # A lost leader cannot authorize numeric group signals. This gate does not
-    # establish stable group authority through CONT or the later escalation.
+def _require_unowned_group_absent(process_group_id: int) -> None:
+    """A numeric lookup may prove absence, never grant termination authority."""
     try:
-        signal.pidfd_send_signal(process_descriptor, signal.SIGSTOP)
+        os.killpg(process_group_id, 0)
+    except ProcessLookupError:
+        return
     except OSError as error:
-        raise ProcessReceiptError("process group remains unreconciled: exact leader could not be stopped") from error
-    with suppress(ProcessLookupError):
-        os.killpg(process_group_id, signal.SIGTERM)
-    with suppress(ProcessLookupError):
-        os.killpg(process_group_id, signal.SIGCONT)
-    deadline = time.monotonic() + 2.0
-    while time.monotonic() < deadline:
-        if not _process_group_has_live_members(process_group_id):
-            return
-        time.sleep(0.02)
-    with suppress(ProcessLookupError):
-        os.killpg(process_group_id, signal.SIGKILL)
+        raise ProcessReceiptError("process group remains unreconciled: group absence could not be verified") from error
+    raise ProcessReceiptError("process group remains unreconciled: group exists without a verified leader")
 
 
-def _process_group_has_live_members(process_group_id: int) -> bool:
-    for process_path in Path("/proc").glob("[0-9]*"):
-        try:
-            fields = (process_path / "stat").read_text().rsplit(")", 1)[1].split()
-            state, observed_process_group = fields[0], int(fields[2])
-        except (FileNotFoundError, PermissionError, IndexError, ValueError):
-            continue
-        if observed_process_group == process_group_id and state != "Z":
-            return True
-    return False
+def _signal_exact_process_group(process_descriptor: int, signum: int) -> bool:
+    """Signal the pidfd's original group; false means that exact group is gone.
+
+    Linux routes PIDTYPE_PGID through the fd's retained struct pid, including
+    after leader reap. Never fall back to a numeric target on unsupported hosts.
+    A successful send is not proof that every member received it or exited.
+    """
+    try:
+        signal.pidfd_send_signal(process_descriptor, signum, None, PIDFD_SIGNAL_PROCESS_GROUP)
+    except ProcessLookupError:
+        return False
+    except OSError as error:
+        raise ProcessReceiptError(
+            f"process group remains unreconciled: group-scoped pidfd signalling failed (errno={error.errno})"
+        ) from error
+    return True
+
+
+def _wait_for_exact_group_exit(process_descriptor: int, timeout_seconds: float) -> bool:
+    deadline = time.monotonic() + timeout_seconds
+    while _signal_exact_process_group(process_descriptor, 0):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        time.sleep(min(0.02, remaining))
+    return True
+
+
+def _terminate_exact_process_group(process_descriptor: int) -> None:
+    if not _signal_exact_process_group(process_descriptor, signal.SIGTERM):
+        return
+    # Resume already-stopped members so they can handle graceful termination.
+    # Group identity no longer depends on stopping or retaining a live leader.
+    if not _signal_exact_process_group(process_descriptor, signal.SIGCONT):
+        return
+    if _wait_for_exact_group_exit(process_descriptor, PROCESS_GROUP_TERM_GRACE_SECONDS):
+        return
+    if not _signal_exact_process_group(process_descriptor, signal.SIGKILL):
+        return
+    if not _wait_for_exact_group_exit(process_descriptor, PROCESS_GROUP_EXIT_CONFIRM_SECONDS):
+        raise ProcessReceiptError("process group remains unreconciled: exit was not confirmed after SIGKILL")
 
 
 def _fsync_directory(path: Path) -> None:

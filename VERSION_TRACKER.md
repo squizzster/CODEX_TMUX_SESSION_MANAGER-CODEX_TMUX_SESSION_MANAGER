@@ -8,7 +8,10 @@ repository currently has no Git release tags, so they do not imply a published r
 
 ## Unreleased
 
-No changes yet.
+### Modified
+
+- A retained-runtime upgrade blocked by a never-saved Codex thread now gives the
+  exact `rodex NAME --force-old` command for reconnecting without an upgrade.
 
 ## 0.16a — 2026-10-14 — current package identifier
 

@@ -189,9 +189,10 @@ is a routing namespace, not a security attestation or content digest.
 Retained implementations can coexist. A retained installation's
 `.venv/bin/rodex` entrypoint accesses its exact implementation's sessions. Opening
 a supported older session through the current entrypoint upgrades that selected
-runtime when its Codex thread is idle. Busy turns fail on stderr with commands to
-retry when idle or reconnect using `rodex NAME --force-old`. The flag attaches
-through the retained installation without upgrading or interrupting its work.
+runtime when its Codex thread is idle. Refusals that leave an older live runtime
+running include a command to reconnect using `rodex NAME --force-old`; busy turns
+also explain how to retry the upgrade when idle. The flag attaches through the
+retained installation without upgrading or interrupting its work.
 Other sessions remain on their owning daemon. Catalogs are schema-generation scoped:
 builds within one generation share the catalog, while live handshakes require the
 exact implementation. Earlier catalogs are not migrated; Codex owns its transcripts.

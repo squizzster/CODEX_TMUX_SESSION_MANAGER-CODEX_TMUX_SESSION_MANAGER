@@ -259,6 +259,18 @@ def test_busy_turn_is_refused_without_stopping(admitted_handoff, which_check):
     assert observed.stops == []
 
 
+def test_missing_history_refusal_explains_how_to_reconnect(admitted_handoff):
+    request, observed, _state = admitted_handoff
+    observed.persisted = False
+    with pytest.raises(RuntimeError) as raised:
+        handoff.stop_selected_idle_runtime(request)
+    assert str(raised.value) == (
+        "selected Codex thread has no saved history; runtime was left running\n"
+        "Reconnect without upgrading: rodex worker --force-old"
+    )
+    assert observed.stops == []
+
+
 @pytest.mark.parametrize("outcome", ["detach", "exited"])
 def test_retained_attachment_keeps_busy_runtime_unchanged(admitted_handoff, outcome):
     request, observed, state = admitted_handoff
@@ -314,12 +326,10 @@ def test_interactive_retained_helper_inherits_tty_and_has_no_upgrade_timeout(sel
     assert options == {"check": False, "env": {}}
 
 
-@pytest.mark.parametrize("reason", ["history", "foreign-pane", "receipt", "process", "incarnation"])
+@pytest.mark.parametrize("reason", ["foreign-pane", "receipt", "process", "incarnation"])
 def test_unproven_upgrade_is_refused_without_stopping(admitted_handoff, monkeypatch, reason):
     request, observed, _state = admitted_handoff
-    if reason == "history":
-        observed.persisted = False
-    elif reason == "foreign-pane":
+    if reason == "foreign-pane":
         observed.ownership = "0"
     elif reason == "receipt":
         observed.native_operation = "2" * 32

@@ -11,7 +11,13 @@ from pathlib import Path
 import pytest
 
 from experiments.find_rg_policy import policy_engine
-from experiments.find_rg_policy.policy_engine import Outcome, inspect, load_policy
+from experiments.find_rg_policy.policy_engine import (
+    Outcome,
+    extract_search_workflows,
+    inspect,
+    inspect_search_workflows,
+    load_policy,
+)
 
 EXPERIMENT_ROOT = Path(__file__).parents[1]
 POLICY_PATH = EXPERIMENT_ROOT / "policy.toml"
@@ -52,6 +58,150 @@ def test_find_root_rejects_statically_with_reference_message(monkeypatch, worksp
         "Rejected: Stage 1: Directory input '/' has no maximum depth. Name a smaller subtree and an explicit "
         "depth bound; output limits and name filters do not bound traversal."
     )
+
+
+def test_static_inspection_is_repeatable_and_never_touches_metadata(monkeypatch, workspace, policy):
+    def unexpected_probe(_path):
+        raise AssertionError("static inspection must not touch the filesystem")
+
+    monkeypatch.setattr(policy_engine.os, "lstat", unexpected_probe)
+
+    first = inspect(
+        "rg needle README.md",
+        cwd=workspace,
+        policy=policy,
+        verify_filesystem=False,
+        environment={},
+    )
+    second = inspect(
+        "rg needle README.md",
+        cwd=workspace,
+        policy=policy,
+        verify_filesystem=False,
+        environment={},
+    )
+
+    assert first == second
+    assert first.outcome is Outcome.NEEDS_FILESYSTEM
+    assert first.code == "FILESYSTEM_REQUIRED"
+    assert first.scope == {"requests": 1}
+    assert not first
+
+
+def test_static_inspection_keeps_decisive_rejections(policy):
+    decision = inspect("find /", cwd="/synthetic", policy=policy, verify_filesystem=False, environment={})
+
+    assert decision.outcome is Outcome.REJECTED
+    assert decision.code == "UNBOUNDED_DEPTH"
+
+
+def test_extracts_single_line_pipeline_and_continued_wrapped_workflow(policy):
+    source = """printf 'rg quoted only'
+nice -n 19 ionice -c 3 timeout 10s \\
+  rg --no-config --max-depth 2 needle src
+find src -maxdepth 2 -type f | rg py | head -10
+printf '$(find /)'
+"""
+
+    workflows = extract_search_workflows(source, policy=policy)
+
+    assert [workflow.ordinal for workflow in workflows] == [1, 2]
+    assert [(workflow.start_line, workflow.end_line) for workflow in workflows] == [(2, 3), (4, 4)]
+    assert workflows[0].command.startswith("nice -n 19")
+    assert "\\\n  rg --no-config" in workflows[0].command
+    assert workflows[1].command == "find src -maxdepth 2 -type f | rg py | head -10"
+    assert all(source[item.start : item.end] == item.command for item in workflows)
+
+
+def test_extraction_requires_a_real_shell_command_boundary(policy):
+    source = """printf 'find /'
+echo "$(rg needle .)"
+cat <(find /)
+bash -c 'rg needle .'
+"""
+
+    assert extract_search_workflows(source, policy=policy) == ()
+
+
+def test_extraction_never_treats_heredoc_body_as_shell_commands(policy):
+    source = """python3 - <<'PY'
+find /
+rg needle .
+PY
+rg --version
+"""
+
+    workflows = extract_search_workflows(source, policy=policy)
+
+    assert len(workflows) == 1
+    assert workflows[0].command == "rg --version"
+    assert workflows[0].start_line == 5
+
+
+def test_direct_search_heredoc_header_is_retained_but_body_is_not(workspace, policy):
+    source = """rg needle README.md <<EOF
+find /
+EOF
+"""
+
+    workflows = extract_search_workflows(source, policy=policy)
+    results = inspect_search_workflows(
+        source,
+        cwd=workspace,
+        policy=policy,
+        verify_filesystem=False,
+        environment={},
+    )
+
+    assert [item.command for item in workflows] == ["rg needle README.md <<EOF"]
+    assert len(results) == 1
+    assert results[0].decision.outcome is Outcome.REJECTED
+
+
+def test_extraction_retains_multiline_pipeline_redirection_and_background(workspace, policy):
+    source = """find src -maxdepth 1 |
+  rg py >&2
+rg needle README.md &
+"""
+
+    workflows = extract_search_workflows(source, policy=policy)
+
+    assert len(workflows) == 2
+    assert workflows[0].command == "find src -maxdepth 1 |\n  rg py >&2"
+    assert (workflows[0].start_line, workflows[0].end_line) == (1, 2)
+    assert workflows[1].command == "rg needle README.md &"
+    results = inspect_search_workflows(
+        source,
+        cwd=workspace,
+        policy=policy,
+        verify_filesystem=False,
+        environment={},
+    )
+    assert results[0].decision.outcome is Outcome.NEEDS_FILESYSTEM
+    assert results[1].decision.code == "SHELL_CONTROL"
+
+
+def test_inspects_every_extracted_workflow_in_source_order(workspace, policy):
+    source = """find /
+rg needle README.md
+printf ignored
+rg --version
+"""
+
+    results = inspect_search_workflows(
+        source,
+        cwd=workspace,
+        policy=policy,
+        verify_filesystem=False,
+        environment={},
+    )
+
+    assert [item.workflow.start_line for item in results] == [1, 2, 4]
+    assert [item.decision.outcome for item in results] == [
+        Outcome.REJECTED,
+        Outcome.NEEDS_FILESYSTEM,
+        Outcome.ALLOWED,
+    ]
 
 
 def test_non_search_is_a_distinct_not_applicable_outcome(workspace, policy):
@@ -242,6 +392,58 @@ def test_cli_plain_allowed_result_is_literal_true(workspace):
     assert completed.stderr == ""
 
 
+def test_cli_static_result_is_false_and_machine_distinguishable(workspace):
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(CLI_PATH),
+            "--cwd",
+            str(workspace),
+            "--bash",
+            "rg needle README.md",
+            "--static",
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=3,
+        env={key: value for key, value in os.environ.items() if key != "RIPGREP_CONFIG_PATH"},
+    )
+
+    assert completed.returncode == 2
+    payload = json.loads(completed.stdout)
+    assert payload["outcome"] == "needs_filesystem"
+    assert payload["allowed"] is False
+    assert payload["code"] == "FILESYSTEM_REQUIRED"
+
+
+def test_cli_extracts_multiline_workflows_without_echoing_commands(workspace):
+    source = "find /\nprintf ignored\nrg needle README.md\n"
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(CLI_PATH),
+            "--cwd",
+            str(workspace),
+            "--bash",
+            source,
+            "--extract",
+            "--static",
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=3,
+        env={key: value for key, value in os.environ.items() if key != "RIPGREP_CONFIG_PATH"},
+    )
+
+    assert completed.returncode == 2
+    payload = json.loads(completed.stdout)
+    assert [item["workflow"]["start_line"] for item in payload] == [1, 3]
+    assert [item["decision"]["outcome"] for item in payload] == ["rejected", "needs_filesystem"]
+    assert all("command" not in item["workflow"] for item in payload)
+
+
 def test_cli_not_applicable_is_not_reported_as_success(workspace):
     completed = subprocess.run(
         [sys.executable, str(CLI_PATH), "--cwd", str(workspace), "--bash", "printf hello"],
@@ -262,3 +464,16 @@ def test_direct_search_parser_is_total_over_deterministic_noise(policy):
         command = randomizer.choice(("rg ", "find ")) + "".join(randomizer.choice(alphabet) for _ in range(80))
         decision = inspect(command, cwd="/synthetic/unavailable", policy=policy)
         assert isinstance(decision.allowed, bool)
+
+
+def test_workflow_extraction_is_repeatable_over_deterministic_noise(policy):
+    randomizer = random.Random(9102)
+    alphabet = "rg find nice timeout -- ' \" $ ( ) \\ ; | & {} [] abc012\n"
+
+    for _ in range(500):
+        source = "".join(randomizer.choice(alphabet) for _ in range(160))
+        first = extract_search_workflows(source, policy=policy)
+        second = extract_search_workflows(source, policy=policy)
+        assert first == second
+        assert [item.ordinal for item in first] == list(range(1, len(first) + 1))
+        assert all(source[item.start : item.end] == item.command for item in first)

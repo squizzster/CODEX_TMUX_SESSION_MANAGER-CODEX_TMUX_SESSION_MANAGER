@@ -40,6 +40,7 @@ non_default_engines = ["pcre2", "auto"]
 [messages]
 allowed = "Allowed: the verified inputs fit the configured find/rg work limits. This is not a runtime guarantee."
 not_applicable = "Not applicable: no direct find or rg command was found."
+FILESYSTEM_REQUIRED = "Needs filesystem: static structure passed, but input metadata must be verified before this search can be approved."
 NUL = "A NUL byte is not a valid command argument."
 QUOTING = "The command contains incomplete quoting or escaping."
 DYNAMIC_SHELL = "Shell expansion or substitution is present. Resolve variables and generated arguments first; their scope cannot be certified from this string."

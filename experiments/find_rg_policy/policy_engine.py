@@ -13,6 +13,7 @@ import shlex
 import stat
 import time
 import tomllib
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
@@ -24,6 +25,7 @@ MIB = 1024 * 1024
 class Outcome(StrEnum):
     ALLOWED = "allowed"
     REJECTED = "rejected"
+    NEEDS_FILESYSTEM = "needs_filesystem"
     NOT_APPLICABLE = "not_applicable"
 
 
@@ -50,6 +52,44 @@ class Decision:
             "stage": self.stage,
             "message": self.message,
             "scope": self.scope,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class SearchWorkflow:
+    """One direct top-level find/rg workflow extracted from larger shell text."""
+
+    ordinal: int
+    command: str
+    start: int
+    end: int
+    start_line: int
+    end_line: int
+
+    def to_dict(self, *, include_command: bool = False) -> dict[str, Any]:
+        result: dict[str, Any] = {
+            "ordinal": self.ordinal,
+            "start": self.start,
+            "end": self.end,
+            "start_line": self.start_line,
+            "end_line": self.end_line,
+        }
+        if include_command:
+            result["command"] = self.command
+        return result
+
+
+@dataclass(frozen=True, slots=True)
+class WorkflowDecision:
+    """The admission decision for one extracted search workflow."""
+
+    workflow: SearchWorkflow
+    decision: Decision
+
+    def to_dict(self, *, include_command: bool = False) -> dict[str, Any]:
+        return {
+            "workflow": self.workflow.to_dict(include_command=include_command),
+            "decision": self.decision.to_dict(),
         }
 
 
@@ -432,18 +472,89 @@ def _search_after_assignments(argv: list[str]) -> bool:
     return index < len(argv) and os.path.basename(argv[index]) in {"find", "rg"}
 
 
-def _top_level_segments(command: str) -> list[str]:
-    """Split only top-level shell stages for the applicability precheck.
+_NON_BOUNDARY_SHELL_OPERATORS = ("&>>", "<<<", "<<-", ">>", "<<", ">&", "<&", "<>", ">|", "&>")
 
-    This scanner does not validate or expand shell syntax. Its sole purpose is to
-    avoid applying strict search grammar to unrelated commands. Quoted text and
-    command substitutions remain inside their containing stage.
+
+def _read_heredoc_delimiter(command: str, operator_start: int) -> tuple[str, bool, int] | None:
+    """Return the quote-removed heredoc delimiter and the source position after it."""
+    strip_tabs = command.startswith("<<-", operator_start)
+    index = operator_start + (3 if strip_tabs else 2)
+    while index < len(command) and command[index] in " \t":
+        index += 1
+    characters: list[str] = []
+    quote = ""
+    while index < len(command):
+        character = command[index]
+        if quote:
+            if character == quote:
+                quote = ""
+            elif character == "\\" and quote == '"' and index + 1 < len(command):
+                index += 1
+                characters.append(command[index])
+            else:
+                characters.append(character)
+            index += 1
+            continue
+        if character in " \t\r\n;|&<>()":
+            break
+        if character in {"'", '"'}:
+            quote = character
+            index += 1
+            continue
+        if character == "\\" and index + 1 < len(command):
+            index += 1
+            characters.append(command[index])
+            index += 1
+            continue
+        characters.append(character)
+        index += 1
+    if quote or not characters:
+        return None
+    return "".join(characters), strip_tabs, index
+
+
+def _after_heredoc_bodies(
+    command: str,
+    body_start: int,
+    heredocs: list[tuple[str, bool]],
+) -> int:
+    """Return the first position after queued heredoc bodies and delimiters."""
+    position = body_start
+    for delimiter, strip_tabs in heredocs:
+        while position < len(command):
+            newline = command.find("\n", position)
+            line_end = len(command) if newline < 0 else newline
+            line = command[position:line_end]
+            if (line.lstrip("\t") if strip_tabs else line) == delimiter:
+                position = line_end if newline < 0 else newline + 1
+                break
+            if newline < 0:
+                return len(command)
+            position = newline + 1
+        else:
+            return len(command)
+    return position
+
+
+def _top_level_spans(command: str, *, split_pipelines: bool) -> list[tuple[int, int]]:
+    """Return conservative top-level shell spans without expanding source text.
+
+    List controls and physical newlines delimit workflows. Pipelines can either be
+    retained as one workflow or split into stages for direct-command detection.
+    Escaped newlines, quotes, backticks, and command/process substitutions never
+    create a boundary in their containing source.
     """
-    segments: list[str] = []
+    spans: list[tuple[int, int]] = []
     start = 0
     index = 0
     quote = ""
     backtick = False
+    heredocs: list[tuple[str, bool]] = []
+
+    def pipeline_continues(end: int) -> bool:
+        prefix = command[start:end].rstrip(" \t\r")
+        return (prefix.endswith("|") and not prefix.endswith("||")) or prefix.endswith("|&")
+
     while index < len(command):
         character = command[index]
         if backtick:
@@ -473,7 +584,7 @@ def _top_level_segments(command: str) -> list[str]:
             backtick = True
             index += 1
             continue
-        if command.startswith("$(", index):
+        if command.startswith(("$(", "<(", ">("), index):
             depth = 1
             index += 2
             nested_quote = ""
@@ -498,23 +609,83 @@ def _top_level_segments(command: str) -> list[str]:
             continue
         at_word_boundary = index == start or command[index - 1].isspace() or command[index - 1] in ";|&"
         if character == "#" and at_word_boundary:
-            segments.append(command[start:index])
             newline = command.find("\n", index)
             if newline < 0:
-                return segments
+                spans.append((start, index))
+                return spans
+            if heredocs:
+                spans.append((start, index))
+                index = _after_heredoc_bodies(command, newline + 1, heredocs)
+                heredocs = []
+                start = index
+                continue
+            if pipeline_continues(index):
+                index = newline + 1
+                continue
+            spans.append((start, index))
             index = newline + 1
             start = index
             continue
-        if character in ";|&\n":
-            segments.append(command[start:index])
-            if index + 1 < len(command) and command[index + 1] == character and character in "|&":
-                index += 1
+        if command.startswith("<<", index) and not command.startswith("<<<", index):
+            parsed_heredoc = _read_heredoc_delimiter(command, index)
+            if parsed_heredoc is not None:
+                delimiter, strip_tabs, delimiter_end = parsed_heredoc
+                heredocs.append((delimiter, strip_tabs))
+                index = delimiter_end
+                continue
+        non_boundary = next(
+            (operator for operator in _NON_BOUNDARY_SHELL_OPERATORS if command.startswith(operator, index)),
+            None,
+        )
+        if non_boundary is not None:
+            index += len(non_boundary)
+            continue
+        if command.startswith(("&&", "||"), index):
+            spans.append((start, index))
+            index += 2
+            start = index
+            continue
+        if command.startswith("|&", index):
+            if split_pipelines:
+                spans.append((start, index))
+                start = index + 2
+            index += 2
+            continue
+        if character == "|":
+            if split_pipelines:
+                spans.append((start, index))
+                start = index + 1
+            index += 1
+            continue
+        if character == "\n" and pipeline_continues(index):
+            index += 1
+            continue
+        if character == "\n" and heredocs:
+            spans.append((start, index))
+            index = _after_heredoc_bodies(command, index + 1, heredocs)
+            heredocs = []
+            start = index
+            continue
+        if character in ";\n":
+            spans.append((start, index))
+            index += 1
+            start = index
+            continue
+        if character == "&":
+            # Retain the background operator with its left workflow so admission
+            # reports SHELL_CONTROL rather than silently analyzing a foreground form.
+            spans.append((start, index + 1))
             index += 1
             start = index
             continue
         index += 1
-    segments.append(command[start:])
-    return segments
+    spans.append((start, len(command)))
+    return spans
+
+
+def _top_level_segments(command: str) -> list[str]:
+    """Split stages for applicability checks while retaining nested shell text."""
+    return [command[start:end] for start, end in _top_level_spans(command, split_pipelines=True)]
 
 
 def _looks_like_direct_search(command: str, policy: Policy) -> bool:
@@ -522,7 +693,9 @@ def _looks_like_direct_search(command: str, policy: Policy) -> bool:
         return True
     for segment in _top_level_segments(command):
         try:
-            arguments = shlex.split(segment, comments=True, posix=True)
+            # Python's shlex retains an escaped newline as a token, while Bash
+            # removes the pair before word splitting.
+            arguments = shlex.split(segment.replace("\\\n", ""), comments=True, posix=True)
         except ValueError:
             direct_prefix = re.match(r"\s*(?:/bin/|/usr/bin/|/usr/local/bin/)?(find|rg)(?=$|\s)", segment)
             if direct_prefix is not None:
@@ -542,6 +715,42 @@ def _looks_like_direct_search(command: str, policy: Policy) -> bool:
                 if os.path.basename(remaining[0]) in {"find", "rg"} or _search_after_assignments(remaining):
                     return True
     return False
+
+
+def extract_search_workflows(source: str, *, policy: Policy) -> tuple[SearchWorkflow, ...]:
+    """Extract direct top-level find/rg workflows without executing shell text.
+
+    Pipelines remain intact. Top-level lists and unescaped physical newlines form
+    extraction boundaries; a backslash-newline remains part of its logical command.
+    Search-looking text inside quotes, backticks, and command/process substitutions
+    is not extracted.
+    """
+    if not isinstance(source, str):
+        raise TypeError("source must be a string")
+    workflows: list[SearchWorkflow] = []
+    for raw_start, raw_end in _top_level_spans(source, split_pipelines=False):
+        start = raw_start
+        end = raw_end
+        while start < end and source[start].isspace():
+            start += 1
+        while end > start and source[end - 1].isspace():
+            end -= 1
+        if start == end:
+            continue
+        command = source[start:end]
+        if not _looks_like_direct_search(command, policy):
+            continue
+        workflows.append(
+            SearchWorkflow(
+                ordinal=len(workflows) + 1,
+                command=command,
+                start=start,
+                end=end,
+                start_line=source.count("\n", 0, start) + 1,
+                end_line=source.count("\n", 0, end) + 1,
+            )
+        )
+    return tuple(workflows)
 
 
 def _words(value: str) -> frozenset[str]:
@@ -968,7 +1177,12 @@ def _inside(path: str, root: str) -> bool:
         return False
 
 
-def _static_plan(stages: list[Stage], policy: Policy, cwd: str) -> list[CensusRequest]:
+def _static_plan(
+    stages: list[Stage],
+    policy: Policy,
+    cwd: str,
+    environment: Mapping[str, str],
+) -> list[CensusRequest]:
     requests: list[CensusRequest] = []
     root_count = 0
     for stage_number, stage_data in enumerate(stages, 1):
@@ -1063,7 +1277,7 @@ def _static_plan(stages: list[Stage], policy: Policy, cwd: str) -> list[CensusRe
                     for value in stage_data.values(option)
                 ):
                     _fail(policy, "REGEX_MEMORY", stage_number, option="--" + option)
-            if os.environ.get("RIPGREP_CONFIG_PATH") and not stage_data.has("no-config"):
+            if environment.get("RIPGREP_CONFIG_PATH") and not stage_data.has("no-config"):
                 _fail(policy, "HIDDEN_CONFIG", stage_number)
         if stage_data.mode == "metadata":
             continue
@@ -1204,7 +1418,14 @@ def _census(requests: list[CensusRequest], policy: Policy) -> dict[str, Any]:
     return result
 
 
-def inspect(command: str, *, cwd: str | Path, policy: Policy) -> Decision:
+def inspect(
+    command: str,
+    *,
+    cwd: str | Path,
+    policy: Policy,
+    verify_filesystem: bool = True,
+    environment: Mapping[str, str] | None = None,
+) -> Decision:
     if not isinstance(command, str):
         raise TypeError("command must be a string")
     workdir = os.fspath(cwd)
@@ -1216,7 +1437,14 @@ def inspect(command: str, *, cwd: str | Path, policy: Policy) -> Decision:
         stages = parse(command, policy)
         if stages is None:
             return Decision(Outcome.NOT_APPLICABLE, "NOT_APPLICABLE", policy.render("not_applicable"))
-        requests = _static_plan(stages, policy, workdir)
+        requests = _static_plan(stages, policy, workdir, os.environ if environment is None else environment)
+        if requests and not verify_filesystem:
+            return Decision(
+                Outcome.NEEDS_FILESYSTEM,
+                "FILESYSTEM_REQUIRED",
+                policy.render("FILESYSTEM_REQUIRED"),
+                scope={"requests": len(requests)},
+            )
         scope = _census(requests, policy) if requests else {}
     except PolicyViolation as violation:
         prefix = f"Stage {violation.stage}: " if violation.stage is not None else ""
@@ -1227,3 +1455,27 @@ def inspect(command: str, *, cwd: str | Path, policy: Policy) -> Decision:
             violation.stage,
         )
     return Decision(Outcome.ALLOWED, "ALLOWED", policy.render("allowed"), scope=scope)
+
+
+def inspect_search_workflows(
+    source: str,
+    *,
+    cwd: str | Path,
+    policy: Policy,
+    verify_filesystem: bool = True,
+    environment: Mapping[str, str] | None = None,
+) -> tuple[WorkflowDecision, ...]:
+    """Extract and inspect every direct top-level search workflow in source order."""
+    return tuple(
+        WorkflowDecision(
+            workflow=workflow,
+            decision=inspect(
+                workflow.command,
+                cwd=cwd,
+                policy=policy,
+                verify_filesystem=verify_filesystem,
+                environment=environment,
+            ),
+        )
+        for workflow in extract_search_workflows(source, policy=policy)
+    )

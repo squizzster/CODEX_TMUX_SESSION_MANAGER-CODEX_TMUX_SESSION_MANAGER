@@ -3,7 +3,8 @@
 This independent experiment decides whether one literal `find` or ripgrep (`rg`)
 workflow fits a small, explicit work budget. It returns an immediate, specific
 explanation for the first rule that prevents approval. It never runs the supplied
-command.
+command. A boundary-aware extractor can also isolate every direct top-level search
+workflow from single-line or multiline shell text while retaining complete pipelines.
 
 The experiment is intentionally outside Rodex's runtime and hook packages. It has no
 history model, SQLite database, command runner, generated replay, or dependency on the
@@ -18,6 +19,9 @@ Use Python 3.11 or newer from the repository root:
 experiments/find_rg_policy/cli.py --bash "find /"
 experiments/find_rg_policy/cli.py --bash "find src -maxdepth 2 -type f"
 experiments/find_rg_policy/cli.py --bash "rg --max-depth 2 needle src"
+experiments/find_rg_policy/cli.py --static --bash "rg needle README.md"
+experiments/find_rg_policy/cli.py --extract --static --json \
+  --bash $'printf ignored\nfind /\nrg needle README.md'
 ```
 
 `--cwd /absolute/path` selects the directory used to resolve literal relative paths.
@@ -27,12 +31,19 @@ The text contract is deliberately small:
 
 - `true`, exit 0: the understood workflow and presently verified inputs fit policy.
 - `Rejected: ...`, exit 2: a search was understood but did not earn approval.
+- `Needs filesystem: ...`, exit 2: static rules passed, but approval requires a
+  metadata census that `--static` deliberately disabled.
 - `Not applicable: ...`, exit 3: no direct `find` or `rg` command was present.
 - Configuration/input errors use stderr and exit 3.
 
-Only `decision.allowed is True` means search admission succeeded. Rejection and
-not-applicable decisions are both false in boolean context, but remain distinct
-structured outcomes.
+Only `decision.allowed is True` means search admission succeeded. Rejected,
+needs-filesystem, and not-applicable decisions are false in boolean context, but
+remain distinct structured outcomes.
+
+`--extract` emits one result for each extracted workflow in source order. Its JSON
+form reports ordinals, source spans, and line numbers without echoing command content.
+Plain output uses tab-separated ordinal, starting line, and result. Exit 0 requires
+at least one extracted workflow and every result to be allowed.
 
 ## Fast decision pipeline
 
@@ -44,13 +55,33 @@ literal command
   → find/rg option parser
   → static policy
   → bounded metadata census, only if approval is still possible
-  → allowed | rejected | not_applicable
+  → allowed | rejected | needs_filesystem | not_applicable
 ```
+
+Static inspection branches after the static policy and returns `needs_filesystem`
+instead of invoking the census.
 
 This stage is effectively deterministic: equivalent command text, cwd, policy,
 relevant environment, and observed filesystem metadata produce the same outcome and
 message. No elapsed timing is placed in the result. A census at the configured
 deadline can still conservatively reject under unusually slow storage or host load.
+For a filesystem-independent replay, use static inspection with an explicit
+environment mapping; command text, cwd, policy, and environment then fully determine
+the result.
+
+## Boundary-aware extraction
+
+`extract_search_workflows` splits source only at top-level shell-list and command
+boundaries. It retains pipelines so a downstream `rg` keeps its producer context.
+Unescaped newlines delimit workflows; backslash-newline and a newline following `|`
+continue the same workflow. Supported launch wrappers remain attached to their
+effective `find` or `rg` command.
+
+A candidate must place `find` or `rg` at a real command position after optional
+assignments or supported wrappers. Quoted mentions, backticks, command/process
+substitutions, and arguments to unrelated commands do not become candidates. An
+extracted decision applies only to that standalone workflow; it never approves the
+larger script or models state changes made by omitted commands.
 
 Obvious hazards stop before filesystem access. For example, `find /` produces:
 
@@ -113,12 +144,22 @@ inputs fit the current configured rules at inspection time.
 ## Focused validation
 
 ```bash
-uv run pytest experiments/find_rg_policy/tests
+uv run python -m pytest experiments/find_rg_policy/tests
 uv run ruff check experiments/find_rg_policy
 uv run ruff format --check experiments/find_rg_policy
 ```
 
 The tests pin the exact `find /` message and prove that this static rejection performs
-no metadata call. They also cover the three outcomes, bounded files/directories,
+no metadata call. They also cover the four outcomes, bounded files/directories,
 pipelines, mutation and external-input rejection, symlinks, budgets, hidden ripgrep
-configuration, non-execution, and CLI output.
+configuration, non-execution, boundary extraction, multiline continuations, static
+replay, and CLI output.
+
+The untracked ZIP corpus was also used for a read-only repeatability audit on
+2026-10-14. From 47,430 source records, the boundary produced 50,691 workflows,
+including 74 multiline workflows and 22 with backslash-newline continuation. Two
+filesystem-free passes produced zero exceptions and the same complete-output digest,
+`f497317cab01509541955f8a9eaed6b07d4bc63b25fba72ae2ed00c16d6bedec`. Of those
+workflows, 40,623 needed filesystem evidence, 10,065 were structurally rejected, and
+three metadata-only requests were allowed. The private corpus and its audit adapter
+are not runtime/package data or maintained test fixtures.

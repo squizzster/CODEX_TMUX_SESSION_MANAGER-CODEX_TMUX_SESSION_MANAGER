@@ -36,6 +36,7 @@ from .interaction_pipeline import (
 from .interaction_transport import SESSION_INTERACTION_CONNECTION_PATH, serve_session_interaction
 from .pane_control import TmuxPaneController
 from .protocol_input_text import UserPromptHookError
+from .protocol_projection import ProtocolProjectionFailure, ProtocolProjectionGuard
 from .runtime_endpoint import ExclusiveUnixEndpoint
 from .runtime_peer import RuntimePeerIdentity, require_unix_peer_process, runtime_peer_server_hooks
 from .status_bar import (
@@ -958,6 +959,7 @@ class CodexProtocolProxy:
         primary_pane: TmuxPaneController | None = None,
         model_message_sender: Callable[[InteractionRequest], InteractionResult] | None = None,
         event_tap: CodexProtocolEventTap | None = None,
+        projection_guard: ProtocolProjectionGuard | None = None,
     ) -> None:
         self._proxy_socket_path = proxy_socket_path
         self._app_server_socket_path = app_server_socket_path
@@ -970,6 +972,7 @@ class CodexProtocolProxy:
         self._on_primary_client_message = on_primary_client_message
         self._on_primary_disconnect = on_primary_disconnect
         self._event_tap = event_tap
+        self._projection_guard = projection_guard if projection_guard is not None else ProtocolProjectionGuard()
         self._primary_source_epoch: int | None = None
         self.interactions = interaction_pipeline if interaction_pipeline is not None else SessionInteractionPipeline()
         self._runtime_identity = f"{peer_identity.runtime_id}:{peer_identity.tmux_server_id}"
@@ -1062,6 +1065,11 @@ class CodexProtocolProxy:
         if not self._primary_connection_released.wait(timeout_seconds):
             raise RodexProtocolProxyError("primary Codex protocol connection did not close before retry")
 
+    @property
+    def projection_failures(self) -> tuple[ProtocolProjectionFailure, ...]:
+        """Inspect auxiliary degradation without retaining conversation or error bodies."""
+        return self._projection_guard.failures
+
     def _handle_connection(self, tui_connection: Any) -> None:
         path = _connection_path(tui_connection)
         if path == SESSION_INTERACTION_CONNECTION_PATH:
@@ -1090,7 +1098,9 @@ class CodexProtocolProxy:
                     message = request.payload
                     assert isinstance(message, (str, bytes))
                     if is_primary_connection and self._on_primary_client_message is not None:
-                        self._on_primary_client_message(message, _json_object(message))
+                        self._projection_guard.observe(
+                            "primary-input", self._on_primary_client_message, message, _json_object(message)
+                        )
                     app_server_connection.send(request.payload)
                     return InteractionResult(DeliveryStatus.DELIVERED)
 
@@ -1110,9 +1120,13 @@ class CodexProtocolProxy:
                                 # must end continuity, never strand exact waiters.
                                 self._event_tap.reset_after_disconnect(source_epoch=source_epoch)
                                 raise
-                        self._tool_call_counter.observe_protocol_event(event)
+                        self._projection_guard.observe(
+                            "tool-count", self._tool_call_counter.observe_protocol_event, event
+                        )
                         if self._on_primary_server_message is not None:
-                            self._on_primary_server_message(message, event)
+                            self._projection_guard.observe(
+                                "primary-output", self._on_primary_server_message, message, event
+                            )
                     else:
                         tui_connection.send(message)
                     return InteractionResult(DeliveryStatus.DELIVERED)

@@ -32,7 +32,9 @@ def connect(path, route="/events"):
 
 
 @contextmanager
-def running_proxy(tmp_path, *, on_disconnect=None, on_server_message=None):
+def running_proxy(
+    tmp_path, *, on_disconnect=None, on_server_message=None, on_client_message=None, tool_counter=None, interactions=None
+):
     def echo(connection):
         with suppress(ConnectionClosed):
             for message in connection:
@@ -45,9 +47,11 @@ def running_proxy(tmp_path, *, on_disconnect=None, on_server_message=None):
     proxy = CodexProtocolProxy(
         tmp_path / "proxy.sock",
         tmp_path / "app.sock",
-        ToolCallCounter(lambda _count: None),
+        tool_counter if tool_counter is not None else ToolCallCounter(lambda _count: None),
         on_primary_server_message=on_server_message,
         on_primary_disconnect=on_disconnect,
+        on_primary_client_message=on_client_message,
+        interaction_pipeline=interactions,
         peer_identity=TEST_PEER,
         app_server_process=LiveTestProcess(),
         native_tui_process=LiveTestProcess(),

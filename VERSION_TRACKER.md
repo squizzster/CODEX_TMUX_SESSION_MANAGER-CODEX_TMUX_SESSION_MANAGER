@@ -15,6 +15,12 @@ repository currently has no Git release tags, so they do not imply a published r
   populate or close a replacement stream. Exact waits report continuity loss without
   retrying model work. Mandatory publication precedes auxiliary projections, and
   input EOF invalidates subscribers even while an output projection is blocked.
+- Auxiliary protocol participants contain exceptions independently and expose
+  content-free failure counts (A05 first stage). Intentional prompt rejection and
+  mandatory event observation remain authoritative. Context rendering cannot suppress
+  lower-usage steering evidence; failed control observations revoke pending work.
+  Bounded asynchronous dispatch, overflow/reset ordering and blocked-input isolation
+  remain open.
 - A retained-runtime upgrade blocked by a never-saved Codex thread now gives the
   exact `rodex NAME --force-old` command for reconnecting without an upgrade.
 - First correctness tranche from the 2026-10-14 integrated architecture assessment:

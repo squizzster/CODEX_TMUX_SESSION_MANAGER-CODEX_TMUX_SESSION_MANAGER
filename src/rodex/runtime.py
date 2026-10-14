@@ -83,6 +83,7 @@ from .process_environment import (
     user_process_environment,
     validated_user_environment_entries,
 )
+from .protocol_projection import ProtocolProjectionGuard
 from .protocol_proxy import (
     CONTROL_CONNECTION_PATH,
     CodexContextStatusObserver,
@@ -2841,9 +2842,25 @@ def _run_runtime_service(
                 tmux_pane_target,
             )
             context_status.update(context_status_segment(None))
+            projection_guard = ProtocolProjectionGuard()
+
+            def publish_context_status(rendered_status: str) -> None:
+                # Display failure must not skip the percentage callback which
+                # can revoke a pending steer after usage drops below threshold.
+                projection_guard.observe("context-status-render", context_status.update, rendered_status)
+
+            def observe_context_percent(thread_id: str, context_percent: float) -> None:
+                if not projection_guard.observe(
+                    "context-steering-percent",
+                    context_threshold_steering.observe_context_percent,
+                    thread_id,
+                    context_percent,
+                ):
+                    projection_guard.observe("context-steering-reset", context_threshold_steering.reset_after_disconnect)
+
             live_context_observer = CodexContextStatusObserver(
-                context_status.update,
-                on_context_percent=context_threshold_steering.observe_context_percent,
+                publish_context_status,
+                on_context_percent=observe_context_percent,
                 codex_sessions_root=config.analytics.codex_sessions_root,
             )
             context_status_observer = live_context_observer
@@ -2868,31 +2885,44 @@ def _run_runtime_service(
             live_event_tap = CodexProtocolEventTap(protocol_event_socket_path, peer_identity=peer_identity)
             protocol_event_tap = live_event_tap
             live_event_tap.start()
+            primary_output_projections = [
+                ("presentation-output", presentation_pipeline.observe_protocol_output),
+                ("context-steering", context_threshold_steering.observe_protocol_event),
+                ("context-status", live_context_observer.observe_protocol_event),
+                ("working-status", live_working_observer.observe_protocol_event),
+            ]
+            # These observers produce automatic model actions, not just pixels.
+            # Lost observation must revoke pending work, even as native traffic
+            # continues. Resets clear admission evidence before external cancel.
+            projection_failure_resets = {
+                "context-steering": context_threshold_steering.reset_after_disconnect,
+                "context-status": context_threshold_steering.reset_after_disconnect,
+            }
+            if server_overloaded_recovery is not None:
+                primary_output_projections.append(
+                    ("overload-recovery", server_overloaded_recovery.observe_protocol_event)
+                )
+                projection_failure_resets["overload-recovery"] = server_overloaded_recovery.reset_after_disconnect
+            if agent_observer_controller is not None:
+                primary_output_projections.append(("agent-observer", agent_observer_controller.observe_protocol_event))
 
             def publish_primary_server_message(
-                message: str | bytes,
+                _message: str | bytes,
                 event: dict[str, Any] | None,
             ) -> None:
-                presentation_pipeline.observe_protocol_output(event)
-                with suppress(Exception):
-                    context_threshold_steering.observe_protocol_event(event)
-                live_context_observer.observe_protocol_event(event)
-                live_working_observer.observe_protocol_event(event)
-                if server_overloaded_recovery is not None:
-                    with suppress(Exception):
-                        server_overloaded_recovery.observe_protocol_event(event)
-                if agent_observer_controller is not None:
-                    with suppress(Exception):
-                        agent_observer_controller.observe_protocol_event(event)
+                for participant_name, observe in primary_output_projections:
+                    if not projection_guard.observe(participant_name, observe, event):
+                        reset = projection_failure_resets.get(participant_name)
+                        if reset is not None:
+                            projection_guard.observe(f"{participant_name}-reset", reset)
                 if event is not None:
-                    with suppress(Exception):
-                        on_analytics_event(event)
+                    projection_guard.observe("analytics", on_analytics_event, event)
 
             def observe_primary_client_message(
                 _message: str | bytes,
                 request: dict[str, Any] | None,
             ) -> None:
-                presentation_pipeline.observe_protocol_input(request)
+                projection_guard.observe("presentation-input", presentation_pipeline.observe_protocol_input, request)
 
             lifecycle_participants = [
                 presentation_pipeline,
@@ -2938,6 +2968,7 @@ def _run_runtime_service(
                 primary_pane=primary_pane,
                 model_message_sender=dispatch_model_interaction,
                 event_tap=live_event_tap,
+                projection_guard=projection_guard,
             )
             protocol_proxy.start()
             input_presentation = InputInterceptorPresentation(

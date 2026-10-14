@@ -124,6 +124,9 @@ def test_host_retires_only_exact_unregistered_writer_conflicts_within_its_retry_
         def activate(self, **_options):
             pass
 
+        def observe_protocol_event(self, _event):
+            pass
+
         def close(self):
             pass
 

@@ -64,6 +64,21 @@ This is explicit loss, not transparent reconnect or recovery of missing history.
 Blocking auxiliary callbacks can still delay forwarding (A05 queued dispatch remains
 open); an input callback blocked before the next read can also delay observing EOF.
 
+Auxiliary input/output callbacks, tool counts, presentation, context/working status,
+steering/recovery observation, observer panes and analytics wakes have independent
+exception boundaries. A failing participant does not skip later participants or
+abort forwarded traffic. `CodexProtocolProxy.projection_failures` exposes immutable
+participant/count/exception-type records, without payloads, exception messages or
+tracebacks. These counters indicate degradation, not proven projection completeness.
+Context status rendering is guarded separately so a display error cannot suppress
+the percentage update that revokes stale steering. Failed control-producing
+observations reset pending steering/recovery authority; later fresh lifecycle
+evidence is required to admit new automatic work. Reset failures are counted too;
+these controllers clear admission evidence before calling external cancellation.
+Prompt-hook rejection, native transport failures and mandatory identity/event
+observation stay outside that guard. The guard is synchronous, not a scheduling or
+execution-time guarantee.
+
 ## Outcomes and recovery
 
 `delivered` means transport accepted, observer admitted, or stdout flushed, not confirmed

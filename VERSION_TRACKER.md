@@ -11,8 +11,9 @@ repository currently has no Git release tags, so they do not imply a published r
 ### Added
 
 - Managed runtimes provide an active-prefix `m` fallback that toggles session mouse
-  mode when the key is unbound or still uses tmux's stock pane-mark action, while
-  preserving any non-stock user binding during startup and reconciliation.
+  mode and briefly confirms `Mouse: ON/OFF` when the key is unbound or still uses
+  tmux's stock pane-mark action, while preserving any non-stock user binding during
+  startup and reconciliation.
 - [Native interaction findings](docs/INTERACTION_PIPELINE_REPORT.md), dated
   2026-10-11, preserve Codex 0.162.1 notice-placement evidence and its verification limits.
 - Native managed-session command-policy hook with volatile tmux-only command status,

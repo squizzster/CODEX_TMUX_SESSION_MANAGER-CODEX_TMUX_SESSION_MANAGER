@@ -167,7 +167,7 @@ _POLL_INTERVAL_SECONDS: Final = 0.05
 RODEX_TMUX_REQUIRED_CLIENT_FEATURES: Final = "RGB"
 RODEX_SHARED_TMUX_CTRL_C_COMMAND_OPTION: Final = "@rodex_shared_tmux_ctrl_c_command"
 RODEX_SHARED_TMUX_CTRL_D_COMMAND_OPTION: Final = "@rodex_shared_tmux_ctrl_d_command"
-RODEX_TMUX_MOUSE_TOGGLE_COMMAND: Final = "set-option mouse"
+RODEX_TMUX_MOUSE_TOGGLE_COMMAND: Final = "set-option mouse ; display-message 'Mouse: #{?mouse,ON,OFF}'"
 TMUX_STOCK_PREFIX_M_COMMAND: Final = "select-pane -m"
 RODEX_SHARED_TMUX_COORDINATION_HOOKS: Final = (
     "client-attached",
@@ -2437,7 +2437,7 @@ class RodexRuntimeLauncher:
             "-T",
             "prefix",
             "m",
-            *shlex.split(RODEX_TMUX_MOUSE_TOGGLE_COMMAND),
+            RODEX_TMUX_MOUSE_TOGGLE_COMMAND,
         )
         installed_command = self._read_tmux_prefix_key_command(
             runtime,

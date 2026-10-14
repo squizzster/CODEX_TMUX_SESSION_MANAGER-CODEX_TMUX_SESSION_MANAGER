@@ -216,9 +216,9 @@ Production uses neither `tmux send-keys` nor a tmux Enter binding or pane-piping
 
 tmux handles the active-prefix `m` shortcut before terminal input reaches the gateway.
 Runtime UI initialization replaces only an unbound entry or tmux's stock
-`select-pane -m` command with `set-option mouse`, which toggles the current session.
-Any other effective `prefix/m` binding is a user override and remains authoritative;
-reconciliation does not reclaim it.
+`select-pane -m` command with a session mouse toggle followed by a transient
+`Mouse: ON/OFF` confirmation. Any other effective `prefix/m` binding is a user
+override and remains authoritative; reconciliation does not reclaim it.
 
 ## Local commands
 

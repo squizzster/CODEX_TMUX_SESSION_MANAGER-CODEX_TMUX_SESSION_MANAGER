@@ -2788,6 +2788,7 @@ def test_real_tmux_ctrl_b_m_fallback_toggles_session_mouse(
         launcher.initialise_session_ui(runtime)
         binding = tmux("list-keys", "-T", "prefix", "m").stdout
         assert "set-option mouse" in binding
+        assert 'display-message "Mouse: #{?mouse,ON,OFF}"' in binding
         wait_for_mouse("off")
 
         client_pid, terminal_master = pty.fork()
@@ -2867,7 +2868,8 @@ def test_mouse_toggle_fallback_replaces_only_the_stock_or_missing_tmux_binding(
         nonlocal binding
         writes.append(arguments)
         assert arguments[:4] == ("bind-key", "-T", "prefix", "m")
-        binding = shlex.join(arguments[4:])
+        assert len(arguments) == 5
+        binding = arguments[4]
 
     monkeypatch.setattr(launcher, "_read_tmux_prefix_key_command", read_binding)
     monkeypatch.setattr(launcher, "_server_capability_tmux", write_binding)
@@ -2876,12 +2878,25 @@ def test_mouse_toggle_fallback_replaces_only_the_stock_or_missing_tmux_binding(
     launcher._install_mouse_toggle_fallback(runtime, capability)
 
     assert binding == runtime_module.RODEX_TMUX_MOUSE_TOGGLE_COMMAND
-    assert writes == [("bind-key", "-T", "prefix", "m", "set-option", "mouse")]
+    assert writes == [
+        (
+            "bind-key",
+            "-T",
+            "prefix",
+            "m",
+            runtime_module.RODEX_TMUX_MOUSE_TOGGLE_COMMAND,
+        )
+    ]
 
 
+@pytest.mark.parametrize(
+    "user_binding",
+    ("display-message user-mouse-command", "set-option mouse"),
+)
 def test_mouse_toggle_fallback_preserves_a_user_binding(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    user_binding: str,
 ) -> None:
     launcher = RodexRuntimeLauncher("codex", "tmux")
     runtime = LiveTmuxSession(
@@ -2894,7 +2909,7 @@ def test_mouse_toggle_fallback_preserves_a_user_binding(
     monkeypatch.setattr(
         launcher,
         "_read_tmux_prefix_key_command",
-        lambda *_args, **_options: "display-message user-mouse-command",
+        lambda *_args, **_options: user_binding,
     )
     monkeypatch.setattr(
         launcher,
@@ -2929,7 +2944,13 @@ def test_rodex_preserves_user_mouse_value_while_installing_fallback(
     launcher.initialise_session_ui(runtime)
 
     actions = [shlex.split(command[-2]) for command in runner.calls if command[3:4] == ["if-shell"]]
-    assert ["bind-key", "-T", "prefix", "m", "set-option", "mouse"] in actions
+    assert [
+        "bind-key",
+        "-T",
+        "prefix",
+        "m",
+        runtime_module.RODEX_TMUX_MOUSE_TOGGLE_COMMAND,
+    ] in actions
     assert not any(action[:1] == ["set-option"] and "mouse" in action for action in actions)
 
 

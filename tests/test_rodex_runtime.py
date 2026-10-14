@@ -4327,6 +4327,7 @@ def test_runtime_discovery_reads_the_complete_current_identity_tuple(
             str(capability.internal_session_id),
             "registered",
             str(capability.runtime_id),
+            "automatic-beluga",
         )
     )
 
@@ -4349,6 +4350,8 @@ def test_runtime_discovery_reads_the_complete_current_identity_tuple(
         "registered",
         RUNTIME_ID,
         capability,
+        tmux_runtime_capability=capability.runtime_capability,
+        tmux_session_name="automatic-beluga",
     )
     assert len(calls) == 2
     assert calls[1][3:7] == ["if-shell", "-t", "%9", "-F"]
@@ -4472,6 +4475,7 @@ def test_runtime_discovery_rejects_a_noncanonical_runtime_id(
             "",
             "pending",
             "0C01EE2EAD7240E1",
+            "automatic-beluga",
         )
     )
 
@@ -4506,6 +4510,7 @@ def test_runtime_discovery_rejects_a_noncanonical_session_id_marker(
             "",
             "pending",
             str(RUNTIME_ID),
+            "automatic-beluga",
         )
     )
 

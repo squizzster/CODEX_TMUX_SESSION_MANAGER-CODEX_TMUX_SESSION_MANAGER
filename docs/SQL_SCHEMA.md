@@ -111,6 +111,14 @@ Resume replaces runtime ID/start, endpoint, and current root as one tuple agains
 expected previous runtime. Complete-tuple retries are idempotent; timestamps do not
 choose the winner. Stale writers cannot replace only part of the tuple.
 
+Same-incarnation name recovery is a separate, name-only compare-and-swap, not relaxed
+resume/adoption. The lifecycle owner authenticates the unchanged live capability and
+holds the transition lock; the writer compares the complete expected registration
+(SQL rows, socket/name, runtime ID, and current Codex root) before changing only the
+tmux session name. An exact already-repaired tuple is a mutation-free retry. Runtime
+start, membership, root selection, and access provenance remain untouched. This uses
+the existing schema without a generation change or migration.
+
 `codex_threads` owns UUID identity. Immutable `rodex_sessions_codex_threads`
 memberships, current-root selection, rollout sources, and direct-parent spawn edges
 are separate relations. Historical roots remain members without entering the current

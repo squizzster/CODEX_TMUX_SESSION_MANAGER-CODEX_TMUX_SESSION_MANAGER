@@ -260,6 +260,19 @@ class ExactTurnMutationCoordinator:
                     f"Rodex name committed as {assignment.names.display_name!r}, but coordination refresh failed: {error}"
                 ) from error
         if active_tmux is not None and target is not None and previous_display_name != assignment.names.display_name:
+            # Only this operation's committed rename advances the expected name;
+            # all server/session/pane and transport authority remains unchanged.
+            target = replace(
+                target,
+                runtime=active_tmux,
+                display_name=assignment.names.display_name,
+                control=replace(
+                    target.control,
+                    tmux_session_name=(
+                        active_tmux.tmux_session_name if target.control.tmux_session_name is not None else None
+                    ),
+                ),
+            )
             auto_info = (
                 f"RODEX_AUTO_INFO: Rodex session {target.control.rodex_session_id} "
                 f"is now named {assignment.names.display_name!r}."

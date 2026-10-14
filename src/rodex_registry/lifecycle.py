@@ -8,7 +8,7 @@ import sqlite3
 import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TypeVar
@@ -654,22 +654,26 @@ def lookup_rodex_runtime_registration(
     _validate_session_id(session_id)
     path = normalise_rodex_database_path(database_path)
     with open_rodex_read_transaction(path) as connection:
-        row = connection.execute(
-            "SELECT tmux.id, tmux.rodex_sessions_id, tmux.tmux_server_socket_path, "
-            "tmux.tmux_session_name, runtime.runtime_id_signed_bigint, "
-            "identity.codex_thread_public_id_signed_bigint_1, "
-            "identity.codex_thread_public_id_signed_bigint_2 "
-            f"FROM {RODEX_TMUX_SESSIONS_TABLE} AS tmux "
-            f"LEFT JOIN {RODEX_RUNTIME_INSTANCES_TABLE} AS runtime "
-            "ON runtime.rodex_sessions_id = tmux.rodex_sessions_id "
-            f"LEFT JOIN {RODEX_SESSIONS_CURRENT_CODEX_THREADS_TABLE} AS current "
-            "ON current.rodex_sessions_id = tmux.rodex_sessions_id "
-            f"LEFT JOIN {RODEX_SESSIONS_CODEX_THREADS_TABLE} AS membership "
-            "ON membership.id = current.rodex_sessions_codex_threads_id "
-            f"LEFT JOIN {CODEX_THREADS_TABLE} AS identity ON identity.id = membership.codex_threads_id "
-            "WHERE tmux.rodex_sessions_id = ?",
-            (session_id,),
-        ).fetchone()
+        return _select_runtime_registration(connection, session_id)
+
+
+def _select_runtime_registration(connection: sqlite3.Connection, session_id: int) -> RodexRuntimeRegistration | None:
+    row = connection.execute(
+        "SELECT tmux.id, tmux.rodex_sessions_id, tmux.tmux_server_socket_path, "
+        "tmux.tmux_session_name, runtime.runtime_id_signed_bigint, "
+        "identity.codex_thread_public_id_signed_bigint_1, "
+        "identity.codex_thread_public_id_signed_bigint_2 "
+        f"FROM {RODEX_TMUX_SESSIONS_TABLE} AS tmux "
+        f"LEFT JOIN {RODEX_RUNTIME_INSTANCES_TABLE} AS runtime "
+        "ON runtime.rodex_sessions_id = tmux.rodex_sessions_id "
+        f"LEFT JOIN {RODEX_SESSIONS_CURRENT_CODEX_THREADS_TABLE} AS current "
+        "ON current.rodex_sessions_id = tmux.rodex_sessions_id "
+        f"LEFT JOIN {RODEX_SESSIONS_CODEX_THREADS_TABLE} AS membership "
+        "ON membership.id = current.rodex_sessions_codex_threads_id "
+        f"LEFT JOIN {CODEX_THREADS_TABLE} AS identity ON identity.id = membership.codex_threads_id "
+        "WHERE tmux.rodex_sessions_id = ?",
+        (session_id,),
+    ).fetchone()
     if row is None:
         return None
     return RodexRuntimeRegistration(
@@ -677,6 +681,38 @@ def lookup_rodex_runtime_registration(
         runtime_id=None if row[4] is None else RodexRuntimeId.from_signed_bigint(row[4]),
         codex_session_id=None if row[5] is None else join_signed_bigints_into_a_codex_session_id(row[5], row[6]),
     )
+
+
+def repair_rodex_runtime_tmux_session_name(
+    expected_registration: RodexRuntimeRegistration,
+    tmux_session_name: str,
+    database_path: str | os.PathLike[str] | None = None,
+) -> RodexTmuxSession:
+    """CAS a verified incumbent's name only; never adopt another incarnation.
+
+    The lifecycle caller holds its transition lock and authenticates the live
+    capability outside SQL. This writer preserves every other registration and
+    provenance field. An exact already-repaired tuple is a mutation-free retry.
+    """
+    expected_tmux = expected_registration.tmux_session
+    _validate_session_id(expected_tmux.rodex_sessions_id)
+    if expected_registration.runtime_id is None or expected_registration.codex_session_id is None:
+        raise ValueError("name repair requires a complete durable runtime identity")
+    repaired_tmux = replace(expected_tmux, tmux_session_name=_normalise_tmux_session_name(tmux_session_name))
+    repaired_registration = replace(expected_registration, tmux_session=repaired_tmux)
+    path = _database_path_for_mutation(database_path)
+    with open_rodex_transaction(path) as connection:
+        require_current_rodex_schema(connection)
+        observed = _select_runtime_registration(connection, expected_tmux.rodex_sessions_id)
+        if observed == repaired_registration:
+            return repaired_tmux
+        if observed != expected_registration:
+            raise RodexRuntimeRegistrationRejectedError("runtime name repair lost its expected durable registration")
+        connection.execute(
+            f"UPDATE {RODEX_TMUX_SESSIONS_TABLE} SET tmux_session_name = ? WHERE id = ?",
+            (repaired_tmux.tmux_session_name, expected_tmux.id),
+        )
+    return repaired_tmux
 
 
 def _record_rodex_runtime_instance(

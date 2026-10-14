@@ -429,11 +429,18 @@ class LiveTmuxSession:
     tmux_session_name: str
     runtime_id: RodexRuntimeId | None = field(default=None, kw_only=True)
     tmux_capability: TmuxSessionCapability | None = field(default=None, kw_only=True)
+    tmux_runtime_capability: TmuxRuntimeCapability | None = field(default=None, kw_only=True)
     creation_server_id: str | None = field(default=None, kw_only=True)
 
     def __post_init__(self) -> None:
         if self.creation_server_id is not None:
             parse_tmux_server_id(self.creation_server_id)
+        primary = self.tmux_runtime_capability
+        if primary is not None:
+            if primary.tmux_server_socket_path != self.tmux_server_socket_path or primary.runtime_id != self.runtime_id:
+                raise ValueError("primary tmux capability belongs to a different runtime endpoint")
+            if self.creation_server_id is not None and primary.tmux_server_id != self.creation_server_id:
+                raise ValueError("primary tmux capability belongs to a different creation attempt")
         capability = self.tmux_capability
         if capability is None:
             return
@@ -443,6 +450,8 @@ class LiveTmuxSession:
             raise ValueError("tmux capability belongs to a different runtime incarnation")
         if self.creation_server_id is not None and self.creation_server_id != capability.tmux_server_id:
             raise ValueError("tmux capability belongs to a different creation attempt")
+        if primary is not None and capability.runtime_capability != primary:
+            raise ValueError("registered and primary tmux capabilities disagree")
 
 
 @dataclass(frozen=True, slots=True)
@@ -937,6 +946,7 @@ class RodexRuntimeLauncher:
             or control.rodex_session_id != expected_rodex_session_id
             or control.rodex_registry_id != expected_registry_id
             or control.codex_session_id != expected_codex_session_id
+            or (control.tmux_runtime_capability is not None and control.tmux_runtime_capability != bootstrap_capability)
         ):
             raise RodexRuntimeError("runtime registration pending identity disagrees with durable identity")
         if control.registration_state == RODEX_REGISTRATION_REGISTERED:
@@ -1026,6 +1036,7 @@ class RodexRuntimeLauncher:
                 f"#{{{RODEX_INTERNAL_SESSION_ID_OPTION}}}",
                 f"#{{{RODEX_REGISTRATION_STATE_OPTION}}}",
                 f"#{{{RODEX_RUNTIME_ID_OPTION}}}",
+                "#{session_name}",
             )
         )
         observed = self._tmux(
@@ -1039,7 +1050,7 @@ class RodexRuntimeLauncher:
             check=False,
         )
         fields = observed.stdout.rstrip("\n").split("\t")
-        if observed.returncode != 0 or len(fields) != 12:
+        if observed.returncode != 0 or len(fields) != 13:
             raise RodexRuntimeError("live tmux control capability snapshot is unavailable")
         (
             protocol,
@@ -1054,7 +1065,10 @@ class RodexRuntimeLauncher:
             internal_session_id_text,
             registration_state_text,
             runtime_id_text,
+            session_name,
         ) = fields
+        if not session_name or session_name != session_name.strip():
+            raise RodexRuntimeError("live tmux session name is empty or noncanonical")
         if protocol != RODEX_SHARED_TMUX_PROTOCOL:
             raise RodexRuntimeError("live tmux session protocol does not match Rodex")
         try:
@@ -1107,19 +1121,21 @@ class RodexRuntimeLauncher:
             )
         except (TypeError, ValueError) as error:
             raise RodexRuntimeError("live tmux primary capability is malformed") from error
+        if runtime.tmux_runtime_capability is not None and primary != runtime.tmux_runtime_capability:
+            raise RodexRuntimeError("live tmux primary capability changed during discovery")
         guarded = self._tmux(
             runtime,
             *primary_pane_capability_read_arguments(primary, record_format),
             check=False,
         )
         guarded_fields = guarded.stdout.rstrip("\n").split("\t")
-        if guarded.returncode != 0 or len(guarded_fields) != 12:
+        if guarded.returncode != 0 or len(guarded_fields) != 13:
             raise RodexRuntimeError("live tmux primary pane ownership could not be verified")
         completed_registration = (
             registration_state_text == RODEX_REGISTRATION_PENDING
             and guarded_fields[10] == RODEX_REGISTRATION_REGISTERED
             and fields[:9] == guarded_fields[:9]
-            and fields[11] == guarded_fields[11]
+            and fields[11:] == guarded_fields[11:]
             and internal_session_id_text == ""
         )
         if guarded_fields != fields and not completed_registration:
@@ -1158,6 +1174,8 @@ class RodexRuntimeLauncher:
             registration_state,
             runtime_id,
             capability,
+            tmux_runtime_capability=primary,
+            tmux_session_name=session_name,
         )
 
     def rename(self, runtime: LiveTmuxSession, tmux_session_name: str) -> LiveTmuxSession:
@@ -1193,12 +1211,15 @@ class RodexRuntimeLauncher:
         """Resolve startup's random name once, then return immutable pane authority."""
         if runtime.runtime_id is None:
             raise RodexRuntimeError("tmux bootstrap requires a runtime incarnation")
+        expected_primary = runtime.tmux_runtime_capability
         result = self._tmux(
             runtime,
             "display-message",
             "-p",
             "-t",
-            _exact_tmux_pane_target(runtime.tmux_session_name),
+            expected_primary.pane_target
+            if expected_primary is not None
+            else _exact_tmux_pane_target(runtime.tmux_session_name),
             "-F",
             "\t".join(
                 (
@@ -1217,13 +1238,13 @@ class RodexRuntimeLauncher:
             result.returncode != 0
             or len(fields) != 6
             or fields[0] != RODEX_SHARED_TMUX_PROTOCOL
-            or fields[2] != runtime.tmux_session_name
+            or (expected_primary is None and fields[2] != runtime.tmux_session_name)
             or fields[5] != str(runtime.runtime_id)
             or (runtime.creation_server_id is not None and fields[1] != runtime.creation_server_id)
         ):
             raise RodexRuntimeError("startup tmux capability could not be verified")
         try:
-            return TmuxRuntimeCapability(
+            primary = TmuxRuntimeCapability(
                 runtime.tmux_server_socket_path,
                 parse_tmux_server_id(fields[1]),
                 fields[3],
@@ -1232,6 +1253,9 @@ class RodexRuntimeLauncher:
             )
         except ValueError as error:
             raise RodexRuntimeError("startup tmux capability is malformed") from error
+        if expected_primary is not None and primary != expected_primary:
+            raise RodexRuntimeError("startup tmux primary capability changed")
+        return primary
 
     def _read_tmux_server_option(
         self,

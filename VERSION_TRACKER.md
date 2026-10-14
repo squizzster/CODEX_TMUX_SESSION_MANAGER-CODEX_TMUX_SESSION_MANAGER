@@ -10,6 +10,15 @@ repository currently has no Git release tags, so they do not imply a published r
 
 ### Modified
 
+- Same-incarnation reopen repairs only a verified incumbent's tmux name (A12 name
+  recovery portion), with complete-registration SQL compare-and-swap and exact primary
+  authority retained through pending confirmation. Normal display-name restoration
+  follows; failed repair or presentation leaves the discovered incumbent running.
+  Adoption retry immutability remains unchanged. Alias announcements advance only
+  their committed expected name, preserving all runtime authority. Real-tmux tests
+  cover pending/registered reopen, collisions and alias revalidation; injected faults
+  cover acknowledgement loss and competing identities. New-candidate setup-retention
+  policy and real process-death cuts remain separate work.
 - Crash-receipt reconciliation carries one verified pidfd through group-scoped
   TERM/CONT/KILL and exit probes (A02), replacing numeric termination and the STOP
   workaround. Unsupported capabilities, surviving unverified groups and unconfirmed

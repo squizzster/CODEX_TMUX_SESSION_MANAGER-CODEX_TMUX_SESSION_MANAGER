@@ -27,6 +27,7 @@ from rodex_registry import (
     lookup_rodex_session_log,
     parse_codex_session_id,
     record_a_rodex_session_runtime_resume,
+    repair_rodex_runtime_tmux_session_name,
 )
 
 OLD_RUNTIME = RodexRuntimeId.parse("1111111111111111")
@@ -153,6 +154,64 @@ def test_none_expected_incarnation_is_an_absence_assertion(registered: tuple[Pat
     assert _snapshot(database, session) == before
 
 
+def test_name_only_repair_preserves_incarnation_provenance_and_is_idempotent(
+    registered: tuple[Path, RodexSession],
+) -> None:
+    database, session = registered
+    before_registration, before_runtime, before_log = _snapshot(database, session)
+
+    repaired = repair_rodex_runtime_tmux_session_name(before_registration, "observed-name", database)
+    after = _snapshot(database, session)
+    assert after == (replace(before_registration, tmux_session=repaired), before_runtime, before_log)
+    assert repaired == replace(before_registration.tmux_session, tmux_session_name="observed-name")
+    assert repair_rodex_runtime_tmux_session_name(before_registration, "observed-name", database) == repaired
+    assert _snapshot(database, session) == after
+    # Adoption remains immutable even though the dedicated repair can change a name.
+    with pytest.raises(RodexRuntimeRegistrationRejectedError, match="different identity or endpoint"):
+        record_a_rodex_session_runtime_resume(
+            session.rodex_sessions_id,
+            repaired.tmux_server_socket_path,
+            "another-name",
+            database,
+            codex_session_id=CODEX_ID,
+            runtime_id=OLD_RUNTIME,
+            expected_previous_runtime_id=OLD_RUNTIME,
+        )
+
+
+@pytest.mark.parametrize("changed", ["runtime", "codex", "socket", "name", "row", "session"])
+def test_name_repair_rejects_every_stale_durable_identity_component(
+    registered: tuple[Path, RodexSession], changed: str
+) -> None:
+    database, session = registered
+    before = _snapshot(database, session)
+    expected = before[0]
+    if changed == "runtime":
+        expected = replace(expected, runtime_id=OTHER_RUNTIME)
+    elif changed == "codex":
+        expected = replace(expected, codex_session_id=OTHER_CODEX_ID)
+    else:
+        field, value = {
+            "socket": ("tmux_server_socket_path", str(database.parent / "other.sock")),
+            "name": ("tmux_session_name", "stale-name"),
+            "row": ("id", expected.tmux_session.id + 1),
+            "session": ("rodex_sessions_id", session.rodex_sessions_id + 1),
+        }[changed]
+        expected = replace(expected, tmux_session=replace(expected.tmux_session, **{field: value}))
+    with pytest.raises(RodexRuntimeRegistrationRejectedError, match="name repair lost"):
+        repair_rodex_runtime_tmux_session_name(expected, "observed-name", database)
+    assert _snapshot(database, session) == before
+
+
+@pytest.mark.parametrize("missing", ["runtime_id", "codex_session_id"])
+def test_name_repair_requires_complete_durable_identity(registered: tuple[Path, RodexSession], missing: str) -> None:
+    database, session = registered
+    before = _snapshot(database, session)
+    with pytest.raises(ValueError, match="complete durable runtime identity"):
+        repair_rodex_runtime_tmux_session_name(replace(before[0], **{missing: None}), "observed-name", database)
+    assert _snapshot(database, session) == before
+
+
 @pytest.mark.parametrize("offset", [timedelta(), -timedelta(minutes=1), timedelta(days=365)])
 def test_competing_candidates_share_one_compare_and_set_winner(
     registered: tuple[Path, RodexSession], offset: timedelta
@@ -270,6 +329,212 @@ def _prepare(database: Path, session: RodexSession, launcher: _Launcher):
         codex_available=True,
         configured_codex="codex",
     )
+
+
+class _RelocatedLauncher(_Launcher):
+    """One discovered incumbent; never a newly launched cleanup candidate."""
+
+    def __init__(
+        self, database: Path, session: RodexSession, registration_state: str, *, id_liveness: bool = True
+    ) -> None:
+        runtime = LiveTmuxSession(database.parent / "incumbent.sock", "external-name", runtime_id=OLD_RUNTIME)
+        super().__init__(database, session, runtime)
+        self.live_name = runtime.tmux_session_name
+        self.id_liveness = id_liveness
+        self.control = replace(
+            self.control,
+            registration_state=registration_state,
+            tmux_capability=self.capability if registration_state == "registered" else None,
+            tmux_runtime_capability=self.capability.runtime_capability,
+            tmux_session_name=self.live_name,
+        )
+
+    def session_exists(self, runtime: LiveTmuxSession) -> bool:
+        return runtime.runtime_id == OLD_RUNTIME if self.id_liveness else runtime.tmux_session_name == self.live_name
+
+    def list_session_names(self, _socket: Path) -> tuple[str, ...]:
+        return (self.live_name,)
+
+    def rename(self, runtime: LiveTmuxSession, name: str) -> LiveTmuxSession:
+        renamed = super().rename(runtime, name)
+        self.live_name = name
+        self.control = replace(self.control, tmux_session_name=name)
+        return renamed
+
+    def prepare_runtime_upgrade(self, _runtime: LiveTmuxSession) -> None:
+        return None
+
+    def reconcile_session_ui(self, runtime: LiveTmuxSession) -> None:
+        self.calls.append(("reconcile-ui", runtime.runtime_id))
+
+    def refresh_shared_tmux_coordination(self, runtime: LiveTmuxSession) -> None:
+        self.calls.append(("refresh-ui", runtime.runtime_id))
+
+
+@pytest.mark.parametrize("registration_state", ["pending", "registered"])
+@pytest.mark.parametrize("id_liveness", [True, False])
+def test_relocation_repairs_name_of_the_already_persisted_incarnation(
+    registered: tuple[Path, RodexSession], monkeypatch: pytest.MonkeyPatch, registration_state: str, id_liveness: bool
+) -> None:
+    database, session = registered
+    launcher = _RelocatedLauncher(database, session, registration_state, id_liveness=id_liveness)
+    before_runtime = lookup_rodex_runtime_instance(session.rodex_sessions_id, database)
+    monkeypatch.setattr(
+        managed_module, "_start_managed_runtime", lambda *_args, **_kwargs: pytest.fail("must not launch a duplicate")
+    )
+
+    with live_module.session_transition_lock(database, session.rodex_session_id):
+        prepared = _prepare(database, session, launcher)
+        repeated = _prepare(database, session, launcher)
+
+    persisted = lookup_rodex_runtime_registration(session.rodex_sessions_id, database)
+    assert persisted.runtime_id == prepared.active_tmux.runtime_id == repeated.active_tmux.runtime_id == OLD_RUNTIME
+    assert persisted.codex_session_id == session.codex_session_id
+    assert persisted.tmux_session.tmux_server_socket_path == str(database.parent / "incumbent.sock")
+    assert persisted.tmux_session.tmux_session_name == session.cool_name == launcher.live_name
+    assert lookup_rodex_runtime_instance(session.rodex_sessions_id, database) == before_runtime
+    assert prepared.active_tmux.tmux_capability == launcher.capability
+    assert [name for name, _runtime_id in launcher.calls].count("confirm") == (registration_state == "pending")
+    assert [name for name, _runtime_id in launcher.calls].count("rename") == 1
+    assert not any(name == "stop" for name, _runtime_id in launcher.calls)
+
+
+@pytest.mark.parametrize("registration_state", ["pending", "registered"])
+@pytest.mark.parametrize("phase", ["before_repair", "after_repair", "rename_rejected", "rename_ack_lost", "ui"])
+def test_name_repair_failure_never_stops_incumbent_and_reopening_converges(
+    registered: tuple[Path, RodexSession], monkeypatch: pytest.MonkeyPatch, registration_state: str, phase: str
+) -> None:
+    database, session = registered
+    launcher = _RelocatedLauncher(database, session, registration_state)
+    before_runtime = lookup_rodex_runtime_instance(session.rodex_sessions_id, database)
+    repair = live_module.repair_rodex_runtime_tmux_session_name
+    rename = launcher.rename
+
+    def failed_repair(*args):
+        if phase == "before_repair":
+            raise RuntimeError("injected repair rejection")
+        repair(*args)
+        raise RuntimeError("injected repair acknowledgement loss")
+
+    def failed_rename(runtime, name):
+        if phase == "rename_ack_lost":
+            rename(runtime, name)
+        raise RodexRuntimeError("injected rename failure")
+
+    def failed_ui(_runtime):
+        raise RuntimeError("injected UI failure")
+
+    with live_module.session_transition_lock(database, session.rodex_session_id):
+        with monkeypatch.context() as fault:
+            if phase in {"before_repair", "after_repair"}:
+                fault.setattr(live_module, "repair_rodex_runtime_tmux_session_name", failed_repair)
+            elif phase == "ui":
+                fault.setattr(launcher, "refresh_shared_tmux_coordination", failed_ui)
+            else:
+                fault.setattr(launcher, "rename", failed_rename)
+            with pytest.raises(RuntimeError, match="injected"):
+                _prepare(database, session, launcher)
+        intermediate = lookup_rodex_runtime_registration(session.rodex_sessions_id, database)
+        assert intermediate.runtime_id == OLD_RUNTIME
+        assert intermediate.codex_session_id == CODEX_ID
+        assert lookup_rodex_runtime_instance(session.rodex_sessions_id, database) == before_runtime
+        assert not any(name == "stop" for name, _runtime_id in launcher.calls)
+        prepared = _prepare(database, session, launcher)
+        repeated = _prepare(database, session, launcher)
+    after = lookup_rodex_runtime_registration(session.rodex_sessions_id, database)
+    assert after.tmux_session.tmux_session_name == launcher.live_name == session.cool_name
+    assert prepared.active_tmux == repeated.active_tmux
+    assert after.runtime_id == OLD_RUNTIME
+    assert lookup_rodex_runtime_instance(session.rodex_sessions_id, database) == before_runtime
+
+
+@pytest.mark.parametrize("confirmation_committed", [False, True])
+def test_pending_name_repair_recovers_confirmation_rejection_or_lost_acknowledgement(
+    registered: tuple[Path, RodexSession], monkeypatch: pytest.MonkeyPatch, confirmation_committed: bool
+) -> None:
+    database, session = registered
+    launcher = _RelocatedLauncher(database, session, "pending")
+    confirm = launcher.confirm_runtime_registration
+
+    def failed_confirmation(*args, **kwargs):
+        if confirmation_committed:
+            confirm(*args, **kwargs)
+        raise RodexRuntimeError("confirmation acknowledgement unavailable")
+
+    with live_module.session_transition_lock(database, session.rodex_session_id):
+        with monkeypatch.context() as fault:
+            fault.setattr(launcher, "confirm_runtime_registration", failed_confirmation)
+            with pytest.raises(RodexRuntimeError, match="acknowledgement"):
+                _prepare(database, session, launcher)
+        persisted = lookup_rodex_runtime_registration(session.rodex_sessions_id, database)
+        assert persisted.tmux_session.tmux_session_name == "external-name"
+        assert persisted.runtime_id == OLD_RUNTIME
+        assert not any(name == "stop" for name, _runtime_id in launcher.calls)
+        _prepare(database, session, launcher)
+    assert [name for name, _runtime_id in launcher.calls].count("confirm") == 1
+    assert launcher.live_name == session.cool_name
+
+
+@pytest.mark.parametrize("phase", ["before_sql", "after_sql", "after_confirmation"])
+@pytest.mark.parametrize("changed", ["server", "session", "pane", "runtime", "name"])
+def test_changed_primary_authority_or_name_cannot_complete_repair(
+    registered: tuple[Path, RodexSession], phase: str, changed: str
+) -> None:
+    database, session = registered
+    launcher = _RelocatedLauncher(database, session, "pending")
+    sample = {"before_sql": 2, "after_sql": 3, "after_confirmation": 4}[phase]
+
+    def change_after_discovery():
+        if sum(name == "discover" for name, _runtime_id in launcher.calls) != sample:
+            return
+        if changed == "name":
+            launcher.control = replace(launcher.control, tmux_session_name="another-native-name")
+            return
+        field, value = {
+            "server": ("tmux_server_id", "f" * 32),
+            "session": ("tmux_session_id", "$8"),
+            "pane": ("tmux_primary_pane_id", "%8"),
+            "runtime": ("runtime_id", OTHER_RUNTIME),
+        }[changed]
+        primary = replace(launcher.control.tmux_runtime_capability, **{field: value})
+        capability = launcher.control.tmux_capability
+        launcher.control = replace(
+            launcher.control,
+            tmux_runtime_capability=primary,
+            tmux_capability=None if capability is None else replace(capability, **{field: value}),
+            runtime_id=OTHER_RUNTIME if changed == "runtime" else OLD_RUNTIME,
+        )
+
+    launcher.on_discovery = change_after_discovery
+    with (
+        live_module.session_transition_lock(database, session.rodex_session_id),
+        pytest.raises(
+            (managed_module.RodexLaunchError, RodexRuntimeRegistrationRejectedError), match=r"changed|unexpected"
+        ),
+    ):
+        _prepare(database, session, launcher)
+    persisted = lookup_rodex_runtime_registration(session.rodex_sessions_id, database)
+    assert persisted.tmux_session.tmux_session_name == ("incumbent" if phase == "before_sql" else "external-name")
+    assert persisted.runtime_id == OLD_RUNTIME
+    assert not any(name in {"rename", "stop", "refresh-ui"} for name, _runtime_id in launcher.calls)
+
+
+def test_concurrent_registration_wins_over_stale_name_repair(registered: tuple[Path, RodexSession]) -> None:
+    database, session = registered
+    launcher = _RelocatedLauncher(database, session, "pending")
+
+    def replace_durable_registration():
+        if len(launcher.calls) == 2:
+            _adopt(database, session, OTHER_RUNTIME)
+
+    launcher.on_discovery = replace_durable_registration
+    with (
+        live_module.session_transition_lock(database, session.rodex_session_id),
+        pytest.raises(RodexRuntimeRegistrationRejectedError, match="name repair lost"),
+    ):
+        _prepare(database, session, launcher)
+    assert lookup_rodex_runtime_registration(session.rodex_sessions_id, database).runtime_id == OTHER_RUNTIME
+    assert [name for name, _runtime_id in launcher.calls] == ["discover", "discover"]
 
 
 @pytest.mark.parametrize("route", ["read", "resume"])

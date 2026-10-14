@@ -5,6 +5,7 @@ import os
 import uuid
 from collections.abc import Callable
 from contextlib import contextmanager
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -432,7 +433,9 @@ def test_alias_transition_holds_the_lock_and_preserves_committed_announcement_ev
         rodex_session_id="rodex-session",
         rodex_registry_id=registry_id,
         runtime_id="runtime",
+        tmux_session_name="worker",
     )
+    renamed_control = replace(live_control, tmux_session_name="renamed")
     lock_was_held = False
     committed_names = ["worker"]
 
@@ -485,7 +488,7 @@ def test_alias_transition_holds_the_lock_and_preserves_committed_announcement_ev
             self.steered: list[tuple[object, str, str]] = []
 
         def inspect_live(self, observed: object) -> SimpleNamespace:
-            assert observed is live_control
+            assert observed == renamed_control
             return SimpleNamespace(status="active", active_turn_id="turn-active")
 
         def _start_turn(self, *_args: object, **_kwargs: object) -> object:
@@ -582,7 +585,7 @@ def test_alias_transition_holds_the_lock_and_preserves_committed_announcement_ev
         if failure_phase == "refresh"
         else [
             (
-                live_control,
+                renamed_control,
                 "turn-active",
                 "RODEX_AUTO_INFO: Rodex session rodex-session is now named 'renamed'.",
             )

@@ -50,7 +50,6 @@ from .live_runtime import (
 )
 from .process_title import rodex_session_process_title
 from .runtime import (
-    RODEX_REGISTRATION_PENDING,
     LiveRodexRuntime,
     LiveTmuxSession,
     RodexAttachmentOutcome,
@@ -415,22 +414,25 @@ def _prepare_selected_session(
         if relocated_control.runtime_id is None:
             raise RodexLaunchError("relocated runtime lacks an exact incarnation")
         relocated = replace(relocated, runtime_id=relocated_control.runtime_id)
-        record_a_rodex_session_runtime_resume(
-            session_id,
-            relocated.tmux_server_socket_path,
-            relocated.tmux_session_name,
-            database_path,
-            codex_session_id=codex_session_id,
-            runtime_id=relocated_control.runtime_id,
-            expected_previous_runtime_id=expected_runtime_id,
-        )
-        if relocated_control.registration_state == RODEX_REGISTRATION_PENDING:
-            launcher.confirm_runtime_registration(
-                relocated,
+        if relocated_control.runtime_id == expected_runtime_id:
+            if relocated_control.tmux_runtime_capability is None or relocated_control.tmux_session_name is None:
+                raise RodexLaunchError("relocated incumbent lacks its observed name or exact primary authority")
+            # Verification owns name-only repair on both discovery routes. Keep
+            # the expected old durable address and the discovered live authority.
+            relocated = replace(
+                recorded_tmux,
+                tmux_capability=relocated_control.tmux_capability,
+                tmux_runtime_capability=relocated_control.tmux_runtime_capability,
+            )
+        else:
+            record_a_rodex_session_runtime_resume(
                 session_id,
-                expected_rodex_session_id=rodex_session_id,
-                expected_registry_id=registry_id,
-                expected_codex_session_id=codex_session_id,
+                relocated.tmux_server_socket_path,
+                relocated.tmux_session_name,
+                database_path,
+                codex_session_id=codex_session_id,
+                runtime_id=relocated_control.runtime_id,
+                expected_previous_runtime_id=expected_runtime_id,
             )
         relocated_control = verify_live_runtime_identity(
             launcher,
@@ -733,6 +735,8 @@ def _attachable_runtime_identity(
         raise RodexLaunchError("live Rodex runtime lacks registered tmux authority")
     return replace(
         active_tmux,
+        tmux_session_name=control.tmux_session_name or active_tmux.tmux_session_name,
         runtime_id=control.runtime_id,
         tmux_capability=control.tmux_capability,
+        tmux_runtime_capability=control.tmux_runtime_capability,
     )

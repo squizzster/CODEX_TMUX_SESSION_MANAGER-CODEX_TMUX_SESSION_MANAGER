@@ -98,6 +98,7 @@ from .lifecycle import (
     open_a_user_defined_cool_name_assignment,
     record_a_rodex_session_access,
     record_a_rodex_session_runtime_resume,
+    repair_rodex_runtime_tmux_session_name,
     update_rodex_tmux_session_name,
     validate_a_user_defined_cool_name_assignment,
 )
@@ -253,6 +254,7 @@ __all__ = [
     "record_a_rodex_session_access",
     "record_a_rodex_session_runtime_resume",
     "record_rodex_session_analytics_worker_health",
+    "repair_rodex_runtime_tmux_session_name",
     "session_statistics_as_dict",
     "split_codex_item_id_into_signed_bigints",
     "split_codex_session_id_into_signed_bigints",

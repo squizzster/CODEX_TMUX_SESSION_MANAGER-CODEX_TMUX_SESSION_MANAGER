@@ -7,14 +7,27 @@ import tempfile
 import uuid
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+import rodex.managed_session_lifecycle as lifecycle_module
 import rodex.runtime as runtime_module
-from rodex.live_runtime import revalidate_live_control
+from rodex.control import PromptDispatch
+from rodex.errors import RodexLaunchError
+from rodex.exact_turn_mutation import ExactTurnMutationCoordinator
+from rodex.live_runtime import revalidate_live_control, session_transition_lock
 from rodex.runtime import LiveRodexRuntime, LiveTmuxSession, RodexRuntimeError, RodexRuntimeLauncher
 from rodex.tmux_session_capability import runtime_tmux_socket_name
-from rodex_registry import RodexRegistryId, RodexRuntimeId, RodexSessionId
+from rodex_registry import (
+    RodexRegistryId,
+    RodexRuntimeId,
+    RodexSessionId,
+    create_a_rodex_session,
+    lookup_rodex_registry_id,
+    lookup_rodex_runtime_instance,
+    lookup_rodex_runtime_registration,
+)
 
 
 @pytest.fixture
@@ -105,6 +118,139 @@ def test_two_runtimes_separate_native_input_output_and_shutdown(isolated_runtime
     assert not launcher.session_exists(first)
     assert tmux(second, "has-session", "-t", "=runtime-2").returncode == 0
     assert launcher.discover_runtime_control(second).runtime_id == second.runtime_id
+
+
+@pytest.mark.parametrize("registration_state", ["pending", "registered"])
+@pytest.mark.parametrize("native_name_case", ["external", "display", "collision"])
+def test_native_renamed_incumbent_reopens_without_readopting_or_relaunching(
+    isolated_runtimes, tmp_path, monkeypatch, registration_state, native_name_case
+):
+    launcher, create, tmux = isolated_runtimes
+    runtime = create(1)
+    original_primary = runtime.tmux_capability.runtime_capability
+    database = tmp_path / "rodex.sqlite3"
+    session = create_a_rodex_session(
+        database,
+        codex_session_id=runtime.tmux_capability.codex_session_id,
+        rodex_session_id=runtime.tmux_capability.rodex_session_id,
+        runtime_id=runtime.runtime_id,
+        tmux_server_socket_path=runtime.tmux_server_socket_path,
+        tmux_session_name=runtime.tmux_session_name,
+    )
+    before_runtime = lookup_rodex_runtime_instance(session.rodex_sessions_id, database)
+    tmux(runtime, "set-option", "-t", "$0", "@rodex_registry_id", str(lookup_rodex_registry_id(database)))
+    if registration_state == "pending":
+        tmux(runtime, "set-option", "-t", "$0", "@rodex_registration_state", "pending")
+        tmux(runtime, "set-option", "-t", "$0", "@rodex_sessions_id", "")
+    observed_name = session.cool_name if native_name_case == "display" else "external-name"
+    tmux(runtime, "rename-session", "-t", "$0", observed_name)
+    recorded = LiveTmuxSession(runtime.tmux_server_socket_path, runtime.tmux_session_name, runtime_id=runtime.runtime_id)
+    # Production liveness follows the runtime ID and deliberately ignores the stale name.
+    assert launcher.session_exists(recorded)
+    observed = launcher.discover_runtime_control(recorded)
+    assert observed.tmux_session_name == observed_name
+    assert observed.tmux_runtime_capability == original_primary
+    monkeypatch.setattr(launcher, "prepare_runtime_upgrade", lambda _runtime: None)
+    monkeypatch.setattr(launcher, "reconcile_session_ui", lambda _runtime: None)
+    monkeypatch.setattr(launcher, "refresh_shared_tmux_coordination", lambda _runtime: None)
+    monkeypatch.setattr(launcher, "stop", lambda *_args, **_kwargs: pytest.fail("must not stop an incumbent"))
+    monkeypatch.setattr(
+        lifecycle_module,
+        "_start_managed_runtime",
+        lambda *_args, **_kwargs: pytest.fail("must not relaunch an incumbent"),
+    )
+    renames = []
+    native_rename = launcher.rename
+
+    def rename(runtime, name):
+        renames.append((runtime, name))
+        return native_rename(runtime, name)
+
+    monkeypatch.setattr(launcher, "rename", rename)
+    with session_transition_lock(database, session.rodex_session_id):
+        if native_name_case == "collision":
+            collision_target = tmux(
+                runtime, "new-session", "-d", "-s", session.cool_name, "-P", "-F", "#{session_id}", "/bin/cat"
+            ).stdout.strip()
+            with pytest.raises(RodexRuntimeError):
+                lifecycle_module._prepare_selected_session(
+                    session.rodex_sessions_id,
+                    session.cool_name,
+                    database,
+                    launcher,
+                    codex_available=False,
+                    configured_codex="unused",
+                )
+            assert launcher.session_exists(recorded)
+            assert lookup_rodex_runtime_registration(session.rodex_sessions_id, database).runtime_id == runtime.runtime_id
+            assert tmux(runtime, "has-session", "-t", collision_target).returncode == 0
+            tmux(runtime, "kill-session", "-t", collision_target)
+        for _attempt in range(2):
+            prepared = lifecycle_module._prepare_selected_session(
+                session.rodex_sessions_id,
+                session.cool_name,
+                database,
+                launcher,
+                codex_available=False,
+                configured_codex="unused",
+            )
+            assert prepared.active_tmux.tmux_capability.runtime_capability == original_primary
+    assert len(renames) == {"external": 1, "display": 0, "collision": 2}[native_name_case]
+    persisted = lookup_rodex_runtime_registration(session.rodex_sessions_id, database)
+    assert persisted.tmux_session.tmux_session_name == session.cool_name
+    assert persisted.runtime_id == runtime.runtime_id
+    assert persisted.codex_session_id == session.codex_session_id
+    assert lookup_rodex_runtime_instance(session.rodex_sessions_id, database) == before_runtime
+    assert tmux(runtime, "display-message", "-p", "-t", "$0", "#{session_name}").stdout.strip() == session.cool_name
+
+
+@pytest.mark.parametrize("replace_server_after_rename", [False, True])
+def test_native_alias_announces_with_only_its_committed_name_advanced(
+    isolated_runtimes, tmp_path, monkeypatch, replace_server_after_rename
+):
+    launcher, create, tmux = isolated_runtimes
+    runtime = create(1)
+    database = tmp_path / "rodex.sqlite3"
+    session = create_a_rodex_session(
+        database,
+        codex_session_id=runtime.tmux_capability.codex_session_id,
+        rodex_session_id=runtime.tmux_capability.rodex_session_id,
+        runtime_id=runtime.runtime_id,
+        tmux_server_socket_path=runtime.tmux_server_socket_path,
+        tmux_session_name=runtime.tmux_session_name,
+    )
+    tmux(runtime, "set-option", "-t", "$0", "@rodex_registry_id", str(lookup_rodex_registry_id(database)))
+    monkeypatch.setattr(launcher, "refresh_shared_tmux_coordination", lambda _runtime: None)
+    dispatched = []
+
+    class ControlClient:
+        def inspect_live(self, control):
+            assert control.tmux_session_name == "renamed-work"
+            if replace_server_after_rename:
+                tmux(runtime, "set-option", "-s", "@rodex_shared_tmux_server_id", "f" * 32)
+            return SimpleNamespace(status="idle", active_turn_id=None)
+
+        def _start_turn(self, control, prompt, *, dispatch_id, revalidate):
+            revalidate()
+            dispatched.append((control, prompt))
+            return PromptDispatch("started", "fixture-turn", dispatch_id or "fixture-dispatch")
+
+    coordinator = ExactTurnMutationCoordinator(database, launcher, ControlClient())  # type: ignore[arg-type]
+    if replace_server_after_rename:
+        with pytest.raises(RodexLaunchError, match="AUTO_INFO delivery failed"):
+            coordinator.alias_transition(session.cool_name, "renamed-work", force=False)
+        assert dispatched == []
+    else:
+        assert coordinator.alias_transition(session.cool_name, "renamed-work", force=False) == "renamed-work"
+        assert len(dispatched) == 1
+        assert dispatched[0][0].tmux_runtime_capability == runtime.tmux_capability.runtime_capability
+        assert "renamed-work" in dispatched[0][1]
+        assert coordinator.alias_transition(session.cool_name, "renamed-work", force=False) == "renamed-work"
+        assert len(dispatched) == 1
+    assert (
+        lookup_rodex_runtime_registration(session.rodex_sessions_id, database).tmux_session.tmux_session_name
+        == "renamed-work"
+    )
 
 
 @pytest.mark.parametrize("operation", ["swap-pane", "join-pane", "move-pane"])

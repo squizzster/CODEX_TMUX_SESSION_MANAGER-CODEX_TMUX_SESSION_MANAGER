@@ -106,10 +106,26 @@ The creation/admission sequence is:
    retained child process tree; a matching thread ID alone is insufficient.
 
 Locks span identity-sensitive transitions, not terminal attachment. Attachment uses
-immutable `$session_id`, so a concurrent alias cannot redirect it. An unambiguous
-full-capability match can repair an externally renamed endpoint; ambiguous or foreign
-matches cannot. Alias finalization uses compare-and-swap and compensates its own tmux
-rename on failure. See [SQL incarnation rules](SQL_SCHEMA.md#identity-and-lineage).
+immutable `$session_id`, so a concurrent alias cannot redirect it. Discovery retains
+the coherently observed name and exact primary capability, including while registration
+is pending. Shared live verification can repair an externally renamed incumbent under
+the transition lock: it rechecks live authority around a name-only SQL compare-and-swap
+against the complete old registration. Socket, runtime, Codex root, and runtime-start
+provenance do not change. Pending confirmation uses the retained exact pane rather than
+the stale human name. Ambiguous or changed authority is refused, not adopted.
+
+Reopening then restores the intended display name through the normal guarded rename.
+Failures during repair, confirmation, rename, or UI refresh leave this discovered
+incumbent running; another open can reconcile the reached phase. Name collisions must
+be resolved before that rename can finish. Native changes between checks may require
+another retry; this is not atomic exclusion of external tmux mutations. It does not
+change cleanup policy for newly launched candidates or decide post-commit setup retention.
+
+Alias finalization uses compare-and-swap and compensates its own tmux rename on failure.
+Its subsequent announcement advances only the committed name in its expected control
+snapshot, retaining exact authority. The alias command's initial name-only liveness
+check is unchanged: reopen an externally renamed runtime before aliasing it.
+See [SQL incarnation rules](SQL_SCHEMA.md#identity-and-lineage).
 
 ## Liveness and replacement
 

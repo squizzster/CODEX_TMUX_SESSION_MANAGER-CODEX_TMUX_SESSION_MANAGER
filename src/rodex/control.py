@@ -8,7 +8,7 @@ import time
 import uuid
 from collections.abc import Callable
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from threading import Event, Thread
 from typing import Any, Literal
@@ -27,7 +27,7 @@ from .app_server_contract import CODEX_APP_SERVER, RODEX_CONTROL_APP_SERVER_CLIE
 from .interaction_pipeline import InteractionDeliveryIndeterminate, InteractionRejected
 from .protocol_proxy import CONTROL_CONNECTION_PATH, EVENT_STREAM_READY_METHOD
 from .runtime_peer import RuntimePeerIdentity, verified_runtime_connection
-from .tmux_session_capability import TmuxSessionCapability
+from .tmux_session_capability import TmuxRuntimeCapability, TmuxSessionCapability
 
 Connector = Callable[..., Any]
 Revalidate = Callable[[], None]
@@ -103,6 +103,8 @@ class LiveRodexControl:
     registration_state: str | None = None
     runtime_id: RodexRuntimeId | None = None
     tmux_capability: TmuxSessionCapability | None = None
+    tmux_runtime_capability: TmuxRuntimeCapability | None = field(default=None, kw_only=True)
+    tmux_session_name: str | None = field(default=None, kw_only=True)
 
     @property
     def peer_identity(self) -> RuntimePeerIdentity:

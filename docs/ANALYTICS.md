@@ -86,7 +86,21 @@ A publication-sequence race discards the in-memory cursor and reloads SQL before
 accepting more bytes. Deterministic failures park by authenticated source fingerprint;
 I/O and SQLite operational errors remain eligible for delayed retry. Health-only
 publication retries use the same coordinator without replaying rollouts. Failure
-logging records exception type/code locations, not bodies or frame locals.
+logging records the attempt phase, acknowledged publication sequence when known,
+and exception type/code locations, not bodies or frame locals.
+
+Database publication and resident acceptance are separate phases. An exception while
+accepting analyzer, trace or source-cursor state reports `analytics_acceptance_failed`;
+it does not declare the unchanged source invalid. The worker discards partial resident
+state and retries from the latest durable checkpoint within the failure budget below.
+This also applies when restoring an existing checkpoint without a new publication.
+After a publication error, recovery also rebuilds source cursors from SQL: a lost
+acknowledgement may leave an older cursor behind a committed prefix. Cold recovery
+authenticates that full durable prefix before analysis; later appends cannot hide a
+rewrite of the newly committed suffix. Pre-commit lock retries still reuse the
+prepared publication, and deterministic source/calculation conflicts still park.
+Source changes during capture remain subject to the existing failed-work backoff;
+bounded capture-instability retries are separate, unimplemented work.
 
 [`AnalyticsRecoveryBudget`](../src/rodex/analytics_recovery.py) owns a separate
 failed-work deadline. Events, source growth, or retirement cannot reset it. Delay is
@@ -133,5 +147,6 @@ Evidence: [coordinator](../tests/test_rodex_analytics.py),
 [source catalog](../tests/test_rodex_analytics_source_catalog.py),
 [source reader](../tests/test_rodex_analytics_source_reader.py),
 [analyzer parity](../tests/test_rodex_analytics_analyzer.py),
-[recovery](../tests/test_rodex_analytics_recovery.py), and
+[recovery](../tests/test_rodex_analytics_recovery.py),
+[publication acceptance](../tests/test_analytics_publication_acceptance.py), and
 [retirement](../tests/test_analytics_retirement.py).

@@ -10,6 +10,12 @@ repository currently has no Git release tags, so they do not imply a published r
 
 ### Modified
 
+- Analytics distinguishes committed publication from resident acceptance (A14 recovery
+  portion). Partial analyzer/trace/cursor acceptance retries unchanged bytes within
+  the existing cost budget instead of parking them as invalid source data. Publication
+  errors and acceptance failures rebuild cursors from SQL's authenticated checkpoint,
+  including when an acknowledgement was lost. Phase diagnostics remain content-free;
+  capture-instability retry handling is still open.
 - Primary event subscriptions require a verified upstream and end on source loss
   (A04). Publication and invalidation carry the source epoch; stale callbacks cannot
   populate or close a replacement stream. Exact waits report continuity loss without

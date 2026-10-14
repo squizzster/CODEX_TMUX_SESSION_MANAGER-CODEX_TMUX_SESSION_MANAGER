@@ -15,6 +15,7 @@ from contextlib import suppress
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
+from enum import Enum
 from pathlib import Path
 from threading import Event, Lock, Thread
 from traceback import extract_tb
@@ -138,6 +139,12 @@ class _PreparedAnalyticsPublication:
     replace_all_turns: bool
     followup_thread_ids: frozenset[CodexThreadId]
     unresolved_thread_ids: frozenset[CodexThreadId]
+
+
+class _AnalyticsAttemptPhase(Enum):
+    SOURCE_PROCESSING = "source_processing"
+    PUBLICATION = "publication"
+    RESIDENT_ACCEPTANCE = "resident_acceptance"
 
 
 @dataclass(frozen=True, slots=True)
@@ -371,6 +378,8 @@ class AnalyticsRolloutWorker:
             return "recovery_wait"
         expected_codex_session_id = self._expected_codex_session_id
         failure_reads: tuple[StableRolloutRead, ...] = ()
+        phase = _AnalyticsAttemptPhase.SOURCE_PROCESSING
+        publication_receipt: RodexAnalyticsPublishReceipt | None = None
         try:
             session_id = self._session_id
             codex_session_id = self._expected_codex_session_id
@@ -428,6 +437,7 @@ class AnalyticsRolloutWorker:
                 return "failure_parked" if self._pending_failure_health is None else "recovery_wait"
             prepared = self._prepared_publication
             if prepared is not None:
+                failure_reads = prepared.stable_reads
                 if batch is not None:
                     self._deferred_dirty_thread_ids.update(batch.thread_ids)
                 source_growth = tuple(
@@ -451,8 +461,10 @@ class AnalyticsRolloutWorker:
                         ),
                     )
                     self._prepared_publication = prepared
-                receipt = registry.publish(prepared.publication)
-                return self._accept_prepared_publication(prepared, receipt)
+                phase = _AnalyticsAttemptPhase.PUBLICATION
+                publication_receipt = registry.publish(prepared.publication)
+                phase = _AnalyticsAttemptPhase.RESIDENT_ACCEPTANCE
+                return self._accept_prepared_publication(prepared, publication_receipt)
             full_reconcile = self._requires_full_reconcile or batch is None or batch.full_reconcile
             requested_thread_ids: frozenset[CodexThreadId] = frozenset()
             if full_reconcile:
@@ -491,6 +503,7 @@ class AnalyticsRolloutWorker:
                 source_growth = tuple(
                     self._source_reader.verify_captured_prefix(item.authenticated_source) for item in stable_reads
                 )
+                phase = _AnalyticsAttemptPhase.RESIDENT_ACCEPTANCE
                 self._source_reader.accept([item.prepared_read for item in stable_reads])
                 self._promote_verified_sources(stable_reads)
                 self._requires_full_reconcile = False
@@ -535,7 +548,9 @@ class AnalyticsRolloutWorker:
                 )
                 self._published_turns = _turns_by_key(baseline_projection.statistics_projection.turn_statistics)
                 self._latest_turns = _latest_turns_by_thread(baseline_projection.statistics_projection.turn_statistics)
+                phase = _AnalyticsAttemptPhase.RESIDENT_ACCEPTANCE
                 adapter.accept_batch()
+                phase = _AnalyticsAttemptPhase.SOURCE_PROCESSING
                 self._trace_normalizer.warmup(
                     tuple(
                         (
@@ -653,8 +668,11 @@ class AnalyticsRolloutWorker:
                     unresolved_thread_ids=unresolved_thread_ids,
                 )
                 self._prepared_publication = prepared
-                receipt = registry.publish(publication)
-                return self._accept_prepared_publication(prepared, receipt)
+                phase = _AnalyticsAttemptPhase.PUBLICATION
+                publication_receipt = registry.publish(publication)
+                phase = _AnalyticsAttemptPhase.RESIDENT_ACCEPTANCE
+                return self._accept_prepared_publication(prepared, publication_receipt)
+            phase = _AnalyticsAttemptPhase.RESIDENT_ACCEPTANCE
             if previous_turns is None:
                 self._published_turns = dict(resident_turn_updates)
                 self._latest_turns = _latest_turns_by_thread(tuple(resident_turn_updates.values()))
@@ -707,7 +725,8 @@ class AnalyticsRolloutWorker:
             if batch is not None:
                 self._pending_resolution_thread_ids.update(batch.thread_ids)
             self._pending_resolution_thread_ids.update(self._deferred_dirty_thread_ids)
-            diagnostic_code = _diagnostic_code(error)
+            acceptance_failed = phase is _AnalyticsAttemptPhase.RESIDENT_ACCEPTANCE
+            diagnostic_code = "analytics_acceptance_failed" if acceptance_failed else _diagnostic_code(error)
             failure_fingerprint = _AnalyticsFailureFingerprint(
                 diagnostic_code=diagnostic_code,
                 diagnostic_detail=f"{type(error).__qualname__}: {error}",
@@ -724,9 +743,12 @@ class AnalyticsRolloutWorker:
                 # dependency exceptions can contain private transcript text.
                 frames = extract_tb(error.__traceback__)[-6:]
                 _LOGGER.error(
-                    "analytics failure runtime=%s diagnostic=%s exception=%s frames=%s retry_in_seconds=%.3f",
+                    "analytics failure runtime=%s diagnostic=%s phase=%s acknowledged_statistics_sequence=%s "
+                    "exception=%s frames=%s retry_in_seconds=%.3f",
                     self._config.runtime_id,
                     diagnostic_code,
+                    phase.value,
+                    None if publication_receipt is None else publication_receipt.statistics_publication_sequence,
                     type(error).__qualname__,
                     " > ".join(f"{Path(frame.filename).name}:{frame.lineno}:{frame.name}" for frame in frames),
                     max(0.0, self.recovery_retry_at - self._monotonic()),
@@ -743,6 +765,7 @@ class AnalyticsRolloutWorker:
             self._parked_failure = (
                 failure_fingerprint
                 if failure_fingerprint.sources
+                and not acceptance_failed
                 and not isinstance(error, (OSError, AnalyticsSourceReadError, sqlite3.OperationalError))
                 else None
             )
@@ -757,7 +780,14 @@ class AnalyticsRolloutWorker:
             self._adapter = None
             self._prepared_publication = None
             self._deferred_dirty_thread_ids.clear()
-            self._source_reader.require_clean_replay()
+            if phase in {_AnalyticsAttemptPhase.PUBLICATION, _AnalyticsAttemptPhase.RESIDENT_ACCEPTANCE}:
+                # SQL may have advanced even if its acknowledgement was lost;
+                # local acceptance can also stop between component updates.
+                # An old cursor authenticates too little and splits replay at
+                # the wrong baseline. Rebuild from SQL's authenticated prefix.
+                self._source_reader = AnalyticsSourceReader()
+            else:
+                self._source_reader.require_clean_replay()
             self._verified_sources.clear()
             self._trace_normalizer.require_clean_replay()
             # Recovery must warm from the latest durable acceptance, not the

@@ -1160,7 +1160,6 @@ class CodexProtocolProxy:
                         self.interactions,
                         input_target.name,
                         output_target.name,
-                        is_primary_connection,
                         invalidate_primary_source,
                     ),
                     name="rodex-codex-protocol-client-forwarder",
@@ -1330,7 +1329,6 @@ def _forward_messages(
     pipeline: SessionInteractionPipeline,
     target: str,
     output_target: str,
-    consumes_prepared_prompt: bool,
     on_source_end: DisconnectCallback | None = None,
 ) -> None:
     try:
@@ -1341,7 +1339,6 @@ def _forward_messages(
                     InteractionOperation.PROTOCOL_INPUT,
                     "codex-client",
                     payload=message,
-                    consumes_prepared_prompt=consumes_prepared_prompt,
                 )
             )
             if not result.accepted:

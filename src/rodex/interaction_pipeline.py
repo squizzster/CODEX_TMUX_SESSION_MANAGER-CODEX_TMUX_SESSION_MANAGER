@@ -20,9 +20,6 @@ from .protocol_input_text import (
     InputTextHook,
     UserPromptHookError,
     apply_user_prompt_hook,
-    apply_user_prompt_text,
-    is_user_input_submission,
-    user_input_text_items,
 )
 
 
@@ -80,9 +77,6 @@ class InteractionRequest:
     expected_turn_id: str | None = None
     expected_thread_id: str | None = None
     expected_binding: str | None = None
-    # The primary Codex TUI may consume one text submission that the terminal
-    # admission boundary has already transformed. Other protocol clients never do.
-    consumes_prepared_prompt: bool = False
     request_id: str = field(default_factory=lambda: uuid.uuid4().hex)
 
 
@@ -141,30 +135,7 @@ class SessionInteractionPipeline:
         self._outcome_observers = list(outcome_observers)
         self._targets: dict[str, InteractionTarget] = {}
         self._registry_lock = RLock()
-        self._prepared_prompt_lock = RLock()
-        self._prepared_prompts: deque[tuple[str, ...]] = deque(maxlen=256)
         self._records: deque[InteractionRecord] = deque(maxlen=256)
-
-    def prepare_primary_prompt(self, text: str) -> str:
-        """Prepare and admit initial argv, which has no existing editor to update."""
-        transformed = self.transform_primary_prompt(text)
-        self.admit_primary_prompt(transformed)
-        return transformed
-
-    def transform_primary_prompt(self, text: str) -> str:
-        """Compute canonical input without admitting a future protocol request."""
-        if self._input_text_hook is None:
-            return text
-        return apply_user_prompt_text(text, self._input_text_hook)
-
-    def admit_primary_prompt(self, text: str) -> None:
-        """Commit a receipt immediately before releasing verified input to Codex."""
-        if self._input_text_hook is None:
-            return
-        with self._prepared_prompt_lock:
-            # The admitting route supplies submission text: native editor trims
-            # surrounding whitespace, but initial argv preserves it.
-            self._prepared_prompts.append((text,))
 
     def subscribe_outcomes(self, observer: OutcomeObserver) -> OutcomeUnsubscriber:
         """Observe content-free outcomes until the returned exact subscription is closed."""
@@ -272,9 +243,9 @@ class SessionInteractionPipeline:
             raise InteractionRejected(f"interaction target is not available: {request.target}")
         input_text_hook = self._input_text_hook if request.operation == InteractionOperation.PROTOCOL_INPUT else None
         if input_text_hook is not None:
-            prepared = request.consumes_prepared_prompt and self._consume_prepared_prompt(request.payload)
-            if not prepared:
-                request = replace(request, payload=apply_user_prompt_hook(request.payload, input_text_hook))
+            # The submitted RPC owns transformation. Terminal drafts and argv
+            # cannot grant exemptions to a later request by matching its text.
+            request = replace(request, payload=apply_user_prompt_hook(request.payload, input_text_hook))
         transformed = request
         for hook in self._hooks:
             transformed = hook(transformed)
@@ -319,14 +290,8 @@ class SessionInteractionPipeline:
             or not request.source
         ):
             raise InteractionRejected("interaction requires an explicit target and source")
-        if (
-            type(request.start_model_turn) is not bool
-            or type(request.open_if_missing) is not bool
-            or type(request.consumes_prepared_prompt) is not bool
-        ):
+        if type(request.start_model_turn) is not bool or type(request.open_if_missing) is not bool:
             raise InteractionRejected("message intent and missing-target policy must be booleans")
-        if request.consumes_prepared_prompt and request.operation != InteractionOperation.PROTOCOL_INPUT:
-            raise InteractionRejected("only primary protocol input can consume a prepared prompt")
         if request.operation == InteractionOperation.MESSAGE:
             if (
                 not isinstance(request.text, str)
@@ -400,27 +365,6 @@ class SessionInteractionPipeline:
                 # Post-delivery diagnostics cannot turn accepted work into a retry.
                 continue
 
-    def _consume_prepared_prompt(self, payload: str | bytes | None) -> bool:
-        """Consume the next exact terminal admission or discard stale ordering."""
-        try:
-            frame = json.loads(payload) if isinstance(payload, (str, bytes)) else None
-        except (ValueError, UnicodeDecodeError):
-            return False
-        if not is_user_input_submission(frame):
-            return False
-        submitted = tuple(item["text"] for item in user_input_text_items(frame))
-        with self._prepared_prompt_lock:
-            if not self._prepared_prompts:
-                return False
-            expected = self._prepared_prompts.popleft()
-            if _matches_prepared_prompt(submitted, expected):
-                return True
-            # Native commands or rejected composer submissions can consume Enter
-            # without producing a model RPC. Never let such a reservation exempt a
-            # later, unrelated submission from the hook.
-            self._prepared_prompts.clear()
-            return False
-
 
 def _protocol_structure(payload: str | bytes | None) -> object:
     try:
@@ -441,10 +385,3 @@ def _protocol_structure(payload: str | bytes | None) -> object:
         return (type(item), item)
 
     return without_text(value)
-
-
-def _matches_prepared_prompt(submitted: tuple[str, ...], expected: tuple[str, ...]) -> bool:
-    """Match the native text or Codex's optional newline-delimited IDE prefix."""
-    if submitted == expected:
-        return True
-    return len(submitted) == len(expected) == 1 and bool(expected[0]) and submitted[0].endswith(f"\n{expected[0]}")

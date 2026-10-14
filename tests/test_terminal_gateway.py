@@ -15,7 +15,6 @@ import time
 from contextlib import contextmanager, suppress
 from pathlib import Path
 
-import pyte
 import pytest
 
 from rodex.input_interceptor_config import INPUT_INTERCEPTORS
@@ -303,7 +302,7 @@ def test_real_child_terminal_pass_through_resize_signal_exit_and_outer_restorati
             gateway.close()
 
 
-def test_real_pty_rewrites_verified_prompt_before_native_enter():
+def test_real_pty_passes_prompt_and_enter_without_running_text_hook():
     calls = []
 
     def hook(texts):
@@ -316,16 +315,14 @@ def test_real_pty_rewrites_verified_prompt_before_native_enter():
         try:
             read_until(gateway, master, b"READY")
             os.write(master, b"Hello\r")
-            rewritten = b"\x7f" * 5 + b"\x1b[200~Hello!\x1b[201~\r"
-            output = read_until(gateway, master, rewritten)
-
-            assert output.index(rewritten) >= output.index(b"Hello") + len(b"Hello")
-            assert calls == [("Hello",)]
+            output = read_until(gateway, master, b"Hello\r")
+            assert b"Hello!" not in output
+            assert calls == []
         finally:
             gateway.close()
 
 
-def test_canonical_editor_output_reaches_outer_pty_before_enter_and_receipt():
+def test_native_editor_keeps_original_prompt_without_composer_confirmation():
     # A native editor fixture, not an echo process: it consumes edit events and
     # emits a new ANSI frame. The assertion reads that actual outer PTY output.
     child = r"""
@@ -355,22 +352,16 @@ while True:
     render()
 """
     calls = []
-    pipeline = SessionInteractionPipeline(
-        input_text_hook=lambda texts: tuple((PromptTextEdit(0, len(text), "Hello!"),) for text in texts)
-    )
-    visible = pyte.Screen(120, 36)
-    stream = pyte.ByteStream(visible)
+
+    def hook(texts):
+        calls.append(texts)
+        return tuple((PromptTextEdit(0, len(text), "Hello!"),) for text in texts)
+
+    pipeline = SessionInteractionPipeline(input_text_hook=hook)
     with outer_terminal() as (master, slave):
 
         def confirm(text):
-            while select.select([master], [], [], 0)[0]:
-                stream.feed(os.read(master, 65536))
-            matches = visible.display[visible.cursor.y].rstrip() == f"\u203a {text}"
-            if matches:
-                assert not pipeline._prepared_prompts
-                assert not any("SUBMITTED" in line for line in visible.display)
-                calls.append(text)
-            return matches
+            pytest.fail(f"native prompt must not require composer confirmation: {text!r}")
 
         gateway = TerminalSessionGateway(
             [sys.executable, "-I", "-c", child],
@@ -386,10 +377,9 @@ while True:
         try:
             read_until(gateway, master, b"READY")
             os.write(master, b"Hello\r")
-            output = read_until(gateway, master, b"SUBMITTED[Hello!]")
-            assert b"SUBMITTED[Hello]" not in output
-            assert calls == ["Hello", "Hello!"]
-            assert list(pipeline._prepared_prompts) == [("Hello!",)]
+            output = read_until(gateway, master, b"SUBMITTED[Hello]")
+            assert b"Hello!" not in output
+            assert calls == []
         finally:
             gateway.close()
 

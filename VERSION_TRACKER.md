@@ -10,6 +10,13 @@ repository currently has no Git release tags, so they do not imply a published r
 
 ### Modified
 
+- Prompt rules now run only on structured submissions (A06). Terminal drafts and
+  initial argv are not transformed early; text-matching receipts are removed.
+  Native recall retains original input while model/server input is transformed.
+  Repeated, no-RPC, prefix, reconnect and multipart cases cannot reuse preparation;
+  strict rejection and local-command composer verification remain intact.
+  This intentionally changes draft/history display semantics, not native retry
+  deduplication or dispatch guarantees.
 - Command-policy shutdown shares one two-second join deadline across the accept thread
   and all request workers (A17 shutdown-budget portion). Admission stops during close;
   unresolved workers remain owned and are reported with content-free counts. Tests

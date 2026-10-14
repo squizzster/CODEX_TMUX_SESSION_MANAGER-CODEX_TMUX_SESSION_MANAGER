@@ -28,7 +28,7 @@ from rodex.tmux_session_capability import RODEX_TMUX_SOCKET_PATTERN
         ("ultra", "»", "Hello! " + "This is a greeting for the terminal rendering test. " * 3 + "\nHello again!"),
     ],
 )
-def test_real_codex_greeting_matches_terminal_and_persisted_input(tmp_path, request, effort, glyph, replacement):
+def test_real_codex_transforms_model_input_but_preserves_native_recall(tmp_path, request, effort, glyph, replacement):
     codex, tmux = shutil.which("codex"), shutil.which("tmux")
     _require_startup_prerequisite(request, bool(codex and tmux), "Codex and tmux are required")
     project = Path(__file__).parents[1]
@@ -38,7 +38,7 @@ def test_real_codex_greeting_matches_terminal_and_persisted_input(tmp_path, requ
     (tmp_path / "state/rodex").mkdir(mode=0o700, parents=True)
     hook_path = tmp_path / "state/rodex/conf/hooks/user_prompt_substitutions.yaml"
     hook_path.parent.mkdir(parents=True)
-    # A second application changes Hello! to Hello!!; receipt mistakes are visible.
+    # A second application changes Hello! to Hello!!; duplicate transformations are visible.
     hook_path.write_text(
         yaml.safe_dump(
             [
@@ -148,12 +148,10 @@ def test_real_codex_greeting_matches_terminal_and_persisted_input(tmp_path, requ
                 screen = capture()
                 (tmp_path / "submitted-screen.txt").write_text(screen)
                 assert texts == [replacement], (texts, screen)
-                assert "\u203a Hello!" in screen or "» Hello!" in screen, screen
-                assert "\u203a Hello\n" not in screen, screen
                 history = [
                     json.loads(line)["text"] for line in (isolated_home / "history.jsonl").read_text().splitlines()
                 ]
-                assert history == [replacement]
+                assert history == ["Hello"]
         finally:
             for socket in runtime_root.glob(RODEX_TMUX_SOCKET_PATTERN):
                 subprocess.run([tmux, "-N", "-S", str(socket), "kill-server"], capture_output=True, timeout=3)

@@ -4997,7 +4997,7 @@ def test_runtime_service_skips_updater_and_connects_tui_through_protocol_proxy(
         event_socket,
         tmp_path / f"policy-{RUNTIME_ID}.sock",
     )
-    expected_codex_arguments = ["Hello!"] if codex_arguments == ["Hello"] else codex_arguments
+    # Initial prompt text is transformed only when native emits its structured RPC.
     assert tui_commands == [
         [
             "/usr/bin/codex",
@@ -5008,7 +5008,7 @@ def test_runtime_service_skips_updater_and_connects_tui_through_protocol_proxy(
             "--no-alt-screen",
             "--remote",
             f"unix://{proxy_socket}",
-            *expected_codex_arguments,
+            *codex_arguments,
         ]
     ]
     assert len(tui_options) == 1

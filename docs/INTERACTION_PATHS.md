@@ -36,7 +36,7 @@ user-configured generic content-hook loader.
 | Create, selector open, resume, detach | [application pipeline](../src/rodex/application_pipeline.py) → [managed lifecycle](../src/rodex/managed_session_lifecycle.py) → runtime |
 | Native delegation | [`cli._exec_codex`](../src/rodex/cli.py); outside managed interaction |
 | Native typing/output | decoder/interceptor → [gateway](../src/rodex/terminal_gateway.py) → child PTY / terminal surface |
-| Managed initial prompt, verified Enter, queued or control text | [prompt admission](PROMPT_SUBMISSION_FLOW.md) → primary receipt or structured fallback |
+| Managed initial prompt, native Enter, queued or control text | native submission → [structured prompt transformation](PROMPT_SUBMISSION_FLOW.md) → App Server |
 | App Server frames | [proxy](../src/rodex/protocol_proxy.py) protocol input/output → original destination; primary output → mandatory event tap → auxiliary projections |
 | Main context reaches 70% | exact numeric usage projection → [context threshold controller](../src/rodex/context_threshold_steering.py) → shared interaction pipeline → exact active-turn steer |
 | Native shell command policy | App Server `PreToolUse(Bash)` → [retained helper](../src/rodex/command_policy_hook.py) → [private broker](../src/rodex/command_policy.py) → ordered [find/rg and later policies](FIND_RG_COMMAND_POLICY.md) → native Codex enforcement; then asynchronous [tmux-only status](../src/rodex/command_policy_status.py) |
@@ -193,7 +193,7 @@ acceptance; missing primary binding fails delivery. Terminal capture can still s
 native notice output. The [proxy isolation tests](../tests/test_rodex_protocol_proxy.py)
 verify this separation.
 
-Update, prompt-error, handoff-timeout, and menu-placeholder notices use that route.
+Update, prompt-error, and menu-placeholder notices use that route.
 Native UI decides placement: [Codex 0.162.1 observations](INTERACTION_PIPELINE_REPORT.md#native-notice-placement)
 show F2 warning-center placement, not guaranteed inline chat. In `light`, these
 warnings are not semantic commentary items. Switching notification type does not

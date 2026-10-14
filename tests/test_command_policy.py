@@ -36,12 +36,12 @@ from rodex.runtime_peer import CurrentProcessOwner
 RUNTIME = "0000000000000001"
 
 
-def hook_event(command="find . -maxdepth 0 -print"):
+def hook_event(command="printf unchanged", *, cwd="/workspace"):
     return {
         "hook_event_name": "PreToolUse",
         "session_id": "session-1",
         "turn_id": "turn-1",
-        "cwd": "/workspace",
+        "cwd": cwd,
         "permission_mode": "default",
         "tool_name": "Bash",
         "tool_input": {
@@ -60,8 +60,8 @@ def policy_root():
         yield Path(directory)
 
 
-def exchange(path, runtime=RUNTIME, command="find . -maxdepth 0 -print"):
-    request = CommandPolicyRequest.from_hook(runtime, hook_event(command))
+def exchange(path, runtime=RUNTIME, command="printf unchanged", *, cwd="/workspace"):
+    request = CommandPolicyRequest.from_hook(runtime, hook_event(command, cwd=cwd))
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
         connection.settimeout(2)
         connection.connect(str(path))
@@ -94,6 +94,54 @@ def test_policy_denies_standalone_integer_sleeps_below_ten_with_feedback(command
     request = CommandPolicyRequest.from_hook(RUNTIME, hook_event(command))
 
     assert evaluate_command_policy(request) == CommandPolicyDecision("deny", reason=SHORT_SLEEP_DENIAL_REASON)
+
+
+def test_find_rg_customer_policy_rejects_before_later_policy_rules(monkeypatch):
+    monkeypatch.delenv("RIPGREP_CONFIG_PATH", raising=False)
+    request = CommandPolicyRequest.from_hook(RUNTIME, hook_event("find /; sleep 5", cwd="/"))
+
+    decision = evaluate_command_policy(request)
+
+    assert decision.action == "deny"
+    assert decision.reason is not None
+    assert decision.reason.startswith("Rejected: Stage 1: Directory input '/'")
+
+
+def test_non_search_continues_to_the_existing_sleep_policy(monkeypatch):
+    monkeypatch.delenv("RIPGREP_CONFIG_PATH", raising=False)
+    request = CommandPolicyRequest.from_hook(RUNTIME, hook_event("sleep 5"))
+
+    assert evaluate_command_policy(request) == CommandPolicyDecision("deny", reason=SHORT_SLEEP_DENIAL_REASON)
+
+
+def test_allowed_search_continues_through_the_policy_pipeline(monkeypatch):
+    monkeypatch.delenv("RIPGREP_CONFIG_PATH", raising=False)
+    request = CommandPolicyRequest.from_hook(RUNTIME, hook_event("rg --version"))
+
+    assert evaluate_command_policy(request) == CommandPolicyDecision("allow")
+
+
+def test_search_policy_verifies_a_bounded_regular_file(monkeypatch, tmp_path):
+    monkeypatch.delenv("RIPGREP_CONFIG_PATH", raising=False)
+    (tmp_path / "input.txt").write_text("needle\n")
+    request = CommandPolicyRequest.from_hook(
+        RUNTIME,
+        hook_event("rg needle input.txt", cwd=str(tmp_path)),
+    )
+
+    assert evaluate_command_policy(request) == CommandPolicyDecision("allow")
+
+
+def test_search_denial_reason_is_bounded_before_native_encoding(monkeypatch):
+    monkeypatch.delenv("RIPGREP_CONFIG_PATH", raising=False)
+    request = CommandPolicyRequest.from_hook(RUNTIME, hook_event("rg needle /" + "x" * 9000, cwd="/"))
+
+    decision = evaluate_command_policy(request)
+
+    assert decision.action == "deny"
+    assert decision.reason is not None
+    assert len(decision.reason) == 8192
+    assert decision.reason.endswith("...")
 
 
 @pytest.mark.parametrize(
@@ -310,6 +358,7 @@ def test_hook_definition_uses_retained_interpreter_and_no_session_values():
         == "/retained/python/bin/python -I -m rodex.command_policy_hook"
     )
     assert 'matcher="^Bash$"' in definition
+    assert "timeout=3" in definition
     assert "policy-" not in definition
     assert "bypass" not in definition
     assert POLICY_PROTOCOL == "rodex-command-policy-v1"

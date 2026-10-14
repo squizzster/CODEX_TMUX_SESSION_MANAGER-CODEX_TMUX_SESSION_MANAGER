@@ -20,6 +20,10 @@ repository currently has no Git release tags, so they do not imply a published r
   another enabled hook retains `_policy-setup`. Decision and inactive-reminder rows
   last five seconds, expose tmux prefix mode, and restore the normal bar by exact
   claim token; successful admission clears stale inactive state.
+- Production `PreToolUse` customer-policy library for direct `find`/`rg` workflows,
+  with boundary-aware multiline extraction, declarative installed TOML rules,
+  deterministic static outcomes, bounded live metadata census, exact rejection
+  feedback, and no command execution, history, or persistence.
 - A daemon now creates one random 256-bit incarnation capability at each start,
   publishes it privately, and requires it alongside the retained installation identity
   on every request and response.
@@ -28,6 +32,10 @@ repository currently has no Git release tags, so they do not imply a published r
 
 ### Modified
 
+- `evaluate_command_policy` now checks `find`/`rg` before continuing to the existing
+  standalone short-sleep rule. Search evaluation has a combined workflow/deadline
+  budget, native denial reasons are bounded, and the helper/broker timeout is now
+  five seconds while the native hook retains its three-second limit.
 - Rodex now targets Python 3.11 or newer using equivalent pre-PEP-695 typing syntax.
   Launcher discovery includes PATH interpreters and leaves missing-package or module
   failures visible after selecting a compatible Python.

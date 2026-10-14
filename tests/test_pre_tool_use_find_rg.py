@@ -1,0 +1,413 @@
+from __future__ import annotations
+
+import random
+from dataclasses import replace
+from pathlib import Path
+
+import pytest
+
+from rodex.pre_tool_use_customer_library import find_rg as policy_engine
+from rodex.pre_tool_use_customer_library.find_rg import (
+    DEFAULT_FIND_RG_POLICY,
+    Outcome,
+    evaluate_find_rg_source,
+    extract_search_workflows,
+    inspect,
+    inspect_search_workflows,
+    load_policy,
+)
+
+POLICY_PATH = Path(policy_engine.__file__).with_name("find_rg.toml")
+
+
+@pytest.fixture
+def policy(monkeypatch):
+    monkeypatch.delenv("RIPGREP_CONFIG_PATH", raising=False)
+    return load_policy(POLICY_PATH)
+
+
+@pytest.fixture
+def workspace(tmp_path):
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "app.py").write_text("needle\n")
+    (tmp_path / "README.md").write_text("needle\n")
+    (tmp_path / "extensionless").write_text("needle\n")
+    return tmp_path
+
+
+def check(command, workspace, policy):
+    return inspect(command, cwd=workspace, policy=policy)
+
+
+def test_find_root_rejects_statically_with_reference_message(monkeypatch, workspace, policy):
+    def unexpected_probe(_path):
+        raise AssertionError("the static rejection must not touch the filesystem")
+
+    monkeypatch.setattr(policy_engine.os, "lstat", unexpected_probe)
+
+    decision = check("find /", workspace, policy)
+
+    assert decision.outcome is Outcome.REJECTED
+    assert decision.code == "UNBOUNDED_DEPTH"
+    assert not decision
+    assert decision.message == (
+        "Rejected: Stage 1: Directory input '/' has no maximum depth. Name a smaller subtree and an explicit "
+        "depth bound; output limits and name filters do not bound traversal."
+    )
+
+
+def test_static_inspection_is_repeatable_and_never_touches_metadata(monkeypatch, workspace, policy):
+    def unexpected_probe(_path):
+        raise AssertionError("static inspection must not touch the filesystem")
+
+    monkeypatch.setattr(policy_engine.os, "lstat", unexpected_probe)
+
+    first = inspect(
+        "rg needle README.md",
+        cwd=workspace,
+        policy=policy,
+        verify_filesystem=False,
+        environment={},
+    )
+    second = inspect(
+        "rg needle README.md",
+        cwd=workspace,
+        policy=policy,
+        verify_filesystem=False,
+        environment={},
+    )
+
+    assert first == second
+    assert first.outcome is Outcome.NEEDS_FILESYSTEM
+    assert first.code == "FILESYSTEM_REQUIRED"
+    assert first.scope == {"requests": 1}
+    assert not first
+
+
+def test_static_inspection_keeps_decisive_rejections(policy):
+    decision = inspect("find /", cwd="/synthetic", policy=policy, verify_filesystem=False, environment={})
+
+    assert decision.outcome is Outcome.REJECTED
+    assert decision.code == "UNBOUNDED_DEPTH"
+
+
+def test_extracts_single_line_pipeline_and_continued_wrapped_workflow(policy):
+    source = """printf 'rg quoted only'
+nice -n 19 ionice -c 3 timeout 10s \\
+  rg --no-config --max-depth 2 needle src
+find src -maxdepth 2 -type f | rg py | head -10
+printf '$(find /)'
+"""
+
+    workflows = extract_search_workflows(source, policy=policy)
+
+    assert [workflow.ordinal for workflow in workflows] == [1, 2]
+    assert [(workflow.start_line, workflow.end_line) for workflow in workflows] == [(2, 3), (4, 4)]
+    assert workflows[0].command.startswith("nice -n 19")
+    assert "\\\n  rg --no-config" in workflows[0].command
+    assert workflows[1].command == "find src -maxdepth 2 -type f | rg py | head -10"
+    assert all(source[item.start : item.end] == item.command for item in workflows)
+
+
+def test_extraction_requires_a_real_shell_command_boundary(policy):
+    source = """printf 'find /'
+echo "$(rg needle .)"
+cat <(find /)
+bash -c 'rg needle .'
+"""
+
+    assert extract_search_workflows(source, policy=policy) == ()
+
+
+def test_extraction_never_treats_heredoc_body_as_shell_commands(policy):
+    source = """python3 - <<'PY'
+find /
+rg needle .
+PY
+rg --version
+"""
+
+    workflows = extract_search_workflows(source, policy=policy)
+
+    assert len(workflows) == 1
+    assert workflows[0].command == "rg --version"
+    assert workflows[0].start_line == 5
+
+
+def test_direct_search_heredoc_header_is_retained_but_body_is_not(workspace, policy):
+    source = """rg needle README.md <<EOF
+find /
+EOF
+"""
+
+    workflows = extract_search_workflows(source, policy=policy)
+    results = inspect_search_workflows(
+        source,
+        cwd=workspace,
+        policy=policy,
+        verify_filesystem=False,
+        environment={},
+    )
+
+    assert [item.command for item in workflows] == ["rg needle README.md <<EOF"]
+    assert len(results) == 1
+    assert results[0].decision.outcome is Outcome.REJECTED
+
+
+def test_extraction_retains_multiline_pipeline_redirection_and_background(workspace, policy):
+    source = """find src -maxdepth 1 |
+  rg py >&2
+rg needle README.md &
+"""
+
+    workflows = extract_search_workflows(source, policy=policy)
+
+    assert len(workflows) == 2
+    assert workflows[0].command == "find src -maxdepth 1 |\n  rg py >&2"
+    assert (workflows[0].start_line, workflows[0].end_line) == (1, 2)
+    assert workflows[1].command == "rg needle README.md &"
+    results = inspect_search_workflows(
+        source,
+        cwd=workspace,
+        policy=policy,
+        verify_filesystem=False,
+        environment={},
+    )
+    assert results[0].decision.outcome is Outcome.NEEDS_FILESYSTEM
+    assert results[1].decision.code == "SHELL_CONTROL"
+
+
+def test_inspects_every_extracted_workflow_in_source_order(workspace, policy):
+    source = """find /
+rg needle README.md
+printf ignored
+rg --version
+"""
+
+    results = inspect_search_workflows(
+        source,
+        cwd=workspace,
+        policy=policy,
+        verify_filesystem=False,
+        environment={},
+    )
+
+    assert [item.workflow.start_line for item in results] == [1, 2, 4]
+    assert [item.decision.outcome for item in results] == [
+        Outcome.REJECTED,
+        Outcome.NEEDS_FILESYSTEM,
+        Outcome.ALLOWED,
+    ]
+
+
+def test_non_search_is_a_distinct_not_applicable_outcome(workspace, policy):
+    decision = check("printf hello", workspace, policy)
+
+    assert decision.outcome is Outcome.NOT_APPLICABLE
+    assert decision.allowed is False
+    assert not decision
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        'printf "$HOME"',
+        "printf 'find /'",
+        "printf 'quoted; rg needle .'",
+        'printf "$(find /)"',
+        "bash -c 'find /'",
+    ],
+)
+def test_indirect_or_mentioned_search_is_not_applicable(command, workspace, policy):
+    assert check(command, workspace, policy).outcome is Outcome.NOT_APPLICABLE
+
+
+def test_direct_search_with_dynamic_input_is_rejected(workspace, policy):
+    assert check('rg needle "$HOME"', workspace, policy).code == "DYNAMIC_SHELL"
+
+
+def test_environment_assignment_cannot_hide_direct_search(workspace, policy):
+    assert check("ROOT=. rg needle README.md", workspace, policy).code == "UNSUPPORTED_COMMAND"
+
+
+@pytest.mark.parametrize("path", ["README.md", "extensionless"])
+def test_rg_accepts_verified_regular_file(path, workspace, policy):
+    decision = check(f"rg needle {path}", workspace, policy)
+
+    assert decision.outcome is Outcome.ALLOWED
+    assert decision.allowed is True
+    assert bool(decision) is True
+    assert decision.scope["entries"] == 1
+    assert decision.scope["content_files"] == 1
+
+
+def test_filename_spelling_does_not_make_directory_a_file(workspace, policy):
+    (workspace / "looks_like_file.json").mkdir()
+
+    decision = check("rg needle looks_like_file.json", workspace, policy)
+
+    assert decision.code == "UNBOUNDED_DIRECTORY"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "find src -maxdepth 2 -type f",
+        "rg --max-depth 2 needle src",
+        "find README.md -printf '%s %p\\n'",
+    ],
+)
+def test_bounded_inputs_are_allowed(command, workspace, policy):
+    assert check(command, workspace, policy).allowed
+
+
+@pytest.mark.parametrize(
+    "command,code",
+    [
+        ("rg needle", "IMPLICIT_INPUT"),
+        ("rg needle -", "UNBOUNDED_STDIN"),
+        ("rg --files src", "UNBOUNDED_DIRECTORY"),
+        ("find src -maxdepth 99", "DEPTH_BUDGET"),
+        ("find src -maxdepth 1 -delete", "FIND_SIDE_EFFECT_OR_DYNAMIC_INPUT"),
+        (r"find src -maxdepth 1 -exec rg needle '{}' \;", "FIND_SIDE_EFFECT_OR_DYNAMIC_INPUT"),
+        ("rg -P needle README.md", "REGEX_ENGINE"),
+        ("rg --pre cat needle README.md", "RG_EXTERNAL_OR_UNINSPECTED_INPUT"),
+        ("rg -z needle README.md", "DECOMPRESSION"),
+        ("rg -j99 needle README.md", "THREAD_BUDGET"),
+        ("rg 'a{1,999999}' README.md", "PATTERN_EXPANSION"),
+    ],
+)
+def test_consequential_rules_reject(command, code, workspace, policy):
+    assert check(command, workspace, policy).code == code
+
+
+def test_pipeline_checks_producer_and_allows_bounded_consumers(workspace, policy):
+    decision = check("find src -maxdepth 2 -type f | rg py | sort | head -10", workspace, policy)
+
+    assert decision.allowed
+    assert decision.scope["entries"] == 2
+
+
+def test_unrelated_stage_in_search_workflow_is_rejected_without_execution(workspace, policy):
+    marker = workspace / "not-created"
+
+    decision = check(f"rg needle README.md; touch {marker}", workspace, policy)
+
+    assert decision.code == "UNSUPPORTED_COMMAND"
+    assert not marker.exists()
+
+
+def test_symlink_input_is_rejected(workspace, policy):
+    (workspace / "link").symlink_to("README.md")
+
+    assert check("rg needle link", workspace, policy).code == "SYMLINK_PATH"
+
+
+def test_ordered_no_follow_options_restore_non_following_policy(workspace, policy):
+    assert check("rg -L --no-follow needle README.md", workspace, policy).allowed
+    assert check("find -L -P src -maxdepth 1", workspace, policy).allowed
+
+
+def test_wide_shallow_tree_is_bounded(workspace, policy):
+    for number in range(5):
+        (workspace / "src" / str(number)).write_text("")
+    narrow_policy = replace(policy, max_entries=4)
+
+    assert check("find src -maxdepth 1", workspace, narrow_policy).code == "ENTRY_BUDGET"
+
+
+def test_content_byte_limit_is_independent_of_find_inventory(workspace, policy):
+    narrow_policy = replace(policy, max_file_bytes=1)
+
+    assert check("rg needle README.md", workspace, narrow_policy).code == "FILE_BYTE_BUDGET"
+    assert check("find README.md", workspace, narrow_policy).allowed
+
+
+def test_hidden_ripgrep_config_requires_explicit_no_config(monkeypatch, workspace, policy):
+    monkeypatch.setenv("RIPGREP_CONFIG_PATH", "/not/read")
+
+    assert check("rg needle README.md", workspace, policy).code == "HIDDEN_CONFIG"
+    assert check("rg --no-config needle README.md", workspace, policy).allowed
+
+
+def test_metadata_mode_needs_no_filesystem_census(workspace, policy):
+    decision = check("rg --version", workspace, policy)
+
+    assert decision.allowed
+    assert decision.scope == {}
+
+
+def test_shipped_default_policy_is_the_validated_package_resource(policy):
+    assert policy == DEFAULT_FIND_RG_POLICY
+
+
+def test_aggregate_source_returns_first_false_search_decision(workspace, policy):
+    decision = evaluate_find_rg_source(
+        "rg --version\nfind /\nrg needle README.md",
+        cwd=workspace,
+        policy=policy,
+        environment={},
+    )
+
+    assert decision.outcome is Outcome.REJECTED
+    assert decision.code == "UNBOUNDED_DEPTH"
+
+
+def test_aggregate_source_allows_only_when_every_search_is_allowed(workspace, policy):
+    decision = evaluate_find_rg_source(
+        "rg --version\nrg needle README.md",
+        cwd=workspace,
+        policy=policy,
+        environment={},
+    )
+
+    assert decision.outcome is Outcome.ALLOWED
+    assert decision.scope == {"workflows": 2}
+
+
+def test_aggregate_source_has_a_combined_workflow_budget(workspace, policy):
+    source = "\n".join("rg --version" for _ in range(policy.max_workflows + 1))
+
+    decision = evaluate_find_rg_source(source, cwd=workspace, policy=policy, environment={})
+
+    assert decision.outcome is Outcome.REJECTED
+    assert decision.code == "WORKFLOW_BUDGET"
+
+
+def test_aggregate_source_has_one_overall_evaluation_deadline(monkeypatch, workspace, policy):
+    moments = iter((10.0, 10.6))
+    monkeypatch.setattr(policy_engine.time, "monotonic", lambda: next(moments))
+
+    decision = evaluate_find_rg_source(
+        "rg --version",
+        cwd=workspace,
+        policy=policy,
+        environment={},
+        evaluation_seconds=0.5,
+    )
+
+    assert decision.outcome is Outcome.REJECTED
+    assert decision.code == "EVALUATION_TIMEOUT"
+
+
+def test_direct_search_parser_is_total_over_deterministic_noise(policy):
+    randomizer = random.Random(4242)
+    alphabet = "rg find -- ' \" $ ( ) \\ ; | {} [] abc012"
+
+    for _ in range(500):
+        command = randomizer.choice(("rg ", "find ")) + "".join(randomizer.choice(alphabet) for _ in range(80))
+        decision = inspect(command, cwd="/synthetic/unavailable", policy=policy)
+        assert isinstance(decision.allowed, bool)
+
+
+def test_workflow_extraction_is_repeatable_over_deterministic_noise(policy):
+    randomizer = random.Random(9102)
+    alphabet = "rg find nice timeout -- ' \" $ ( ) \\ ; | & {} [] abc012\n"
+
+    for _ in range(500):
+        source = "".join(randomizer.choice(alphabet) for _ in range(160))
+        first = extract_search_workflows(source, policy=policy)
+        second = extract_search_workflows(source, policy=policy)
+        assert first == second
+        assert [item.ordinal for item in first] == list(range(1, len(first) + 1))
+        assert all(source[item.start : item.end] == item.command for item in first)

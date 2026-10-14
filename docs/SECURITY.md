@@ -90,13 +90,15 @@ before broker workers and endpoint cleanup. The retained helper uses `-I` and th
 originating installation. Its socket environment value is not passed to the TUI.
 
 The versioned contract carries session/turn/cwd, permission mode, original tool
-input, and normalized command text. The current capability-test policy recognizes
-one standalone lowercase `sleep N` command with an unsigned integer, optional
-surrounding horizontal whitespace, and one optional terminal semicolon. It denies
-values below 10 and allows values of 10 or more. Command chains, comments, repeated
-semicolons, alternate executable paths, units, and decimals remain outside this
-narrow matcher and are allowed. Typed rewrite-command decisions remain scaffolding
-for future policies. The
+input, and normalized command text. `evaluate_command_policy` runs an ordered
+customer-policy library. Direct top-level `find`/`rg` workflows are checked first;
+their parser, live metadata budgets, precise outcomes, and known shell/filesystem
+limits are defined in the [find/rg policy](FIND_RG_COMMAND_POLICY.md). A rejection
+stops the pipeline. Approval or non-applicability continues to the standalone
+lowercase `sleep N` rule, which denies unsigned integer values below 10. Its optional
+surrounding horizontal whitespace and one optional terminal semicolon remain the
+exact matcher; chains, comments, alternate paths, units, and decimals are outside it.
+Typed rewrite-command decisions remain scaffolding for future policies. The
 [helper](../src/rodex/command_policy_hook.py) returns empty stdout on
 unchanged allow, native denial JSON on deny, or native `updatedInput` on rewrite.
 Only `command` can change; all other input fields remain intact. Rodex executes
@@ -107,7 +109,10 @@ The hook is registered by `policy_hook_override` in
 [command_policy_configuration.py](../src/rodex/command_policy_configuration.py)
 as `PreToolUse(^Bash$)`. It covers shell/unified-exec command initiation, not
 `write_stdin` continuations, hosted web tools, `apply_patch`, or MCP calls. An
-unchanged allow and its separate tmux status add no model context; a denial reason
+individual broker exchange can wait five seconds, while the established native hook
+timeout remains three seconds and is therefore the effective outer boundary. Search
+metadata deadlines are shorter. An unchanged allow and its separate tmux status add
+no model context; a denial reason
 or rewritten command result can reach the model. Native `additionalContext` is
 model input, and native hook `systemMessage` is warning output rather than a
 guarantee of inline display. [Native notice findings](INTERACTION_PIPELINE_REPORT.md#native-notice-placement)

@@ -68,6 +68,7 @@ normal temporary roots.
   [test_interaction_path_ownership.py](../tests/adversarial/test_interaction_path_ownership.py)
   and the [interaction inventory](INTERACTION_PATHS.md#effect-audit).
 - Native command policy: [contract/helper tests](../tests/test_command_policy.py),
+  [find/rg parser and admission tests](../tests/test_pre_tool_use_find_rg.py),
   [trust admission](../tests/test_command_policy_configuration.py),
   [tmux status](../tests/test_command_policy_status.py), and
   [native checks](../tests/test_command_policy_native.py). The native checks use

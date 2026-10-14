@@ -47,9 +47,10 @@ Routing authority: [`UnifiedRodexApplicationPipeline`](../src/rodex/application_
 
 ## Command-policy check
 
-Managed runtimes offer an optional native shell-command hook. The current test
-policy denies integer sleeps below 10 seconds; its exact decision and interception
-scope are defined in [native command policy](SECURITY.md#native-command-policy).
+Managed runtimes offer a native shell-command hook. It evaluates direct `find`/`rg`
+workflows before the narrow rule denying standalone integer sleeps below 10 seconds.
+Exact decisions and interception scope are defined in
+[native command policy](SECURITY.md#native-command-policy).
 
 `Rodex policy allowed: COMMAND` appears in the session's tmux status bar for five
 seconds from interception. A command such as `sleep 10` can finish after the notice

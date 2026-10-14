@@ -1,0 +1,106 @@
+schema_version = 1
+
+[limits]
+max_depth = 3
+max_roots = 8
+max_workflows = 64
+max_entries = 5000
+max_files = 1000
+max_file_bytes = 8388608
+max_total_bytes = 33554432
+max_pattern_bytes = 16384
+max_patterns = 32
+max_context_lines = 1000
+max_threads = 8
+max_stages = 8
+max_command_chars = 32768
+census_seconds = 0.25
+
+[find]
+denied_options = [
+  "-delete",
+  "-exec",
+  "-execdir",
+  "-ok",
+  "-okdir",
+  "-fprint",
+  "-fprint0",
+  "-fprintf",
+  "-fls",
+  "-files0-from",
+]
+follow_options = ["-H", "-L", "-follow"]
+reference_options = ["-newer", "-anewer", "-cnewer", "-samefile"]
+
+[ripgrep]
+external_options = ["pre", "pre-glob", "hostname-bin", "file", "ignore-file", "generate"]
+decompression_options = ["search-zip"]
+follow_options = ["follow"]
+non_default_engines = ["pcre2", "auto"]
+
+[messages]
+allowed = "Allowed: the verified inputs fit the configured find/rg work limits. This is not a runtime guarantee."
+not_applicable = "Not applicable: no direct find or rg command was found."
+FILESYSTEM_REQUIRED = "Needs filesystem: static structure passed, but input metadata must be verified before this search can be approved."
+NUL = "A NUL byte is not a valid command argument."
+QUOTING = "The command contains incomplete quoting or escaping."
+DYNAMIC_SHELL = "Shell expansion or substitution is present. Resolve variables and generated arguments first; their scope cannot be certified from this string."
+SHELL_EXPANSION = "Unquoted glob, brace, or tilde expansion makes the actual arguments unknown. Quote tool patterns and pass resolved literal input paths."
+COMMAND_COMPLEXITY = "The command exceeds a configured parser or stage limit. Split the workflow into separate search requests."
+WORKFLOW_BUDGET = "The command contains {count} direct search workflows, exceeding the combined limit of {maximum}. Split them into separate requests."
+EVALUATION_TIMEOUT = "The complete find/rg policy exceeded its {seconds}-second budget. Split the search workflows into separate requests."
+SHELL_CONTROL = "Shell operator {operator} needs manual review; groups, background jobs, substitutions, and unsupported controls are not approved."
+SHELL_SYNTAX = "A shell operator is missing its command."
+EMPTY_COMMAND = "No command was supplied."
+EXECUTABLE_IDENTITY = "Executable {executable} is not a recognized direct system-command spelling."
+WRAPPER_ARGUMENT = "Unsupported or incomplete {wrapper} launcher arguments."
+WRAPPER_DEPTH = "Too many nested command launchers were supplied."
+UNSUPPORTED_COMMAND = "{tool} is not an approved find/rg search or attached read-only stream consumer. Split the workflow and check its search requests separately."
+MISSING_ARGUMENT = "{option} is missing its value."
+UNEXPECTED_ARGUMENT = "{option} does not take a value."
+UNKNOWN_RG_OPTION = "Unrecognized ripgrep option {option}. Unknown options receive no approval."
+UNKNOWN_FIND_OPTION = "Unrecognized or misplaced find token {option}; the expression cannot be certified."
+INVALID_NUMBER = "{option} needs a nonnegative integer; got {value}."
+INVALID_SIZE = "{option} needs an integer byte size, optionally suffixed K, M, or G."
+MISSING_PATTERN = "ripgrep has no search pattern."
+CONFLICTING_MODES = "Multiple ripgrep output/search modes need review; the checker will not guess which mode wins."
+ENGINE = "Unrecognized regular-expression engine {engine}."
+FIND_TYPE = "Unsupported find type expression {value}."
+FIND_SIZE = "find -size needs a numeric comparison and a recognized size suffix."
+FIND_EXPRESSION = "The find expression is incomplete, unbalanced, or otherwise unsupported."
+FIND_ROOTS = "Explicit find roots cannot be combined with -files0-from."
+CONSUMER_ARGUMENT = "Only bounded, stdin-only {tool} arguments are supported."
+REDIRECTION = "Only /dev/null output, standard-output/error duplication, and bounded rg input files are approved. Other redirections can create files or block."
+FIND_SIDE_EFFECT_OR_DYNAMIC_INPUT = "{options} can mutate files, launch per-entry work, write output files, or introduce an unchecked root list. This read-only checker does not approve those actions."
+SYMLINK_FOLLOW = "Following links can escape the inspected tree or duplicate traversal. Resolve and separately bound targets instead."
+REFERENCE_SCOPE = "Reference input {path} used by {option} is outside ordinary regular-filesystem scope."
+FORMAT_AMPLIFICATION = "The find format can amplify output excessively; shorten the format and field widths."
+RG_EXTERNAL_OR_UNINSPECTED_INPUT = "{options} introduces external code, external option/pattern inputs, or an unsupported mode. Those inputs have not been budgeted."
+DECOMPRESSION = "Compressed input can expand far beyond its on-disk size and invoke decompressors. Use an independently bounded decompressed input."
+REGEX_ENGINE = "PCRE2 or automatic engine selection needs a separate CPU budget. This policy approves the default engine only."
+UNRESTRICTED_COUNT = "More than three -u flags requires version-specific review."
+PATTERN_BUDGET = "Pattern inputs exceed {max_pattern_bytes} bytes or {max_patterns} patterns."
+PATTERN_EXPANSION = "A counted regex repetition exceeds the 10,000-repeat policy limit."
+OUTPUT_CONTEXT = "{option} exceeds the {maximum}-line context budget."
+THREAD_BUDGET = "Requested thread count exceeds {maximum}."
+REGEX_MEMORY = "{option} exceeds the 64 MiB engine-memory policy ceiling."
+AMBIGUOUS_INPUT = "Input redirection combined with a pipeline or separate operands requires review."
+LISTING_STDIN = "rg --files inventories filesystem paths; redirected stdin does not supply a bounded root. Name the directory and its depth explicitly."
+UNBOUNDED_STDIN = "Standalone stdin has no known size or end-of-stream time. Supply a finite regular input file or a fully checked producer pipeline."
+IMPLICIT_INPUT = "No explicit rg input: runtime stdin-versus-current-directory behavior is ambiguous. Name the input files or directory."
+DEPTH_BUDGET = "Requested depth {depth} exceeds the policy maximum {maximum}. Narrow the starting roots or set a smaller depth deliberately."
+ROOT_COUNT = "The request supplies {count} roots, exceeding the combined limit of {maximum}."
+EMPTY_PATH = "An empty input path is not an explicit scope."
+VIRTUAL_INPUT = "{path} is a virtual/device input; apparent file size is not a reliable work bound."
+UNBOUNDED_DEPTH = "Directory input {path} has no maximum depth. Name a smaller subtree and an explicit depth bound; output limits and name filters do not bound traversal."
+UNBOUNDED_DIRECTORY = "{path} is a directory with no maximum depth. Type, name, glob, match, and output filters do not impose a traversal bound."
+FILESYSTEM_UNKNOWN = "Cannot verify input metadata for {path}; no approval was issued."
+SYMLINK_PATH = "Path component {path} is a symlink. Resolve and separately approve its target."
+NONREGULAR_INPUT = "A directory, FIFO, device, socket, or other unsupported entry is reachable at {path}."
+CENSUS_TIMEOUT = "The bounded metadata census exceeded {seconds} seconds; input scope cannot be established cheaply."
+ENTRY_BUDGET = "The reachable inputs exceed {maximum} entries. A shallow directory can still be very wide; narrow the roots."
+FILE_BYTE_BUDGET = "A candidate regular file is {size} bytes, above the {maximum}-byte per-file budget. Small output does not make a large scan cheap."
+FILE_COUNT_BUDGET = "Content inputs exceed {maximum} files."
+TOTAL_BYTE_BUDGET = "Candidate content exceeds the combined {maximum}-byte budget."
+HIDDEN_CONFIG = "RIPGREP_CONFIG_PATH is set. Add --no-config or review the actual config; unseen flags could change the work."
+CWD = "Supply an absolute working-directory path."

@@ -22,8 +22,8 @@ installations keep already-running sessions on the implementation that started t
   and metadata-only traces without creating a second conversation store.
 - **Make it yours.** Change prompts, presentation, and session behaviour in Python,
   without rebuilding Codex. Simple prompt rules live in YAML.
-- **Check command interception.** With [managed hook admission](docs/CLI.md#command-policy-check),
-  see a private `Rodex policy allowed: …` status while Codex still owns execution.
+- **Bound expensive searches.** A native pre-tool policy explains unsafe direct
+  `find`/`rg` requests before execution while preserving Codex approvals and sandboxing.
 
 Rodex is an **ALPHA** in-house Linux pre-release; interfaces may change.
 
@@ -69,6 +69,8 @@ Detach with `Ctrl-D` or `Ctrl-b d`. Return with `./rodex NAME`.
 - [SQL schema](docs/SQL_SCHEMA.md) — persistence methodology, identity, lineage, and transactions.
 - [Security and privacy](docs/SECURITY.md) — native hook admission, trust boundaries,
   local transports, executable assumptions, and content handling.
+- [Find/rg command policy](docs/FIND_RG_COMMAND_POLICY.md) — extraction boundaries,
+  rules, work budgets, outcomes, deadlines, and known limits.
 
 ## Development and agent workflow
 

@@ -436,7 +436,9 @@ def _protocol_structure(payload: str | bytes | None) -> object:
             }
         if isinstance(item, list):
             return [without_text(child) for child in item]
-        return item
+        # Python equates bool/int and int/float; protocol controls retain their
+        # JSON scalar type as well as their value, including nested controls.
+        return (type(item), item)
 
     return without_text(value)
 

@@ -14,6 +14,13 @@ are unchanged. Retained running sessions keep their original implementation.
 
 ### Modified
 
+- Startup identifies the main conversation from its correlated native lifecycle
+  acknowledgement, not the number of loaded threads. Temporary (`ephemeral: true`)
+  helper starts/forks remain correlated but neither select nor suspend main-thread
+  authority. This fixes intermittent initial-prompt startup refusal and subsequent
+  loss of model-input binding. The authenticated read-only startup query shares the
+  same identity owner as steering; version admission, exact-resume checks, connection
+  fences and the 30-second startup allowance remain intact.
 - Changed primary prompts again show their actual expansion in the ordinary Rodex
   pane, through a separate bounded, transient read-only display above the composer.
   Original input is followed by `=> translated =>` and the forwarded text in normal

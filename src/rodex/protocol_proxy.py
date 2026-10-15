@@ -1077,7 +1077,7 @@ class CodexProtocolProxy:
     def _handle_connection(self, tui_connection: Any) -> None:
         path = _connection_path(tui_connection)
         if path == SESSION_INTERACTION_CONNECTION_PATH:
-            serve_session_interaction(tui_connection, self.interactions)
+            serve_session_interaction(tui_connection, self.interactions, primary_thread_id=self.primary_thread_id)
             return
         if path not in NATIVE_CONNECTION_PATHS and path != CONTROL_CONNECTION_PATH:
             tui_connection.close(code=1008, reason="Unknown Rodex route")
@@ -1297,8 +1297,12 @@ class CodexProtocolProxy:
         return True
 
     def _primary_model_thread_id(self) -> str | None:
+        return self.primary_thread_id() if self._model_message_sender is not None else None
+
+    def primary_thread_id(self) -> str | None:
+        """The confirmed non-ephemeral TUI conversation, independent of steering."""
         with self._connection_lock:
-            return self._primary_thread_binding.thread_id if self._model_message_sender is not None else None
+            return self._primary_thread_binding.thread_id
 
     def _observe_primary_input(self, event: dict[str, Any] | None, connection: Any) -> None:
         with self._connection_lock:

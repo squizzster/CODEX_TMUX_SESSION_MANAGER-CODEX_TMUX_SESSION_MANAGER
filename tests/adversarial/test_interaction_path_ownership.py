@@ -78,10 +78,13 @@ EFFECT_OWNERS = {
         "rodex/runtime.py:RodexRuntimeLauncher.attach:self._publish_tui_notice",
     },
     "read-only transient app server probes": {
-        "rodex/runtime.py:RodexRuntimeLauncher._list_loaded_codex_threads:.send",
+        "rodex/runtime.py:RodexRuntimeLauncher._require_app_server_version:.send",
         "rodex/runtime.py:RodexRuntimeLauncher._read_persisted_codex_session:.send",
         "rodex/command_policy_configuration.py:policy_hook_admission:.send",
         "rodex/command_policy_configuration.py:policy_hook_admission.request:.send",
+    },
+    "authenticated read-only primary identity": {
+        "rodex/interaction_transport.py:read_primary_thread_id:.send",
     },
     "private native command policy": {
         "rodex/command_policy.py:CommandPolicyBroker._serve:.sendall",
@@ -246,7 +249,7 @@ def test_pane_mutations_and_model_rpc_calls_have_exact_owners():
 
 def test_bootstrap_app_server_requests_remain_read_only():
     tree = ast.parse((SOURCE_ROOT / "rodex/runtime.py").read_text(encoding="utf-8"))
-    probes = {"_read_persisted_codex_session", "_list_loaded_codex_threads"}
+    probes = {"_read_persisted_codex_session", "_require_app_server_version"}
     for node in ast.walk(tree):
         if isinstance(node, ast.FunctionDef) and node.name in probes:
             methods = {

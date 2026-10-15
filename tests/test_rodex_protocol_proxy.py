@@ -217,7 +217,7 @@ def test_context_observer_projects_last_usage_for_only_the_primary_thread() -> N
         json.dumps(
             {
                 "method": "thread/started",
-                "params": {"thread": {"id": "thread-1"}},
+                "params": {"thread": {"id": "thread-1", "ephemeral": False}},
             }
         )
     )
@@ -262,7 +262,7 @@ def test_context_observer_follows_primary_rollout_during_a_live_turn(
         {
             "method": "thread/started",
             "params": {
-                "thread": {"id": "thread-1", "path": str(rollout_path)},
+                "thread": {"id": "thread-1", "path": str(rollout_path), "ephemeral": False},
             },
         }
     )
@@ -299,7 +299,7 @@ def test_context_observer_rejects_a_rollout_outside_the_codex_sessions_root(
         {
             "method": "thread/started",
             "params": {
-                "thread": {"id": "thread-1", "path": str(rollout_path)},
+                "thread": {"id": "thread-1", "path": str(rollout_path), "ephemeral": False},
             },
         }
     )
@@ -477,10 +477,10 @@ def test_proxy_delivers_rodex_notice_to_tui_without_forwarding_it_upstream(
     thread_started = json.dumps(
         {
             "method": "thread/started",
-            "params": {"thread": {"id": "thread-1"}},
+            "params": {"thread": {"id": "thread-1", "ephemeral": False}},
         }
     )
-    thread_selected = json.dumps({"id": 1, "result": {"thread": {"id": "thread-1"}}})
+    thread_selected = json.dumps({"id": 1, "result": {"thread": {"id": "thread-1", "ephemeral": False}}})
 
     def app_server(connection: object) -> None:
         received_by_server.append(connection.recv())  # type: ignore[attr-defined]
@@ -680,7 +680,9 @@ def test_event_tap_sends_only_semantic_wake_events_to_internal_workers(
     event_socket = tmp_path / "events.sock"
     tap = CodexProtocolEventTap(event_socket, peer_identity=TEST_PEER)
     source_epoch = tap.activate_primary_source()
-    thread_started = json.dumps({"method": "thread/started", "params": {"thread": {"id": "thread-1"}}})
+    thread_started = json.dumps(
+        {"method": "thread/started", "params": {"thread": {"id": "thread-1", "ephemeral": False}}}
+    )
     token_delta = json.dumps({"method": "item/agentMessage/delta", "params": {"delta": "noise"}})
     turn_completed = json.dumps({"method": "turn/completed", "params": {"threadId": "thread-1"}})
     item_completed = json.dumps({"method": "item/completed", "params": {"threadId": "thread-1"}})

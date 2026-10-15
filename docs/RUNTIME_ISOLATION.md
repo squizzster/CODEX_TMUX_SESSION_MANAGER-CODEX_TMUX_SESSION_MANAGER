@@ -105,6 +105,17 @@ The creation/admission sequence is:
    [`RuntimePeerIdentity`](../src/rodex/runtime_peer.py) also pins native peers to the
    retained child process tree; a matching thread ID alone is insufficient.
 
+Before registration, startup verifies the native App Server version and reads the
+proxy's correlated, non-ephemeral primary lifecycle acknowledgement through the
+authenticated `rodex/primary-thread/read` operation. It does not select from
+`thread/loaded/list`: Codex can legitimately keep temporary helpers or child threads
+loaded beside the main conversation. The query shares the steering identity owner,
+does not submit native work, and returns no identity while main selection is pending
+or its connection has been lost. Startup keeps its 30-second allowance; an exact
+resume must still acknowledge the requested UUID. Regression coverage includes
+[delayed startup](../tests/test_rodex_runtime.py) and
+[native start/resume/fork with a loaded helper](../tests/test_primary_thread_discovery_native.py).
+
 Locks span identity-sensitive transitions, not terminal attachment. Attachment uses
 immutable `$session_id`, so a concurrent alias cannot redirect it. Discovery retains
 the coherently observed name and exact primary capability, including while registration

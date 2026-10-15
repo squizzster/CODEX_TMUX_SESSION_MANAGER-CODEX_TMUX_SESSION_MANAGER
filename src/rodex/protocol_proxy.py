@@ -36,6 +36,7 @@ from .interaction_pipeline import (
 from .interaction_transport import SESSION_INTERACTION_CONNECTION_PATH, serve_session_interaction
 from .pane_control import TmuxPaneController
 from .primary_thread_binding import PrimaryThreadBinding
+from .prompt_expansion_display import PromptExpansionDisplay
 from .protocol_input_text import UserPromptHookError
 from .protocol_projection import ProtocolProjectionFailure, ProtocolProjectionGuard
 from .runtime_endpoint import ExclusiveUnixEndpoint
@@ -961,6 +962,7 @@ class CodexProtocolProxy:
         model_message_sender: Callable[[InteractionRequest], InteractionResult] | None = None,
         event_tap: CodexProtocolEventTap | None = None,
         projection_guard: ProtocolProjectionGuard | None = None,
+        prompt_expansion_display: PromptExpansionDisplay | None = None,
     ) -> None:
         self._proxy_socket_path = proxy_socket_path
         self._app_server_socket_path = app_server_socket_path
@@ -973,6 +975,7 @@ class CodexProtocolProxy:
         self._on_primary_client_message = on_primary_client_message
         self._on_primary_disconnect = on_primary_disconnect
         self._event_tap = event_tap
+        self._prompt_expansion_display = prompt_expansion_display
         self._projection_guard = projection_guard if projection_guard is not None else ProtocolProjectionGuard()
         self._primary_source_epoch: int | None = None
         self.interactions = interaction_pipeline if interaction_pipeline is not None else SessionInteractionPipeline()
@@ -1144,6 +1147,13 @@ class CodexProtocolProxy:
                     frozenset({InteractionOperation.PROTOCOL_INPUT}),
                     connection_live.is_set,
                     deliver_input,
+                    observe_delivered=(
+                        lambda original, forwarded: prompt_display.observe_forwarded(
+                            tui_connection, original.payload, forwarded.payload
+                        )
+                    )
+                    if is_primary_connection and (prompt_display := self._prompt_expansion_display) is not None
+                    else None,
                 )
                 output_target = InteractionTarget(
                     f"protocol:{connection_id}:output",
@@ -1160,6 +1170,8 @@ class CodexProtocolProxy:
                         with self._connection_lock:
                             if self._primary_tui_connection is tui_connection:
                                 self._primary_thread_binding.invalidate_after_disconnect()
+                                if self._prompt_expansion_display is not None:
+                                    self._prompt_expansion_display.release_source(tui_connection)
                     if self._event_tap is not None and source_epoch is not None:
                         self._event_tap.reset_after_disconnect(source_epoch=source_epoch)
 
@@ -1315,6 +1327,8 @@ class CodexProtocolProxy:
                 raise RodexProtocolProxyError("primary connection changed during upstream verification")
             if self._event_tap is not None:
                 self._primary_source_epoch = self._event_tap.activate_primary_source()
+            if self._prompt_expansion_display is not None:
+                self._prompt_expansion_display.bind_source(tui_connection)
             return self._primary_source_epoch
 
     def _release_primary_connection(self, tui_connection: Any) -> None:
@@ -1329,6 +1343,8 @@ class CodexProtocolProxy:
                     self._primary_tui_connection = None
                     self._primary_thread_binding = PrimaryThreadBinding()
                     self._primary_binding = None
+                    if self._prompt_expansion_display is not None:
+                        self._prompt_expansion_display.release_source(tui_connection)
                     released = True
             if source_epoch is not None and self._event_tap is not None:
                 self._event_tap.reset_after_disconnect(source_epoch=source_epoch)

@@ -141,6 +141,7 @@ def _mock_terminal_gateway(monkeypatch: pytest.MonkeyPatch) -> list:
             registrations,
             confirm_native_prefix,
             presentation,
+            prompt_expansion_display,
             **options,
         ):
             assert pipeline is not None and runtime_identity == str(RUNTIME_ID)
@@ -148,6 +149,8 @@ def _mock_terminal_gateway(monkeypatch: pytest.MonkeyPatch) -> list:
             assert callable(confirm_native_prefix)
             assert callable(presentation.snapshot)
             assert callable(presentation.subscribe)
+            assert callable(prompt_expansion_display.observe_forwarded)
+            self.prompt_expansion_display = prompt_expansion_display
             self.process = runtime_module.subprocess.Popen(command, **options)
             self.closed = False
             self.wait_timeouts = []
@@ -4760,6 +4763,7 @@ def test_runtime_service_skips_updater_and_connects_tui_through_protocol_proxy(
     status_updates: list[int] = []
     working_updates: list[bool] = []
     proxy_lifecycle: list[str] = []
+    proxy_prompt_displays = []
     protected_paths: tuple[Path, ...] | None = None
     tmux_runtime_capability = TmuxRuntimeCapability(
         tmux_socket,
@@ -4811,6 +4815,7 @@ def test_runtime_service_skips_updater_and_connects_tui_through_protocol_proxy(
     class FakeProxy:
         def __init__(self, *args: object, **kwargs: object) -> None:
             assert args[:2] == (proxy_socket, app_socket)
+            proxy_prompt_displays.append(kwargs["prompt_expansion_display"])
 
         def start(self) -> None:
             proxy_lifecycle.append("start")
@@ -4974,6 +4979,7 @@ def test_runtime_service_skips_updater_and_connects_tui_through_protocol_proxy(
     assert status_updates == [0]
     assert working_updates == [False, False]
     assert len(gateways) == 1 and gateways[0].closed
+    assert proxy_prompt_displays == [gateways[0].prompt_expansion_display]
     assert gateways[0].working_updates == [False]
     assert len(gateways[0].wait_timeouts) == 1
     assert gateways[0].wait_timeouts[0] > 50

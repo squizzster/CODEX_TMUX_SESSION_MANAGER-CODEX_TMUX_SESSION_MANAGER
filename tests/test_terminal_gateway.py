@@ -1,6 +1,7 @@
 """Real isolated PTYs verify transport, child terminal ownership and restoration."""
 
 import fcntl
+import json
 import os
 import pty
 import select
@@ -15,6 +16,7 @@ import time
 from contextlib import contextmanager, suppress
 from pathlib import Path
 
+import pyte
 import pytest
 
 from rodex.input_interceptor_config import INPUT_INTERCEPTORS
@@ -28,6 +30,7 @@ from rodex.interaction_pipeline import (
     SessionInteractionPipeline,
 )
 from rodex.presentation_policy import PresentationSnapshot, PresentationSurface, SessionPresentationPipeline
+from rodex.prompt_expansion_display import PromptExpansionDisplay
 from rodex.protocol_input_text import PromptTextEdit
 from rodex.terminal_gateway import QUEUE_LIMIT_BYTES, WORKING_COUNTER_REFRESH_SECONDS, TerminalSessionGateway
 from rodex.terminal_surface import TerminalSurfaceRenderer
@@ -82,7 +85,7 @@ def read_until(gateway, master, expected):
     return bytes(output)
 
 
-def start_gateway(slave, pipeline, registrations=(), presentation=None):
+def start_gateway(slave, pipeline, registrations=(), presentation=None, prompt_expansion_display=None):
     return TerminalSessionGateway(
         [sys.executable, "-I", "-c", ECHO_CHILD],
         env=dict(os.environ),
@@ -92,9 +95,72 @@ def start_gateway(slave, pipeline, registrations=(), presentation=None):
         registrations=registrations,
         confirm_native_prefix=lambda _prefix: True,
         presentation=presentation,
+        prompt_expansion_display=prompt_expansion_display,
         input_fd=slave,
         output_fd=slave,
     )
+
+
+def test_gateway_displays_and_expires_expansion_without_native_input_or_output(monkeypatch):
+    monkeypatch.setattr("rodex.prompt_expansion_display.PROMPT_EXPANSION_VISIBLE_SECONDS", 0.2)
+    display = PromptExpansionDisplay()
+    source = object()
+    display.bind_source(source)
+    with outer_terminal() as (master, slave):
+        gateway = start_gateway(slave, SessionInteractionPipeline(), prompt_expansion_display=display)
+        try:
+            read_until(gateway, master, b"READY")
+            gateway._dispatch(InteractionOperation.TERMINAL_OUTPUT, "\x1b[2J\x1b[12;1H\u203a draft".encode())
+            read_until(gateway, master, b"draft")
+            screen = pyte.Screen(120, 36)
+            stream = pyte.ByteStream(screen)
+            before = json.dumps({"method": "turn/start", "params": {"input": [{"type": "text", "text": "push"}]}})
+            after = before.replace("push", "Commit/stash → Fetch/prune")
+            display.observe_forwarded(source, before, after)
+            stream.feed(read_until(gateway, master, b"Rodex expanded input:"))
+            assert "Commit/stash" in "\n".join(screen.display)
+            assert not gateway._native_queue
+            assert "Rodex expanded input" not in "\n".join(gateway._surface_renderer.native.screen.display)
+            # No child output is needed to remove the overlay at its deadline.
+            with pytest.raises(subprocess.TimeoutExpired):
+                gateway.wait(timeout=0.3)
+            while select.select([master], [], [], 0)[0]:
+                stream.feed(os.read(master, 65536))
+            assert "Rodex expanded input" not in "\n".join(screen.display)
+            assert screen.display[11].rstrip() == "\u203a draft"
+            assert not gateway._native_queue
+        finally:
+            gateway.close()
+
+
+def test_stalled_terminal_coalesces_expansions_and_expiry_into_one_complete_frame():
+    display = PromptExpansionDisplay()
+    source = object()
+    display.bind_source(source)
+    with outer_terminal() as (master, slave):
+        gateway = start_gateway(slave, SessionInteractionPipeline(), prompt_expansion_display=display)
+        try:
+            read_until(gateway, master, b"READY")
+            gateway._dispatch(InteractionOperation.TERMINAL_OUTPUT, "\x1b[2J\x1b[12;1H\u203a draft".encode())
+            before = json.dumps({"method": "turn/start", "params": {"input": [{"type": "text", "text": "push"}]}})
+            pending_native = bytes(gateway._display_queue)
+            for index in range(100):
+                after = before.replace("push", f"expanded {index} " + "line\\n" * (index % 8))
+                display.observe_forwarded(source, before, after)
+                gateway._sync_prompt_expansion(0)
+                assert bytes(gateway._display_queue) == pending_native
+                assert len(gateway._pending_surface_frame) < 20_000
+            screen = pyte.Screen(120, 36)
+            stream = pyte.ByteStream(screen)
+            stream.feed(pending_native + gateway._pending_surface_frame)
+            assert "expanded 99" in "\n".join(screen.display)
+            gateway._sync_prompt_expansion(float("inf"))
+            assert bytes(gateway._display_queue) == pending_native
+            stream.feed(gateway._pending_surface_frame)
+            assert screen.display == gateway._surface_renderer.native.screen.display
+            assert not gateway._native_queue
+        finally:
+            gateway.close()
 
 
 def test_gateway_relays_resizes_wakes_and_exits_with_high_numbered_descriptors():

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import shlex
 import subprocess
+import time
 from pathlib import Path
 from threading import Event, Thread
 
@@ -11,11 +12,14 @@ from runtime_peer_fixtures import TEST_PEER, LiveTestProcess, peer_response
 from websockets.sync.client import unix_connect
 from websockets.sync.server import unix_serve
 
+from rodex.interaction_pipeline import SessionInteractionPipeline
 from rodex.interaction_transport import (
     SESSION_INTERACTION_CONNECTION_PATH,
     SESSION_INTERACTION_METHOD,
     publish_tui_notice,
 )
+from rodex.prompt_expansion_display import PromptExpansionDisplay
+from rodex.protocol_input_text import PromptTextEdit
 from rodex.protocol_proxy import (
     AGENT_OBSERVER_EVENT_STREAM_PATH,
     ANALYTICS_EVENT_STREAM_PATH,
@@ -397,6 +401,69 @@ def test_proxy_forwards_both_directions_and_counts_server_tool_items(
     assert observed_client_events == [json.loads(client_message)]
     assert decode_calls == 2
     assert not proxy_socket.exists()
+
+
+def test_primary_expansion_display_excludes_control_and_clears_on_disconnect(tmp_path):
+    display = PromptExpansionDisplay()
+    published = Event()
+    display.subscribe(published.set)
+    received = []
+
+    def app_server(connection):
+        for message in connection:
+            received.append(json.loads(message))
+            connection.send(json.dumps({"id": 1, "result": {}}))
+
+    upstream = unix_serve(app_server, path=str(tmp_path / "app.sock"), compression=None)
+    thread = Thread(target=upstream.serve_forever, daemon=True)
+    thread.start()
+    pipeline = SessionInteractionPipeline(
+        input_text_hook=lambda texts: tuple((PromptTextEdit(len(text), len(text), "!"),) for text in texts)
+    )
+    proxy = CodexProtocolProxy(
+        tmp_path / "proxy.sock",
+        tmp_path / "app.sock",
+        ToolCallCounter(lambda _count: None),
+        peer_identity=TEST_PEER,
+        app_server_process=LiveTestProcess(),
+        native_tui_process=LiveTestProcess(),
+        interaction_pipeline=pipeline,
+        prompt_expansion_display=display,
+    )
+    prompt = json.dumps({"id": 1, "method": "turn/start", "params": {"input": [{"type": "text", "text": "Hello"}]}})
+    try:
+        proxy.start()
+        for route in (CONTROL_CONNECTION_PATH, "/rpc", "/rpc"):
+            published.clear()
+            with unix_connect(
+                str(tmp_path / "proxy.sock"),
+                uri=f"ws://localhost{route}",
+                compression=None,
+                additional_headers=TEST_PEER.headers(),
+            ) as client:
+                client.send(prompt)
+                client.recv(timeout=2)
+                if route == "/rpc":
+                    # Source binding also wakes the relay; wait for publication,
+                    # not merely the first wake or the racing server response.
+                    for record in pipeline.records:
+                        assert not hasattr(record, "payload")
+                    deadline = time.monotonic() + 2
+                    while display.snapshot(0)[0] is None and time.monotonic() < deadline:
+                        published.wait(0.01)
+                        published.clear()
+                    assert display.snapshot(0)[0] == "Hello!"
+                else:
+                    assert display.snapshot(0) == (None, None)
+            if route == "/rpc":
+                proxy.wait_for_primary_connection_release(2)
+                assert display.snapshot(0) == (None, None)
+    finally:
+        proxy.close()
+        upstream.shutdown(close_connections=True)
+        thread.join(timeout=5)
+    assert len(received) == 3
+    assert all(frame["params"]["input"][0]["text"] == "Hello!" for frame in received)
 
 
 def test_proxy_delivers_rodex_notice_to_tui_without_forwarding_it_upstream(

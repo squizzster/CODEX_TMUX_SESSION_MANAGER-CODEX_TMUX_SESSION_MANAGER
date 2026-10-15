@@ -129,6 +129,9 @@ class InteractionTarget:
     model_thread_id: Callable[[], str | None] = lambda: None
     open: Callable[[], InteractionResult] | None = None
     binding_identity: Callable[[], str | None] = lambda: None
+    # Optional display handoff only: implementations must be bounded/nonblocking.
+    # Original/final content never enters the content-free outcome record.
+    observe_delivered: Callable[[InteractionRequest, InteractionRequest], None] | None = None
 
 
 MessageHook = Callable[[InteractionRequest], InteractionRequest]
@@ -258,6 +261,7 @@ class SessionInteractionPipeline:
         if not exists and not (request.open_if_missing or request.operation == InteractionOperation.OPEN):
             raise InteractionRejected(f"interaction target is not available: {request.target}")
         input_text_hook = self._input_text_hook if request.operation == InteractionOperation.PROTOCOL_INPUT else None
+        original_request = request
         if input_text_hook is not None:
             # The submitted RPC owns transformation. Terminal drafts and argv
             # cannot grant exemptions to a later request by matching its text.
@@ -293,7 +297,11 @@ class SessionInteractionPipeline:
             raise InteractionRejected("interaction destination changed before delivery")
         if model_operation and target.model_thread_id() != bound_thread_id:
             raise InteractionRejected("model thread binding changed before delivery")
-        return target.deliver(transformed)
+        result = target.deliver(transformed)
+        if result.accepted and target.observe_delivered is not None:
+            with suppress(Exception):
+                target.observe_delivered(original_request, transformed)
+        return result
 
     @staticmethod
     def _validate_request(request: InteractionRequest) -> None:

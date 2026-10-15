@@ -41,6 +41,19 @@ class TerminalSurfaceRenderer:
         self._presentation = _DEFAULT_PRESENTATION
         self._last_semantic_frame: bytes | None = None
         self._pending_presentation: PresentationSnapshot | None = None
+        self._prompt_expansion: str | None = None
+
+    def show_prompt_expansion(self, text: str | None) -> bytes:
+        """Display forwarded text locally; retain native draft, history and cursor."""
+        if text == self._prompt_expansion:
+            return b""
+        self._prompt_expansion = text
+        self._last_semantic_frame = None
+        if not self.native.at_boundary:
+            return b""  # Native output will repaint once its current token is complete.
+        if self._presentation.surface == PresentationSurface.SEMANTIC:
+            return self._semantic_redraw()
+        return self._restore() + self._paint()
 
     @property
     def presentation_surface(self) -> PresentationSurface:
@@ -172,6 +185,7 @@ class TerminalSurfaceRenderer:
                 )
                 if selected and self._state.stage == InputMenuStage.ARGUMENTS:
                     cursor = (current_row, 0)
+        output.extend(self._paint_prompt_expansion())
         output.extend(b"\x1b[0m" + _position(*cursor) + b"\x1b[?25h")
         return self._without_wrapping(bytes(output))
 
@@ -196,7 +210,17 @@ class TerminalSurfaceRenderer:
         return screen.cursor.y, line[: len(line) - len(state.native_prefix)] if state.native_prefix else line
 
     def _paint(self) -> bytes:
-        if self._state is None or self._suspended or (anchor := self._anchor(self._state)) is None:
+        if self._suspended:
+            return b""
+        if self._state is None:
+            output = self._paint_prompt_expansion()
+            if not output:
+                return b""
+            screen = self.native.screen
+            return self._without_wrapping(
+                output + _position(screen.cursor.y, screen.cursor.x) + _rendition(screen.cursor.attrs)
+            )
+        if (anchor := self._anchor(self._state)) is None:
             return b""
         row, prompt = anchor
         screen = self.native.screen
@@ -217,6 +241,29 @@ class TerminalSurfaceRenderer:
                 cursor = (current_row, 0)
         output.extend(b"\x1b[0m" + _position(*cursor))
         return self._without_wrapping(bytes(output))
+
+    def _paint_prompt_expansion(self) -> bytes:
+        """Reserve at most six rows above the composer; menus and native dialogs win."""
+        if self._prompt_expansion is None or self._suspended or self._state is not None or not self.native.paintable:
+            return b""
+        screen = self.native.screen
+        composer_row = _native_composer_row(screen)
+        if composer_row is None or composer_row < 3:
+            return b""
+        available = min(6, composer_row - 1)
+        width = max(1, screen.columns - 1)
+        lines = _wrap_cells(_terminal_safe_text(self._prompt_expansion), width)
+        if len(lines) > available - 1:
+            lines = lines[: available - 1]
+            lines[-1] = _clip_cells(lines[-1], max(0, width - 1)) + "…"
+        lines.insert(0, "Rodex expanded input:")
+        first_row = composer_row - 1 - len(lines)
+        self._painted_from_row = first_row
+        output = bytearray()
+        for row, line in enumerate(lines, first_row):
+            style = b"\x1b[1;36m" if row == first_row else b"\x1b[0m"
+            output.extend(_position(row, 0) + b"\x1b[0m\x1b[2K" + style + _clip_cells(line, width).encode())
+        return bytes(output)
 
     def _restore(self) -> bytes:
         if self._painted_from_row is None:

@@ -82,6 +82,7 @@ from .process_environment import (
     user_process_environment,
     validated_user_environment_entries,
 )
+from .prompt_expansion_display import PromptExpansionDisplay
 from .protocol_projection import ProtocolProjectionGuard
 from .protocol_proxy import (
     CONTROL_CONNECTION_PATH,
@@ -2732,6 +2733,7 @@ def _run_runtime_service(
     server_overloaded_recovery: ServerOverloadedRecoveryController | None = None
     context_threshold_steering: ContextThresholdSteeringController | None = None
     interaction_pipeline = SessionInteractionPipeline(input_text_hook=load_user_prompt_hook(environment=user_environment))
+    prompt_expansion_display = PromptExpansionDisplay()
     presentation_pipeline = SessionPresentationPipeline()
     presentation_policy_interaction = PresentationPolicyInteractionAdapter(
         interaction_pipeline,
@@ -2986,6 +2988,7 @@ def _run_runtime_service(
                 model_message_sender=dispatch_model_interaction,
                 event_tap=live_event_tap,
                 projection_guard=projection_guard,
+                prompt_expansion_display=prompt_expansion_display,
             )
             protocol_proxy.start()
             input_presentation = InputInterceptorPresentation(
@@ -3061,6 +3064,7 @@ def _run_runtime_service(
                     confirm_native_prefix=input_presentation.confirm_native_prefix,
                     read_terminal_size=primary_pane.terminal_size,
                     presentation=presentation_pipeline,
+                    prompt_expansion_display=prompt_expansion_display,
                     input_fd=terminal_fd,
                     output_fd=terminal_fd,
                     process_owner=native_tui_process,

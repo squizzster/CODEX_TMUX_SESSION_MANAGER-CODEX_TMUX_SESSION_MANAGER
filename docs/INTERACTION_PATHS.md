@@ -37,6 +37,7 @@ user-configured generic content-hook loader.
 | Native delegation | [`cli._exec_codex`](../src/rodex/cli.py); outside managed interaction |
 | Native typing/output | decoder/interceptor → [gateway](../src/rodex/terminal_gateway.py) → child PTY / terminal surface |
 | Managed initial prompt, native Enter, queued or control text | native submission → [structured prompt transformation](PROMPT_SUBMISSION_FLOW.md) → App Server |
+| Changed primary prompt display | successful upstream send → bounded [expansion handoff](../src/rodex/prompt_expansion_display.py) → gateway-owned read-only surface; no extra submission |
 | App Server frames | [proxy](../src/rodex/protocol_proxy.py) protocol input/output → original destination; primary output → mandatory event tap → auxiliary projections |
 | Main context reaches 70% | exact numeric usage projection → [context threshold controller](../src/rodex/context_threshold_steering.py) → shared interaction pipeline → exact active-turn steer |
 | Native shell command policy | App Server `PreToolUse(Bash)` → [retained helper](../src/rodex/command_policy_hook.py) → [private broker](../src/rodex/command_policy.py) → ordered [find/rg and later policies](FIND_RG_COMMAND_POLICY.md) → native Codex enforcement; then asynchronous [tmux-only status](../src/rodex/command_policy_status.py) |
@@ -53,6 +54,12 @@ The proxy forwards accepted primary output to Codex before its presentation/cont
 observer projections. Control-client output goes only to its destination, never into
 the primary presentation. Ordinary clients use separate upstream connections; reading
 or mutating does not make a control client the subscribed primary.
+
+Primary prompt expansion is a post-delivery, latest-only display handoff, separate
+from content-free outcome records and pre-send input correlation. Its exact connection
+owns publication and invalidation. Gateway wake/deadline handling renders and expires
+the bounded text; no terminal work runs on the forwarding thread. It does not use
+the native warning API, whose placement can require F2.
 
 Main model identity comes from a type-exact, connection-local correlation of the
 primary's `thread/start`, `thread/resume`, or `thread/fork` request with its successful

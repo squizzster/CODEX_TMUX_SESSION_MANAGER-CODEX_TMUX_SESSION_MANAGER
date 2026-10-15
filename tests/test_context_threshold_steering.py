@@ -6,6 +6,7 @@ from threading import Event, Thread
 import pytest
 
 from rodex.context_threshold_steering import (
+    CONTEXT_BINDING_RETRY_DELAYS_SECONDS,
     CONTEXT_STEER_MESSAGE,
     CONTEXT_STEER_SOURCE,
     CONTEXT_STEER_THRESHOLD_PERCENT,
@@ -15,6 +16,7 @@ from rodex.interaction_pipeline import (
     DeliveryStatus,
     InteractionDeliveryIndeterminate,
     InteractionOperation,
+    InteractionRejectionReason,
     InteractionRequest,
     InteractionResult,
     InteractionTarget,
@@ -315,3 +317,136 @@ def test_threshold_configuration_requires_a_finite_percentage(threshold: object)
 def test_message_configuration_cannot_be_empty() -> None:
     with pytest.raises(ValueError, match="message"):
         ContextThresholdSteeringController(SessionInteractionPipeline(), message="  ")
+
+
+def test_missing_binding_retries_then_delivers_once_without_a_new_usage_event():
+    harness = SteeringHarness()
+    binding = [None]
+    harness.pipeline.unregister(harness.target)
+    harness.pipeline.register(replace(harness.target, model_thread_id=lambda: binding[0]))
+    try:
+        harness.start_turn()
+        harness.controller.observe_context_percent(ROOT_THREAD, 70)
+        harness.deferred_calls[-1].fire()
+        assert not harness.requests
+        assert "reason=model_thread_unbound" in harness.logs[-2]
+        assert "admitted=false" in harness.logs[-2]
+        assert harness.deferred_calls[-1].delay_seconds == CONTEXT_BINDING_RETRY_DELAYS_SECONDS[0]
+        binding[0] = ROOT_THREAD
+        harness.deferred_calls[-1].fire()
+        assert len(harness.requests) == 1
+        assert harness.controller.snapshot.last_completed_dispatch_id == harness.requests[0].dispatch_id
+        harness.controller.observe_context_percent(ROOT_THREAD, 90)
+        assert len(harness.deferred_calls) == 2
+    finally:
+        harness.close()
+
+
+def test_missing_binding_retry_budget_is_finite_until_a_new_crossing():
+    harness = SteeringHarness()
+    harness.pipeline.unregister(harness.target)
+    harness.pipeline.register(replace(harness.target, model_thread_id=lambda: None))
+    try:
+        harness.start_turn()
+        harness.controller.observe_context_percent(ROOT_THREAD, 70)
+        for _ in range(1 + len(CONTEXT_BINDING_RETRY_DELAYS_SECONDS)):
+            harness.deferred_calls[-1].fire()
+            harness.controller.observe_context_percent(ROOT_THREAD, 90)
+        assert len(harness.deferred_calls) == 1 + len(CONTEXT_BINDING_RETRY_DELAYS_SECONDS)
+        assert not harness.controller.snapshot.threshold_armed
+        harness.controller.observe_context_percent(ROOT_THREAD, 60)
+        harness.controller.observe_context_percent(ROOT_THREAD, 70)
+        assert len(harness.deferred_calls) == 2 + len(CONTEXT_BINDING_RETRY_DELAYS_SECONDS)
+    finally:
+        harness.close()
+
+
+@pytest.mark.parametrize("cancel", ["turn", "drop", "compaction", "disconnect", "close"])
+def test_binding_retry_cannot_escape_cancellation(cancel):
+    harness = SteeringHarness()
+    binding = [None]
+    harness.pipeline.unregister(harness.target)
+    harness.pipeline.register(replace(harness.target, model_thread_id=lambda: binding[0]))
+    try:
+        harness.start_turn()
+        harness.controller.observe_context_percent(ROOT_THREAD, 70)
+        harness.deferred_calls[-1].fire()
+        retry = harness.deferred_calls[-1]
+        if cancel == "turn":
+            harness.controller.observe_protocol_event(turn_completed("turn-1"))
+        elif cancel == "drop":
+            harness.controller.observe_context_percent(ROOT_THREAD, 60)
+        elif cancel == "compaction":
+            harness.controller.observe_protocol_event(compaction("item/started"))
+        elif cancel == "disconnect":
+            harness.controller.reset_after_disconnect()
+        else:
+            harness.close()
+        binding[0] = ROOT_THREAD
+        retry.fire(even_if_cancelled=True)
+        assert not harness.requests
+    finally:
+        harness.close()
+
+
+@pytest.mark.parametrize("admitted", [False, True])
+@pytest.mark.parametrize("outcome", ["rejected", "uncertain", "failed"])
+def test_no_retry_of_other_refusal_or_uncertain_outcome(admitted, outcome):
+    harness = SteeringHarness()
+
+    def deliver(request):
+        if admitted:
+            harness.controller.admit_dispatch(request)
+        if outcome == "uncertain":
+            raise InteractionDeliveryIndeterminate("sensitive fixture text")
+        if outcome == "failed":
+            raise RuntimeError("sensitive fixture text")
+        return InteractionResult(
+            DeliveryStatus.REJECTED,
+            "sensitive fixture text",
+            rejection_reason=(
+                InteractionRejectionReason.MODEL_THREAD_UNBOUND if admitted else InteractionRejectionReason.UNSPECIFIED
+            ),
+        )
+
+    harness.pipeline.unregister(harness.target)
+    harness.pipeline.register(replace(harness.target, deliver=deliver))
+    try:
+        harness.start_turn()
+        harness.controller.observe_context_percent(ROOT_THREAD, 70)
+        harness.deferred_calls[-1].fire()
+        harness.controller.observe_context_percent(ROOT_THREAD, 90)
+        assert len(harness.deferred_calls) == 1
+        assert "sensitive fixture text" not in "\n".join(harness.logs)
+    finally:
+        harness.close()
+
+
+@pytest.mark.parametrize("uncertain", [False, True])
+def test_reconnect_cannot_rearm_an_admitted_crossing(uncertain):
+    harness = SteeringHarness()
+
+    def deliver(request):
+        harness.controller.admit_dispatch(request)
+        harness.requests.append(request)
+        if uncertain:
+            raise InteractionDeliveryIndeterminate("native may have accepted")
+        return InteractionResult(DeliveryStatus.COMPLETED)
+
+    harness.pipeline.unregister(harness.target)
+    harness.pipeline.register(replace(harness.target, deliver=deliver))
+    try:
+        harness.start_turn()
+        harness.controller.observe_context_percent(ROOT_THREAD, 70)
+        harness.deferred_calls[-1].fire()
+        harness.controller.reset_after_disconnect()
+        harness.controller.bind_root_thread(ROOT_THREAD)
+        harness.start_turn()
+        harness.controller.observe_context_percent(ROOT_THREAD, 90)
+        assert len(harness.deferred_calls) == 1
+        assert len(harness.requests) == 1
+        harness.controller.observe_context_percent(ROOT_THREAD, 60)
+        harness.controller.observe_context_percent(ROOT_THREAD, 70)
+        assert len(harness.deferred_calls) == 2
+    finally:
+        harness.close()

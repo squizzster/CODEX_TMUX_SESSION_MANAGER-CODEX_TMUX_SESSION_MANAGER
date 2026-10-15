@@ -412,7 +412,8 @@ def test_one_remote_interface_routes_display_and_explicit_model_intent_without_d
 
     primary = Primary()
     assert proxy._claim_primary_connection(primary)
-    proxy._primary_thread_id = "thread-1"
+    proxy._observe_primary_input({"id": 1, "method": "thread/start", "params": {}}, primary)
+    proxy._observe_primary_response({"id": 1, "result": {"thread": {"id": "thread-1"}}}, primary)
     proxy.start()
     try:
         displayed_result = publish_session_interaction(

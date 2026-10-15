@@ -14,6 +14,14 @@ are unchanged. Retained running sessions keep their original implementation.
 
 ### Modified
 
+- Resumed primary connections now bind model input from correlated native lifecycle
+  replies instead of requiring `thread/started`. This fixes 70% context reminders
+  being rejected locally before `turn/steer`. Typed RPC IDs, child/control isolation,
+  pending-selection suspension, and disconnect fences preserve exact authority.
+  Missing-binding refusals have a content-free reason and three bounded pre-admission
+  retries; admitted or uncertain sends are never resent. A real native/local-model
+  regression verifies one reminder reaches the same running resumed turn without
+  interruption. Existing retained runtimes require explicit upgrade to use this fix.
 - Prompt rules now run only on structured submissions (A06). Terminal drafts and
   initial argv are not transformed early; text-matching receipts are removed.
   Native recall retains original input while model/server input is transformed.

@@ -15,6 +15,7 @@ from .interaction_pipeline import (
     DeliveryStatus,
     InteractionDeliveryIndeterminate,
     InteractionOperation,
+    InteractionRejectionReason,
     InteractionRequest,
     InteractionResult,
     SessionInteractionPipeline,
@@ -109,7 +110,13 @@ def publish_session_interaction(
             DeliveryStatus.INDETERMINATE, "interaction response is malformed", {"dispatch_id": dispatch_id}
         )
     try:
-        return InteractionResult(DeliveryStatus(result["status"]), str(result.get("detail", "")), result.get("value"))
+        reason = result.get("rejection_reason")
+        return InteractionResult(
+            DeliveryStatus(result["status"]),
+            str(result.get("detail", "")),
+            result.get("value"),
+            None if reason is None else InteractionRejectionReason(reason),
+        )
     except (ValueError, KeyError, TypeError):
         return InteractionResult(
             DeliveryStatus.INDETERMINATE, "interaction result status is malformed", {"dispatch_id": dispatch_id}
@@ -172,7 +179,12 @@ def serve_session_interaction(connection: Any, pipeline: SessionInteractionPipel
             json.dumps(
                 {
                     "id": request_id,
-                    "result": {"status": result.status.value, "detail": result.detail, "value": result.value},
+                    "result": {
+                        "status": result.status.value,
+                        "detail": result.detail,
+                        "value": result.value,
+                        "rejection_reason": result.rejection_reason,
+                    },
                 },
                 separators=(",", ":"),
             )

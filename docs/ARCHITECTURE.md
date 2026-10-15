@@ -61,6 +61,10 @@ package startup publishes or reuses the retained installation before CLI composi
 - [`PrimaryConnectionLifecycleCoordinator`](../src/rodex/primary_connection_lifecycle.py)
   resets every participant even if one fails. Observer epoch ownership remains in
   the reducer, not in reset callers or transport.
+- [`PrimaryThreadBinding`](../src/rodex/primary_thread_binding.py) derives main model
+  authority from correlated primary lifecycle replies, not thread-start notifications.
+  The proxy owns its connection fences and locking; optional projections cannot
+  establish authority, and input EOF revokes it before deferred cleanup.
 - [`ContextThresholdSteeringController`](../src/rodex/context_threshold_steering.py)
   converts exact main-thread usage into one guarded steer at a 70% crossing. It
   schedules outside protocol forwarding, then returns through the shared interaction

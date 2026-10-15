@@ -14,6 +14,7 @@ from .interaction_pipeline import (
     DeliveryStatus,
     InteractionOperation,
     InteractionRejected,
+    InteractionRejectionReason,
     InteractionRequest,
     InteractionResult,
     SessionInteractionPipeline,
@@ -25,6 +26,7 @@ CONTEXT_STEER_MESSAGE: Final = (
     "your're currently doing...no rush...."
 )
 CONTEXT_STEER_SOURCE: Final = "context-threshold-steer"
+CONTEXT_BINDING_RETRY_DELAYS_SECONDS: Final = (0.25, 1.0, 2.0)
 
 
 class DeferredCall(Protocol):
@@ -98,6 +100,7 @@ class ContextThresholdSteeringController:
         self._active_turn_id: str | None = None
         self._context_percent: float | None = None
         self._threshold_armed = True
+        self._binding_retry_count = 0
         self._active_compaction_item_ids: set[str] = set()
         self._pending_attempt: ContextThresholdSteerAttempt | None = None
         self._pending_call: DeferredCall | None = None
@@ -137,6 +140,7 @@ class ContextThresholdSteeringController:
                 self._active_turn_id = None
                 self._context_percent = None
                 self._threshold_armed = True
+                self._binding_retry_count = 0
                 self._active_compaction_item_ids.clear()
             self._dispatch_ready = True
             scheduled = self._schedule_if_ready_locked()
@@ -237,6 +241,7 @@ class ContextThresholdSteeringController:
             self._context_percent = exact_percent
             if exact_percent < self._threshold_percent:
                 self._threshold_armed = True
+                self._binding_retry_count = 0
                 _cancelled, cancelled_call = self._clear_pending_locked()
             else:
                 scheduled = self._schedule_if_ready_locked()
@@ -271,10 +276,13 @@ class ContextThresholdSteeringController:
             ):
                 raise InteractionRejected("context steer became stale before dispatch admission")
             self._admitted_request_ids.add(request.request_id)
+            # Scheduling only reserves this crossing. Final admission consumes it;
+            # any subsequent outcome may have reached native and is not retried.
+            self._threshold_armed = False
             self._clear_pending_locked()
 
     def reset_after_disconnect(self) -> None:
-        """Discard connection/turn state while retaining durable root identity."""
+        """Discard observations, retaining root and already consumed crossings."""
         cancelled_call: DeferredCall | None = None
         with self._lock:
             if self._closed:
@@ -282,7 +290,8 @@ class ContextThresholdSteeringController:
             _cancelled, cancelled_call = self._clear_pending_locked()
             self._active_turn_id = None
             self._context_percent = None
-            self._threshold_armed = True
+            # Reconnect is not evidence of a new below-to-high crossing. Keep an
+            # admitted/uncertain attempt consumed, even if the same turn resumes.
             self._active_compaction_item_ids.clear()
         if cancelled_call is not None:
             cancelled_call.cancel()
@@ -300,7 +309,9 @@ class ContextThresholdSteeringController:
         if cancelled_call is not None:
             cancelled_call.cancel()
 
-    def _schedule_if_ready_locked(self) -> tuple[ContextThresholdSteerAttempt, DeferredCall] | None:
+    def _schedule_if_ready_locked(
+        self, delay_seconds: float = 0.0
+    ) -> tuple[ContextThresholdSteerAttempt, DeferredCall] | None:
         if (
             self._closed
             or not self._dispatch_ready
@@ -322,8 +333,7 @@ class ContextThresholdSteeringController:
             self._threshold_percent,
             f"rodex:context-threshold:{self._root_thread_id}:{self._active_turn_id}:{generation}",
         )
-        deferred_call = self._deferred_call_factory(0.0, lambda: self._dispatch_pending(generation))
-        self._threshold_armed = False
+        deferred_call = self._deferred_call_factory(delay_seconds, lambda: self._dispatch_pending(generation))
         self._pending_attempt = attempt
         self._pending_call = deferred_call
         return attempt, deferred_call
@@ -376,6 +386,7 @@ class ContextThresholdSteeringController:
             self._dispatch_requests[request.request_id] = (generation, attempt)
         result: InteractionResult | None = None
         error: Exception | None = None
+        retry: tuple[ContextThresholdSteerAttempt, DeferredCall] | None = None
         try:
             result = self._interaction_pipeline.execute(request)
         except Exception as caught:
@@ -387,20 +398,38 @@ class ContextThresholdSteeringController:
                 self._admitted_request_ids.discard(request.request_id)
                 if generation == self._generation and self._pending_attempt is attempt:
                     self._clear_pending_locked()
+                    if (
+                        not admitted
+                        and error is None
+                        and result is not None
+                        and result.status is DeliveryStatus.REJECTED
+                        and result.rejection_reason is InteractionRejectionReason.MODEL_THREAD_UNBOUND
+                        and self._binding_retry_count < len(CONTEXT_BINDING_RETRY_DELAYS_SECONDS)
+                    ):
+                        delay = CONTEXT_BINDING_RETRY_DELAYS_SECONDS[self._binding_retry_count]
+                        self._binding_retry_count += 1
+                        retry = self._schedule_if_ready_locked(delay)
+                    else:
+                        # Unknown failures are not evidence that delivery did not
+                        # occur. Exhausted/permanent refusals also stop this crossing.
+                        self._threshold_armed = False
                 if admitted and result is not None and result.status is DeliveryStatus.COMPLETED:
                     self._last_completed_dispatch_id = attempt.dispatch_id
         if error is not None:
             self._safe_log(
                 f"dispatchFailed threadId={attempt.thread_id} turnId={attempt.turn_id} "
-                f"dispatchId={attempt.dispatch_id} errorType={type(error).__name__}"
+                f"dispatchId={attempt.dispatch_id} admitted={str(admitted).lower()} errorType={type(error).__name__}"
             )
             return
         assert result is not None
         outcome = "completed" if admitted and result.status is DeliveryStatus.COMPLETED else "rejected"
         self._safe_log(
             f"dispatch{outcome.title()} threadId={attempt.thread_id} turnId={attempt.turn_id} "
-            f"dispatchId={attempt.dispatch_id} status={result.status.value}"
+            f"dispatchId={attempt.dispatch_id} status={result.status.value} admitted={str(admitted).lower()} "
+            f"reason={(result.rejection_reason or InteractionRejectionReason.UNSPECIFIED).value} "
+            f"retryScheduled={str(retry is not None).lower()}"
         )
+        self._start_scheduled(retry)
 
     def _clear_pending_locked(
         self,

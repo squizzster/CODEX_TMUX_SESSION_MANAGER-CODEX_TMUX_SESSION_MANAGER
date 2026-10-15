@@ -76,10 +76,26 @@ deduplication of native retries or a guarantee of exactly-once turn execution.
 **Intentional ALPHA behavior change:** the native draft and local recall history
 retain the user's original input, while App Server/model input contains transformed
 text. Optimistic native display can therefore differ from persisted server history.
-Rodex does not rewrite the composer or reconcile these two displays. Recalling the
+Rodex does not rewrite the composer or native transcript. Recalling the
 original input and resubmitting applies the current rules to that original again.
 Rules match the actual submitted text, including any native-added IDE context;
 they do not match an inferred draft stripped of that context.
+
+Changed primary submissions also show **Rodex expanded input:** above the composer
+in the ordinary pane, in native and light presentation. This is a separate read-only
+view of the actual forwarded text, not a second hook invocation or model message.
+It appears after upstream send, not as proof of native acceptance. Native recall
+still contains the original input. Control/background connections do not publish
+this primary-pane view.
+
+The latest expansion is retained for 15 seconds, replaced by the next changed primary
+submission, and cleared on disconnect. Unchanged input (including native startup
+helper requests) does not erase it. The mailbox holds at most 8,194 characters;
+the surface shows at most six rows, marking truncation with an ellipsis. Local menus,
+native dialogs and incomplete terminal sequences take precedence. The gateway alone
+renders/clears it, preserving cursor, native projection and terminal scrollback.
+Output backpressure coalesces complete display frames. Display failure cannot reject
+or retry a forwarded submission; no prompt bodies enter outcome logs or storage.
 
 Invalid rules refuse the structured request before upstream delivery. Enter may
 already have changed native editor/history state; Rodex does not promise draft
@@ -113,7 +129,11 @@ prompt-transform implementation.
 - [Terminal input](../tests/test_terminal_input.py): no-RPC Enter, rapid/repeated
   requests, history edits, prefixes, paired CRLF, and unchanged local takeover.
 - [Gateway](../tests/test_terminal_gateway.py): real PTY/editor fixtures preserve
-  the native draft without executing the prompt hook.
+  the native draft without executing the prompt hook; local expansion expiry needs
+  no subsequent native output.
+- [Expansion handoff](../tests/test_prompt_expansion_display.py) and
+  [surface rendering](../tests/test_terminal_surface.py): post-send observation,
+  source fences, bounded latest-only state, safe text and native/light restoration.
 - [Proxy integration](../tests/test_interaction_integration.py): non-idempotent rules
   across all four RPC methods, native/control connections, reconnect and multipart
   input; correlated rejection without upstream delivery.

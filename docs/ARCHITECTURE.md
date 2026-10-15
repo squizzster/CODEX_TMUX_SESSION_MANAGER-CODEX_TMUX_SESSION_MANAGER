@@ -54,6 +54,10 @@ package startup publishes or reuses the retained installation before CLI composi
   input/output owner, regardless of attached-client count. The foreground
   [terminal bridge](../src/rodex/terminal_bridge.py) transfers its TTY and resize
   notifications without consuming native input.
+- [`PromptExpansionDisplay`](../src/rodex/prompt_expansion_display.py) carries only
+  the latest changed primary submission after forwarding. Connection fencing and
+  bounded transient state feed the gateway's existing native/light surface; this
+  local display never owns editor input, model dispatch or persistent history.
 - [Interaction paths](INTERACTION_PATHS.md) maps terminal, protocol, menu, observer,
   and background effects to owners. [Prompt submission](PROMPT_SUBMISSION_FLOW.md)
   owns the single structured-input transformation boundary; Codex owns original

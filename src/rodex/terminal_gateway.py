@@ -36,6 +36,7 @@ from .interaction_pipeline import (
     SessionInteractionPipeline,
 )
 from .presentation_policy import PresentationSnapshotSource, PresentationSurface
+from .prompt_expansion_display import PromptExpansionDisplay
 from .runtime_peer import BoundProcessOwner
 from .terminal_input import TerminalInputDecoder, TerminalInputInterceptor
 from .terminal_surface import TerminalSurfaceRenderer
@@ -68,6 +69,7 @@ class TerminalSessionGateway:
         registrations: tuple[InputInterceptorRegistration, ...],
         confirm_native_prefix: Callable[[str], bool],
         presentation: PresentationSnapshotSource | None = None,
+        prompt_expansion_display: PromptExpansionDisplay | None = None,
         stderr: BinaryIO | int | None = None,
         input_fd: int = 0,
         output_fd: int = 1,
@@ -106,6 +108,8 @@ class TerminalSessionGateway:
         self._presentation = presentation
         self._presentation_revision: int | None = None
         self._unsubscribe_presentation: Callable[[], None] | None = None
+        self._prompt_expansion_display = prompt_expansion_display
+        self._unsubscribe_prompt_expansion: Callable[[], None] | None = None
         self._supervisor_lock = Lock()
         self._working_lock = Lock()
         self._working = False
@@ -146,6 +150,8 @@ class TerminalSessionGateway:
             self._wake_read, self._wake_write = os.pipe2(os.O_CLOEXEC | os.O_NONBLOCK)
             if self._presentation is not None:
                 self._unsubscribe_presentation = self._presentation.subscribe(self._notify_relay)
+            if self._prompt_expansion_display is not None:
+                self._unsubscribe_prompt_expansion = self._prompt_expansion_display.subscribe(self._notify_relay)
             self._pipeline.register(self._target)
             gate_read, gate_write = os.pipe2(os.O_CLOEXEC)
             try:
@@ -303,6 +309,9 @@ class TerminalSessionGateway:
             if deadline is not None and now >= deadline:
                 raise subprocess.TimeoutExpired(self.process.args, timeout)
             wake_deadlines = [value for value in (deadline, exit_deadline) if value is not None]
+            expansion_expiry = self._sync_prompt_expansion(now)
+            if expansion_expiry is not None:
+                wake_deadlines.append(expansion_expiry)
             if returncode is None:
                 for working_deadline in (
                     self._refresh_working_counter(now),
@@ -325,6 +334,17 @@ class TerminalSessionGateway:
             self._sync_presentation()
             if self._take_supervisor_check():
                 return None
+
+    def _sync_prompt_expansion(self, now: float) -> float | None:
+        if self._prompt_expansion_display is None:
+            return None
+        text, expiry = self._prompt_expansion_display.snapshot(now)
+        rendered = self._surface_renderer.show_prompt_expansion(text)
+        if rendered:
+            # A stalled terminal retains one complete newest surface,
+            # not an unbounded sequence of notice paint/restore diffs.
+            self._queue_rendered_surface(self._surface_renderer.redraw(), complete_frame=True)
+        return expiry
 
     def _deliver(self, request: InteractionRequest) -> InteractionResult:
         if request.operation == InteractionOperation.DISPLAY_STATE:
@@ -526,6 +546,9 @@ class TerminalSessionGateway:
             return
         self._closed = True
         try:
+            if self._unsubscribe_prompt_expansion is not None:
+                self._unsubscribe_prompt_expansion()
+                self._unsubscribe_prompt_expansion = None
             if self._unsubscribe_presentation is not None:
                 self._unsubscribe_presentation()
                 self._unsubscribe_presentation = None

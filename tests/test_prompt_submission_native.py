@@ -78,6 +78,9 @@ def test_native_submission_transforms_once_and_preserves_original_recall(route, 
                 assert "Hello!" in submitted_texts()
                 assert "Hello!!" not in submitted_texts()
                 assert "Hello" not in submitted_texts()
+                # This is the ordinary pane, not the native F2 warnings view.
+                await_screen(client, "Rodex expanded input:")
+                await_screen(client, "Hello!")
                 await_screen(client, "Fixture command completed.")
                 history = [
                     json.loads(line)["text"] for line in (native.codex_home / "history.jsonl").read_text().splitlines()

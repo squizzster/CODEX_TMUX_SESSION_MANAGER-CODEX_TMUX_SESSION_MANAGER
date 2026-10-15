@@ -14,6 +14,12 @@ are unchanged. Retained running sessions keep their original implementation.
 
 ### Modified
 
+- Changed primary prompts again show their actual expansion in the ordinary Rodex
+  pane, through a separate bounded, transient read-only display above the composer.
+  Transformation still runs once at structured submission; original native draft
+  and recall remain unchanged. Post-send display never adds a prompt or retries
+  delivery. Connection fences, safe terminal text, native/light restoration, expiry
+  and complete-frame coalescing keep display separate from submission authority.
 - Resumed primary connections now bind model input from correlated native lifecycle
   replies instead of requiring `thread/started`. This fixes 70% context reminders
   being rejected locally before `turn/steer`. Typed RPC IDs, child/control isolation,

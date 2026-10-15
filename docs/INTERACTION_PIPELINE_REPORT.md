@@ -76,7 +76,7 @@ Evidence in [test_command_policy_native.py](../tests/test_command_policy_native.
 The real affected saved session also reopened with its original UUID. A separate
 direct-Codex failure involved an unreachable shared-daemon socket; local logs
 predated these hook changes, and a direct `--no-daemon` resume succeeded. The socket's
-removal cause was not established. [Resume diagnosis](OPERATIONS.md#resume-failures)
+removal cause was not established. [Resume diagnosis](OPERATIONS.md#startup-and-resume-failures)
 keeps these failure domains separate.
 
 ## Original validation scope

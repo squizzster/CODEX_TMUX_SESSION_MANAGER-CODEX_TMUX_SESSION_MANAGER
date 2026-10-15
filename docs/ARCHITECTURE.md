@@ -70,8 +70,8 @@ package startup publishes or reuses the retained installation before CLI composi
   The proxy owns its connection fences and locking; optional projections cannot
   establish authority, and input EOF revokes it before deferred cleanup.
 - [`ContextThresholdSteeringController`](../src/rodex/context_threshold_steering.py)
-  converts exact main-thread usage into one guarded steer at a 70% crossing. It
-  schedules outside protocol forwarding, then returns through the shared interaction
+  schedules a guarded steer from exact main-thread usage at a 70% crossing, outside
+  protocol forwarding, then returns through the shared interaction
   pipeline and exact-turn mutation boundary; [interaction paths](INTERACTION_PATHS.md#context-threshold-steering)
   owns the crossing, compaction, and retry contract.
 - [`TmuxStatusPipeline`](../src/rodex/tmux_status.py) is the shared Python API for

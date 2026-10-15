@@ -16,8 +16,8 @@ installations keep already-running sessions on the implementation that started t
   above Codex. Keep working below.
 - **Less babysitting.** When a turn fails from server overload, Rodex waits and
   sends `Continue...` for you. Repeated overloads back off; typing cancels a pending retry.
-- **Keep long turns oriented.** When the registered main turn crosses 70% exact
-  context usage, Rodex steers it once to preserve the most relevant objectives.
+- **Keep long turns oriented.** At an observed 70% context crossing, Rodex schedules
+  a guarded reminder for the active main turn; cancellation and refusal remain explicit.
 - **Take the controls.** Start, steer, interrupt, and collect exact-turn results
   from another shell or agent.
 - **Understand the work.** Inspect durable local statistics, agent relationships,
@@ -54,42 +54,20 @@ toggles mouse mode and briefly confirms `Mouse: ON/OFF` unless the user's tmux
 configuration defines another `m` action.
 Return with `./rodex NAME`.
 
-## CLI and operations
+## Find the right authority
 
-- [Installation and updates](INSTALL.md) — prerequisites, command-versus-environment
-  setup, per-user provisioning, retained installations, upgrades, relocation, and removal.
-- [CLI workflows](docs/CLI.md) — routing, names and aliases, detach/resume, observation,
-  exact-turn control, statistics, and traces.
-- [Operations](docs/OPERATIONS.md) — local state, runtime files, terminal settings,
-  CPU diagnosis, and failed-runtime handling.
+Start with the row matching your task; follow its source/test links as needed.
+Current contracts belong to the topic guides, not the dated reports.
 
-## Architecture and technical contracts
-
-- [Change guide](DESIGN.md) — choose the authority and boundary for a proposed change.
-- [Architecture](docs/ARCHITECTURE.md) — system shape and domain owners.
-- [Interaction paths](docs/INTERACTION_PATHS.md) — input/output, views, observers,
-  local notices, overload recovery, and the effect audit.
-- [Prompt submission flow](docs/PROMPT_SUBMISSION_FLOW.md) — prompt rules, interception,
-  validation, and submission.
-- [Runtime isolation](docs/RUNTIME_ISOLATION.md) — identity, capabilities, lifecycle,
-  compatibility, and retained-runtime handoff.
-- [Analytics](docs/ANALYTICS.md) — rollout admission, scheduling, traces, coverage, and health.
-- [SQL schema](docs/SQL_SCHEMA.md) — persistence methodology, identity, lineage, and transactions.
-- [Security and privacy](docs/SECURITY.md) — native hook admission, trust boundaries,
-  local transports, executable assumptions, and content handling.
-- [Find/rg command policy](docs/FIND_RG_COMMAND_POLICY.md) — extraction boundaries,
-  rules, work budgets, outcomes, deadlines, and known limits.
-
-## Development and agent workflow
-
-- [Development and validation](docs/DEVELOPMENT.md) — test gates, focused test selection,
-  CPU regression checks, and documentation validation.
-- [Rodex session-control agent instructions](.agents/skills/rodex-session-control/SKILL.md) —
-  authoritative repository-local workflow for identifying, observing, and controlling
-  one exact live session and turn.
-
-## Reports and history
-
-- [Native interaction findings](docs/INTERACTION_PIPELINE_REPORT.md) — dated Codex
-  0.162.1 notice-placement and resume evidence, with verification limits.
-- [Version tracker](VERSION_TRACKER.md) — pending changes and verified package milestones.
+| Task | Start here |
+| --- | --- |
+| Install, update, provision another user, or relocate | [Installation](INSTALL.md) |
+| Run commands, reconnect, or diagnose a session | [CLI workflows](docs/CLI.md) → [Operations](docs/OPERATIONS.md) |
+| Inspect or control one exact live turn | [Session-control agent instructions](.agents/skills/rodex-session-control/SKILL.md) |
+| Change implementation and select tests | [Change guide](DESIGN.md) → [domain owners](docs/ARCHITECTURE.md) → [validation gates](docs/DEVELOPMENT.md) |
+| Change prompt rules or understand the translated-input display | [Prompt submission](docs/PROMPT_SUBMISSION_FLOW.md) |
+| Trace forwarding, local notices, or automatic model input | [Interaction ownership](docs/INTERACTION_PATHS.md), including the [70% reminder](docs/INTERACTION_PATHS.md#context-threshold-steering) |
+| Diagnose startup or change runtime lifetime/upgrade behavior | [Runtime isolation](docs/RUNTIME_ISOLATION.md), including [primary discovery](docs/RUNTIME_ISOLATION.md#primary-conversation-discovery) |
+| Interpret statistics/trace coverage or change persistence | [Analytics](docs/ANALYTICS.md) → [SQL authority](docs/SQL_SCHEMA.md) |
+| Review trust/privacy or command-policy decisions | [Security](docs/SECURITY.md) → [find/rg policy](docs/FIND_RG_COMMAND_POLICY.md) |
+| Consult historical evidence | [Version tracker](VERSION_TRACKER.md), [dated native interaction findings](docs/INTERACTION_PIPELINE_REPORT.md) |

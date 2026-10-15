@@ -55,11 +55,11 @@ observer projections. Control-client output goes only to its destination, never 
 the primary presentation. Ordinary clients use separate upstream connections; reading
 or mutating does not make a control client the subscribed primary.
 
-Primary prompt expansion is a post-delivery, latest-only display handoff, separate
-from content-free outcome records and pre-send input correlation. Its exact connection
-owns publication and invalidation. Gateway wake/deadline handling renders and expires
-the bounded text; no terminal work runs on the forwarding thread. It does not use
-the native warning API, whose placement can require F2.
+The gateway owns the post-send, connection-fenced expansion view; no terminal work
+runs on the forwarding thread. [Prompt submission](PROMPT_SUBMISSION_FLOW.md#one-structured-submission-boundary)
+owns its appearance, limits, expiry, and distinction from native warning notices.
+
+### Primary conversation identity
 
 Main model identity comes from a type-exact, connection-local correlation of the
 primary's `thread/start`, `thread/resume`, or `thread/fork` request with its successful
@@ -74,11 +74,11 @@ acknowledgements invalidate it until reconnect. Input EOF revokes it immediately
 even if an output projection delays full connection release. Control and old-connection
 responses cannot bind a replacement primary.
 
-Startup reads this same identity over the authenticated `/rodex-interaction` route
-using `rodex/primary-thread/read`; the transport returns only the acknowledged ID
-or null, independently of model-steering availability. This read does not enter
-the mutation pipeline or open an upstream connection. Native version admission
-remains a separate read-only initialize exchange.
+[Startup discovery](RUNTIME_ISOLATION.md#primary-conversation-discovery) reads this
+same identity independently of model-steering availability. It does not introduce
+another binding authority.
+
+### Event continuity and projection failures
 
 The event tap admits subscriptions only after primary upstream peer verification.
 Its source epoch fences publication and loss under the same registration lock.

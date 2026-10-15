@@ -161,8 +161,10 @@ dot in a native `config.toml` hook key. The helper supplies the key inside a who
 TOML `hooks.state` value; native merging preserves unrelated entries.
 
 The inventory is a pre-thread snapshot rather than a lock on Codex hook files.
-A later hook addition receives no temporary trust; a changed Rodex hash invalidates
-the admitted entry. Such a change can still cause native review during startup.
+Rodex grants temporary trust only to that inventoried key/hash; it does not grant
+trust to later additions or changed definitions. Enforcement after a file changes
+depends on native definition-at-use checks, not another Rodex snapshot. The listed
+tests do not establish safety for concurrent hook-file mutation.
 If either inventory is unavailable or the exact definition/key/hash cannot be
 verified, both Rodex's hook injection and temporary trust override are removed before
 the remote TUI starts. Only the provisional server is restarted. Existing native
@@ -192,9 +194,12 @@ duplicate plaintext bodies. The [trace reader](../src/rodex_registry/agent_trace
 reads SQL metadata; [`_attach_authenticated_rollout_bodies`](../src/rodex/agent_trace_commands.py)
 expands an explicit snapshot request after re-authenticating recorded prefixes across
 current/historical memberships. Follow mode remains metadata-only. That command
-adapter's `_safe_event_body` and `_redact_message_content` exclude hidden reasoning;
+adapter's `_safe_event_body` and `_redact_message_content` filter recognized reasoning
+objects and unknown message blocks;
 [`agent_trace_privacy`](../src/rodex/agent_trace_privacy.py) supplies the shared
-encrypted-value classifier/redactor for normalization and expansion.
+encrypted-value classifier/redactor for normalization and expansion. This is
+shape-based filtering, not a guarantee for unknown native schemas or reasoning
+serialized inside otherwise permitted text fields.
 
 Analytics reads only authenticated files under its configured root; its resident
 append trust assumption is explicit in [analytics](ANALYTICS.md#source-admission-and-append-work).
@@ -223,6 +228,7 @@ observer view; do not assume all observation commands share the observer's filte
 Interaction outcome buffers contain metadata, not prompt bodies. Analytics failure
 logs retain exception type/code locations, never exception bodies or frame locals.
 The [context-threshold controller](INTERACTION_PATHS.md#context-threshold-steering)
-retains only numeric usage and exact runtime identifiers in memory, logs bounded
-metadata, and injects one source-defined fixed steer. It adds no history, SQL row,
-rollout body, or duplicate conversation store.
+retains only numeric usage and exact runtime identifiers in memory and logs bounded
+metadata. Its fixed reminder is real model input when dispatched and can appear in
+native Codex history. The controller adds no separate Rodex body/history store;
+ordinary analytics can observe the native records.

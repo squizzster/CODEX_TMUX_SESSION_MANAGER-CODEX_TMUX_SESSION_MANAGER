@@ -164,7 +164,8 @@ def test_server_overloaded_starts_continue_through_the_shared_pipeline_after_ini
 
 
 @pytest.mark.evolutionary_regression
-def test_child_thread_start_does_not_replace_main_binding_before_overload_recovery(tmp_path) -> None:
+@pytest.mark.parametrize("temporary_helper", [False, True])
+def test_child_thread_start_does_not_replace_main_binding_before_overload_recovery(tmp_path, temporary_helper) -> None:
     """A spawned child must not make the registered root recovery look stale."""
     pipeline = SessionInteractionPipeline()
     model_requests: list[InteractionRequest] = []
@@ -198,7 +199,9 @@ def test_child_thread_start_does_not_replace_main_binding_before_overload_recove
     assert proxy._claim_primary_connection(primary_connection)
     try:
         proxy._observe_primary_input({"id": 1, "method": "thread/start", "params": {}}, primary_connection)
-        proxy._observe_primary_response({"id": 1, "result": {"thread": {"id": ROOT_THREAD}}}, primary_connection)
+        proxy._observe_primary_response(
+            {"id": 1, "result": {"thread": {"id": ROOT_THREAD, "ephemeral": False}}}, primary_connection
+        )
         root_started = thread_started()
         proxy._observe_primary_response(root_started, primary_connection)
         controller.observe_protocol_event(root_started)
@@ -206,6 +209,14 @@ def test_child_thread_start_does_not_replace_main_binding_before_overload_recove
         child_started = thread_started("child-thread")
         proxy._observe_primary_response(child_started, primary_connection)
         controller.observe_protocol_event(child_started)
+
+        if temporary_helper:
+            proxy._observe_primary_input(
+                {"id": 2, "method": "thread/start", "params": {"ephemeral": True}}, primary_connection
+            )
+            proxy._observe_primary_response(
+                {"id": 2, "result": {"thread": {"id": "temporary-helper", "ephemeral": True}}}, primary_connection
+            )
 
         controller.observe_protocol_event(server_overloaded("failed-root-turn"))
         deferred_calls[-1].fire()

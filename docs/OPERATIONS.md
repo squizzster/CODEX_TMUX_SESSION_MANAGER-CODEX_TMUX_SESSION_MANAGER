@@ -122,7 +122,7 @@ retained installation while its current work continues.
 Never overwrite ownership markers, replace live SQL files, or infer
 destruction authority from a display name or PID alone.
 
-## Resume failures
+## Startup and resume failures
 
 Separate saved-thread admission from fresh startup. Record the exact Rodex name,
 Codex UUID, runtime/installation identity, App Server version, and failing stage.
@@ -132,8 +132,11 @@ and existing-only [SQL reads](SQL_SCHEMA.md#storage-and-transactions) to reconci
 identities without mutating the catalog.
 
 - **Rodex waits for the Codex session before attachment:** inspect the owned
-  runtime log and native startup protocol. A TUI modal can precede thread loading
-  and leave stderr quiet. The known 0.162.1
+  runtime log and native startup protocol. [Primary discovery](RUNTIME_ISOLATION.md#primary-conversation-discovery)
+  allows 30 seconds for the main acknowledgement; a few seconds of startup is normal.
+  Temporary native helpers may coexist with main and must not be counted as competing
+  main conversations. A TUI modal can precede thread loading and leave stderr quiet.
+  The known 0.162.1
   [hook-review boundary](SECURITY.md#hook-admission-and-resume) explains why a
   successful fresh session did not prove saved-session resume would work.
 - **Direct Codex reports its shared App Server is not ready:** inspect the exact

@@ -118,8 +118,10 @@ bytes pass through unchanged.
 and UTF-8 annotation rebasing. Annotations overlapping rewritten spans are removed.
 Other RPC fields, request IDs, routing, settings, attachments, and control intent
 remain unchanged. Unknown frames pass through without interpreting new text fields.
-Native commands, specialized review/goal fields, internal agent traffic, approvals,
-and tool output remain outside this user-input transformation contract.
+Specialized review/goal fields, approvals, and tool output remain outside this
+transformation contract. Selection uses the four RPC methods and their text-input
+shape, not thread kind: a temporary native helper using the same submission shape
+on a proxied connection is not exempt. Native command parsing remains Codex-owned.
 
 A replacement is JSON text, never terminal input: slash commands, shell escapes,
 and terminal-control-looking text cannot gain editor or command authority through

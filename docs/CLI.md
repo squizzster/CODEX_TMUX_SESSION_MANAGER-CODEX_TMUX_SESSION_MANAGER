@@ -72,7 +72,7 @@ Unsupported, disabled, unexpected, or unverifiable Rodex hooks remain inactive.
 The inactive notice also lasts five seconds; metadata remains so a later attach can
 repeat the reminder. Successful admission clears that stale state. For a saved
 session that times out before attachment, use the
-[resume diagnosis](OPERATIONS.md#resume-failures); fresh-start success alone does
+[resume diagnosis](OPERATIONS.md#startup-and-resume-failures); fresh-start success alone does
 not verify native resume preflight.
 
 ## Open, detach, and resume
@@ -95,9 +95,10 @@ rodex resume SESSION --force-old
 This attaches through the retained installation, including during a busy turn,
 without stopping, restarting, or sending model input. It also skips an available
 idle upgrade. When missing history prevents an idle live-runtime upgrade, the refusal
-includes this reconnect command. Ended runtimes require normal resume, where missing
-history remains an error. [Retained-runtime handoff](RUNTIME_ISOLATION.md#retained-runtime-upgrade)
-defines admission and ownership.
+includes this reconnect command. Ended runtimes require normal resume under the
+saved-thread rules above; `--force-old` cannot recreate them.
+[Retained-runtime handoff](RUNTIME_ISOLATION.md#retained-runtime-upgrade) defines
+admission and ownership.
 
 `_detach` follows the create/open/resume flow without attaching and reports identities
 as JSON. `_running` reports unverified or unregistered sessions separately; it does

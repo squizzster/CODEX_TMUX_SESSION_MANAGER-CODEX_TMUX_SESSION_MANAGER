@@ -170,8 +170,12 @@ projection understands the same source record; the
 requests. Each joins the exact collaboration tool request, activity, scope, target,
 and latest parent user-message reference preceding the tool request in that same
 turn. A separate association pairs unmatched requests with unclaimed target turns
-FIFO per thread, enforcing one-to-one ownership and time order. Reusing an agent adds
-a request/turn association, not a new thread or overwritten history.
+FIFO per thread, enforcing one-to-one ownership. This `next_observed_turn` association
+is inference, not a native causal acknowledgement. The
+[reconciler](../src/rodex_registry/agent_request_reconciliation.py) uses `julianday`
+time comparisons, which do not preserve full microsecond precision; existing links
+are not reconsidered when earlier evidence arrives. Reusing an agent adds a
+request/turn association, not a new thread or overwritten history.
 
 `send_message` deliberately creates no request row: `interacted` alone cannot identify
 follow-up intent. Public reads expose `collaboration_invocation` only through the

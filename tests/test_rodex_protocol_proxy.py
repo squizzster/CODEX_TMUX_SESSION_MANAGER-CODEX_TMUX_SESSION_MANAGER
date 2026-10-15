@@ -412,10 +412,12 @@ def test_proxy_delivers_rodex_notice_to_tui_without_forwarding_it_upstream(
             "params": {"thread": {"id": "thread-1"}},
         }
     )
+    thread_selected = json.dumps({"id": 1, "result": {"thread": {"id": "thread-1"}}})
 
     def app_server(connection: object) -> None:
         received_by_server.append(connection.recv())  # type: ignore[attr-defined]
         connection.send(thread_started)  # type: ignore[attr-defined]
+        connection.send(thread_selected)  # type: ignore[attr-defined]
         release_upstream.wait(2)
 
     upstream = unix_serve(app_server, path=str(app_socket), compression=None)
@@ -431,7 +433,7 @@ def test_proxy_delivers_rodex_notice_to_tui_without_forwarding_it_upstream(
         app_server_process=LiveTestProcess(),
         native_tui_process=LiveTestProcess(),
     )
-    client_message = json.dumps({"method": "initialize", "id": 1, "params": {}})
+    client_message = json.dumps({"method": "thread/start", "id": 1, "params": {}})
     try:
         proxy.start()
         with unix_connect(
@@ -439,6 +441,7 @@ def test_proxy_delivers_rodex_notice_to_tui_without_forwarding_it_upstream(
         ) as tui:
             tui.send(client_message)
             assert tui.recv(timeout=1) == thread_started
+            assert tui.recv(timeout=1) == thread_selected
 
             assert publish_tui_notice(proxy_socket, "Rodex: Codex update available", peer_identity=TEST_PEER)
             assert json.loads(tui.recv(timeout=1)) == {
@@ -455,7 +458,7 @@ def test_proxy_delivers_rodex_notice_to_tui_without_forwarding_it_upstream(
         upstream_thread.join(timeout=5)
 
     assert received_by_server == [client_message]
-    assert observed_events == [thread_started]
+    assert observed_events == [thread_started, thread_selected]
 
 
 def test_tui_notice_reports_undelivered_without_a_primary_tui(tmp_path: Path) -> None:

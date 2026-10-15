@@ -54,6 +54,15 @@ observer projections. Control-client output goes only to its destination, never 
 the primary presentation. Ordinary clients use separate upstream connections; reading
 or mutating does not make a control client the subscribed primary.
 
+Main model identity comes from a type-exact, connection-local correlation of the
+primary's `thread/start`, `thread/resume`, or `thread/fork` request with its successful
+`result.thread.id`. It is established before forwarding that reply. Notifications
+cannot select main: child starts share the stream, and native resume need not emit
+`thread/started`. Pending selection suspends model authority; conflicting or malformed
+acknowledgements invalidate it until reconnect. Input EOF revokes it immediately,
+even if an output projection delays full connection release. Control and old-connection
+responses cannot bind a replacement primary.
+
 The event tap admits subscriptions only after primary upstream peer verification.
 Its source epoch fences publication and loss under the same registration lock.
 Primary loss clears snapshots, drains queued events, and interrupts subscribers;
@@ -139,23 +148,35 @@ What's the most relevant objectives currently?, where/why? Compact insights, cor
 ```
 
 High usage observed before registration or before a turn becomes active waits for
-both authorities. Child-thread usage is ignored. Scheduling consumes the crossing;
-it stays disarmed regardless of outcome until an exact observation falls below 70%.
+both authorities. Child-thread usage is ignored. Scheduling reserves the crossing;
+final dispatch admission consumes it. Only the typed, local `model_thread_unbound`
+refusal before admission retries, after 0.25, 1, then 2 seconds. This is finite recovery
+for binding readiness, not an eventual-delivery guarantee. Exhaustion or another
+failure disarms the crossing until an exact observation falls below 70%.
 Compaction cancels pending work, ignores its usage snapshots, and requires a fresh
 post-compaction below-to-threshold crossing. Turn completion, disconnect, root
 rebinding, and close also cancel pending work.
+Reconnect clears observations but does not rearm a consumed crossing; a fresh
+below-threshold observation is required within the surviving controller lifetime.
 
 The deferred request enters `SessionInteractionPipeline`, where hooks and exact target
 checks still apply. After session-lock and transport waits, the exact mutation adapter
 revalidates connection, runtime, thread, turn, context percentage, compaction state,
 dispatch identity, and fixed text immediately before `turn/steer`. Only an admitted
-`completed` result records success. Rejection, failure, and indeterminate delivery are
-not retried automatically. Protocol forwarding never waits for this work, and the
+`completed` result records success. Admitted attempts, other rejections, failures,
+and indeterminate delivery are never resent automatically. Logs retain dispatch identity,
+admission state, a content-free rejection code, and whether recovery was scheduled;
+arbitrary exception bodies are not logged. Protocol forwarding never waits for this work, and the
 external `/rodex-interaction` decoder does not expose `STEER`.
 
 Evidence: [controller and race cases](../tests/test_context_threshold_steering.py),
 [raw usage projection](../tests/test_rodex_protocol_proxy.py), and
 [pipeline/exact-control integration](../tests/test_interaction_integration.py).
+[Primary binding regressions](../tests/test_primary_thread_binding.py) reproduce
+resume without a start notification. The [isolated native test](../tests/test_context_threshold_native.py)
+uses a persisted/resumed native thread and synthetic local model counters to prove
+one reminder reaches the same running turn, without interruption or a new turn.
+Native 0.162.1 passed; SQL/tmux discovery is fixture-provided in that test.
 
 ## Model input and local notices
 
@@ -184,7 +205,8 @@ requires the verified proxy endpoint and `RuntimePeerIdentity`. The private
 These are Python APIs; no `_notice` CLI exists.
 
 The [proxy](../src/rodex/protocol_proxy.py) sends a downstream `warning` with the
-currently observed main-thread ID, which can be null before `thread/started`.
+currently attested main-thread ID, which is null while lifecycle acknowledgement
+is pending or binding is unavailable.
 Display delivery requires the primary connection, not a loaded thread. It opens
 no upstream App Server connection and bypasses
 presentation, observer, and analytics event callbacks. There is no model submission,

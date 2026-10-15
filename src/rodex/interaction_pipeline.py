@@ -54,8 +54,23 @@ class DeliveryStatus(StrEnum):
     INDETERMINATE = "indeterminate"
 
 
+class InteractionRejectionReason(StrEnum):
+    """Owned, content-free diagnostics; never copy arbitrary exception bodies."""
+
+    UNSPECIFIED = "unspecified"
+    MODEL_THREAD_UNBOUND = "model_thread_unbound"
+
+
 class InteractionRejected(ValueError):
     """An operation cannot safely reach its requested destination."""
+
+    reason = InteractionRejectionReason.UNSPECIFIED
+
+
+class ModelThreadUnbound(InteractionRejected):
+    """Local pre-delivery refusal: no model input has been sent."""
+
+    reason = InteractionRejectionReason.MODEL_THREAD_UNBOUND
 
 
 class InteractionDeliveryIndeterminate(RuntimeError):
@@ -85,6 +100,7 @@ class InteractionResult:
     status: DeliveryStatus
     detail: str = ""
     value: object = None
+    rejection_reason: InteractionRejectionReason | None = None
 
     @property
     def accepted(self) -> bool:
@@ -201,7 +217,7 @@ class SessionInteractionPipeline:
         except UserPromptHookError as error:
             result = InteractionResult(DeliveryStatus.REJECTED, str(error), value=error)
         except InteractionRejected as error:
-            result = InteractionResult(DeliveryStatus.REJECTED, str(error))
+            result = InteractionResult(DeliveryStatus.REJECTED, str(error), rejection_reason=error.reason)
         except InteractionDeliveryIndeterminate:
             self._record(request, DeliveryStatus.INDETERMINATE)
             raise
@@ -235,7 +251,7 @@ class SessionInteractionPipeline:
         }
         bound_thread_id = target.model_thread_id() if model_operation else None
         if model_operation and bound_thread_id is None:
-            raise InteractionRejected(f"{request.target} has no unambiguous model thread binding")
+            raise ModelThreadUnbound(f"{request.target} has no unambiguous model thread binding")
         if request.expected_thread_id is not None and request.expected_thread_id != bound_thread_id:
             raise InteractionRejected("requested model thread binding is stale")
         request = replace(request, expected_thread_id=bound_thread_id)

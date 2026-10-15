@@ -197,12 +197,14 @@ def test_child_thread_start_does_not_replace_main_binding_before_overload_recove
     primary_connection = object()
     assert proxy._claim_primary_connection(primary_connection)
     try:
+        proxy._observe_primary_input({"id": 1, "method": "thread/start", "params": {}}, primary_connection)
+        proxy._observe_primary_response({"id": 1, "result": {"thread": {"id": ROOT_THREAD}}}, primary_connection)
         root_started = thread_started()
-        proxy._observe_primary_thread(root_started)
+        proxy._observe_primary_response(root_started, primary_connection)
         controller.observe_protocol_event(root_started)
 
         child_started = thread_started("child-thread")
-        proxy._observe_primary_thread(child_started)
+        proxy._observe_primary_response(child_started, primary_connection)
         controller.observe_protocol_event(child_started)
 
         controller.observe_protocol_event(server_overloaded("failed-root-turn"))

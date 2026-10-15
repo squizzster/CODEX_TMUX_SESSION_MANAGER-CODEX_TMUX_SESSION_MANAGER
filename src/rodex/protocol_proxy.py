@@ -35,6 +35,7 @@ from .interaction_pipeline import (
 )
 from .interaction_transport import SESSION_INTERACTION_CONNECTION_PATH, serve_session_interaction
 from .pane_control import TmuxPaneController
+from .primary_thread_binding import PrimaryThreadBinding
 from .protocol_input_text import UserPromptHookError
 from .protocol_projection import ProtocolProjectionFailure, ProtocolProjectionGuard
 from .runtime_endpoint import ExclusiveUnixEndpoint
@@ -983,7 +984,7 @@ class CodexProtocolProxy:
         self._primary_send_lock = Lock()
         self._primary_connection_claimed = False
         self._primary_tui_connection: Any | None = None
-        self._primary_thread_id: str | None = None
+        self._primary_thread_binding = PrimaryThreadBinding()
         self._primary_binding: str | None = None
         self._primary_connection_released = Event()
         self._primary_connection_released.set()
@@ -1004,7 +1005,7 @@ class CodexProtocolProxy:
                 ),
                 self._primary_available,
                 self._deliver_main_interaction,
-                model_thread_id=lambda: self._primary_thread_id if self._model_message_sender is not None else None,
+                model_thread_id=self._primary_model_thread_id,
                 binding_identity=lambda: self._primary_binding,
             )
         )
@@ -1097,10 +1098,14 @@ class CodexProtocolProxy:
                 def deliver_input(request: InteractionRequest) -> InteractionResult:
                     message = request.payload
                     assert isinstance(message, (str, bytes))
-                    if is_primary_connection and self._on_primary_client_message is not None:
-                        self._projection_guard.observe(
-                            "primary-input", self._on_primary_client_message, message, _json_object(message)
-                        )
+                    if is_primary_connection:
+                        event = _json_object(message)
+                        # Retain only accepted input, before upstream can reply.
+                        self._observe_primary_input(event, tui_connection)
+                        if self._on_primary_client_message is not None:
+                            self._projection_guard.observe(
+                                "primary-input", self._on_primary_client_message, message, event
+                            )
                     app_server_connection.send(request.payload)
                     return InteractionResult(DeliveryStatus.DELIVERED)
 
@@ -1108,10 +1113,12 @@ class CodexProtocolProxy:
                     message = request.payload
                     assert isinstance(message, (str, bytes))
                     if is_primary_connection:
+                        event = _json_object(message)
+                        # Establish identity before the TUI can act on its reply or
+                        # observers schedule model input. This is not a projection.
+                        self._observe_primary_response(event, tui_connection)
                         if not self._send_primary_tui_message(message, expected_connection=tui_connection):
                             return InteractionResult(DeliveryStatus.FAILED, "primary connection is unavailable")
-                        event = _json_object(message)
-                        self._observe_primary_thread(event)
                         if self._event_tap is not None and source_epoch is not None:
                             try:
                                 self._event_tap.publish_protocol_event(message, event, source_epoch=source_epoch)
@@ -1149,6 +1156,10 @@ class CodexProtocolProxy:
                 self.interactions.register(output_target)
 
                 def invalidate_primary_source() -> None:
+                    if is_primary_connection:
+                        with self._connection_lock:
+                            if self._primary_tui_connection is tui_connection:
+                                self._primary_thread_binding.invalidate_after_disconnect()
                     if self._event_tap is not None and source_epoch is not None:
                         self._event_tap.reset_after_disconnect(source_epoch=source_epoch)
 
@@ -1203,7 +1214,10 @@ class CodexProtocolProxy:
     def validate_primary_model_binding(self, request: InteractionRequest) -> None:
         """Recheck the selected connection/thread at the exact model RPC boundary."""
         with self._connection_lock:
-            if self._primary_binding != request.expected_binding or self._primary_thread_id != request.expected_thread_id:
+            if (
+                self._primary_binding != request.expected_binding
+                or self._primary_thread_binding.thread_id != request.expected_thread_id
+            ):
                 raise InteractionRejected("main conversation changed before model dispatch")
 
     def _deliver_main_interaction(self, request: InteractionRequest) -> InteractionResult:
@@ -1239,7 +1253,7 @@ class CodexProtocolProxy:
 
     def _warning_notification(self, message: str) -> str:
         with self._connection_lock:
-            thread_id = self._primary_thread_id
+            thread_id = self._primary_thread_binding.thread_id
         return json.dumps(
             {
                 "method": CODEX_APP_SERVER.warning_method,
@@ -1270,17 +1284,19 @@ class CodexProtocolProxy:
                 return False
         return True
 
-    def _observe_primary_thread(self, event: dict[str, Any] | None) -> None:
-        if event is None or event.get("method") != CODEX_APP_SERVER.thread_started_method:
-            return
-        params = event.get("params")
-        thread_id = _started_thread_id(params) if isinstance(params, dict) else None
-        if thread_id is not None:
-            with self._connection_lock:
-                # One TUI connection owns one main thread, while App Server also
-                # reports child-thread starts on that same event stream.
-                if self._primary_thread_id is None:
-                    self._primary_thread_id = thread_id
+    def _primary_model_thread_id(self) -> str | None:
+        with self._connection_lock:
+            return self._primary_thread_binding.thread_id if self._model_message_sender is not None else None
+
+    def _observe_primary_input(self, event: dict[str, Any] | None, connection: Any) -> None:
+        with self._connection_lock:
+            if event is not None and self._primary_tui_connection is connection:
+                self._primary_thread_binding.observe_request(event)
+
+    def _observe_primary_response(self, event: dict[str, Any] | None, connection: Any) -> None:
+        with self._connection_lock:
+            if event is not None and self._primary_tui_connection is connection:
+                self._primary_thread_binding.observe_response(event)
 
     def _claim_primary_connection(self, tui_connection: Any) -> bool:
         with self._primary_lifecycle_lock, self._connection_lock:
@@ -1288,7 +1304,7 @@ class CodexProtocolProxy:
                 return False
             self._primary_connection_claimed = True
             self._primary_tui_connection = tui_connection
-            self._primary_thread_id = None
+            self._primary_thread_binding = PrimaryThreadBinding()
             self._primary_binding = uuid.uuid4().hex
             self._primary_connection_released.clear()
             return True
@@ -1311,7 +1327,7 @@ class CodexProtocolProxy:
                     self._primary_source_epoch = None
                     self._primary_connection_claimed = False
                     self._primary_tui_connection = None
-                    self._primary_thread_id = None
+                    self._primary_thread_binding = PrimaryThreadBinding()
                     self._primary_binding = None
                     released = True
             if source_epoch is not None and self._event_tap is not None:

@@ -6,6 +6,7 @@ import json
 import time
 from collections.abc import Callable
 from contextlib import suppress
+from dataclasses import dataclass
 from threading import Lock
 
 from .protocol_input_text import is_user_input_submission, user_input_text_items
@@ -14,20 +15,28 @@ PROMPT_EXPANSION_MAX_CHARACTERS = 8192
 PROMPT_EXPANSION_VISIBLE_SECONDS = 15.0
 
 
+@dataclass(frozen=True, slots=True)
+class PromptExpansion:
+    """Bounded before/after text from one successfully forwarded submission."""
+
+    original_text: str
+    forwarded_text: str
+
+
 class PromptExpansionDisplay:
     """Latest-only handoff. Producers never render, write terminal data, or await it."""
 
     def __init__(self) -> None:
         self._lock = Lock()
         self._source: object | None = None
-        self._text: str | None = None
+        self._expansion: PromptExpansion | None = None
         self._expires_at: float | None = None
         self._wake: Callable[[], None] | None = None
 
     def bind_source(self, source: object) -> None:
         with self._lock:
             self._source = source
-            self._text = self._expires_at = None
+            self._expansion = self._expires_at = None
             wake = self._wake
         self._notify(wake)
 
@@ -35,7 +44,7 @@ class PromptExpansionDisplay:
         with self._lock:
             if self._source is not source:
                 return
-            self._source = self._text = self._expires_at = None
+            self._source = self._expansion = self._expires_at = None
             wake = self._wake
         self._notify(wake)
 
@@ -51,36 +60,30 @@ class PromptExpansionDisplay:
         except (ValueError, UnicodeDecodeError):
             return
         after = user_input_text_items(frame)
-        changed = tuple(item["text"] for item in before) != tuple(item["text"] for item in after)
-        if not changed:
+        before_texts = tuple(item["text"] for item in before)
+        after_texts = tuple(item["text"] for item in after)
+        if before_texts == after_texts:
             # Native startup can immediately submit an unchanged helper-thread
             # prompt. It must not erase the visible user expansion before attach.
             return
-        # Slice before joining: neither multipart nor a huge replacement can
-        # grow the retained mailbox beyond its explicit character budget.
-        remaining = PROMPT_EXPANSION_MAX_CHARACTERS
-        parts = []
-        for item in after:
-            part = item["text"]
-            parts.append(part[:remaining])
-            remaining -= len(part) + 1
-            if remaining < 0:
-                parts.append("…")
-                break
-        text = "\n".join(parts)[: PROMPT_EXPANSION_MAX_CHARACTERS + 2]
+        original_text = _bounded_text(before_texts, 512)
+        expansion = PromptExpansion(
+            original_text,
+            _bounded_text(after_texts, PROMPT_EXPANSION_MAX_CHARACTERS - len(original_text)),
+        )
         with self._lock:
             if self._source is not source:
                 return
-            self._text = text
+            self._expansion = expansion
             self._expires_at = time.monotonic() + PROMPT_EXPANSION_VISIBLE_SECONDS
             wake = self._wake
         self._notify(wake)
 
-    def snapshot(self, now: float) -> tuple[str | None, float | None]:
+    def snapshot(self, now: float) -> tuple[PromptExpansion | None, float | None]:
         with self._lock:
             if self._expires_at is not None and now >= self._expires_at:
-                self._text = self._expires_at = None
-            return self._text, self._expires_at
+                self._expansion = self._expires_at = None
+            return self._expansion, self._expires_at
 
     def subscribe(self, wake: Callable[[], None]) -> Callable[[], None]:
         """Bind the current gateway's nonblocking wake; preserve startup publications."""
@@ -99,3 +102,18 @@ class PromptExpansionDisplay:
         if wake is not None:
             with suppress(Exception):
                 wake()
+
+
+def _bounded_text(texts: tuple[str, ...], limit: int) -> str:
+    """Slice before joining; even multipart input stays within the display budget."""
+    parts = []
+    remaining = limit
+    for index, text in enumerate(texts):
+        remaining -= bool(index)
+        if remaining < 0:
+            return "\n".join(parts)[: limit - 1] + "…"
+        parts.append(text[:remaining])
+        if len(text) > remaining:
+            return "\n".join(parts)[: limit - 1] + "…"
+        remaining -= len(text)
+    return "\n".join(parts)

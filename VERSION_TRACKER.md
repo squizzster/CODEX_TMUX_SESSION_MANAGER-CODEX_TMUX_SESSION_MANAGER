@@ -16,6 +16,8 @@ are unchanged. Retained running sessions keep their original implementation.
 
 - Changed primary prompts again show their actual expansion in the ordinary Rodex
   pane, through a separate bounded, transient read-only display above the composer.
+  Original input is followed by `=> translated =>` and the forwarded text in normal
+  terminal colours, with no bright heading.
   Transformation still runs once at structured submission; original native draft
   and recall remain unchanged. Post-send display never adds a prompt or retries
   delivery. Connection fences, safe terminal text, native/light restoration, expiry

@@ -8,6 +8,7 @@ import pytest
 from rodex.input_interceptor_config import INPUT_INTERCEPTORS
 from rodex.input_menu import ARGUMENT_MENU_FOOTER, InputInterceptionMenu, InputMenuRow, InputMenuView
 from rodex.presentation_policy import PresentationItemText, PresentationSnapshot, PresentationSurface
+from rodex.prompt_expansion_display import PromptExpansion
 from rodex.terminal_surface import TerminalSurfaceRenderer
 
 NATIVE_MENU = (
@@ -41,7 +42,7 @@ class DisplayHarness:
         return rendered
 
     def expansion(self, text):
-        rendered = self.renderer.show_prompt_expansion(text)
+        rendered = self.renderer.show_prompt_expansion(None if text is None else PromptExpansion("push", text))
         self._output.feed(rendered)
         return rendered
 
@@ -54,7 +55,13 @@ def test_prompt_expansion_is_visible_but_never_changes_native_composer_or_histor
     before = harness.visible.display
     cursor = (harness.visible.cursor.y, harness.visible.cursor.x)
     harness.expansion("Commit/stash → Fetch/prune → Switch main")
-    assert "Rodex expanded input:" in "\n".join(harness.visible.display)
+    assert harness.visible.display[1].rstrip() == "push"
+    assert harness.visible.display[2].rstrip() == "=> translated => Commit/stash → Fetch/prune → Switch main"
+    for row in (1, 2):
+        for cell in harness.visible.buffer[row].values():
+            assert cell.fg == cell.bg == "default"
+            assert not cell.bold and not cell.blink
+    assert "Rodex expanded input:" not in "\n".join(harness.visible.display)
     assert "Commit/stash" in "\n".join(harness.visible.display)
     assert harness.renderer.native.screen.display[4].rstrip() == "\u203a /r"
     assert (harness.visible.cursor.y, harness.visible.cursor.x) == cursor
@@ -70,26 +77,26 @@ def test_prompt_expansion_sanitizes_controls_restores_on_scroll_and_yields_to_me
     assert b"\x1b]52" not in rendered and b"\x07" not in rendered
     assert "世界 é" in "\n".join(harness.visible.display)  # pyte normalizes combining accents.
     assert harness.display(STATE)
-    assert "Rodex expanded input" not in "\n".join(harness.visible.display)
+    assert "=> translated =>" not in "\n".join(harness.visible.display)
     harness.display(None)
-    assert "Rodex expanded input" in "\n".join(harness.visible.display)
+    assert "=> translated =>" in "\n".join(harness.visible.display)
     harness._output.feed(harness.renderer.suspend())
     assert harness.visible.display == harness.renderer.native.screen.display
     harness._output.feed(harness.renderer.resume())
     harness.native(b"\x1b[12;1H\r\n" * 15)
     history = "".join(cell.data for line in harness.visible.history.top for cell in line.values())
-    assert "Rodex expanded input" not in history and "secret" not in history
+    assert "=> translated =>" not in history and "secret" not in history
 
 
 def test_initial_prompt_display_uses_composer_boundary_not_cursor_position():
     harness = DisplayHarness()
     harness.native(NATIVE_MENU + b"\x1b[1;1H\x1b[?25l")
     harness.expansion("initial argv expansion")
-    assert "Rodex expanded input:" in "\n".join(harness.visible.display)
+    assert "=> translated =>" in "\n".join(harness.visible.display)
     assert (harness.visible.cursor.y, harness.visible.cursor.x) == (0, 0)
     assert harness.visible.cursor.hidden
     harness.native(b"\x1b[2J\x1b[1;1HApproval dialog")
-    assert "Rodex expanded input:" not in "\n".join(harness.visible.display)
+    assert "=> translated =>" not in "\n".join(harness.visible.display)
 
 
 @pytest.mark.parametrize("frame", [b"\x1b]0;title\x1b\\", b"\x1bPopaque\x1b\\", "世界".encode()])

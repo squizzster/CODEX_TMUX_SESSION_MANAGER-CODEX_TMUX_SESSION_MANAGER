@@ -338,8 +338,8 @@ class TerminalSessionGateway:
     def _sync_prompt_expansion(self, now: float) -> float | None:
         if self._prompt_expansion_display is None:
             return None
-        text, expiry = self._prompt_expansion_display.snapshot(now)
-        rendered = self._surface_renderer.show_prompt_expansion(text)
+        expansion, expiry = self._prompt_expansion_display.snapshot(now)
+        rendered = self._surface_renderer.show_prompt_expansion(expansion)
         if rendered:
             # A stalled terminal retains one complete newest surface,
             # not an unbounded sequence of notice paint/restore diffs.

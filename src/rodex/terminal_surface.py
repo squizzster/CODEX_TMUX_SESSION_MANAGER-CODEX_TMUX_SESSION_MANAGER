@@ -17,6 +17,7 @@ from .input_menu import ARGUMENT_MENU_FOOTER, InputMenuStage, InputMenuView
 from .native_composer import composer_gutter
 from .native_terminal_projection import NativeTerminalProjection
 from .presentation_policy import PresentationSnapshot, PresentationSurface
+from .prompt_expansion_display import PromptExpansion
 
 _DEFAULT_PRESENTATION = PresentationSnapshot(0, "dark", PresentationSurface.NATIVE, "", (), ())
 
@@ -41,13 +42,13 @@ class TerminalSurfaceRenderer:
         self._presentation = _DEFAULT_PRESENTATION
         self._last_semantic_frame: bytes | None = None
         self._pending_presentation: PresentationSnapshot | None = None
-        self._prompt_expansion: str | None = None
+        self._prompt_expansion: PromptExpansion | None = None
 
-    def show_prompt_expansion(self, text: str | None) -> bytes:
+    def show_prompt_expansion(self, expansion: PromptExpansion | None) -> bytes:
         """Display forwarded text locally; retain native draft, history and cursor."""
-        if text == self._prompt_expansion:
+        if expansion == self._prompt_expansion:
             return b""
-        self._prompt_expansion = text
+        self._prompt_expansion = expansion
         self._last_semantic_frame = None
         if not self.native.at_boundary:
             return b""  # Native output will repaint once its current token is complete.
@@ -252,17 +253,17 @@ class TerminalSurfaceRenderer:
             return b""
         available = min(6, composer_row - 1)
         width = max(1, screen.columns - 1)
-        lines = _wrap_cells(_terminal_safe_text(self._prompt_expansion), width)
+        lines = _wrap_cells("=> translated => " + _terminal_safe_text(self._prompt_expansion.forwarded_text), width)
         if len(lines) > available - 1:
             lines = lines[: available - 1]
             lines[-1] = _clip_cells(lines[-1], max(0, width - 1)) + "…"
-        lines.insert(0, "Rodex expanded input:")
+        original = _terminal_safe_text(self._prompt_expansion.original_text).replace("\n", " ").replace("\t", " ")
+        lines.insert(0, _clip_cells(original, width))
         first_row = composer_row - 1 - len(lines)
         self._painted_from_row = first_row
         output = bytearray()
         for row, line in enumerate(lines, first_row):
-            style = b"\x1b[1;36m" if row == first_row else b"\x1b[0m"
-            output.extend(_position(row, 0) + b"\x1b[0m\x1b[2K" + style + _clip_cells(line, width).encode())
+            output.extend(_position(row, 0) + b"\x1b[0m\x1b[2K" + _clip_cells(line, width).encode())
         return bytes(output)
 
     def _restore(self) -> bytes:

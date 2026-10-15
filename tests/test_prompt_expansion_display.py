@@ -13,7 +13,7 @@ from rodex.interaction_pipeline import (
     InteractionTarget,
     SessionInteractionPipeline,
 )
-from rodex.prompt_expansion_display import PROMPT_EXPANSION_MAX_CHARACTERS, PromptExpansionDisplay
+from rodex.prompt_expansion_display import PROMPT_EXPANSION_MAX_CHARACTERS, PromptExpansion, PromptExpansionDisplay
 from rodex.protocol_input_text import PromptTextEdit
 
 
@@ -58,7 +58,7 @@ def test_forwarded_actual_multipart_expansion_without_a_second_hook_call(method)
     ).accepted
     assert calls == [("Hello", "world")]
     assert len(sent) == 1
-    assert display.snapshot(0)[0] == "Hello!\nworld!"
+    assert display.snapshot(0)[0] == PromptExpansion("Hello\nworld", "Hello!\nworld!")
     assert not hasattr(pipeline.records[0], "payload")
 
 
@@ -96,20 +96,20 @@ def test_latest_only_source_fencing_startup_expiry_and_unchanged_submission():
     display.observe_forwarded(old, submission("push"), submission("expanded"))
     wakes = []
     unsubscribe = display.subscribe(lambda: wakes.append(True))
-    assert display.snapshot(0)[0] == "expanded"  # Initial argv precedes gateway subscription.
+    assert display.snapshot(0)[0] == PromptExpansion("push", "expanded")  # Initial argv precedes gateway subscription.
     display.bind_source(current)
     display.observe_forwarded(old, submission("push"), submission("stale"))
     display.release_source(old)
     assert display.snapshot(0) == (None, None)
     for i in range(1000):
         display.observe_forwarded(current, submission("push"), submission(str(i)))
-    assert display.snapshot(0)[0] == "999"
+    assert display.snapshot(0)[0] == PromptExpansion("push", "999")
     display.observe_forwarded(current, submission("plain"), submission("plain"))
-    assert display.snapshot(0)[0] == "999"  # Unchanged native helper input does not erase it.
+    assert display.snapshot(0)[0] == PromptExpansion("push", "999")  # Unchanged native helper input does not erase it.
     display.observe_forwarded(current, submission("push"), submission("x" * 100_000))
-    text, expiry = display.snapshot(0)
-    assert len(text) <= PROMPT_EXPANSION_MAX_CHARACTERS + 2
-    assert text.endswith("…")
+    expansion, expiry = display.snapshot(0)
+    assert len(expansion.original_text) + len(expansion.forwarded_text) <= PROMPT_EXPANSION_MAX_CHARACTERS
+    assert expansion.forwarded_text.endswith("…")
     assert display.snapshot(expiry) == (None, None)
     unsubscribe()
     before = len(wakes)
@@ -125,3 +125,16 @@ def test_replacing_gateway_subscription_cannot_be_unsubscribed_by_old_gateway():
     old()
     display.bind_source(object())
     assert wakes == ["new"]
+
+
+def test_large_original_and_multipart_expansion_share_one_bounded_display_budget():
+    display = PromptExpansionDisplay()
+    source = object()
+    display.bind_source(source)
+    display.observe_forwarded(source, submission("o" * 100_000), submission("a" * 4000, "b" * 100_000))
+    expansion, _expiry = display.snapshot(0)
+    assert len(expansion.original_text) == 512
+    assert expansion.original_text.endswith("…")
+    assert expansion.forwarded_text.startswith("a" * 4000 + "\n")
+    assert expansion.forwarded_text.endswith("…")
+    assert len(expansion.original_text) + len(expansion.forwarded_text) == PROMPT_EXPANSION_MAX_CHARACTERS

@@ -452,7 +452,8 @@ def test_primary_expansion_display_excludes_control_and_clears_on_disconnect(tmp
                     while display.snapshot(0)[0] is None and time.monotonic() < deadline:
                         published.wait(0.01)
                         published.clear()
-                    assert display.snapshot(0)[0] == "Hello!"
+                    assert display.snapshot(0)[0].original_text == "Hello"
+                    assert display.snapshot(0)[0].forwarded_text == "Hello!"
                 else:
                     assert display.snapshot(0) == (None, None)
             if route == "/rpc":

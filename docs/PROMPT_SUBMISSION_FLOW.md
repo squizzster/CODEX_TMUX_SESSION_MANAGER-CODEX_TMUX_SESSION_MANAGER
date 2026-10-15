@@ -81,8 +81,10 @@ original input and resubmitting applies the current rules to that original again
 Rules match the actual submitted text, including any native-added IDE context;
 they do not match an inferred draft stripped of that context.
 
-Changed primary submissions also show **Rodex expanded input:** above the composer
-in the ordinary pane, in native and light presentation. This is a separate read-only
+Changed primary submissions show the original input on one line, followed by
+`=> translated =>` and the forwarded text, using ordinary terminal colours without
+a bold/coloured heading. This appears above the composer in both native and light
+presentation. It is a separate read-only
 view of the actual forwarded text, not a second hook invocation or model message.
 It appears after upstream send, not as proof of native acceptance. Native recall
 still contains the original input. Control/background connections do not publish
@@ -90,7 +92,8 @@ this primary-pane view.
 
 The latest expansion is retained for 15 seconds, replaced by the next changed primary
 submission, and cleared on disconnect. Unchanged input (including native startup
-helper requests) does not erase it. The mailbox holds at most 8,194 characters;
+helper requests) does not erase it. The mailbox holds at most 8,192 characters across
+the original preview (up to 512 characters) and forwarded text;
 the surface shows at most six rows, marking truncation with an ellipsis. Local menus,
 native dialogs and incomplete terminal sequences take precedence. The gateway alone
 renders/clears it, preserving cursor, native projection and terminal scrollback.

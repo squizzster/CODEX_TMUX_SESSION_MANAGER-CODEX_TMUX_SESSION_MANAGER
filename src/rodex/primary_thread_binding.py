@@ -7,23 +7,31 @@ main: child starts share the stream, and resume need not emit thread/started.
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Final
 
 PRIMARY_THREAD_METHODS: Final = frozenset({"thread/start", "thread/resume", "thread/fork"})
 MAX_PENDING_THREAD_SELECTIONS: Final = 32
 
 
+@dataclass(frozen=True, slots=True)
+class _PendingThread:
+    expected_thread_id: str | None
+    ephemeral: bool
+
+
 class PrimaryThreadBinding:
     def __init__(self) -> None:
         self._selected_thread_id: str | None = None
-        self._pending: dict[tuple[type, int | str], str | None] = {}
+        self._pending: dict[tuple[type, int | str], _PendingThread] = {}
         self._invalid = False
 
     @property
     def thread_id(self) -> str | None:
         # An in-flight selection can change the native conversation. Do not keep
         # authorizing the previous root until its acknowledgement arrives.
-        return None if self._invalid or self._pending else self._selected_thread_id
+        selecting_main = any(not pending.ephemeral for pending in self._pending.values())
+        return None if self._invalid or selecting_main else self._selected_thread_id
 
     def observe_request(self, message: Mapping[str, object]) -> None:
         method = message.get("method")
@@ -43,7 +51,15 @@ class PrimaryThreadBinding:
         if expected_thread is not None and (not isinstance(expected_thread, str) or not expected_thread):
             self._invalidate()
             return
-        self._pending[key] = expected_thread
+        # Native temporary structured requests share the TUI connection. Only
+        # start/fork support ephemeral; absent/null means the native default.
+        ephemeral = params.get("ephemeral") if method in {"thread/start", "thread/fork"} else False
+        if ephemeral is None:
+            ephemeral = False
+        if type(ephemeral) is not bool:
+            self._invalidate()
+            return
+        self._pending[key] = _PendingThread(expected_thread, ephemeral)
 
     def observe_response(self, message: Mapping[str, object]) -> None:
         if "method" in message or self._invalid:
@@ -51,7 +67,7 @@ class PrimaryThreadBinding:
         key = _request_key(message.get("id"))
         if key is None or key not in self._pending:
             return
-        expected_thread = self._pending.pop(key)
+        pending = self._pending.pop(key)
         if "error" in message and "result" not in message:
             error = message["error"]
             if isinstance(error, Mapping) and type(error.get("code")) is int and isinstance(error.get("message"), str):
@@ -61,18 +77,21 @@ class PrimaryThreadBinding:
         result = message.get("result")
         thread = result.get("thread") if isinstance(result, Mapping) else None
         thread_id = thread.get("id") if isinstance(thread, Mapping) else None
+        ephemeral = thread.get("ephemeral") if isinstance(thread, Mapping) else None
         if (
             "error" in message
             or not isinstance(thread_id, str)
             or not thread_id
-            or (expected_thread is not None and expected_thread != thread_id)
-            or (self._selected_thread_id is not None and self._selected_thread_id != thread_id)
+            or ephemeral is not pending.ephemeral
+            or (pending.expected_thread_id is not None and pending.expected_thread_id != thread_id)
+            or (not ephemeral and self._selected_thread_id is not None and self._selected_thread_id != thread_id)
         ):
             # One managed runtime owns one root. Malformed or conflicting success
             # must not preserve old authority or guess a replacement root.
             self._invalidate()
             return
-        self._selected_thread_id = thread_id
+        if not ephemeral:
+            self._selected_thread_id = thread_id
 
     def _invalidate(self) -> None:
         self._invalid = True

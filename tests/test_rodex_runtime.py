@@ -29,6 +29,7 @@ from rodex.command_policy_configuration import (
 )
 from rodex.control import LiveRodexControl
 from rodex.daemon_client import daemon_socket_path
+from rodex.interaction_transport import PRIMARY_THREAD_READ_METHOD, read_primary_thread_id
 from rodex.process_contracts import AnalyticsRuntimeConfig, RuntimeServiceConfig
 from rodex.process_environment import (
     exact_environment_exec_command,
@@ -365,22 +366,11 @@ def _register_real_tmux_session(
 
 
 class FakeWebSocket:
-    def __init__(self, loaded: list[str], *, version: str = "0.151.0") -> None:
+    def __init__(self, primary_thread_id: str | None, *, version: str = "0.151.0") -> None:
         self.sent: list[dict[str, object]] = []
         self.response = SimpleNamespace(headers=PEER_IDENTITY.headers())
-        self.responses = iter(
-            [
-                {
-                    "id": 0,
-                    "result": {
-                        "platformOs": "linux",
-                        "userAgent": f"rodex/{version} (linux)",
-                    },
-                },
-                {"method": "remoteControl/status/changed", "params": {}},
-                {"id": 1, "result": {"data": loaded, "nextCursor": None}},
-            ]
-        )
+        self.primary_thread_id = primary_thread_id
+        self.version = version
 
     def __enter__(self) -> FakeWebSocket:
         return self
@@ -393,12 +383,18 @@ class FakeWebSocket:
 
     def recv(self, timeout: float) -> str:
         assert timeout > 0
-        return json.dumps(next(self.responses))
+        request = self.sent[-1]
+        if request["method"] == "initialize":
+            result = {"platformOs": "linux", "userAgent": f"rodex/{self.version} (linux)"}
+        else:
+            assert request["method"] == PRIMARY_THREAD_READ_METHOD
+            result = {"thread_id": self.primary_thread_id}
+        return json.dumps({"id": request["id"], "result": result})
 
 
 class RecordingConnector:
-    def __init__(self, loaded: list[str], *, version: str = "0.151.0") -> None:
-        self.websocket = FakeWebSocket(loaded, version=version)
+    def __init__(self, primary_thread_id: str | None, *, version: str = "0.151.0") -> None:
+        self.websocket = FakeWebSocket(primary_thread_id, version=version)
         self.calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
 
     def __call__(self, *args: object, **kwargs: object) -> FakeWebSocket:
@@ -594,10 +590,14 @@ def test_observer_uses_distinct_codex_identity_fields_and_no_compression(
     tmp_path: Path,
 ) -> None:
     codex_session_id = "01a00654-f2bc-7a30-834a-a5f886a65f82"
-    connector = RecordingConnector([codex_session_id])
+    connector = RecordingConnector(codex_session_id)
     launcher = RodexRuntimeLauncher("codex", "tmux", connector=connector)
 
-    assert launcher._list_loaded_codex_threads(tmp_path / "proxy.sock", PEER_IDENTITY) == [codex_session_id]
+    launcher._require_app_server_version(tmp_path / "proxy.sock", PEER_IDENTITY)
+    assert (
+        read_primary_thread_id(tmp_path / "proxy.sock", peer_identity=PEER_IDENTITY, connector=connector)
+        == codex_session_id
+    )
 
     _, options = connector.calls[0]
     assert options["compression"] is None
@@ -614,18 +614,18 @@ def test_observer_uses_distinct_codex_identity_fields_and_no_compression(
             },
         },
         {"method": "initialized", "params": {}},
-        {"method": "thread/loaded/list", "id": 1, "params": {}},
+        {"method": PRIMARY_THREAD_READ_METHOD, "id": 0, "params": {}},
     ]
 
 
 def test_runtime_discovery_rejects_a_noncharacterized_app_server(
     tmp_path: Path,
 ) -> None:
-    connector = RecordingConnector([], version="0.150.1")
+    connector = RecordingConnector(None, version="0.150.1")
     launcher = RodexRuntimeLauncher("codex", "tmux", connector=connector)
 
     with pytest.raises(RodexAppServerVersionError, match=r"live server is 0\.150\.1"):
-        launcher._list_loaded_codex_threads(tmp_path / "proxy.sock", PEER_IDENTITY)
+        launcher._require_app_server_version(tmp_path / "proxy.sock", PEER_IDENTITY)
 
     assert [message["method"] for message in connector.websocket.sent] == ["initialize"]
 
@@ -719,7 +719,7 @@ def test_start_directly_hosts_codex_in_tmux_and_returns_its_session_id(
         lambda size: "0123456789abcdef" if size == 8 else "0123456789abcdef" * 2,
     )
     runner = RuntimeRunner(tmp_path)
-    connector = RecordingConnector([codex_session_id])
+    connector = RecordingConnector(codex_session_id)
     daemon_factory = RecordingDaemonFactory()
     rodex_virtual_environment = Path(sys.prefix)
     launcher = RodexRuntimeLauncher(
@@ -912,7 +912,7 @@ def test_startup_environment_failure_never_starts_host_and_removes_placeholder(
         "/usr/bin/codex",
         "/usr/bin/tmux",
         runner=runner,
-        connector=RecordingConnector([]),
+        connector=RecordingConnector(None),
         daemon_client_factory=RecordingDaemonFactory(),
         python_executable="/venv/bin/python",
         environment={"PATH": "/usr/bin", "USER_SETTING": "preserved"},
@@ -1032,7 +1032,7 @@ def test_start_passes_the_exact_leading_zero_session_id_to_the_daemon(
         "/usr/bin/codex",
         "/usr/bin/tmux",
         runner=runner,
-        connector=RecordingConnector([codex_session_id]),
+        connector=RecordingConnector(codex_session_id),
         python_executable="/venv/bin/python",
         daemon_client_factory=daemon_factory,  # type: ignore[arg-type]
     )
@@ -1117,7 +1117,7 @@ def test_exact_resume_rejects_a_different_loaded_id_before_publishing_control(
         lambda size: "0123456789abcdef" if size == 8 else "0123456789abcdef" * 2,
     )
     runner = RuntimeRunner(tmp_path)
-    connector = RecordingConnector([str(observed_codex_session_id)])
+    connector = RecordingConnector(str(observed_codex_session_id))
     daemon_factory = RecordingDaemonFactory()
     launcher = RodexRuntimeLauncher(
         "/usr/bin/codex",
@@ -4040,7 +4040,7 @@ def test_real_tmux_survives_rename_and_status_configuration(tmp_path: Path) -> N
             client.communicate(timeout=2)
 
 
-def test_more_than_one_loaded_codex_thread_aborts_the_exact_tmux_session(
+def test_unconfirmed_primary_waits_for_startup_allowance_then_aborts_only_its_candidate(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("RODEX_RUNTIME_DIR", str(tmp_path))
@@ -4050,22 +4050,24 @@ def test_more_than_one_loaded_codex_thread_aborts_the_exact_tmux_session(
         lambda size: "0123456789abcdef" if size == 8 else "0123456789abcdef" * 2,
     )
     runner = RuntimeRunner(tmp_path)
-    connector = RecordingConnector(
-        [
-            "01a00654-f2bc-7a30-834a-a5f886a65f82",
-            "01a00656-4c5e-7eb0-ae87-4765725b6f00",
-        ]
-    )
+    connector = RecordingConnector(None)
+    elapsed = [0.0]
+
+    def sleep(seconds):
+        elapsed[0] += seconds
+
     launcher = RodexRuntimeLauncher(
         "codex",
         "tmux",
         runner=runner,
         connector=connector,
         daemon_client_factory=RecordingDaemonFactory(),  # type: ignore[arg-type]
+        monotonic=lambda: elapsed[0],
+        sleep=sleep,
     )
     monkeypatch.setattr(launcher, "_stable_tmux_session_target", lambda _runtime: "$7")
 
-    with pytest.raises(RodexRuntimeError, match="more than one"):
+    with pytest.raises(RodexRuntimeError, match="timed out waiting for the primary Codex session acknowledgement"):
         launcher.start(
             tmp_path,
             [],
@@ -4078,6 +4080,35 @@ def test_more_than_one_loaded_codex_thread_aborts_the_exact_tmux_session(
     assert runner.calls[-1][3:8] == ["if-shell", "-t", "%9", "-F", runner.calls[-1][7]]
     assert "kill-session -t '$7'" in runner.calls[-1][-2]
     assert str(RUNTIME_ID) in runner.calls[-1][7]
+    assert 30 <= elapsed[0] < 30.2
+    assert sum(message["method"] == "initialize" for message in connector.websocket.sent) == 1
+
+
+@pytest.mark.parametrize("ready_after", [0.0, 8.0, 29.0])
+def test_primary_discovery_allows_slow_startup_without_guessing_a_loaded_thread(tmp_path, monkeypatch, ready_after):
+    elapsed = [0.0]
+    root = "01a00654-f2bc-7a30-834a-a5f886a65f82"
+    connector = RecordingConnector(None)
+
+    def sleep(seconds):
+        elapsed[0] += seconds
+        if elapsed[0] >= ready_after:
+            connector.websocket.primary_thread_id = root
+
+    if ready_after == 0:
+        connector.websocket.primary_thread_id = root
+    launcher = RodexRuntimeLauncher("codex", "tmux", connector=connector, monotonic=lambda: elapsed[0], sleep=sleep)
+    monkeypatch.setattr(launcher, "_bootstrap_session_exists", lambda _runtime: True)
+    runtime = SimpleNamespace(
+        protocol_proxy_socket_path=tmp_path,
+        runtime_id=RUNTIME_ID,
+        creation_server_id=PEER_IDENTITY.tmux_server_id,
+        app_server_log_path=tmp_path / "absent.log",
+    )
+    assert launcher._wait_for_primary_codex_session_id(runtime) == uuid.UUID(root)
+    assert ready_after <= elapsed[0] < ready_after + 0.2
+    assert sum(message["method"] == "initialize" for message in connector.websocket.sent) == 1
+    assert all(message["method"] != "thread/loaded/list" for message in connector.websocket.sent)
 
 
 def test_configured_runtime_path_must_fit_a_unix_socket(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

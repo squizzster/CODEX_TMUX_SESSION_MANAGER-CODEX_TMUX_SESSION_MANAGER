@@ -63,12 +63,22 @@ the native warning API, whose placement can require F2.
 
 Main model identity comes from a type-exact, connection-local correlation of the
 primary's `thread/start`, `thread/resume`, or `thread/fork` request with its successful
-`result.thread.id`. It is established before forwarding that reply. Notifications
+`result.thread.id` and required boolean `result.thread.ephemeral`. It is established
+before forwarding that reply. Notifications
 cannot select main: child starts share the stream, and native resume need not emit
-`thread/started`. Pending selection suspends model authority; conflicting or malformed
+`thread/started`. Explicit temporary (`ephemeral: true`) starts/forks share typed-ID
+correlation but do not select or suspend main. Their replies must confirm that kind;
+ordinary requests must acknowledge a non-ephemeral thread. Pending main selection
+suspends model authority; conflicting or malformed
 acknowledgements invalidate it until reconnect. Input EOF revokes it immediately,
 even if an output projection delays full connection release. Control and old-connection
 responses cannot bind a replacement primary.
+
+Startup reads this same identity over the authenticated `/rodex-interaction` route
+using `rodex/primary-thread/read`; the transport returns only the acknowledged ID
+or null, independently of model-steering availability. This read does not enter
+the mutation pipeline or open an upstream connection. Native version admission
+remains a separate read-only initialize exchange.
 
 The event tap admits subscriptions only after primary upstream peer verification.
 Its source epoch fences publication and loss under the same registration lock.

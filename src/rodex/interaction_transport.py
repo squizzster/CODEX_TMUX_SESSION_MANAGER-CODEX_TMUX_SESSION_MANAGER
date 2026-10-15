@@ -24,6 +24,47 @@ from .runtime_peer import RuntimePeerIdentity, verified_runtime_connection
 
 SESSION_INTERACTION_CONNECTION_PATH: Final = "/rodex-interaction"
 SESSION_INTERACTION_METHOD: Final = "rodex/interaction"
+PRIMARY_THREAD_READ_METHOD: Final = "rodex/primary-thread/read"
+
+
+def read_primary_thread_id(
+    proxy_socket_path: Path,
+    *,
+    peer_identity: RuntimePeerIdentity,
+    connector: Callable[..., Any] = unix_connect,
+) -> str | None:
+    """Read the proxy's acknowledged primary identity; None means not yet bound.
+
+    This read never opens an upstream connection or submits native work. Startup
+    and model admission use the same connection-fenced identity owner.
+    """
+    with verified_runtime_connection(
+        connector,
+        proxy_socket_path,
+        peer_identity=peer_identity,
+        uri=f"ws://localhost{SESSION_INTERACTION_CONNECTION_PATH}",
+        compression=None,
+        open_timeout=1,
+        close_timeout=1,
+    ) as connection:
+        connection.send(json.dumps({"id": 0, "method": PRIMARY_THREAD_READ_METHOD, "params": {}}))
+        response = _interaction_json_object(connection.recv(timeout=1))
+    if (
+        response is None
+        or type(response.get("id")) is not int
+        or response["id"] != 0
+        or "error" in response
+        or "method" in response
+        or not isinstance(response.get("result"), dict)
+    ):
+        raise ValueError("primary-thread response is malformed")
+    result = response["result"]
+    if "thread_id" not in result:
+        raise ValueError("primary-thread response has no identity")
+    thread_id = result["thread_id"]
+    if thread_id is not None and (not isinstance(thread_id, str) or not thread_id):
+        raise ValueError("primary-thread response has an invalid identity")
+    return thread_id
 
 
 def publish_tui_notice(
@@ -131,7 +172,12 @@ def _interaction_json_object(message: str | bytes) -> dict[str, Any] | None:
     return value if isinstance(value, dict) else None
 
 
-def serve_session_interaction(connection: Any, pipeline: SessionInteractionPipeline) -> None:
+def serve_session_interaction(
+    connection: Any,
+    pipeline: SessionInteractionPipeline,
+    *,
+    primary_thread_id: Callable[[], str | None] | None = None,
+) -> None:
     """Decode one public operation and return explicit rejection/uncertainty, not a silent drop."""
     request_id: object = None
     result = InteractionResult(DeliveryStatus.REJECTED, "invalid interaction request")
@@ -141,6 +187,9 @@ def serve_session_interaction(connection: Any, pipeline: SessionInteractionPipel
             if request is not None:
                 request_id = request.get("id")
                 params = request.get("params")
+                if request.get("method") == PRIMARY_THREAD_READ_METHOD and params == {} and primary_thread_id is not None:
+                    connection.send(json.dumps({"id": request_id, "result": {"thread_id": primary_thread_id()}}))
+                    return
                 if request.get("method") == SESSION_INTERACTION_METHOD and isinstance(params, dict):
                     operation = InteractionOperation(params.get("operation"))
                     if operation in {

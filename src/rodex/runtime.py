@@ -69,7 +69,7 @@ from .interaction_pipeline import (
     InteractionResult,
     SessionInteractionPipeline,
 )
-from .interaction_transport import publish_tui_notice
+from .interaction_transport import publish_tui_notice, read_primary_thread_id
 from .pane_control import TmuxPaneController
 from .presentation_policy import PresentationPolicyInteractionAdapter, SessionPresentationPipeline
 from .primary_connection_lifecycle import PrimaryConnectionLifecycleCoordinator
@@ -792,7 +792,7 @@ class RodexRuntimeLauncher:
         rodex_registry_id: RodexRegistryId,
         rodex_database_path: Path,
     ) -> tuple[LiveRodexRuntime, CodexSessionId]:
-        """Start tmux and return only after its single Codex session ID is observable."""
+        """Start tmux and return after the native TUI acknowledges its main thread."""
         resolved_workspace = workspace.expanduser().resolve()
         if not resolved_workspace.is_dir():
             raise RodexRuntimeError(f"workspace is not a directory: {resolved_workspace}")
@@ -866,7 +866,7 @@ class RodexRuntimeLauncher:
             )
             daemon_client.await_ready(operation_id, str(runtime_id), timeout_seconds=self._startup_timeout_seconds)
             requested_codex_session_id = _requested_exact_codex_resume(codex_arguments)
-            codex_session_id = self._wait_for_single_codex_session_id(
+            codex_session_id = self._wait_for_primary_codex_session_id(
                 runtime,
                 requested_codex_session_id=requested_codex_session_id,
             )
@@ -2300,7 +2300,7 @@ class RodexRuntimeLauncher:
             elif not isinstance(cleanup_failure, RodexRuntimeError):
                 raise
 
-    def _wait_for_single_codex_session_id(
+    def _wait_for_primary_codex_session_id(
         self,
         runtime: LiveRodexRuntime,
         *,
@@ -2308,6 +2308,7 @@ class RodexRuntimeLauncher:
     ) -> CodexSessionId:
         deadline = self._monotonic() + self._startup_timeout_seconds
         last_error: BaseException | None = None
+        server_admitted = False
         while self._monotonic() < deadline:
             if not self._bootstrap_session_exists(runtime):
                 detail = _read_runtime_error_detail(runtime.app_server_log_path)
@@ -2323,31 +2324,36 @@ class RodexRuntimeLauncher:
                 try:
                     if runtime.runtime_id is None or runtime.creation_server_id is None:
                         raise RodexRuntimeError("startup protocol discovery requires its original creation receipt")
-                    loaded = self._list_loaded_codex_threads(
+                    peer_identity = RuntimePeerIdentity(runtime.runtime_id, runtime.creation_server_id)
+                    if not server_admitted:
+                        self._require_app_server_version(runtime.protocol_proxy_socket_path, peer_identity)
+                        server_admitted = True
+                    thread_id = read_primary_thread_id(
                         runtime.protocol_proxy_socket_path,
-                        RuntimePeerIdentity(runtime.runtime_id, runtime.creation_server_id),
+                        peer_identity=peer_identity,
+                        connector=self._connect,
                     )
+                except ValueError as error:
+                    raise RodexRuntimeError(str(error)) from error
                 except (ConnectionClosed, InvalidHandshake, OSError, TimeoutError) as error:
                     last_error = error
                 else:
-                    if len(loaded) == 1:
+                    if thread_id is not None:
                         try:
-                            return parse_codex_session_id(loaded[0])
+                            return parse_codex_session_id(thread_id)
                         except ValueError as error:
                             raise RodexRuntimeError(
-                                f"app-server returned an invalid Codex session ID: {loaded[0]!r}"
+                                f"primary TUI acknowledged an invalid Codex session ID: {thread_id!r}"
                             ) from error
-                    if len(loaded) > 1:
-                        raise RodexRuntimeError("private app-server loaded more than one Codex thread")
             self._sleep(_POLL_INTERVAL_SECONDS)
 
         detail = _read_runtime_error_detail(runtime.app_server_log_path)
         if not detail and last_error is not None:
             detail = str(last_error)
         suffix = f": {detail}" if detail else ""
-        raise RodexRuntimeError(f"timed out waiting for the Codex session{suffix}")
+        raise RodexRuntimeError(f"timed out waiting for the primary Codex session acknowledgement{suffix}")
 
-    def _list_loaded_codex_threads(self, socket_path: Path, peer_identity: RuntimePeerIdentity) -> list[str]:
+    def _require_app_server_version(self, socket_path: Path, peer_identity: RuntimePeerIdentity) -> None:
         with verified_runtime_connection(
             self._connect,
             socket_path,
@@ -2361,12 +2367,6 @@ class RodexRuntimeLauncher:
             initialized = _receive_response(websocket, 0)
             CODEX_APP_SERVER.require_minimum_version(initialized)
             websocket.send(json.dumps(CODEX_APP_SERVER.initialized_notification()))
-            websocket.send(json.dumps(CODEX_APP_SERVER.request(1, CODEX_APP_SERVER.thread_loaded_list_method, {})))
-            result = _receive_response(websocket, 1)
-        data = result.get("data")
-        if not isinstance(data, list) or not all(isinstance(item, str) for item in data):
-            raise RodexRuntimeError("app-server returned an invalid loaded-thread result")
-        return data
 
     def _tmux(
         self,

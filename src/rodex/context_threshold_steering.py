@@ -22,8 +22,15 @@ from .interaction_pipeline import (
 
 CONTEXT_STEER_THRESHOLD_PERCENT: Final = 70.0
 CONTEXT_STEER_MESSAGE: Final = (
-    "What's the most relevant objectives currently?, where/why? Compact insights, correctly finish whatever "
-    "your're currently doing...no rush...."
+    "## Update me and continue\n"
+    "At the next, at a non-interrupting natural break, (no rush, finish your current experiment or module), "
+    "enclosed within tags, whilst continuing the work, give me a concise yet substantive where necessary "
+    "insightful update:- where we are, what we\u2019ve achieved, what we\u2019ve learned, what is driving progress, "
+    "the current strategy, and/or the most promising avenues still to explore. In your own time, state "
+    "your current objective, then continue independently, reflecting on how best to advance to achieve "
+    "the true underlying objective.\n"
+    "Also ask yourself, if necessary, interesting (insightfully relevant) key question-criteria that you "
+    "think we should or might need to explore in the future?"
 )
 CONTEXT_STEER_SOURCE: Final = "context-threshold-steer"
 CONTEXT_BINDING_RETRY_DELAYS_SECONDS: Final = (0.25, 1.0, 2.0)

@@ -161,7 +161,9 @@ A qualifying below-to-`>=70%` crossing schedules one asynchronous `STEER` for th
 exact active main turn with this fixed text:
 
 ```text
-What's the most relevant objectives currently?, where/why? Compact insights, correctly finish whatever your're currently doing...no rush....
+## Update me and continue
+At the next, at a non-interrupting natural break, (no rush, finish your current experiment or module), enclosed within tags, whilst continuing the work, give me a concise yet substantive where necessary insightful update:- where we are, what we’ve achieved, what we’ve learned, what is driving progress, the current strategy, and/or the most promising avenues still to explore. In your own time, state your current objective, then continue independently, reflecting on how best to advance to achieve the true underlying objective.
+Also ask yourself, if necessary, interesting (insightfully relevant) key question-criteria that you think we should or might need to explore in the future?
 ```
 
 High usage observed before registration or before a turn becomes active waits for

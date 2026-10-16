@@ -124,7 +124,9 @@ def test_default_reminder_preserves_requested_wording_and_paragraphs() -> None:
         "your current objective, then continue independently, reflecting on how best to advance to achieve "
         "the true underlying objective.\n"
         "Also ask yourself, if necessary, interesting (insightfully relevant) key question-criteria that you "
-        "think we should or might need to explore in the future?"
+        "think we should or might need to explore in the future?\n"
+        "You should continue the turn only if you are absolutely clear on the objectives, how we can achieve them, "
+        "or otherwise, end-turn at the next natural break."
     )
 
 

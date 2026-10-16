@@ -30,7 +30,9 @@ CONTEXT_STEER_MESSAGE: Final = (
     "your current objective, then continue independently, reflecting on how best to advance to achieve "
     "the true underlying objective.\n"
     "Also ask yourself, if necessary, interesting (insightfully relevant) key question-criteria that you "
-    "think we should or might need to explore in the future?"
+    "think we should or might need to explore in the future?\n"
+    "You should continue the turn only if you are absolutely clear on the objectives, how we can achieve them, "
+    "or otherwise, end-turn at the next natural break."
 )
 CONTEXT_STEER_SOURCE: Final = "context-threshold-steer"
 CONTEXT_BINDING_RETRY_DELAYS_SECONDS: Final = (0.25, 1.0, 2.0)

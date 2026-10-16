@@ -164,6 +164,7 @@ exact active main turn with this fixed text:
 ## Update me and continue
 At the next, at a non-interrupting natural break, (no rush, finish your current experiment or module), enclosed within tags, whilst continuing the work, give me a concise yet substantive where necessary insightful update:- where we are, what we’ve achieved, what we’ve learned, what is driving progress, the current strategy, and/or the most promising avenues still to explore. In your own time, state your current objective, then continue independently, reflecting on how best to advance to achieve the true underlying objective.
 Also ask yourself, if necessary, interesting (insightfully relevant) key question-criteria that you think we should or might need to explore in the future?
+You should continue the turn only if you are absolutely clear on the objectives, how we can achieve them, or otherwise, end-turn at the next natural break.
 ```
 
 High usage observed before registration or before a turn becomes active waits for

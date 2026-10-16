@@ -15,7 +15,9 @@ are unchanged. Retained running sessions keep their original implementation.
 ### Modified
 
 - The 70% context reminder now asks for an insightful update at a natural break,
-  followed by independent continuation. The [exact message](docs/INTERACTION_PATHS.md#context-threshold-steering)
+  followed by independent continuation only with clear objectives and a path to
+  achieve them; otherwise it asks to end the turn at the next natural break.
+  The [exact message](docs/INTERACTION_PATHS.md#context-threshold-steering)
   preserves the requested heading and paragraphs; threshold, admission, cancellation,
   and retry behavior are unchanged. Retained live runtimes keep their original text.
 - Startup identifies the main conversation from its correlated native lifecycle

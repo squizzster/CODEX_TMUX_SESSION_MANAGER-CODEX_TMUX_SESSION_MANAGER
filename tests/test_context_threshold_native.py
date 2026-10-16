@@ -192,8 +192,22 @@ def test_resumed_native_high_context_steers_running_turn_without_interrupting():
                     history = client.rpc("thread/read", {"threadId": root, "includeTurns": True})
                     current_turn = next(item for item in history["thread"]["turns"] if item["id"] == turn)
                     assert current_turn["status"] == "completed"
-                    assert json.dumps(current_turn).count(CONTEXT_STEER_MESSAGE) == 1
-                    assert any(CONTEXT_STEER_MESSAGE in json.dumps(request["input"]) for request in native.model.requests)
+                    user_texts = [
+                        part["text"]
+                        for item in current_turn["items"]
+                        if item["type"] == "userMessage"
+                        for part in item["content"]
+                        if part["type"] == "text"
+                    ]
+                    assert user_texts.count(CONTEXT_STEER_MESSAGE) == 1
+                    assert any(
+                        part.get("text") == CONTEXT_STEER_MESSAGE
+                        for request in native.model.requests
+                        for item in request["input"]
+                        if item.get("role") == "user"
+                        for part in item.get("content", [])
+                        if part.get("type") == "input_text"
+                    )
                     assert sum(request.get("method") == "turn/steer" for request in wire_requests) == 1
                     assert not any(request.get("method") == "turn/interrupt" for request in wire_requests)
                     assert sum(request.get("method") == "turn/start" for request in wire_requests) == 1

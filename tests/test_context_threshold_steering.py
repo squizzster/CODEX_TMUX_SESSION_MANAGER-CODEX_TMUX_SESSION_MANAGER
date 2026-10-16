@@ -114,6 +114,20 @@ def compaction(method: str, item_id: str = "compact-1") -> dict[str, object]:
     }
 
 
+def test_default_reminder_preserves_requested_wording_and_paragraphs() -> None:
+    assert CONTEXT_STEER_MESSAGE == (
+        "## Update me and continue\n"
+        "At the next, at a non-interrupting natural break, (no rush, finish your current experiment or module), "
+        "enclosed within tags, whilst continuing the work, give me a concise yet substantive where necessary "
+        "insightful update:- where we are, what we\u2019ve achieved, what we\u2019ve learned, what is driving progress, "
+        "the current strategy, and/or the most promising avenues still to explore. In your own time, state "
+        "your current objective, then continue independently, reflecting on how best to advance to achieve "
+        "the true underlying objective.\n"
+        "Also ask yourself, if necessary, interesting (insightfully relevant) key question-criteria that you "
+        "think we should or might need to explore in the future?"
+    )
+
+
 def test_exact_seventy_percent_steers_once_with_the_configured_message() -> None:
     harness = SteeringHarness()
     try:

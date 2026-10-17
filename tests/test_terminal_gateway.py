@@ -117,16 +117,16 @@ def test_gateway_displays_and_expires_expansion_without_native_input_or_output(m
             before = json.dumps({"method": "turn/start", "params": {"input": [{"type": "text", "text": "push"}]}})
             after = before.replace("push", "Commit/stash → Fetch/prune")
             display.observe_forwarded(source, before, after)
-            stream.feed(read_until(gateway, master, b"=> translated =>"))
+            stream.feed(read_until(gateway, master, b"push =>"))
             assert "Commit/stash" in "\n".join(screen.display)
             assert not gateway._native_queue
-            assert "=> translated =>" not in "\n".join(gateway._surface_renderer.native.screen.display)
+            assert "push =>" not in "\n".join(gateway._surface_renderer.native.screen.display)
             # No child output is needed to remove the overlay at its deadline.
             with pytest.raises(subprocess.TimeoutExpired):
                 gateway.wait(timeout=0.3)
             while select.select([master], [], [], 0)[0]:
                 stream.feed(os.read(master, 65536))
-            assert "=> translated =>" not in "\n".join(screen.display)
+            assert "push =>" not in "\n".join(screen.display)
             assert screen.display[11].rstrip() == "\u203a draft"
             assert not gateway._native_queue
         finally:

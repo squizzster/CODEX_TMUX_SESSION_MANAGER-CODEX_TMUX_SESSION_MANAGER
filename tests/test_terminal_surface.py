@@ -41,8 +41,8 @@ class DisplayHarness:
         self._output.feed(rendered)
         return rendered
 
-    def expansion(self, text):
-        rendered = self.renderer.show_prompt_expansion(None if text is None else PromptExpansion("push", text))
+    def expansion(self, text, original="push"):
+        rendered = self.renderer.show_prompt_expansion(None if text is None else PromptExpansion(original, text))
         self._output.feed(rendered)
         return rendered
 
@@ -55,19 +55,98 @@ def test_prompt_expansion_is_visible_but_never_changes_native_composer_or_histor
     before = harness.visible.display
     cursor = (harness.visible.cursor.y, harness.visible.cursor.x)
     harness.expansion("Commit/stash → Fetch/prune → Switch main")
-    assert harness.visible.display[1].rstrip() == "push"
-    assert harness.visible.display[2].rstrip() == "=> translated => Commit/stash → Fetch/prune → Switch main"
-    for row in (1, 2):
-        for cell in harness.visible.buffer[row].values():
-            assert cell.fg == cell.bg == "default"
-            assert not cell.bold and not cell.blink
+    assert harness.visible.display[2].rstrip() == "push => Commit/stash → Fetch/prune → Switch main"
+    for cell in harness.visible.buffer[2].values():
+        assert cell.fg == cell.bg == "default"
+        assert not cell.bold and not cell.blink
     assert "Rodex expanded input:" not in "\n".join(harness.visible.display)
+    assert "translated" not in "\n".join(harness.visible.display)
     assert "Commit/stash" in "\n".join(harness.visible.display)
     assert harness.renderer.native.screen.display[4].rstrip() == "\u203a /r"
     assert (harness.visible.cursor.y, harness.visible.cursor.x) == cursor
     harness.expansion(None)
     assert harness.visible.display == before
     assert not harness.visible.history.top
+
+
+@pytest.mark.parametrize("keyword", ["push", "review", "future-keyword", "検証"])
+@pytest.mark.parametrize("glyph", ["\u203a", "»"])
+def test_expansion_uses_actual_keyword_directly_beneath_native_echo(keyword, glyph):
+    harness = DisplayHarness()
+    native = f"\x1b[2J\x1b[2;1H{glyph} {keyword}\x1b[7;1H{glyph} draft".encode()
+    harness.native(native)
+    before = harness.visible.display
+    cursor = (harness.visible.cursor.y, harness.visible.cursor.x)
+    harness.expansion("Expanded instruction", original=keyword)
+    assert harness.visible.display[1].rstrip() == f"{glyph} {keyword}"
+    assert harness.visible.display[2].rstrip() == f"{keyword} => Expanded instruction"
+    assert sum("=>" in row for row in harness.visible.display) == 1
+    assert harness.renderer.native.screen.display == before
+    assert (harness.visible.cursor.y, harness.visible.cursor.x) == cursor
+    harness.expansion(None)
+    assert harness.visible.display == before
+
+
+def test_expansion_wraps_one_notice_and_does_not_displace_native_output_for_placement():
+    harness = DisplayHarness(columns=30)
+    harness.native("\x1b[2J\x1b[2;1H\u203a review\x1b[3;1HNative response\x1b[10;1H\u203a draft".encode())
+    before = harness.visible.display
+    harness.expansion("Inspect changes and report findings.\nKeep working.", original="review")
+    assert harness.visible.display[1].rstrip() == "\u203a review"
+    assert harness.visible.display[2].rstrip() == "Native response"
+    notice = "\n".join(harness.visible.display)
+    assert "review => Inspect changes" in notice
+    assert "Keep working." in notice
+    assert "translated" not in notice
+    harness.expansion(None)
+    assert harness.visible.display == before
+    assert not harness.visible.history.top
+
+
+def test_expansion_truncates_within_six_rows_and_sanitizes_original_too():
+    harness = DisplayHarness(columns=30)
+    harness.native("\x1b[2J\x1b[10;1H\u203a draft".encode())
+    rendered = harness.expansion("line\n" * 30, original="other\x1b]52;c;secret\x07\nkeyword")
+    assert b"\x1b]52" not in rendered and b"\x07" not in rendered
+    assert harness.visible.display[7].rstrip().endswith("…")
+    assert harness.visible.display[8].strip() == ""
+    assert harness.visible.display[9].rstrip() == "\u203a draft"
+    assert not harness.visible.history.top
+
+
+def test_expansion_placement_follows_latest_visible_echo_and_native_redraw():
+    harness = DisplayHarness()
+    harness.native("\x1b[2J\x1b[2;1H\u203a review\x1b[5;1H\u203a review\x1b[10;1H\u203a draft".encode())
+    harness.expansion("Expanded instruction", original="review")
+    assert harness.visible.display[2].strip() == ""
+    assert harness.visible.display[5].rstrip() == "review => Expanded instruction"
+    harness.native("\x1b[2J\x1b[3;1H\u203a review\x1b[8;1H\u203a draft".encode())
+    assert harness.visible.display[3].rstrip() == "review => Expanded instruction"
+    assert sum("review =>" in row for row in harness.visible.display) == 1
+    harness.expansion(None)
+    assert harness.visible.display == harness.renderer.native.screen.display
+    assert not harness.visible.history.top
+
+
+@pytest.mark.parametrize("blank_rows", [0, 1, 2])
+def test_long_expansion_never_covers_its_echo_or_the_following_native_status(blank_rows):
+    harness = DisplayHarness(columns=30)
+    status_row = 3 + blank_rows
+    composer_row = status_row + 1
+    harness.native(
+        f"\x1b[2J\x1b[2;1H\u203a push\x1b[{status_row};1HNative status\x1b[{composer_row};1H\u203a draft".encode()
+    )
+    before = harness.visible.display
+    harness.expansion("a long expanded instruction " * 10)
+    assert harness.visible.display[1].rstrip() == "\u203a push"
+    assert harness.visible.display[status_row - 1].rstrip() == "Native status"
+    if blank_rows:
+        assert harness.visible.display[2].startswith("push => ")
+        assert harness.visible.display[status_row - 2].rstrip().endswith("…")
+    else:
+        assert harness.visible.display == before
+    harness.expansion(None)
+    assert harness.visible.display == before
 
 
 def test_prompt_expansion_sanitizes_controls_restores_on_scroll_and_yields_to_menu():
@@ -77,26 +156,26 @@ def test_prompt_expansion_sanitizes_controls_restores_on_scroll_and_yields_to_me
     assert b"\x1b]52" not in rendered and b"\x07" not in rendered
     assert "世界 é" in "\n".join(harness.visible.display)  # pyte normalizes combining accents.
     assert harness.display(STATE)
-    assert "=> translated =>" not in "\n".join(harness.visible.display)
+    assert "push =>" not in "\n".join(harness.visible.display)
     harness.display(None)
-    assert "=> translated =>" in "\n".join(harness.visible.display)
+    assert "push =>" in "\n".join(harness.visible.display)
     harness._output.feed(harness.renderer.suspend())
     assert harness.visible.display == harness.renderer.native.screen.display
     harness._output.feed(harness.renderer.resume())
     harness.native(b"\x1b[12;1H\r\n" * 15)
     history = "".join(cell.data for line in harness.visible.history.top for cell in line.values())
-    assert "=> translated =>" not in history and "secret" not in history
+    assert "push =>" not in history and "secret" not in history
 
 
 def test_initial_prompt_display_uses_composer_boundary_not_cursor_position():
     harness = DisplayHarness()
     harness.native(NATIVE_MENU + b"\x1b[1;1H\x1b[?25l")
     harness.expansion("initial argv expansion")
-    assert "=> translated =>" in "\n".join(harness.visible.display)
+    assert "push =>" in "\n".join(harness.visible.display)
     assert (harness.visible.cursor.y, harness.visible.cursor.x) == (0, 0)
     assert harness.visible.cursor.hidden
     harness.native(b"\x1b[2J\x1b[1;1HApproval dialog")
-    assert "=> translated =>" not in "\n".join(harness.visible.display)
+    assert "push =>" not in "\n".join(harness.visible.display)
 
 
 @pytest.mark.parametrize("frame", [b"\x1b]0;title\x1b\\", b"\x1bPopaque\x1b\\", "世界".encode()])

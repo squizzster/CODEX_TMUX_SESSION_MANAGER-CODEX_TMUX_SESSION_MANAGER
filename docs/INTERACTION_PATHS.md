@@ -288,6 +288,14 @@ Runtime UI initialization replaces only an unbound entry or tmux's stock
 `Mouse: ON/OFF` confirmation. Any other effective `prefix/m` binding is a user
 override and remains authoritative; reconciliation does not reclaim it.
 
+Private `Ctrl-C` uses that same native task-bar message surface for a four-second
+exit countdown. A one-key tmux table handles `d` (detach), `q` (exit), or any other
+key (consume and cancel); no shell helper or gateway input path is added.
+Native tmux timers retain the originating client and check the warning sequence
+and current key table, so cancelled/rearmed warnings cannot reuse an old deadline.
+Exit rechecks whole-runtime ownership and attached-client count. Shared `Ctrl-C`
+still detaches immediately, and process signals bypass the keyboard path.
+
 ## Local commands
 
 [`INPUT_INTERCEPTORS`](../src/rodex/input_interceptor_config.py) is Python

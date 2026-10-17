@@ -1900,7 +1900,7 @@ def test_rename_and_session_ui_initialisation_use_the_real_tmux_session_name(
     assert shared_ctrl_c_binding[:3] == ["bind-key", "-n", "C-c"]
     assert shared_ctrl_c_binding[3].startswith("if-shell -F ")
     assert "detach-client" in shared_ctrl_c_binding[3]
-    assert "run-shell" not in shared_ctrl_c_binding[3]
+    assert "run-shell -b -C -d 4" in shared_ctrl_c_binding[3]
     assert str(RUNTIME_ID) in shared_ctrl_c_binding[3]
     ctrl_d_owner_claim = next(
         command for command in status_actions if command[:3] == ["set-option", "-so", "@rodex_shared_tmux_ctrl_d_command"]
@@ -3930,7 +3930,7 @@ def test_real_tmux_survives_rename_and_status_configuration(tmp_path: Path) -> N
             capture_output=True,
         )
         assert "detach-client" in ctrl_c_binding.stdout
-        assert "run-shell -b" not in ctrl_c_binding.stdout
+        assert "run-shell -b -C -d 4" in ctrl_c_binding.stdout
         discovered = launcher.discover_runtime_control(renamed)
         assert discovered.protocol_proxy_socket_path == tmp_path / f"proxy-{RUNTIME_ID}.sock"
         assert discovered.protocol_event_socket_path == tmp_path / f"events-{RUNTIME_ID}.sock"

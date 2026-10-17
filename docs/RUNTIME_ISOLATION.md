@@ -203,6 +203,11 @@ Whole-runtime destruction additionally proves the sole server session and owners
 of every affected pane. Foreign panes block it. [CLI lifecycle keys](CLI.md#open-detach-and-resume)
 execute in native originating-client context; `exit-unattached` and
 `destroy-unattached` are disabled so the final detach does not destroy a runtime.
+Private keyboard `Ctrl-C` first offers a four-second task-bar countdown. Its native
+timers require the same warning sequence and client key table; `q` and expiry
+recheck the full capability and require both the attachment count and roster to
+identify only the originating client. A connected-but-exiting client cannot lend
+its old timer to a replacement. External signals do not use this input path.
 
 Global client/layout hooks are wake-only because a detached session may no longer
 exist when the hook runs. The coordinator inventories the roster and uses each

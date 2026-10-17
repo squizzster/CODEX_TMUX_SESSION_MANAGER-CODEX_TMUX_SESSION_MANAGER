@@ -44,34 +44,35 @@ def _capability(socket_path: Path, session_id: str = "$7", pane_id: str = "%9") 
     )
 
 
-def test_ctrl_c_contract_contains_no_asynchronous_or_shared_confirmation_state() -> None:
+def test_ctrl_c_countdown_uses_native_tmux_without_a_shell_helper() -> None:
     command = shared_ctrl_c_binding_command(_capability(Path("/unused.sock")))
 
     assert "detach-client" in command
     assert "session_attached" in command
     assert "client_session" in command
     assert "@rodex_pane_runtime_id" in command
+    assert "run-shell -b -C -d 4" in command
+    assert "rodex-exit-" in command
     for removed_mechanism in (
-        "run-shell",
         "confirm-before",
-        "set-option",
         "show-options",
         "monotonic",
         "confirmation_claim",
-        "2s",
+        "python",
     ):
         assert removed_mechanism not in command
 
 
-def test_binding_has_no_deferred_action_or_explicit_client_or_pane_fallback_target() -> None:
-    command = shlex.split(shared_ctrl_c_binding_command(_capability(Path("/unused.sock"))))
-    private_or_shared = shlex.split(command[3])
-
-    assert command[:2] == ["if-shell", "-F"]
-    assert private_or_shared[:3] == ["if-shell", "-F", "#{==:#{session_attached},1}"]
-    assert private_or_shared[3] == "kill-session -t '$7'"
-    assert private_or_shared[4] == "detach-client"
-    assert shlex.split(command[4]) == ["display-message", CTRL_C_OWNERSHIP_REJECTION]
+def test_binding_preserves_originating_client_admission_and_immediate_shared_detach() -> None:
+    command = shared_ctrl_c_binding_command(_capability(Path("/unused.sock")))
+    parsed = shlex.split(command)
+    assert parsed[:2] == ["if-shell", "-F"]
+    assert parsed[3].startswith("if-shell -F '#{==:#{session_attached},1}' { bind-key")
+    assert "switch-client -T rodex-exit-" in parsed[3]
+    assert "display-message -d 1100" in parsed[3]
+    assert parsed[3].endswith("} { detach-client }")
+    assert shlex.split(parsed[4]) == ["display-message", CTRL_C_OWNERSHIP_REJECTION]
+    assert len(command) < 16_000
 
 
 @dataclass
@@ -149,7 +150,10 @@ class _IsolatedTmux:
         self.command("set-option", "-t", self.capability.session_target, "status-left", "application-status")
         self.command("set-option", "-t", self.capability.session_target, "status-right", "")
         self.command("set-option", "-t", self.capability.session_target, "assume-paste-time", "0")
-        self.command("bind-key", "-n", "C-c", shared_ctrl_c_binding_command(self.capability))
+        installed = self.command("bind-key", "-n", "C-c", shared_ctrl_c_binding_command(self.capability), check=False)
+        if installed.returncode:
+            self.close()
+            pytest.fail(f"failed to install test binding: {installed.stderr}")
 
     def command(self, *arguments: str, check: bool = True) -> subprocess.CompletedProcess[str]:
         for client in self.clients:
@@ -159,7 +163,7 @@ class _IsolatedTmux:
         )
 
     def wait(self, predicate: Callable[[], bool], reason: str) -> None:
-        deadline = time.monotonic() + 4
+        deadline = time.monotonic() + 6
         while time.monotonic() < deadline:
             for client in self.clients:
                 client.drain()
@@ -193,6 +197,10 @@ class _IsolatedTmux:
 
     def exists(self) -> bool:
         return self.command("has-session", "-t", self.capability.session_target, check=False).returncode == 0
+
+    def arm_exit(self, client: _Client) -> None:
+        client.send(b"\x03")
+        self.wait(lambda: "in 4 seconds:" in client.drain(), "private Ctrl-C did not show the exit warning")
 
     def attached(self) -> set[str]:
         return set(self.command("list-clients", "-F", "#{client_name}").stdout.splitlines())
@@ -266,8 +274,117 @@ def tmux(tmp_path: Path) -> Iterator[_IsolatedTmux]:
 
 def test_private_ctrl_c_ends_the_actual_sole_clients_session(tmux: _IsolatedTmux) -> None:
     client = tmux.attach()
-    client.send(b"\x03")
+    started = time.monotonic()
+    tmux.arm_exit(client)
+    assert "'d' to detach, 'q' to quit now, other key to abort." in client.drain()
+    for remaining in (3, 2, 1):
+        tmux.wait(lambda remaining=remaining: f"in {remaining} seconds:" in client.drain(), "countdown did not update")
+        assert tmux.exists()
     tmux.wait(lambda: not tmux.exists(), "private Ctrl-C did not terminate")
+    assert time.monotonic() - started >= 3.8
+
+
+def test_q_exits_immediately_during_warning(tmux: _IsolatedTmux) -> None:
+    client = tmux.attach()
+    tmux.arm_exit(client)
+    started = time.monotonic()
+    client.send(b"q")
+    tmux.wait(lambda: not tmux.exists(), "q did not exit immediately")
+    assert time.monotonic() - started < 2
+
+
+def test_d_detaches_and_old_countdown_cannot_exit_reused_terminal(tmux: _IsolatedTmux) -> None:
+    client = tmux.attach()
+    tmux.arm_exit(client)
+    client.send(b"d")
+    replacement = tmux.reattach_same_terminal(client)
+    time.sleep(4.2)
+    tmux.assert_quiet()
+    assert tmux.attached() == {replacement.name}
+    assert "Rodex will" not in replacement.drain()
+
+
+def test_other_keys_consume_and_abort_the_warning(tmux: _IsolatedTmux) -> None:
+    client = tmux.attach()
+    for key in (b"x", b"\x03", b"\x04", b"\r", b"\x1b[A", b"\x1b"):
+        tmux.arm_exit(client)
+        client.send(key)
+        tmux.wait(lambda: "Rodex will" not in client.drain(), "abort did not restore the task bar")
+        assert tmux.command("list-clients", "-F", "#{client_key_table}").stdout.strip() == "root"
+    time.sleep(4.2)
+    tmux.assert_quiet()
+    assert tmux.attached() == {client.name}
+    assert not tmux.command("capture-pane", "-p", "-t", tmux.capability.pane_target).stdout.strip()
+
+
+def test_cancel_then_rearm_gets_a_fresh_four_seconds(tmux: _IsolatedTmux) -> None:
+    client = tmux.attach()
+    tmux.arm_exit(client)
+    time.sleep(1.2)
+    client.send(b"x")
+    tmux.wait(lambda: "Rodex will" not in client.drain(), "abort did not clear warning")
+    tmux.arm_exit(client)
+    time.sleep(3.1)
+    assert tmux.exists(), "old timer shortened the new countdown"
+    tmux.wait(lambda: not tmux.exists(), "new countdown did not exit")
+
+
+@pytest.mark.parametrize("key", [b"q", b""])
+def test_new_shared_client_prevents_countdown_exit(tmux: _IsolatedTmux, key: bytes) -> None:
+    first = tmux.attach()
+    tmux.arm_exit(first)
+    second = tmux.attach()
+    first.send(key)
+    tmux.wait(lambda: first.name not in tmux.attached(), "now-shared client did not detach")
+    tmux.assert_quiet()
+    assert tmux.attached() == {second.name}
+    assert "Rodex will" not in second.drain()
+
+
+@pytest.mark.parametrize("key", [b"q", b""])
+def test_exit_rechecks_ownership_after_warning(tmux: _IsolatedTmux, key: bytes) -> None:
+    client = tmux.attach()
+    tmux.arm_exit(client)
+    tmux.command("set-option", "-p", "-t", tmux.capability.pane_target, RODEX_PANE_RUNTIME_ID_OPTION, "foreign")
+    client.send(key)
+    tmux.wait(lambda: CTRL_C_OWNERSHIP_REJECTION in client.drain(), "exit did not recheck ownership")
+    tmux.assert_quiet()
+    assert tmux.attached() == {client.name}
+
+
+def test_external_termination_does_not_enter_keyboard_warning(tmux: _IsolatedTmux) -> None:
+    client = tmux.attach()
+    client.process.terminate()
+    tmux.wait(lambda: client.name not in tmux.attached(), "signalled client did not detach")
+    assert "@rodex_exit_sequence" not in tmux.command("show-options").stdout
+    tmux.assert_quiet()
+
+
+def test_expiry_rejects_switching_to_an_owned_observer_pane(tmux: _IsolatedTmux) -> None:
+    client = tmux.attach()
+    tmux.arm_exit(client)
+    observer = tmux.command(
+        "split-window", "-P", "-F", "#{pane_id}", "-t", tmux.capability.pane_target, "sleep 120"
+    ).stdout.strip()
+    tmux.command("set-option", "-p", "-t", observer, RODEX_PANE_RUNTIME_ID_OPTION, str(tmux.capability.runtime_id))
+    tmux.wait(lambda: CTRL_C_OWNERSHIP_REJECTION in client.drain(), "expiry did not check the client's current pane")
+    tmux.assert_quiet()
+
+
+def test_exiting_client_with_pending_countdown_cannot_exit_replacement(tmux: _IsolatedTmux) -> None:
+    first = tmux.attach()
+    tmux.arm_exit(first)
+    os.kill(first.process.pid, signal.SIGSTOP)
+    try:
+        tmux.command("detach-client", "-t", first.name)
+        second = tmux.attach()
+        assert first.name in tmux.attached(), "test missed connected-but-exiting interval"
+        time.sleep(4.2)
+        tmux.assert_quiet()
+        assert second.name in tmux.attached()
+        assert "Rodex will" not in second.drain()
+    finally:
+        os.kill(first.process.pid, signal.SIGCONT)
 
 
 @pytest.mark.parametrize("client_count", [2, 3])

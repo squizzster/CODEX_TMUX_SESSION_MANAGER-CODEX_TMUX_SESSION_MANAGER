@@ -110,8 +110,12 @@ why a timeout cannot be treated as a dead runtime.
   session and briefly displays `Mouse: ON/OFF` with tmux's message styling. Rodex
   installs that fallback only when `prefix/m` is unbound or still tmux's stock
   pane-mark action; any other user binding wins.
-- Shared `Ctrl-C` detaches that client. Private `Ctrl-C` ends the exact runtime only
-  after the ownership/topology guard passes. It is not a normal Codex interrupt key.
+- Shared `Ctrl-C` detaches that client. Private `Ctrl-C` shows a four-second exit
+  countdown in the task bar: `d` detaches, `q` quits immediately, and any other key
+  cancels without forwarding that key to Codex. With no input, the exact runtime
+  exits after four seconds. Ownership/topology is checked again before exit; if
+  another client has attached, only the invoking client detaches. External process
+  signals do not enter this keyboard warning. `Ctrl-C` is not a normal Codex interrupt key.
 - Exiting the Codex TUI ends its runtime; opening the name can resume later.
 
 Attach/detach/exit banners use the current display name. The attached client process

@@ -23,7 +23,7 @@ TAIL_USAGE: Final = "usage: rodex _tail [-f|--follow] [-n NUM|--lines NUM|--line
 _SHORT_LINE_COUNT = re.compile(r"-[0-9]+")
 _LINE_COUNT = re.compile(r"[+-]?[0-9]+")
 _ACTIVE_STATUS_LINE = re.compile(
-    r"^[•◦]\s+(?:Working|Waiting for background terminal)\s+"
+    r"^(?:[•◦]\s+)?(?:Working|Waiting for background terminal)\s+"
     r"\((?:[0-9]+h )?(?:[0-9]+m )?[0-9]+s\s+•\s+"
 )
 _COMPOSER_LINE = re.compile(r"^\N{SINGLE RIGHT-POINTING ANGLE QUOTATION MARK}(?: |$)")

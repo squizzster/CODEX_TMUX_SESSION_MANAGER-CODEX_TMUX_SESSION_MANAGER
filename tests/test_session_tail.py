@@ -291,6 +291,11 @@ def test_plain_cursor_publishes_history_while_a_spinner_keeps_changing() -> None
 @pytest.mark.parametrize(
     "status_template",
     [
+        "Working ({seconds}s • esc to interrupt)",
+        (
+            "Working (1m {seconds:02d}s • esc to interrupt) · 3 background terminals running"
+            " · /ps to view · /stop to close"
+        ),
         "• Working ({seconds}s • esc to interrupt)",
         "◦ Working ({seconds}s • esc to interrupt)",
         ("• Waiting for background terminal (1m {seconds}s • esc to interrupt) · 1 background terminal running"),
@@ -351,7 +356,24 @@ def test_plain_cursor_settles_content_above_a_changing_activity_line(
     ) == ("new result",)
 
 
-def test_plain_cursor_does_not_treat_quoted_working_text_as_live_status() -> None:
+def test_plain_cursor_ignores_repeated_left_justified_status_updates() -> None:
+    composer = "\N{SINGLE RIGHT-POINTING ANGLE QUOTATION MARK} Ask Codex to do anything"
+
+    def snapshot(seconds: int) -> TmuxScrollbackSnapshot:
+        return TmuxScrollbackSnapshot(
+            ("history", "old response", f"Working ({seconds}s • esc to interrupt)", "", "", composer),
+            1,
+        )
+
+    cursor = PlainTailCursor(snapshot(39))
+    for seconds in (40, 43, 45, 47, 49):
+        state = _state(snapshot(seconds))
+        for _ in range(4):
+            assert cursor.try_advance_state(state) == ()
+
+
+@pytest.mark.parametrize("status_line", ["Working (4s • esc to interrupt)", "• Working (4s • esc to interrupt)"])
+def test_plain_cursor_does_not_treat_quoted_working_text_as_live_status(status_line: str) -> None:
     cursor = PlainTailCursor(
         TmuxScrollbackSnapshot(
             (
@@ -367,7 +389,7 @@ def test_plain_cursor_does_not_treat_quoted_working_text_as_live_status() -> Non
         (
             "history",
             "old response",
-            "• Working (4s • esc to interrupt)",
+            status_line,
             "quoted explanation",
             "\N{SINGLE RIGHT-POINTING ANGLE QUOTATION MARK} prompt",
         ),
@@ -377,7 +399,7 @@ def test_plain_cursor_does_not_treat_quoted_working_text_as_live_status() -> Non
     assert cursor.advance(current) == ()
     assert cursor.advance(current) == ()
     assert cursor.advance(current) == (
-        "• Working (4s • esc to interrupt)",
+        status_line,
         "quoted explanation",
     )
 

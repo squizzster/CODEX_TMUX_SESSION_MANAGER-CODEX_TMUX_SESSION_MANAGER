@@ -81,11 +81,15 @@ original input and resubmitting applies the current rules to that original again
 Rules match the actual submitted text, including any native-added IDE context;
 they do not match an inferred draft stripped of that context.
 
-Changed primary submissions show the original input on one line, followed by
-`=> translated =>` and the forwarded text, using ordinary terminal colours without
-a bold/coloured heading. This appears above the composer in both native and light
-presentation. It is a separate read-only
-view of the actual forwarded text, not a second hook invocation or model message.
+Changed primary submissions show one plain `original input => forwarded text`
+notice, wrapping when needed, without a bold/coloured heading. The left side comes
+from the actual input, not a hard-coded keyword. Native presentation places it
+directly beneath a visible one-line original echo when blank space permits;
+otherwise it uses the bounded area above the composer, as light presentation does.
+Long notices are clipped to the available rows; that original echo is never covered
+to make room. Placement never rewrites native transcript cells or displaces native
+output. It is a separate read-only view of the actual forwarded text, not a second
+hook invocation or model message.
 It appears after upstream send, not as proof of native acceptance. Native recall
 still contains the original input. Control/background connections do not publish
 this primary-pane view.

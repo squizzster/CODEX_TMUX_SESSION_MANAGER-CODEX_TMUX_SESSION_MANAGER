@@ -253,13 +253,35 @@ class TerminalSurfaceRenderer:
             return b""
         available = min(6, composer_row - 1)
         width = max(1, screen.columns - 1)
-        lines = _wrap_cells("=> translated => " + _terminal_safe_text(self._prompt_expansion.forwarded_text), width)
-        if len(lines) > available - 1:
-            lines = lines[: available - 1]
-            lines[-1] = _clip_cells(lines[-1], max(0, width - 1)) + "…"
         original = _terminal_safe_text(self._prompt_expansion.original_text).replace("\n", " ").replace("\t", " ")
-        lines.insert(0, _clip_cells(original, width))
-        first_row = composer_row - 1 - len(lines)
+        lines = _wrap_cells(
+            _clip_cells(original, width) + " => " + _terminal_safe_text(self._prompt_expansion.forwarded_text), width
+        )
+        visible_lines = min(available, len(lines))
+        first_row = composer_row - 1 - visible_lines
+        if self._presentation.surface == PresentationSurface.NATIVE:
+            # Placement only, never submission authority: use blank space directly
+            # beneath a visible one-line echo when available. Do not edit native
+            # cells or displace later output to manufacture room for the notice.
+            display = screen.display
+            for row in range(composer_row - 1, -1, -1):
+                echoed = display[row].strip()
+                gutter = composer_gutter(echoed)
+                if gutter is not None and echoed == gutter + self._prompt_expansion.original_text:
+                    blank_rows = 0
+                    for below in range(row + 1, min(composer_row, row + 1 + visible_lines)):
+                        if display[below].strip():
+                            break
+                        blank_rows += 1
+                    if blank_rows:
+                        first_row = row + 1
+                        visible_lines = blank_rows
+                    elif first_row <= row < first_row + visible_lines:
+                        return b""  # Never cover the original echo to display its expansion.
+                    break
+        if len(lines) > visible_lines:
+            lines = lines[:visible_lines]
+            lines[-1] = _clip_cells(lines[-1], max(0, width - 1)) + "…"
         self._painted_from_row = first_row
         output = bytearray()
         for row, line in enumerate(lines, first_row):

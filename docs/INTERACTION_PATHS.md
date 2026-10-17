@@ -252,7 +252,7 @@ fixed idle relay timer. [Local-command composer confirmation](#local-commands)
 uses bounded event-specific rechecks, not idle screen polling. Prompt rules do not
 rewrite the composer.
 
-Main-thread working transitions enable a three-second native elapsed-counter refresh
+Main-thread working transitions enable a one-second native elapsed-counter refresh
 deadline in the gateway. A due refresh sends the existing native resize signal without
 changing terminal geometry or composer input; terminal turn/disconnect transitions
 remove the deadline. The same active state drives the 250-millisecond title pulse;

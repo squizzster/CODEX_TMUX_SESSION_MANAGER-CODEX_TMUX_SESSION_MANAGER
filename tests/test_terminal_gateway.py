@@ -562,7 +562,7 @@ def test_idle_gateway_blocks_once_until_supervisor_deadline(monkeypatch):
             gateway.close()
 
 
-def test_working_counter_refresh_is_due_every_three_seconds_and_skips_missed_ticks(monkeypatch):
+def test_working_counter_refresh_is_due_every_second_and_skips_missed_ticks(monkeypatch):
     pipeline = SessionInteractionPipeline()
     with outer_terminal() as (master, slave):
         gateway = start_gateway(slave, pipeline)
@@ -573,13 +573,13 @@ def test_working_counter_refresh_is_due_every_three_seconds_and_skips_missed_tic
             now = time.monotonic()
             gateway.set_working(True)
             deadline = gateway._working_refresh_deadline
-            assert deadline == pytest.approx(now + 3, abs=0.01)
-            assert WORKING_COUNTER_REFRESH_SECONDS == 3
+            assert deadline == pytest.approx(now + 1, abs=0.01)
+            assert WORKING_COUNTER_REFRESH_SECONDS == 1
             assert gateway._refresh_working_counter(deadline - 0.01) == deadline
             assert signals == []
-            assert gateway._refresh_working_counter(deadline) == deadline + 3
+            assert gateway._refresh_working_counter(deadline) == deadline + 1
             assert signals == [signal.SIGWINCH]
-            assert gateway._refresh_working_counter(deadline + 12) == deadline + 15
+            assert gateway._refresh_working_counter(deadline + 12) == deadline + 13
             assert signals == [signal.SIGWINCH, signal.SIGWINCH]
             gateway.set_working(False)
             assert gateway._refresh_working_counter(deadline + 18) is None

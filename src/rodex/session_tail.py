@@ -17,7 +17,9 @@ from .runtime import LiveTmuxSession, TmuxScrollbackSnapshot, TmuxScrollbackStat
 DEFAULT_TAIL_LINE_COUNT: Final = 10
 TAIL_POLL_INTERVAL_SECONDS: Final = 0.4
 TAIL_MAX_IDLE_POLL_INTERVAL_SECONDS: Final = 3.2
-TAIL_SETTLED_POLL_COUNT: Final = 3
+# Nine observations leave eight complete poll intervals, making 3.2 seconds the
+# smallest default settling window above three seconds at the 0.4-second cadence.
+TAIL_SETTLED_POLL_COUNT: Final = 9
 TAIL_CURSOR_HISTORY_LINE_COUNT: Final = 256
 TAIL_USAGE: Final = "usage: rodex _tail [-f|--follow] [-n NUM|--lines NUM|--lines=NUM|-NUM] SESSION_NAME"
 _SHORT_LINE_COUNT = re.compile(r"-[0-9]+")

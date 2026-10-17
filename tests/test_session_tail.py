@@ -10,6 +10,7 @@ from rodex.runtime import LiveTmuxSession, TmuxScrollbackSnapshot, TmuxScrollbac
 from rodex.session_tail import (
     TAIL_MAX_IDLE_POLL_INTERVAL_SECONDS,
     TAIL_POLL_INTERVAL_SECONDS,
+    TAIL_SETTLED_POLL_COUNT,
     PlainTailCursor,
     SessionTailRequest,
     follow_session_tail,
@@ -167,7 +168,7 @@ def test_tail_settles_the_final_visible_answer_before_backing_off_idle_polls(
     snapshots = [initial]
     if redraw_before_settling:
         snapshots.append(TmuxScrollbackSnapshot(("earlier output", "partial answer", composer), 0))
-    snapshots.extend([finished] * 8)
+    snapshots.extend([finished] * (TAIL_SETTLED_POLL_COUNT + 5))
     states = iter(map(_state, snapshots))
     output = io.StringIO()
     intervals: list[float] = []
@@ -196,9 +197,16 @@ def test_tail_settles_the_final_visible_answer_before_backing_off_idle_polls(
 
     assert output.getvalue() == "FINAL ANSWER\n"
     assert full_captures == 1
-    settling_poll_count = 3 + int(redraw_before_settling)
+    settling_poll_count = TAIL_SETTLED_POLL_COUNT + int(redraw_before_settling)
     assert intervals[:settling_poll_count] == [TAIL_POLL_INTERVAL_SECONDS] * settling_poll_count
     assert intervals[-1] == TAIL_MAX_IDLE_POLL_INTERVAL_SECONDS
+
+
+def test_default_visible_settling_window_is_the_smallest_poll_window_over_three_seconds() -> None:
+    minimum_settling_seconds = (TAIL_SETTLED_POLL_COUNT - 1) * TAIL_POLL_INTERVAL_SECONDS
+
+    assert minimum_settling_seconds > 3
+    assert minimum_settling_seconds - TAIL_POLL_INTERVAL_SECONDS <= 3
 
 
 def test_plain_cursor_emits_a_visible_row_if_it_changed_before_scrolling() -> None:

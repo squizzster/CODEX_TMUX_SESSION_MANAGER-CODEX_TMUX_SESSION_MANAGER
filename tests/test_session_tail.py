@@ -292,6 +292,7 @@ def test_plain_cursor_publishes_history_while_a_spinner_keeps_changing() -> None
     "status_template",
     [
         "Working ({seconds}s • esc to interrupt)",
+        "Compacting context ({seconds}s • esc to interrupt)",
         (
             "Working (1m {seconds:02d}s • esc to interrupt) · 3 background terminals running"
             " · /ps to view · /stop to close"
@@ -372,8 +373,54 @@ def test_plain_cursor_ignores_repeated_left_justified_status_updates() -> None:
             assert cursor.try_advance_state(state) == ()
 
 
-@pytest.mark.parametrize("status_line", ["Working (4s • esc to interrupt)", "• Working (4s • esc to interrupt)"])
-def test_plain_cursor_does_not_treat_quoted_working_text_as_live_status(status_line: str) -> None:
+@pytest.mark.parametrize("already_compacting", [False, True])
+@pytest.mark.parametrize("poll_count", [1, 4])
+def test_plain_cursor_keeps_compaction_opening_and_completion_without_timer_ticks(
+    already_compacting: bool, poll_count: int
+) -> None:
+    composer = "\N{SINGLE RIGHT-POINTING ANGLE QUOTATION MARK} Ask Codex to do anything"
+    opening = ("Compacting context (1s • esc to interrupt)", "  └ Making room to continue.")
+    initial_notice = opening if already_compacting else ()
+    cursor = PlainTailCursor(TmuxScrollbackSnapshot(("history", "old response", *initial_notice, composer), 1))
+    emitted: list[str] = []
+
+    for seconds in (1, 3, 6, 8, 10, 12, 15, 17, 19):
+        detail = ("  └ Making room to continue.",) if seconds == 1 else ()
+        state = _state(
+            TmuxScrollbackSnapshot(
+                ("history", "old response", f"Compacting context ({seconds}s • esc to interrupt)", *detail, "", composer),
+                1,
+            )
+        )
+        for _ in range(poll_count):
+            emitted.extend(cursor.try_advance_state(state) or ())
+    assert tuple(emitted) == (() if already_compacting else opening)
+
+    completion = "• Context compacted · 1m 40s"
+    finished_lines = ("history", "old response", completion, composer)
+    finished = _state(TmuxScrollbackSnapshot(finished_lines, 1))
+    assert cursor.try_advance_state(finished) == ()
+    assert cursor.try_advance_state(finished) == ()
+    assert cursor.try_advance_state(finished) == (completion,)
+    assert cursor.try_advance_state(finished) == ()
+    assert cursor.try_advance_state(_state(TmuxScrollbackSnapshot(finished_lines, 3))) == ()
+
+    next_opening = ("Compacting context (2s • esc to interrupt)", "  └ Making room to continue.")
+    next_compaction = _state(TmuxScrollbackSnapshot((*finished_lines[:-1], *next_opening, "", composer), 3))
+    assert cursor.try_advance_state(next_compaction) == ()
+    assert cursor.try_advance_state(next_compaction) == ()
+    assert cursor.try_advance_state(next_compaction) == next_opening
+
+
+@pytest.mark.parametrize(
+    "status_line",
+    [
+        "Working (4s • esc to interrupt)",
+        "• Working (4s • esc to interrupt)",
+        "Compacting context (4s • esc to interrupt)",
+    ],
+)
+def test_plain_cursor_does_not_treat_quoted_activity_text_as_live_status(status_line: str) -> None:
     cursor = PlainTailCursor(
         TmuxScrollbackSnapshot(
             (

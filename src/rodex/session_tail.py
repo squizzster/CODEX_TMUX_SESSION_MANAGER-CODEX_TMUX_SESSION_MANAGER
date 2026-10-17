@@ -23,7 +23,7 @@ TAIL_USAGE: Final = "usage: rodex _tail [-f|--follow] [-n NUM|--lines NUM|--line
 _SHORT_LINE_COUNT = re.compile(r"-[0-9]+")
 _LINE_COUNT = re.compile(r"[+-]?[0-9]+")
 _ACTIVE_STATUS_LINE = re.compile(
-    r"^(?:[•◦]\s+)?(?:Working|Waiting for background terminal)\s+"
+    r"^(?:[•◦]\s+)?(?P<activity>Working|Waiting for background terminal|Compacting context)\s+"
     r"\((?:[0-9]+h )?(?:[0-9]+m )?[0-9]+s\s+•\s+"
 )
 _COMPOSER_LINE = re.compile(r"^\N{SINGLE RIGHT-POINTING ANGLE QUOTATION MARK}(?: |$)")
@@ -59,7 +59,8 @@ class PlainTailCursor:
         self._history_line_count = initial_snapshot.history_line_count
         self._history_lines = initial_snapshot.history_lines[-TAIL_CURSOR_HISTORY_LINE_COUNT:]
         self._observed_visible = deque(initial_snapshot.visible_lines)
-        initial_visible = _settled_visible_lines(initial_snapshot.visible_lines)
+        self._compaction_notice: tuple[str, ...] | None = None
+        initial_visible = self._settled_visible_lines(initial_snapshot.visible_lines)
         self._published_visible = initial_visible
         self._candidate_visible = initial_visible
         self._candidate_poll_count = 0
@@ -108,7 +109,7 @@ class PlainTailCursor:
         )
         if emitted is None:
             return None
-        settled_visible = _settled_visible_lines(current_visible)
+        settled_visible = self._settled_visible_lines(current_visible)
         if settled_visible != self._candidate_visible:
             self._candidate_visible = settled_visible
             self._candidate_poll_count = 1
@@ -153,10 +154,29 @@ class PlainTailCursor:
         self._history_line_count = snapshot.history_line_count
         self._history_lines = snapshot.history_lines[-TAIL_CURSOR_HISTORY_LINE_COUNT:]
         self._observed_visible = deque(snapshot.visible_lines)
-        settled_visible = _settled_visible_lines(snapshot.visible_lines)
+        self._compaction_notice = None
+        settled_visible = self._settled_visible_lines(snapshot.visible_lines)
         self._published_visible = settled_visible
         self._candidate_visible = settled_visible
         self._candidate_poll_count = 0
+
+    def _settled_visible_lines(self, visible_lines: tuple[str, ...]) -> tuple[str, ...]:
+        """Keep one compaction opening while its changing timer stays transient."""
+        content = _settled_visible_lines(visible_lines)
+        status_region = visible_lines[len(content) :]
+        active = _ACTIVE_STATUS_LINE.match(status_region[0]) if status_region else None
+        if active is None or active["activity"] != "Compacting context":
+            self._compaction_notice = None
+            return content
+        if self._compaction_notice is None:
+            notice = []
+            for line in status_region:
+                if _COMPOSER_LINE.match(line):
+                    break
+                if line:
+                    notice.append(line)
+            self._compaction_notice = tuple(notice)
+        return (*content, *self._compaction_notice)
 
 
 def parse_session_tail_request(arguments: Sequence[str]) -> SessionTailRequest:

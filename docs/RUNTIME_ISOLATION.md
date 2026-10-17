@@ -137,6 +137,8 @@ incumbent running; another open can reconcile the reached phase. Name collisions
 be resolved before that rename can finish. Native changes between checks may require
 another retry; this is not atomic exclusion of external tmux mutations. It does not
 change cleanup policy for newly launched candidates or decide post-commit setup retention.
+Real-tmux and injected-fault tests cover repair phases; real process-death cuts
+remain unverified.
 
 Alias finalization uses compare-and-swap and compensates its own tmux rename on failure.
 Its subsequent announcement advances only the committed name in its expected control
@@ -204,7 +206,8 @@ of every affected pane. Foreign panes block it. [CLI lifecycle keys](CLI.md#open
 execute in native originating-client context; `exit-unattached` and
 `destroy-unattached` are disabled so the final detach does not destroy a runtime.
 Private keyboard `Ctrl-C` first offers a four-second task-bar countdown. Its native
-timers require the same warning sequence and client key table; `q` and expiry
+timers require the same warning sequence and client key table, so cancelling and
+rearming cannot reuse an old deadline. `q` and expiry
 recheck the full capability and require both the attachment count and roster to
 identify only the originating client. A connected-but-exiting client cannot lend
 its old timer to a replacement. External signals do not use this input path.
@@ -228,6 +231,7 @@ servers can both contain `%0`. [Observer state](INTERACTION_PATHS.md#observer-st
 owns visibility, not pane mechanics.
 
 Evidence: [runtime isolation](../tests/test_runtime_isolation.py),
+[keyboard exit/detach](../tests/test_tmux_shared_ctrl_c.py),
 [daemon lifetimes](../tests/test_daemon_resource_lifetimes.py),
 [runtime peers](../tests/test_runtime_peer.py),
 [registration/adoption](../tests/test_runtime_registration_adoption.py),

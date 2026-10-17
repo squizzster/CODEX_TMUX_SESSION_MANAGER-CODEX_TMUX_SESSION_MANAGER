@@ -24,25 +24,14 @@ the wrong runtime; unverifiable sessions are reported, not auto-adopted or remov
 ## Launcher boundary
 
 The [installation guide](../INSTALL.md#command-and-environment-are-separate) owns
-environment-preparation routes and the exact resolver order. The
-[installed shim](../usr/local/bin/rodex) treats the configured checkout as one
-candidate, then probes only named, already-existing executable capabilities: explicit,
-checkout, and active environments; exact uv-tool directories; and explicit or fixed
-system Python locations. A missing or inaccessible checkout does not block an
-independent candidate. An environment candidate is accepted when its Python starts at
-version 3.11 or newer; package/dependency failure remains the selected environment's
-visible result. Standalone-Python discovery prefers an interpreter that imports Rodex,
-but otherwise executes the first compatible interpreter so its module error remains
-visible. Standalone execution uses `-I` and cleared Python path/startup variables, so
-user-site packages and `PYTHONPATH` are not implicit capabilities. The shim may ask an
-existing `uv` for `uv tool dir`, which is read-only. It never calls `uv sync`, `uv run`,
-a package/Python installer, `find`, `rg`, or recursive traversal.
-
-Failure is also read-only: the shim reports that no usable environment exists and
-exits. It does not create a per-user fallback, change the checkout, or download
-anything. Environment preparation remains an explicit administrator/owner action.
-The maintained checkout and any selected environment remain trusted executable input;
-ordinary ownership and permissions govern who may change them.
+environment preparation, resolver order and missing-package diagnostics. The
+[installed shim](../usr/local/bin/rodex) probes only bounded, already-existing
+executable capabilities. Discovery and unsupported-environment failure do not install,
+download, recursively inspect or modify anything. Preparation is an explicit owner
+or administrator action; ordinary Rodex startup can still create its private state.
+The selected checkout/environment is trusted executable input, governed by filesystem
+ownership and permissions. Standalone Python uses `-I`; user-site packages and
+`PYTHONPATH` do not supply implicit launcher capability.
 
 [`enter_fixed_installation`](../src/rodex/installation.py) uses lightweight metadata
 to notice normal source/environment changes. It copies a changed environment once and
@@ -76,6 +65,8 @@ tmux's global environment is not caller authority. Startup stages an inert pane,
 fences the runtime, installs byte-escaped caller values over tmux stdin, marks
 global-only names removed, and only then starts the bridge. General environment
 payload does not enter process arguments; cwd remains an explicit control argument.
+Source queues keep command boundaries separate from environment names and values;
+embedded semicolons remain data.
 [`environment_exec`](../src/rodex/environment_exec.py) removes names outside the
 caller/tmux contract at host and observer exec boundaries. Same-uid concurrent
 dynamic-loader mutation is outside this Python-launcher boundary.
@@ -124,8 +115,8 @@ metadata deadlines are shorter. An unchanged allow and its separate tmux status 
 no model context; a denial reason
 or rewritten command result can reach the model. Native `additionalContext` is
 model input, and native hook `systemMessage` is warning output rather than a
-guarantee of inline display. [Native notice findings](INTERACTION_PIPELINE_REPORT.md#native-notice-placement)
-bound the tested UI behavior.
+guarantee of inline display. [Native notice limits](INTERACTION_PATHS.md#native-notice-limits)
+define the tested UI boundary.
 
 ### Hook admission and resume
 
@@ -150,7 +141,7 @@ or modified hook. Disabled hooks stay disabled.
 
 Codex **0.162.1 remote resume** can show hook review before `thread/resume`, even
 with the TUI bypass flag accepted by fresh startup. Rodex waits for the thread
-before attaching, so that modal used to cause a hidden prompt and a startup timeout.
+before attaching, so that ordering can hide the prompt until startup times out.
 Exact native trust avoids this ordering problem without modifying protocol replies.
 Another enabled hook can still require native review; explicit bypass is not a
 guarantee that remote resume will proceed.

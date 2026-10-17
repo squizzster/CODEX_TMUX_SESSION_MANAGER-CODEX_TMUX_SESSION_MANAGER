@@ -43,6 +43,7 @@ user-configured generic content-hook loader.
 | Native shell command policy | App Server `PreToolUse(Bash)` → [retained helper](../src/rodex/command_policy_hook.py) → [private broker](../src/rodex/command_policy.py) → ordered [find/rg and later policies](FIND_RG_COMMAND_POLICY.md) → native Codex enforcement; then asynchronous [tmux-only status](../src/rodex/command_policy_status.py) |
 | `_start`, `_steer`, `_interrupt`, alias, mouse | [exact mutation coordinator](../src/rodex/exact_turn_mutation.py) → fenced adapter |
 | Active-prefix `m` | user binding when non-stock; otherwise runtime-installed fallback → current tmux session's `mouse` option |
+| Keyboard `Ctrl-C` / `Ctrl-D` | native originating-client binding → [lifecycle key contract](RUNTIME_ISOLATION.md#tmux-and-observer-lifecycle) |
 | `_cat`, `_tail`, `_events` | [live read pipeline](../src/rodex/session_read_pipeline.py); terminal text and protocol events remain distinct |
 | `_stats`, `_stats-status`, `_agents`, `_trace` | [statistics](../src/rodex/statistics_commands.py) / [trace commands](../src/rodex/agent_trace_commands.py) → owned durable reads |
 | Local menu selection | [configuration](../src/rodex/input_interceptor_config.py) → submitted-command handler → typed target/operation |
@@ -87,8 +88,8 @@ no connection remains subscribed across a source gap. Input-transport exit also
 invalidates the source before waiting for upstream close or output projections.
 The proxy owns mandatory publication and invalidation, outside auxiliary resets.
 This is explicit loss, not transparent reconnect or recovery of missing history.
-Blocking auxiliary callbacks can still delay forwarding (A05 queued dispatch remains
-open); an input callback blocked before the next read can also delay observing EOF.
+Auxiliary callbacks run synchronously and can delay forwarding; an input callback
+blocked before the next read can also delay observing EOF.
 
 Auxiliary input/output callbacks, tool counts, presentation, context/working status,
 steering/recovery observation, observer panes and analytics wakes have independent
@@ -158,14 +159,9 @@ parse the rendered `Context: N%` status, and display rounding cannot trigger it.
 Exactly `70.0` qualifies; every lower value does not.
 
 A qualifying below-to-`>=70%` crossing schedules one asynchronous `STEER` for the
-exact active main turn with this fixed text:
-
-```text
-## Update me and continue
-At the next, at a non-interrupting natural break, (no rush, finish your current experiment or module), enclosed within tags, whilst continuing the work, give me a concise yet substantive where necessary insightful update:- where we are, what we’ve achieved, what we’ve learned, what is driving progress, the current strategy, and/or the most promising avenues still to explore. In your own time, state your current objective, then continue independently, reflecting on how best to advance to achieve the true underlying objective.
-Also ask yourself, if necessary, interesting (insightfully relevant) key question-criteria that you think we should or might need to explore in the future?
-You should continue the turn only if you are absolutely clear on the objectives, how we can achieve them, or otherwise, end-turn at the next natural break.
-```
+exact active main turn. [`CONTEXT_STEER_MESSAGE`](../src/rodex/context_threshold_steering.py)
+owns the fixed text: request a tagged progress update at a natural break, then
+continue only with clear objectives and a path forward. It is real model input.
 
 High usage observed before registration or before a turn becomes active waits for
 both authorities. Child-thread usage is ignored. Scheduling reserves the crossing;
@@ -231,17 +227,32 @@ Display delivery requires the primary connection, not a loaded thread. It opens
 no upstream App Server connection and bypasses
 presentation, observer, and analytics event callbacks. There is no model submission,
 Rodex conversation record, or durable replay queue. `delivered` means transport
-acceptance; missing primary binding fails delivery. Terminal capture can still see
+acceptance; a missing primary connection fails delivery. Terminal capture can still see
 native notice output. The [proxy isolation tests](../tests/test_rodex_protocol_proxy.py)
 verify this separation.
 
 Update, prompt-error, and menu-placeholder notices use that route.
-Native UI decides placement: [Codex 0.162.1 observations](INTERACTION_PIPELINE_REPORT.md#native-notice-placement)
-show F2 warning-center placement, not guaranteed inline chat. In `light`, these
-warnings are not semantic commentary items. Switching notification type does not
-establish inline rendering. Any inline display extension needs an owned local item,
-explicit retention, and native/light, editing, resize, reconnect, and restart behavior;
-fabricated assistant items or model prompts would change the contract.
+
+### Native notice limits
+
+Native Codex owns placement. In the characterized **0.162.1** idle-screen probe,
+`warning` and `deprecationNotice` text appeared in F2's warning center, not inline;
+neither generated upstream model input. In `light`, warnings are not semantic
+commentary items. Changing notification type or using hook `systemMessage` does
+not establish an inline-rendering contract.
+
+The probe bypassed the full managed gateway and did not cover active turns,
+persisted history or restart; native `thread/read(includeTurns=true)` was unsupported
+in that fixture. Its ad-hoc captures are not a committed regression test.
+`await_native_warning` in [managed startup tests](../tests/test_managed_startup.py)
+accepts either inline or F2 placement, so passing it does not prove inline display.
+Use the [proxy isolation tests](../tests/test_rodex_protocol_proxy.py) for transport
+separation and [native hook tests](../tests/test_command_policy_native.py) for
+start/resume/fork trust—not as evidence of notice persistence.
+
+An inline display extension needs explicit retention and native/light, editing,
+resize, reconnect and restart behavior. Fabricated assistant items or model prompts
+would change the display-only contract.
 
 ## Terminal and presentation
 
@@ -252,12 +263,12 @@ fixed idle relay timer. [Local-command composer confirmation](#local-commands)
 uses bounded event-specific rechecks, not idle screen polling. Prompt rules do not
 rewrite the composer.
 
-Main-thread working transitions enable a one-second native elapsed-counter refresh
-deadline in the gateway. A due refresh sends the existing native resize signal without
-changing terminal geometry or composer input; terminal turn/disconnect transitions
-remove the deadline. The same active state drives the 250-millisecond title pulse;
-the gateway coalesces frames and restores the idle field. Idle relaying remains
-event-driven.
+Main-thread working transitions enable the gateway's native elapsed-counter and
+title deadlines. A counter refresh sends the existing native resize signal without
+changing geometry or composer input; terminal turn/disconnect transitions remove
+the deadlines. The gateway coalesces title frames and restores the idle field.
+[Terminal settings](OPERATIONS.md#terminal-settings) owns the visible cadence;
+idle relaying remains event-driven.
 
 [`NativeTerminalProjection`](../src/rodex/native_terminal_projection.py) continuously
 advances one [`NativeTerminalScreen`](../src/rodex/native_terminal_screen.py), even
@@ -288,13 +299,15 @@ Runtime UI initialization replaces only an unbound entry or tmux's stock
 `Mouse: ON/OFF` confirmation. Any other effective `prefix/m` binding is a user
 override and remains authoritative; reconciliation does not reclaim it.
 
-Private `Ctrl-C` uses that same native task-bar message surface for a four-second
-exit countdown. A one-key tmux table handles `d` (detach), `q` (exit), or any other
-key (consume and cancel); no shell helper or gateway input path is added.
-Native tmux timers retain the originating client and check the warning sequence
-and current key table, so cancelled/rearmed warnings cannot reuse an old deadline.
-Exit rechecks whole-runtime ownership and attached-client count. Shared `Ctrl-C`
-still detaches immediately, and process signals bypass the keyboard path.
+The [exit countdown](CLI.md#open-detach-and-resume) also uses native client-local
+task-bar messages, not session-wide status claims or gateway input. Its timers and
+destructive checks belong to [tmux lifecycle ownership](RUNTIME_ISOLATION.md#tmux-and-observer-lifecycle).
+
+[`PlainTailCursor`](../src/rodex/session_tail.py) separates committed history from
+settled visible output. It recognizes status only beside the native composer,
+accepts left-justified activity labels, and retains one compaction opening per
+observed compaction. [_tail behavior and sampling limits](CLI.md#observe-without-guessing-completion)
+apply independently of the native redraw interval; no live session input is injected.
 
 ## Local commands
 
@@ -367,7 +380,10 @@ classifications there when a route changes, and update the route-level map above
 It also checks subprocess entrypoints, mutation owners, and read-only bootstrap probes;
 it is not a proof against arbitrary Python reflection or a runtime monitor.
 
-Status-bar and outer terminal-title configuration remain under [`TmuxStatusPipeline`](../src/rodex/tmux_status.py).
+Session-wide status-bar and static terminal-title configuration remain under
+[`TmuxStatusPipeline`](../src/rodex/tmux_status.py). Client-local native messages for
+keyboard exit, ownership rejection and mouse-toggle confirmation do not claim or
+restore session-wide status options.
 Its timed-notice API owns delayed restoration; `TimedStatusPublisher` owns the
 coalescing runtime worker. Use `TmuxStatusPresentation.message(text)` for literal
 text with control stripping and prefix indication. A launcher notice uses

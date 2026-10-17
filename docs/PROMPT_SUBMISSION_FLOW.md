@@ -73,8 +73,8 @@ An Enter without an RPC performs no transformation and leaves no permission for
 a later submission. Each subsequent RPC is independently transformed; this is not
 deduplication of native retries or a guarantee of exactly-once turn execution.
 
-**Intentional ALPHA behavior change:** the native draft and local recall history
-retain the user's original input, while App Server/model input contains transformed
+The native draft and local recall history retain the user's original input,
+while App Server/model input contains transformed
 text. Optimistic native display can therefore differ from persisted server history.
 Rodex does not rewrite the composer or native transcript. Recalling the
 original input and resubmitting applies the current rules to that original again.

@@ -61,7 +61,7 @@ work time for one second:
 `59m23s` below an hour, `23h20m` below a day, and `10d23h20m` once days are needed.
 
 The gateway coalesces title frames, skips obsolete ones when busy, and stops the title
-deadline at idle. It also requests a native Codex redraw every three seconds during
+deadline at idle. It also requests a native Codex redraw every second during
 active work, preserving terminal size and composer input while advancing Codex's
 `Working (… • esc to interrupt)` counter. Idle relaying remains event-driven.
 
@@ -72,8 +72,9 @@ override and briefly displays `Mouse: ON/OFF`, or `_mouse` sets one explicitly;
 `_mouse SESSION inherit` removes that override.
 During UI initialization and reconciliation, Rodex replaces an unbound `prefix/m` or
 tmux's stock `select-pane -m` action with this fallback. Any other effective user binding
-is preserved. Status shows `CTRL-B MODE` while tmux awaits the next key; custom prefix/root
-bindings are otherwise not replaced. Sharing transitions have their own bounded status
+is preserved. Status shows `CTRL-B MODE` while tmux awaits the next key. Rodex owns
+root `Ctrl-C`/`Ctrl-D`; conflicting user bindings fail initialization rather than
+being replaced. Other custom keys remain untouched. Sharing transitions have their own bounded status
 animation, independent of Codex's `tui.animations` setting. See
 [`TmuxStatusPipeline`](../src/rodex/tmux_status.py) for status ownership.
 

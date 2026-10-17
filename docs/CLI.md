@@ -105,7 +105,8 @@ as JSON. `_running` reports unverified or unregistered sessions separately; it d
 not silently adopt or delete them. [Lifecycle authority](RUNTIME_ISOLATION.md) explains
 why a timeout cannot be treated as a dead runtime.
 
-- `Ctrl-D` and `Ctrl-b d` detach only the invoking client and leave the runtime alive.
+- Outside an exit countdown, `Ctrl-D` and `Ctrl-b d` detach only the invoking client
+  and leave the runtime alive.
 - With the default prefix, `Ctrl-b m` toggles mouse mode for the current managed
   session and briefly displays `Mouse: ON/OFF` with tmux's message styling. Rodex
   installs that fallback only when `prefix/m` is unbound or still tmux's stock
@@ -136,11 +137,12 @@ Repeating the same alias does not retry the announcement.
 - `_context --json` verifies the invoking pane's identity and attached-client snapshot.
   Inherited `TMUX`/`TMUX_PANE` are addresses, not authority; inspect the thread for cwd.
 - `_cat SESSION` is a finite plain-text snapshot of the immutable primary pane.
-- `_tail SESSION` follows by default: committed history emits promptly; visible text
-  settles before emission. It excludes the live composer/status region, retaining
-  the opening compaction notice and its detail once, then the completion message,
-  without repeated compaction timer updates. This is
-  sampled terminal text, not an authoritative turn event stream.
+- `_tail SESSION` prints a recent snapshot, then follows settled text. Repeated live
+  `Working` and `Waiting for background terminal` rows are excluded; compaction keeps
+  one opening notice/detail and the completion message, without timer repeats.
+  The initial snapshot is unfiltered and may include the current status/composer.
+  Quoted status text outside the live footer remains content. This is sampled
+  terminal text, not an authoritative turn event stream.
 - `_events SESSION` follows selected future protocol events as JSON Lines.
 - `_stats`, `_stats-status`, `_agents`, and `_trace` read durable projections without
   requiring a live runtime. Read [analytics coverage limits](ANALYTICS.md#health-and-coverage)

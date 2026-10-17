@@ -38,6 +38,8 @@ Choose the gate deliberately:
 
 Long in-project `--basetemp` paths can overflow Unix-socket limits; use pytest's
 normal temporary roots.
+Native fixtures have emitted multithreaded `forkpty()` deprecation warnings on
+Python 3.12; passing offline checks does not resolve that process-launch warning.
 
 ## Test selection
 
@@ -53,6 +55,10 @@ normal temporary roots.
 - Input and display: [terminal input](../tests/test_terminal_input.py),
   [gateway](../tests/test_terminal_gateway.py), [native composer](../tests/test_native_composer.py),
   [observer safety](../tests/test_observer_runtime_safety.py).
+  [Exit/detach tests](../tests/test_tmux_shared_ctrl_c.py) use disposable tmux clients
+  for countdown choices, ownership changes, reconnects and stale timers.
+  [Tail tests](../tests/test_session_tail.py) cover footer filtering, one compaction
+  opening/completion, quoted text and scrollback rollover.
   [Status messages](../tests/test_tmux_status_messages.py) checks actual terminal
   colours, literal text, Ctrl-B, live fields after both expiry paths, and stale timers.
   [Working status](../tests/test_working_status.py) checks root activity, tmux-owned
@@ -98,8 +104,9 @@ visible-history invalidation. Pair them with [interval runtime measurements](OPE
 ## Documentation changes
 
 [README.md](../README.md) is the complete documentation index; [DESIGN.md](../DESIGN.md)
-helps select a change boundary. [VERSION_TRACKER.md](../VERSION_TRACKER.md) owns
-version history. Keep current contracts in topic guides and dated findings in reports.
+helps select a change boundary. [VERSION_TRACKER.md](../VERSION_TRACKER.md) points to
+current compatibility authorities. Keep contracts and verification limits in their
+topic guides; Git retains historical findings and implementation changes.
 
 For documentation-only changes:
 

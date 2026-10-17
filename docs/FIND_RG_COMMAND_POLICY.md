@@ -7,8 +7,7 @@ specific feedback. An allowed or non-applicable search continues through the ord
 policy pipeline.
 
 The policy never executes the supplied command, reads file contents, consults history,
-or writes runtime state. It has no SQLite database, command runner, generated replay,
-or dependency on the temporary `find_rg_checker.zip` corpus.
+or writes runtime state. It has no SQLite database or command runner.
 
 ## Runtime composition
 
@@ -105,9 +104,8 @@ The production adapter admits at most 64 direct search workflows in one Bash req
 gives the complete search policy 0.5 seconds, and gives an individual metadata census
 at most 0.25 seconds within that total. The helper/private broker transport can wait
 up to five seconds, while the established native hook timeout remains three seconds.
-The native boundary is therefore the effective user-visible ceiling; increasing the
-private timeout prevents the former one-second cutoff from discarding a response that
-returns before that ceiling.
+The native boundary is therefore the effective user-visible ceiling, even though
+the private transport can wait longer.
 
 The metadata census uses in-process `lstat` and `scandir`, never reads contents or
 follows symlinks, and checks its deadline between metadata operations. A single kernel
@@ -150,11 +148,5 @@ pipelines, mutation and external-input rejection, symlinks, budgets, hidden ripg
 configuration, non-execution, boundary extraction, multiline continuations, static
 replay, policy ordering, reason bounds, and native decisions.
 
-The untracked ZIP corpus was used for a read-only repeatability audit on 2026-10-14.
-From 47,430 source records, the boundary produced 50,691 workflows, including 74
-multiline workflows and 22 with backslash-newline continuation. Two filesystem-free
-passes produced zero exceptions and the same complete-output digest,
-`f497317cab01509541955f8a9eaed6b07d4bc63b25fba72ae2ed00c16d6bedec`. Of those
-workflows, 40,623 needed filesystem evidence, 10,065 were structurally rejected, and
-three metadata-only requests were allowed. The private corpus and audit adapter are
-not runtime, package, or maintained test data.
+Private audit corpora are not shipped or maintained test evidence. Filesystem-free
+replay cannot establish live traversal approval.

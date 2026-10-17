@@ -65,7 +65,7 @@ Current contracts belong to the topic guides, not the dated reports.
 | Run commands, reconnect, or diagnose a session | [CLI workflows](docs/CLI.md) → [Operations](docs/OPERATIONS.md) |
 | Inspect or control one exact live turn | [Session-control agent instructions](.agents/skills/rodex-session-control/SKILL.md) |
 | Change implementation and select tests | [Change guide](DESIGN.md) → [domain owners](docs/ARCHITECTURE.md) → [validation gates](docs/DEVELOPMENT.md) |
-| Change prompt rules or understand the translated-input display | [Prompt submission](docs/PROMPT_SUBMISSION_FLOW.md) |
+| Change prompt rules or understand the expansion notice | [Prompt submission](docs/PROMPT_SUBMISSION_FLOW.md) |
 | Trace forwarding, local notices, or automatic model input | [Interaction ownership](docs/INTERACTION_PATHS.md), including the [70% reminder](docs/INTERACTION_PATHS.md#context-threshold-steering) |
 | Diagnose startup or change runtime lifetime/upgrade behavior | [Runtime isolation](docs/RUNTIME_ISOLATION.md), including [primary discovery](docs/RUNTIME_ISOLATION.md#primary-conversation-discovery) |
 | Interpret statistics/trace coverage or change persistence | [Analytics](docs/ANALYTICS.md) → [SQL authority](docs/SQL_SCHEMA.md) |

@@ -133,9 +133,8 @@ Repeating the same alias does not retry the announcement.
   Inherited `TMUX`/`TMUX_PANE` are addresses, not authority; inspect the thread for cwd.
 - `_cat SESSION` is a finite plain-text snapshot of the immutable primary pane.
 - `_tail SESSION` follows by default: committed history emits promptly; visible text
-  settles for the smallest 0.4-second polling window above three seconds before
-  emission. It excludes the live composer/status region. This is sampled terminal
-  text, not an authoritative turn event stream.
+  settles before emission. It excludes the live composer/status region. This is
+  sampled terminal text, not an authoritative turn event stream.
 - `_events SESSION` follows selected future protocol events as JSON Lines.
 - `_stats`, `_stats-status`, `_agents`, and `_trace` read durable projections without
   requiring a live runtime. Read [analytics coverage limits](ANALYTICS.md#health-and-coverage)

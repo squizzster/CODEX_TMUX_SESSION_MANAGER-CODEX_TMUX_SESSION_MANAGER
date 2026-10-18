@@ -239,7 +239,7 @@ def test_published_installation_keeps_code_dependencies_and_defaults_after_repla
     first = publish(tmp_path, development_installation)
     before = info(first)
     first_notice = capsys.readouterr().err
-    assert f"Rodex {before['version']} installation {first.parents[2].name}" in first_notice
+    assert first_notice == f"rodex: Is upgrading to v{before['version']} installation, please wait...\n"
     edits = (
         (source / "rodex/version.py", "0.17a", "0.18a"),
         (source / "rodex/daemon_client.py", "rodex-daemon-v5", "rodex-daemon-v6"),
@@ -262,8 +262,7 @@ def test_published_installation_keeps_code_dependencies_and_defaults_after_repla
     after = info(second)
     second_notice = capsys.readouterr().err
     assert after["version"] == "0.18a"
-    assert f"Rodex {after['version']} installation {second.parents[2].name}" in second_notice
-    assert f"Rodex {before['version']}" not in second_notice
+    assert second_notice == f"rodex: Is upgrading to v{after['version']} installation, please wait...\n"
     assert first != second
     assert after["dependency"] == "B"
     assert after["database"] == "rodex-v23.sqlite3"
@@ -297,14 +296,7 @@ def test_concurrent_launches_publish_one_complete_installation(tmp_path, develop
     assert not list((tmp_path / "installations").glob(".preparing-*"))
     captured = capsys.readouterr()
     assert captured.out == ""
-    source, library = development_installation
-    destination = interpreters[0].parents[2]
-    assert captured.err.splitlines() == [
-        f"rodex: Preparing local Rodex {RODEX_VERSION} installation {destination.name}; copying code and dependencies...",
-        f"rodex:   Source code: {source}",
-        f"rodex:   Installed dependencies: {library}",
-        f"rodex: Local Rodex {RODEX_VERSION} installation ready at {destination}.",
-    ]
+    assert captured.err == f"rodex: Is upgrading to v{RODEX_VERSION} installation, please wait...\n"
 
 
 def test_external_editable_dependency_is_rejected(tmp_path, development_installation):
@@ -442,14 +434,7 @@ def test_unchanged_bootstrap_reuses_retained_installation_without_copying(
     first = publish(tmp_path, development_installation)
     captured = capsys.readouterr()
     assert captured.out == ""
-    source, library = development_installation
-    destination = first.parents[2]
-    assert captured.err.splitlines() == [
-        f"rodex: Preparing local Rodex {RODEX_VERSION} installation {destination.name}; copying code and dependencies...",
-        f"rodex:   Source code: {source}",
-        f"rodex:   Installed dependencies: {library}",
-        f"rodex: Local Rodex {RODEX_VERSION} installation ready at {destination}.",
-    ]
+    assert captured.err == f"rodex: Is upgrading to v{RODEX_VERSION} installation, please wait...\n"
 
     def unexpected_copy(*_args, **_kwargs):
         raise AssertionError("unchanged startup copied its environment again")
@@ -469,20 +454,13 @@ def test_installation_flushes_preparation_notice_before_copy_and_does_not_report
 ):
     import rodex.installation as installation
 
-    identity = "a" * 64
-    monkeypatch.setattr(installation.secrets, "token_hex", lambda _length: identity)
     stderr = Mock(wraps=installation.sys.stderr)
     monkeypatch.setattr(installation.sys, "stderr", stderr)
 
     def failed_copy(*_args, **_kwargs):
         captured = capsys.readouterr()
         assert captured.out == ""
-        source, library = development_installation
-        assert captured.err.splitlines() == [
-            f"rodex: Preparing local Rodex {RODEX_VERSION} installation {identity}; copying code and dependencies...",
-            f"rodex:   Source code: {source}",
-            f"rodex:   Installed dependencies: {library}",
-        ]
+        assert captured.err == f"rodex: Is upgrading to v{RODEX_VERSION} installation, please wait...\n"
         stderr.flush.assert_called_once_with()
         raise OSError("copy failed")
 

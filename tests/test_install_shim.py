@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-import json
 import os
 import shutil
 import subprocess
-import sysconfig
 from pathlib import Path
 
 import pytest
@@ -12,19 +10,7 @@ import pytest
 from rodex.version import RODEX_VERSION
 
 LAUNCHERS = ["rodex", "usr/local/bin/rodex"]
-
-
-def _assert_preparation_messages(stderr: str, project_root: Path, state_home: Path) -> None:
-    manifests = list((state_home / "rodex/implementations").glob("*/rodex-installation.json"))
-    assert len(manifests) == 1
-    destination = manifests[0].parent
-    assert json.loads(manifests[0].read_text())["implementation"] == destination.name
-    assert stderr.splitlines() == [
-        f"rodex: Preparing local Rodex {RODEX_VERSION} installation {destination.name}; copying code and dependencies...",
-        f"rodex:   Source code: {project_root / 'src'}",
-        f"rodex:   Installed dependencies: {Path(sysconfig.get_path('purelib')).resolve()}",
-        f"rodex: Local Rodex {RODEX_VERSION} installation ready at {destination}.",
-    ]
+PREPARATION_NOTICE = f"rodex: Is upgrading to v{RODEX_VERSION} installation, please wait...\n"
 
 
 def _write_successful_python(environment_root: Path) -> Path:
@@ -256,7 +242,7 @@ def test_launchers_preserve_codex_subcommand_passthrough_without_tmux(
 
     assert result.returncode == 0
     assert result.stdout.splitlines() == ["exec", "--json", "probe"]
-    _assert_preparation_messages(result.stderr, project_root, state_home)
+    assert result.stderr == PREPARATION_NOTICE
     assert not database.exists()
 
 
@@ -286,7 +272,7 @@ def test_launchers_print_rodex_help_without_codex_tmux_or_database(
     assert result.returncode == 0
     assert result.stdout.startswith("usage: rodex [CODEX_OPTIONS] [PROMPT]\n")
     assert "_create" in result.stdout
-    _assert_preparation_messages(result.stderr, project_root, state_home)
+    assert result.stderr == PREPARATION_NOTICE
     assert not database.exists()
 
 

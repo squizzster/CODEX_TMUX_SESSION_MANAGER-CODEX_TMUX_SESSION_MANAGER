@@ -210,9 +210,7 @@ def prepare_installation(
         destination = store / identity
         release_version = _source_release_version(source_root)
         print(
-            f"rodex: Preparing local Rodex {release_version} installation {identity}; copying code and dependencies...\n"
-            f"rodex:   Source code: {source_root.resolve()}\n"
-            f"rodex:   Installed dependencies: {site_packages.resolve()}",
+            f"rodex: Is upgrading to v{release_version} installation, please wait...",
             file=sys.stderr,
             flush=True,
         )
@@ -253,7 +251,6 @@ def prepare_installation(
                 shutil.rmtree(stage)
         interpreter = _validate(destination, identity)
         _write_bootstrap_cache(cache_path, state, identity)
-        print(f"rodex: Local Rodex {release_version} installation ready at {destination}.", file=sys.stderr, flush=True)
         return interpreter
     finally:
         os.close(descriptor)

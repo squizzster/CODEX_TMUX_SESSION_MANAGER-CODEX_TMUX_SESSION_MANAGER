@@ -35,14 +35,17 @@ def _state(
     [
         (["_tail", "worker"], SessionTailRequest("worker", 10)),
         (["_tail", "-5", "worker"], SessionTailRequest("worker", 5)),
+        (["_tail", "-10000", "worker"], SessionTailRequest("worker", 10_000)),
+        (["_tail", "-f", "worker"], SessionTailRequest("worker", 10, follow=True)),
+        (["_tail", "-10000", "-f", "worker"], SessionTailRequest("worker", 10_000, follow=True)),
         (["_tail", "worker", "-n", "25"], SessionTailRequest("worker", 25)),
         (
             ["_tail", "--lines=+3", "worker", "--follow"],
-            SessionTailRequest("worker", 3, from_start=True),
+            SessionTailRequest("worker", 3, from_start=True, follow=True),
         ),
         (
             ["_tail", "-f", "--lines", "-2", "worker"],
-            SessionTailRequest("worker", 2),
+            SessionTailRequest("worker", 2, follow=True),
         ),
         (["_tail", "-n", "0", "worker"], SessionTailRequest("worker", 0)),
         (["_tail", "--", "worker"], SessionTailRequest("worker", 10)),

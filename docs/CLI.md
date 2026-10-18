@@ -137,12 +137,15 @@ Repeating the same alias does not retry the announcement.
 - `_context --json` verifies the invoking pane's identity and attached-client snapshot.
   Inherited `TMUX`/`TMUX_PANE` are addresses, not authority; inspect the thread for cwd.
 - `_cat SESSION` is a finite plain-text snapshot of the immutable primary pane.
-- `_tail SESSION` prints a recent snapshot, then follows settled text. Repeated live
-  `Working` and `Waiting for background terminal` rows are excluded; compaction keeps
-  one opening notice/detail and the completion message, without timer repeats.
-  The initial snapshot is unfiltered and may include the current status/composer.
-  Quoted status text outside the live footer remains content. This is sampled
-  terminal text, not an authoritative turn event stream.
+- `_tail SESSION` prints the last 10 retained terminal lines and exits. `-5` or
+  `-n 5` selects the last five lines; `-10000` prints up to 10,000 available lines.
+  Add `-f` or `--follow` to print the snapshot and then follow settled text;
+  `_tail -10000 -f SESSION` does both, and `_tail -n 0 -f SESSION` follows only new text.
+  The snapshot is unfiltered and may include the current status/composer. During
+  follow, repeated live `Working` and `Waiting for background terminal` rows are
+  excluded; compaction keeps one opening notice/detail and the completion message,
+  without timer repeats. Quoted status text outside the live footer remains content.
+  This is sampled terminal text, not an authoritative turn event stream.
 - `_events SESSION` follows selected future protocol events as JSON Lines.
 - `_stats`, `_stats-status`, `_agents`, and `_trace` read durable projections without
   requiring a live runtime. Read [analytics coverage limits](ANALYTICS.md#health-and-coverage)

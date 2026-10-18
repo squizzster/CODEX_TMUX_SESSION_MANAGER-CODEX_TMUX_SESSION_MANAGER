@@ -2033,10 +2033,72 @@ def test_events_fail_closed_when_current_tmux_identity_cannot_be_verified(
         )
 
 
+@pytest.mark.parametrize(
+    ("options", "retained_count", "first_line", "last_line"),
+    [
+        ([], 15, 6, 15),
+        (["-5"], 15, 11, 15),
+        (["-10000"], 12_000, 2_001, 12_000),
+        (["-10000"], 3, 1, 3),
+        (["-5"], 0, 1, 0),
+        (["-n", "0"], 15, 1, 0),
+        (["--lines=+3"], 15, 3, 15),
+    ],
+)
+def test_tail_prints_selected_retained_lines_and_exits_without_following(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    options: list[str],
+    retained_count: int,
+    first_line: int,
+    last_line: int,
+) -> None:
+    database = tmp_path / "rodex.sqlite3"
+    monkeypatch.setattr("cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga")
+    monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
+    create_exact_controlled_session(database, tmp_path)
+    launcher = StubLauncher(tmp_path)
+    launcher.scrollback = tuple(f"line {number}" for number in range(1, retained_count + 1))
+    control = StubControlClient()
+
+    def reject_follow(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("tail without -f must exit after one verified snapshot")
+
+    monkeypatch.setattr(session_commands_module, "follow_session_tail", reject_follow)
+    monkeypatch.setattr(launcher, "capture_scrollback_state", reject_follow)
+
+    assert (
+        run(
+            ["_tail", *options, "automatic-beluga"],
+            database_path=database,
+            launcher=launcher,  # type: ignore[arg-type]
+            control_client=control,  # type: ignore[arg-type]
+        )
+        == 0
+    )
+
+    captured = capsys.readouterr()
+    assert captured.out == "".join(f"line {number}\n" for number in range(first_line, last_line + 1))
+    assert captured.err == ""
+    assert len(launcher.scrollback_captures) == 1
+    assert control.event_streams == []
+
+
 @pytest.mark.evolutionary_regression
+@pytest.mark.parametrize(
+    ("arguments", "line_count"),
+    [
+        (["_tail", "-5", "automatic-beluga", "--follow"], 5),
+        (["_tail", "-f", "automatic-beluga"], 10),
+        (["_tail", "-10000", "-f", "automatic-beluga"], 10_000),
+    ],
+)
 def test_tail_follows_verified_session_text_without_protocol_events(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    arguments: list[str],
+    line_count: int,
 ) -> None:
     database = tmp_path / "rodex.sqlite3"
     monkeypatch.setattr("cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga")
@@ -2059,7 +2121,7 @@ def test_tail_follows_verified_session_text_without_protocol_events(
 
     assert (
         run(
-            ["_tail", "-5", "automatic-beluga", "--follow"],
+            arguments,
             database_path=database,
             launcher=launcher,  # type: ignore[arg-type]
             control_client=control,  # type: ignore[arg-type]
@@ -2067,7 +2129,7 @@ def test_tail_follows_verified_session_text_without_protocol_events(
         == 0
     )
 
-    assert observed[0] == SessionTailRequest("automatic-beluga", 5)
+    assert observed[0] == SessionTailRequest("automatic-beluga", line_count, follow=True)
     observed_runtime = observed[1]
     assert isinstance(observed_runtime, LiveTmuxSession)
     assert observed_runtime.tmux_server_socket_path == tmp_path / "tmux.sock"

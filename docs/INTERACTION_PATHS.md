@@ -45,6 +45,7 @@ user-configured generic content-hook loader.
 | Active-prefix `m` | user binding when non-stock; otherwise runtime-installed fallback → current tmux session's `mouse` option |
 | Keyboard `Ctrl-C` / `Ctrl-D` | native originating-client binding → [lifecycle key contract](RUNTIME_ISOLATION.md#tmux-and-observer-lifecycle) |
 | `_cat`, `_tail`, `_events` | [live read pipeline](../src/rodex/session_read_pipeline.py); terminal text and protocol events remain distinct |
+| Bootstrap preparation | [`prepare_installation`](../src/rodex/installation.py) → startup stderr; [preparation notice contract](../INSTALL.md#retained-installations-and-compatibility) |
 | `_stats`, `_stats-status`, `_agents`, `_trace` | [statistics](../src/rodex/statistics_commands.py) / [trace commands](../src/rodex/agent_trace_commands.py) → owned durable reads |
 | Local menu selection | [configuration](../src/rodex/input_interceptor_config.py) → submitted-command handler → typed target/operation |
 | Attach/update notices | registered capability → display-only interaction |

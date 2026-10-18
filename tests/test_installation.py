@@ -13,6 +13,7 @@ import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 from terminal_tmux_fixture import tmux_terminal
@@ -280,12 +281,18 @@ def test_configuration_only_change_publishes_new_defaults(tmp_path, development_
     assert info(first)["configuration"] != "[]\n"
 
 
-def test_concurrent_launches_publish_one_complete_installation(tmp_path, development_installation):
+def test_concurrent_launches_publish_one_complete_installation(tmp_path, development_installation, capsys):
     with ThreadPoolExecutor(max_workers=3) as executor:
         interpreters = list(executor.map(lambda _: publish(tmp_path, development_installation), range(3)))
     assert len(set(interpreters)) == 1
     assert info(interpreters[0])["dependency"] == "A"
     assert not list((tmp_path / "installations").glob(".preparing-*"))
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.splitlines() == [
+        "rodex: Preparing a new local installation; copying code and dependencies...",
+        "rodex: Local installation ready.",
+    ]
 
 
 def test_external_editable_dependency_is_rejected(tmp_path, development_installation):
@@ -416,11 +423,17 @@ def test_installation_store_stays_outside_bootstrap_environment(tmp_path, monkey
 
 
 def test_unchanged_bootstrap_reuses_retained_installation_without_copying(
-    tmp_path, development_installation, monkeypatch
+    tmp_path, development_installation, monkeypatch, capsys
 ):
     import rodex.installation as installation
 
     first = publish(tmp_path, development_installation)
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.splitlines() == [
+        "rodex: Preparing a new local installation; copying code and dependencies...",
+        "rodex: Local installation ready.",
+    ]
 
     def unexpected_copy(*_args, **_kwargs):
         raise AssertionError("unchanged startup copied its environment again")
@@ -431,3 +444,28 @@ def test_unchanged_bootstrap_reuses_retained_installation_without_copying(
     monkeypatch.setattr(installation.shutil, "copytree", unexpected_copy)
     monkeypatch.setattr(installation.fcntl, "flock", unexpected_lock)
     assert publish(tmp_path, development_installation) == first
+    captured = capsys.readouterr()
+    assert captured.out == captured.err == ""
+
+
+def test_installation_flushes_preparation_notice_before_copy_and_does_not_report_failure_as_ready(
+    tmp_path, development_installation, monkeypatch, capsys
+):
+    import rodex.installation as installation
+
+    stderr = Mock(wraps=installation.sys.stderr)
+    monkeypatch.setattr(installation.sys, "stderr", stderr)
+
+    def failed_copy(*_args, **_kwargs):
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert captured.err == "rodex: Preparing a new local installation; copying code and dependencies...\n"
+        stderr.flush.assert_called_once_with()
+        raise OSError("copy failed")
+
+    monkeypatch.setattr(installation.shutil, "copytree", failed_copy)
+    with pytest.raises(OSError, match="copy failed"):
+        publish(tmp_path, development_installation)
+    captured = capsys.readouterr()
+    assert captured.out == captured.err == ""
+    assert not list((tmp_path / "installations").glob(".preparing-*"))

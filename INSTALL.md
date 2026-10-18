@@ -187,6 +187,10 @@ External/editable dependency paths are rejected because they cannot be copied in
 self-contained retained environment; only Rodex itself may use the checkout's editable
 path. Wheel installs include the same prompt defaults and use the same boundary.
 
+Preparing a new copy emits flushed start/completion messages on stderr; cached
+launches stay silent and stdout is unchanged. Completion means the installation
+is ready, not that a session has attached. Waiting for the preparation lock is silent.
+
 Publication is locked and atomic. The lock coordinates the uncommon copy operation,
 not every retained runtime. Helpers use the retained interpreter with `-I`. Python
 aliases normalize within the selected environment, not to a shared base interpreter.

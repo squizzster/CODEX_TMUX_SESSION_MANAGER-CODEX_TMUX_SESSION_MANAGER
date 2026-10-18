@@ -191,6 +191,11 @@ def prepare_installation(
         while (store / identity).exists():  # pragma: no cover - a 256-bit collision is not operationally reproducible.
             identity = secrets.token_hex(32)
         destination = store / identity
+        print(
+            "rodex: Preparing a new local installation; copying code and dependencies...",
+            file=sys.stderr,
+            flush=True,
+        )
         stage = Path(tempfile.mkdtemp(prefix=".preparing-", dir=store))
         try:
             for package in FIRST_PARTY_PACKAGES:
@@ -228,6 +233,7 @@ def prepare_installation(
                 shutil.rmtree(stage)
         interpreter = _validate(destination, identity)
         _write_bootstrap_cache(cache_path, state, identity)
+        print("rodex: Local installation ready.", file=sys.stderr, flush=True)
         return interpreter
     finally:
         os.close(descriptor)

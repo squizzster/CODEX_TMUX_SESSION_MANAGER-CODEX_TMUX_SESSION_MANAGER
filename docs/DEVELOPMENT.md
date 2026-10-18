@@ -44,7 +44,9 @@ Python 3.12; passing offline checks does not resolve that process-launch warning
 ## Test selection
 
 - CLI routing and compatibility: [command contract](../tests/test_command_contract.py),
-  [current contracts](../tests/test_current_contracts.py).
+  [current contracts](../tests/test_current_contracts.py), and
+  [CLI behavior](../tests/test_rodex_cli.py). CLI tests verify that `_tail` returns the
+  requested retained lines and exits, with streaming enabled only by `-f`/`--follow`.
 - Installation and lifecycle: [shim discovery](../tests/test_install_shim.py),
   [retained installations](../tests/test_installation.py),
   [daemon](../tests/test_rodex_daemon.py), [runtime isolation](../tests/test_runtime_isolation.py),
@@ -52,13 +54,16 @@ Python 3.12; passing offline checks does not resolve that process-launch warning
   [Retained handoff admission](../tests/test_runtime_upgrade.py) checks idle-only
   upgrades and attachment without replacement; installation tests verify a busy turn
   completes across `--force-old` reconnect before its idle runtime is upgraded.
+  Installation and shim tests also check the single versioned preparation notice,
+  the copied source's release version, and silent reuse of a cached installation.
 - Input and display: [terminal input](../tests/test_terminal_input.py),
   [gateway](../tests/test_terminal_gateway.py), [native composer](../tests/test_native_composer.py),
   [observer safety](../tests/test_observer_runtime_safety.py).
   [Exit/detach tests](../tests/test_tmux_shared_ctrl_c.py) use disposable tmux clients
   for countdown choices, ownership changes, reconnects and stale timers.
-  [Tail tests](../tests/test_session_tail.py) cover footer filtering, one compaction
-  opening/completion, quoted text and scrollback rollover.
+  [Tail tests](../tests/test_session_tail.py) cover line-selection grammar, follow
+  flags, footer filtering, one compaction opening/completion, quoted text and
+  scrollback rollover.
   [Status messages](../tests/test_tmux_status_messages.py) checks actual terminal
   colours, literal text, Ctrl-B, live fields after both expiry paths, and stale timers.
   [Working status](../tests/test_working_status.py) checks root activity, tmux-owned

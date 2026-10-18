@@ -26,6 +26,7 @@ from test_managed_startup import (
 
 from rodex.implementation_identity import FIRST_PARTY_PACKAGES
 from rodex.installation import RodexInstallationError, prepare_installation
+from rodex.version import RODEX_VERSION
 
 PROJECT = Path(__file__).resolve().parents[1]
 
@@ -56,8 +57,9 @@ from rodex.daemon_client import RODEX_DAEMON_PROTOCOL
 from rodex.pre_tool_use_customer_library.find_rg import DEFAULT_FIND_RG_POLICY
 from rodex.tmux_session_capability import RODEX_SHARED_TMUX_PROTOCOL
 from rodex.user_prompt_hook import USER_PROMPT_SUBSTITUTIONS_PATH
+from rodex.version import RODEX_VERSION
 from rodex_sql import RODEX_DATABASE_FILENAME
-print(json.dumps(dict(identity=RODEX_IMPLEMENTATION_ID, daemon=RODEX_DAEMON_PROTOCOL,
+print(json.dumps(dict(identity=RODEX_IMPLEMENTATION_ID, version=RODEX_VERSION, daemon=RODEX_DAEMON_PROTOCOL,
     tmux=RODEX_SHARED_TMUX_PROTOCOL, database=RODEX_DATABASE_FILENAME,
     find_rg_depth=DEFAULT_FIND_RG_POLICY.max_depth,
     dependency=dependency.VERSION, configuration=USER_PROMPT_SUBSTITUTIONS_PATH.read_text(),
@@ -231,11 +233,13 @@ def test_current_resume_upgrades_one_idle_retained_runtime_and_preserves_its_dae
 
 
 def test_published_installation_keeps_code_dependencies_and_defaults_after_replacement(
-    tmp_path, development_installation
+    tmp_path, development_installation, capsys
 ):
     source, library = development_installation
     first = publish(tmp_path, development_installation)
     before = info(first)
+    first_notice = capsys.readouterr().err
+    assert first_notice == f"rodex: Is upgrading to v{before['version']} installation, please wait...\n"
     edits = (
         (source / "rodex/version.py", "0.17a", "0.18a"),
         (source / "rodex/daemon_client.py", "rodex-daemon-v5", "rodex-daemon-v6"),
@@ -256,6 +260,9 @@ def test_published_installation_keeps_code_dependencies_and_defaults_after_repla
     configuration.write_text(configuration.read_text() + "\n# replacement defaults\n")
     second = publish(tmp_path, development_installation)
     after = info(second)
+    second_notice = capsys.readouterr().err
+    assert after["version"] == "0.18a"
+    assert second_notice == f"rodex: Is upgrading to v{after['version']} installation, please wait...\n"
     assert first != second
     assert after["dependency"] == "B"
     assert after["database"] == "rodex-v23.sqlite3"
@@ -289,10 +296,7 @@ def test_concurrent_launches_publish_one_complete_installation(tmp_path, develop
     assert not list((tmp_path / "installations").glob(".preparing-*"))
     captured = capsys.readouterr()
     assert captured.out == ""
-    assert captured.err.splitlines() == [
-        "rodex: Preparing a new local installation; copying code and dependencies...",
-        "rodex: Local installation ready.",
-    ]
+    assert captured.err == f"rodex: Is upgrading to v{RODEX_VERSION} installation, please wait...\n"
 
 
 def test_external_editable_dependency_is_rejected(tmp_path, development_installation):
@@ -430,10 +434,7 @@ def test_unchanged_bootstrap_reuses_retained_installation_without_copying(
     first = publish(tmp_path, development_installation)
     captured = capsys.readouterr()
     assert captured.out == ""
-    assert captured.err.splitlines() == [
-        "rodex: Preparing a new local installation; copying code and dependencies...",
-        "rodex: Local installation ready.",
-    ]
+    assert captured.err == f"rodex: Is upgrading to v{RODEX_VERSION} installation, please wait...\n"
 
     def unexpected_copy(*_args, **_kwargs):
         raise AssertionError("unchanged startup copied its environment again")
@@ -459,7 +460,7 @@ def test_installation_flushes_preparation_notice_before_copy_and_does_not_report
     def failed_copy(*_args, **_kwargs):
         captured = capsys.readouterr()
         assert captured.out == ""
-        assert captured.err == "rodex: Preparing a new local installation; copying code and dependencies...\n"
+        assert captured.err == f"rodex: Is upgrading to v{RODEX_VERSION} installation, please wait...\n"
         stderr.flush.assert_called_once_with()
         raise OSError("copy failed")
 

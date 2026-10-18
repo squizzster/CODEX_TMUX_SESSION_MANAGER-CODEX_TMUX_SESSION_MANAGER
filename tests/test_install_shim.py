@@ -7,10 +7,10 @@ from pathlib import Path
 
 import pytest
 
+from rodex.version import RODEX_VERSION
+
 LAUNCHERS = ["rodex", "usr/local/bin/rodex"]
-PREPARATION_MESSAGES = (
-    "rodex: Preparing a new local installation; copying code and dependencies...\nrodex: Local installation ready.\n"
-)
+PREPARATION_NOTICE = f"rodex: Is upgrading to v{RODEX_VERSION} installation, please wait...\n"
 
 
 def _write_successful_python(environment_root: Path) -> Path:
@@ -242,7 +242,7 @@ def test_launchers_preserve_codex_subcommand_passthrough_without_tmux(
 
     assert result.returncode == 0
     assert result.stdout.splitlines() == ["exec", "--json", "probe"]
-    assert result.stderr == PREPARATION_MESSAGES
+    assert result.stderr == PREPARATION_NOTICE
     assert not database.exists()
 
 
@@ -272,7 +272,7 @@ def test_launchers_print_rodex_help_without_codex_tmux_or_database(
     assert result.returncode == 0
     assert result.stdout.startswith("usage: rodex [CODEX_OPTIONS] [PROMPT]\n")
     assert "_create" in result.stdout
-    assert result.stderr == PREPARATION_MESSAGES
+    assert result.stderr == PREPARATION_NOTICE
     assert not database.exists()
 
 

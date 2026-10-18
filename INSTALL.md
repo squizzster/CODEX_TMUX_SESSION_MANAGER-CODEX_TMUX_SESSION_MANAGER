@@ -187,9 +187,11 @@ External/editable dependency paths are rejected because they cannot be copied in
 self-contained retained environment; only Rodex itself may use the checkout's editable
 path. Wheel installs include the same prompt defaults and use the same boundary.
 
-Preparing a new copy emits flushed start/completion messages on stderr; cached
-launches stay silent and stdout is unchanged. Completion means the installation
-is ready, not that a session has attached. Waiting for the preparation lock is silent.
+Preparing a new copy emits one flushed stderr notice:
+`rodex: Is upgrading to vVERSION installation, please wait...`, using the release
+version from the source being copied. Startup continues when preparation finishes,
+without a completion message. Cached launches and waiting for the preparation lock
+remain silent; stdout is unchanged.
 
 Publication is locked and atomic. The lock coordinates the uncommon copy operation,
 not every retained runtime. Helpers use the retained interpreter with `-I`. Python

@@ -7,6 +7,7 @@ their interpreter paths remain usable by older daemons, hooks and observers.
 
 from __future__ import annotations
 
+import ast
 import fcntl
 import hashlib
 import json
@@ -86,6 +87,22 @@ def _shipped_configuration(source_root: Path) -> Path:
 def _path_state(path: Path, name: str) -> list[str | int]:
     observed = path.lstat()
     return [name, stat.S_IFMT(observed.st_mode), observed.st_size, observed.st_mtime_ns]
+
+
+def _source_release_version(source_root: Path) -> str:
+    """Describe the source being copied, which may differ from this process's imports."""
+    try:
+        statements = ast.parse((source_root / "rodex/version.py").read_text()).body
+        for statement in statements:
+            if isinstance(statement, ast.Assign) and any(
+                isinstance(target, ast.Name) and target.id == "RODEX_VERSION" for target in statement.targets
+            ):
+                version = ast.literal_eval(statement.value)
+                if isinstance(version, str) and version:
+                    return version
+    except (OSError, SyntaxError, ValueError):
+        pass
+    return "unknown"
 
 
 def _bootstrap_state(source_root: Path, site_packages: Path, configuration: Path) -> dict[str, object]:
@@ -191,8 +208,9 @@ def prepare_installation(
         while (store / identity).exists():  # pragma: no cover - a 256-bit collision is not operationally reproducible.
             identity = secrets.token_hex(32)
         destination = store / identity
+        release_version = _source_release_version(source_root)
         print(
-            "rodex: Preparing a new local installation; copying code and dependencies...",
+            f"rodex: Is upgrading to v{release_version} installation, please wait...",
             file=sys.stderr,
             flush=True,
         )
@@ -233,7 +251,6 @@ def prepare_installation(
                 shutil.rmtree(stage)
         interpreter = _validate(destination, identity)
         _write_bootstrap_cache(cache_path, state, identity)
-        print("rodex: Local installation ready.", file=sys.stderr, flush=True)
         return interpreter
     finally:
         os.close(descriptor)

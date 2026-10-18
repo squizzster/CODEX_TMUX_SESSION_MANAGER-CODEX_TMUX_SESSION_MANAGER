@@ -152,8 +152,8 @@ COMMAND_SPECS: Final = (
         TAIL_COMMAND,
         CommandRoute.SESSION,
         (
-            "_tail [-f] [-n NUM] SESSION",
-            "Print recent terminal output and follow settled plain-text changes.",
+            "_tail [-f] [-n NUM|-NUM] SESSION",
+            "Print the last NUM retained lines (default 10) and exit; -f follows settled text.",
         ),
     ),
     CommandSpec(

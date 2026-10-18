@@ -46,7 +46,7 @@ from .runtime import (
     current_tmux_server_socket_paths,
 )
 from .session_read_pipeline import LiveSessionReadPipeline
-from .session_tail import follow_session_tail, parse_session_tail_request
+from .session_tail import follow_session_tail, parse_session_tail_request, print_session_tail_snapshot
 
 
 def execute_session_command(
@@ -115,7 +115,12 @@ def execute_session_command(
         return
     if command == TAIL_COMMAND:
         request = parse_session_tail_request(arguments)
-        LiveSessionReadPipeline(database_path, launcher, _record_access_best_effort).stream_scrollback(
+        reads = LiveSessionReadPipeline(database_path, launcher, _record_access_best_effort)
+        if not request.follow:
+            snapshot = reads.snapshot(request.session_name, launcher.capture_scrollback_snapshot)
+            print_session_tail_snapshot(request, snapshot)
+            return
+        reads.stream_scrollback(
             request.session_name,
             lambda runtime, revalidate: follow_session_tail(
                 request,

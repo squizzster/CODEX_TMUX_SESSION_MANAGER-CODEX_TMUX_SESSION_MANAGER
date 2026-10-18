@@ -38,11 +38,12 @@ Sleeper = Callable[[float], None]
 
 @dataclass(frozen=True, slots=True)
 class SessionTailRequest:
-    """One parsed terminal-follow request using familiar tail line selection."""
+    """One terminal snapshot request with familiar line selection and optional follow."""
 
     session_name: str
     line_count: int = DEFAULT_TAIL_LINE_COUNT
     from_start: bool = False
+    follow: bool = False
 
 
 class PlainTailCursor:
@@ -187,6 +188,7 @@ def parse_session_tail_request(arguments: Sequence[str]) -> SessionTailRequest:
     session_name: str | None = None
     line_count = DEFAULT_TAIL_LINE_COUNT
     from_start = False
+    follow = False
     index = 1
     options_enabled = True
     while index < len(arguments):
@@ -196,6 +198,7 @@ def parse_session_tail_request(arguments: Sequence[str]) -> SessionTailRequest:
             index += 1
             continue
         if options_enabled and argument in {"-f", "--follow"}:
+            follow = True
             index += 1
             continue
         if options_enabled and argument in {"-n", "--lines"}:
@@ -222,7 +225,18 @@ def parse_session_tail_request(arguments: Sequence[str]) -> SessionTailRequest:
 
     if session_name is None:
         raise RodexLaunchError(TAIL_USAGE)
-    return SessionTailRequest(session_name, line_count, from_start)
+    return SessionTailRequest(session_name, line_count, from_start, follow=follow)
+
+
+def print_session_tail_snapshot(
+    request: SessionTailRequest,
+    snapshot: TmuxScrollbackSnapshot,
+    *,
+    output: TextIO | None = None,
+) -> None:
+    """Print the requested lines from an already verified terminal snapshot."""
+    destination = sys.stdout if output is None else output
+    _write_lines(_select_initial_lines(snapshot.lines, request), destination)
 
 
 def follow_session_tail(
@@ -247,7 +261,7 @@ def follow_session_tail(
     observed_state = capture_scrollback_state(runtime)
     initial = capture_scrollback(runtime)
     revalidate()
-    _write_lines(_select_initial_lines(initial.lines, request), destination)
+    print_session_tail_snapshot(request, initial, output=destination)
     cursor = PlainTailCursor(initial)
     next_poll_interval = poll_interval_seconds
 

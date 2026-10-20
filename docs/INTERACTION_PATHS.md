@@ -291,9 +291,9 @@ composites without feeding its own frames back into that native screen. Preserve
 - Native clear/resize/reflow ownership. A clear ends eligibility for old reflow history.
   Whole-row erasure disconnects both adjacent soft-wrap links; line moves disconnect
   their source/destination boundaries and move sparse blank rows over old text.
-  Character shifts retain the vacated cell
-  positions used by reflow and discard cells beyond the viewport. These properties
-  matter on the next resize even when the current screen looks unchanged.
+  Character shifts retain the vacated cell positions used by reflow and discard
+  cells beyond the viewport. These properties matter on the next resize even when
+  the current screen looks unchanged.
 - Native wide-character cells. Partial overwrites clear the surviving half of an
   overlapping glyph, and combining marks stay with its leading cell before redraw
   or semantic presentation reads the screen.

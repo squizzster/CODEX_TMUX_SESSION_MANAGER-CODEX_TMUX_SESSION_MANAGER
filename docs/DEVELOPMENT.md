@@ -59,6 +59,14 @@ Python 3.12; passing offline checks does not resolve that process-launch warning
 - Input and display: [terminal input](../tests/test_terminal_input.py),
   [gateway](../tests/test_terminal_gateway.py), [native composer](../tests/test_native_composer.py),
   [observer safety](../tests/test_observer_runtime_safety.py).
+  Input and gateway tests cover split escape/UTF-8 tokens, streamed paste/reply
+  ownership, title deferral, partial writes, and blocking without expired deadlines.
+  [Native continuation](../tests/test_native_terminal_protocol.py) checks the next
+  output after presentation changes, including delayed autowrap, scroll margins,
+  cursor visibility, and deferred mode transitions. [Edit/resize comparisons](../tests/test_native_terminal_resize.py)
+  check real tmux against projected wide cells, wrap links, sparse blank rows, and
+  shifted character extents. An immediately correct screenshot alone does not
+  verify these stateful boundaries; continue output and resize after the edit.
   [Exit/detach tests](../tests/test_tmux_shared_ctrl_c.py) use disposable tmux clients
   for countdown choices, ownership changes, reconnects and stale timers.
   [Tail tests](../tests/test_session_tail.py) cover line-selection grammar, follow

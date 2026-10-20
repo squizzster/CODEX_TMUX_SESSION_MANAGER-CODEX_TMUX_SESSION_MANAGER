@@ -6,6 +6,7 @@ scope. Presentation frames never enter this screen or its bounded history.
 
 from __future__ import annotations
 
+import unicodedata
 from collections import defaultdict, deque
 
 import pyte
@@ -47,6 +48,21 @@ class NativeTerminalScreen(pyte.Screen):
     def draw(self, data: str) -> None:
         for character in data:
             width = wcwidth(character)
+            if width == 0 and unicodedata.combining(character):
+                row, column = self.cursor.y, self.cursor.x - 1
+                if column < 0 and row > 0:
+                    row, column = row - 1, self.columns - 1
+                if column >= 0:
+                    line = self.buffer[row]
+                    # A wide glyph's trailing cell is only a position marker.
+                    # Attach accents to its leading cell so replacing the glyph
+                    # cannot leave an accent behind on the replacement text.
+                    if not line[column].data and column > 0:
+                        column -= 1
+                    cell = line[column]
+                    line[column] = cell._replace(data=unicodedata.normalize("NFC", cell.data + character))
+                    self.dirty.add(row)
+                continue
             if width > 0 and self.cursor.x + width > self.columns:
                 if modes.DECAWM in self.mode:
                     self.buffer[self.cursor.y].wrapped = True
@@ -54,6 +70,14 @@ class NativeTerminalScreen(pyte.Screen):
                     self.index()
                 else:
                     self.cursor.x = max(0, self.columns - width)
+            if width > 0 and modes.IRM not in self.mode:
+                line = self.buffer[self.cursor.y]
+                column = self.cursor.x
+                if column > 0 and not line[column].data:
+                    line[column - 1] = line[column - 1]._replace(data=" ")
+                end = column + width
+                if end < self.columns and not line[end].data:
+                    line[end] = line[end]._replace(data=" ")
             super().draw(character)
 
     def index(self) -> None:

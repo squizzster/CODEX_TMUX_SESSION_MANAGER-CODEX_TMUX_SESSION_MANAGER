@@ -268,6 +268,9 @@ Main-thread working transitions enable the gateway's native elapsed-counter and
 title deadlines. A counter refresh sends the existing native resize signal without
 changing geometry or composer input; terminal turn/disconnect transitions remove
 the deadlines. The gateway coalesces title frames and restores the idle field.
+Title frames wait for a complete native escape, UTF-8, and synchronized-update
+boundary, even after the output queue drains. Only the newest deferred title is
+retained; completing a consumed terminal query also releases it.
 [Terminal settings](OPERATIONS.md#terminal-settings) owns the visible cadence;
 idle relaying remains event-driven.
 
@@ -281,6 +284,9 @@ composites without feeding its own frames back into that native screen. Preserve
 - Complete escape tokens and synchronized updates before switching surfaces.
   Coalescing semantic frames must not discard required native bytes or replies.
 - Native clear/resize/reflow ownership. A clear ends eligibility for old reflow history.
+- Native wide-character cells. Partial overwrites clear the surviving half of an
+  overlapping glyph, and combining marks stay with its leading cell before redraw
+  or semantic presentation reads the screen.
 - [`SessionPresentationPipeline`](../src/rodex/presentation_policy.py) identity:
   deltas inherit the exact started item and `thread/read` uses request correlation.
   Keep hidden semantic history without rebuilding/waking an unused native-policy view;

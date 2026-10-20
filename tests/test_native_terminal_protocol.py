@@ -101,6 +101,28 @@ def test_mixed_unicode_controls_and_queries_have_identical_state_for_every_read_
         assert projection.paintable
 
 
+@pytest.mark.parametrize("column,replacement", [(3, "X"), (4, "X"), (5, "X"), (6, "X"), (4, "猫"), (3, "猫")])
+@pytest.mark.parametrize("draft", ["世界!", "世\u0301界!"])
+def test_partial_wide_character_overwrite_preserves_composer_on_redraw(tmp_path, column, replacement, draft):
+    with tmux_terminal(tmp_path, columns=30, rows=12) as terminal:
+        renderer = TerminalSurfaceRenderer(30, 12)
+        data = f"\x1b[5;1H\u203a {draft}\x1b[5;{column}H{replacement}".encode()
+        rendered = renderer.native_output(data)
+        terminal.write(rendered.stream + rendered.frame)
+        expected_display, expected_cursor = terminal.screen()
+        assert [row.rstrip() for row in renderer.native.screen.display] == expected_display
+
+        terminal.write(renderer.redraw())
+        assert terminal.screen() == (expected_display, expected_cursor)
+        # The same native cells feed light mode's retained composer, too.
+        terminal.write(renderer.present(policy("light")))
+        display, cursor = terminal.screen()
+        assert display[4:] == expected_display[4:]
+        assert cursor == expected_cursor
+        terminal.write(renderer.present(policy("dark")))
+        assert terminal.screen() == (expected_display, expected_cursor)
+
+
 @pytest.mark.parametrize("utf8_switch", [b"\x1b%G", b"\x1b%8"])
 def test_encoding_switches_apply_before_decoding_following_bytes_for_every_read_split(utf8_switch):
     data = b"\xc3\xa9\x1b%@\xe9" + utf8_switch + b"\xc3\xa9\x1b%@\xe9\x1b[6n"

@@ -18,6 +18,7 @@ from pathlib import Path
 
 import pyte
 import pytest
+from terminal_tmux_fixture import tmux_terminal
 
 from rodex.input_interceptor_config import INPUT_INTERCEPTORS
 from rodex.input_menu import INPUT_MENU_TARGET, InputMenuStage, InputMenuView
@@ -283,6 +284,117 @@ def test_partial_writes_and_frame_replacement_preserve_controls_and_replies(monk
         assert written.count(control) == 1
     assert b"\x1b[6n" not in written
     assert gateway._native_queue == b"\x1b[2;3R"
+
+
+@pytest.mark.parametrize("write_size", [1, 7, 16384])
+@pytest.mark.parametrize("title_before_flush", [False, True])
+@pytest.mark.parametrize(
+    "native_token",
+    [
+        "世界".encode(),
+        b"\x1b]2;native title\x07",
+        b"\x1b]10;?\x1b\\",
+        b"\x1bP+q544e\x1b\\",
+        b"\x1b[31m",
+        b"\x1b[?2026hpaint\x1b[?2026l",
+    ],
+)
+def test_title_frames_wait_for_native_token_boundary(monkeypatch, write_size, title_before_flush, native_token):
+    title = terminal_title_pane_escape(" ------- ")
+    for split in range(1, len(native_token)):
+        gateway = TerminalSessionGateway.__new__(TerminalSessionGateway)
+        gateway._output_fd, gateway._master = 19, 20
+        gateway._display_queue, gateway._native_queue = bytearray(), bytearray()
+        gateway._pending_surface_frame = None
+        gateway._pending_title_frame = None
+        gateway._surface_renderer = TerminalSurfaceRenderer(80, 12)
+        written = bytearray()
+
+        def partial_write(fd, data, gateway=gateway, written=written):
+            assert fd == gateway._output_fd
+            written.extend(data[:write_size])
+            return min(len(data), write_size)
+
+        def flush_display(gateway=gateway):
+            while gateway._display_queue:
+                gateway._flush(gateway._output_fd, gateway._display_queue)
+
+        def native_output(data, gateway=gateway):
+            gateway._deliver(InteractionRequest("terminal", InteractionOperation.TERMINAL_OUTPUT, "test", payload=data))
+
+        monkeypatch.setattr(os, "write", partial_write)
+        native_output(native_token[:split])
+        if gateway._surface_renderer.native.at_boundary:
+            continue
+        if not title_before_flush:
+            flush_display()
+        gateway._queue_terminal_title(" ------- ")
+        flush_display()
+        assert title not in written, (native_token, split, bytes(written))
+        native_output(native_token[split:])
+        flush_display()
+        assert bytes(written) == native_token + title, (native_token, split, bytes(written))
+        assert not gateway._native_queue
+
+
+@pytest.mark.parametrize("mode", ["dark", "light"])
+def test_deferred_titles_coalesce_and_resume_after_query_only_completion(mode):
+    gateway = TerminalSessionGateway.__new__(TerminalSessionGateway)
+    gateway._output_fd, gateway._master = 19, 20
+    gateway._display_queue, gateway._native_queue = bytearray(), bytearray()
+    gateway._pending_surface_frame = None
+    gateway._pending_title_frame = None
+    gateway._surface_renderer = TerminalSurfaceRenderer(80, 12)
+    if mode == "light":
+        gateway._surface_renderer.present(PresentationSnapshot(1, mode, PresentationSurface.SEMANTIC, "LIGHT", (), ()))
+
+    def native_output(data):
+        gateway._deliver(InteractionRequest("terminal", InteractionOperation.TERMINAL_OUTPUT, "test", payload=data))
+
+    native_output(b"\x1b[")
+    for field in (" ------- ", "0m05s", TERMINAL_TITLE_IDLE_FIELD):
+        gateway._queue_terminal_title(field)
+        assert not gateway._display_queue
+    # This completes a query that the projection consumes; no native bytes or
+    # changed surface are available to wake a deferred title via normal writes.
+    native_output(b"6n")
+    assert gateway._display_queue == terminal_title_pane_escape(TERMINAL_TITLE_IDLE_FIELD)
+    assert gateway._pending_title_frame is None
+    assert gateway._native_queue == b"\x1b[1;1R"
+
+
+def test_title_never_turns_native_control_payload_into_visible_tmux_text(tmp_path, monkeypatch):
+    gateway = TerminalSessionGateway.__new__(TerminalSessionGateway)
+    gateway._output_fd, gateway._master = 19, 20
+    gateway._display_queue, gateway._native_queue = bytearray(), bytearray()
+    gateway._pending_surface_frame = None
+    gateway._pending_title_frame = None
+    gateway._surface_renderer = TerminalSurfaceRenderer(80, 23)
+    written = bytearray()
+
+    def write(fd, data):
+        assert fd == gateway._output_fd
+        written.extend(data)
+        return len(data)
+
+    def flush_display():
+        while gateway._display_queue:
+            gateway._flush(gateway._output_fd, gateway._display_queue)
+
+    with monkeypatch.context() as capture:
+        capture.setattr(os, "write", write)
+        for fragment in (b"\x1b]2;nati", b"ve title\x07X"):
+            gateway._deliver(
+                InteractionRequest("terminal", InteractionOperation.TERMINAL_OUTPUT, "test", payload=fragment)
+            )
+            flush_display()
+            gateway._queue_terminal_title(" ------- ")
+            flush_display()
+    with tmux_terminal(tmp_path) as terminal:
+        terminal.write(bytes(written))
+        display, cursor = terminal.screen()
+        assert display[0] == "X"  # Previously leaked the control payload: "ve titleX".
+        assert cursor == (1, 0)
 
 
 @pytest.mark.parametrize("mode", ["dark", "light"])

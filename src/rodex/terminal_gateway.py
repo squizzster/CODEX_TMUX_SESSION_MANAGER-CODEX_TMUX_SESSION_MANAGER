@@ -371,6 +371,7 @@ class TerminalSessionGateway:
                     self._pending_surface_frame = None
                 self._display_queue.extend(rendered.stream)
             self._queue_rendered_surface(rendered.frame, complete_frame=True)
+            self._promote_pending_display()
         return InteractionResult(DeliveryStatus.DELIVERED)
 
     def _dispatch(self, operation: InteractionOperation, data: bytes) -> None:
@@ -513,12 +514,21 @@ class TerminalSessionGateway:
         self._display_queue.extend(rendered)
 
     def _queue_terminal_title(self, field: str) -> None:
-        """Coalesce title frames behind any terminal bytes already in flight."""
-        rendered = terminal_title_pane_escape(field)
+        """Retain the latest title until the native terminal token is complete."""
+        self._pending_title_frame = terminal_title_pane_escape(field)
+        self._promote_pending_display()
+
+    def _promote_pending_display(self) -> None:
         if self._display_queue:
-            self._pending_title_frame = rendered
             return
-        self._display_queue.extend(rendered)
+        # OSC/DCS and UTF-8 may span native reads even after every queued byte
+        # has been written. Inserting a title there corrupts the outer parser.
+        if self._pending_title_frame is not None and self._surface_renderer.native.at_boundary:
+            self._display_queue.extend(self._pending_title_frame)
+            self._pending_title_frame = None
+        elif self._pending_surface_frame is not None:
+            self._display_queue.extend(self._pending_surface_frame)
+            self._pending_surface_frame = None
 
     def _flush(self, fd: int, queue: bytearray) -> None:
         try:
@@ -532,13 +542,8 @@ class TerminalSessionGateway:
             queue.clear()
             return
         del queue[:written]
-        if fd == self._output_fd and not queue:
-            if self._pending_title_frame is not None:
-                queue.extend(self._pending_title_frame)
-                self._pending_title_frame = None
-            elif self._pending_surface_frame is not None:
-                queue.extend(self._pending_surface_frame)
-                self._pending_surface_frame = None
+        if fd == self._output_fd:
+            self._promote_pending_display()
 
     def close(self) -> None:
         """Idempotent resource cleanup, including constructor and writer-retry failures."""

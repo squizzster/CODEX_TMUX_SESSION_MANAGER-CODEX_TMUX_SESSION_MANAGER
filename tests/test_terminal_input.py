@@ -25,6 +25,8 @@ from rodex.interaction_pipeline import (
 from rodex.protocol_input_text import PromptTextEdit, UserPromptHookError
 from rodex.terminal_input import (
     ESCAPE_WAIT_SECONDS,
+    INCOMPLETE_FRAME_WAIT_SECONDS,
+    MAX_LOCAL_DRAFT_BYTES,
     PASTE_END,
     PASTE_START,
     TerminalInputDecoder,
@@ -651,6 +653,67 @@ def test_expiring_a_partial_reply_keeps_its_suffix_out_of_candidate_matching():
     harness.feed(b"/rodex\x07")
     assert harness.forwarded == b"\x1b]52;c;/rodex\x07"
     assert harness.events == []
+
+
+@pytest.mark.parametrize("opener", [b"\x1b]", b"\x1bP", b"\x1b_", b"\x1b^"])
+def test_expired_reply_waits_for_split_terminator_without_rearming_an_elapsed_deadline(opener):
+    harness = InputHarness()
+    harness.feed(b"/ro")
+    reply = opener + b"opaque /rodex payload\x1b"
+    harness.feed(reply)
+    for event in harness.decoder.expire_incomplete(INCOMPLETE_FRAME_WAIT_SECONDS):
+        harness.interceptor.accept(event)
+    assert harness.forwarded == b"/r" + reply[:-1]
+    # The retained ESC belongs to this reply, not a new Escape key. Nothing
+    # can expire until another byte arrives; the gateway must be able to block.
+    assert harness.decoder.incomplete_deadline() is None
+    assert harness.decoder.expire_incomplete(100) == []
+    harness.feed(b"\\d")
+    assert harness.forwarded == b"/r" + reply + b"\\"
+    assert menu_view(harness).draft == "/rod"
+    assert harness.decoder.incomplete_deadline() is None
+
+
+@pytest.mark.parametrize("opener", [b"\x1b]", b"\x1bP", b"\x1b_", b"\x1b^"])
+@pytest.mark.parametrize("suffix", [b"tail", b"tail\x07", b"tail\x1b\\"])
+def test_large_paste_owns_reply_looking_content_until_its_closing_marker(opener, suffix):
+    harness = InputHarness()
+    # Fill four production-sized reads, then force the bounded streaming path
+    # to retain exactly the reply-looking six-byte suffix.
+    first = PASTE_START + b"x" * (MAX_LOCAL_DRAFT_BYTES - len(PASTE_START)) + opener + b"test"
+    for offset in range(0, len(first), 16384):
+        harness.feed(first[offset : offset + 16384])
+    harness.feed(suffix + PASTE_END + b"hello")
+    assert harness.forwarded == first + suffix + PASTE_END + b"hello"
+    assert harness.events == []
+    assert harness.decoder.incomplete_deadline() is None
+    harness.feed(b"\x15/ro")
+    assert harness.interceptor.active
+    assert menu_view(harness).draft == "/ro"
+
+
+@pytest.mark.parametrize("ending", [b"\x07", b"\x1b\\"])
+def test_argument_picker_never_forwards_reply_looking_bytes_from_large_paste(ending):
+    harness = InputHarness()
+    harness.feed(b"/rod\r")
+    first = PASTE_START + b"x" * MAX_LOCAL_DRAFT_BYTES + b"\x1b]test"
+    harness.feed(first)
+    harness.feed(b"tail" + ending + PASTE_END)
+    assert harness.forwarded == b"/r"
+    assert menu_view(harness).stage == InputMenuStage.ARGUMENTS
+
+
+def test_streaming_reply_owns_paste_looking_bytes_until_its_closing_marker():
+    decoder = TerminalInputDecoder()
+    prefix = b"\x1b]52;c;"
+    assert decoder.feed(prefix, now=0) == []
+    first = decoder.expire_incomplete(1)
+    suffix = PASTE_START + b"/rodex" + PASTE_END + b"\x1b\\"
+    second = decoder.feed(suffix + b"x", now=2)
+    assert b"".join(event.raw for event in first + second) == prefix + suffix + b"x"
+    assert all(event.kind == "terminal_reply" for event in first + second[:-1])
+    assert second[-1].kind == "text" and second[-1].text == "x"
+    assert decoder.incomplete_deadline() is None
 
 
 @pytest.mark.parametrize("encoding", ["csi-u", "modify-other-keys"])

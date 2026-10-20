@@ -642,12 +642,16 @@ def test_close_waits_for_inflight_wake_before_releasing_descriptor(monkeypatch):
             gateway.close()
 
 
-def test_idle_gateway_blocks_once_until_supervisor_deadline(monkeypatch):
+@pytest.mark.parametrize("retained_reply_terminator", [False, True])
+def test_idle_gateway_blocks_once_until_supervisor_deadline(monkeypatch, retained_reply_terminator):
     pipeline = SessionInteractionPipeline()
     with outer_terminal() as (master, slave):
         gateway = start_gateway(slave, pipeline)
         try:
             read_until(gateway, master, b"READY")
+            if retained_reply_terminator:
+                gateway._decoder.feed(b"\x1b]10;rgb:aaaa/bbbb/cccc\x1b", now=time.monotonic() - 1)
+                gateway._decoder.expire_incomplete(time.monotonic())
             select_calls = []
             size_probes = []
             real_select = selectors.PollSelector.select

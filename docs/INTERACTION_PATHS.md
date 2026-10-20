@@ -283,7 +283,17 @@ composites without feeding its own frames back into that native screen. Preserve
   use child coordinates; capability and colour queries reach the real terminal.
 - Complete escape tokens and synchronized updates before switching surfaces.
   Coalescing semantic frames must not discard required native bytes or replies.
+  Surface changes also wait for a paintable cursor/mode state: positioning a cursor
+  at delayed autowrap would change the next character, and origin/insert modes
+  change how a frame is interpreted. The latest requested surface resumes after
+  native output restores a paintable state. Native reconstruction restores scroll
+  margins before positioning the cursor, including its visibility.
 - Native clear/resize/reflow ownership. A clear ends eligibility for old reflow history.
+  Whole-row erasure disconnects both adjacent soft-wrap links; line moves disconnect
+  their source/destination boundaries and move sparse blank rows over old text.
+  Character shifts retain the vacated cell
+  positions used by reflow and discard cells beyond the viewport. These properties
+  matter on the next resize even when the current screen looks unchanged.
 - Native wide-character cells. Partial overwrites clear the surviving half of an
   overlapping glyph, and combining marks stay with its leading cell before redraw
   or semantic presentation reads the screen.
@@ -299,6 +309,19 @@ Approval/unrecognized modal input stays native.
 with a 35 ms deadline; complete arrow frames decode immediately. Rodex leaves tmux's
 own `escape-time` unchanged, so it can add latency. This is framing, not a menu delay.
 Production uses neither `tmux send-keys` nor a tmux Enter binding or pane-piping adapter.
+
+An admitted paste or terminal reply owns its bytes through its closing marker,
+including after bounded buffering starts streaming. Reply-looking text within a
+paste cannot become a reply or escape an argument picker's ignored-paste policy.
+A reply's retained final `ESC` waits for its next byte without an expiry deadline;
+it is not a lone keyboard Escape and must not cause repeated zero-timeout polls.
+
+Evidence: [input framing](../tests/test_terminal_input.py),
+[gateway blocking](../tests/test_terminal_gateway.py),
+[native continuation across presentation changes](../tests/test_native_terminal_protocol.py),
+and [real-tmux edit/resize comparisons](../tests/test_native_terminal_resize.py).
+These compare subsequent updates as well as the immediate display. They do not
+establish equivalence for every VT extension or identify an uncaptured live glitch.
 
 tmux handles the active-prefix `m` shortcut before terminal input reaches the gateway.
 Runtime UI initialization replaces only an unbound entry or tmux's stock

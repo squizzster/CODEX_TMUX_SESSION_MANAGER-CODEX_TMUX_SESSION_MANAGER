@@ -6,6 +6,7 @@ scope. Presentation frames never enter this screen or its bounded history.
 
 from __future__ import annotations
 
+import unicodedata
 from collections import defaultdict, deque
 
 import pyte
@@ -47,6 +48,21 @@ class NativeTerminalScreen(pyte.Screen):
     def draw(self, data: str) -> None:
         for character in data:
             width = wcwidth(character)
+            if width == 0 and unicodedata.combining(character):
+                row, column = self.cursor.y, self.cursor.x - 1
+                if column < 0 and row > 0:
+                    row, column = row - 1, self.columns - 1
+                if column >= 0:
+                    line = self.buffer[row]
+                    # A wide glyph's trailing cell is only a position marker.
+                    # Attach accents to its leading cell so replacing the glyph
+                    # cannot leave an accent behind on the replacement text.
+                    if not line[column].data and column > 0:
+                        column -= 1
+                    cell = line[column]
+                    line[column] = cell._replace(data=unicodedata.normalize("NFC", cell.data + character))
+                    self.dirty.add(row)
+                continue
             if width > 0 and self.cursor.x + width > self.columns:
                 if modes.DECAWM in self.mode:
                     self.buffer[self.cursor.y].wrapped = True
@@ -54,6 +70,14 @@ class NativeTerminalScreen(pyte.Screen):
                     self.index()
                 else:
                     self.cursor.x = max(0, self.columns - width)
+            if width > 0 and modes.IRM not in self.mode:
+                line = self.buffer[self.cursor.y]
+                column = self.cursor.x
+                if column > 0 and not line[column].data:
+                    line[column - 1] = line[column - 1]._replace(data=" ")
+                end = column + width
+                if end < self.columns and not line[end].data:
+                    line[end] = line[end]._replace(data=" ")
             super().draw(character)
 
     def index(self) -> None:
@@ -71,10 +95,78 @@ class NativeTerminalScreen(pyte.Screen):
             for column in tuple(row):
                 if column >= used:
                     del row[column]
-        if how == 2:
-            row.wrapped = False
+        if how == 2 or (how == 0 and self.cursor.x == 0) or (how == 1 and self.cursor.x >= self.columns - 1):
+            self._break_wrap_at(self.cursor.y)
             if self.cursor.attrs.bg == "default":
                 row.clear()
+
+    def _break_wrap_at(self, row: int) -> None:
+        """A cleared physical row disconnects both adjacent soft-wrap links."""
+        self.buffer[row].wrapped = False
+        self._break_wrap_before(row)
+
+    def _break_wrap_before(self, row: int) -> None:
+        if row > 0:
+            self.buffer[row - 1].wrapped = False
+        elif self._scrollback:
+            self._scrollback[-1].wrapped = False
+
+    def insert_characters(self, count: int | None = None) -> None:
+        super().insert_characters(count)
+        # Pyte retains a cell at columns (one past the viewport). It is invisible
+        # until reflow, when it otherwise reappears as an extra character.
+        self.buffer[self.cursor.y].pop(self.columns, None)
+
+    def delete_characters(self, count: int | None = None) -> None:
+        count = min(count or 1, max(0, self.columns - self.cursor.x))
+        if not count:
+            return
+        if count == self.columns - self.cursor.x:
+            self.erase_in_line(0)
+            return
+        line = self.buffer[self.cursor.y]
+        used = max(line.used, self.columns - count)
+        super().delete_characters(count)
+        # Vacated cells still occupy their original positions in a wrapped row;
+        # removing their sparse entries must not shorten its logical-line offset.
+        blank = self.default_char._replace(bg=self.cursor.attrs.bg)
+        for column in range(self.columns - count, used):
+            line[column] = blank
+        for column in tuple(line):
+            if column >= used:
+                del line[column]
+
+    def insert_lines(self, count: int | None = None) -> None:
+        top, bottom = self.margins or (0, self.lines - 1)
+        row = self.cursor.y
+        if not top <= row <= bottom:
+            return
+        count = min(count or 1, bottom - row + 1)
+        shifted = bottom - row + 1 - count
+        # Disconnect the destination boundary before moving its old row object.
+        self._break_wrap_before(row + count)
+        super().insert_lines(count)
+        self._break_wrap_before(row)
+        self._break_wrap_before(row + shifted)
+
+    def delete_lines(self, count: int | None = None) -> None:
+        top, bottom = self.margins or (0, self.lines - 1)
+        row = self.cursor.y
+        if not top <= row <= bottom:
+            return
+        count = min(count or 1, bottom - row + 1)
+        self._break_wrap_before(row)
+        # An absent sparse source row is still a blank row. Leaving its old
+        # destination untouched would duplicate text when deleting above it.
+        for destination in range(row, bottom + 1):
+            source = destination + count
+            if source <= bottom and source in self.buffer:
+                self.buffer[destination] = self.buffer.pop(source)
+            else:
+                self.buffer.pop(destination, None)
+        self.dirty.update(range(row, bottom + 1))
+        self.carriage_return()
+        self._break_wrap_before(bottom + 1 - count)
 
     def erase_in_display(self, how: int = 0, *args: object, **kwargs: object) -> None:
         if how == 3:
@@ -85,7 +177,7 @@ class NativeTerminalScreen(pyte.Screen):
             range(self.cursor.y + 1, self.lines) if how == 0 else range(self.cursor.y) if how == 1 else range(self.lines)
         )
         for row in rows:
-            self.buffer[row].wrapped = False
+            self._break_wrap_at(row)
             if self.cursor.attrs.bg == "default":
                 self.buffer.pop(row, None)
         if how == 2:

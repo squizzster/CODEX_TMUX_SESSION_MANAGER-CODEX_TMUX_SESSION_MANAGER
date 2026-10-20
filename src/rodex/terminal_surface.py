@@ -66,7 +66,7 @@ class TerminalSurfaceRenderer:
         output = self.native.feed(data)
         stream = output.controls if semantic else restored + output.native + self._paint()
         frame = self._semantic_redraw() if semantic else b""
-        if self._pending_presentation is not None and self.native.at_boundary:
+        if self._pending_presentation is not None and self.native.paintable:
             frame = self.present(self._pending_presentation) or frame
         return TerminalRenderOutput(stream, frame, output.replies)
 
@@ -83,7 +83,7 @@ class TerminalSurfaceRenderer:
 
     def present(self, snapshot: PresentationSnapshot) -> bytes:
         """Select one semantic/native surface without changing the hidden native state."""
-        if not self.native.at_boundary:
+        if not self.native.paintable:
             self._pending_presentation = snapshot
             return b""
         self._pending_presentation = None
@@ -191,11 +191,20 @@ class TerminalSurfaceRenderer:
         return self._without_wrapping(bytes(output))
 
     def _native_redraw(self) -> bytes:
+        # A complete token is not necessarily a safe repaint point: positioning
+        # clears delayed autowrap, and origin/insert modes change frame semantics.
+        if not self.native.paintable:
+            return b""
         screen = self.native.screen
         output = bytearray(_screen_reset())
         for row in range(screen.lines):
             output.extend(_native_row(screen, row))
+        # Painting temporarily needs the whole viewport. Restore the native
+        # scrolling region before the cursor, since setting margins homes it.
+        if screen.margins is not None:
+            output.extend(f"\x1b[{screen.margins.top + 1};{screen.margins.bottom + 1}r".encode())
         output.extend(b"\x1b[0m" + _position(screen.cursor.y, screen.cursor.x) + _rendition(screen.cursor.attrs))
+        output.extend(b"\x1b[?25l" if screen.cursor.hidden else b"\x1b[?25h")
         return self._without_wrapping(bytes(output))
 
     def _anchor(self, state: InputMenuView) -> tuple[int, str] | None:

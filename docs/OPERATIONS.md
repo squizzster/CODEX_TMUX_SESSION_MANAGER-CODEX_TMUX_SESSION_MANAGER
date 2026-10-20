@@ -41,6 +41,13 @@ changes presentation, not execution, logging, or model input.
 [`PRESENTATION_POLICIES`](../src/rodex/presentation_policy.py) owns the selectors;
 [local-command handling](INTERACTION_PATHS.md#local-commands) owns menu admission.
 
+A presentation change can wait until native output reaches a safe redraw point.
+The most recent selection applies automatically when output permits it. If native
+output stops with a partial escape/UTF-8 token, an open synchronized update, delayed
+autowrap, or origin/insert mode active, the selection remains pending until later
+output clears that state. [Terminal presentation](INTERACTION_PATHS.md#terminal-and-presentation)
+defines the preserved cursor, scrolling, and input boundaries.
+
 Managed Codex defaults to `tui.animations=false` to avoid decorative spinner/shimmer
 redraw work. `rodex --config tui.animations=true` explicitly restores it. The source
 of launch defaults is [`runtime.py`](../src/rodex/runtime.py), not a second Codex config.
@@ -60,9 +67,10 @@ the nine-cell field pulses every 250 milliseconds. Every five seconds it shows e
 work time for one second:
 `59m23s` below an hour, `23h20m` below a day, and `10d23h20m` once days are needed.
 
-The gateway coalesces title frames, skips obsolete ones when busy, and stops the title
-deadline at idle. It also requests a native Codex redraw every second during
-active work, preserving terminal size and composer input while advancing Codex's
+The gateway coalesces title frames, skips obsolete ones when busy, and waits for a
+complete native escape/UTF-8 and synchronized-update boundary before emitting one.
+It stops the title deadline at idle. It also requests a native Codex redraw every
+second during active work, preserving terminal size and composer input while advancing Codex's
 `Working (… • esc to interrupt)` counter. Idle relaying remains event-driven.
 
 tmux's 50,000-line history limit is installed before pane creation; it is not retroactive.

@@ -51,7 +51,11 @@ class TerminalInputDecoder:
         events: list[TerminalInputEvent] = []
         while self._pending:
             pending = bytes(self._pending)
-            if self._streaming_reply or pending[:2] in {b"\x1b]", b"\x1bP", b"\x1b_", b"\x1b^"}:
+            # Once a paste owns the stream, reply-looking payload stays pasted
+            # text even when bounded buffering exposes it at a read boundary.
+            if not self._streaming_paste and (
+                self._streaming_reply or pending[:2] in {b"\x1b]", b"\x1bP", b"\x1b_", b"\x1b^"}
+            ):
                 terminators = [
                     position + length
                     for marker, length in ((b"\x07", 1), (b"\x1b\\", 2))
@@ -163,6 +167,10 @@ class TerminalInputDecoder:
         if not self._pending or self._last_data_at is None:
             return None
         if self._streaming_paste or self._pending.startswith(PASTE_START):
+            return None
+        if self._streaming_reply and self._pending == b"\x1b":
+            # This byte can only be resolved by the next reply byte. Expiring
+            # it again makes no progress and would keep the relay busy-polling.
             return None
         delay = ESCAPE_WAIT_SECONDS if self._pending == b"\x1b" else INCOMPLETE_FRAME_WAIT_SECONDS
         return self._last_data_at + delay

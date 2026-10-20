@@ -101,6 +101,80 @@ def test_mixed_unicode_controls_and_queries_have_identical_state_for_every_read_
         assert projection.paintable
 
 
+@pytest.mark.parametrize("column,replacement", [(3, "X"), (4, "X"), (5, "X"), (6, "X"), (4, "猫"), (3, "猫")])
+@pytest.mark.parametrize("draft", ["世界!", "世\u0301界!"])
+def test_partial_wide_character_overwrite_preserves_composer_on_redraw(tmp_path, column, replacement, draft):
+    with tmux_terminal(tmp_path, columns=30, rows=12) as terminal:
+        renderer = TerminalSurfaceRenderer(30, 12)
+        data = f"\x1b[5;1H\u203a {draft}\x1b[5;{column}H{replacement}".encode()
+        rendered = renderer.native_output(data)
+        terminal.write(rendered.stream + rendered.frame)
+        expected_display, expected_cursor = terminal.screen()
+        assert [row.rstrip() for row in renderer.native.screen.display] == expected_display
+
+        terminal.write(renderer.redraw())
+        assert terminal.screen() == (expected_display, expected_cursor)
+        # The same native cells feed light mode's retained composer, too.
+        terminal.write(renderer.present(policy("light")))
+        display, cursor = terminal.screen()
+        assert display[4:] == expected_display[4:]
+        assert cursor == expected_cursor
+        terminal.write(renderer.present(policy("dark")))
+        assert terminal.screen() == (expected_display, expected_cursor)
+
+
+@pytest.mark.parametrize(
+    "initial,following",
+    [
+        (b"\x1b[3;6r\x1b[3;1Htop\x1b[6;1Hbottom", b"\r\nnext"),
+        (b"\x1b[3;1H" + b"x" * 24, b"Y"),
+        (b"\x1b[3;1Habcdef\x1b[3;3H\x1b[4h", b"Y\x1b[4l"),
+        (b"\x1b[3;6r\x1b[?6h\x1b[2;3Hdraft", b"\x1b[2;1HY"),
+        ("\x1b[3;1H\u203a draft\x1b[?25l".encode(), b"Y"),
+    ],
+    ids=["scroll-region", "delayed-wrap", "insert-mode", "origin-mode", "hidden-cursor"],
+)
+def test_presentation_roundtrip_preserves_the_next_native_update(tmp_path, initial, following):
+    with tmux_terminal(tmp_path, columns=24, rows=8) as terminal:
+        terminal.write(initial + following)
+        expected = terminal.screen()
+        cursor_visible = terminal.tmux("display-message", "-p", "-t", "%0", "#{cursor_flag}")
+        terminal.write(b"\x1bc")
+        renderer = TerminalSurfaceRenderer(24, 8)
+        rendered = renderer.native_output(initial)
+        terminal.write(rendered.stream + rendered.frame)
+        terminal.write(renderer.present(policy("light")))
+        terminal.write(renderer.present(policy("dark")))
+        rendered = renderer.native_output(following)
+        terminal.write(rendered.stream + rendered.frame)
+        assert terminal.screen() == expected
+        assert terminal.tmux("display-message", "-p", "-t", "%0", "#{cursor_flag}") == cursor_visible
+
+
+@pytest.mark.parametrize("source,target", [("dark", "light"), ("light", "dark")])
+@pytest.mark.parametrize(
+    "initial,resume",
+    [
+        (b"x" * 24, b"Y"),
+        (b"\x1b[3;6r\x1b[?6h", b"\x1b[?6l"),
+        (b"\x1b[4h", b"\x1b[4l"),
+    ],
+    ids=["delayed-wrap", "origin-mode", "insert-mode"],
+)
+def test_policy_change_waits_for_a_paintable_state_and_resumes_without_another_request(source, target, initial, resume):
+    renderer = TerminalSurfaceRenderer(24, 8)
+    renderer.present(policy(source))
+    renderer.native_output(initial)
+    assert renderer.native.at_boundary and not renderer.native.paintable
+    assert renderer.present(policy(target)) == b""
+    assert renderer.presentation_surface == policy(source).surface
+    assert renderer.redraw() == b""
+    rendered = renderer.native_output(resume)
+    assert rendered.frame
+    assert renderer.presentation_surface == policy(target).surface
+    assert renderer.native.paintable
+
+
 @pytest.mark.parametrize("utf8_switch", [b"\x1b%G", b"\x1b%8"])
 def test_encoding_switches_apply_before_decoding_following_bytes_for_every_read_split(utf8_switch):
     data = b"\xc3\xa9\x1b%@\xe9" + utf8_switch + b"\xc3\xa9\x1b%@\xe9\x1b[6n"

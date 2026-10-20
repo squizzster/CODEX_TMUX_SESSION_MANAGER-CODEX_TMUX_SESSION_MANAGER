@@ -61,3 +61,59 @@ def test_scrolling_and_native_clear_bound_resize_restoration(tmp_path):
             projection.screen.resize(lines=rows)
             terminal.write(b"")
             assert_matches(terminal, projection)
+
+
+@pytest.mark.parametrize("row", [1, 2, 3])
+@pytest.mark.parametrize(
+    "column,erase",
+    [(1, b"K"), (24, b"1K"), (10, b"2K"), (1, b"J"), (10, b"J"), (24, b"1J")],
+)
+def test_erasing_wrapped_lines_breaks_reflow_at_the_cleared_rows(tmp_path, row, column, erase):
+    with tmux_terminal(tmp_path, columns=24, rows=8) as terminal:
+        projection = NativeTerminalProjection(24, 8)
+        initial = b"1234567890" * 5 + b"\r\nsecond\r\nthird"
+        initial += f"\x1b[{row};{column}H\x1b[".encode() + erase
+        terminal.write(initial)
+        projection.feed(initial)
+        assert_matches(terminal, projection)
+        for columns in (18, 40, 24):
+            terminal.size(columns, 8)
+            projection.screen.resize(columns=columns)
+            terminal.write(b"")
+            assert_matches(terminal, projection)
+
+
+@pytest.mark.parametrize(
+    "update",
+    [
+        b"\x1b[2;1H\x1b[L",
+        b"\x1b[2;1H\x1b[2L",
+        b"\x1b[2;1H\x1b[M",
+        b"\x1b[2;1H\x1b[2M",
+        b"\x1b[1;5H\x1b[3@",
+        b"\x1b[1;5H\x1b[3P",
+    ],
+)
+@pytest.mark.parametrize("text", [b"abcdef", b"1234567890" * 10])
+def test_insert_and_delete_do_not_restore_shifted_out_cells_or_join_inserted_rows(tmp_path, update, text):
+    with tmux_terminal(tmp_path, columns=24, rows=8) as terminal:
+        projection = NativeTerminalProjection(24, 8)
+        data = text + update
+        terminal.write(data)
+        projection.feed(data)
+        assert_matches(terminal, projection)
+        for columns in (18, 40, 24):
+            terminal.size(columns, 8)
+            projection.screen.resize(columns=columns)
+            terminal.write(b"")
+            assert_matches(terminal, projection)
+
+
+@pytest.mark.parametrize("count", [1, 2, 8])
+def test_deleting_rows_moves_untouched_blank_rows_over_old_text(tmp_path, count):
+    with tmux_terminal(tmp_path, columns=24, rows=8) as terminal:
+        projection = NativeTerminalProjection(24, 8)
+        data = b"first\x1b[3;1Hthird" + f"\x1b[1;1H\x1b[{count}M".encode()
+        terminal.write(data)
+        projection.feed(data)
+        assert_matches(terminal, projection)

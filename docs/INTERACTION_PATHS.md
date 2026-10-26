@@ -293,22 +293,36 @@ composites without feeding its own frames back into that native screen. Preserve
 
 - Exact query/UTF-8/encoding-switch boundaries when batching bytes. Cursor replies
   use child coordinates; capability and colour queries reach the real terminal.
+- Control-family cancellation. OSC/APC and escape/CSI restart or cancel according
+  to their grammar; DCS payload controls remain payload. Embedded C0 actions survive
+  cancellation, and interrupted queries cannot leave the outer parser inside an
+  abandoned sequence. Native bytes remain ordered through these boundaries.
 - Complete escape tokens and synchronized updates before switching surfaces.
   Coalescing semantic frames must not discard required native bytes or replies.
   Surface changes also wait for a paintable cursor/mode state: positioning a cursor
   at delayed autowrap would change the next character, and origin/insert modes
   change how a frame is interpreted. The latest requested surface resumes after
   native output restores a paintable state. Native reconstruction restores scroll
-  margins before positioning the cursor, including its visibility.
+  margins before positioning the cursor, including its visibility. Local painting
+  also waits for at least three columns, needed to stage clusters at the margin.
 - Native clear/resize/reflow ownership. A clear ends eligibility for old reflow history.
   Whole-row erasure disconnects both adjacent soft-wrap links; line moves disconnect
   their source/destination boundaries and move sparse blank rows over old text.
   Character shifts retain the vacated cell positions used by reflow and discard
   cells beyond the viewport. These properties matter on the next resize even when
-  the current screen looks unchanged.
-- Native wide-character cells. Partial overwrites clear the surviving half of an
-  overlapping glyph, and combining marks stay with its leading cell before redraw
-  or semantic presentation reads the screen.
+  the current screen looks unchanged. Insert/delete-line preserve the exact column,
+  including delayed autowrap. After reconstruction, the delivered resize callback
+  reflows the authoritative grid and repaints it; generated rows do not supply the
+  original native soft-wrap links.
+- Profile-specific cluster cells. Complete text, occupied cells, style and explicit
+  continuation entries travel together through drawing, editing, reflow, extraction
+  and reconstruction. Preserve native edit remnants, including orphan padding and
+  overlapping entries; normalizing them can change the next print or resize.
+  Clipping, wrapping and composer placement use the same profile's drawing rules.
+  Runtime reads the owned tmux server's version through its capability fence:
+  **3.2a** retains separate emoji occupancy; **3.4** has joined emoji and selector
+  expansion. Other versions are logged as unverified, keep native relay and replies,
+  and disable local reconstruction and composer interception.
 - [`SessionPresentationPipeline`](../src/rodex/presentation_policy.py) identity:
   deltas inherit the exact started item and `thread/read` uses request correlation.
   Keep hidden semantic history without rebuilding/waking an unused native-policy view;
@@ -332,6 +346,10 @@ Evidence: [input framing](../tests/test_terminal_input.py),
 [gateway blocking](../tests/test_terminal_gateway.py),
 [native continuation across presentation changes](../tests/test_native_terminal_protocol.py),
 and [real-tmux edit/resize comparisons](../tests/test_native_terminal_resize.py).
+The [cancellation matrix](../tests/test_terminal_cancellation.py),
+[line operations](../tests/test_terminal_line_operations.py), and
+[Unicode profiles](../tests/test_terminal_unicode_profiles.py) compare both supported
+servers at byte splits, margins, redraw and subsequent output.
 These compare subsequent updates as well as the immediate display. They do not
 establish equivalence for every VT extension or identify an uncaptured live glitch.
 

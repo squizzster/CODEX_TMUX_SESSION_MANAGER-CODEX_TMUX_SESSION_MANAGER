@@ -28,7 +28,11 @@ def workload(ready: Path) -> None:
     if child == 0:
         signal.signal(signal.SIGTERM, signal.SIG_IGN)
         signal.signal(signal.SIGHUP, signal.SIG_IGN)
-        ready.write_text(str(os.getpid()))
+        # Existence is the parent's readiness signal. Publish only a complete
+        # PID, so cleanup cannot start before it has acquired the child pidfd.
+        pending = ready.with_name("workload-child.pending.pid")
+        pending.write_text(str(os.getpid()))
+        pending.replace(ready)
     while True:
         signal.pause()
 

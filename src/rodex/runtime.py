@@ -2988,11 +2988,20 @@ def _run_runtime_service(
                 agent_observer=agent_observer_controller,
             )
             protocol_proxy.start()
+            terminal_profile = primary_pane.terminal_profile()
+            log.write(f"Rodex terminal profile: {terminal_profile.name}\n".encode())
+            if not terminal_profile.verified:
+                log.write(
+                    b"Unverified terminal profile: native relay and terminal-owned replies; "
+                    b"local reconstruction disabled.\n"
+                )
+            log.flush()
             input_presentation = InputInterceptorPresentation(
                 interaction_pipeline,
                 INPUT_INTERCEPTORS,
                 tmux_runtime_capability,
                 primary_pane,
+                terminal_profile=terminal_profile,
             )
 
             runtime_path_keepalive = _RuntimePathKeepalive(
@@ -3057,6 +3066,7 @@ def _run_runtime_service(
                     registrations=INPUT_INTERCEPTORS,
                     confirm_native_prefix=input_presentation.confirm_native_prefix,
                     read_terminal_size=primary_pane.terminal_size,
+                    terminal_profile=terminal_profile,
                     presentation=presentation_pipeline,
                     prompt_expansion_display=prompt_expansion_display,
                     input_fd=terminal_fd,

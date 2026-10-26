@@ -51,6 +51,7 @@ from rodex.runtime import (
 )
 from rodex.runtime_peer import RuntimePeerIdentity
 from rodex.status_animation import FRAME_INTERVAL_SECONDS, status_frames
+from rodex.terminal_cells import TMUX_34_PROFILE
 from rodex.tmux_session_capability import (
     RODEX_SHARED_TMUX_PROTOCOL,
     RODEX_SHARED_TMUX_PROTOCOL_OPTION,
@@ -171,6 +172,7 @@ def _mock_terminal_gateway(monkeypatch: pytest.MonkeyPatch) -> list:
             presentation,
             prompt_expansion_display,
             process_lifecycle,
+            terminal_profile,
             **options,
         ):
             assert pipeline is not None and runtime_identity == str(RUNTIME_ID)
@@ -179,6 +181,7 @@ def _mock_terminal_gateway(monkeypatch: pytest.MonkeyPatch) -> list:
             assert callable(presentation.snapshot)
             assert callable(presentation.subscribe)
             assert callable(prompt_expansion_display.observe_forwarded)
+            assert terminal_profile is TMUX_34_PROFILE
             self.prompt_expansion_display = prompt_expansion_display
             self.process_lifecycle = process_lifecycle
             self.process = process_lifecycle.start("native-tui", command, **options)
@@ -211,8 +214,9 @@ def _mock_terminal_gateway(monkeypatch: pytest.MonkeyPatch) -> list:
             return None
 
     class FakePresentation:
-        def __init__(self, pipeline, registrations, *_args):
+        def __init__(self, pipeline, registrations, *_args, terminal_profile):
             assert pipeline is not None and registrations == runtime_module.INPUT_INTERCEPTORS
+            assert terminal_profile is TMUX_34_PROFILE
 
         def confirm_native_prefix(self, _prefix):
             return False
@@ -244,6 +248,7 @@ def _mock_terminal_gateway(monkeypatch: pytest.MonkeyPatch) -> list:
             pass
 
     monkeypatch.setattr(runtime_module, "TerminalSessionGateway", FakeGateway)
+    monkeypatch.setattr(runtime_module.TmuxPaneController, "terminal_profile", lambda _self: TMUX_34_PROFILE)
     monkeypatch.setattr(runtime_module, "RuntimeProcessLifecycle", FakeProcessLifecycle)
     monkeypatch.setattr(runtime_module, "InputInterceptorPresentation", FakePresentation)
     monkeypatch.setattr(runtime_module, "TmuxWorkingStatus", FakeWorkingStatus)
@@ -5116,7 +5121,7 @@ def test_runtime_service_skips_updater_and_connects_tui_through_protocol_proxy(
         captured_stderr = tui_options[0].get("stderr")
         assert captured_stderr is not None
         assert cast(BinaryIO, captured_stderr).closed
-        assert (tmp_path / "app.log").read_text() == ""
+        assert (tmp_path / "app.log").read_text() == f"Rodex terminal profile: {TMUX_34_PROFILE.name}\n"
     else:
         assert set(tui_options[0]) == {
             "env",

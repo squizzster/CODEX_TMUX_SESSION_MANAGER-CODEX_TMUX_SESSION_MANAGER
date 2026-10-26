@@ -315,7 +315,9 @@ def test_narrower_viewport_restoration_does_not_wrap_and_scroll_the_conversation
     assert harness.display(STATE)
     harness.visible.resize(columns=15)
     harness._output.feed(harness.renderer.resize(15, 12))
-    assert harness.visible.display[0].rstrip() == "Native conversa"
+    # The resize callback restores the reflowed authoritative viewport;
+    # Pyte's outer resize alone only clips its old physical rows.
+    assert harness.visible.display == harness.renderer.native.screen.display
     assert not harness.visible.history.top
 
 

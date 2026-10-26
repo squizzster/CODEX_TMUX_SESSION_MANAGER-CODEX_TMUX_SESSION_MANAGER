@@ -67,6 +67,11 @@ Python 3.12; passing offline checks does not resolve that process-launch warning
   check real tmux against projected wide cells, wrap links, sparse blank rows, and
   shifted character extents. An immediately correct screenshot alone does not
   verify these stateful boundaries; continue output and resize after the edit.
+  [Cancellation](../tests/test_terminal_cancellation.py),
+  [line operations](../tests/test_terminal_line_operations.py), and
+  [Unicode profiles](../tests/test_terminal_unicode_profiles.py) must also run with
+  both tmux 3.2a and 3.4 on `PATH`. The fixture binds interpretation to the server
+  version; selectors, joiners, padding and margin behavior differ between profiles.
   [Exit/detach tests](../tests/test_tmux_shared_ctrl_c.py) use disposable tmux clients
   for countdown choices, ownership changes, reconnects and stale timers.
   [Tail tests](../tests/test_session_tail.py) cover line-selection grammar, follow

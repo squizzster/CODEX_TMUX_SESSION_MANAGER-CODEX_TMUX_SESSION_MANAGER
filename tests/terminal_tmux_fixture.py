@@ -31,6 +31,12 @@ class TmuxTerminal:
         self.gateway = gateway
         self.last_size = None
 
+    @property
+    def profile(self):
+        from rodex.terminal_cells import terminal_profile
+
+        return terminal_profile(self.tmux("display-message", "-p", "-t", "%0", "#{version}"))
+
     def tmux(self, *arguments: str) -> str:
         return subprocess.run(
             ["tmux", "-S", self.socket_path, *arguments], capture_output=True, text=True, check=True, timeout=5
@@ -153,6 +159,7 @@ def child(path: str) -> None:
 def gateway(path: str, mode: str, *, foreground_resize: bool) -> None:
     from rodex.interaction_pipeline import SessionInteractionPipeline
     from rodex.presentation_policy import SessionPresentationPipeline
+    from rodex.terminal_cells import terminal_profile
     from rodex.terminal_gateway import TerminalSessionGateway
 
     presentation = SessionPresentationPipeline()
@@ -176,6 +183,9 @@ def gateway(path: str, mode: str, *, foreground_resize: bool) -> None:
         confirm_native_prefix=lambda _: False,
         presentation=presentation,
         read_terminal_size=read_terminal_size,
+        terminal_profile=terminal_profile(
+            subprocess.check_output(["tmux", "display-message", "-p", "#{version}"], text=True)
+        ),
     )
     signal.signal(signal.SIGWINCH, (lambda *_: terminal.resize()) if foreground_resize else signal.SIG_IGN)
     signal.signal(signal.SIGTERM, lambda *_: terminal.forward_signal(signal.SIGTERM))

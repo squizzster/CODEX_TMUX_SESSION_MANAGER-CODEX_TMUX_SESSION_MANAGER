@@ -456,7 +456,18 @@ os.write(1, b'\x1b[2J\x1b[HREPLY=' + reply.hex().encode())
             output_fd=slave,
         )
         try:
-            read_until(gateway, master, b"REPLY=1b5b323b3352")
+            # Semantic reconstruction may position individual cells. Verify
+            # the displayed reply, independent of its frame serialization.
+            screen = pyte.Screen(120, 36)
+            stream = pyte.ByteStream(screen)
+            deadline = time.monotonic() + 5
+            expected = "REPLY=1b5b323b3352"
+            while expected not in screen.display[0] and time.monotonic() < deadline:
+                with suppress(subprocess.TimeoutExpired):
+                    gateway.wait(timeout=0.04)
+                while select.select([master], [], [], 0)[0]:
+                    stream.feed(os.read(master, 65536))
+            assert screen.display[0].startswith(expected)
             assert gateway.wait(timeout=2) == 0
             assert calls == []
             assert gateway._interceptor._candidate == ""

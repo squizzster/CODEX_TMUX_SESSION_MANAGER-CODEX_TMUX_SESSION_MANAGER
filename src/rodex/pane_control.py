@@ -14,6 +14,7 @@ from .process_environment import (
     exact_environment_exec_command,
     validated_user_environment_entries,
 )
+from .terminal_cells import TerminalProfile, terminal_profile
 from .tmux_executor import SyncTmuxExecutor, SyncTmuxRunner, TmuxCommandResult
 from .tmux_session_capability import (
     TmuxRuntimeCapability,
@@ -91,6 +92,13 @@ class TmuxPaneController:
         if result.returncode or not (1 <= columns <= 65535 and 1 <= rows <= 65535):
             raise OSError("could not read the owned tmux pane dimensions")
         return columns, rows
+
+    def terminal_profile(self) -> TerminalProfile:
+        """Bind interpretation to the owned server, not the tmux client binary."""
+        if not self._primary:
+            raise ValueError("terminal profile requires the primary pane owner")
+        result = self._tmux_executor.run(primary_pane_capability_read_arguments(self._capability, "#{version}"))
+        return terminal_profile(result.stdout if result.returncode == 0 else "")
 
     def locate(self) -> str | None:
         if self._primary:

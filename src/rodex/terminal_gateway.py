@@ -38,6 +38,7 @@ from .presentation_policy import PresentationSnapshotSource, PresentationSurface
 from .process_receipts import OwnedProcessGroup, RuntimeProcessLifecycle
 from .prompt_expansion_display import PromptExpansionDisplay
 from .runtime_peer import BoundProcessOwner
+from .terminal_cells import TMUX_32_PROFILE, TerminalProfile
 from .terminal_input import TerminalInputDecoder, TerminalInputInterceptor
 from .terminal_surface import TerminalSurfaceRenderer
 from .terminal_title import (
@@ -79,6 +80,7 @@ class TerminalSessionGateway:
         on_process_stopped: Callable[[subprocess.Popen[bytes]], None] = lambda _process: None,
         close_outer_fds: bool = False,
         read_terminal_size: Callable[[], tuple[int, int]] | None = None,
+        terminal_profile: TerminalProfile = TMUX_32_PROFILE,
     ) -> None:
         self._pipeline = pipeline
         self._input_fd = input_fd
@@ -108,7 +110,7 @@ class TerminalSessionGateway:
         self._saved_attributes: list | None = None
         self.process: subprocess.Popen[bytes] | None = None
         self._decoder = TerminalInputDecoder()
-        self._surface_renderer = TerminalSurfaceRenderer()
+        self._surface_renderer = TerminalSurfaceRenderer(profile=terminal_profile)
         self._presentation = presentation
         self._presentation_revision: int | None = None
         self._unsubscribe_presentation: Callable[[], None] | None = None

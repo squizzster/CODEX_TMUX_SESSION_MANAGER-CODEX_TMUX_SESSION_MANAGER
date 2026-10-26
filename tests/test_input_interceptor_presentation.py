@@ -281,3 +281,38 @@ def test_unproven_terminal_dimensions_cannot_be_used(output, returncode):
     pane = TmuxPaneController("tmux", capability(), "%9", primary=True, runner=runner)
     with pytest.raises(OSError, match="owned tmux pane dimensions"):
         pane.terminal_size()
+
+
+@pytest.mark.parametrize("version,joined", [("3.2a", False), ("3.4", True)])
+def test_terminal_profile_reads_the_owned_server_instead_of_client_version(version, joined):
+    commands = []
+
+    def runner(command, **_options):
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0, version + "\n", "")
+
+    pane = TmuxPaneController("different-client", capability(), "%9", primary=True, runner=runner)
+    profile = pane.terminal_profile()
+    assert profile.verified and profile.server_version == version and profile.joined_emoji is joined
+    assert len(commands) == 1
+    assert commands[0][:7] == [
+        "different-client",
+        "-S",
+        str(capability().tmux_server_socket_path),
+        "if-shell",
+        "-t",
+        "%9",
+        "-F",
+    ]
+    for expected in (capability().tmux_server_id, str(capability().runtime_id), "$1", "%9"):
+        assert expected in commands[0][-3]
+    assert "#{version}" in commands[0][-2]
+
+
+@pytest.mark.parametrize("output,returncode", [("", 0), ("3.4", 1), ("3.5", 0), ("3.4\n3.2a", 0)])
+def test_unproven_server_profile_disables_local_interpretation(output, returncode):
+    def runner(command, **_options):
+        return subprocess.CompletedProcess(command, returncode, output, "")
+
+    pane = TmuxPaneController("tmux", capability(), "%9", primary=True, runner=runner)
+    assert not pane.terminal_profile().verified

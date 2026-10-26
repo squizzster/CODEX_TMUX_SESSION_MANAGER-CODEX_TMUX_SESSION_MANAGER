@@ -18,6 +18,7 @@ from test_rodex_runtime import RUNTIME_ID, _create_socket_path, _mock_terminal_g
 
 import rodex.runtime as runtime
 from rodex.process_contracts import AnalyticsRuntimeConfig, RuntimeServiceConfig
+from rodex.process_receipts import RuntimeProcessLifecycle
 from rodex.terminal_gateway import TerminalSessionGateway
 from rodex.tmux_session_capability import TmuxRuntimeCapability
 from rodex_registry import RodexRegistryId, RodexSessionId
@@ -31,6 +32,7 @@ def test_activation_retries_relay_bidirectional_traffic_past_registration_deadli
     # terminal gateway, PTYs, executable child and monotonic deadlines.
     _mock_terminal_gateway(monkeypatch)
     monkeypatch.setattr(runtime, "TerminalSessionGateway", TerminalSessionGateway)
+    monkeypatch.setattr(runtime, "RuntimeProcessLifecycle", RuntimeProcessLifecycle)
 
     class Component:
         failure = None
@@ -71,7 +73,7 @@ def test_activation_retries_relay_bidirectional_traffic_past_registration_deadli
         lambda *_: TmuxRuntimeCapability(tmp_path / "tmux.sock", "a" * 32, "$7", "%9", RUNTIME_ID),
     )
     monkeypatch.setattr(runtime, "RODEX_REGISTRATION_TIMEOUT_SECONDS", 0.2)
-    monkeypatch.setattr(runtime, "ANALYTICS_ACTIVATION_RETRY_SECONDS", 0.1)
+    monkeypatch.setattr(runtime, "ANALYTICS_ACTIVATION_RETRY_SECONDS", 0.1, raising=False)
     executable = tmp_path / "native-fixture"
     executable.write_text(
         f"#!{sys.executable}\n"

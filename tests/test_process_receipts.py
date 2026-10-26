@@ -39,6 +39,7 @@ def test_numeric_group_calls_can_only_check_absence():
         "extinct_before_cont",
         "leader_absent",
         "already_extinct",
+        "reconcile_retry",
     ],
 )
 def test_isolated_group_lifetimes_preserve_signal_authority(tmp_path, scenario):
@@ -144,6 +145,20 @@ def _fake_retained_receipt(tmp_path, monkeypatch):
     return store, path, closed
 
 
+def _finish_retained_reconciliation(path, monkeypatch):
+    def absent(*_args):
+        raise ProcessLookupError(errno.ESRCH, "exact retained group is now extinct")
+
+    monkeypatch.setattr(receipts.os, "pidfd_open", lambda _pid: pytest.fail("reopened dead leader"))
+    monkeypatch.setattr(
+        receipts, "_read_process_state_from_descriptor", lambda *_args: pytest.fail("reauthenticated dead leader")
+    )
+    monkeypatch.setattr(receipts.signal, "pidfd_send_signal", absent)
+    monkeypatch.setattr(receipts, "_fsync_directory", lambda _path: None)
+    receipts.RuntimeProcessReceipts(path.parent).reconcile()
+    assert not path.exists()
+
+
 @pytest.mark.parametrize("error_number", [errno.EINVAL, errno.ENOSYS, errno.EPERM])
 @pytest.mark.parametrize("failing_signal", [signal.SIGTERM, signal.SIGCONT, signal.SIGKILL, 0])
 def test_group_signal_failure_keeps_receipt_without_numeric_fallback(tmp_path, monkeypatch, error_number, failing_signal):
@@ -162,8 +177,11 @@ def test_group_signal_failure_keeps_receipt_without_numeric_fallback(tmp_path, m
     with pytest.raises(receipts.ProcessReceiptError, match="unreconciled"):
         store.reconcile()
     assert path.exists()
-    assert closed == [123]
+    assert closed == []
+    assert receipts._RECONCILED_GROUPS[path].descriptor == 123
     assert signal.SIGSTOP not in sent
+    _finish_retained_reconciliation(path, monkeypatch)
+    assert closed == [123]
 
 
 @pytest.mark.parametrize("extinction_call", range(5))
@@ -199,6 +217,8 @@ def test_successful_kill_without_confirmed_exit_keeps_receipt_and_bounds_wait(tm
     assert clock[0] == 4.0
     assert [signum for signum in sent if signum] == [signal.SIGTERM, signal.SIGCONT, signal.SIGKILL]
     assert path.exists()
+    assert closed == []
+    _finish_retained_reconciliation(path, monkeypatch)
     assert closed == [123]
 
 

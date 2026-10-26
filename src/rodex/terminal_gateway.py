@@ -15,7 +15,6 @@ import selectors
 import signal
 import struct
 import subprocess
-import sys
 import termios
 import time
 import tty
@@ -36,6 +35,7 @@ from .interaction_pipeline import (
     SessionInteractionPipeline,
 )
 from .presentation_policy import PresentationSnapshotSource, PresentationSurface
+from .process_receipts import OwnedProcessGroup, RuntimeProcessLifecycle
 from .prompt_expansion_display import PromptExpansionDisplay
 from .runtime_peer import BoundProcessOwner
 from .terminal_input import TerminalInputDecoder, TerminalInputInterceptor
@@ -74,6 +74,7 @@ class TerminalSessionGateway:
         input_fd: int = 0,
         output_fd: int = 1,
         process_owner: BoundProcessOwner | None = None,
+        process_lifecycle: RuntimeProcessLifecycle | None = None,
         on_process_started: Callable[[subprocess.Popen[bytes]], None] = lambda _process: None,
         on_process_stopped: Callable[[subprocess.Popen[bytes]], None] = lambda _process: None,
         close_outer_fds: bool = False,
@@ -94,8 +95,11 @@ class TerminalSessionGateway:
         self._resize_pending = True
         self._last_dimensions: bytes | None = None
         self._close_outer_fds = close_outer_fds
-        self._on_process_stopped = on_process_stopped
-        self._process_announced = False
+        self._process_lifecycle = process_lifecycle or RuntimeProcessLifecycle(
+            on_started=lambda _kind, group: on_process_started(group.process),
+            on_stopped=lambda _kind, group: on_process_stopped(group.process),
+        )
+        self._process_group: OwnedProcessGroup | None = None
         self._native_queue = bytearray()
         self._display_queue = bytearray()
         self._pending_surface_frame: bytes | None = None
@@ -153,38 +157,19 @@ class TerminalSessionGateway:
             if self._prompt_expansion_display is not None:
                 self._unsubscribe_prompt_expansion = self._prompt_expansion_display.subscribe(self._notify_relay)
             self._pipeline.register(self._target)
-            gate_read, gate_write = os.pipe2(os.O_CLOEXEC)
-            try:
-                self.process = subprocess.Popen(
-                    [
-                        sys.executable,
-                        "-I",
-                        "-m",
-                        "rodex.terminal_exec",
-                        "--parent-pid",
-                        str(os.getpid()),
-                        "--start-gate-fd",
-                        str(gate_read),
-                        "--",
-                        *command,
-                    ],
-                    stdin=self._slave,
-                    stdout=self._slave,
-                    stderr=self._slave if stderr is None else stderr,
-                    env=env,
-                    cwd=cwd,
-                    start_new_session=True,
-                    pass_fds=(gate_read,),
-                )
-                if process_owner is not None:
-                    process_owner.bind(self.process)
-                on_process_started(self.process)
-                self._process_announced = True
-                self._process_pidfd = os.pidfd_open(self.process.pid)
-                os.write(gate_write, b"1")
-            finally:
-                os.close(gate_read)
-                os.close(gate_write)
+            self.process = self._process_lifecycle.start(
+                "native-tui",
+                command,
+                terminal=True,
+                on_acquired=self._retain_process_group,
+                bind_process=process_owner.bind if process_owner is not None else lambda _process: None,
+                stdin=self._slave,
+                stdout=self._slave,
+                stderr=self._slave if stderr is None else stderr,
+                env=env,
+                cwd=cwd,
+            )
+            self._process_pidfd = self._process_lifecycle.duplicate_exit_descriptor("native-tui")
             os.close(self._slave)
             self._slave = -1
         except BaseException:
@@ -195,6 +180,9 @@ class TerminalSessionGateway:
         """Signal handlers schedule resize; the relay loop alone mutates terminal state."""
         self._resize_pending = True
         self._notify_relay()
+
+    def _retain_process_group(self, group: OwnedProcessGroup) -> None:
+        self._process_group = group
 
     def request_supervisor_check(self) -> None:
         """Wake a blocked relay so its owner can revalidate external state."""
@@ -547,6 +535,15 @@ class TerminalSessionGateway:
 
     def close(self) -> None:
         """Idempotent resource cleanup, including constructor and writer-retry failures."""
+        try:
+            # Presentation closure never consumes the group cleanup obligation.
+            # Repeated finalizers retry it even after terminal resources closed.
+            if self._process_group is not None:
+                self._process_lifecycle.stop("native-tui", expected=self._process_group)
+        finally:
+            self._close_presentation()
+
+    def _close_presentation(self) -> None:
         if self._closed:
             return
         self._closed = True
@@ -559,16 +556,6 @@ class TerminalSessionGateway:
                 self._unsubscribe_presentation = None
             with suppress(Exception):
                 self._interceptor.release()
-            if self.process is not None and self.process.poll() is None:
-                self.process.terminate()
-                try:
-                    self.process.wait(timeout=2)
-                except subprocess.TimeoutExpired:
-                    os.killpg(self.process.pid, 9)
-                    self.process.wait(timeout=2)
-            if self.process is not None and self._process_announced:
-                self._on_process_stopped(self.process)
-                self._process_announced = False
         finally:
             self._pipeline.unregister(self._target)
             if self._saved_attributes is not None:

@@ -44,12 +44,19 @@ def arm_parent_death_signal(expected_parent_pid: int) -> None:
 def main(arguments: Sequence[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="python -m rodex.process_guard")
     parser.add_argument("--parent-pid", required=True, type=int)
+    parser.add_argument("--start-gate-fd", type=int)
     parser.add_argument("command", nargs=argparse.REMAINDER)
     parsed = parser.parse_args(arguments)
     command = parsed.command[1:] if parsed.command[:1] == ["--"] else parsed.command
     if not command:
         parser.error("an executable command is required after --")
     arm_parent_death_signal(parsed.parent_pid)
+    if parsed.start_gate_fd is not None:
+        try:
+            if os.read(parsed.start_gate_fd, 1) != b"1":
+                raise SystemExit("process-guard start gate closed before release")
+        finally:
+            os.close(parsed.start_gate_fd)
     os.execvpe(command[0], command, os.environ)
 
 

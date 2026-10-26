@@ -31,6 +31,7 @@ from rodex.interaction_pipeline import (
     SessionInteractionPipeline,
 )
 from rodex.presentation_policy import PresentationSnapshot, PresentationSurface, SessionPresentationPipeline
+from rodex.process_receipts import RuntimeProcessLifecycle
 from rodex.prompt_expansion_display import PromptExpansionDisplay
 from rodex.protocol_input_text import PromptTextEdit
 from rodex.terminal_gateway import QUEUE_LIMIT_BYTES, WORKING_COUNTER_REFRESH_SECONDS, TerminalSessionGateway
@@ -100,6 +101,34 @@ def start_gateway(slave, pipeline, registrations=(), presentation=None, prompt_e
         input_fd=slave,
         output_fd=slave,
     )
+
+
+def test_repeated_old_gateway_close_cannot_stop_its_replacement():
+    lifecycle = RuntimeProcessLifecycle()
+    with outer_terminal() as (master, slave):
+        options = dict(
+            env=dict(os.environ),
+            cwd=Path.cwd(),
+            pipeline=SessionInteractionPipeline(),
+            runtime_identity="gateway-retry",
+            registrations=(),
+            confirm_native_prefix=lambda _prefix: False,
+            input_fd=slave,
+            output_fd=slave,
+            process_lifecycle=lifecycle,
+        )
+        first = TerminalSessionGateway([sys.executable, "-c", ECHO_CHILD], **options)
+        read_until(first, master, b"READY")
+        first.close()
+        second = TerminalSessionGateway([sys.executable, "-c", ECHO_CHILD], **options)
+        try:
+            read_until(second, master, b"READY")
+            first.close()
+            assert second.process.poll() is None
+            os.write(master, b"still-owned")
+            read_until(second, master, b"still-owned")
+        finally:
+            second.close()
 
 
 def test_gateway_displays_and_expires_expansion_without_native_input_or_output(monkeypatch):

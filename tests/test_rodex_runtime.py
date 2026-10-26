@@ -110,6 +110,33 @@ def _mock_terminal_gateway(monkeypatch: pytest.MonkeyPatch) -> list:
     """Host composition tests inject the terminal boundary; real PTYs have their own suite."""
     gateways = []
 
+    class FakeProcessLifecycle:
+        def __init__(self, *_args, **_kwargs):
+            self.groups = {}
+
+        def start(self, kind, command, **options):
+            assert kind not in self.groups
+            spawn = options.pop("process_spawner", runtime_module.subprocess.Popen)
+            options.pop("python_executable", None)
+            process = spawn(command, **options)
+            self.groups[kind] = process
+            return process
+
+        def stop(self, kind):
+            process = self.groups.get(kind)
+            if process is not None and process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=3)
+            self.groups.pop(kind, None)
+
+        def close(self):
+            for kind in tuple(self.groups):
+                self.stop(kind)
+
     class FakePolicyBroker:
         instances: ClassVar[list] = []
 
@@ -143,6 +170,7 @@ def _mock_terminal_gateway(monkeypatch: pytest.MonkeyPatch) -> list:
             confirm_native_prefix,
             presentation,
             prompt_expansion_display,
+            process_lifecycle,
             **options,
         ):
             assert pipeline is not None and runtime_identity == str(RUNTIME_ID)
@@ -152,7 +180,8 @@ def _mock_terminal_gateway(monkeypatch: pytest.MonkeyPatch) -> list:
             assert callable(presentation.subscribe)
             assert callable(prompt_expansion_display.observe_forwarded)
             self.prompt_expansion_display = prompt_expansion_display
-            self.process = runtime_module.subprocess.Popen(command, **options)
+            self.process_lifecycle = process_lifecycle
+            self.process = process_lifecycle.start("native-tui", command, **options)
             self.closed = False
             self.wait_timeouts = []
             self.working_updates = []
@@ -166,6 +195,7 @@ def _mock_terminal_gateway(monkeypatch: pytest.MonkeyPatch) -> list:
                 return None
 
         def close(self):
+            self.process_lifecycle.stop("native-tui")
             self.closed = True
 
         def resize(self):
@@ -214,6 +244,7 @@ def _mock_terminal_gateway(monkeypatch: pytest.MonkeyPatch) -> list:
             pass
 
     monkeypatch.setattr(runtime_module, "TerminalSessionGateway", FakeGateway)
+    monkeypatch.setattr(runtime_module, "RuntimeProcessLifecycle", FakeProcessLifecycle)
     monkeypatch.setattr(runtime_module, "InputInterceptorPresentation", FakePresentation)
     monkeypatch.setattr(runtime_module, "TmuxWorkingStatus", FakeWorkingStatus)
     monkeypatch.setattr(runtime_module, "CommandPolicyBroker", FakePolicyBroker)
@@ -638,7 +669,8 @@ def test_transient_app_server_reads_exact_persisted_codex_identity_and_cleans_up
 ) -> None:
     codex_session_id = uuid.UUID("01a015f4-f27c-7592-8060-d12313e8d0ce")
     monkeypatch.setenv("RODEX_RUNTIME_DIR", str(tmp_path))
-    monkeypatch.setattr(runtime_module.secrets, "token_hex", lambda _size: "catalogtoken0001")
+    _mock_terminal_gateway(monkeypatch)
+    monkeypatch.setattr(runtime_module.secrets, "token_hex", lambda size: "a" * (2 * size))
     read_response: dict[str, object]
     if persisted:
         read_response = {
@@ -680,7 +712,7 @@ def test_transient_app_server_reads_exact_persisted_codex_identity_and_cleans_up
         "/usr/bin/codex",
         "app-server",
         "--listen",
-        f"unix://{tmp_path / 'catalog-catalogtoken0001.sock'}",
+        f"unix://{tmp_path / ('catalog-' + 'a' * 16 + '.sock')}",
     )
     assert websocket.sent == [
         {
@@ -704,8 +736,8 @@ def test_transient_app_server_reads_exact_persisted_codex_identity_and_cleans_up
             },
         },
     ]
-    assert not (tmp_path / "catalog-catalogtoken0001.sock").exists()
-    assert not (tmp_path / "catalog-catalogtoken0001.log").exists()
+    assert not (tmp_path / ("catalog-" + "a" * 16 + ".sock")).exists()
+    assert not (tmp_path / ("catalog-" + "a" * 16 + ".log")).exists()
 
 
 def test_start_directly_hosts_codex_in_tmux_and_returns_its_session_id(
@@ -5093,8 +5125,6 @@ def test_runtime_service_skips_updater_and_connects_tui_through_protocol_proxy(
             "input_fd",
             "output_fd",
             "process_owner",
-            "on_process_started",
-            "on_process_stopped",
         }
 
 

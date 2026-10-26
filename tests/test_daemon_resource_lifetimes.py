@@ -3,6 +3,7 @@
 import array
 import os
 import socket
+import sys
 from contextlib import suppress
 from threading import Event, Thread
 
@@ -11,6 +12,7 @@ from test_rodex_daemon import RecordingAnalytics, RecordingReceipts, _config
 
 import rodex.daemon as daemon
 import rodex.runtime as runtime
+from rodex import process_receipts
 
 
 class ReceivingSocket:
@@ -153,6 +155,54 @@ def test_stop_cannot_close_worker_owned_descriptor(tmp_path, monkeypatch):
     finally:
         release.set()
         context.done.wait(1)
+        manager.close()
+        sender.close()
+        receiver.close()
+
+
+def test_finished_service_cannot_report_terminal_until_native_cleanup_is_proved(tmp_path, monkeypatch):
+    analytics = RecordingAnalytics()
+    manager = daemon.DaemonRuntimeManager(tmp_path, analytics=analytics)
+    config = _config(tmp_path, 1)
+    manager.reserve("1" * 32, config)
+    monkeypatch.setattr(daemon, "admit_runtime_terminal_fd", lambda *args, **kwargs: (None, {}))
+    spawned = []
+
+    def service(_config, *, process_lifecycle, **_kwargs):
+        spawned.append(process_lifecycle.start("app-server", [sys.executable, "-c", "import time; time.sleep(20)"]))
+        return 0
+
+    monkeypatch.setattr(runtime, "_run_runtime_service", service)
+    sender, receiver = socket.socketpair()
+    descriptor = os.open(os.devnull, os.O_RDONLY)
+    context = bind(manager, config, descriptor, receiver)
+
+    def fail_signal(*_args):
+        raise PermissionError("injected group signal denial")
+
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(process_receipts.signal, "pidfd_send_signal", fail_signal)
+            manager.start_bound_runtime(context)
+            context.thread.join(timeout=2)
+            assert not context.thread.is_alive() and context.service_finished
+            assert not context.done.is_set()
+            assert str(config.runtime_id) in manager._runtimes
+            assert str(config.runtime_id) not in manager._completed
+            assert not analytics.retired
+            assert manager.stop_runtime("1" * 32, str(config.runtime_id)) == "stopping"
+            assert list(tmp_path.glob(process_receipts.PROCESS_RECEIPT_PATTERN))
+            assert spawned[0].poll() is None
+            with pytest.raises(daemon.RodexDaemonServerError, match="stopping or terminal"):
+                manager.reserve("1" * 32, config)
+        assert manager.stop_runtime("1" * 32, str(config.runtime_id)) == "terminal"
+        assert spawned[0].poll() is not None
+        assert context.done.is_set()
+        assert analytics.retired == [str(config.runtime_id)]
+        assert not list(tmp_path.glob(process_receipts.PROCESS_RECEIPT_PATTERN))
+        assert manager.stop_runtime("1" * 32, str(config.runtime_id)) == "terminal"
+        assert analytics.retired == [str(config.runtime_id)]
+    finally:
         manager.close()
         sender.close()
         receiver.close()

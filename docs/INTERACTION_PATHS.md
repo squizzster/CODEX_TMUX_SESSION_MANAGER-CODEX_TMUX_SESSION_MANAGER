@@ -410,6 +410,11 @@ classifications there when a route changes, and update the route-level map above
 It also checks subprocess entrypoints, mutation owners, and read-only bootstrap probes;
 it is not a proof against arbitrary Python reflection or a runtime monitor.
 
+[`OwnedProcessGroup`](../src/rodex/process_receipts.py) owns gated native process
+execution for the runtime, gateway and catalog probe. The same lifecycle retains
+authenticated pidfd authority through termination and exact receipt retirement;
+the terminal gateway owns presentation and a separate exit-readiness descriptor.
+
 Session-wide status-bar and static terminal-title configuration remain under
 [`TmuxStatusPipeline`](../src/rodex/tmux_status.py). Client-local native messages for
 keyboard exit, ownership rejection and mouse-toggle confirmation do not claim or

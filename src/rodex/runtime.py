@@ -160,6 +160,7 @@ CODEX_ACTIVE_WRITER_RETRY_INTERVAL_SECONDS: Final = 0.25
 CODEX_PRIMARY_CONNECTION_RELEASE_TIMEOUT_SECONDS: Final = 2.5
 RUNTIME_PATH_KEEPALIVE_INTERVAL_SECONDS: Final = 60.0 * 60.0
 RODEX_REGISTRATION_TIMEOUT_SECONDS: Final = 60.0
+ANALYTICS_ACTIVATION_RETRY_SECONDS: Final = 1.0
 RODEX_TMUX_HISTORY_LIMIT_LINES: Final = 50_000
 RODEX_TMUX_SCROLLBACK_STATE_LINES: Final = 256
 RODEX_TMUX_COMMAND_TIMEOUT_SECONDS: Final = 5.0
@@ -2707,7 +2708,6 @@ def _run_runtime_service(
     tmux_binary = config.tmux_binary
     tmux_server_socket_path = config.tmux_server_socket_path
     codex_arguments = config.codex_arguments
-    pending_analytics_config: AnalyticsRuntimeConfig | None = config.analytics
     tmux_pane_target = config.tmux_pane_target
     tmux_runtime_capability = _resolve_runtime_service_tmux_capability(
         tmux_binary,
@@ -2741,7 +2741,8 @@ def _run_runtime_service(
         str(config.runtime_id),
     )
     registered_interaction_context: AnalyticsRuntimeConfig | None = None
-    registration_deadline = time.monotonic() + RODEX_REGISTRATION_TIMEOUT_SECONDS
+    registration_deadline: float | None = time.monotonic() + RODEX_REGISTRATION_TIMEOUT_SECONDS
+    analytics_activation_deadline: float | None = None
     command_policy_status = CommandPolicyStatus(tmux_binary, tmux_runtime_capability, tmux_pane_target)
     command_policy = CommandPolicyBroker(
         config.command_policy_socket_path,
@@ -3077,14 +3078,19 @@ def _run_runtime_service(
                 on_terminal_gateway_ready(terminal_gateway.request_supervisor_check, terminal_gateway.resize)
                 on_started()
                 while True:
-                    if pending_analytics_config is not None:
+                    if stop.is_set():
+                        returncode = 0
+                        break
+                    if registered_interaction_context is None:
                         activated_analytics = _registered_analytics_runtime_config(
-                            pending_analytics_config,
+                            config.analytics,
                             tmux_binary,
                             tmux_server_socket_path,
                             tmux_pane_target,
                         )
                         if activated_analytics is not None:
+                            registration_deadline = None
+                            analytics_activation_deadline = time.monotonic()
                             if registered_interaction_context is None:
                                 registered_interaction_context = activated_analytics
                                 assert activated_analytics.codex_session_id is not None
@@ -3103,16 +3109,18 @@ def _run_runtime_service(
                                             rodex_session_id=str(activated_analytics.rodex_session_id),
                                             root_thread_id=activated_analytics.codex_session_id,
                                         )
-                            # Persistent statistics remain fail-open and must not
-                            # interrupt the daemon's interactive runtime pipeline.
-                            try:
-                                on_analytics_activated(activated_analytics)
-                            except Exception:
-                                pass
-                            else:
-                                pending_analytics_config = None
-                        elif time.monotonic() >= registration_deadline:
+                        elif registration_deadline is not None and time.monotonic() >= registration_deadline:
                             raise RodexRuntimeError("runtime registration was not confirmed before its deadline")
+                    if analytics_activation_deadline is not None and time.monotonic() >= analytics_activation_deadline:
+                        assert registered_interaction_context is not None
+                        # Registration is already accepted. Statistics may recover
+                        # independently while the terminal continues relaying I/O.
+                        try:
+                            on_analytics_activated(registered_interaction_context)
+                        except Exception:
+                            analytics_activation_deadline = time.monotonic() + ANALYTICS_ACTIVATION_RETRY_SECONDS
+                        else:
+                            analytics_activation_deadline = None
                     failure = runtime_path_keepalive.failure
                     if failure is not None:
                         _record_runtime_path_keepalive_failure(log, failure)
@@ -3121,14 +3129,15 @@ def _run_runtime_service(
                     if diagnostic_failure is not None:
                         raise diagnostic_failure
                     try:
-                        registration_pending = pending_analytics_config is not None
+                        registration_pending = registered_interaction_context is None
                         if stop.is_set():
                             returncode = 0
                             break
-                        registration_timeout = (
-                            max(0.0, registration_deadline - time.monotonic()) if registration_pending else None
+                        supervisor_deadline = registration_deadline or analytics_activation_deadline
+                        supervisor_timeout = (
+                            max(0.0, supervisor_deadline - time.monotonic()) if supervisor_deadline is not None else None
                         )
-                        returncode = terminal_gateway.wait(timeout=registration_timeout)
+                        returncode = terminal_gateway.wait(timeout=supervisor_timeout)
                     except subprocess.TimeoutExpired:
                         continue
                     if returncode is None:
@@ -3150,6 +3159,7 @@ def _run_runtime_service(
                     break
                 if (
                     returncode == 0
+                    or registered_interaction_context is not None
                     or requested_codex_session_id is None
                     or active_writer_deadline is None
                     or not _active_writer_handoff_can_retry(

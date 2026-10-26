@@ -5013,7 +5013,10 @@ def test_runtime_service_skips_updater_and_connects_tui_through_protocol_proxy(
     assert proxy_prompt_displays == [gateways[0].prompt_expansion_display]
     assert gateways[0].working_updates == [False]
     assert len(gateways[0].wait_timeouts) == 1
-    assert gateways[0].wait_timeouts[0] > 50
+    if analytics_start_fails:
+        assert 0 < gateways[0].wait_timeouts[0] <= runtime_module.ANALYTICS_ACTIVATION_RETRY_SECONDS
+    else:
+        assert gateways[0].wait_timeouts[0] > 50
     assert proxy_lifecycle == [
         "event-start",
         "start",

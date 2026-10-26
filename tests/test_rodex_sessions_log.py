@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import pwd
 import sqlite3
 import uuid
 from datetime import UTC, datetime, timedelta, timezone
@@ -110,23 +112,49 @@ def test_creating_a_session_also_creates_its_one_log_row(tmp_path: Path, monkeyp
 
 
 def test_session_user_defaults_to_the_posix_operating_system_identity(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, executing_user: RodexSessionsUserIdentity
 ) -> None:
     database = tmp_path / "rodex.sqlite3"
-    monkeypatch.setattr(session_module.os, "getuid", lambda: 1009)
-    monkeypatch.setattr(session_module.os, "getgid", lambda: 1010)
-    monkeypatch.setattr(
-        session_module.pwd,
-        "getpwuid",
-        lambda uid: type("PasswordEntry", (), {"pw_name": "dna"})(),
-    )
 
     session = create_a_rodex_session(database, codex_session_id=CODEX_SESSION_ID_1)
 
+    assert database.stat().st_uid == executing_user.uid
     log = lookup_rodex_session_log(session.rodex_sessions_id, database)
     assert log is not None
     assert lookup_rodex_sessions_user(log.rodex_sessions_users_id, database) == (
-        session_module.RodexSessionsUser(id=1, uid=1009, gid=1010, user_name="dna")
+        session_module.RodexSessionsUser(
+            id=1, uid=executing_user.uid, gid=executing_user.gid, user_name=executing_user.user_name
+        )
+    )
+
+
+def test_synthetic_session_identity_does_not_change_storage_identity_or_leak(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    executing_user: RodexSessionsUserIdentity,
+    foreign_user: RodexSessionsUserIdentity,
+) -> None:
+    database = tmp_path / "rodex.sqlite3"
+    real_identity_functions = os.getuid, os.getgid, pwd.getpwuid
+    with monkeypatch.context() as identity_patch:
+        identity_patch.setattr(session_module, "current_rodex_sessions_user_identity", lambda: foreign_user)
+
+        synthetic = create_a_rodex_session(database, codex_session_id=CODEX_SESSION_ID_1)
+
+        assert (os.getuid, os.getgid, pwd.getpwuid) == real_identity_functions
+        assert os.getuid() == database.stat().st_uid == executing_user.uid
+        log = lookup_rodex_session_log(synthetic.rodex_sessions_id, database)
+        assert log is not None
+        assert lookup_rodex_sessions_user(log.rodex_sessions_users_id, database) == session_module.RodexSessionsUser(
+            id=1, uid=foreign_user.uid, gid=foreign_user.gid, user_name=foreign_user.user_name
+        )
+
+    actual = create_a_rodex_session(database, codex_session_id=CODEX_SESSION_ID_2)
+    log = lookup_rodex_session_log(actual.rodex_sessions_id, database)
+    assert log is not None
+    assert session_module.current_rodex_sessions_user_identity() == executing_user
+    assert lookup_rodex_sessions_user(log.rodex_sessions_users_id, database) == session_module.RodexSessionsUser(
+        id=2, uid=executing_user.uid, gid=executing_user.gid, user_name=executing_user.user_name
     )
 
 

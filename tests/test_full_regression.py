@@ -15,9 +15,9 @@ from rodex_registry import (
 )
 
 
-def test_full_rodex_database_regression(tmp_path: Path) -> None:
+def test_full_rodex_database_regression(tmp_path: Path, executing_user: RodexSessionsUserIdentity) -> None:
     database = tmp_path / "rodex.sqlite3"
-    user = RodexSessionsUserIdentity(uid=1009, gid=1010, user_name="dna")
+    user = executing_user
 
     first = create_a_rodex_session(database, codex_session_id=uuid.UUID(int=1), user_identity=user)
     second = create_a_rodex_session(database, codex_session_id=uuid.UUID(int=2), user_identity=user)
@@ -34,7 +34,7 @@ def test_full_rodex_database_regression(tmp_path: Path) -> None:
 
     with sqlite3.connect(database) as connection:
         assert connection.execute("SELECT id, uid, gid, user_name FROM rodex_sessions_users").fetchall() == [
-            (1, 1009, 1010, "dna")
+            (1, user.uid, user.gid, user.user_name)
         ]
         assert connection.execute(
             "SELECT rodex_sessions_id, rodex_sessions_users_id FROM rodex_sessions_log ORDER BY id"

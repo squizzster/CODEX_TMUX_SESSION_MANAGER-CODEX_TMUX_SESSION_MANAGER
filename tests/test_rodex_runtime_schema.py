@@ -482,13 +482,14 @@ def test_pending_runtime_id_candidate_exhaustion_is_fatal(tmp_path: Path, monkey
 
 def test_one_transaction_matches_rodex_codex_and_tmux_without_mixing_ids(
     tmp_path: Path,
+    executing_user: RodexSessionsUserIdentity,
 ) -> None:
     database = tmp_path / "rodex.sqlite3"
     session = create_a_rodex_session(
         database,
-        user_identity=RodexSessionsUserIdentity(1009, 1010, "dna"),
+        user_identity=executing_user,
         codex_session_id=CODEX_SESSION_ID,
-        tmux_server_socket_path="/run/user/1009/rodex/tmux.sock",
+        tmux_server_socket_path=tmp_path / "tmux.sock",
         tmux_session_name="rodex-example",
     )
 
@@ -504,15 +505,17 @@ def test_one_transaction_matches_rodex_codex_and_tmux_without_mixing_ids(
 
 def test_codex_identity_lookup_enforces_the_complete_posix_owner(
     tmp_path: Path,
+    executing_user: RodexSessionsUserIdentity,
+    foreign_user: RodexSessionsUserIdentity,
 ) -> None:
     database = tmp_path / "rodex.sqlite3"
-    owner = RodexSessionsUserIdentity(1009, 1010, "dna")
-    other_user = RodexSessionsUserIdentity(2001, 2002, "other")
+    owner = executing_user
+    other_user = foreign_user
     session = create_a_rodex_session(
         database,
         user_identity=owner,
         codex_session_id=CODEX_SESSION_ID,
-        tmux_server_socket_path="/run/user/1009/rodex/tmux.sock",
+        tmux_server_socket_path=tmp_path / "tmux.sock",
         tmux_session_name="rodex-example",
     )
 
@@ -552,7 +555,9 @@ def test_codex_session_id_unique_index_rejects_a_second_rodex_owner(tmp_path: Pa
     assert fetch_all(database, "SELECT COUNT(*) FROM cool_names") == [(1,)]
 
 
-def test_runtime_matchmaking_rows_rollback_with_the_session(tmp_path: Path) -> None:
+def test_runtime_matchmaking_rows_rollback_with_the_session(
+    tmp_path: Path, executing_user: RodexSessionsUserIdentity
+) -> None:
     database = initialise_rodex_database(tmp_path / "rodex.sqlite3")
     with sqlite3.connect(database) as connection:
         connection.execute(
@@ -563,7 +568,7 @@ def test_runtime_matchmaking_rows_rollback_with_the_session(tmp_path: Path) -> N
     with pytest.raises(sqlite3.IntegrityError, match="forced tmux failure"):
         create_a_rodex_session(
             database,
-            user_identity=RodexSessionsUserIdentity(1009, 1010, "dna"),
+            user_identity=executing_user,
             codex_session_id=CODEX_SESSION_ID,
             tmux_server_socket_path="/tmp/rodex/tmux.sock",
             tmux_session_name="rodex-example",

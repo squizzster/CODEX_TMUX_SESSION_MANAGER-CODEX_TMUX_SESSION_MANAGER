@@ -5,9 +5,11 @@ import pwd
 import sqlite3
 import uuid
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+import rodex_registry.lifecycle as session_module
 from rodex_registry import (
     RodexSessionError,
     RodexSessionsUser,
@@ -107,6 +109,27 @@ def test_current_identity_comes_from_posix_uid_gid_and_password_database() -> No
     assert identity.gid == os.getgid()
 
 
+def test_identity_provider_reads_each_posix_field_without_patching_global_modules(
+    monkeypatch: pytest.MonkeyPatch,
+    foreign_user: RodexSessionsUserIdentity,
+) -> None:
+    """Provider unit test: synthetic OS inputs never reach real storage checks."""
+    requested_uids = []
+
+    def password_entry(uid: int) -> SimpleNamespace:
+        requested_uids.append(uid)
+        return SimpleNamespace(pw_name=foreign_user.user_name)
+
+    monkeypatch.setattr(
+        session_module, "os", SimpleNamespace(getuid=lambda: foreign_user.uid, getgid=lambda: foreign_user.gid)
+    )
+    monkeypatch.setattr(session_module, "pwd", SimpleNamespace(getpwuid=password_entry))
+
+    assert current_rodex_sessions_user_identity() == foreign_user
+    assert requested_uids == [foreign_user.uid]
+    assert os.getuid() != foreign_user.uid
+
+
 def test_windows_is_explicitly_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("rodex_registry.lifecycle.sys.platform", "win32")
 
@@ -114,9 +137,11 @@ def test_windows_is_explicitly_rejected(monkeypatch: pytest.MonkeyPatch) -> None
         current_rodex_sessions_user_identity()
 
 
-def test_new_session_log_references_the_normalized_user_lookup(tmp_path: Path) -> None:
+def test_new_session_log_references_the_normalized_user_lookup(
+    tmp_path: Path, executing_user: RodexSessionsUserIdentity
+) -> None:
     database = tmp_path / "rodex.sqlite3"
-    identity = RodexSessionsUserIdentity(1009, 1010, "dna")
+    identity = executing_user
 
     first = create_a_rodex_session(database, codex_session_id=CODEX_SESSION_ID_1, user_identity=identity)
     second = create_a_rodex_session(database, codex_session_id=CODEX_SESSION_ID_2, user_identity=identity)
@@ -154,7 +179,9 @@ def test_invalid_posix_user_identity_is_rejected(tmp_path: Path, identity: Rodex
         )
 
 
-def test_user_session_and_log_insertions_are_one_transaction(tmp_path: Path) -> None:
+def test_user_session_and_log_insertions_are_one_transaction(
+    tmp_path: Path, executing_user: RodexSessionsUserIdentity
+) -> None:
     database = initialise_rodex_database(tmp_path / "rodex.sqlite3")
     with sqlite3.connect(database) as connection:
         connection.execute(
@@ -166,7 +193,7 @@ def test_user_session_and_log_insertions_are_one_transaction(tmp_path: Path) -> 
         create_a_rodex_session(
             database,
             codex_session_id=CODEX_SESSION_ID_1,
-            user_identity=RodexSessionsUserIdentity(1009, 1010, "dna"),
+            user_identity=executing_user,
         )
 
     assert fetch_all(database, "SELECT COUNT(*) FROM rodex_sessions_users") == [(0,)]

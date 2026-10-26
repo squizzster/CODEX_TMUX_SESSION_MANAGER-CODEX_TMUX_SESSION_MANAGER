@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 from concurrent.futures import ThreadPoolExecutor
-from threading import Event
+from threading import Event, Lock
 
 import pytest
 from test_context_threshold_steering import ROOT_THREAD, SteeringHarness
@@ -16,7 +16,12 @@ import rodex.runtime as runtime_module
 from rodex.interaction_pipeline import InteractionOperation, InteractionRejected, SessionInteractionPipeline
 from rodex.process_contracts import AnalyticsRuntimeConfig, RuntimeServiceConfig
 from rodex.protocol_projection import ProtocolProjectionFailure, ProtocolProjectionGuard
-from rodex.protocol_proxy import EVENT_STREAM_READY_MESSAGE, CodexContextStatusObserver, ToolCallCounter
+from rodex.protocol_proxy import (
+    EVENT_STREAM_READY_MESSAGE,
+    CodexContextStatusObserver,
+    CodexProtocolProxy,
+    ToolCallCounter,
+)
 from rodex.tmux_session_capability import TmuxRuntimeCapability
 from rodex_registry import RodexRegistryId, RodexSessionId
 
@@ -49,16 +54,20 @@ def test_context_render_failure_does_not_preserve_stale_steering_authority(sourc
 
     observer = CodexContextStatusObserver(
         lambda status: guard.observe("context-status-render", render, status),
-        on_context_percent=harness.controller.observe_context_percent,
+        on_context_percent=lambda thread, percent, generation: harness.controller.observe_context_percent(
+            thread, percent, connection_generation=generation
+        ),
     )
+    observer.bind_primary_thread(ROOT_THREAD, "fixture-connection")
 
     def usage(percent):
         if source == "protocol":
             observer.observe_protocol_event(
-                json.loads(token_usage_updated(percent * 10, thread_id=ROOT_THREAD, context_window=1000))
+                json.loads(token_usage_updated(percent * 10, thread_id=ROOT_THREAD, context_window=1000)),
+                connection_generation="fixture-connection",
             )
         else:
-            observer.observe_rollout_context_percent(ROOT_THREAD, percent)
+            observer.observe_rollout_context_percent(ROOT_THREAD, percent, connection_generation="fixture-connection")
 
     try:
         harness.start_turn()
@@ -84,7 +93,7 @@ def test_failed_control_observation_revokes_authority_even_when_cancellation_rai
 
     try:
         harness.start_turn()
-        harness.controller.observe_context_percent(ROOT_THREAD, 75)
+        harness.controller.observe_context_percent(ROOT_THREAD, 75, connection_generation="fixture-connection")
         pending = harness.deferred_calls[0]
         pending.cancel = fail
         if not guard.observe("context-status", fail):
@@ -209,7 +218,7 @@ def test_runtime_projection_faults(tmp_path, monkeypatch, failing_participant):
         monkeypatch.setattr(
             getattr(runtime_module, component),
             method,
-            lambda _self, _event, participant=name: observe(participant),
+            lambda _self, _event, participant=name, **_kwargs: observe(participant),
         )
     for component in ("ContextThresholdSteeringController", "ServerOverloadedRecoveryController"):
         original_reset = getattr(runtime_module, component).reset_after_disconnect
@@ -262,15 +271,26 @@ def test_runtime_projection_faults(tmp_path, monkeypatch, failing_participant):
             *,
             on_primary_client_message,
             projection_guard,
+            context_observer,
+            context_steering,
             **_options,
         ):
             self.on_output = on_output
             self.on_input = on_primary_client_message
             self.guard = projection_guard
+            self._projection_guard = projection_guard
+            self._context_observer = context_observer
+            self._context_steering = context_steering
+            self._connection_lock = Lock()
+            self._primary_tui_connection = object()
+            self._primary_context_generation = "fixture-connection"
 
         def start(self):
             for _ in range(2):
                 self.on_input("{}", {})
+                CodexProtocolProxy._project_primary_context(
+                    self, {}, self._primary_tui_connection, connection_generation=self._primary_context_generation
+                )
                 self.on_output("{}", {})
             health_snapshots.append(self.guard.failures)
 
@@ -322,7 +342,22 @@ def test_runtime_projection_faults(tmp_path, monkeypatch, failing_participant):
         )
         == 0
     )
-    assert observations == ([name for name, *_ in RUNTIME_PROJECTIONS] + ["analytics"]) * 2
+    assert (
+        observations
+        == (
+            [
+                "presentation-input",
+                "context-steering",
+                "context-status",
+                "presentation-output",
+                "working-status",
+                "overload-recovery",
+                "agent-observer",
+                "analytics",
+            ]
+        )
+        * 2
+    )
     assert health_snapshots == [(ProtocolProjectionFailure(failing_participant, 2, "RuntimeError"),)]
     assert "private" not in repr(health_snapshots)
     if failing_participant in {"context-steering", "context-status"}:

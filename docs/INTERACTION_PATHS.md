@@ -159,6 +159,16 @@ rollout follower: `100 * totalTokens / modelContextWindow`. It does not scrape o
 parse the rendered `Context: N%` status, and display rounding cannot trigger it.
 Exactly `70.0` qualifies; every lower value does not.
 
+Context status and steering use the proxy's correlated primary identity. Neither
+usage nor a helper's start notification can select main. A context generation
+changes on connection replacement and on suspended/restored main selection, even
+when the thread UUID is unchanged. Events and percentage callbacks retain that
+generation through delivery. Binding loss immediately clears displayed usage,
+compaction and pending work, and signals the old rollout follower to stop.
+The binding retains only accepted main `id`, `ephemeral` and `path` metadata;
+resume and rejected reselection can start a fresh follower without a start
+notification. Registration independently enables steering dispatch.
+
 A qualifying below-to-`>=70%` crossing schedules one asynchronous `STEER` for the
 exact active main turn. [`CONTEXT_STEER_MESSAGE`](../src/rodex/context_threshold_steering.py)
 owns the fixed text: request a tagged progress update at a natural break, then
@@ -190,7 +200,9 @@ Evidence: [controller and race cases](../tests/test_context_threshold_steering.p
 [raw usage projection](../tests/test_rodex_protocol_proxy.py), and
 [pipeline/exact-control integration](../tests/test_interaction_integration.py).
 [Primary binding regressions](../tests/test_primary_thread_binding.py) reproduce
-resume without a start notification. The [isolated native test](../tests/test_context_threshold_native.py)
+resume without a start notification. [Context binding acceptance](../tests/test_primary_context_binding.py)
+covers helpers, same-thread reconnects, restored selections, stale callbacks and EOF.
+The [isolated native test](../tests/test_context_threshold_native.py)
 uses a persisted/resumed native thread and synthetic local model counters to prove
 one reminder reaches the same running turn, without interruption or a new turn.
 Native 0.162.1 passed; SQL/tmux discovery is fixture-provided in that test.

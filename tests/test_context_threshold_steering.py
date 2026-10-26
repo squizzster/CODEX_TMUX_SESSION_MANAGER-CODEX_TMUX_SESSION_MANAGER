@@ -65,6 +65,7 @@ class SteeringHarness:
             binding_identity=lambda: "primary-connection",
         )
         self.pipeline.register(self.target)
+        self.controller.bind_primary_thread(ROOT_THREAD, "fixture-connection")
         if bind:
             self.controller.bind_root_thread(ROOT_THREAD)
 
@@ -79,7 +80,7 @@ class SteeringHarness:
         return InteractionResult(DeliveryStatus.COMPLETED, value={"turn_id": request.expected_turn_id})
 
     def start_turn(self, turn_id: str = "turn-1") -> None:
-        self.controller.observe_protocol_event(turn_started(turn_id))
+        self.controller.observe_protocol_event(turn_started(turn_id), connection_generation="fixture-connection")
 
     def close(self) -> None:
         self.controller.close()
@@ -134,10 +135,10 @@ def test_exact_seventy_percent_steers_once_with_the_configured_message() -> None
     harness = SteeringHarness()
     try:
         harness.start_turn()
-        harness.controller.observe_context_percent(ROOT_THREAD, 69.999)
+        harness.controller.observe_context_percent(ROOT_THREAD, 69.999, connection_generation="fixture-connection")
         assert harness.deferred_calls == []
 
-        harness.controller.observe_context_percent(ROOT_THREAD, 70.0)
+        harness.controller.observe_context_percent(ROOT_THREAD, 70.0, connection_generation="fixture-connection")
 
         assert len(harness.deferred_calls) == 1
         assert harness.deferred_calls[0].started
@@ -155,7 +156,7 @@ def test_exact_seventy_percent_steers_once_with_the_configured_message() -> None
         assert request.dispatch_id.startswith(f"rodex:context-threshold:{ROOT_THREAD}:turn-1:")
         assert harness.controller.snapshot.last_completed_dispatch_id == request.dispatch_id
 
-        harness.controller.observe_context_percent(ROOT_THREAD, 90.0)
+        harness.controller.observe_context_percent(ROOT_THREAD, 90.0, connection_generation="fixture-connection")
         assert len(harness.deferred_calls) == 1
         assert len(harness.requests) == 1
     finally:
@@ -166,12 +167,14 @@ def test_a_below_threshold_observation_rearms_the_next_crossing() -> None:
     harness = SteeringHarness()
     try:
         harness.start_turn()
-        harness.controller.observe_context_percent(ROOT_THREAD, CONTEXT_STEER_THRESHOLD_PERCENT)
+        harness.controller.observe_context_percent(
+            ROOT_THREAD, CONTEXT_STEER_THRESHOLD_PERCENT, connection_generation="fixture-connection"
+        )
         harness.deferred_calls[-1].fire()
         first_dispatch_id = harness.requests[-1].dispatch_id
 
-        harness.controller.observe_context_percent(ROOT_THREAD, 69.0)
-        harness.controller.observe_context_percent(ROOT_THREAD, 70.0)
+        harness.controller.observe_context_percent(ROOT_THREAD, 69.0, connection_generation="fixture-connection")
+        harness.controller.observe_context_percent(ROOT_THREAD, 70.0, connection_generation="fixture-connection")
         harness.deferred_calls[-1].fire()
 
         assert len(harness.requests) == 2
@@ -183,8 +186,8 @@ def test_a_below_threshold_observation_rearms_the_next_crossing() -> None:
 def test_high_context_waits_for_registration_and_an_exact_active_turn() -> None:
     harness = SteeringHarness(bind=False)
     try:
-        harness.controller.observe_protocol_event(thread_started())
-        harness.controller.observe_context_percent(ROOT_THREAD, 75.0)
+        harness.controller.observe_protocol_event(thread_started(), connection_generation="fixture-connection")
+        harness.controller.observe_context_percent(ROOT_THREAD, 75.0, connection_generation="fixture-connection")
         assert harness.deferred_calls == []
 
         harness.controller.bind_root_thread(ROOT_THREAD)
@@ -201,12 +204,14 @@ def test_high_context_waits_for_registration_and_an_exact_active_turn() -> None:
 def test_child_thread_context_and_turns_cannot_trigger_main_steering() -> None:
     harness = SteeringHarness()
     try:
-        harness.controller.observe_protocol_event(turn_started("child-turn", thread_id="child-thread"))
-        harness.controller.observe_context_percent("child-thread", 90.0)
+        harness.controller.observe_protocol_event(
+            turn_started("child-turn", thread_id="child-thread"), connection_generation="fixture-connection"
+        )
+        harness.controller.observe_context_percent("child-thread", 90.0, connection_generation="fixture-connection")
         assert harness.deferred_calls == []
 
         harness.start_turn("root-turn")
-        harness.controller.observe_context_percent(ROOT_THREAD, 70.0)
+        harness.controller.observe_context_percent(ROOT_THREAD, 70.0, connection_generation="fixture-connection")
         harness.deferred_calls[0].fire()
         assert [request.expected_turn_id for request in harness.requests] == ["root-turn"]
     finally:
@@ -217,21 +222,23 @@ def test_compaction_cancels_pending_work_and_requires_a_fresh_crossing() -> None
     harness = SteeringHarness()
     try:
         harness.start_turn()
-        harness.controller.observe_context_percent(ROOT_THREAD, 70.0)
+        harness.controller.observe_context_percent(ROOT_THREAD, 70.0, connection_generation="fixture-connection")
         pending = harness.deferred_calls[-1]
 
-        harness.controller.observe_protocol_event(compaction("item/started"))
+        harness.controller.observe_protocol_event(compaction("item/started"), connection_generation="fixture-connection")
         assert pending.cancelled
         pending.fire(even_if_cancelled=True)
         assert harness.requests == []
 
-        harness.controller.observe_context_percent(ROOT_THREAD, 20.0)
-        harness.controller.observe_protocol_event(compaction("item/completed"))
-        harness.controller.observe_context_percent(ROOT_THREAD, 75.0)
+        harness.controller.observe_context_percent(ROOT_THREAD, 20.0, connection_generation="fixture-connection")
+        harness.controller.observe_protocol_event(
+            compaction("item/completed"), connection_generation="fixture-connection"
+        )
+        harness.controller.observe_context_percent(ROOT_THREAD, 75.0, connection_generation="fixture-connection")
         assert len(harness.deferred_calls) == 1
 
-        harness.controller.observe_context_percent(ROOT_THREAD, 20.0)
-        harness.controller.observe_context_percent(ROOT_THREAD, 70.0)
+        harness.controller.observe_context_percent(ROOT_THREAD, 20.0, connection_generation="fixture-connection")
+        harness.controller.observe_context_percent(ROOT_THREAD, 70.0, connection_generation="fixture-connection")
         assert len(harness.deferred_calls) == 2
         harness.deferred_calls[-1].fire()
         assert len(harness.requests) == 1
@@ -243,10 +250,10 @@ def test_turn_completion_cancels_a_not_yet_admitted_steer() -> None:
     harness = SteeringHarness()
     try:
         harness.start_turn()
-        harness.controller.observe_context_percent(ROOT_THREAD, 70.0)
+        harness.controller.observe_context_percent(ROOT_THREAD, 70.0, connection_generation="fixture-connection")
         pending = harness.deferred_calls[-1]
 
-        harness.controller.observe_protocol_event(turn_completed("turn-1"))
+        harness.controller.observe_protocol_event(turn_completed("turn-1"), connection_generation="fixture-connection")
 
         assert pending.cancelled
         pending.fire(even_if_cancelled=True)
@@ -259,7 +266,7 @@ def test_a_replacement_active_turn_cancels_the_old_turns_pending_steer() -> None
     harness = SteeringHarness()
     try:
         harness.start_turn("old-turn")
-        harness.controller.observe_context_percent(ROOT_THREAD, 70.0)
+        harness.controller.observe_context_percent(ROOT_THREAD, 70.0, connection_generation="fixture-connection")
         pending = harness.deferred_calls[-1]
 
         harness.start_turn("replacement-turn")
@@ -284,12 +291,12 @@ def test_context_drop_while_a_hook_waits_rejects_at_final_admission() -> None:
 
     harness.pipeline._hooks = (block_context_steer,)
     harness.start_turn()
-    harness.controller.observe_context_percent(ROOT_THREAD, 70.0)
+    harness.controller.observe_context_percent(ROOT_THREAD, 70.0, connection_generation="fixture-connection")
     worker = Thread(target=harness.deferred_calls[-1].fire)
     worker.start()
     try:
         assert entered.wait(1)
-        harness.controller.observe_context_percent(ROOT_THREAD, 69.0)
+        harness.controller.observe_context_percent(ROOT_THREAD, 69.0, connection_generation="fixture-connection")
         release.set()
         worker.join(2)
         assert not worker.is_alive()
@@ -313,12 +320,12 @@ def test_indeterminate_delivery_is_not_recorded_as_success_or_retried() -> None:
     harness.pipeline.register(replace(original_target, deliver=indeterminate))
     try:
         harness.start_turn()
-        harness.controller.observe_context_percent(ROOT_THREAD, 70.0)
+        harness.controller.observe_context_percent(ROOT_THREAD, 70.0, connection_generation="fixture-connection")
         harness.deferred_calls[-1].fire()
 
         assert harness.controller.snapshot.last_completed_dispatch_id is None
         assert harness.pipeline.records[-1].status is DeliveryStatus.INDETERMINATE
-        harness.controller.observe_context_percent(ROOT_THREAD, 90.0)
+        harness.controller.observe_context_percent(ROOT_THREAD, 90.0, connection_generation="fixture-connection")
         assert len(harness.deferred_calls) == 1
     finally:
         harness.close()
@@ -342,7 +349,7 @@ def test_missing_binding_retries_then_delivers_once_without_a_new_usage_event():
     harness.pipeline.register(replace(harness.target, model_thread_id=lambda: binding[0]))
     try:
         harness.start_turn()
-        harness.controller.observe_context_percent(ROOT_THREAD, 70)
+        harness.controller.observe_context_percent(ROOT_THREAD, 70, connection_generation="fixture-connection")
         harness.deferred_calls[-1].fire()
         assert not harness.requests
         assert "reason=model_thread_unbound" in harness.logs[-2]
@@ -352,7 +359,7 @@ def test_missing_binding_retries_then_delivers_once_without_a_new_usage_event():
         harness.deferred_calls[-1].fire()
         assert len(harness.requests) == 1
         assert harness.controller.snapshot.last_completed_dispatch_id == harness.requests[0].dispatch_id
-        harness.controller.observe_context_percent(ROOT_THREAD, 90)
+        harness.controller.observe_context_percent(ROOT_THREAD, 90, connection_generation="fixture-connection")
         assert len(harness.deferred_calls) == 2
     finally:
         harness.close()
@@ -364,14 +371,14 @@ def test_missing_binding_retry_budget_is_finite_until_a_new_crossing():
     harness.pipeline.register(replace(harness.target, model_thread_id=lambda: None))
     try:
         harness.start_turn()
-        harness.controller.observe_context_percent(ROOT_THREAD, 70)
+        harness.controller.observe_context_percent(ROOT_THREAD, 70, connection_generation="fixture-connection")
         for _ in range(1 + len(CONTEXT_BINDING_RETRY_DELAYS_SECONDS)):
             harness.deferred_calls[-1].fire()
-            harness.controller.observe_context_percent(ROOT_THREAD, 90)
+            harness.controller.observe_context_percent(ROOT_THREAD, 90, connection_generation="fixture-connection")
         assert len(harness.deferred_calls) == 1 + len(CONTEXT_BINDING_RETRY_DELAYS_SECONDS)
         assert not harness.controller.snapshot.threshold_armed
-        harness.controller.observe_context_percent(ROOT_THREAD, 60)
-        harness.controller.observe_context_percent(ROOT_THREAD, 70)
+        harness.controller.observe_context_percent(ROOT_THREAD, 60, connection_generation="fixture-connection")
+        harness.controller.observe_context_percent(ROOT_THREAD, 70, connection_generation="fixture-connection")
         assert len(harness.deferred_calls) == 2 + len(CONTEXT_BINDING_RETRY_DELAYS_SECONDS)
     finally:
         harness.close()
@@ -385,15 +392,19 @@ def test_binding_retry_cannot_escape_cancellation(cancel):
     harness.pipeline.register(replace(harness.target, model_thread_id=lambda: binding[0]))
     try:
         harness.start_turn()
-        harness.controller.observe_context_percent(ROOT_THREAD, 70)
+        harness.controller.observe_context_percent(ROOT_THREAD, 70, connection_generation="fixture-connection")
         harness.deferred_calls[-1].fire()
         retry = harness.deferred_calls[-1]
         if cancel == "turn":
-            harness.controller.observe_protocol_event(turn_completed("turn-1"))
+            harness.controller.observe_protocol_event(
+                turn_completed("turn-1"), connection_generation="fixture-connection"
+            )
         elif cancel == "drop":
-            harness.controller.observe_context_percent(ROOT_THREAD, 60)
+            harness.controller.observe_context_percent(ROOT_THREAD, 60, connection_generation="fixture-connection")
         elif cancel == "compaction":
-            harness.controller.observe_protocol_event(compaction("item/started"))
+            harness.controller.observe_protocol_event(
+                compaction("item/started"), connection_generation="fixture-connection"
+            )
         elif cancel == "disconnect":
             harness.controller.reset_after_disconnect()
         else:
@@ -429,9 +440,9 @@ def test_no_retry_of_other_refusal_or_uncertain_outcome(admitted, outcome):
     harness.pipeline.register(replace(harness.target, deliver=deliver))
     try:
         harness.start_turn()
-        harness.controller.observe_context_percent(ROOT_THREAD, 70)
+        harness.controller.observe_context_percent(ROOT_THREAD, 70, connection_generation="fixture-connection")
         harness.deferred_calls[-1].fire()
-        harness.controller.observe_context_percent(ROOT_THREAD, 90)
+        harness.controller.observe_context_percent(ROOT_THREAD, 90, connection_generation="fixture-connection")
         assert len(harness.deferred_calls) == 1
         assert "sensitive fixture text" not in "\n".join(harness.logs)
     finally:
@@ -453,16 +464,17 @@ def test_reconnect_cannot_rearm_an_admitted_crossing(uncertain):
     harness.pipeline.register(replace(harness.target, deliver=deliver))
     try:
         harness.start_turn()
-        harness.controller.observe_context_percent(ROOT_THREAD, 70)
+        harness.controller.observe_context_percent(ROOT_THREAD, 70, connection_generation="fixture-connection")
         harness.deferred_calls[-1].fire()
         harness.controller.reset_after_disconnect()
+        harness.controller.bind_primary_thread(ROOT_THREAD, "fixture-connection")
         harness.controller.bind_root_thread(ROOT_THREAD)
         harness.start_turn()
-        harness.controller.observe_context_percent(ROOT_THREAD, 90)
+        harness.controller.observe_context_percent(ROOT_THREAD, 90, connection_generation="fixture-connection")
         assert len(harness.deferred_calls) == 1
         assert len(harness.requests) == 1
-        harness.controller.observe_context_percent(ROOT_THREAD, 60)
-        harness.controller.observe_context_percent(ROOT_THREAD, 70)
+        harness.controller.observe_context_percent(ROOT_THREAD, 60, connection_generation="fixture-connection")
+        harness.controller.observe_context_percent(ROOT_THREAD, 70, connection_generation="fixture-connection")
         assert len(harness.deferred_calls) == 2
     finally:
         harness.close()

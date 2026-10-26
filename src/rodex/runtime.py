@@ -2868,12 +2868,13 @@ def _run_runtime_service(
                 # can revoke a pending steer after usage drops below threshold.
                 projection_guard.observe("context-status-render", context_status.update, rendered_status)
 
-            def observe_context_percent(thread_id: str, context_percent: float) -> None:
+            def observe_context_percent(thread_id: str, context_percent: float, connection_generation: str) -> None:
                 if not projection_guard.observe(
                     "context-steering-percent",
                     context_threshold_steering.observe_context_percent,
                     thread_id,
                     context_percent,
+                    connection_generation=connection_generation,
                 ):
                     projection_guard.observe("context-steering-reset", context_threshold_steering.reset_after_disconnect)
 
@@ -2906,17 +2907,12 @@ def _run_runtime_service(
             live_event_tap.start()
             primary_output_projections = [
                 ("presentation-output", presentation_pipeline.observe_protocol_output),
-                ("context-steering", context_threshold_steering.observe_protocol_event),
-                ("context-status", live_context_observer.observe_protocol_event),
                 ("working-status", live_working_observer.observe_protocol_event),
             ]
             # These observers produce automatic model actions, not just pixels.
             # Lost observation must revoke pending work, even as native traffic
             # continues. Resets clear admission evidence before external cancel.
-            projection_failure_resets = {
-                "context-steering": context_threshold_steering.reset_after_disconnect,
-                "context-status": context_threshold_steering.reset_after_disconnect,
-            }
+            projection_failure_resets = {}
             if server_overloaded_recovery is not None:
                 primary_output_projections.append(
                     ("overload-recovery", server_overloaded_recovery.observe_protocol_event)
@@ -2989,6 +2985,8 @@ def _run_runtime_service(
                 event_tap=live_event_tap,
                 projection_guard=projection_guard,
                 prompt_expansion_display=prompt_expansion_display,
+                context_observer=live_context_observer,
+                context_steering=context_threshold_steering,
             )
             protocol_proxy.start()
             input_presentation = InputInterceptorPresentation(

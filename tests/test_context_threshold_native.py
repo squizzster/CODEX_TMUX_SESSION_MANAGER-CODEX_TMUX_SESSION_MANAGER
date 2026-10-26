@@ -102,9 +102,9 @@ def test_resumed_native_high_context_steers_running_turn_without_interrupting():
             controller = ContextThresholdSteeringController(pipeline, logger=log)
             controller.bind_root_thread(root)
 
-            def percentage(thread_id, percent):
+            def percentage(thread_id, percent, generation):
                 percentages.append(percent)
-                controller.observe_context_percent(thread_id, percent)
+                controller.observe_context_percent(thread_id, percent, connection_generation=generation)
 
             context = CodexContextStatusObserver(lambda _: None, on_context_percent=percentage)
             tap = CodexProtocolEventTap(native.root / "events.sock", peer_identity=TEST_PEER)
@@ -143,21 +143,18 @@ def test_resumed_native_high_context_steers_running_turn_without_interrupting():
                 dispatches.append(dispatch)
                 return InteractionResult(DeliveryStatus.COMPLETED)
 
-            def observe(_message, event):
-                controller.observe_protocol_event(event)
-                context.observe_protocol_event(event)
-
             proxy = CodexProtocolProxy(
                 control.protocol_proxy_socket_path,
                 app,
                 ToolCallCounter(lambda _: None),
-                observe,
                 interaction_pipeline=pipeline,
                 peer_identity=TEST_PEER,
                 app_server_process=process,
                 native_tui_process=LiveTestProcess(),
                 model_message_sender=deliver,
                 event_tap=tap,
+                context_observer=context,
+                context_steering=controller,
             )
             try:
                 tap.start()

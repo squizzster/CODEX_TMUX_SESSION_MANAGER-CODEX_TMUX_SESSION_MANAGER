@@ -23,6 +23,7 @@ class _PendingThread:
 class PrimaryThreadBinding:
     def __init__(self) -> None:
         self._selected_thread_id: str | None = None
+        self._selected_thread_metadata: dict[str, object] | None = None
         self._pending: dict[tuple[type, int | str], _PendingThread] = {}
         self._invalid = False
 
@@ -61,6 +62,15 @@ class PrimaryThreadBinding:
             return
         self._pending[key] = _PendingThread(expected_thread, ephemeral)
 
+    @property
+    def thread_metadata(self) -> dict[str, object] | None:
+        """Minimal accepted main metadata, hidden while selection is suspended."""
+        return (
+            dict(self._selected_thread_metadata)
+            if self.thread_id is not None and self._selected_thread_metadata is not None
+            else None
+        )
+
     def observe_response(self, message: Mapping[str, object]) -> None:
         if "method" in message or self._invalid:
             return
@@ -92,10 +102,14 @@ class PrimaryThreadBinding:
             return
         if not ephemeral:
             self._selected_thread_id = thread_id
+            self._selected_thread_metadata = {"id": thread_id, "ephemeral": False}
+            if isinstance(thread.get("path"), str):
+                self._selected_thread_metadata["path"] = thread["path"]
 
     def _invalidate(self) -> None:
         self._invalid = True
         self._selected_thread_id = None
+        self._selected_thread_metadata = None
         self._pending.clear()
 
     def invalidate_after_disconnect(self) -> None:

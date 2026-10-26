@@ -24,6 +24,7 @@ from websockets.sync.server import ServerConnection, unix_serve
 
 from .analytics_source_reader import AnalyticsSourceReadError, open_rollout_descriptor
 from .app_server_contract import CODEX_APP_SERVER
+from .context_threshold_steering import ContextThresholdSteeringController
 from .interaction_pipeline import (
     DeliveryStatus,
     InteractionOperation,
@@ -77,7 +78,7 @@ _WORKING_STATUS_EVENT_METHODS: Final = frozenset(
 )
 ProtocolEventCallback = Callable[[str | bytes, dict[str, Any] | None], None]
 ContextStatusCallback = Callable[[str], None]
-ContextPercentCallback = Callable[[str, float], None]
+ContextPercentCallback = Callable[[str, float, str], None]
 DisconnectCallback = Callable[[], None]
 ROLLOUT_CONTEXT_POLL_INTERVAL_SECONDS: Final = 0.25
 ROLLOUT_CONTEXT_MAX_IDLE_POLL_INTERVAL_SECONDS: Final = 2.0
@@ -508,7 +509,7 @@ class CodexContextStatusObserver:
         self,
         on_status_changed: ContextStatusCallback,
         *,
-        on_context_percent: ContextPercentCallback = lambda _thread_id, _context_percent: None,
+        on_context_percent: ContextPercentCallback = lambda _thread_id, _context_percent, _generation: None,
         animation_interval_seconds: float = CONTEXT_COMPACTION_FRAME_INTERVAL_SECONDS,
         compaction_watchdog_seconds: float = CONTEXT_COMPACTION_WATCHDOG_SECONDS,
         codex_sessions_root: Path | None = None,
@@ -538,6 +539,8 @@ class CodexContextStatusObserver:
         self._rollout_poll_interval_seconds = rollout_poll_interval_seconds
         self._rollout_max_idle_poll_interval_seconds = rollout_max_idle_poll_interval_seconds
         self._primary_thread_id: str | None = None
+        self._connection_generation: str | None = None
+        self._binding_revision = 0
         self._latest_context_status = context_status_segment(None)
         self._active_compaction_item_ids: set[str] = set()
         self._animation_generation = 0
@@ -550,11 +553,11 @@ class CodexContextStatusObserver:
         self._closed = False
         self._lock = Lock()
 
-    def observe_server_message(self, message: str | bytes) -> None:
+    def observe_server_message(self, message: str | bytes, *, connection_generation: str | None = None) -> None:
         """Consume one primary app-server-to-TUI protocol message."""
-        self.observe_protocol_event(_json_object(message))
+        self.observe_protocol_event(_json_object(message), connection_generation=connection_generation)
 
-    def observe_protocol_event(self, payload: dict[str, Any] | None) -> None:
+    def observe_protocol_event(self, payload: dict[str, Any] | None, *, connection_generation: str | None = None) -> None:
         """Consume the proxy's single decoded primary protocol event."""
         if payload is None:
             return
@@ -566,28 +569,14 @@ class CodexContextStatusObserver:
             _started_thread_id(params) if method == CODEX_APP_SERVER.thread_started_method else _event_thread_id(params)
         )
         if event_thread_id is not None:
-            self._wake_rollout_follower(event_thread_id)
+            self._wake_rollout_follower(event_thread_id, connection_generation)
         if method == CODEX_APP_SERVER.thread_started_method:
             thread_id = _started_thread_id(params)
             if thread_id is not None:
                 with self._lock:
-                    if self._closed or not self._accept_thread_locked(thread_id):
+                    if self._closed or not self._accept_thread_locked(thread_id, connection_generation):
                         return
-                    rollout_path = _started_thread_rollout_path(
-                        params,
-                        thread_id=thread_id,
-                        codex_sessions_root=self._codex_sessions_root,
-                    )
-                    if rollout_path is not None and self._rollout_thread is None:
-                        rollout_stop = Event()
-                        self._rollout_stop = rollout_stop
-                        self._rollout_thread = Thread(
-                            target=self._follow_rollout_context,
-                            args=(thread_id, rollout_path, rollout_stop),
-                            name="rodex-rollout-context-follower",
-                            daemon=True,
-                        )
-                        self._rollout_thread.start()
+                    self._start_rollout_follower_locked(params)
             return
         if method == "thread/tokenUsage/updated":
             context_percent = _context_percent(params)
@@ -596,19 +585,20 @@ class CodexContextStatusObserver:
                 return
             rendered_status = context_status_segment(context_percent)
             with self._lock:
-                if self._closed or not self._accept_thread_locked(thread_id):
+                if self._closed or not self._accept_thread_locked(thread_id, connection_generation):
                     return
                 self._latest_context_status = rendered_status
                 if not self._active_compaction_item_ids:
                     self._publish_status_locked(rendered_status)
-            self._publish_context_percent(thread_id, context_percent)
+                revision = self._binding_revision
+            self._publish_context_percent(thread_id, context_percent, connection_generation, revision)
             return
         if method == CODEX_APP_SERVER.turn_completed_method:
             thread_id = _event_thread_id(params)
             if thread_id is None:
                 return
             with self._lock:
-                if self._closed or not self._accept_thread_locked(thread_id):
+                if self._closed or not self._accept_thread_locked(thread_id, connection_generation):
                     return
                 self._finish_compaction_locked()
             return
@@ -623,7 +613,7 @@ class CodexContextStatusObserver:
             return
         if method == "item/started":
             with self._lock:
-                if self._closed or not self._accept_thread_locked(thread_id):
+                if self._closed or not self._accept_thread_locked(thread_id, connection_generation):
                     return
                 if item_id in self._active_compaction_item_ids:
                     return
@@ -635,7 +625,7 @@ class CodexContextStatusObserver:
                     self._new_animation_thread_locked().start()
             return
         with self._lock:
-            if self._closed or not self._accept_thread_locked(thread_id):
+            if self._closed or not self._accept_thread_locked(thread_id, connection_generation):
                 return
             if item_id not in self._active_compaction_item_ids:
                 return
@@ -648,9 +638,11 @@ class CodexContextStatusObserver:
         self,
         thread_id: str,
         context_percent: float,
+        *,
+        connection_generation: str | None = None,
     ) -> None:
         """Accept one authenticated primary-rollout context snapshot."""
-        self._observe_rollout_context_percent(thread_id, context_percent)
+        self._observe_rollout_context_percent(thread_id, context_percent, connection_generation=connection_generation)
 
     def _observe_rollout_context_percent(
         self,
@@ -658,20 +650,22 @@ class CodexContextStatusObserver:
         context_percent: float,
         *,
         rollout_stop: Event | None = None,
+        connection_generation: str | None = None,
     ) -> None:
         rendered_status = context_status_segment(context_percent)
         with self._lock:
             if (
                 self._closed
                 or (rollout_stop is not None and rollout_stop is not self._rollout_stop)
-                or not self._accept_thread_locked(thread_id)
+                or not self._accept_thread_locked(thread_id, connection_generation)
             ):
                 return
             status_changed = self._latest_context_status != rendered_status
             self._latest_context_status = rendered_status
             if status_changed and not self._active_compaction_item_ids:
                 self._publish_status_locked(rendered_status)
-        self._publish_context_percent(thread_id, context_percent)
+            revision = self._binding_revision
+        self._publish_context_percent(thread_id, context_percent, connection_generation, revision)
 
     def close(self) -> None:
         """Stop any live animation without delaying protocol shutdown."""
@@ -699,46 +693,78 @@ class CodexContextStatusObserver:
             rollout_thread.join(timeout=1)
 
     def reset_after_disconnect(self) -> None:
-        """Discard state and workers owned by the disconnected primary transport."""
+        """Revoke the disconnected source before any deferred projection can run."""
+        self.bind_primary_thread(None, None)
+
+    def bind_primary_thread(
+        self, thread_id: str | None, connection_generation: str | None, *, thread: dict[str, Any] | None = None
+    ) -> None:
+        """Only the proxy's correlated lifecycle owner may supply this identity."""
         with self._lock:
             if self._closed:
                 return
-            had_active_compaction = bool(self._active_compaction_item_ids)
-            self._active_compaction_item_ids.clear()
-            self._animation_generation += 1
-            if self._animation_stop is not None:
-                self._animation_stop.set()
-                self._animation_stop = None
-            animation_threads = tuple(self._animation_threads)
-            rollout_stop = self._rollout_stop
-            rollout_thread = self._rollout_thread
-            self._rollout_stop = None
-            self._rollout_thread = None
-            if rollout_stop is not None:
-                rollout_stop.set()
-            self._primary_thread_id = None
-            disconnected_status = context_status_segment(None)
-            should_publish = had_active_compaction or self._latest_context_status != disconnected_status
-            self._latest_context_status = disconnected_status
-            if should_publish:
-                self._publish_status_locked(disconnected_status)
-        if rollout_stop is not None:
-            self._signal_rollout_follower()
-        for animation_thread in animation_threads:
-            animation_thread.join(timeout=1)
-        if rollout_thread is not None:
-            rollout_thread.join(timeout=1)
-        with self._lock:
-            self._animation_threads = [thread for thread in self._animation_threads if thread.is_alive()]
+            if (thread_id, connection_generation) != (self._primary_thread_id, self._connection_generation):
+                self._binding_revision += 1
+                had_compaction = bool(self._active_compaction_item_ids)
+                self._active_compaction_item_ids.clear()
+                self._animation_generation += 1
+                if self._animation_stop is not None:
+                    self._animation_stop.set()
+                    self._animation_stop = None
+                if self._rollout_stop is not None:
+                    self._rollout_stop.set()
+                    self._signal_rollout_follower()
+                self._rollout_stop = None
+                self._rollout_thread = None
+                self._primary_thread_id = thread_id
+                self._connection_generation = connection_generation
+                unknown = context_status_segment(None)
+                changed = had_compaction or self._latest_context_status != unknown
+                self._latest_context_status = unknown
+                if changed:
+                    self._publish_status_locked(unknown)
+            if (
+                thread_id is not None
+                and connection_generation is not None
+                and thread is not None
+                and thread.get("id") == thread_id
+            ):
+                self._start_rollout_follower_locked({"thread": thread})
 
-    def _accept_thread_locked(self, thread_id: str) -> bool:
-        if self._primary_thread_id is None:
-            self._primary_thread_id = thread_id
-        return self._primary_thread_id == thread_id
+    def _start_rollout_follower_locked(self, params: dict[str, Any]) -> None:
+        thread_id = self._primary_thread_id
+        generation = self._connection_generation
+        if thread_id is None or generation is None or self._rollout_thread is not None:
+            return
+        rollout_path = _started_thread_rollout_path(
+            params, thread_id=thread_id, codex_sessions_root=self._codex_sessions_root
+        )
+        if rollout_path is None:
+            return
+        stop = Event()
+        self._rollout_stop = stop
+        self._rollout_thread = Thread(
+            target=self._follow_rollout_context,
+            args=(thread_id, rollout_path, stop, generation),
+            name="rodex-rollout-context-follower",
+            daemon=True,
+        )
+        self._rollout_thread.start()
 
-    def _wake_rollout_follower(self, thread_id: str) -> None:
+    def _accept_thread_locked(self, thread_id: str, connection_generation: str | None) -> bool:
+        return (
+            connection_generation is not None
+            and self._connection_generation == connection_generation
+            and self._primary_thread_id == thread_id
+        )
+
+    def _wake_rollout_follower(self, thread_id: str, connection_generation: str | None) -> None:
         with self._lock:
-            should_wake = not self._closed and self._primary_thread_id == thread_id and self._rollout_thread is not None
+            should_wake = (
+                not self._closed
+                and self._accept_thread_locked(thread_id, connection_generation)
+                and self._rollout_thread is not None
+            )
         if should_wake:
             self._signal_rollout_follower()
 
@@ -812,18 +838,29 @@ class CodexContextStatusObserver:
             # Status rendering must never interrupt the Codex protocol stream.
             return
 
-    def _publish_context_percent(self, thread_id: str, context_percent: float) -> None:
-        try:
-            self._on_context_percent(thread_id, context_percent)
-        except Exception:
-            # Derived policy work cannot interrupt the protocol or rollout follower.
-            return
+    def _publish_context_percent(
+        self, thread_id: str, context_percent: float, connection_generation: str | None, binding_revision: int
+    ) -> None:
+        with self._lock:
+            if (
+                self._closed
+                or binding_revision != self._binding_revision
+                or not self._accept_thread_locked(thread_id, connection_generation)
+            ):
+                return
+            assert connection_generation is not None
+            try:
+                self._on_context_percent(thread_id, context_percent, connection_generation)
+            except Exception:
+                # Derived policy work cannot interrupt protocol or rollout forwarding.
+                return
 
     def _follow_rollout_context(
         self,
         thread_id: str,
         rollout_path: Path,
         stop: Event,
+        connection_generation: str,
     ) -> None:
         """Follow bounded JSONL additions without retaining arbitrary rollout bodies."""
         wake_generation = self._rollout_wake_snapshot()
@@ -842,6 +879,7 @@ class CodexContextStatusObserver:
                             thread_id,
                             initial_percent,
                             rollout_stop=stop,
+                            connection_generation=connection_generation,
                         )
                     rollout.seek(initial_offset)
                     checkpoint = _rollout_follow_checkpoint(rollout)
@@ -898,6 +936,7 @@ class CodexContextStatusObserver:
                                     thread_id,
                                     context_percent,
                                     rollout_stop=stop,
+                                    connection_generation=connection_generation,
                                 )
                             continue
                         if len(line) > _ROLLOUT_CONTEXT_LINE_BYTES:
@@ -963,6 +1002,8 @@ class CodexProtocolProxy:
         event_tap: CodexProtocolEventTap | None = None,
         projection_guard: ProtocolProjectionGuard | None = None,
         prompt_expansion_display: PromptExpansionDisplay | None = None,
+        context_observer: CodexContextStatusObserver | None = None,
+        context_steering: ContextThresholdSteeringController | None = None,
     ) -> None:
         self._proxy_socket_path = proxy_socket_path
         self._app_server_socket_path = app_server_socket_path
@@ -976,6 +1017,8 @@ class CodexProtocolProxy:
         self._on_primary_disconnect = on_primary_disconnect
         self._event_tap = event_tap
         self._prompt_expansion_display = prompt_expansion_display
+        self._context_observer = context_observer
+        self._context_steering = context_steering
         self._projection_guard = projection_guard if projection_guard is not None else ProtocolProjectionGuard()
         self._primary_source_epoch: int | None = None
         self.interactions = interaction_pipeline if interaction_pipeline is not None else SessionInteractionPipeline()
@@ -989,6 +1032,8 @@ class CodexProtocolProxy:
         self._primary_tui_connection: Any | None = None
         self._primary_thread_binding = PrimaryThreadBinding()
         self._primary_binding: str | None = None
+        self._primary_context_identity: tuple[str | None, str | None] = (None, None)
+        self._primary_context_generation: str | None = None
         self._primary_connection_released = Event()
         self._primary_connection_released.set()
         self._server: Any | None = None
@@ -1119,7 +1164,7 @@ class CodexProtocolProxy:
                         event = _json_object(message)
                         # Establish identity before the TUI can act on its reply or
                         # observers schedule model input. This is not a projection.
-                        self._observe_primary_response(event, tui_connection)
+                        context_generation = self._observe_primary_response(event, tui_connection)
                         if not self._send_primary_tui_message(message, expected_connection=tui_connection):
                             return InteractionResult(DeliveryStatus.FAILED, "primary connection is unavailable")
                         if self._event_tap is not None and source_epoch is not None:
@@ -1130,6 +1175,7 @@ class CodexProtocolProxy:
                                 # must end continuity, never strand exact waiters.
                                 self._event_tap.reset_after_disconnect(source_epoch=source_epoch)
                                 raise
+                        self._project_primary_context(event, tui_connection, connection_generation=context_generation)
                         self._projection_guard.observe(
                             "tool-count", self._tool_call_counter.observe_protocol_event, event
                         )
@@ -1167,11 +1213,7 @@ class CodexProtocolProxy:
 
                 def invalidate_primary_source() -> None:
                     if is_primary_connection:
-                        with self._connection_lock:
-                            if self._primary_tui_connection is tui_connection:
-                                self._primary_thread_binding.invalidate_after_disconnect()
-                                if self._prompt_expansion_display is not None:
-                                    self._prompt_expansion_display.release_source(tui_connection)
+                        self._invalidate_primary_binding(tui_connection)
                     if self._event_tap is not None and source_epoch is not None:
                         self._event_tap.reset_after_disconnect(source_epoch=source_epoch)
 
@@ -1308,11 +1350,75 @@ class CodexProtocolProxy:
         with self._connection_lock:
             if event is not None and self._primary_tui_connection is connection:
                 self._primary_thread_binding.observe_request(event)
+                self._sync_primary_context_locked()
 
-    def _observe_primary_response(self, event: dict[str, Any] | None, connection: Any) -> None:
+    def _invalidate_primary_binding(self, connection: Any) -> None:
+        """Input EOF revokes authority before deferred transport cleanup."""
+        with self._connection_lock:
+            if self._primary_tui_connection is connection:
+                self._primary_thread_binding.invalidate_after_disconnect()
+                self._sync_primary_context_locked()
+                if self._prompt_expansion_display is not None:
+                    self._prompt_expansion_display.release_source(connection)
+
+    def _observe_primary_response(self, event: dict[str, Any] | None, connection: Any) -> str | None:
         with self._connection_lock:
             if event is not None and self._primary_tui_connection is connection:
                 self._primary_thread_binding.observe_response(event)
+                self._sync_primary_context_locked()
+                return self._primary_context_generation
+        return None
+
+    def _sync_primary_context_locked(self) -> None:
+        thread_id = self._primary_thread_binding.thread_id
+        identity = (self._primary_binding, thread_id)
+        if identity != self._primary_context_identity:
+            self._primary_context_identity = identity
+            # A suspended/rebound selection on the same connection also revokes
+            # callbacks. Thread UUID equality cannot preserve old authority.
+            self._primary_context_generation = uuid.uuid4().hex if thread_id is not None else None
+        generation = self._primary_context_generation
+        if self._context_steering is not None:
+            self._projection_guard.observe(
+                "context-binding-steering", self._context_steering.bind_primary_thread, thread_id, generation
+            )
+        if self._context_observer is not None:
+            self._projection_guard.observe(
+                "context-binding-status",
+                self._context_observer.bind_primary_thread,
+                thread_id,
+                generation,
+                thread=self._primary_thread_binding.thread_metadata,
+            )
+
+    def _project_primary_context(
+        self, event: dict[str, Any] | None, connection: Any, *, connection_generation: str | None
+    ) -> None:
+        # Keep source validation and projection in one authority interval. An old
+        # output callback cannot enter a reconnected binding with the same UUID.
+        with self._connection_lock:
+            if (
+                self._primary_tui_connection is not connection
+                or self._primary_context_generation != connection_generation
+            ):
+                return
+            for name, participant in (
+                ("context-steering", self._context_steering),
+                ("context-status", self._context_observer),
+            ):
+                if (
+                    participant is not None
+                    and not self._projection_guard.observe(
+                        name,
+                        participant.observe_protocol_event,
+                        event,
+                        connection_generation=connection_generation,
+                    )
+                    and self._context_steering is not None
+                ):
+                    self._projection_guard.observe(
+                        "context-steering-reset", self._context_steering.reset_after_disconnect
+                    )
 
     def _claim_primary_connection(self, tui_connection: Any) -> bool:
         with self._primary_lifecycle_lock, self._connection_lock:
@@ -1322,6 +1428,7 @@ class CodexProtocolProxy:
             self._primary_tui_connection = tui_connection
             self._primary_thread_binding = PrimaryThreadBinding()
             self._primary_binding = uuid.uuid4().hex
+            self._sync_primary_context_locked()
             self._primary_connection_released.clear()
             return True
 
@@ -1347,6 +1454,7 @@ class CodexProtocolProxy:
                     self._primary_tui_connection = None
                     self._primary_thread_binding = PrimaryThreadBinding()
                     self._primary_binding = None
+                    self._sync_primary_context_locked()
                     if self._prompt_expansion_display is not None:
                         self._prompt_expansion_display.release_source(tui_connection)
                     released = True

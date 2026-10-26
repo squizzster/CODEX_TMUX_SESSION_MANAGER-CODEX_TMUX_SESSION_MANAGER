@@ -105,6 +105,8 @@ class ContextThresholdSteeringController:
         self._deferred_call_factory = deferred_call_factory
         self._lock = Lock()
         self._root_thread_id: str | None = None
+        self._registered_thread_id: str | None = None
+        self._connection_generation: str | None = None
         self._dispatch_ready = False
         self._active_turn_id: str | None = None
         self._context_percent: float | None = None
@@ -143,21 +145,38 @@ class ContextThresholdSteeringController:
         with self._lock:
             if self._closed:
                 return
-            if self._root_thread_id != thread_id:
+            self._registered_thread_id = thread_id
+            self._dispatch_ready = self._root_thread_id == thread_id and self._connection_generation is not None
+            if not self._dispatch_ready:
                 _cancelled, cancelled_call = self._clear_pending_locked()
-                self._root_thread_id = thread_id
-                self._active_turn_id = None
-                self._context_percent = None
-                self._threshold_armed = True
-                self._binding_retry_count = 0
-                self._active_compaction_item_ids.clear()
-            self._dispatch_ready = True
             scheduled = self._schedule_if_ready_locked()
         if cancelled_call is not None:
             cancelled_call.cancel()
         self._start_scheduled(scheduled)
 
-    def observe_protocol_event(self, event: Mapping[str, object] | None) -> None:
+    def bind_primary_thread(self, thread_id: str | None, connection_generation: str | None) -> None:
+        """Use correlated proxy authority; a notification cannot select main."""
+        with self._lock:
+            if self._closed or (thread_id, connection_generation) == (self._root_thread_id, self._connection_generation):
+                return
+            _cancelled, cancelled_call = self._clear_pending_locked()
+            if thread_id is not None and thread_id != self._registered_thread_id:
+                self._threshold_armed = True
+            self._root_thread_id = thread_id
+            self._connection_generation = connection_generation
+            self._dispatch_ready = (
+                connection_generation is not None and thread_id is not None and thread_id == self._registered_thread_id
+            )
+            self._active_turn_id = None
+            self._context_percent = None
+            self._binding_retry_count = 0
+            self._active_compaction_item_ids.clear()
+        if cancelled_call is not None:
+            cancelled_call.cancel()
+
+    def observe_protocol_event(
+        self, event: Mapping[str, object] | None, *, connection_generation: str | None = None
+    ) -> None:
         """Track the exact main active turn and compaction state without blocking."""
         if event is None:
             return
@@ -165,24 +184,13 @@ class ContextThresholdSteeringController:
         params = event.get("params")
         if not isinstance(method, str) or not isinstance(params, Mapping):
             return
-        if method == CODEX_APP_SERVER.thread_started_method:
-            thread = params.get("thread")
-            thread_id = thread.get("id") if isinstance(thread, Mapping) else None
-            if isinstance(thread_id, str) and thread_id:
-                with self._lock:
-                    if not self._closed and self._root_thread_id is None:
-                        # The first primary thread is observed before durable
-                        # registration. It may accumulate state but cannot dispatch.
-                        self._root_thread_id = thread_id
-            return
-
         thread_id = params.get("threadId")
         if not isinstance(thread_id, str) or not thread_id:
             return
         cancelled_call: DeferredCall | None = None
         scheduled: tuple[ContextThresholdSteerAttempt, DeferredCall] | None = None
         with self._lock:
-            if self._closed or thread_id != self._root_thread_id:
+            if self._closed or not self._accept_binding_locked(thread_id, connection_generation):
                 return
             if method == CODEX_APP_SERVER.turn_started_method:
                 turn_id = _turn_id(params)
@@ -226,7 +234,9 @@ class ContextThresholdSteeringController:
             cancelled_call.cancel()
         self._start_scheduled(scheduled)
 
-    def observe_context_percent(self, thread_id: str, context_percent: float) -> None:
+    def observe_context_percent(
+        self, thread_id: str, context_percent: float, *, connection_generation: str | None = None
+    ) -> None:
         """Consume one authenticated exact-percentage observation for main."""
         if not isinstance(thread_id, str) or not thread_id:
             raise ValueError("context observation requires a thread identity")
@@ -241,7 +251,7 @@ class ContextThresholdSteeringController:
         cancelled_call: DeferredCall | None = None
         scheduled: tuple[ContextThresholdSteerAttempt, DeferredCall] | None = None
         with self._lock:
-            if self._closed or thread_id != self._root_thread_id:
+            if self._closed or not self._accept_binding_locked(thread_id, connection_generation):
                 return
             # Usage snapshots observed during compaction cannot establish a new
             # crossing. Wait for a post-compaction observation to rearm.
@@ -257,6 +267,13 @@ class ContextThresholdSteeringController:
         if cancelled_call is not None:
             cancelled_call.cancel()
         self._start_scheduled(scheduled)
+
+    def _accept_binding_locked(self, thread_id: str, connection_generation: str | None) -> bool:
+        return (
+            connection_generation is not None
+            and connection_generation == self._connection_generation
+            and thread_id == self._root_thread_id
+        )
 
     def admit_dispatch(self, request: InteractionRequest) -> None:
         """Recheck threshold authority at the final exact-control send boundary."""
@@ -291,12 +308,15 @@ class ContextThresholdSteeringController:
             self._clear_pending_locked()
 
     def reset_after_disconnect(self) -> None:
-        """Discard observations, retaining root and already consumed crossings."""
+        """Revoke source authority, retaining registration and consumed crossings."""
         cancelled_call: DeferredCall | None = None
         with self._lock:
             if self._closed:
                 return
             _cancelled, cancelled_call = self._clear_pending_locked()
+            self._root_thread_id = None
+            self._connection_generation = None
+            self._dispatch_ready = False
             self._active_turn_id = None
             self._context_percent = None
             # Reconnect is not evidence of a new below-to-high crossing. Keep an

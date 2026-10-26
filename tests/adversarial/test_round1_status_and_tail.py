@@ -65,7 +65,8 @@ def test_round1_compaction_resets_on_terminal_turn_when_completion_is_lost() -> 
         publish,
         animation_interval_seconds=60,
     )
-    observer.observe_protocol_event(_compaction_event("item/started"))
+    observer.bind_primary_thread("thread-1", "fixture-connection")
+    observer.observe_protocol_event(_compaction_event("item/started"), connection_generation="fixture-connection")
     try:
         assert first_frame.wait(1)
         observer.observe_protocol_event(
@@ -75,9 +76,10 @@ def test_round1_compaction_resets_on_terminal_turn_when_completion_is_lost() -> 
                     "threadId": "thread-1",
                     "turn": {"id": "turn-1", "status": "completed"},
                 },
-            }
+            },
+            connection_generation="fixture-connection",
         )
-        observer.observe_rollout_context_percent("thread-1", 10.0)
+        observer.observe_rollout_context_percent("thread-1", 10.0, connection_generation="fixture-connection")
         assert "Context: 10%" in observed[-1]
         assert "COMPACTING" not in observed[-1]
     finally:
@@ -100,6 +102,7 @@ def test_round1_compaction_animation_has_an_internal_watchdog() -> None:
     observed: list[str] = []
     stop = VirtualStop()
     observer = CodexContextStatusObserver(observed.append, animation_interval_seconds=0.1)
+    observer.bind_primary_thread("thread-1", "fixture-connection")
     observer._animation_generation = 1
     observer._active_compaction_item_ids.add("compact-1")
     observer._monotonic = lambda: stop.elapsed
@@ -123,6 +126,7 @@ def test_round1_primary_disconnect_immediately_resets_compaction(
             first_frame.set()
 
     observer = CodexContextStatusObserver(publish, animation_interval_seconds=60)
+    observer.bind_primary_thread("thread-1", "fixture-connection")
 
     def reset_compaction() -> None:
         nonlocal disconnects
@@ -140,15 +144,15 @@ def test_round1_primary_disconnect_immediately_resets_compaction(
     )
     connection = object()
     assert proxy._claim_primary_connection(connection)
-    observer.observe_protocol_event(_compaction_event("item/started"))
+    observer.observe_protocol_event(_compaction_event("item/started"), connection_generation="fixture-connection")
     try:
         assert first_frame.wait(1)
         proxy._release_primary_connection(connection)
         proxy._release_primary_connection(connection)
-        observer.observe_rollout_context_percent("thread-1", 10.0)
+        observer.observe_rollout_context_percent("thread-1", 10.0, connection_generation="fixture-connection")
 
         assert disconnects == 1
-        assert "Context: 10%" in observed[-1]
+        assert "Context: --" in observed[-1]
         assert "COMPACTING" not in observed[-1]
     finally:
         observer.close()
@@ -169,6 +173,7 @@ def test_round1_primary_disconnect_replaces_thread_and_rollout_follower(
         codex_sessions_root=sessions_root,
         rollout_poll_interval_seconds=0.01,
     )
+    observer.bind_primary_thread("thread-old", "fixture-connection")
     proxy = CodexProtocolProxy(
         tmp_path / "proxy.sock",
         tmp_path / "app.sock",
@@ -185,9 +190,10 @@ def test_round1_primary_disconnect_replaces_thread_and_rollout_follower(
         {
             "method": "thread/started",
             "params": {"thread": {"id": "thread-old", "path": str(old_rollout)}},
-        }
+        },
+        connection_generation="fixture-connection",
     )
-    observer.observe_rollout_context_percent("thread-old", 10.0)
+    observer.observe_rollout_context_percent("thread-old", 10.0, connection_generation="fixture-connection")
     with observer._lock:
         old_follower = observer._rollout_thread
     assert old_follower is not None
@@ -195,16 +201,19 @@ def test_round1_primary_disconnect_replaces_thread_and_rollout_follower(
 
     try:
         proxy._release_primary_connection(old_connection)
+        old_follower.join(timeout=1)
         old_alive_after_disconnect = old_follower.is_alive()
 
         assert proxy._claim_primary_connection(new_connection)
+        observer.bind_primary_thread("thread-new", "replacement-connection")
         observer.observe_protocol_event(
             {
                 "method": "thread/started",
                 "params": {"thread": {"id": "thread-new", "path": str(new_rollout)}},
-            }
+            },
+            connection_generation="replacement-connection",
         )
-        observer.observe_rollout_context_percent("thread-new", 70.0)
+        observer.observe_rollout_context_percent("thread-new", 70.0, connection_generation="replacement-connection")
         with observer._lock:
             accepted_thread_id = observer._primary_thread_id
             new_follower = observer._rollout_thread
@@ -232,6 +241,7 @@ def test_round1_twenty_idle_rollout_followers_have_bounded_metadata_only_work(
         lambda _status: None,
         codex_sessions_root=sessions_root,
     )
+    observer.bind_primary_thread("thread-1", "fixture-connection")
     real_fstat = protocol_proxy_module.os.fstat
     real_stat = protocol_proxy_module.os.stat
     real_boundary_hash = protocol_proxy_module._rollout_boundary_sha256
@@ -288,7 +298,9 @@ def test_round1_twenty_idle_rollout_followers_have_bounded_metadata_only_work(
             advance_virtual_time,
         )
         with pytest.raises(VirtualMinuteComplete):
-            observer._follow_rollout_context(f"thread-{follower_index}", rollout_path, Event())
+            observer._follow_rollout_context(
+                f"thread-{follower_index}", rollout_path, Event(), connection_generation="fixture-connection"
+            )
         intervals_by_follower.append(tuple(intervals))
 
     observer.close()
@@ -327,6 +339,7 @@ def test_round1_invalid_rollout_path_retries_with_bounded_idle_backoff(
         lambda _status: None,
         codex_sessions_root=sessions_root,
     )
+    observer.bind_primary_thread("thread-1", "fixture-connection")
     intervals: list[float] = []
 
     def exhaust_retry_budget(
@@ -345,7 +358,7 @@ def test_round1_invalid_rollout_path_retries_with_bounded_idle_backoff(
         exhaust_retry_budget,
     )
     with pytest.raises(RetryBudgetComplete):
-        observer._follow_rollout_context("thread-1", rollout_path, Event())
+        observer._follow_rollout_context("thread-1", rollout_path, Event(), connection_generation="fixture-connection")
     observer.close()
 
     assert intervals == [
@@ -393,11 +406,13 @@ def test_round1_protocol_event_wakes_an_idle_rollout_follower(
         rollout_poll_interval_seconds=0.01,
         rollout_max_idle_poll_interval_seconds=0.5,
     )
+    observer.bind_primary_thread("thread-1", "fixture-connection")
     observer.observe_protocol_event(
         {
             "method": "thread/started",
             "params": {"thread": {"id": "thread-1", "path": str(rollout_path)}},
-        }
+        },
+        connection_generation="fixture-connection",
     )
     try:
         assert restored.wait(1)
@@ -427,7 +442,8 @@ def test_round1_protocol_event_wakes_an_idle_rollout_follower(
                     "turnId": "turn-1",
                     "item": {"type": "agentMessage", "id": "message-1"},
                 },
-            }
+            },
+            connection_generation="fixture-connection",
         )
         assert advanced.wait(0.3)
         assert time.monotonic() - started < 0.3
@@ -474,11 +490,13 @@ def test_round1_rollout_replacement_is_detected_within_the_idle_poll_ceiling(
         rollout_poll_interval_seconds=0.005,
         rollout_max_idle_poll_interval_seconds=0.05,
     )
+    observer.bind_primary_thread("thread-1", "fixture-connection")
     observer.observe_protocol_event(
         {
             "method": "thread/started",
             "params": {"thread": {"id": "thread-1", "path": str(rollout_path)}},
-        }
+        },
+        connection_generation="fixture-connection",
     )
     try:
         assert restored.wait(1)

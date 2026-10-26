@@ -211,20 +211,24 @@ def test_context_observer_projects_last_usage_for_only_the_primary_thread() -> N
     context_observations: list[tuple[str, float]] = []
     observer = CodexContextStatusObserver(
         observed.append,
-        on_context_percent=lambda thread_id, percent: context_observations.append((thread_id, percent)),
+        on_context_percent=lambda thread_id, percent, _generation: context_observations.append((thread_id, percent)),
     )
+    observer.bind_primary_thread("thread-1", "fixture-connection")
     observer.observe_server_message(
         json.dumps(
             {
                 "method": "thread/started",
                 "params": {"thread": {"id": "thread-1", "ephemeral": False}},
             }
-        )
+        ),
+        connection_generation="fixture-connection",
     )
 
-    observer.observe_server_message(token_usage_updated(206_720, thread_id="thread-2"))
-    observer.observe_server_message(token_usage_updated(180_880))
-    observer.observe_server_message("not-json")
+    observer.observe_server_message(
+        token_usage_updated(206_720, thread_id="thread-2"), connection_generation="fixture-connection"
+    )
+    observer.observe_server_message(token_usage_updated(180_880), connection_generation="fixture-connection")
+    observer.observe_server_message("not-json", connection_generation="fixture-connection")
     observer.close()
 
     assert len(observed) == 1
@@ -254,17 +258,19 @@ def test_context_observer_follows_primary_rollout_during_a_live_turn(
 
     observer = CodexContextStatusObserver(
         record_status,
-        on_context_percent=lambda thread_id, percent: context_observations.append((thread_id, percent)),
+        on_context_percent=lambda thread_id, percent, _generation: context_observations.append((thread_id, percent)),
         codex_sessions_root=sessions_root,
         rollout_poll_interval_seconds=0.005,
     )
+    observer.bind_primary_thread("thread-1", "fixture-connection")
     observer.observe_protocol_event(
         {
             "method": "thread/started",
             "params": {
                 "thread": {"id": "thread-1", "path": str(rollout_path), "ephemeral": False},
             },
-        }
+        },
+        connection_generation="fixture-connection",
     )
     try:
         assert restored.wait(1)
@@ -294,6 +300,7 @@ def test_context_observer_rejects_a_rollout_outside_the_codex_sessions_root(
         codex_sessions_root=sessions_root,
         rollout_poll_interval_seconds=0.005,
     )
+    observer.bind_primary_thread("thread-1", "fixture-connection")
 
     observer.observe_protocol_event(
         {
@@ -301,7 +308,8 @@ def test_context_observer_rejects_a_rollout_outside_the_codex_sessions_root(
             "params": {
                 "thread": {"id": "thread-1", "path": str(rollout_path), "ephemeral": False},
             },
-        }
+        },
+        connection_generation="fixture-connection",
     )
     observer.close()
 
@@ -321,17 +329,21 @@ def test_context_observer_animates_compaction_then_restores_fresh_usage() -> Non
         record_status,
         animation_interval_seconds=0.005,
     )
-    observer.observe_server_message(token_usage_updated(193_800))
-    observer.observe_server_message(item_started("contextCompaction", "compact-1"))
+    observer.bind_primary_thread("thread-1", "fixture-connection")
+    observer.observe_server_message(token_usage_updated(193_800), connection_generation="fixture-connection")
+    observer.observe_server_message(
+        item_started("contextCompaction", "compact-1"), connection_generation="fixture-connection"
+    )
     try:
         assert two_frames_seen.wait(1)
-        observer.observe_rollout_context_percent("thread-1", 10.0)
+        observer.observe_rollout_context_percent("thread-1", 10.0, connection_generation="fixture-connection")
         assert "COMPACTING" in observed[-1]
         observer.observe_server_message(
             item_started("contextCompaction", "compact-1").replace(
                 '"item/started"',
                 '"item/completed"',
-            )
+            ),
+            connection_generation="fixture-connection",
         )
         assert "Context: 10% |" in observed[-1]
     finally:

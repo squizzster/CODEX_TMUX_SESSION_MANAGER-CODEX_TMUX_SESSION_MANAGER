@@ -407,6 +407,27 @@ Generic `interacted` cannot identify the operation. Unbound turn-producing reque
 wait FIFO for distinct target turns; `send_message` cannot acquire a later turn or
 terminal recap. [SQL provenance](SQL_SCHEMA.md#agent-requests-and-trace) is authoritative.
 
+The producer reducer keys live correlation by connection epoch, root and item.
+Invocation recipients have an independent target index, so either arrival order
+and invocation-only target completion can retire prompts. Compact activity,
+completion and duplicate metadata survive payload retirement; they contain no
+prompt aliases. Multi-recipient payloads remain until every recipient settles.
+The proxy fences delivery and current-turn recovery to its verified primary source;
+old callbacks and resets cannot populate or clear a replacement epoch.
+
+The [observer contract](../src/rodex/observer_contract.py) caps correlation at 512
+metadata records, 128 pending payloads totaling 512 KiB, 64 targets per record,
+and 256 known agents. Five-minute retention expires on incoming-event access;
+there is no idle expiry timer. Byte/count limits still hold during idle periods.
+Any retention loss marks snapshot coverage incomplete. For the rest of that epoch,
+an unseen request ID cannot prove new work: the reducer consults the event tap's
+current active-turn evidence for that exact source. It may recover current work,
+but cannot attach the delayed request's prompt to that turn. Unavailable or absent
+active-turn evidence does not establish completion. Fresh native lifecycle events
+continue work tracking; reconnect starts a fresh correlation epoch.
+Acceptance inspects private payloads as well as visible snapshots in
+[correlation tests](../tests/test_observer_correlation.py).
+
 Live collaboration prompts and exact same-turn root user text have different labels
 and provenance. Missing plaintext stays unavailable, never inferred from replies.
 The allowed text/privacy boundary is in [security](SECURITY.md#content-and-privacy).

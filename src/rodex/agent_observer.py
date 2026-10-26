@@ -51,7 +51,7 @@ from .observer_projection import (
     project_subagent_activity_event,
     project_user_message_event,
 )
-from .observer_state import ObserverStateReducer
+from .observer_state import ActiveTurnReader, ObserverStateReducer
 from .protocol_proxy import AGENT_OBSERVER_EVENT_STREAM_PATH
 from .runtime_endpoint import ExclusiveUnixEndpoint
 from .runtime_peer import RuntimePeerIdentity, RuntimePeerIdentityError, verified_runtime_connection
@@ -319,6 +319,7 @@ class AgentObserverCoordinator:
         *,
         runner: Runner = subprocess.run,
         cursor_reader: CursorReader = read_rodex_agent_trace_cursor,
+        active_turn_reader: ActiveTurnReader = lambda _target: (False, None),
         event_sender: EventSender | None = None,
         python_executable: str = sys.executable,
         interaction_pipeline: SessionInteractionPipeline | None = None,
@@ -339,12 +340,14 @@ class AgentObserverCoordinator:
             snapshot_publisher=self._publish_current_observer_snapshot,
         )
         self._cursor_reader = cursor_reader
-        self._observer_state = ObserverStateReducer.producer()
+        self._observer_state = ObserverStateReducer.producer(active_turn_reader=active_turn_reader)
         self._database_path: Path | None = None
         self._rodex_sessions_id: int | None = None
         self._rodex_session_id: str | None = None
         self._root_thread_id: uuid.UUID | None = None
         self._lifecycle_lock = RLock()
+        self._bound_source_generation: str | None = None
+        self._source_was_bound = False
         self._closed = False
         self._pending_pane_close = False
         self._pane_close_attempts = 0
@@ -388,12 +391,28 @@ class AgentObserverCoordinator:
         self._rodex_sessions_id = rodex_sessions_id
         self._rodex_session_id = rodex_session_id
         self._root_thread_id = uuid.UUID(str(root_thread_id))
+        self._observer_state.bind_root_thread(str(self._root_thread_id))
 
-    def observe_protocol_event(self, event: Mapping[str, object] | None) -> None:
+    def bind_protocol_source(self, source_generation: str, *, active_turn_reader: ActiveTurnReader) -> None:
+        """Fence producer correlation and recovery to the verified primary source."""
+        with self._lifecycle_lock:
+            if self._bound_source_generation not in {None, source_generation}:
+                self.reset_after_disconnect()
+            self._bound_source_generation = source_generation
+            self._source_was_bound = True
+            self._observer_state.bind_active_turn_reader(active_turn_reader)
+
+    def observe_protocol_event(self, event: Mapping[str, object] | None, *, source_generation: str | None = None) -> None:
         """Reduce one event, then reconcile the pane with the running-agent count."""
         with self._lifecycle_lock:
-            if self._closed:
+            if (
+                self._closed
+                or source_generation != self._bound_source_generation
+                or (self._source_was_bound and self._bound_source_generation is None)
+            ):
                 return
+            if self._observer_state.expire_protocol_state():
+                self._send_observer_snapshot(self._observer_state.snapshot())
             previously_running = self._observer_state.running_agent_count
             initial_event = self._observe_protocol_event_locked(event)
             self._reconcile_observer_pane(previously_running, initial_event)
@@ -432,8 +451,6 @@ class AgentObserverCoordinator:
         item_id = str(item["id"])
         target_thread_id = str(item["agent_thread_id"])
         collaboration_invocation = self._observer_state.collaboration_invocation(item_id)
-        if collaboration_invocation is not None:
-            projected["collaboration_invocation"] = collaboration_invocation["item"]
         is_new_spawn = item["activity_kind"] == "started"
         is_known = self._observer_state.is_known_activity(item_id)
         target_is_known = self._observer_state.knows_agent(target_thread_id)
@@ -443,24 +460,35 @@ class AgentObserverCoordinator:
             assert self._rodex_sessions_id is not None
             cursor = self._cursor_reader(self._rodex_sessions_id, self._database_path)
             projected["after_event_id"] = None if cursor is None else str(cursor)
-        self._observer_state.remember_activity(
-            item_id,
-            projected,
-            new_spawn=is_new_spawn,
-        )
+        if not self._observer_state.remember_activity(item_id, projected):
+            return
+        if self._observer_state.correlation_is_uncertain(item_id):
+            if self._observer_state.start_agent_work(target_thread_id, request_id=item_id):
+                self._publish_agent_work_started(target_thread_id)
+            self._send_observer_snapshot(self._observer_state.snapshot())
+            return
+        if collaboration_invocation is not None:
+            projected["collaboration_invocation"] = collaboration_invocation["item"]
         tool_name = _projected_invocation_tool_name(collaboration_invocation)
         completed_work = False
         if item["activity_kind"] in {"completed", "failed", "aborted", "shutdown"}:
-            completed_work = self._observer_state.finish_agent_work(target_thread_id, request_id=item_id)
+            completed_work = self._observer_state.finish_agent_work(
+                target_thread_id, request_id=item_id
+            ) or not self._observer_state.tracks_target(target_thread_id)
         elif is_new_spawn:
             self._observer_state.start_agent_work(target_thread_id, request_id=item_id)
         has_root_request_context = tool_name in _TURN_REQUEST_KINDS or tool_name == ("collaboration.send_message")
-        request_event = self._root_request_context_event(projected) if has_root_request_context else None
+        request_event = (
+            self._root_request_context_event(projected)
+            if has_root_request_context
+            and not self._observer_state.root_request_context_was_sent(item_id, target_thread_id)
+            else None
+        )
         if request_event is not None:
             projected["root_request_context_follows"] = True
         self._send_observer_event(projected)
         if request_event is not None:
-            self._observer_state.mark_root_request_context_sent(item_id)
+            self._observer_state.mark_root_request_context_sent(item_id, target_thread_id)
             self._send_observer_event(request_event)
         self._prune_completed_activity(projected)
         if completed_work:
@@ -479,33 +507,45 @@ class AgentObserverCoordinator:
         if item.get("sender_thread_id") != str(self._root_thread_id):
             return
         item_id = str(item["id"])
-        self._observer_state.remember_collaboration_invocation(item_id, invocation)
-        activity = self._observer_state.activity(item_id)
-        if activity is not None:
-            activity["collaboration_invocation"] = item
-        receiver_ids = item.get("receiver_thread_ids")
-        if item.get("tool_name") == "collaboration.followup_task" and item.get("status") == "completed":
-            for target in receiver_ids if isinstance(receiver_ids, list) else ():
-                if isinstance(target, str) and self._observer_state.knows_agent(target):
-                    self._observer_state.start_agent_work(target, request_id=item_id)
-                    if self._observer_state.tracks_target(target):
-                        self._publish_agent_work_started(target)
-        targets_tracked = isinstance(receiver_ids, list) and any(
-            isinstance(target, str) and self._observer_state.tracks_target(target) for target in receiver_ids
-        )
-        if activity is None and not targets_tracked:
-            if invocation.get("method") == "item/completed":
-                self._observer_state.forget_collaboration_invocation(item_id)
+        if not self._observer_state.remember_collaboration_invocation(item_id, invocation):
             return
-        request_event = None
-        if activity is not None and not self._observer_state.root_request_context_was_sent(item_id):
-            request_event = self._root_request_context_event(activity)
-            if request_event is not None:
+        try:
+            receiver_ids = item.get("receiver_thread_ids")
+            if item.get("tool_name") == "collaboration.followup_task" and item.get("status") == "completed":
+                for target in receiver_ids if isinstance(receiver_ids, list) else ():
+                    if (
+                        isinstance(target, str)
+                        and self._observer_state.knows_agent(target)
+                        and self._observer_state.start_agent_work(target, request_id=item_id)
+                    ):
+                        self._publish_agent_work_started(target)
+            if self._observer_state.correlation_is_uncertain(item_id):
+                # Recovered work describes the current turn, never this old prompt.
+                self._send_observer_snapshot(self._observer_state.snapshot())
+                return
+            activities = self._observer_state.activities(item_id)
+            targets_tracked = isinstance(receiver_ids, list) and any(
+                isinstance(target, str) and self._observer_state.tracks_target(target) for target in receiver_ids
+            )
+            if not activities and not targets_tracked:
+                return
+            request_events = []
+            for activity in activities:
+                activity_item = activity["item"]
+                assert isinstance(activity_item, dict)
+                target = str(activity_item["agent_thread_id"])
+                if not self._observer_state.root_request_context_was_sent(item_id, target):
+                    request_event = self._root_request_context_event(activity)
+                    if request_event is not None:
+                        request_events.append((target, request_event))
+            if request_events:
                 invocation["root_request_context_follows"] = True
-        self._send_observer_event(invocation)
-        if request_event is not None:
-            self._observer_state.mark_root_request_context_sent(item_id)
-            self._send_observer_event(request_event)
+            self._send_observer_event(invocation)
+            for target, request_event in request_events:
+                self._observer_state.mark_root_request_context_sent(item_id, target)
+                self._send_observer_event(request_event)
+        finally:
+            self._observer_state.settle_correlation(item_id)
 
     def _prune_completed_activity(self, event: Mapping[str, object]) -> None:
         if event.get("method") != "item/completed":
@@ -514,7 +554,7 @@ class AgentObserverCoordinator:
         if not isinstance(item, Mapping):
             return
         item_id = str(item.get("id", ""))
-        self._observer_state.complete_activity(item_id)
+        self._observer_state.complete_activity(item_id, str(item.get("agent_thread_id", "")))
 
     def _observe_protocol_work_lifecycle(
         self,
@@ -549,8 +589,10 @@ class AgentObserverCoordinator:
                 self._observer_state.start_agent_work(thread_id)
                 self._publish_agent_work_started(thread_id)
             inactive = isinstance(status, Mapping) and status.get("type") in {"idle", "notLoaded", "systemError"}
-        if inactive and self._observer_state.finish_agent_work(thread_id, turn_id):
-            self._prune_target_thread(thread_id)
+        if inactive:
+            finished = self._observer_state.finish_agent_work(thread_id, turn_id)
+            if finished or not self._observer_state.tracks_target(thread_id):
+                self._prune_target_thread(thread_id)
 
     def _prune_target_thread(self, target_thread_id: str) -> None:
         self._send_observer_snapshot(self._observer_state.prune_protocol_target(target_thread_id))
@@ -626,11 +668,19 @@ class AgentObserverCoordinator:
     def reset_after_disconnect(self) -> None:
         """Prune all primary-connection correlation state after its producer exits."""
         with self._lifecycle_lock:
-            if self._closed:
+            if self._closed or (self._source_was_bound and self._bound_source_generation is None):
                 return
+            self._bound_source_generation = None
+            self._observer_state.bind_active_turn_reader(lambda _target: (False, None))
             previously_running = self._observer_state.running_agent_count
             self._send_observer_snapshot(self._observer_state.reset_epoch())
             self._reconcile_observer_pane(previously_running)
+
+    def reset_protocol_source(self, source_generation: str) -> None:
+        """A delayed old-source reset cannot clear a replacement's correlation."""
+        with self._lifecycle_lock:
+            if self._bound_source_generation == source_generation:
+                self.reset_after_disconnect()
 
     def close(self) -> None:
         """Release host state; the runtime shutdown owns its remaining presentation process."""

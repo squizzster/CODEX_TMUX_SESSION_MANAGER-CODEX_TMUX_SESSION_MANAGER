@@ -273,6 +273,7 @@ def test_runtime_projection_faults(tmp_path, monkeypatch, failing_participant):
             projection_guard,
             context_observer,
             context_steering,
+            agent_observer,
             **_options,
         ):
             self.on_output = on_output
@@ -284,6 +285,8 @@ def test_runtime_projection_faults(tmp_path, monkeypatch, failing_participant):
             self._connection_lock = Lock()
             self._primary_tui_connection = object()
             self._primary_context_generation = "fixture-connection"
+            self._primary_agent_observer = agent_observer
+            self._primary_observer_generation = "fixture-connection"
 
         def start(self):
             for _ in range(2):
@@ -292,6 +295,9 @@ def test_runtime_projection_faults(tmp_path, monkeypatch, failing_participant):
                     self, {}, self._primary_tui_connection, connection_generation=self._primary_context_generation
                 )
                 self.on_output("{}", {})
+                CodexProtocolProxy._project_primary_agent_observer(
+                    self, {}, self._primary_tui_connection, source_generation=self._primary_observer_generation
+                )
             health_snapshots.append(self.guard.failures)
 
     monkeypatch.setattr(runtime_module.subprocess, "Popen", Process)
@@ -352,8 +358,8 @@ def test_runtime_projection_faults(tmp_path, monkeypatch, failing_participant):
                 "presentation-output",
                 "working-status",
                 "overload-recovery",
-                "agent-observer",
                 "analytics",
+                "agent-observer",
             ]
         )
         * 2
@@ -366,3 +372,51 @@ def test_runtime_projection_faults(tmp_path, monkeypatch, failing_participant):
         assert failure_resets == ["ServerOverloadedRecoveryController"] * 2
     else:
         assert failure_resets == []
+
+
+def test_observer_binding_failure_preserves_native_forwarding_without_unfenced_callbacks(tmp_path):
+    class BrokenObserver:
+        def bind_protocol_source(self, *_args, **_kwargs):
+            raise RuntimeError("injected observer bind failure")
+
+        def observe_protocol_event(self, *_args, **_kwargs):
+            pytest.fail("an unbound observer received native output")
+
+    with running_proxy(tmp_path) as (proxy, _tap):
+        proxy._primary_agent_observer = BrokenObserver()
+        with connect(tmp_path / "proxy.sock", "/rpc") as tui:
+            for message in ("first native frame", "second native frame"):
+                tui.send(message)
+                assert tui.recv(timeout=1) == message
+            assert proxy._primary_observer_generation is None
+            assert proxy.projection_failures == (ProtocolProjectionFailure("agent-observer-binding", 1, "RuntimeError"),)
+
+
+def test_blocked_observer_reset_does_not_delay_mandatory_source_revocation(tmp_path):
+    reset_entered, release_reset = Event(), Event()
+
+    class BlockedObserver:
+        def bind_protocol_source(self, *_args, **_kwargs):
+            pass
+
+        def observe_protocol_event(self, *_args, **_kwargs):
+            pass
+
+        def reset_protocol_source(self, _generation):
+            reset_entered.set()
+            assert release_reset.wait(2)
+
+    with running_proxy(tmp_path) as (proxy, tap):
+        proxy._primary_agent_observer = BlockedObserver()
+        try:
+            with connect(tmp_path / "proxy.sock", "/rpc") as tui:
+                tui.send("ready")
+                assert tui.recv(timeout=1) == "ready"
+                source_epoch = proxy._primary_source_epoch
+                tui.close()
+                assert reset_entered.wait(1)
+                assert proxy.primary_thread_id() is None
+                assert tap.read_active_turn("main", source_epoch=source_epoch) == (False, None)
+        finally:
+            release_reset.set()
+        proxy.wait_for_primary_connection_release(2)

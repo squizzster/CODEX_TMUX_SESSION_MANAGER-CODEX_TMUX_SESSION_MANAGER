@@ -2918,8 +2918,6 @@ def _run_runtime_service(
                     ("overload-recovery", server_overloaded_recovery.observe_protocol_event)
                 )
                 projection_failure_resets["overload-recovery"] = server_overloaded_recovery.reset_after_disconnect
-            if agent_observer_controller is not None:
-                primary_output_projections.append(("agent-observer", agent_observer_controller.observe_protocol_event))
 
             def publish_primary_server_message(
                 _message: str | bytes,
@@ -2987,6 +2985,7 @@ def _run_runtime_service(
                 prompt_expansion_display=prompt_expansion_display,
                 context_observer=live_context_observer,
                 context_steering=context_threshold_steering,
+                agent_observer=agent_observer_controller,
             )
             protocol_proxy.start()
             input_presentation = InputInterceptorPresentation(

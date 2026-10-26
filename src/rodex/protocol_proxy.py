@@ -16,7 +16,7 @@ from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Condition, Event, Lock, Thread
-from typing import Any, Final
+from typing import TYPE_CHECKING, Any, Final
 
 from websockets.exceptions import ConnectionClosed, InvalidHandshake
 from websockets.sync.client import unix_connect
@@ -51,6 +51,9 @@ from .status_bar import (
 )
 from .tmux_session_capability import TmuxRuntimeCapability
 from .tmux_status import TmuxStatusOption
+
+if TYPE_CHECKING:
+    from .agent_observer import AgentObserverCoordinator
 
 TOOL_CALL_ITEM_TYPES: Final = frozenset(
     {
@@ -184,6 +187,13 @@ class CodexProtocolEventTap:
     def publish(self, message: str | bytes, *, source_epoch: int) -> None:
         """Offer one event to every live subscriber without delaying the TUI."""
         self.publish_protocol_event(message, _json_object(message), source_epoch=source_epoch)
+
+    def read_active_turn(self, thread_id: str, *, source_epoch: int) -> tuple[bool, str | None]:
+        """Read current primary-source lifecycle evidence without admitting old epochs."""
+        with self._subscribers_lock:
+            if self._closed or not self._source_available or source_epoch != self._source_epoch:
+                return False, None
+            return True, self._active_turns.get(thread_id)
 
     def publish_protocol_event(
         self,
@@ -1004,6 +1014,7 @@ class CodexProtocolProxy:
         prompt_expansion_display: PromptExpansionDisplay | None = None,
         context_observer: CodexContextStatusObserver | None = None,
         context_steering: ContextThresholdSteeringController | None = None,
+        agent_observer: AgentObserverCoordinator | None = None,
     ) -> None:
         self._proxy_socket_path = proxy_socket_path
         self._app_server_socket_path = app_server_socket_path
@@ -1019,6 +1030,8 @@ class CodexProtocolProxy:
         self._prompt_expansion_display = prompt_expansion_display
         self._context_observer = context_observer
         self._context_steering = context_steering
+        self._primary_agent_observer = agent_observer
+        self._primary_observer_generation: str | None = None
         self._projection_guard = projection_guard if projection_guard is not None else ProtocolProjectionGuard()
         self._primary_source_epoch: int | None = None
         self.interactions = interaction_pipeline if interaction_pipeline is not None else SessionInteractionPipeline()
@@ -1139,6 +1152,7 @@ class CodexProtocolProxy:
             ) as app_server_connection:
                 require_unix_peer_process(app_server_connection, self._app_server_process)
                 source_epoch = self._activate_primary_source(tui_connection) if is_primary_connection else None
+                observer_generation = self._primary_observer_generation if is_primary_connection else None
                 connection_live = Event()
                 connection_live.set()
                 connection_id = uuid.uuid4().hex
@@ -1183,6 +1197,7 @@ class CodexProtocolProxy:
                             self._projection_guard.observe(
                                 "primary-output", self._on_primary_server_message, message, event
                             )
+                        self._project_primary_agent_observer(event, tui_connection, source_generation=observer_generation)
                     else:
                         tui_connection.send(message)
                     return InteractionResult(DeliveryStatus.DELIVERED)
@@ -1354,12 +1369,18 @@ class CodexProtocolProxy:
 
     def _invalidate_primary_binding(self, connection: Any) -> None:
         """Input EOF revokes authority before deferred transport cleanup."""
+        observer_generation = None
         with self._connection_lock:
             if self._primary_tui_connection is connection:
                 self._primary_thread_binding.invalidate_after_disconnect()
+                observer_generation = self._primary_observer_generation
+                self._primary_observer_generation = None
+                if self._event_tap is not None and self._primary_source_epoch is not None:
+                    self._event_tap.reset_after_disconnect(source_epoch=self._primary_source_epoch)
                 self._sync_primary_context_locked()
                 if self._prompt_expansion_display is not None:
                     self._prompt_expansion_display.release_source(connection)
+        self._reset_primary_agent_observer(observer_generation)
 
     def _observe_primary_response(self, event: dict[str, Any] | None, connection: Any) -> str | None:
         with self._connection_lock:
@@ -1432,6 +1453,33 @@ class CodexProtocolProxy:
             self._primary_connection_released.clear()
             return True
 
+    def _project_primary_agent_observer(
+        self, event: dict[str, Any] | None, connection: Any, *, source_generation: str | None
+    ) -> None:
+        with self._connection_lock:
+            observer = self._primary_agent_observer
+            admitted = (
+                observer is not None
+                and self._primary_tui_connection is connection
+                and source_generation is not None
+                and source_generation == self._primary_observer_generation
+            )
+        if admitted:
+            # The reducer's source check shares its mutation lock with reset.
+            # Optional pane work must not hold mandatory connection authority.
+            self._projection_guard.observe(
+                "agent-observer",
+                observer.observe_protocol_event,
+                event,
+                source_generation=source_generation,
+            )
+
+    def _reset_primary_agent_observer(self, source_generation: str | None) -> None:
+        if self._primary_agent_observer is not None and source_generation is not None:
+            self._projection_guard.observe(
+                "agent-observer-reset", self._primary_agent_observer.reset_protocol_source, source_generation
+            )
+
     def _activate_primary_source(self, tui_connection: Any) -> int | None:
         with self._primary_lifecycle_lock, self._connection_lock:
             if self._primary_tui_connection is not tui_connection:
@@ -1440,12 +1488,28 @@ class CodexProtocolProxy:
                 self._primary_source_epoch = self._event_tap.activate_primary_source()
             if self._prompt_expansion_display is not None:
                 self._prompt_expansion_display.bind_source(tui_connection)
+            self._primary_observer_generation = self._primary_binding
+            if self._primary_agent_observer is not None:
+                assert self._primary_binding is not None
+                tap, epoch = self._event_tap, self._primary_source_epoch
+                if not self._projection_guard.observe(
+                    "agent-observer-binding",
+                    self._primary_agent_observer.bind_protocol_source,
+                    self._primary_binding,
+                    active_turn_reader=lambda target: (
+                        tap.read_active_turn(target, source_epoch=epoch)
+                        if tap is not None and epoch is not None
+                        else (False, None)
+                    ),
+                ):
+                    self._primary_observer_generation = None
             return self._primary_source_epoch
 
     def _release_primary_connection(self, tui_connection: Any) -> None:
         with self._primary_lifecycle_lock:
             released = False
             source_epoch = None
+            observer_generation = None
             with self._primary_send_lock, self._connection_lock:
                 if self._primary_tui_connection is tui_connection:
                     source_epoch = self._primary_source_epoch
@@ -1454,12 +1518,15 @@ class CodexProtocolProxy:
                     self._primary_tui_connection = None
                     self._primary_thread_binding = PrimaryThreadBinding()
                     self._primary_binding = None
+                    observer_generation = self._primary_observer_generation
+                    self._primary_observer_generation = None
+                    if source_epoch is not None and self._event_tap is not None:
+                        self._event_tap.reset_after_disconnect(source_epoch=source_epoch)
                     self._sync_primary_context_locked()
                     if self._prompt_expansion_display is not None:
                         self._prompt_expansion_display.release_source(tui_connection)
                     released = True
-            if source_epoch is not None and self._event_tap is not None:
-                self._event_tap.reset_after_disconnect(source_epoch=source_epoch)
+            self._reset_primary_agent_observer(observer_generation)
             if released and self._on_primary_disconnect is not None:
                 with suppress(Exception):
                     self._on_primary_disconnect()

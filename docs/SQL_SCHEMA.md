@@ -32,6 +32,13 @@ fails with `database_moved`; even bootstrap cannot recreate something this proce
 already admitted. Restart is required after an authorized offline move. There is no
 watcher: move-away-and-back entirely between fences is unobservable.
 
+The database must have exactly one hard link at admission and every identity fence,
+including fresh `fstat()` of a retained descriptor when its owner is reused. Multiple
+names can split SQLite's WAL/journal identity. Unsafe link counts are rejected
+explicitly; Rodex never removes aliases or repairs the file. A failed in-transaction
+fence rolls back pending work. This checks the existing fences, not arbitrary
+filesystem changes between them.
+
 Ordinary transactions and integrity audits hold a shared `flock`; writers do not
 exclusively block WAL readers. Lock/WAL activation waits have ten-second monotonic
 deadlines and sleeping backoff capped at 50 ms. Writers enable foreign keys, WAL,

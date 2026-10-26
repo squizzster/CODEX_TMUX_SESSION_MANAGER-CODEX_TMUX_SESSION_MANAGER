@@ -145,13 +145,22 @@ def list_rodex_session_codex_rollout_sources(
     )
 
 
-def select_codex_threads_in_transaction(connection: sqlite3.Connection, session_id: int) -> list[tuple[object, ...]]:
+def select_codex_threads_in_transaction(
+    connection: sqlite3.Connection, session_id: int, *, include_historical: bool = False
+) -> list[tuple[object, ...]]:
     """Select every rooted thread and its current worker checkpoint in one query."""
-    rows = connection.execute(
-        f"WITH RECURSIVE hierarchy(id, parent_id, thread_depth) AS ("
-        "SELECT current.rodex_sessions_codex_threads_id, NULL, 0 "
+    roots = (
+        f"SELECT membership.id, NULL, 0 FROM {RODEX_SESSIONS_CODEX_THREADS_TABLE} AS membership "
+        "WHERE membership.rodex_sessions_id = ? AND NOT EXISTS ("
+        f"SELECT 1 FROM {RODEX_SESSIONS_SUBAGENT_SPAWNS_TABLE} AS spawn "
+        "WHERE spawn.subagent_rodex_sessions_codex_threads_id = membership.id) "
+        if include_historical
+        else "SELECT current.rodex_sessions_codex_threads_id, NULL, 0 "
         f"FROM {RODEX_SESSIONS_CURRENT_CODEX_THREADS_TABLE} AS current "
         "WHERE current.rodex_sessions_id = ? "
+    )
+    rows = connection.execute(
+        f"WITH RECURSIVE hierarchy(id, parent_id, thread_depth) AS ({roots}"
         "UNION ALL "
         "SELECT spawns.subagent_rodex_sessions_codex_threads_id, "
         "spawns.parent_rodex_sessions_codex_threads_id, parent.thread_depth + 1 "

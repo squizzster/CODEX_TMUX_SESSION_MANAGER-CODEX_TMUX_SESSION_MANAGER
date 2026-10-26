@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from typing import Any, TypeAlias
 
 from rodex_registry import (
@@ -21,10 +22,12 @@ from rodex_registry import (
     parse_codex_thread_id,
     parse_codex_turn_id,
 )
+from rodex_registry.normalization_schema import CURRENT_TRACE_VERSION
 
 from .agent_trace_privacy import contains_codex_encrypted_value
+from .rollout_turn_lifecycle import RolloutRecordAdmission, RolloutTurnLifecycle
 
-AGENT_TRACE_SCHEMA_VERSION = "rodex-agent-trace-v5"
+AGENT_TRACE_SCHEMA_VERSION = CURRENT_TRACE_VERSION
 AgentTraceSource: TypeAlias = tuple[CodexThreadId, bytes] | tuple[CodexThreadId, bytes, int | Sequence[int]]
 SubagentSpawningTurn: TypeAlias = tuple[CodexThreadId, str]
 
@@ -33,8 +36,10 @@ class StatefulAgentTraceNormalizer:
     """Retain turn and tool-call context only after the matching SQL commit."""
 
     def __init__(self) -> None:
-        self._accepted_active_turns: dict[CodexThreadId, str | None] = {}
-        self._candidate_active_turns: dict[CodexThreadId, str | None] | None = None
+        self._accepted_active_turns: dict[CodexThreadId, RolloutTurnLifecycle] = {}
+        self._candidate_active_turns: dict[CodexThreadId, RolloutTurnLifecycle] | None = None
+        self._accepted_records: dict[CodexThreadId, RolloutRecordAdmission] = {}
+        self._candidate_records: dict[CodexThreadId, RolloutRecordAdmission] | None = None
         self._accepted_tool_names: dict[tuple[CodexThreadId, str], str] = {}
         self._candidate_tool_names: dict[tuple[CodexThreadId, str], str] | None = None
         self._accepted_subagent_spawning_turns: dict[CodexThreadId, set[SubagentSpawningTurn]] = {}
@@ -48,7 +53,8 @@ class StatefulAgentTraceNormalizer:
         calculated_at_utc: str,
         source_coverage_state: str = "complete",
     ) -> RodexAgentTracePublication:
-        candidate = dict(self._accepted_active_turns)
+        candidate = {thread: state.copy() for thread, state in self._accepted_active_turns.items()}
+        candidate_records = {thread: state.copy() for thread, state in self._accepted_records.items()}
         candidate_tool_names = dict(self._accepted_tool_names)
         candidate_spawning_turns = _copy_subagent_spawning_turns(self._accepted_subagent_spawning_turns)
         publication = normalize_rollout_trace(
@@ -57,17 +63,20 @@ class StatefulAgentTraceNormalizer:
             calculated_at_utc=calculated_at_utc,
             source_coverage_state=source_coverage_state,
             _active_turns=candidate,
+            _record_admissions=candidate_records,
             _tool_names=candidate_tool_names,
         )
         _remember_subagent_spawning_turns(candidate_spawning_turns, publication.events)
         self._candidate_active_turns = candidate
+        self._candidate_records = candidate_records
         self._candidate_tool_names = candidate_tool_names
         self._candidate_subagent_spawning_turns = candidate_spawning_turns
         return publication
 
     def warmup(self, sources: Sequence[AgentTraceSource]) -> None:
         """Restore source-local context from an accepted prefix without publishing it."""
-        active_turns = dict(self._accepted_active_turns)
+        active_turns = {thread: state.copy() for thread, state in self._accepted_active_turns.items()}
+        record_admissions = {thread: state.copy() for thread, state in self._accepted_records.items()}
         tool_names = dict(self._accepted_tool_names)
         spawning_turns = _copy_subagent_spawning_turns(self._accepted_subagent_spawning_turns)
         publication = normalize_rollout_trace(
@@ -75,10 +84,12 @@ class StatefulAgentTraceNormalizer:
             based_on_trace_publication_sequence=None,
             calculated_at_utc="warmup",
             _active_turns=active_turns,
+            _record_admissions=record_admissions,
             _tool_names=tool_names,
         )
         _remember_subagent_spawning_turns(spawning_turns, publication.events)
         self._accepted_active_turns = active_turns
+        self._accepted_records = record_admissions
         self._accepted_tool_names = tool_names
         self._accepted_subagent_spawning_turns = spawning_turns
 
@@ -92,6 +103,9 @@ class StatefulAgentTraceNormalizer:
         return {thread_id: frozenset(turns) for thread_id, turns in candidate.items()}
 
     def accept_batch(self) -> None:
+        if self._candidate_records is not None:
+            self._accepted_records = self._candidate_records
+        self._candidate_records = None
         if self._candidate_active_turns is not None:
             self._accepted_active_turns = self._candidate_active_turns
         if self._candidate_tool_names is not None:
@@ -103,6 +117,8 @@ class StatefulAgentTraceNormalizer:
         self._candidate_subagent_spawning_turns = None
 
     def require_clean_replay(self) -> None:
+        self._accepted_records.clear()
+        self._candidate_records = None
         self._accepted_active_turns.clear()
         self._candidate_active_turns = None
         self._accepted_tool_names.clear()
@@ -139,13 +155,15 @@ def normalize_rollout_trace(
     based_on_trace_publication_sequence: int | None,
     calculated_at_utc: str,
     source_coverage_state: str = "complete",
-    _active_turns: dict[CodexThreadId, str | None] | None = None,
+    _active_turns: dict[CodexThreadId, RolloutTurnLifecycle] | None = None,
+    _record_admissions: dict[CodexThreadId, RolloutRecordAdmission] | None = None,
     _tool_names: dict[tuple[CodexThreadId, str], str] | None = None,
 ) -> RodexAgentTracePublication:
     """Project exact ordinal-addressed records without retaining sensitive bodies."""
     events: list[RodexAgentTraceEvent] = []
     coverage_gapped = source_coverage_state != "complete"
     active_turns = {} if _active_turns is None else _active_turns
+    record_admissions = {} if _record_admissions is None else _record_admissions
     tool_names = {} if _tool_names is None else _tool_names
     for source in sources:
         thread_id, content = source[:2]
@@ -162,7 +180,8 @@ def normalize_rollout_trace(
             ):
                 raise ValueError("agent trace source ordinals must match its records")
         parsed_thread_id = parse_codex_thread_id(thread_id)
-        active_turn_id = active_turns.get(parsed_thread_id)
+        lifecycle = active_turns.setdefault(parsed_thread_id, RolloutTurnLifecycle())
+        admission = record_admissions.setdefault(parsed_thread_id, RolloutRecordAdmission())
         for physical_ordinal, line in zip(physical_ordinals, lines, strict=True):
             try:
                 record = json.loads(line)
@@ -172,11 +191,15 @@ def normalize_rollout_trace(
             if not isinstance(record, Mapping):
                 coverage_gapped = True
                 continue
+            if not admission.admit(record, physical_ordinal=physical_ordinal):
+                continue
             ordinal = _integer(record.get("ordinal"))
             if ordinal is None or ordinal < 0:
                 ordinal = physical_ordinal
             payload = _mapping(record.get("payload"))
             record_type = _text(record.get("type"))
+            record_turn_id = None
+            lifecycle_eligible = False
             try:
                 record_turn_id = _canonical_record_turn_id(record_type, payload)
             except ValueError:
@@ -189,9 +212,9 @@ def normalize_rollout_trace(
                 event_turn_id = None
                 coverage_gapped = True
             else:
-                if record_turn_id is not None:
-                    active_turn_id = record_turn_id
-                event_turn_id = active_turn_id
+                observation = lifecycle.observe(record_type, _text(payload.get("type")), record_turn_id)
+                event_turn_id = observation.codex_turn_id
+                lifecycle_eligible = observation.lifecycle_eligible
             normalized = _normalize_record(
                 parsed_thread_id,
                 event_turn_id,
@@ -201,10 +224,13 @@ def normalize_rollout_trace(
                 payload,
                 tool_names,
             )
+            normalized = tuple(
+                replace(event, lifecycle_eligible=lifecycle_eligible)
+                if event.event_kind in {"turn_started", "turn_completed", "turn_aborted"}
+                else event
+                for event in normalized
+            )
             events.extend(normalized)
-            if payload.get("type") in {"task_complete", "turn_aborted"}:
-                active_turn_id = None
-        active_turns[parsed_thread_id] = active_turn_id
     coverage = (
         "gapped" if coverage_gapped or any(event.event_kind == "unrecognized_record" for event in events) else "complete"
     )

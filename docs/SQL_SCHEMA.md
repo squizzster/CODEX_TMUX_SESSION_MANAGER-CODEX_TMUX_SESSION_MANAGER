@@ -162,6 +162,14 @@ event ordinal)`. Detail hashes cover the complete fact: equal authenticated repl
 idempotent; changed facts at an existing coordinate conflict. Published provenance,
 typed details, aliases, and ownership are immutable. Target thread identity can exist
 before verified membership; later verification reuses it without mutating the activity.
+The explicit [v5-to-v6 normalization transition](ANALYTICS.md#publication-and-recovery)
+is the sole repair exception for derived ownership. It verifies every stored source
+fact, preserves canonical identities and source coordinates, and audits repaired
+ownership, lifecycle, request and checkpoint values. Metrics are recomputed atomically.
+Its optional extension has its own exact generation marker;
+base schema 22 remains unchanged. Guard suspension, reconstruction, foreign-key
+checks and guard restoration occur inside the same fenced publication transaction.
+Ordinary append and replay retain all immutability guards.
 Rate-limit normalization preserves supplied primary/secondary windows in order and
 does not invent absent windows. Typed satellites contain no JSON columns.
 Message detail stores `assistant`, `developer`, `user`, and `system` as distinct
@@ -204,6 +212,12 @@ persisted head instead of recounting history. Coverage is cumulative: a prior ga
 nonzero unrecognized-record count cannot become complete through an ordinary append.
 Statistics mark-and-sweep replaces metrics/counts, never canonical turns or trace.
 Failure-health writes preserve last-good statistics, checkpoints, and trace.
+Aggregate publication owns accepted lifecycle state; trace insertion does not
+overwrite it. Trace-only publication checks source-coordinate admission and explicit
+lifecycle eligibility before applying its first-terminal/observed-start rule.
+Missing terminal timestamps remain missing, even if a later ignored observation
+has one. Shared [turn metric writes](../src/rodex_registry/turn_statistics_writer.py)
+serve ordinary publication and verified rebuild without a reverse domain dependency.
 
 Fixed metrics are typed scalar columns; distributions, genuine dynamic counts, and
 ordered audit limits have relational rows. Model/reasoning/tool dimensions are

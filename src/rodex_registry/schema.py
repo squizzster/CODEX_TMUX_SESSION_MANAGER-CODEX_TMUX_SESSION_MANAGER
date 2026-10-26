@@ -22,6 +22,7 @@ from rodex_sql import (
     require_active_rodex_transaction,
 )
 
+from . import normalization_schema as normalization_catalog
 from .errors import RodexSessionError
 from .identity import RodexRegistryId
 from .statistics_fields import SESSION_STATISTICS_SCALARS, TURN_STATISTICS_SCALARS
@@ -1910,6 +1911,44 @@ END
 """
 
 
+def ensure_normalization_schema(connection: sqlite3.Connection, *, install: bool = False) -> None:
+    """Accept complete absence or attest/install the complete optional extension."""
+    present = connection.execute(
+        "SELECT name FROM sqlite_master WHERE name LIKE 'rodex_analytics_normalization_%' "
+        "OR name LIKE 'rodex_agent_trace_normalization_%'"
+    ).fetchall()
+    marker_present = any(row[0] == normalization_catalog.NORMALIZATION_SCHEMA_TABLE for row in present)
+    if present and not marker_present:
+        raise RodexSessionError("unmarked analytics normalization extension")
+    if not present and not install:
+        return
+    # A pre-existing extension must be complete before CREATE IF NOT EXISTS can
+    # repair anything. Missing objects are corruption, not an installation.
+    expected = (
+        set(normalization_catalog._TABLES) | set(normalization_catalog._INDEXES) | set(normalization_catalog._GUARDS)
+    )
+    expected.update(f"{table}_reject_{op}" for table in normalization_catalog._TABLES for op in ("update", "delete"))
+    if present and {row[0] for row in present} != expected:
+        raise RodexSessionError("incomplete analytics normalization extension")
+    for name, statement in normalization_catalog._TABLES.items():
+        connection.execute(statement)
+        _verify_schema_object_definition_exact(connection, "table", name, statement)
+        _create_and_verify_append_only_triggers(connection, name, "normalization repair evidence is immutable")
+    for name, (table, columns, unique) in normalization_catalog._INDEXES.items():
+        statement = f"CREATE {'UNIQUE ' if unique else ''}INDEX IF NOT EXISTS {name} ON {table} ({columns})"
+        connection.execute(statement)
+        _verify_schema_object_definition_exact(connection, "index", name, statement)
+    for name, statement in normalization_catalog._GUARDS.items():
+        connection.execute(statement)
+        _verify_schema_object_definition_exact(connection, "trigger", name, statement)
+    if not present:
+        connection.execute(f"INSERT INTO {normalization_catalog.NORMALIZATION_SCHEMA_TABLE} VALUES (1, 1)")
+    if connection.execute(
+        f"SELECT id, extension_generation FROM {normalization_catalog.NORMALIZATION_SCHEMA_TABLE}"
+    ).fetchall() != [(1, 1)]:
+        raise RodexSessionError("unsupported analytics normalization extension generation")
+
+
 def initialise_rodex_database(
     database_path: str | os.PathLike[str] | None = None,
 ) -> Path:
@@ -2888,6 +2927,7 @@ def _bootstrap_or_audit_rodex_database(
             RODEX_SESSIONS_AGENT_REQUEST_TARGET_TURNS_TABLE,
             "agent request target-turn association is immutable",
         )
+        ensure_normalization_schema(connection, install=not full_audit)
         if full_audit:
             connection.require_canonical_catalog()
     return path

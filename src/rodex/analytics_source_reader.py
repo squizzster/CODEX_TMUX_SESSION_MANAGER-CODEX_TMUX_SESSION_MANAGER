@@ -55,6 +55,8 @@ class AnalyticsSourceRead:
     appended_source_line_ordinals: tuple[int, ...]
     authenticated_source: AuthenticatedRolloutPrefix
     _candidate_cursor: _AppendCursor
+    analyzer_source_line_ordinals: tuple[int, ...] = ()
+    accepted_source_line_ordinals: tuple[int, ...] = ()
 
 
 @dataclass(slots=True)
@@ -107,6 +109,8 @@ class AnalyticsSourceReader:
                 accepted_content,
                 appended,
                 appended_ordinals,
+                analyzer_ordinals,
+                accepted_ordinals,
             ) = _new_cursor(
                 normalized,
                 resolved,
@@ -120,6 +124,8 @@ class AnalyticsSourceReader:
             next_cursor, appended, appended_ordinals = _advance_cursor(cursor, resolved, after, added)
             analyzer_content = appended
             accepted_content = b""
+            analyzer_ordinals = appended_ordinals
+            accepted_ordinals = ()
         return AnalyticsSourceRead(
             analyzer_content=analyzer_content,
             has_accepted_baseline=(cursor is not None or normalized.accepted_prefix_size_bytes is not None),
@@ -128,6 +134,8 @@ class AnalyticsSourceReader:
             appended_source_line_ordinals=appended_ordinals,
             authenticated_source=next_cursor.authenticated_source,
             _candidate_cursor=next_cursor,
+            analyzer_source_line_ordinals=analyzer_ordinals,
+            accepted_source_line_ordinals=accepted_ordinals,
         )
 
     def accept(self, reads: list[AnalyticsSourceRead]) -> None:
@@ -274,15 +282,15 @@ def _new_cursor(
     content: bytes,
     *,
     append_after_size: int | None,
-) -> tuple[_AppendCursor, bytes, bytes, bytes, tuple[int, ...]]:
+) -> tuple[_AppendCursor, bytes, bytes, bytes, tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
     raw_complete, tail = _split_complete_prefix(content)
     if not _content_declares_thread(raw_complete, source.codex_thread_id):
         raise AnalyticsSourceReadError("rollout has an unexpected Codex identity")
-    analyzer_content, _analyzer_ordinals = _filter_analyzer_lines(source, raw_complete, line_offset=0)
+    analyzer_content, analyzer_ordinals = _filter_analyzer_lines(source, raw_complete, line_offset=0)
     accepted_size = 0 if append_after_size is None else append_after_size
     if accepted_size < 0 or accepted_size > len(raw_complete):
         raise AnalyticsSourceReadError("durable rollout checkpoint is outside the complete-record prefix")
-    accepted_content, _accepted_ordinals = _filter_analyzer_lines(source, raw_complete[:accepted_size], line_offset=0)
+    accepted_content, accepted_ordinals = _filter_analyzer_lines(source, raw_complete[:accepted_size], line_offset=0)
     appended_content, appended_ordinals = _filter_analyzer_lines(
         source,
         raw_complete[accepted_size:],
@@ -311,6 +319,8 @@ def _new_cursor(
         accepted_content,
         appended_content,
         appended_ordinals,
+        analyzer_ordinals,
+        accepted_ordinals,
     )
 
 

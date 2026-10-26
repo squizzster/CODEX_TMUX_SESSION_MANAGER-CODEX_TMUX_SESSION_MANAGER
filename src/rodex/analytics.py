@@ -43,6 +43,8 @@ from rodex_registry import (
     current_rodex_sessions_user_identity,
     parse_codex_thread_id,
 )
+from rodex_registry.normalization_rebuild import AnalyticsNormalizationRebuild
+from rodex_registry.normalization_schema import PREVIOUS_TRACE_VERSION
 from rodex_sql import RodexDatabaseMovedError, RodexDatabaseNotFoundError
 
 from .agent_observer import notify_agent_observer_trace_publication
@@ -83,7 +85,7 @@ from .source_configuration import default_codex_sessions_root as default_codex_s
 
 ANALYTICS_RESTART_DELAY_SECONDS = 2.0
 ANALYTICS_HEALTH_RETRY_DELAY_SECONDS = 1.0
-STATISTICS_PROJECTION_SCHEMA_VERSION = "rodex-statistics-v10"
+STATISTICS_PROJECTION_SCHEMA_VERSION = "rodex-statistics-v11"
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -154,6 +156,8 @@ class _AnalyticsFailureFingerprint:
     diagnostic_code: str
     diagnostic_detail: str
     sources: tuple[tuple[CodexThreadId, AuthenticatedRolloutPrefix], ...]
+    normalization_generation: str = AGENT_TRACE_SCHEMA_VERSION
+    based_on_trace_sequence: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -371,6 +375,10 @@ class AnalyticsRolloutWorker:
     def poll_once(self, batch: AnalyticsDirtyBatch | None = None) -> str:
         """Perform one reconciliation; no analytics failure is allowed to escape."""
         attempt_started_at = self._monotonic()
+        if self._parked_failure is not None and (
+            self._parked_failure.normalization_generation != AGENT_TRACE_SCHEMA_VERSION
+        ):
+            self._accept_recovery()
         if self.recovery_retry_at is not None and attempt_started_at < self.recovery_retry_at:
             if batch is not None:
                 self._pending_resolution_thread_ids.update(batch.thread_ids)
@@ -394,13 +402,16 @@ class AnalyticsRolloutWorker:
                     expected_codex_session_id=codex_session_id,
                 )
                 self._registry = registry
-            checkpoint = self._checkpoint
+            checkpoint = None if self._parked_failure is not None else self._checkpoint
             cold_start = checkpoint is None
             if checkpoint is None:
                 checkpoint = registry.load_checkpoint()
                 if (checkpoint.statistics is None) != (checkpoint.trace is None):
                     raise RodexAnalyticsError("analytics checkpoint has only one of its atomic publication heads")
-                if checkpoint.trace is not None and checkpoint.trace.trace_schema_version != AGENT_TRACE_SCHEMA_VERSION:
+                if checkpoint.trace is not None and checkpoint.trace.trace_schema_version not in {
+                    AGENT_TRACE_SCHEMA_VERSION,
+                    PREVIOUS_TRACE_VERSION,
+                }:
                     raise RodexAnalyticsError("agent trace schema does not match this Rodex generation")
                 self._checkpoint = checkpoint
                 self._accepted_observations = _checkpoint_source_observations(checkpoint.sources)
@@ -456,7 +467,7 @@ class AnalyticsRolloutWorker:
                                     source_growth,
                                     strict=True,
                                 )
-                                if grew
+                                if grew and item.observation.codex_thread_id in self._accepted_observations
                             )
                         ),
                     )
@@ -465,9 +476,38 @@ class AnalyticsRolloutWorker:
                 publication_receipt = registry.publish(prepared.publication)
                 phase = _AnalyticsAttemptPhase.RESIDENT_ACCEPTANCE
                 return self._accept_prepared_publication(prepared, publication_receipt)
-            full_reconcile = self._requires_full_reconcile or batch is None or batch.full_reconcile
+            rebuilding = (
+                checkpoint.trace is not None
+                and checkpoint.trace.trace_schema_version == PREVIOUS_TRACE_VERSION
+                and checkpoint.trace.trace_publication_sequence == self._trace_publication_sequence
+            )
+            rebuild_sources = ()
+            rebuild_reads = ()
+            full_reconcile = rebuilding or self._requires_full_reconcile or batch is None or batch.full_reconcile
             requested_thread_ids: frozenset[CodexThreadId] = frozenset()
-            if full_reconcile:
+            if rebuilding:
+                replay_checkpoint = registry.load_checkpoint(include_historical_sources=True)
+                if replay_checkpoint.trace != checkpoint.trace or replay_checkpoint.statistics != checkpoint.statistics:
+                    raise RodexSessionStatisticsPublicationRaceError("normalization checkpoint changed before replay")
+                rebuild_sources = replay_checkpoint.sources
+                all_reads = self._read_registered_sources(rebuild_sources)
+                if all_reads is None or not {source.codex_thread_id for source in rebuild_sources}.issubset(
+                    read.observation.codex_thread_id for read in all_reads
+                ):
+                    self._project_health("catching_up", "normalization_rebuild_source_missing", codex_session_id)
+                    return "catching_up"
+                current_ids = {source.codex_thread_id for source in checkpoint.sources}
+                # Newly discovered descendants belong to a current root only
+                # when their verified parent does; historical trees stay separate.
+                for read in sorted(all_reads, key=lambda item: item.observation.thread_depth):
+                    if read.observation.parent_codex_thread_id in current_ids:
+                        current_ids.add(read.observation.codex_thread_id)
+                replay_ids = current_ids | {source.codex_thread_id for source in rebuild_sources}
+                rebuild_reads = tuple(read for read in all_reads if read.observation.codex_thread_id in replay_ids)
+                stable_reads = [read for read in all_reads if read.observation.codex_thread_id in current_ids]
+                self._pending_resolution_thread_ids.difference_update(current_ids)
+                unresolved_thread_ids = frozenset(self._pending_resolution_thread_ids)
+            elif full_reconcile:
                 stable_reads = self._read_registered_sources(checkpoint.sources)
                 if stable_reads is not None:
                     self._pending_resolution_thread_ids.difference_update(
@@ -478,14 +518,18 @@ class AnalyticsRolloutWorker:
                 requested_thread_ids = frozenset(batch.thread_ids | self._pending_resolution_thread_ids)
                 stable_reads, unresolved_thread_ids = self._read_exact_sources(requested_thread_ids)
                 self._pending_resolution_thread_ids = set(unresolved_thread_ids)
-            failure_reads = () if stable_reads is None else tuple(stable_reads)
+            failure_reads = rebuild_reads or (() if stable_reads is None else tuple(stable_reads))
             if stable_reads is None or (not stable_reads and unresolved_thread_ids):
                 self._project_health("catching_up", "rollout_not_found", codex_session_id)
                 return "catching_up"
-            checkpoint_matches = cold_start and _view_matches_source_reads(
-                checkpoint.statistics,
-                checkpoint.sources,
-                stable_reads,
+            checkpoint_matches = (
+                not rebuilding
+                and cold_start
+                and _view_matches_source_reads(
+                    checkpoint.statistics,
+                    checkpoint.sources,
+                    stable_reads,
+                )
             )
             accepted_observations = dict(self._accepted_observations)
             if checkpoint_matches:
@@ -521,7 +565,8 @@ class AnalyticsRolloutWorker:
                 return "up_to_date"
             baseline_reads = tuple(item for item in stable_reads if item.has_accepted_baseline)
             has_current_baseline = (
-                adapter_needs_warmup
+                not rebuilding
+                and adapter_needs_warmup
                 and checkpoint.statistics is not None
                 and checkpoint.statistics.statistics_projection_schema_version == STATISTICS_PROJECTION_SCHEMA_VERSION
                 and self._trace_publication_sequence is not None
@@ -556,6 +601,7 @@ class AnalyticsRolloutWorker:
                         (
                             item.observation.codex_thread_id,
                             item.accepted_analyzer_content,
+                            item.prepared_read.accepted_source_line_ordinals,
                         )
                         for item in baseline_reads
                     )
@@ -577,16 +623,25 @@ class AnalyticsRolloutWorker:
                 tuple(
                     (
                         item.observation.codex_thread_id,
-                        item.appended_analyzer_content,
-                        item.appended_source_line_ordinals,
+                        item.analyzer_content if rebuilding else item.appended_analyzer_content,
+                        item.prepared_read.analyzer_source_line_ordinals
+                        if rebuilding
+                        else item.appended_source_line_ordinals,
                     )
-                    for item in stable_reads
+                    for item in (rebuild_reads if rebuilding else stable_reads)
                 ),
                 based_on_trace_publication_sequence=self._trace_publication_sequence,
                 calculated_at_utc=calculated_at_utc,
                 source_coverage_state=calculation.coverage_state,
             )
             trace_spawning_turns = self._trace_normalizer.candidate_subagent_spawning_turns()
+            if rebuilding:
+                next_observations = {
+                    thread_id: replace(source, spawning_codex_turn_id=None)
+                    if trace_spawning_turns.get(thread_id)
+                    else source
+                    for thread_id, source in next_observations.items()
+                }
             previous_turns = self._published_turns
             if previous_turns is None:
                 verified_collaboration = _derive_verified_collaboration_projection(
@@ -612,21 +667,56 @@ class AnalyticsRolloutWorker:
                 resident_turn_updates = turn_updates
             removed_turn_keys: frozenset[tuple[CodexThreadId, str]] = frozenset()
             trace_needs_publication = self._trace_publication_sequence is None
-            should_publish = trace_needs_publication or (
-                not checkpoint_matches
-                and bool(
-                    changed_source_thread_ids
-                    or trace_publication.events
-                    or changed_turn_keys
-                    or checkpoint.statistics is None
-                    or checkpoint.statistics.statistics_projection_schema_version != STATISTICS_PROJECTION_SCHEMA_VERSION
+            should_publish = (
+                rebuilding
+                or trace_needs_publication
+                or (
+                    not checkpoint_matches
+                    and bool(
+                        changed_source_thread_ids
+                        or trace_publication.events
+                        or changed_turn_keys
+                        or checkpoint.statistics is None
+                        or checkpoint.statistics.statistics_projection_schema_version
+                        != STATISTICS_PROJECTION_SCHEMA_VERSION
+                    )
                 )
             )
             trace_target_thread_ids = _trace_target_thread_ids(
-                trace_publication.events,
+                tuple(event for event in trace_publication.events if event.codex_thread_id in next_observations),
                 already_observed=next_observations,
             )
             if should_publish:
+                normalization_rebuild = None
+                if rebuilding:
+                    historical_reads = [
+                        read for read in rebuild_reads if read.observation.codex_thread_id not in next_observations
+                    ]
+                    historical_turns = ()
+                    historical_observations = ()
+                    if historical_reads:
+                        historical_calculation = self._adapter_factory().analyze_rollouts(
+                            _analyzer_sources(historical_reads), _current_analytics_user_id()
+                        )
+                        historical_projection = _derive_verified_collaboration_projection(
+                            historical_calculation.statistics_projection,
+                            analyzed_sources=tuple(
+                                replace(read.observation, spawning_codex_turn_id=None)
+                                if trace_spawning_turns.get(read.observation.codex_thread_id)
+                                else read.observation
+                                for read in historical_reads
+                            ),
+                            trace_spawning_turns=trace_spawning_turns,
+                        )
+                        historical_turns = historical_projection.statistics_projection.turn_statistics
+                        historical_observations = historical_projection.analyzed_sources
+                    for read in rebuild_reads:
+                        self._source_reader.verify_captured_prefix(read.authenticated_source)
+                    normalization_rebuild = AnalyticsNormalizationRebuild(
+                        previous_sources=tuple(rebuild_sources),
+                        replayed_sources=tuple(verified_collaboration.analyzed_sources) + historical_observations,
+                        turn_statistics=verified_collaboration.statistics_projection.turn_statistics + historical_turns,
+                    )
                 publication_projection = (
                     verified_collaboration.statistics_projection
                     if changed_turn_keys is None
@@ -646,10 +736,11 @@ class AnalyticsRolloutWorker:
                     changed_turn_keys=changed_turn_keys,
                     removed_turn_keys=removed_turn_keys,
                     agent_trace_publication=trace_publication,
+                    normalization_rebuild=normalization_rebuild,
                 )
                 prepared = _PreparedAnalyticsPublication(
                     publication=publication,
-                    stable_reads=tuple(stable_reads),
+                    stable_reads=rebuild_reads or tuple(stable_reads),
                     observations=tuple(verified_collaboration.analyzed_sources),
                     turn_updates_by_key=resident_turn_updates,
                     replace_all_turns=previous_turns is None,
@@ -736,6 +827,7 @@ class AnalyticsRolloutWorker:
                         key=lambda item: str(item[0]),
                     )
                 ),
+                based_on_trace_sequence=self._trace_publication_sequence,
             )
             log_key = (diagnostic_code, failure_fingerprint.diagnostic_detail)
             if log_key != self._last_logged_failure:
@@ -807,6 +899,10 @@ class AnalyticsRolloutWorker:
     ) -> bool:
         parked = self._parked_failure
         if parked is None:
+            return False
+        if parked.based_on_trace_sequence != self._trace_publication_sequence:
+            self._parked_failure = None
+            self._pending_failure_health = None
             return False
         captured_thread_ids = frozenset(thread_id for thread_id, _source in parked.sources)
         pending_thread_ids = self._pending_resolution_thread_ids | (set() if batch is None else set(batch.thread_ids))
@@ -1003,8 +1099,11 @@ class AnalyticsRolloutWorker:
         self._accepted_observations = {item.codex_thread_id: item for item in prepared.observations}
         adapter.accept_batch()
         self._trace_normalizer.accept_batch()
-        self._source_reader.accept([item.prepared_read for item in prepared.stable_reads])
-        self._promote_verified_sources(prepared.stable_reads)
+        current_reads = tuple(
+            item for item in prepared.stable_reads if item.observation.codex_thread_id in self._accepted_observations
+        )
+        self._source_reader.accept([item.prepared_read for item in current_reads])
+        self._promote_verified_sources(current_reads)
         self._requires_full_reconcile = False
         self._accept_recovery()
         self._parked_failure = None

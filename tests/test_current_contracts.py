@@ -40,8 +40,8 @@ def test_current_release_declares_matching_package_and_process_versions() -> Non
     assert peer_headers["X-Rodex-Peer-Contract"] == "rodex-runtime-peer-v6"
     assert peer_headers["X-Rodex-Implementation-Id"].startswith("0.17a+installation.")
     assert MACHINE_ENVELOPE_SCHEMA_VERSION == 5
-    assert AGENT_TRACE_SCHEMA_VERSION == "rodex-agent-trace-v5"
-    assert STATISTICS_PROJECTION_SCHEMA_VERSION == "rodex-statistics-v10"
+    assert AGENT_TRACE_SCHEMA_VERSION == "rodex-agent-trace-v6"
+    assert STATISTICS_PROJECTION_SCHEMA_VERSION == "rodex-statistics-v11"
     assert OBSERVER_SCHEMA == "rodex-agent-observer-v4"
 
 

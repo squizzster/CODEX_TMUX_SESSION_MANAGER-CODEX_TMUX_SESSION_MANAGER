@@ -65,6 +65,7 @@ from .schema import (
     RODEX_SESSIONS_CODEX_TURN_STATES_TABLE,
     RODEX_SESSIONS_CODEX_TURNS_TABLE,
     TOOL_NAMES_TABLE,
+    ensure_normalization_schema,
 )
 from .validation import _validate_session_id
 
@@ -76,6 +77,7 @@ def publish_agent_trace_in_transaction(
     *,
     model_name_ids: dict[str, int],
     reasoning_effort_name_ids: dict[str, int],
+    statistics_owns_lifecycle: bool = False,
 ) -> RodexAgentTracePublishReceipt:
     """Append a deduplicated trace batch and advance its independent CAS head."""
     _validate_session_id(session_id)
@@ -83,7 +85,7 @@ def publish_agent_trace_in_transaction(
     require_active_rodex_transaction(connection)
     current = connection.execute(
         f"SELECT trace_publication_sequence, durable_event_count, "
-        "unrecognized_record_count, coverage_state FROM "
+        "unrecognized_record_count, coverage_state, trace_schema_version FROM "
         f"{RODEX_SESSIONS_AGENT_TRACE_PUBLICATIONS_TABLE} "
         "WHERE rodex_sessions_id = ?",
         (session_id,),
@@ -94,6 +96,20 @@ def publish_agent_trace_in_transaction(
     prior_coverage = None if current is None else str(current[3])
     if current_sequence != prepared.based_on_trace_publication_sequence:
         raise RodexSessionStatisticsPublicationRaceError("agent trace publication sequence changed during calculation")
+    from .normalization_schema import CURRENT_TRACE_VERSION, NORMALIZATION_TRANSITIONS_TABLE
+
+    if prepared.trace_schema_version == CURRENT_TRACE_VERSION:
+        ensure_normalization_schema(connection, install=True)
+    if current is not None and current[4] != prepared.trace_schema_version:
+        transition = None
+        if prepared.trace_schema_version == CURRENT_TRACE_VERSION:
+            transition = connection.execute(
+                f"SELECT 1 FROM {NORMALIZATION_TRANSITIONS_TABLE} WHERE rodex_sessions_id = ? "
+                "AND previous_trace_publication_sequence = ? AND rebuilt_trace_schema_version = ?",
+                (session_id, current_sequence, prepared.trace_schema_version),
+            ).fetchone()
+        if transition is None:
+            raise RodexSessionStatisticsConflictError("trace normalization generation requires a verified rebuild")
     sequence = 1 if current_sequence is None else current_sequence + 1
     thread_memberships = _trace_thread_memberships(
         connection,
@@ -121,8 +137,6 @@ def publish_agent_trace_in_transaction(
             session_id,
             thread_row_id,
             event.codex_turn_id,
-            event_kind=kind,
-            event_time_utc=event.event_time_utc,
         )
         scope_id = _resolve_or_insert_activity_scope(
             connection,
@@ -183,6 +197,8 @@ def publish_agent_trace_in_transaction(
                 raise RodexSessionStatisticsConflictError("authenticated rollout event changed after trace publication")
             continue
         assert trace_event_public_id is not None
+        if turn_row_id is not None and not statistics_owns_lifecycle and event.lifecycle_eligible is not False:
+            _apply_inserted_trace_lifecycle(connection, session_id, turn_row_id, scope_id, kind, event.event_time_utc)
         inserted_event_count += 1
         inserted_unrecognized_count += kind == "unrecognized_record"
         request_target_id = _insert_trace_detail(
@@ -242,9 +258,6 @@ def _resolve_optional_trace_turn_id(
     session_id: int,
     thread_row_id: int,
     codex_turn_id: str | None,
-    *,
-    event_kind: str,
-    event_time_utc: str | None,
 ) -> int | None:
     if codex_turn_id is None:
         return None
@@ -287,18 +300,30 @@ def _resolve_optional_trace_turn_id(
                 break
     if row is None:
         raise RodexSessionStatisticsConflictError("trace turn identity was not registered")
-    turn_row_id = int(row[0])
-    outcome = "completed" if event_kind == "turn_completed" else "aborted" if event_kind == "turn_aborted" else "open"
+    return int(row[0])
+
+
+def _apply_inserted_trace_lifecycle(
+    connection: sqlite3.Connection,
+    session_id: int,
+    turn_row_id: int,
+    scope_id: int,
+    event_kind: str,
+    event_time_utc: str | None,
+) -> None:
+    """Apply only newly admitted observations when no aggregate owns state.
+
+    Aggregate publication supplies its accepted lifecycle outcome directly.
+    Trace-only publication follows the same first-terminal/observed-start rule;
+    a missing timestamp is not evidence that a terminal remains unaccepted.
+    """
     connection.execute(
         f"INSERT OR IGNORE INTO {RODEX_SESSIONS_CODEX_TURN_STATES_TABLE} "
         "(rodex_sessions_id, rodex_sessions_codex_turns_id, started_at_utc, "
-        "terminal_at_utc, outcome) VALUES (?, ?, ?, ?, ?)",
+        "terminal_at_utc, outcome) VALUES (?, ?, NULL, NULL, 'open')",
         (
             session_id,
             turn_row_id,
-            event_time_utc if event_kind == "turn_started" else None,
-            event_time_utc if outcome != "open" else None,
-            outcome,
         ),
     )
     if event_kind == "turn_started":
@@ -311,15 +336,17 @@ def _resolve_optional_trace_turn_id(
     elif event_kind in {"turn_completed", "turn_aborted"}:
         connection.execute(
             f"UPDATE {RODEX_SESSIONS_CODEX_TURN_STATES_TABLE} SET "
-            "terminal_at_utc = COALESCE(terminal_at_utc, ?), outcome = ? "
-            "WHERE rodex_sessions_codex_turns_id = ?",
+            "terminal_at_utc = ?, outcome = ? "
+            "WHERE rodex_sessions_codex_turns_id = ? AND outcome = 'open' "
+            f"AND EXISTS (SELECT 1 FROM {RODEX_SESSIONS_AGENT_TRACE_EVENTS_TABLE} "
+            "WHERE rodex_sessions_codex_activity_scopes_id = ? AND event_kind = 'turn_started')",
             (
                 event_time_utc,
                 "completed" if event_kind == "turn_completed" else "aborted",
                 turn_row_id,
+                scope_id,
             ),
         )
-    return turn_row_id
 
 
 def _resolve_or_insert_activity_scope(

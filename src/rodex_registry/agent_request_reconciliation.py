@@ -69,6 +69,7 @@ def _insert_agent_request_from_activity(
     target_codex_threads_id: int,
     collaboration_tool_call_id: int,
     activity_kind: str,
+    preserved_identity: tuple[int, int, int] | None = None,
 ) -> bool:
     """Create one canonical request from exact message/call/activity provenance."""
     tool_activity = connection.execute(
@@ -121,17 +122,22 @@ def _insert_agent_request_from_activity(
         return False
     for _attempt_number in index_re_try_attempt_numbers():
         public_id = uuid.uuid4()
+        identity_columns = "" if preserved_identity is None else "id, "
+        identity_placeholder = "" if preserved_identity is None else "?, "
+        identity_values = (
+            split_codex_thread_id_into_signed_bigints(public_id) if preserved_identity is None else preserved_identity
+        )
         inserted = connection.execute(
             f"INSERT OR IGNORE INTO {RODEX_SESSIONS_AGENT_REQUESTS_TABLE} "
-            "(agent_request_public_id_signed_bigint_1, "
+            f"({identity_columns}agent_request_public_id_signed_bigint_1, "
             "agent_request_public_id_signed_bigint_2, rodex_sessions_id, "
             "rodex_sessions_codex_activity_scopes_id, "
             "parent_rodex_sessions_agent_trace_messages_id, "
             "rodex_sessions_agent_trace_tool_call_activities_id, "
             "rodex_sessions_agent_trace_subagent_activities_id, "
-            "target_codex_threads_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            f"target_codex_threads_id) VALUES ({identity_placeholder}?, ?, ?, ?, ?, ?, ?, ?)",
             (
-                *split_codex_thread_id_into_signed_bigints(public_id),
+                *identity_values,
                 session_id,
                 scope_id,
                 int(parent_message[0]),

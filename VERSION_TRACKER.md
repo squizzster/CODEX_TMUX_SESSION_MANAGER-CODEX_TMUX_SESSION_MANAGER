@@ -20,6 +20,9 @@ are separate identities.
   or security attestation. Updating the checkout does not replace live helpers.
 - Catalog compatibility does not establish live-runtime ownership. Earlier catalogs
   are not implicitly migrated; unknown wire generations are refused.
+- Within base catalog 22, trace v5 has one supported, verified normalization rebuild
+  to trace v6/statistics v11. [Analytics recovery](docs/ANALYTICS.md#publication-and-recovery)
+  defines its source verification, identity preservation and atomic repair audit.
 - Supported retained runtimes use the [idle upgrade or explicit reconnect route](docs/RUNTIME_ISOLATION.md#retained-runtime-upgrade).
   The [resize-only legacy bridge](docs/RUNTIME_ISOLATION.md#compatibility-boundary)
   grants no launch, stop, adoption or model-input authority.

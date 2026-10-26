@@ -1663,6 +1663,12 @@ def test_restarted_worker_rejects_non_atomic_or_incompatible_publication_heads(
     before = read_rodex_session_statistics(1, config.rodex_database_path)
     assert before.statistics is not None
     with sqlite3.connect(config.rodex_database_path) as connection:
+        # Simulate an externally corrupted catalog after verifying ordinary old
+        # writers cannot downgrade or delete the new normalization head.
+        with pytest.raises(sqlite3.IntegrityError, match="normalization"):
+            connection.execute(checkpoint_mutation)
+        connection.execute("DROP TRIGGER rodex_agent_trace_normalization_no_downgrade")
+        connection.execute("DROP TRIGGER rodex_agent_trace_normalization_no_delete")
         connection.execute(checkpoint_mutation)
     restarted_adapter = FakeAnalyticsAdapter()
 
@@ -2591,7 +2597,7 @@ def test_real_worker_publishes_exact_turn_projection_into_rodex_sql(
 
     exact = read_rodex_session_turn_statistics(1, TURN_TEST_ID, config.rodex_database_path)
     assert exact.statistics is not None
-    assert exact.statistics.statistics_projection_schema_version == "rodex-statistics-v10"
+    assert exact.statistics.statistics_projection_schema_version == "rodex-statistics-v11"
     assert exact.worker is not None
     assert exact.worker.worker_state == "up_to_date"
     assert exact.turn is not None

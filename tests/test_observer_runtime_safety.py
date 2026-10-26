@@ -203,7 +203,9 @@ def test_delayed_split_cannot_be_resubmitted(owned_tmux) -> None:
     assert len(pending) == 2
     responses = [subprocess.run(command, **options) for command, options in reversed(pending)]
     assert all(response.returncode == 0 for response in responses)
-    admitted = [response.stdout.strip() for response in responses if response.stdout.startswith("%")]
+    admitted = [
+        response.stdout.splitlines()[-1] for response in responses if response.stdout.startswith("split-dispatched:")
+    ]
     assert len(admitted) == 1
     candidate = controller.create(("sleep", "60"))
     assert candidate == admitted[0]
@@ -223,7 +225,7 @@ def test_moved_candidate_is_never_claimed_or_killed(owned_tmux, stage: str) -> N
         response = subprocess.run(command, **options)
         action = shlex.split(command[-2])
         if "split-window" in command[-2]:
-            candidate = response.stdout.strip()
+            candidate = response.stdout.splitlines()[-1]
         trigger = (
             "split-window" in command[-2]
             if stage == "split"
@@ -239,8 +241,8 @@ def test_moved_candidate_is_never_claimed_or_killed(owned_tmux, stage: str) -> N
     assert candidate is not None
     assert run("display-message", "-p", "-t", candidate, "#{session_name}").stdout.strip() == "foreign"
     if stage == "split":
-        assert run("show-options", "-p", "-v", "-t", candidate, "@rodex_pane_runtime_id").stdout.strip() == ""
-        assert run("show-options", "-p", "-v", "-t", candidate, "@rodex_agent_observer_for").stdout.strip() == ""
+        assert run("display-message", "-p", "-t", candidate, "#{@rodex_pane_runtime_id}").stdout.strip() == ""
+        assert run("display-message", "-p", "-t", candidate, "#{@rodex_agent_observer_for}").stdout.strip() == ""
 
 
 def test_failed_lookup_is_not_absence(owned_tmux) -> None:
@@ -484,3 +486,179 @@ def test_all_observer_control_frames_require_the_exact_runtime_peer(kind: str, i
         assert events.get_nowait() == frame_event
     if kind == "display_message":
         assert connection.acknowledgement == (b"1" if accepted else b"0")
+
+
+def test_rejected_split_retires_exact_operation_and_allows_retry(owned_tmux) -> None:
+    tmux, capability, run = owned_tmux
+    controller = pane_controller(tmux, capability)
+    run("resize-window", "-t", capability.session_target, "-y", "2")
+    assert controller.create(("sleep", "60")) is None
+    receipt = run("show-options", "-pv", "-t", capability.pane_target, controller._creation_receipt_option).stdout.strip()
+    assert receipt.startswith("retired:")
+    assert not controller.creation_pending
+    run("resize-window", "-t", capability.session_target, "-y", "50")
+    pane = controller.create(("sleep", "60"))
+    assert pane is not None
+    assert controller.create(("sleep", "60")) == pane
+    assert len(run("list-panes", "-a").stdout.splitlines()) == 2
+
+
+@pytest.mark.parametrize(
+    "failure", ["generic", "timeout", "unavailable", "missing_ack", "wrong_ack", "extra_output", "malformed_error"]
+)
+def test_uncertain_split_failure_never_retires_pending_receipt(owned_tmux, failure: str) -> None:
+    tmux, capability, run = owned_tmux
+    run("resize-window", "-t", capability.session_target, "-y", "2")
+    splits = 0
+
+    def runner(command, **options):
+        nonlocal splits
+        result = subprocess.run(command, **options)
+        if "split-window" in command[-2]:
+            splits += 1
+            assert result.returncode == 1 and result.stderr == "no space for new pane\n"
+            if failure == "timeout":
+                raise subprocess.TimeoutExpired(command, options["timeout"], output=result.stdout, stderr=result.stderr)
+            if failure == "unavailable":
+                raise OSError("lost transport")
+            if failure == "generic":
+                result.stderr = "unknown failure\n"
+            elif failure == "malformed_error":
+                result.stderr = "create pane failed: reason\ntrailing garbage"
+            elif failure == "missing_ack":
+                result.stdout = ""
+            elif failure == "wrong_ack":
+                result.stdout = "split-dispatched:" + "f" * 32 + "\n"
+            else:
+                result.stdout += "malformed\n"
+        return result
+
+    controller = pane_controller(tmux, capability, runner)
+    assert controller.create(("sleep", "60")) is None
+    run("resize-window", "-t", capability.session_target, "-y", "50")
+    assert controller.create(("sleep", "60")) is None
+    assert controller.creation_pending and splits == 1
+    assert run(
+        "show-options", "-pv", "-t", capability.pane_target, controller._creation_receipt_option
+    ).stdout.startswith("pending:")
+    assert len(run("list-panes", "-a").stdout.splitlines()) == 1
+
+
+@pytest.mark.parametrize("lost_after_execution", [False, True])
+def test_rejected_split_retirement_reconciles_lost_reply(owned_tmux, lost_after_execution: bool) -> None:
+    tmux, capability, run = owned_tmux
+    run("resize-window", "-t", capability.session_target, "-y", "2")
+    failed = False
+
+    def runner(command, **options):
+        nonlocal failed
+        if not failed and command[-2].startswith("set-option") and "retired:" in command[-2]:
+            failed = True
+            if lost_after_execution:
+                subprocess.run(command, **options)
+            raise subprocess.TimeoutExpired(command, options["timeout"])
+        return subprocess.run(command, **options)
+
+    controller = pane_controller(tmux, capability, runner)
+    assert controller.create(("sleep", "60")) is None
+    assert failed
+    assert controller.creation_pending is not lost_after_execution
+    run("resize-window", "-t", capability.session_target, "-y", "50")
+    assert controller.create(("sleep", "60")) is not None
+    assert len(run("list-panes", "-a").stdout.splitlines()) == 2
+
+
+def test_rejected_split_cannot_retire_a_competing_operation(owned_tmux) -> None:
+    tmux, capability, run = owned_tmux
+    run("resize-window", "-t", capability.session_target, "-y", "2")
+    competing = "pending:" + "b" * 32
+
+    def runner(command, **options):
+        response = subprocess.run(command, **options)
+        if "split-window" in command[-2]:
+            assert response.returncode == 1
+            run("set-option", "-p", "-t", capability.pane_target, "@rodex_agent_observer_pane_id_creation", competing)
+        return response
+
+    controller = pane_controller(tmux, capability, runner)
+    assert controller.create(("sleep", "60")) is None
+    assert controller.create(("sleep", "60")) is None
+    assert controller._creation_operation_id == "b" * 32
+    assert (
+        run("show-options", "-pv", "-t", capability.pane_target, controller._creation_receipt_option).stdout.strip()
+        == competing
+    )
+
+
+def test_rejected_split_cannot_retire_after_capability_change(owned_tmux) -> None:
+    tmux, capability, run = owned_tmux
+    run("resize-window", "-t", capability.session_target, "-y", "2")
+
+    def runner(command, **options):
+        response = subprocess.run(command, **options)
+        if "split-window" in command[-2]:
+            assert response.returncode == 1
+            run("set-option", "-s", "@rodex_shared_tmux_server_id", "b" * 32)
+        return response
+
+    controller = pane_controller(tmux, capability, runner)
+    assert controller.create(("sleep", "60")) is None
+    assert controller.creation_pending
+    assert controller.reconcile_retirement() == (False, None)
+    assert run(
+        "show-options", "-pv", "-t", capability.pane_target, controller._creation_receipt_option
+    ).stdout.startswith("pending:")
+
+
+def test_rejected_split_retains_proof_until_retirement_readback_succeeds(owned_tmux) -> None:
+    tmux, capability, run = owned_tmux
+    run("resize-window", "-t", capability.session_target, "-y", "2")
+    retirement_attempted = False
+    readback_available = False
+
+    def runner(command, **options):
+        nonlocal retirement_attempted
+        if command[-2].startswith("set-option") and "retired:" in command[-2]:
+            retirement_attempted = True
+        if retirement_attempted and not readback_available and command[-2].startswith("display-message"):
+            raise OSError("readback unavailable")
+        return subprocess.run(command, **options)
+
+    controller = pane_controller(tmux, capability, runner)
+    assert controller.create(("sleep", "60")) is None
+    rejected = controller._rejected_split_operation_id
+    assert rejected is not None and controller.creation_pending
+    assert controller.reconcile_retirement() == (False, None)
+    assert controller._rejected_split_operation_id == rejected
+    readback_available = True
+    assert controller.reconcile_retirement() == (True, None)
+    assert controller._rejected_split_operation_id is None
+    assert not controller.creation_pending
+
+
+@pytest.mark.parametrize("failed_step", range(4))
+def test_native_failed_registration_retires_candidate_before_retry(owned_tmux, failed_step: int) -> None:
+    tmux, capability, run = owned_tmux
+    seen_steps = 0
+    failed = False
+
+    def runner(command, **options):
+        nonlocal seen_steps, failed
+        payload = command[-2]
+        if (
+            not failed
+            and "split-window" not in payload
+            and (payload.startswith(("set-option", "select-pane")) or "registered:" in payload)
+        ):
+            if seen_steps == failed_step:
+                failed = True
+                return subprocess.CompletedProcess(command, 1, "", "registration failed")
+            seen_steps += 1
+        return subprocess.run(command, **options)
+
+    controller = pane_controller(tmux, capability, runner)
+    assert controller.create(("sleep", "60")) is None
+    assert failed
+    assert len(run("list-panes", "-a").stdout.splitlines()) == 1
+    assert controller.create(("sleep", "60")) is not None
+    assert len(run("list-panes", "-a").stdout.splitlines()) == 2

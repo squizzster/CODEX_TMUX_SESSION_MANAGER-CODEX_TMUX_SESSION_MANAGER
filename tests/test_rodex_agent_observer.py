@@ -113,6 +113,15 @@ def _tmux_command_actions(command: str) -> list[list[str]]:
     return [arguments]
 
 
+def _split_creation_reply(command: list[str]) -> str:
+    dispatch = next(
+        action[-1]
+        for action in _tmux_command_actions(command[-2])
+        if action[0] == "display-message" and action[-1].startswith("split-dispatched:")
+    )
+    return f"{dispatch}\n%9\n"
+
+
 def _receive_control_event(listener: socket.socket) -> dict[str, object]:
     connection, _address = listener.accept()
     with connection:
@@ -472,7 +481,7 @@ def test_exact_spawn_creates_a_disabled_top_third_without_changing_focus(
         if read_output is not None:
             return subprocess.CompletedProcess(command, 0, read_output, "")
         if operation == "if-shell" and "split-window" in command[-2]:
-            return subprocess.CompletedProcess(command, 0, "%9\n", "")
+            return subprocess.CompletedProcess(command, 0, _split_creation_reply(command), "")
         return subprocess.CompletedProcess(command, 0, "", "")
 
     controller = AgentObserverCoordinator(
@@ -507,8 +516,8 @@ def test_exact_spawn_creates_a_disabled_top_third_without_changing_focus(
         "-v",
         "-b",
         "-d",
-        "-p",
-        "33",
+        "-l",
+        "33%",
         "-t",
         "%7",
         "-c",
@@ -577,7 +586,7 @@ def test_observer_creation_rolls_back_every_partial_registration_failure(
         if operation != "if-shell":
             raise AssertionError(f"unexpected tmux command: {command}")
         if "split-window" in command[-2]:
-            return subprocess.CompletedProcess(command, 0, "%9\n", "")
+            return subprocess.CompletedProcess(command, 0, _split_creation_reply(command), "")
         if not failure_injected:
             if registration_step == failed_registration_step:
                 failure_injected = True
@@ -667,7 +676,7 @@ def test_same_turn_parent_request_is_sent_exactly_without_entering_process_args(
         if read_output is not None:
             return subprocess.CompletedProcess(command, 0, read_output, "")
         if operation == "if-shell" and "split-window" in command[-2]:
-            return subprocess.CompletedProcess(command, 0, "%9\n", "")
+            return subprocess.CompletedProcess(command, 0, _split_creation_reply(command), "")
         return subprocess.CompletedProcess(command, 0, "", "")
 
     controller = AgentObserverCoordinator(
@@ -896,7 +905,7 @@ def test_controller_close_waits_for_inflight_callback_and_blocks_late_mutation(
         if read_output is not None:
             return subprocess.CompletedProcess(command, 0, read_output, "")
         if operation == "if-shell" and "split-window" in command[-2]:
-            return subprocess.CompletedProcess(command, 0, "%9\n", "")
+            return subprocess.CompletedProcess(command, 0, _split_creation_reply(command), "")
         return subprocess.CompletedProcess(command, 0, "", "")
 
     controller = AgentObserverCoordinator(

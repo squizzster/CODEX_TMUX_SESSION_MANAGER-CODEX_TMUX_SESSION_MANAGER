@@ -255,7 +255,13 @@ It reads guarded logical pane dimensions because tmux's kernel PTY size can lag 
 hook. Generic layout changes and pane swaps must both reach this path.
 
 Observer creation publishes an operation receipt before splitting; a lost split
-reply cannot authorize a second pane. Registration publishes its binding last.
+reply cannot authorize a second pane. Splits request `-l 33%`. A pending creation
+can retire after rejection only when its exact dispatch acknowledgement and a
+complete native pre-creation diagnostic prove that split failed. Unknown errors,
+timeouts and malformed replies retain candidate recovery. Retirement compares the
+dispatched operation and primary capability, then verifies the receipt by readback;
+an adopted or competing operation cannot inherit the original failure proof.
+Registration publishes its binding last.
 Uncertain retirement retains the original target and generation tombstone; new work
 waits for that outcome. Frames carry runtime/server identity because separate tmux
 servers can both contain `%0`. [Observer state](INTERACTION_PATHS.md#observer-state)

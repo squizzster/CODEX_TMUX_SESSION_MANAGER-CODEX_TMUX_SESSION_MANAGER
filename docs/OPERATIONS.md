@@ -48,6 +48,12 @@ autowrap, or origin/insert mode active, the selection remains pending until late
 output clears that state. [Terminal presentation](INTERACTION_PATHS.md#terminal-and-presentation)
 defines the preserved cursor, scrolling, and input boundaries.
 
+Local reconstruction and composer interception use verified tmux **3.2a** and **3.4**
+profiles selected from the owned server's version. Other versions keep native
+display and terminal-owned replies; Rodex logs the profile as unverified and disables
+those local presentation features. Viewports narrower than three columns also defer
+local reconstruction until sufficient width returns.
+
 Managed Codex defaults to `tui.animations=false` to avoid decorative spinner/shimmer
 redraw work. `rodex --config tui.animations=true` explicitly restores it. The source
 of launch defaults is [`runtime.py`](../src/rodex/runtime.py), not a second Codex config.
@@ -145,6 +151,9 @@ identities without mutating the catalog.
   allows 30 seconds for the main acknowledgement; a few seconds of startup is normal.
   Temporary native helpers may coexist with main and must not be counted as competing
   main conversations. A TUI modal can precede thread loading and leave stderr quiet.
+  Accepted registration retires its startup deadline even when analytics activation
+  is pending. Inspect `_stats-status SESSION` for analytics health; activation retries
+  continue independently while the terminal remains available.
   The known 0.162.1
   [hook-review boundary](SECURITY.md#hook-admission-and-resume) explains why a
   successful fresh session did not prove saved-session resume would work.

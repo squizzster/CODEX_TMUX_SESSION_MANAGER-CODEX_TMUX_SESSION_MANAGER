@@ -54,6 +54,10 @@ Python 3.12; passing offline checks does not resolve that process-launch warning
   [Retained handoff admission](../tests/test_runtime_upgrade.py) checks idle-only
   upgrades and attachment without replacement; installation tests verify a busy turn
   completes across `--force-old` reconnect before its idle runtime is upgraded.
+  [Activation retries](../tests/test_runtime_activation.py) distinguish registered
+  runtimes from pending analytics. [Owned process lifecycle](../tests/test_process_lifecycle.py)
+  and [receipt reconciliation](../tests/test_process_receipts.py) exercise gated
+  startup, surviving group members, failed cleanup and retained finalization authority.
   Installation and shim tests also check the single versioned preparation notice,
   the copied source's release version, and silent reuse of a cached installation.
 - Input and display: [terminal input](../tests/test_terminal_input.py),
@@ -84,12 +88,16 @@ Python 3.12; passing offline checks does not resolve that process-launch warning
   pin timing and elapsed formats; gateway and live prompt-handoff tests cover
   coalescing, the idle reset, and the native elapsed timer.
 - Persistence: [SQLite adversarial boundaries](../tests/adversarial/test_round3_sqlite_boundaries.py)
-  and the registry/analytics suites beside the relevant implementation tests.
+  and [hard-link identity fences](../tests/adversarial/test_sqlite_link_identity.py),
+  plus the registry/analytics suites beside the relevant implementation tests.
 - Rollout statistics and token accounting: start with
   [analyzer parity](../tests/test_rodex_analytics_analyzer.py), then add
   [worker/publication](../tests/test_rodex_analytics.py) or
   [trace normalization](../tests/test_rodex_agent_trace.py) only when that boundary
   is touched.
+  Changes to turn outcomes or projection generations also need
+  [lifecycle consistency](../tests/test_analytics_lifecycle_consistency.py) and
+  [verified normalization rebuilds](../tests/test_analytics_normalization_rebuild.py).
 - New effect-bearing paths: update the classification in
   [test_interaction_path_ownership.py](../tests/adversarial/test_interaction_path_ownership.py)
   and the [interaction inventory](INTERACTION_PATHS.md#effect-audit).

@@ -6,7 +6,6 @@ import json
 import os
 import secrets
 import shlex
-import signal
 import socket
 import stat as stat_module
 import subprocess
@@ -82,6 +81,7 @@ from .process_environment import (
     user_process_environment,
     validated_user_environment_entries,
 )
+from .process_receipts import OwnedProcessGroup, RuntimeProcessLifecycle, RuntimeProcessReceipts
 from .prompt_expansion_display import PromptExpansionDisplay
 from .protocol_projection import ProtocolProjectionGuard
 from .protocol_proxy import (
@@ -160,6 +160,7 @@ CODEX_ACTIVE_WRITER_RETRY_INTERVAL_SECONDS: Final = 0.25
 CODEX_PRIMARY_CONNECTION_RELEASE_TIMEOUT_SECONDS: Final = 2.5
 RUNTIME_PATH_KEEPALIVE_INTERVAL_SECONDS: Final = 60.0 * 60.0
 RODEX_REGISTRATION_TIMEOUT_SECONDS: Final = 60.0
+ANALYTICS_ACTIVATION_RETRY_SECONDS: Final = 1.0
 RODEX_TMUX_HISTORY_LIMIT_LINES: Final = 50_000
 RODEX_TMUX_SCROLLBACK_STATE_LINES: Final = 256
 RODEX_TMUX_COMMAND_TIMEOUT_SECONDS: Final = 5.0
@@ -696,11 +697,22 @@ class RodexRuntimeLauncher:
         self._publish_tui_notice = tui_notice_publisher
         self._user_process_environment = user_process_environment(os.environ if environment is None else environment)
         self._daemon_client_factory = daemon_client_factory
+        self._catalog_lifecycle: RuntimeProcessLifecycle | None = None
 
     def codex_session_is_persisted(self, codex_session_id: CodexSessionId) -> bool:
         """Ask a transient App Server whether an exact thread is resumable."""
         runtime_root = default_runtime_root()
+        if self._catalog_lifecycle is not None:
+            self._catalog_lifecycle.close()
         token = secrets.token_hex(8)
+        catalog_runtime = parse_rodex_runtime_id(token)
+        catalog_operation = secrets.token_hex(16)
+        receipts = RuntimeProcessReceipts(runtime_root, catalog=True)
+        lifecycle = RuntimeProcessLifecycle(
+            on_started=lambda kind, group: receipts.record(kind, catalog_runtime, catalog_operation, group),
+            on_stopped=lambda kind, group: receipts.release(kind, catalog_runtime, catalog_operation, group),
+        )
+        self._catalog_lifecycle = lifecycle
         socket_path = runtime_root / f"catalog-{token}.sock"
         log_path = runtime_root / f"catalog-{token}.log"
         _require_short_unix_socket_path(socket_path)
@@ -711,15 +723,17 @@ class RodexRuntimeLauncher:
             cleanup.callback(log_path.unlink, missing_ok=True)
             log = _open_private_runtime_log(log_path)
             cleanup.callback(log.close)
-            process = self._spawn_process(
+            cleanup.callback(lifecycle.close)
+            process = lifecycle.start(
+                "app-server",
                 CODEX_APP_SERVER.command(self._codex_binary, socket_path),
+                process_spawner=self._spawn_process,
+                python_executable=self._python_executable,
                 stdin=subprocess.DEVNULL,
                 stdout=log,
                 stderr=log,
                 env=self._user_process_environment,
-                start_new_session=True,
             )
-            cleanup.callback(_stop_child_process, process, owns_process_group=True)
             _wait_for_app_server_socket(process, socket_path)
             endpoint.retain_bound_path()
             if endpoint.bound_alias is not None:
@@ -2651,13 +2665,15 @@ def run_runtime_service(
     on_started: Callable[[], None] = lambda: None,
     on_analytics_activated: Callable[[AnalyticsRuntimeConfig], None] = lambda _config: None,
     on_analytics_event: Callable[[Mapping[str, Any]], None] = lambda _event: None,
-    on_process_started: Callable[[str, subprocess.Popen[bytes]], None] = lambda _kind, _process: None,
-    on_process_stopped: Callable[[str, subprocess.Popen[bytes]], None] = lambda _kind, _process: None,
+    on_process_started: Callable[[str, OwnedProcessGroup], None] = lambda _kind, _group: None,
+    on_process_stopped: Callable[[str, OwnedProcessGroup], None] = lambda _kind, _group: None,
+    process_lifecycle: RuntimeProcessLifecycle | None = None,
     on_terminal_gateway_ready: Callable[[Callable[[], None], Callable[[], None]], None] = (
         lambda _supervisor_wake, _terminal_resize: None
     ),
 ) -> int:
     """Own one daemon-managed runtime and always release its transferred pane TTY."""
+    lifecycle = process_lifecycle or RuntimeProcessLifecycle(on_process_started, on_process_stopped)
     try:
         _require_runtime_not_stopped(stop)
         return _run_runtime_service(
@@ -2668,13 +2684,15 @@ def run_runtime_service(
             on_started=on_started,
             on_analytics_activated=on_analytics_activated,
             on_analytics_event=on_analytics_event,
-            on_process_started=on_process_started,
-            on_process_stopped=on_process_stopped,
+            process_lifecycle=lifecycle,
             on_terminal_gateway_ready=on_terminal_gateway_ready,
         )
     finally:
-        with suppress(OSError):
-            os.close(terminal_fd)
+        try:
+            lifecycle.close()
+        finally:
+            with suppress(OSError):
+                os.close(terminal_fd)
 
 
 def _run_runtime_service(
@@ -2686,8 +2704,7 @@ def _run_runtime_service(
     on_started: Callable[[], None],
     on_analytics_activated: Callable[[AnalyticsRuntimeConfig], None],
     on_analytics_event: Callable[[Mapping[str, Any]], None],
-    on_process_started: Callable[[str, subprocess.Popen[bytes]], None],
-    on_process_stopped: Callable[[str, subprocess.Popen[bytes]], None],
+    process_lifecycle: RuntimeProcessLifecycle,
     on_terminal_gateway_ready: Callable[[Callable[[], None], Callable[[], None]], None],
 ) -> int:
     """Own one daemon-managed app-server, proxy, analytics task, and Codex TUI."""
@@ -2707,7 +2724,6 @@ def _run_runtime_service(
     tmux_binary = config.tmux_binary
     tmux_server_socket_path = config.tmux_server_socket_path
     codex_arguments = config.codex_arguments
-    pending_analytics_config: AnalyticsRuntimeConfig | None = config.analytics
     tmux_pane_target = config.tmux_pane_target
     tmux_runtime_capability = _resolve_runtime_service_tmux_capability(
         tmux_binary,
@@ -2719,8 +2735,6 @@ def _run_runtime_service(
     peer_identity = RuntimePeerIdentity(config.runtime_id, config.tmux_server_id)
     app_endpoint = ExclusiveUnixEndpoint(app_server_socket_path, allow_child_alias=True)
     app_server: subprocess.Popen[bytes] | None = None
-    app_server_announced = False
-    tui: subprocess.Popen[bytes] | None = None
     terminal_gateway: TerminalSessionGateway | None = None
     input_presentation: InputInterceptorPresentation | None = None
     protocol_proxy: CodexProtocolProxy | None = None
@@ -2741,7 +2755,8 @@ def _run_runtime_service(
         str(config.runtime_id),
     )
     registered_interaction_context: AnalyticsRuntimeConfig | None = None
-    registration_deadline = time.monotonic() + RODEX_REGISTRATION_TIMEOUT_SECONDS
+    registration_deadline: float | None = time.monotonic() + RODEX_REGISTRATION_TIMEOUT_SECONDS
+    analytics_activation_deadline: float | None = None
     command_policy_status = CommandPolicyStatus(tmux_binary, tmux_runtime_capability, tmux_pane_target)
     command_policy = CommandPolicyBroker(
         config.command_policy_socket_path,
@@ -2776,24 +2791,16 @@ def _run_runtime_service(
             # Probe native inventory, optionally restart with exact temporary
             # trust, then fall back without our hook if verification fails.
             for _policy_attempt in range(3):
-                app_server = subprocess.Popen(
-                    (
-                        sys.executable,
-                        "-I",
-                        "-m",
-                        "rodex.process_guard",
-                        "--parent-pid",
-                        str(os.getpid()),
-                        "--",
-                        *CODEX_APP_SERVER.command(
-                            codex_binary,
-                            app_server_socket_path,
-                            command_policy_hook=policy_hook_override() if inject_policy else None,
-                            command_policy_trust=(
-                                temporary_policy_trust.configuration_override()
-                                if temporary_policy_trust is not None
-                                else None
-                            ),
+                app_server = process_lifecycle.start(
+                    "app-server",
+                    CODEX_APP_SERVER.command(
+                        codex_binary,
+                        app_server_socket_path,
+                        command_policy_hook=policy_hook_override() if inject_policy else None,
+                        command_policy_trust=(
+                            temporary_policy_trust.configuration_override()
+                            if temporary_policy_trust is not None
+                            else None
                         ),
                     ),
                     stdin=subprocess.DEVNULL,
@@ -2801,12 +2808,7 @@ def _run_runtime_service(
                     stderr=subprocess.STDOUT,
                     env=app_server_environment,
                     cwd=config.workspace,
-                    # Own shutdown independently of pane hangups, including bounded
-                    # escalation to the wrapper's native App Server child.
-                    start_new_session=True,
                 )
-                on_process_started("app-server", app_server)
-                app_server_announced = True
                 command_policy.bind_app_server(app_server)
                 _wait_for_app_server_socket(app_server, app_server_socket_path, stop)
                 _require_runtime_not_stopped(stop)
@@ -2827,9 +2829,7 @@ def _run_runtime_service(
                     break
                 # Only the provisional pre-TUI server is replaced. Untrusted native
                 # onboarding otherwise prevents Rodex's thread-before-attach gate.
-                _stop_child_process(app_server, owns_process_group=True)
-                on_process_stopped("app-server", app_server)
-                app_server_announced = False
+                process_lifecycle.stop("app-server")
                 app_server = None
                 app_endpoint.close()
                 app_endpoint.acquire()
@@ -2868,12 +2868,13 @@ def _run_runtime_service(
                 # can revoke a pending steer after usage drops below threshold.
                 projection_guard.observe("context-status-render", context_status.update, rendered_status)
 
-            def observe_context_percent(thread_id: str, context_percent: float) -> None:
+            def observe_context_percent(thread_id: str, context_percent: float, connection_generation: str) -> None:
                 if not projection_guard.observe(
                     "context-steering-percent",
                     context_threshold_steering.observe_context_percent,
                     thread_id,
                     context_percent,
+                    connection_generation=connection_generation,
                 ):
                     projection_guard.observe("context-steering-reset", context_threshold_steering.reset_after_disconnect)
 
@@ -2906,24 +2907,17 @@ def _run_runtime_service(
             live_event_tap.start()
             primary_output_projections = [
                 ("presentation-output", presentation_pipeline.observe_protocol_output),
-                ("context-steering", context_threshold_steering.observe_protocol_event),
-                ("context-status", live_context_observer.observe_protocol_event),
                 ("working-status", live_working_observer.observe_protocol_event),
             ]
             # These observers produce automatic model actions, not just pixels.
             # Lost observation must revoke pending work, even as native traffic
             # continues. Resets clear admission evidence before external cancel.
-            projection_failure_resets = {
-                "context-steering": context_threshold_steering.reset_after_disconnect,
-                "context-status": context_threshold_steering.reset_after_disconnect,
-            }
+            projection_failure_resets = {}
             if server_overloaded_recovery is not None:
                 primary_output_projections.append(
                     ("overload-recovery", server_overloaded_recovery.observe_protocol_event)
                 )
                 projection_failure_resets["overload-recovery"] = server_overloaded_recovery.reset_after_disconnect
-            if agent_observer_controller is not None:
-                primary_output_projections.append(("agent-observer", agent_observer_controller.observe_protocol_event))
 
             def publish_primary_server_message(
                 _message: str | bytes,
@@ -2989,13 +2983,25 @@ def _run_runtime_service(
                 event_tap=live_event_tap,
                 projection_guard=projection_guard,
                 prompt_expansion_display=prompt_expansion_display,
+                context_observer=live_context_observer,
+                context_steering=context_threshold_steering,
+                agent_observer=agent_observer_controller,
             )
             protocol_proxy.start()
+            terminal_profile = primary_pane.terminal_profile()
+            log.write(f"Rodex terminal profile: {terminal_profile.name}\n".encode())
+            if not terminal_profile.verified:
+                log.write(
+                    b"Unverified terminal profile: native relay and terminal-owned replies; "
+                    b"local reconstruction disabled.\n"
+                )
+            log.flush()
             input_presentation = InputInterceptorPresentation(
                 interaction_pipeline,
                 INPUT_INTERCEPTORS,
                 tmux_runtime_capability,
                 primary_pane,
+                terminal_profile=terminal_profile,
             )
 
             runtime_path_keepalive = _RuntimePathKeepalive(
@@ -3011,10 +3017,7 @@ def _run_runtime_service(
             )
 
             def stop_tui_after_keepalive_failure(_error: RodexRuntimeError) -> None:
-                active_tui = tui
-                if active_tui is None or active_tui.poll() is not None:
-                    return
-                _stop_child_process(active_tui)
+                process_lifecycle.stop("native-tui")
 
             runtime_path_keepalive.failure_callback = stop_tui_after_keepalive_failure
             try:
@@ -3063,28 +3066,32 @@ def _run_runtime_service(
                     registrations=INPUT_INTERCEPTORS,
                     confirm_native_prefix=input_presentation.confirm_native_prefix,
                     read_terminal_size=primary_pane.terminal_size,
+                    terminal_profile=terminal_profile,
                     presentation=presentation_pipeline,
                     prompt_expansion_display=prompt_expansion_display,
                     input_fd=terminal_fd,
                     output_fd=terminal_fd,
                     process_owner=native_tui_process,
-                    on_process_started=lambda process: on_process_started("native-tui", process),
-                    on_process_stopped=lambda process: on_process_stopped("native-tui", process),
+                    process_lifecycle=process_lifecycle,
                 )
-                tui = terminal_gateway.process
                 live_working_observer.publish_current_state()
                 diagnostic_relay.bind_supervisor_wake(terminal_gateway.request_supervisor_check)
                 on_terminal_gateway_ready(terminal_gateway.request_supervisor_check, terminal_gateway.resize)
                 on_started()
                 while True:
-                    if pending_analytics_config is not None:
+                    if stop.is_set():
+                        returncode = 0
+                        break
+                    if registered_interaction_context is None:
                         activated_analytics = _registered_analytics_runtime_config(
-                            pending_analytics_config,
+                            config.analytics,
                             tmux_binary,
                             tmux_server_socket_path,
                             tmux_pane_target,
                         )
                         if activated_analytics is not None:
+                            registration_deadline = None
+                            analytics_activation_deadline = time.monotonic()
                             if registered_interaction_context is None:
                                 registered_interaction_context = activated_analytics
                                 assert activated_analytics.codex_session_id is not None
@@ -3103,16 +3110,18 @@ def _run_runtime_service(
                                             rodex_session_id=str(activated_analytics.rodex_session_id),
                                             root_thread_id=activated_analytics.codex_session_id,
                                         )
-                            # Persistent statistics remain fail-open and must not
-                            # interrupt the daemon's interactive runtime pipeline.
-                            try:
-                                on_analytics_activated(activated_analytics)
-                            except Exception:
-                                pass
-                            else:
-                                pending_analytics_config = None
-                        elif time.monotonic() >= registration_deadline:
+                        elif registration_deadline is not None and time.monotonic() >= registration_deadline:
                             raise RodexRuntimeError("runtime registration was not confirmed before its deadline")
+                    if analytics_activation_deadline is not None and time.monotonic() >= analytics_activation_deadline:
+                        assert registered_interaction_context is not None
+                        # Registration is already accepted. Statistics may recover
+                        # independently while the terminal continues relaying I/O.
+                        try:
+                            on_analytics_activated(registered_interaction_context)
+                        except Exception:
+                            analytics_activation_deadline = time.monotonic() + ANALYTICS_ACTIVATION_RETRY_SECONDS
+                        else:
+                            analytics_activation_deadline = None
                     failure = runtime_path_keepalive.failure
                     if failure is not None:
                         _record_runtime_path_keepalive_failure(log, failure)
@@ -3121,14 +3130,15 @@ def _run_runtime_service(
                     if diagnostic_failure is not None:
                         raise diagnostic_failure
                     try:
-                        registration_pending = pending_analytics_config is not None
+                        registration_pending = registered_interaction_context is None
                         if stop.is_set():
                             returncode = 0
                             break
-                        registration_timeout = (
-                            max(0.0, registration_deadline - time.monotonic()) if registration_pending else None
+                        supervisor_deadline = registration_deadline or analytics_activation_deadline
+                        supervisor_timeout = (
+                            max(0.0, supervisor_deadline - time.monotonic()) if supervisor_deadline is not None else None
                         )
-                        returncode = terminal_gateway.wait(timeout=registration_timeout)
+                        returncode = terminal_gateway.wait(timeout=supervisor_timeout)
                     except subprocess.TimeoutExpired:
                         continue
                     if returncode is None:
@@ -3142,14 +3152,14 @@ def _run_runtime_service(
                             # Codex can leave its TUI alive after rejecting resume.
                             # Its stderr pipe is a real relay event, so retire this
                             # unregistered attempt without a supervisory timer.
-                            assert tui is not None
-                            _stop_child_process(tui)
+                            process_lifecycle.stop("native-tui")
                             returncode = 1
                             break
                         continue
                     break
                 if (
                     returncode == 0
+                    or registered_interaction_context is not None
                     or requested_codex_session_id is None
                     or active_writer_deadline is None
                     or not _active_writer_handoff_can_retry(
@@ -3178,8 +3188,7 @@ def _run_runtime_service(
                 runtime_path_keepalive.close()
         finally:
             try:
-                if tui is not None:
-                    _stop_child_process(tui)
+                process_lifecycle.stop("native-tui")
             finally:
                 if terminal_gateway is not None:
                     with suppress(Exception):
@@ -3216,9 +3225,7 @@ def _run_runtime_service(
                             finally:
                                 try:
                                     if app_server is not None:
-                                        _stop_child_process(app_server, owns_process_group=True)
-                                        if app_server_announced:
-                                            on_process_stopped("app-server", app_server)
+                                        process_lifecycle.stop("app-server")
                                 finally:
                                     try:
                                         command_policy.close()
@@ -3436,24 +3443,6 @@ def _registered_analytics_runtime_config(
         rodex_sessions_id=rodex_sessions_id,
         codex_session_id=codex_session_id,
     )
-
-
-def _stop_child_process(process: subprocess.Popen[bytes], *, owns_process_group: bool = False) -> None:
-    """Stop the retained child, escalating within its creation-owned group only."""
-    if process.poll() is not None:
-        return
-    process.terminate()
-    try:
-        process.wait(timeout=3)
-    except subprocess.TimeoutExpired:
-        if owns_process_group:
-            # Only callers that created a new process session may use this.
-            # The timed-out child has not been reaped, so its group ID cannot
-            # be recycled before escalation reaches its native descendants.
-            os.killpg(process.pid, signal.SIGKILL)
-        else:
-            process.kill()
-        process.wait(timeout=3)
 
 
 def _receive_response(websocket: Any, request_id: int) -> dict[str, Any]:

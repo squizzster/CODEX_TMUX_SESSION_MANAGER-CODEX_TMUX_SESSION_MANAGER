@@ -14,6 +14,7 @@ from .process_environment import (
     exact_environment_exec_command,
     validated_user_environment_entries,
 )
+from .terminal_cells import TerminalProfile, terminal_profile
 from .tmux_executor import SyncTmuxExecutor, SyncTmuxRunner, TmuxCommandResult
 from .tmux_session_capability import (
     TmuxRuntimeCapability,
@@ -55,6 +56,7 @@ class TmuxPaneController:
         self._owner_pane_option = owner_pane_option
         self._observer_pane_target: str | None = None
         self._creation_operation_id: str | None = None
+        self._rejected_split_operation_id: str | None = None
         self._tmux_executor = SyncTmuxExecutor(
             tmux_binary,
             capability.tmux_server_socket_path,
@@ -90,6 +92,13 @@ class TmuxPaneController:
         if result.returncode or not (1 <= columns <= 65535 and 1 <= rows <= 65535):
             raise OSError("could not read the owned tmux pane dimensions")
         return columns, rows
+
+    def terminal_profile(self) -> TerminalProfile:
+        """Bind interpretation to the owned server, not the tmux client binary."""
+        if not self._primary:
+            raise ValueError("terminal profile requires the primary pane owner")
+        result = self._tmux_executor.run(primary_pane_capability_read_arguments(self._capability, "#{version}"))
+        return terminal_profile(result.stdout if result.returncode == 0 else "")
 
     def locate(self) -> str | None:
         if self._primary:
@@ -142,6 +151,8 @@ class TmuxPaneController:
     def _create(self, pane_command: tuple[str, ...], *, retire_missing: bool) -> str | None:
         if self._primary:
             return self.locate()
+        if not self._reconcile_rejected_split():
+            return None
         if self._observer_pane_target is not None:
             existing = self.locate()
             if existing is not None:
@@ -183,8 +194,8 @@ class TmuxPaneController:
             "-v",
             "-b",
             "-d",
-            "-p",
-            "33",
+            "-l",
+            "33%",
             "-t",
             self._primary_pane_target,
             "-c",
@@ -214,6 +225,7 @@ class TmuxPaneController:
                             self._creation_receipt_option,
                             f"pending:{operation_id}",
                         ),
+                        ("display-message", "-p", "-t", self._primary_pane_target, f"split-dispatched:{operation_id}"),
                         split_command,
                     )
                 ),
@@ -222,13 +234,59 @@ class TmuxPaneController:
                 ),
             )
         )
-        pane_target = split.stdout.strip()
+        # Keep the dispatched identity independent of any receipt subsequently
+        # adopted from another creator. Only this branch's acknowledgement plus
+        # a native pre-creation rejection can authorize retiring its pending claim.
+        if self._split_rejected(split, operation_id):
+            self._rejected_split_operation_id = operation_id
+            self._reconcile_rejected_split()
+            return None
+        output = split.stdout.splitlines()
+        pane_target = output[1] if len(output) == 2 and output[0] == f"split-dispatched:{operation_id}" else ""
         if split.returncode != 0 or _PANE_ID_PATTERN.fullmatch(pane_target) is None:
             receipt = self._read_creation_receipt()
             if receipt is None:
                 return None
             return self._adopt_creation_receipt(receipt, pane_command, retire_missing=retire_missing)
         return self._register_candidate(pane_target)
+
+    @staticmethod
+    def _split_rejected(result: TmuxCommandResult, operation_id: str) -> bool:
+        # cmd-split-window emits these diagnostics before publishing a pane.
+        # A generic command error, timeout, transport failure or partial reply
+        # cannot prove that this particular split failed. Unknown errors remain
+        # pending for candidate recovery rather than licensing another split.
+        return (
+            result.returncode == 1
+            and not result.timed_out
+            and not result.unavailable
+            and result.stdout == f"split-dispatched:{operation_id}\n"
+            and (
+                result.stderr == "no space for new pane\n"
+                or result.stderr == "size missing\n"
+                or re.fullmatch(r"create pane failed: [^\r\n]+\n", result.stderr) is not None
+            )
+        )
+
+    def _reconcile_rejected_split(self) -> bool:
+        operation_id = self._rejected_split_operation_id
+        if operation_id is None:
+            return True
+        pending = f"pending:{operation_id}"
+        retired = f"retired:{operation_id}"
+        self._mutate(
+            ("set-option", "-p", "-t", self._primary_pane_target, self._creation_receipt_option, retired),
+            condition=f"#{{==:#{{{self._creation_receipt_option}}},{pending}}}",
+        )
+        observed = self._read_creation_value()
+        if observed is None or observed == pending or not observed:
+            return False
+        # A different valid receipt is also conclusive: this attempt no longer
+        # owns the slot. Do not retire or forget the subsequently adopted owner.
+        self._rejected_split_operation_id = None
+        if self._creation_operation_id == operation_id:
+            self._creation_operation_id = None
+        return True
 
     def _adopt_creation_receipt(
         self, receipt: tuple[str, str, str | None], pane_command: tuple[str, ...], *, retire_missing: bool
@@ -278,6 +336,8 @@ class TmuxPaneController:
 
     def reconcile_retirement(self) -> tuple[bool, str | None]:
         """Fence unadmitted work, or recover the exact pane for a final close."""
+        if not self._reconcile_rejected_split():
+            return False, None
         value = self._read_creation_value()
         if value is None:
             return False, None

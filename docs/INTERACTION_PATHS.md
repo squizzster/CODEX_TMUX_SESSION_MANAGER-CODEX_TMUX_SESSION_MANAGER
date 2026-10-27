@@ -159,6 +159,16 @@ rollout follower: `100 * totalTokens / modelContextWindow`. It does not scrape o
 parse the rendered `Context: N%` status, and display rounding cannot trigger it.
 Exactly `70.0` qualifies; every lower value does not.
 
+Context status and steering use the proxy's correlated primary identity. Neither
+usage nor a helper's start notification can select main. A context generation
+changes on connection replacement and on suspended/restored main selection, even
+when the thread UUID is unchanged. Events and percentage callbacks retain that
+generation through delivery. Binding loss immediately clears displayed usage,
+compaction and pending work, and signals the old rollout follower to stop.
+The binding retains only accepted main `id`, `ephemeral` and `path` metadata;
+resume and rejected reselection can start a fresh follower without a start
+notification. Registration independently enables steering dispatch.
+
 A qualifying below-to-`>=70%` crossing schedules one asynchronous `STEER` for the
 exact active main turn. [`CONTEXT_STEER_MESSAGE`](../src/rodex/context_threshold_steering.py)
 owns the fixed text: request a tagged progress update at a natural break, then
@@ -190,7 +200,9 @@ Evidence: [controller and race cases](../tests/test_context_threshold_steering.p
 [raw usage projection](../tests/test_rodex_protocol_proxy.py), and
 [pipeline/exact-control integration](../tests/test_interaction_integration.py).
 [Primary binding regressions](../tests/test_primary_thread_binding.py) reproduce
-resume without a start notification. The [isolated native test](../tests/test_context_threshold_native.py)
+resume without a start notification. [Context binding acceptance](../tests/test_primary_context_binding.py)
+covers helpers, same-thread reconnects, restored selections, stale callbacks and EOF.
+The [isolated native test](../tests/test_context_threshold_native.py)
 uses a persisted/resumed native thread and synthetic local model counters to prove
 one reminder reaches the same running turn, without interruption or a new turn.
 Native 0.162.1 passed; SQL/tmux discovery is fixture-provided in that test.
@@ -281,22 +293,36 @@ composites without feeding its own frames back into that native screen. Preserve
 
 - Exact query/UTF-8/encoding-switch boundaries when batching bytes. Cursor replies
   use child coordinates; capability and colour queries reach the real terminal.
+- Control-family cancellation. OSC/APC and escape/CSI restart or cancel according
+  to their grammar; DCS payload controls remain payload. Embedded C0 actions survive
+  cancellation, and interrupted queries cannot leave the outer parser inside an
+  abandoned sequence. Native bytes remain ordered through these boundaries.
 - Complete escape tokens and synchronized updates before switching surfaces.
   Coalescing semantic frames must not discard required native bytes or replies.
   Surface changes also wait for a paintable cursor/mode state: positioning a cursor
   at delayed autowrap would change the next character, and origin/insert modes
   change how a frame is interpreted. The latest requested surface resumes after
   native output restores a paintable state. Native reconstruction restores scroll
-  margins before positioning the cursor, including its visibility.
+  margins before positioning the cursor, including its visibility. Local painting
+  also waits for at least three columns, needed to stage clusters at the margin.
 - Native clear/resize/reflow ownership. A clear ends eligibility for old reflow history.
   Whole-row erasure disconnects both adjacent soft-wrap links; line moves disconnect
   their source/destination boundaries and move sparse blank rows over old text.
   Character shifts retain the vacated cell positions used by reflow and discard
   cells beyond the viewport. These properties matter on the next resize even when
-  the current screen looks unchanged.
-- Native wide-character cells. Partial overwrites clear the surviving half of an
-  overlapping glyph, and combining marks stay with its leading cell before redraw
-  or semantic presentation reads the screen.
+  the current screen looks unchanged. Insert/delete-line preserve the exact column,
+  including delayed autowrap. After reconstruction, the delivered resize callback
+  reflows the authoritative grid and repaints it; generated rows do not supply the
+  original native soft-wrap links.
+- Profile-specific cluster cells. Complete text, occupied cells, style and explicit
+  continuation entries travel together through drawing, editing, reflow, extraction
+  and reconstruction. Preserve native edit remnants, including orphan padding and
+  overlapping entries; normalizing them can change the next print or resize.
+  Clipping, wrapping and composer placement use the same profile's drawing rules.
+  Runtime reads the owned tmux server's version through its capability fence:
+  **3.2a** retains separate emoji occupancy; **3.4** has joined emoji and selector
+  expansion. Other versions are logged as unverified, keep native relay and replies,
+  and disable local reconstruction and composer interception.
 - [`SessionPresentationPipeline`](../src/rodex/presentation_policy.py) identity:
   deltas inherit the exact started item and `thread/read` uses request correlation.
   Keep hidden semantic history without rebuilding/waking an unused native-policy view;
@@ -320,6 +346,10 @@ Evidence: [input framing](../tests/test_terminal_input.py),
 [gateway blocking](../tests/test_terminal_gateway.py),
 [native continuation across presentation changes](../tests/test_native_terminal_protocol.py),
 and [real-tmux edit/resize comparisons](../tests/test_native_terminal_resize.py).
+The [cancellation matrix](../tests/test_terminal_cancellation.py),
+[line operations](../tests/test_terminal_line_operations.py), and
+[Unicode profiles](../tests/test_terminal_unicode_profiles.py) compare both supported
+servers at byte splits, margins, redraw and subsequent output.
 These compare subsequent updates as well as the immediate display. They do not
 establish equivalence for every VT extension or identify an uncaptured live glitch.
 
@@ -395,6 +425,27 @@ Generic `interacted` cannot identify the operation. Unbound turn-producing reque
 wait FIFO for distinct target turns; `send_message` cannot acquire a later turn or
 terminal recap. [SQL provenance](SQL_SCHEMA.md#agent-requests-and-trace) is authoritative.
 
+The producer reducer keys live correlation by connection epoch, root and item.
+Invocation recipients have an independent target index, so either arrival order
+and invocation-only target completion can retire prompts. Compact activity,
+completion and duplicate metadata survive payload retirement; they contain no
+prompt aliases. Multi-recipient payloads remain until every recipient settles.
+The proxy fences delivery and current-turn recovery to its verified primary source;
+old callbacks and resets cannot populate or clear a replacement epoch.
+
+The [observer contract](../src/rodex/observer_contract.py) caps correlation at 512
+metadata records, 128 pending payloads totaling 512 KiB, 64 targets per record,
+and 256 known agents. Five-minute retention expires on incoming-event access;
+there is no idle expiry timer. Byte/count limits still hold during idle periods.
+Any retention loss marks snapshot coverage incomplete. For the rest of that epoch,
+an unseen request ID cannot prove new work: the reducer consults the event tap's
+current active-turn evidence for that exact source. It may recover current work,
+but cannot attach the delayed request's prompt to that turn. Unavailable or absent
+active-turn evidence does not establish completion. Fresh native lifecycle events
+continue work tracking; reconnect starts a fresh correlation epoch.
+Acceptance inspects private payloads as well as visible snapshots in
+[correlation tests](../tests/test_observer_correlation.py).
+
 Live collaboration prompts and exact same-turn root user text have different labels
 and provenance. Missing plaintext stays unavailable, never inferred from replies.
 The allowed text/privacy boundary is in [security](SECURITY.md#content-and-privacy).
@@ -409,6 +460,11 @@ injected effect sinks, and SQL connections across production packages. Add/remov
 classifications there when a route changes, and update the route-level map above.
 It also checks subprocess entrypoints, mutation owners, and read-only bootstrap probes;
 it is not a proof against arbitrary Python reflection or a runtime monitor.
+
+[`OwnedProcessGroup`](../src/rodex/process_receipts.py) owns gated native process
+execution for the runtime, gateway and catalog probe. The same lifecycle retains
+authenticated pidfd authority through termination and exact receipt retirement;
+the terminal gateway owns presentation and a separate exit-readiness descriptor.
 
 Session-wide status-bar and static terminal-title configuration remain under
 [`TmuxStatusPipeline`](../src/rodex/tmux_status.py). Client-local native messages for

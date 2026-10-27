@@ -56,9 +56,7 @@ class PrivateDatabaseBoundary:
             raise RodexSQLError(f"could not securely open database {self.path}: {error}") from error
         try:
             state = os.fstat(descriptor)
-            _validate_private_regular_file(self.path, state)
-            if stat_module.S_IMODE(state.st_mode) != 0o600:
-                raise RodexSQLError(f"database is not private: {self.path}")
+            _validate_private_database_file(self.path, state)
         except BaseException:
             os.close(descriptor)
             raise
@@ -164,9 +162,7 @@ def open_private_database_boundary(
                 )
             except FileNotFoundError as error:
                 raise RodexDatabaseNotFoundError(f"database does not exist: {path}") from error
-            _validate_private_regular_file(path, existing_database_state)
-            if stat_module.S_IMODE(existing_database_state.st_mode) != 0o600:
-                raise RodexSQLError(f"database is not private: {path}")
+            _validate_private_database_file(path, existing_database_state)
         lock_path = database_transition_lock_path(path)
         lock_flags = os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC
         if create:
@@ -220,3 +216,12 @@ def _validate_private_regular_file(path: Path, state: os.stat_result) -> None:
         raise RodexSQLError(f"database storage path is not a regular file: {path}")
     if state.st_uid != os.getuid():
         raise RodexSQLError(f"database storage is not owned by uid {os.getuid()}: {path}")
+
+
+def _validate_private_database_file(path: Path, state: os.stat_result) -> None:
+    """Admit one private database name; aliases would split its WAL identity."""
+    _validate_private_regular_file(path, state)
+    if stat_module.S_IMODE(state.st_mode) != 0o600:
+        raise RodexSQLError(f"database is not private: {path}")
+    if state.st_nlink != 1:
+        raise RodexSQLError(f"database must have exactly one hard link (observed {state.st_nlink}): {path}")

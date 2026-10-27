@@ -13,6 +13,8 @@ and pidfd support, and an authenticated stable Codex App Server **0.151.0+**.
 Checkout setup uses `uv`; no numeric tmux, SQLite or `uv` CLI minimum is asserted.
 See [prerequisites and capability limits](INSTALL.md#prerequisites) and
 [current versions](VERSION_TRACKER.md). Running sessions retain their owning implementation.
+Local terminal reconstruction supports verified tmux 3.2a and 3.4 profiles;
+other versions retain native display and terminal-owned replies.
 
 ## Install and use
 

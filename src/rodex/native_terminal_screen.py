@@ -6,26 +6,25 @@ scope. Presentation frames never enter this screen or its bounded history.
 
 from __future__ import annotations
 
-import unicodedata
 from collections import defaultdict, deque
 
 import pyte
 from pyte import modes
-from pyte.screens import Char
-from wcwidth import wcwidth
+
+from .terminal_cells import TMUX_32_PROFILE, TerminalCell, TerminalProfile
 
 NATIVE_SCROLLBACK_LIMIT = 50_000
 
 
-class TerminalLine(dict[int, Char]):
+class TerminalLine(dict[int, TerminalCell]):
     """Sparse styled cells plus the soft-wrap boundary needed for width reflow."""
 
-    def __init__(self, default: Char) -> None:
+    def __init__(self, default: TerminalCell) -> None:
         super().__init__()
         self.default = default
         self.wrapped = False
 
-    def __missing__(self, _column: int) -> Char:
+    def __missing__(self, _column: int) -> TerminalCell:
         return self.default
 
     @property
@@ -36,49 +35,121 @@ class TerminalLine(dict[int, Char]):
 class NativeTerminalScreen(pyte.Screen):
     """Keep the native cursor, row contents and scroll history in one coordinate space."""
 
-    def __init__(self, columns: int, lines: int) -> None:
+    def __init__(self, columns: int, lines: int, *, profile: TerminalProfile = TMUX_32_PROFILE) -> None:
+        self.profile = profile
         self._scrollback: deque[TerminalLine] = deque(maxlen=NATIVE_SCROLLBACK_LIMIT)
         super().__init__(columns, lines)
 
     def reset(self) -> None:
         super().reset()
+        self.cursor.attrs = self.default_char
         self.buffer = defaultdict(lambda: TerminalLine(self.default_char))
         self._scrollback.clear()
 
+    @property
+    def default_char(self) -> TerminalCell:
+        return TerminalCell(reverse=modes.DECSCNM in self.mode)
+
+    @property
+    def display(self) -> list[str]:
+        return [self.row_text(row) for row in range(self.lines)]
+
+    def row_text(self, row: int, end_column: int | None = None) -> str:
+        """Extract by physical cells, never slice Unicode text with a column."""
+        line = self.buffer[row]
+        end = self.columns if end_column is None else min(end_column, self.columns)
+        return "".join(line[column].data for column in range(end) if not line[column].continuation)
+
     def draw(self, data: str) -> None:
+        data = data.translate(self.g1_charset if self.charset else self.g0_charset)
         for character in data:
-            width = wcwidth(character)
-            if width == 0 and unicodedata.combining(character):
-                row, column = self.cursor.y, self.cursor.x - 1
-                if column < 0 and row > 0:
-                    row, column = row - 1, self.columns - 1
-                if column >= 0:
-                    line = self.buffer[row]
-                    # A wide glyph's trailing cell is only a position marker.
-                    # Attach accents to its leading cell so replacing the glyph
-                    # cannot leave an accent behind on the replacement text.
-                    if not line[column].data and column > 0:
-                        column -= 1
-                    cell = line[column]
-                    line[column] = cell._replace(data=unicodedata.normalize("NFC", cell.data + character))
-                    self.dirty.add(row)
-                continue
-            if width > 0 and self.cursor.x + width > self.columns:
-                if modes.DECAWM in self.mode:
-                    self.buffer[self.cursor.y].wrapped = True
-                    self.carriage_return()
-                    self.index()
-                else:
-                    self.cursor.x = max(0, self.columns - width)
-            if width > 0 and modes.IRM not in self.mode:
-                line = self.buffer[self.cursor.y]
-                column = self.cursor.x
-                if column > 0 and not line[column].data:
-                    line[column - 1] = line[column - 1]._replace(data=" ")
-                end = column + width
-                if end < self.columns and not line[end].data:
-                    line[end] = line[end]._replace(data=" ")
-            super().draw(character)
+            self.draw_character(character)
+
+    def draw_character(self, character: str) -> int | None:
+        """Apply one decoded character; return the changed cluster's physical column."""
+        width = self.profile.character_width(character)
+        line = self.buffer[self.cursor.y]
+        column = self.cursor.x
+        # Combining is relative to the current grid and survives input
+        # chunks, SGR changes and queries without a parallel text buffer.
+        previous_column = column - 1
+        if self.profile.joined_emoji:
+            if previous_column > 0 and line[previous_column].continuation:
+                previous_column -= 1
+        else:
+            while previous_column > 0 and line[previous_column].continuation:
+                previous_column -= 1
+        if column > 0:
+            previous = line[previous_column]
+            if not self.profile.joined_emoji or previous.occupied_cells == column - previous_column:
+                combined = self.profile.combine(previous, character)
+                if combined is not None:
+                    line[previous_column] = combined
+                    if combined.occupied_cells > previous.occupied_cells:
+                        # tmux 3.4 puts padding at the expanded cursor,
+                        # leaving the intervening cell intact. Preserve
+                        # this profile-specific grid fact through edits.
+                        expanded = column + 1
+                        line[expanded] = combined.padding()
+                        self.cursor.x = expanded if expanded <= self.columns else self.columns - 1
+                    self.dirty.add(self.cursor.y)
+                    return previous_column
+                if (
+                    self.profile.joined_emoji
+                    and width == 0
+                    and len((previous.data + character).encode()) > self.profile.cluster_bytes
+                ):
+                    # 3.4 falls through to a separate zero-width grid entry
+                    # when its 21-byte combining buffer is full.
+                    line[column] = self.cursor.attrs._replace(data=character, occupied_cells=0, continuation=False)
+                    self.dirty.add(self.cursor.y)
+                    return column
+        if width <= 0:
+            return None
+        if width > self.columns:
+            return None
+        if self.cursor.x + width > self.columns:
+            if modes.DECAWM in self.mode:
+                line.wrapped = True
+                self.carriage_return()
+                self.index()
+            else:
+                return None
+        if modes.IRM in self.mode:
+            self.insert_characters(width)
+        line = self.buffer[self.cursor.y]
+        column = self.cursor.x
+        collected_ascii = (
+            len(character) == 1 and ord(character) < 127 and modes.DECAWM in self.mode and modes.IRM not in self.mode
+        )
+        self._clear_overwritten_cluster(line, column, collected_ascii=collected_ascii)
+        for occupied in range(column + 1, column + width):
+            self._clear_overwritten_cluster(line, occupied)
+        cell = self.cursor.attrs._replace(data=character, occupied_cells=width, continuation=False)
+        line[column] = cell
+        for occupied in range(column + 1, column + width):
+            line[occupied] = cell.padding()
+        self.cursor.x = min(column + width, self.columns if modes.DECAWM in self.mode else self.columns - 1)
+        self.dirty.add(self.cursor.y)
+        return column
+
+    def _clear_overwritten_cluster(self, line: TerminalLine, column: int, *, collected_ascii: bool = False) -> None:
+        cell = line[column]
+        if cell.continuation:
+            left = column
+            while left > 0 and line[left].continuation:
+                left -= 1
+            if not collected_ascii or line[left].occupied_cells > 1:
+                line[left] = self.default_char
+            right = column + 1
+            while right < self.columns and line[right].continuation:
+                line[right] = self.default_char
+                right += 1
+        elif cell.occupied_cells > 1 or collected_ascii:
+            occupied = column + 1
+            while occupied < self.columns and line[occupied].continuation:
+                line[occupied] = self.default_char
+                occupied += 1
 
     def index(self) -> None:
         top, bottom = self.margins or (0, self.lines - 1)
@@ -140,12 +211,24 @@ class NativeTerminalScreen(pyte.Screen):
         top, bottom = self.margins or (0, self.lines - 1)
         row = self.cursor.y
         if not top <= row <= bottom:
-            return
+            bottom = self.lines - 1
+            if (count or 1) >= bottom - row + 1:
+                # Both admitted tmux profiles leave a full-height insertion
+                # outside the scroll region unchanged (zero rows to move).
+                return
         count = min(count or 1, bottom - row + 1)
         shifted = bottom - row + 1 - count
         # Disconnect the destination boundary before moving its old row object.
         self._break_wrap_before(row + count)
-        super().insert_lines(count)
+        # Move sparse rows without Pyte's delegated carriage return. tmux
+        # preserves even x == columns, which represents delayed autowrap.
+        for destination in range(bottom, row - 1, -1):
+            source = destination - count
+            if source >= row and source in self.buffer:
+                self.buffer[destination] = self.buffer.pop(source)
+            else:
+                self.buffer.pop(destination, None)
+        self.dirty.update(range(row, bottom + 1))
         self._break_wrap_before(row)
         self._break_wrap_before(row + shifted)
 
@@ -153,7 +236,7 @@ class NativeTerminalScreen(pyte.Screen):
         top, bottom = self.margins or (0, self.lines - 1)
         row = self.cursor.y
         if not top <= row <= bottom:
-            return
+            bottom = self.lines - 1
         count = min(count or 1, bottom - row + 1)
         self._break_wrap_before(row)
         # An absent sparse source row is still a blank row. Leaving its old
@@ -165,7 +248,6 @@ class NativeTerminalScreen(pyte.Screen):
             else:
                 self.buffer.pop(destination, None)
         self.dirty.update(range(row, bottom + 1))
-        self.carriage_return()
         self._break_wrap_before(bottom + 1 - count)
 
     def erase_in_display(self, how: int = 0, *args: object, **kwargs: object) -> None:
@@ -237,23 +319,19 @@ class NativeTerminalScreen(pyte.Screen):
                 )
             segments: list[TerminalLine] = []
             current = TerminalLine(self.default_char)
-            offset = column = 0
+            offset = column = occupied_width = 0
             for cell in cells:
-                if not cell.data:  # Continuation of a wide cell is created with its leading cell.
-                    continue
-                cell_width = max(1, wcwidth(cell.data[0]))
-                if column and column + cell_width > width:
+                if column and occupied_width + cell.occupied_cells > width:
                     current.wrapped = True
                     segments.append(current)
                     current = TerminalLine(self.default_char)
-                    column = 0
-                if cursor_offset is not None and offset <= cursor_offset < offset + cell_width:
-                    mapped_cursor = (column + cursor_offset - offset, len(output) + len(segments))
+                    column = occupied_width = 0
+                if cursor_offset == offset:
+                    mapped_cursor = (column, len(output) + len(segments))
                 current[column] = cell
-                if cell_width == 2:
-                    current[column + 1] = cell._replace(data="")
-                offset += cell_width
-                column += cell_width
+                offset += 1
+                column += 1
+                occupied_width += cell.occupied_cells
             if cursor_offset is not None and cursor_offset >= offset:
                 mapped_cursor = (min(column, width), len(output) + len(segments))
             segments.append(current)

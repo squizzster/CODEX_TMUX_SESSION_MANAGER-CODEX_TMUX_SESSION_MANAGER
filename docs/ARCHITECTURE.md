@@ -34,6 +34,11 @@ package startup publishes or reuses the retained installation before CLI composi
   exact-thread resume and CAS registration on the current implementation.
   A recognized selector with `--force-old` instead delegates guarded attachment
   through that interpreter and leaves its runtime running unchanged.
+- [`RuntimeProcessLifecycle`](../src/rodex/process_receipts.py) owns native child
+  startup, replacement, group termination and receipt retirement. Its retained
+  `OwnedProcessGroup` capability survives presentation closure and failed cleanup;
+  only confirmed group extinction and receipt retirement complete that lifecycle.
+  Runtime registration and analytics activation have independent retry deadlines.
 - [`ExactTurnMutationCoordinator`](../src/rodex/exact_turn_mutation.py) owns start,
   steer, interrupt, mouse, and alias transitions. It resolves, locks, re-resolves,
   then revalidates immediately before mutation. Transport is not a public unfenced
@@ -54,6 +59,9 @@ package startup publishes or reuses the retained installation before CLI composi
   input/output owner, regardless of attached-client count. The foreground
   [terminal bridge](../src/rodex/terminal_bridge.py) transfers its TTY and resize
   notifications without consuming native input.
+  The owned tmux server selects a [terminal profile](../src/rodex/terminal_cells.py)
+  shared by native projection, reconstruction and composer matching. Unverified
+  versions keep native display and terminal-owned replies.
 - [`PromptExpansionDisplay`](../src/rodex/prompt_expansion_display.py) carries only
   the latest changed primary submission after forwarding. Connection fencing and
   bounded transient state feed the gateway's existing native/light surface; this
@@ -95,6 +103,10 @@ package startup publishes or reuses the retained installation before CLI composi
 - [`SharedAnalyticsCoordinator`](../src/rodex/analytics.py) serializes runtime workers
   on one daemon thread, preserving separate cursors, retries, and health. See
   [analytics](ANALYTICS.md) for bounded work and incomplete-coverage semantics.
+  Trace and statistics share the [source-ordered turn reducer](../src/rodex/rollout_turn_lifecycle.py).
+  The registry's [normalization rebuild](../src/rodex_registry/normalization_rebuild.py)
+  owns the supported trace-v5 repair transaction after authenticated source replay;
+  it preserves canonical identities and commits repair evidence with both heads.
 - [`rodex_registry`](../src/rodex_registry/__init__.py) owns durable session/lineage
   transitions and publication. The [trace contract](../src/rodex_registry/agent_trace_contract.py)
   prepares facts before SQL; its [writer](../src/rodex_registry/agent_trace_writer.py)

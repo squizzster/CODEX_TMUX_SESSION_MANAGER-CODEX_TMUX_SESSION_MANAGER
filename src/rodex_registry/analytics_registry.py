@@ -20,6 +20,7 @@ from .identity import (
     RodexRuntimeId,
     RodexSessionId,
 )
+from .normalization_rebuild import AnalyticsNormalizationRebuild
 from .statistics import (
     RodexAnalyticsCheckpoint,
     RodexAnalyticsPublishReceipt,
@@ -47,6 +48,7 @@ class RodexAnalyticsPublication:
     changed_turn_keys: frozenset[tuple[CodexThreadId, str]] | None = None
     removed_turn_keys: frozenset[tuple[CodexThreadId, str]] = frozenset()
     agent_trace_publication: RodexAgentTracePublication | None = None
+    normalization_rebuild: AnalyticsNormalizationRebuild | None = None
 
 
 class RodexAnalyticsRegistry:
@@ -107,13 +109,14 @@ class RodexAnalyticsRegistry:
     def expected_codex_session_id(self) -> CodexSessionId:
         return self._identity.codex_session_id
 
-    def load_checkpoint(self) -> RodexAnalyticsCheckpoint:
+    def load_checkpoint(self, *, include_historical_sources: bool = False) -> RodexAnalyticsCheckpoint:
         """Load the last committed analytics checkpoint for this worker."""
         return read_rodex_analytics_checkpoint(
             self._identity.rodex_sessions_id,
             self._database_path,
             expected_current_codex_session_id=self._identity.codex_session_id,
             identity_fence=self._identity,
+            include_historical_sources=include_historical_sources,
         )
 
     def publish(self, publication: RodexAnalyticsPublication) -> RodexAnalyticsPublishReceipt:
@@ -138,6 +141,7 @@ class RodexAnalyticsRegistry:
                 model_name_ids=model_name_ids,
                 reasoning_effort_name_ids=reasoning_effort_name_ids,
                 agent_trace_publication=publication.agent_trace_publication,
+                normalization_rebuild=publication.normalization_rebuild,
             )
         except sqlite3.OperationalError as error:
             error_code = getattr(error, "sqlite_errorcode", 0)

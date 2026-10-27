@@ -16,7 +16,7 @@ from types import SimpleNamespace
 import pytest
 
 import rodex.runtime as runtime_module
-from rodex.runtime import _stop_child_process
+from rodex.process_receipts import RuntimeProcessLifecycle
 
 WRAPPED_WRITER = """
 import fcntl
@@ -82,9 +82,10 @@ def test_owned_app_server_shutdown_releases_native_writer_and_preserves_other_pr
     wrapper.write_text(WRAPPED_WRITER)
     writer_lock = tmp_path / "writer.lock"
     ready = tmp_path / "writer.pid"
-    process = subprocess.Popen(
+    lifecycle = RuntimeProcessLifecycle()
+    process = lifecycle.start(
+        "app-server",
         [sys.executable, str(wrapper), str(writer_lock), str(ready), mode],
-        start_new_session=True,
     )
     unrelated = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"], start_new_session=True)
     native_descriptor = None
@@ -102,7 +103,7 @@ def test_owned_app_server_shutdown_releases_native_writer_and_preserves_other_pr
             with pytest.raises(BlockingIOError):
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
 
-            _stop_child_process(process, owns_process_group=True)
+            lifecycle.close()
 
             assert process.returncode == (-signal.SIGKILL if mode == "stalled" else 0)
             exited = select.poll()
@@ -119,3 +120,4 @@ def test_owned_app_server_shutdown_releases_native_writer_and_preserves_other_pr
             if child.poll() is None:
                 child.kill()
             child.wait(timeout=5)
+        lifecycle.close()

@@ -673,7 +673,7 @@ def test_developer_message_role_round_trips_through_contract_and_sql(
     _publish_trace(database, publication)
 
     snapshot = read_rodex_agent_trace(1, database)
-    assert snapshot.trace_schema_version == "rodex-agent-trace-v5"
+    assert snapshot.trace_schema_version == "rodex-agent-trace-v6"
     assert snapshot.events[0]["detail"]["message_role"] == "developer"
     with sqlite3.connect(database) as connection:
         assert connection.execute("SELECT message_role FROM rodex_sessions_agent_trace_messages").fetchall() == [

@@ -38,7 +38,7 @@ def require_database_identity(
     *,
     stage: str,
 ) -> None:
-    """Revalidate parent, lock, database path, descriptors, owner, type, and mode."""
+    """Revalidate storage identities, privacy, and the database's single link."""
     boundary = opened.boundary
     admitted_identity = _DatabaseIdentity(
         parent=_identity(boundary.parent_state),
@@ -97,6 +97,14 @@ def require_database_identity(
     ]
     if mismatches:
         _reject(opened, f"{stage} identity mismatch: {', '.join(mismatches)}")
+    # Retained admission snapshots cannot reveal aliases added during ownership.
+    for label, state in (
+        ("database descriptor", database_descriptor_state),
+        ("database relative path", database_relative_state),
+        ("database absolute path", database_absolute_state),
+    ):
+        if state.st_nlink != 1:
+            _reject(opened, f"{stage} {label} has {state.st_nlink} hard links; expected exactly one hard link")
     if (
         not _private_directory(parent_descriptor_state)
         or not _private_regular_file(lock_descriptor_state)

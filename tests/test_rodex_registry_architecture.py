@@ -14,7 +14,12 @@ SQL_ROOT = SOURCE_ROOT / "rodex_sql"
 
 def _relative_imports(module_name: str) -> set[str]:
     tree = ast.parse((REGISTRY_ROOT / f"{module_name}.py").read_text(encoding="utf-8"))
-    return {node.module or "" for node in ast.walk(tree) if isinstance(node, ast.ImportFrom) and node.level > 0}
+    return {
+        node.module or alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom) and node.level > 0
+        for alias in node.names
+    }
 
 
 def _function_calls(module_name: str, function_name: str) -> set[str]:
@@ -46,7 +51,7 @@ def test_registry_has_one_way_domain_dependencies_without_the_old_monolith() -> 
     assert _relative_imports("identity") == set()
     assert _relative_imports("errors") == set()
     assert _relative_imports("validation") == set()
-    assert _relative_imports("schema") == {"errors", "identity", "statistics_fields"}
+    assert _relative_imports("schema") == {"errors", "identity", "statistics_fields", "normalization_schema"}
     assert _relative_imports("execution") == {
         "errors",
         "identity",
@@ -69,6 +74,7 @@ def test_registry_has_one_way_domain_dependencies_without_the_old_monolith() -> 
         "execution",
         "identity",
         "schema",
+        "normalization_schema",
         "validation",
     }
     assert _relative_imports("agent_trace_reader") == {
@@ -86,6 +92,8 @@ def test_registry_has_one_way_domain_dependencies_without_the_old_monolith() -> 
         "schema",
         "statistics_fields",
         "statistics_projection",
+        "normalization_rebuild",
+        "turn_statistics_writer",
         "validation",
     }
     assert _relative_imports("statistics_fields") == {"statistics_projection"}
@@ -95,6 +103,7 @@ def test_registry_has_one_way_domain_dependencies_without_the_old_monolith() -> 
         "identity",
         "statistics",
         "statistics_projection",
+        "normalization_rebuild",
         "validation",
     }
     assert _relative_imports("lifecycle") == {
@@ -106,6 +115,21 @@ def test_registry_has_one_way_domain_dependencies_without_the_old_monolith() -> 
     }
     assert "statistics" not in _relative_imports("lifecycle")
     assert "statistics" not in _relative_imports("execution")
+    assert _relative_imports("normalization_schema") == set()
+    assert "statistics" not in _relative_imports("normalization_rebuild")
+
+
+def test_registry_domain_imports_form_an_acyclic_graph() -> None:
+    modules = {path.stem for path in REGISTRY_ROOT.glob("*.py") if path.stem != "__init__"}
+    dependencies = {module: _relative_imports(module) & modules for module in modules}
+
+    def visit(module: str, ancestors: frozenset[str]) -> None:
+        assert module not in ancestors, f"registry dependency cycle: {ancestors} -> {module}"
+        for dependency in dependencies[module]:
+            visit(dependency, ancestors | {module})
+
+    for module in modules:
+        visit(module, frozenset())
 
 
 def test_registry_modules_do_not_import_their_public_facade() -> None:

@@ -39,6 +39,7 @@ from rodex_registry import (
     parse_turn_statistics_snapshot,
 )
 
+from .agent_trace import _canonical_record_turn_id
 from .analytics_contracts import (
     AnalyticsAnalyzerSource as AnalyticsAnalyzerSource,
 )
@@ -54,6 +55,7 @@ from .analytics_contracts import (
 from .analytics_contracts import (
     RodexAnalyticsError as RodexAnalyticsError,
 )
+from .rollout_turn_lifecycle import RolloutRecordAdmission, RolloutTurnLifecycle
 
 OperationValue = TypeVar("OperationValue")
 
@@ -127,6 +129,8 @@ class _SourceState:
     session_id: str
     pending_content: bytes = b""
     token_accounting: _TokenAccountingState = field(default_factory=lambda: _TokenAccountingState())
+    lifecycle: RolloutTurnLifecycle = field(default_factory=RolloutTurnLifecycle)
+    record_admission: RolloutRecordAdmission = field(default_factory=RolloutRecordAdmission)
 
 
 _TOKEN_FIELDS = (
@@ -152,6 +156,8 @@ class _TokenAccountingState:
 def _adapt_token_accounting_content(content: bytes, thread_id: CodexThreadId) -> bytes:
     """Present one authoritative token stream to the pinned analyzer."""
     state = _TokenAccountingState()
+    lifecycle = RolloutTurnLifecycle()
+    admission = RolloutRecordAdmission()
     adapted_lines: list[bytes] = []
     for line in content.splitlines(keepends=True):
         body = line.rstrip(b"\r\n")
@@ -167,12 +173,41 @@ def _adapt_token_accounting_content(content: bytes, thread_id: CodexThreadId) ->
         if not isinstance(record, dict):
             adapted_lines.append(line)
             continue
-        adapted = _adapt_token_accounting_record(record, thread_id, state)
+        if not admission.admit(record):
+            continue
+        adapted = _adapt_lifecycle_record(_adapt_token_accounting_record(record, thread_id, state), lifecycle)
         if adapted is record:
             adapted_lines.append(line)
         else:
             adapted_lines.append(json.dumps(adapted, ensure_ascii=False, separators=(",", ":")).encode("utf-8") + ending)
     return b"".join(adapted_lines)
+
+
+def _adapt_lifecycle_record(record: dict[str, Any], lifecycle: RolloutTurnLifecycle) -> dict[str, Any]:
+    """Give both analyzers the same event scope as trace normalization.
+
+    The dependency's lifecycle audit retains explicit missing-ID behavior. Other
+    records carry their resolved scope so its internal fallback cannot select an
+    older active turn or override explicit response metadata.
+    """
+    record_type = record.get("type")
+    supplied = record.get("payload")
+    payload = supplied if isinstance(supplied, Mapping) else {}
+    try:
+        explicit = _canonical_record_turn_id(record_type, payload)
+    except ValueError:
+        if record_type != "response_item":
+            raise
+        event_turn_id = None
+    else:
+        event_turn_id = lifecycle.observe(record_type, payload.get("type"), explicit).codex_turn_id
+    if record_type == "session_meta" or (
+        record_type == "event_msg" and payload.get("type") in {"task_started", "task_complete", "turn_aborted"}
+    ):
+        return record
+    # This local label is never a public turn or persisted identity. The pinned
+    # analyzer looks up existing turns and cannot materialize it from metadata.
+    return {**record, "payload": {**payload, "turn_id": event_turn_id or "rodex:thread-scoped-observation"}}
 
 
 def _adapt_token_accounting_record(
@@ -779,6 +814,8 @@ class StatefulCodexProtocolAnalyticsAdapter:
                         record,
                         touches,
                     )
+                    if adapted_record is None:
+                        continue
                     event_name = self._new_event_name(adapted_record)
                     if event_name is not None:
                         self._unknown_event_types_by_source.setdefault(source.codex_thread_id, set()).add(str(event_name))
@@ -843,7 +880,9 @@ class StatefulCodexProtocolAnalyticsAdapter:
         state: _SourceState,
         record: dict[str, Any],
         touches: _BatchTouches,
-    ) -> dict[str, Any]:
+    ) -> dict[str, Any] | None:
+        if not state.record_admission.admit(record):
+            return None
         self._analyzer.records += 1
         self._analyzer.sequence += 1
         payload_value = record.get("payload")
@@ -856,10 +895,15 @@ class StatefulCodexProtocolAnalyticsAdapter:
             self._analyzer.sessions.add(identifier)
             return record
         adapted_record = _adapt_token_accounting_record(record, thread_id, state.token_accounting)
+        adapted_record = _adapt_lifecycle_record(adapted_record, state.lifecycle)
         adapted_payload_value = adapted_record.get("payload")
         adapted_payload = dict(adapted_payload_value) if isinstance(adapted_payload_value, Mapping) else {}
         self._remember_touches(adapted_record, adapted_payload, state.session_id, touches)
         self._analyzer._consume(adapted_record, adapted_payload, state.session_id)
+        if state.lifecycle.active_turn_id is None:
+            self._analyzer.active_turn.pop(state.session_id, None)
+        else:
+            self._analyzer.active_turn[state.session_id] = state.lifecycle.active_turn_id
         return adapted_record
 
     def _remember_touches(

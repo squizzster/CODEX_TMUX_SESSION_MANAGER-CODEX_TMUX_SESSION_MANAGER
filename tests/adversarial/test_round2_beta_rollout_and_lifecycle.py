@@ -131,10 +131,11 @@ def test_round2_rollout_follower_recovers_when_the_path_is_replaced(
         observed.append,
         codex_sessions_root=tmp_path,
     )
+    observer.bind_primary_thread("thread-1", "fixture-connection")
     stop = _MutatingStop(lambda: os.replace(replacement, rollout))
     observer._rollout_stop = stop  # type: ignore[assignment]
 
-    observer._follow_rollout_context("thread-1", rollout, stop)  # type: ignore[arg-type]
+    observer._follow_rollout_context("thread-1", rollout, stop, connection_generation="fixture-connection")  # type: ignore[arg-type]
 
     assert any("Context: 10% |" in status for status in observed)
     assert any("Context: 70% |" in status for status in observed), (
@@ -155,6 +156,7 @@ def test_round2_rollout_follower_recovers_when_the_file_is_truncated(
         observed.append,
         codex_sessions_root=tmp_path,
     )
+    observer.bind_primary_thread("thread-1", "fixture-connection")
 
     def truncate() -> None:
         rollout.write_text(_token_count_line(80) + "\n", encoding="utf-8")
@@ -162,7 +164,7 @@ def test_round2_rollout_follower_recovers_when_the_file_is_truncated(
     stop = _MutatingStop(truncate)
     observer._rollout_stop = stop  # type: ignore[assignment]
 
-    observer._follow_rollout_context("thread-1", rollout, stop)  # type: ignore[arg-type]
+    observer._follow_rollout_context("thread-1", rollout, stop, connection_generation="fixture-connection")  # type: ignore[arg-type]
 
     assert any("Context: 10% |" in status for status in observed)
     assert any("Context: 80% |" in status for status in observed), (
@@ -182,6 +184,7 @@ def test_round2_rollout_follower_preserves_append_after_inode_replacement(
         observed.append,
         codex_sessions_root=tmp_path,
     )
+    observer.bind_primary_thread("thread-1", "fixture-connection")
 
     def replace_rollout() -> None:
         os.replace(replacement, rollout)
@@ -193,7 +196,7 @@ def test_round2_rollout_follower_preserves_append_after_inode_replacement(
     stop = _SequencedMutatingStop((replace_rollout, lambda: None, append_to_replacement))
     observer._rollout_stop = stop  # type: ignore[assignment]
 
-    observer._follow_rollout_context("thread-1", rollout, stop)  # type: ignore[arg-type]
+    observer._follow_rollout_context("thread-1", rollout, stop, connection_generation="fixture-connection")  # type: ignore[arg-type]
 
     assert [percent for percent in (10, 70, 90) if any(f"Context: {percent}% |" in status for status in observed)] == [
         10,
@@ -215,6 +218,7 @@ def test_round2_rollout_follower_completes_a_startup_partial_record(
         observed.append,
         codex_sessions_root=tmp_path,
     )
+    observer.bind_primary_thread("thread-1", "fixture-connection")
 
     def complete_partial_record() -> None:
         with rollout.open("a", encoding="utf-8") as output:
@@ -223,7 +227,7 @@ def test_round2_rollout_follower_completes_a_startup_partial_record(
     stop = _MutatingStop(complete_partial_record)
     observer._rollout_stop = stop  # type: ignore[assignment]
 
-    observer._follow_rollout_context("thread-1", rollout, stop)  # type: ignore[arg-type]
+    observer._follow_rollout_context("thread-1", rollout, stop, connection_generation="fixture-connection")  # type: ignore[arg-type]
 
     assert sum("Context: 10% |" in status for status in observed) == 1
     assert sum("Context: 70% |" in status for status in observed) == 1
@@ -241,6 +245,7 @@ def test_round2_rollout_follower_completes_a_replacement_partial_record(
         observed.append,
         codex_sessions_root=tmp_path,
     )
+    observer.bind_primary_thread("thread-1", "fixture-connection")
 
     def replace_rollout() -> None:
         os.replace(replacement, rollout)
@@ -252,7 +257,7 @@ def test_round2_rollout_follower_completes_a_replacement_partial_record(
     stop = _SequencedMutatingStop((replace_rollout, lambda: None, complete_partial_record))
     observer._rollout_stop = stop  # type: ignore[assignment]
 
-    observer._follow_rollout_context("thread-1", rollout, stop)  # type: ignore[arg-type]
+    observer._follow_rollout_context("thread-1", rollout, stop, connection_generation="fixture-connection")  # type: ignore[arg-type]
 
     assert sum("Context: 10% |" in status for status in observed) == 1
     assert sum("Context: 70% |" in status for status in observed) == 1
@@ -272,6 +277,7 @@ def test_round2_rollout_follower_detects_same_inode_equal_size_rewrite(
         observed.append,
         codex_sessions_root=tmp_path,
     )
+    observer.bind_primary_thread("thread-1", "fixture-connection")
 
     def rewrite_same_inode() -> None:
         _rewrite_with_distinct_metadata(rollout, rewritten)
@@ -280,7 +286,7 @@ def test_round2_rollout_follower_detects_same_inode_equal_size_rewrite(
     stop = _MutatingStop(rewrite_same_inode)
     observer._rollout_stop = stop  # type: ignore[assignment]
 
-    observer._follow_rollout_context("thread-1", rollout, stop)  # type: ignore[arg-type]
+    observer._follow_rollout_context("thread-1", rollout, stop, connection_generation="fixture-connection")  # type: ignore[arg-type]
 
     assert sum("Context: 10% |" in status for status in observed) == 1
     assert sum("Context: 80% |" in status for status in observed) == 1
@@ -328,6 +334,7 @@ def test_round2_rollout_follower_detects_truncate_regrow_past_old_offset(
         observed.append,
         codex_sessions_root=tmp_path,
     )
+    observer.bind_primary_thread("thread-1", "fixture-connection")
 
     def truncate_and_regrow() -> None:
         rollout.write_text(regrown, encoding="utf-8")
@@ -336,7 +343,7 @@ def test_round2_rollout_follower_detects_truncate_regrow_past_old_offset(
     stop = _MutatingStop(truncate_and_regrow)
     observer._rollout_stop = stop  # type: ignore[assignment]
 
-    observer._follow_rollout_context("thread-1", rollout, stop)  # type: ignore[arg-type]
+    observer._follow_rollout_context("thread-1", rollout, stop, connection_generation="fixture-connection")  # type: ignore[arg-type]
 
     assert sum("Context: 10% |" in status for status in observed) == 1
     assert sum("Context: 80% |" in status for status in observed) == 1
@@ -353,6 +360,7 @@ def test_round2_rollout_rewrite_then_append_rebaselines_without_interim_publish(
         observed.append,
         codex_sessions_root=tmp_path,
     )
+    observer.bind_primary_thread("thread-1", "fixture-connection")
 
     def rewrite_then_append() -> None:
         rollout.write_text(
@@ -364,7 +372,7 @@ def test_round2_rollout_rewrite_then_append_rebaselines_without_interim_publish(
     stop = _MutatingStop(rewrite_then_append)
     observer._rollout_stop = stop  # type: ignore[assignment]
 
-    observer._follow_rollout_context("thread-1", rollout, stop)  # type: ignore[arg-type]
+    observer._follow_rollout_context("thread-1", rollout, stop, connection_generation="fixture-connection")  # type: ignore[arg-type]
 
     assert sum("Context: 10% |" in status for status in observed) == 1
     assert not any("Context: 70% |" in status for status in observed)
@@ -385,6 +393,7 @@ def test_round2_rollout_reopen_does_not_publish_a_duplicate_baseline(
         observed.append,
         codex_sessions_root=tmp_path,
     )
+    observer.bind_primary_thread("thread-1", "fixture-connection")
     actions: list[str] = []
     real_open = protocol_proxy_module.open_rollout_descriptor
 
@@ -401,7 +410,7 @@ def test_round2_rollout_reopen_does_not_publish_a_duplicate_baseline(
     stop = ReplacingStop(lambda: os.replace(replacement, rollout))
     observer._rollout_stop = stop  # type: ignore[assignment]
 
-    observer._follow_rollout_context("thread-1", rollout, stop)  # type: ignore[arg-type]
+    observer._follow_rollout_context("thread-1", rollout, stop, connection_generation="fixture-connection")  # type: ignore[arg-type]
 
     assert sum("Context: 10% |" in status for status in observed) == 1
     assert actions[:3] == ["open", "wait", "wait"]
@@ -441,6 +450,7 @@ def test_round2_rollout_symlink_rejection_has_bounded_open_wait_and_byte_budgets
         observed.append,
         codex_sessions_root=tmp_path,
     )
+    observer.bind_primary_thread("thread-1", "fixture-connection")
 
     class RecordingStop(_CountingStop):
         def wait(self, delay: float) -> bool:
@@ -450,7 +460,7 @@ def test_round2_rollout_symlink_rejection_has_bounded_open_wait_and_byte_budgets
     stop = RecordingStop(4)
     observer._rollout_stop = stop  # type: ignore[assignment]
 
-    observer._follow_rollout_context("thread-1", rollout, stop)  # type: ignore[arg-type]
+    observer._follow_rollout_context("thread-1", rollout, stop, connection_generation="fixture-connection")  # type: ignore[arg-type]
 
     assert opens <= stop.waits
     assert stop.waits == 4

@@ -36,7 +36,7 @@ def test_queries_reply_once_at_query_time_with_every_read_split(mode):
 
 def test_cursor_query_respects_origin_and_delayed_autowrap():
     projection = NativeTerminalProjection(8, 10)
-    assert projection.feed(b"12345678\x1b[6n").replies == b"\x1b[1;8R"
+    assert projection.feed(b"12345678\x1b[6n").replies == b"\x1b[1;9R"
     assert projection.feed(b"\x1b[3;8r\x1b[?6h\x1b[2;3H\x1b[6n").replies == b"\x1b[2;3R"
 
 

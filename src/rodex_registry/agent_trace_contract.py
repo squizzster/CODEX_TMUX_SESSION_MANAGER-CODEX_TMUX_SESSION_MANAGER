@@ -156,6 +156,10 @@ class RodexAgentTraceEvent:
     event_kind: str
     event_time_utc: str | None
     detail: TraceDetail = None
+    # None denotes an explicitly constructed typed event. Raw normalization must
+    # carry the reducer's accepted transition: event scope alone cannot start or
+    # close a turn. This control metadata is separate from immutable source detail.
+    lifecycle_eligible: bool | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -335,6 +339,10 @@ def _validate_event(event: RodexAgentTraceEvent) -> RodexAgentTraceEvent:
     kind = _normalise_required_text(event.event_kind, "event_kind")
     if kind not in TRACE_EVENT_KINDS:
         raise ValueError(f"unsupported agent trace event kind: {kind}")
+    if event.lifecycle_eligible is not None and (
+        not isinstance(event.lifecycle_eligible, bool) or kind not in {"turn_started", "turn_completed", "turn_aborted"}
+    ):
+        raise ValueError("lifecycle eligibility must be a boolean on a lifecycle observation")
     event_time = None if event.event_time_utc is None else _normalise_utc_timestamp_text(event.event_time_utc)
     detail = _validate_detail(kind, event.detail)
     return replace(

@@ -82,6 +82,8 @@ def harness(tmp_path):
             claim = action[4] == "#{==:#{@rodex_agent_observer_pane_id_creation},}"
             return execute(shlex.split(action[6] if claim and panes.receipt else action[5]))
         if action[0] == "display-message":
+            if action[-1].startswith("split-dispatched:"):
+                return action[-1] + "\n"
             if action[-1] == "1":
                 return "1"
             if "pane_current_path" in action[-1]:
@@ -98,7 +100,7 @@ def harness(tmp_path):
             assert panes.observer is None
             panes.observer = f"%{panes.next_id}"
             panes.next_id += 1
-            return panes.observer
+            return panes.observer + "\n"
         if action[0] == "kill-pane":
             assert action == ["kill-pane", "-t", panes.observer]
             assert panes.observer != "%7"

@@ -41,7 +41,20 @@ continuous authentication against hostile same-uid rewrites. Clean replay invali
 cached lineage metadata with reader state, not just the byte cursor.
 
 [`agent_trace`](../src/rodex/agent_trace.py) normalizes response metadata and typed
-facts. Canonical lifecycle turn IDs stay strict UUIDs. Synthetic labels such as
+facts. Trace and both statistics adapters share the
+[source-ordered lifecycle reducer](../src/rodex/rollout_turn_lifecycle.py). Explicit
+event identity does not select active context. Starts select it; context can
+initialize an empty binding; only an accepted terminal clears its matching turn.
+The first explicit terminal after an observed start wins, including its absent
+timestamp. Missing-ID/missing-start and later contradictory terminals remain trace
+evidence without changing lifecycle state. Statistics owns outcome and terminal
+timestamp together in the atomic publication; trace insertion cannot overwrite them.
+Exact source-coordinate replays are admitted before lifecycle effects and do not
+increase event or duplicate-terminal counts. A repeated terminal at a new coordinate
+does increase the ignored-terminal counter. Changed content at an admitted coordinate
+fails closed. Checkpoint warmup uses the same reducer and physical source coordinates.
+
+Canonical lifecycle turn IDs stay strict UUIDs. Synthetic labels such as
 `auto-compact-1` remain thread-scoped with gapped coverage rather than replacing an
 active canonical turn. Exact spawn facts bind child to parent turn; durable lineage
 is the restart fallback. First-linked timestamps apply only to legacy histories with
@@ -51,7 +64,8 @@ identities; `unknown` remains the explicit fallback for absent or unsupported ro
 
 ## Token accounting
 
-Statistics projection v10 adapts Codex's top-level `token_usage_record` into the
+Statistics projection v11 retains the response-token accounting introduced in v10,
+adapting Codex's top-level `token_usage_record` into the
 pinned analyzer's cumulative token input. In
 [`_adapt_token_accounting_record`](../src/rodex/analytics_analyzer.py), `response_id`
 is the deduplication identity, `usage` is that response's increment, and
@@ -92,6 +106,35 @@ statistics, trace suffix, and health in one identity-fenced transaction. SQL ret
 reuse that immutable publication without rerunning analysis or source I/O under a
 writer lock. [SQL publication rules](SQL_SCHEMA.md#publication-and-durability) define
 independent statistics/trace compare-and-set heads and cumulative coverage.
+
+Trace v6 and statistics v11 introduce a verified rebuild for existing trace-v5
+publications. On activation/restart, the worker authenticates every accepted source
+prefix, including historical roots, then reconstructs scopes, lifecycle state and
+metrics before advancing either head. Missing sources, changed prefixes, unsupported
+generations or contradictory canonical item/call ownership preserve the old
+publication and report unresolved/degraded health. A version mismatch alone is not
+a rebuild. Only the supported v5-to-v6 transition is automatic; other generations
+remain explicit errors. A failure parked under an older normalizer is eligible for
+recalculation without requiring source growth.
+
+The [normalization rebuild](../src/rodex_registry/normalization_rebuild.py) preserves
+canonical public/SQL identities and immutable event coordinates, timestamps, typed
+detail hashes and original publication sequence. Its optional catalog extension
+records authenticated old/new prefixes and repaired ownership, lifecycle, request
+and checkpoint values; metrics are recomputed atomically rather than individually
+audited. Scope repair includes item/call aliases, spawn ownership and request ancestry. Requests
+that no longer have a verified parent message are withdrawn from active attribution;
+their complete original identity, provenance and target association remain in the
+immutable repair audit. Historical sources are repaired without entering current-tree
+aggregates or pending source discovery.
+
+Repair evidence, derived projections, checkpoints and both heads commit together.
+The narrow projection guards are attested and restored inside that transaction, with
+foreign-key verification before commit. Rollback leaves the old catalog intact;
+lost acknowledgement recovers from the committed heads. Database guards prevent a
+retained older writer from downgrading or deleting a v6 head. Base database generation
+22 and its filename are unchanged. The extension is installed lazily for an existing
+catalog and checked by the normal read-only catalog audit.
 
 A publication-sequence race discards the in-memory cursor and reloads SQL before
 accepting more bytes. Deterministic failures park by authenticated source fingerprint;
@@ -160,4 +203,6 @@ Evidence: [coordinator](../tests/test_rodex_analytics.py),
 [analyzer parity](../tests/test_rodex_analytics_analyzer.py),
 [recovery](../tests/test_rodex_analytics_recovery.py),
 [publication acceptance](../tests/test_analytics_publication_acceptance.py), and
-[retirement](../tests/test_analytics_retirement.py).
+[retirement](../tests/test_analytics_retirement.py). Lifecycle consistency and repair
+acceptance are covered by [lifecycle tests](../tests/test_analytics_lifecycle_consistency.py)
+and [normalization rebuild tests](../tests/test_analytics_normalization_rebuild.py).

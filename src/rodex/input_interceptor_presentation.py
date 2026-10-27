@@ -14,6 +14,7 @@ from .interaction_pipeline import (
 )
 from .native_composer import matches_composer
 from .pane_control import TmuxPaneController
+from .terminal_cells import TMUX_32_PROFILE, TerminalProfile
 from .tmux_session_capability import TmuxRuntimeCapability
 
 
@@ -26,9 +27,12 @@ class InputInterceptorPresentation:
         registrations: tuple[InputInterceptorRegistration, ...],
         capability: TmuxRuntimeCapability,
         pane: TmuxPaneController,
+        *,
+        terminal_profile: TerminalProfile = TMUX_32_PROFILE,
     ) -> None:
         self._pipeline = pipeline
         self._pane = pane
+        self._terminal_profile = terminal_profile
         self._registrations = {entry.target: entry for entry in registrations}
         self._targets = (
             InteractionTarget(
@@ -58,7 +62,7 @@ class InputInterceptorPresentation:
         if snapshot is None:
             return False
         rows, cursor_x, width = snapshot
-        return matches_composer(rows, cursor_x, prefix, width)
+        return matches_composer(rows, cursor_x, prefix, width, profile=self._terminal_profile)
 
     def _deliver(self, request: InteractionRequest) -> InteractionResult:
         if request.operation == InteractionOperation.INPUT_RELEASE:

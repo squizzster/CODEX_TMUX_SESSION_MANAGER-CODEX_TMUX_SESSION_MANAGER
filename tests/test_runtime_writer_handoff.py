@@ -38,6 +38,7 @@ CONFLICT = f"thread-store conflict: thread {THREAD_ID} already has an active wri
         ("no_marker", 1, 0),
         ("stale_attempt", 1, 0),
         ("registered", 1, 0),
+        ("registered_activation_failed", 1, 1),
         ("nonexact_arguments", 1, 0),
         ("expired", 1, 1),
         ("persistent", 3, 1),
@@ -81,7 +82,7 @@ def test_host_retires_only_exact_unregistered_writer_conflicts_within_its_retry_
                 raise subprocess.TimeoutExpired("still-live-tui", timeout)
             if scenario in {"current_exact", "expired", "persistent"} and self.attempt == 1:
                 pytest.fail("host waited again on the live TUI after its exact startup rejection")
-            self.returncode = 0
+            self.returncode = 1 if scenario == "registered_activation_failed" else 0
             return self.returncode
 
     def popen(command, **options):
@@ -162,7 +163,9 @@ def test_host_retires_only_exact_unregistered_writer_conflicts_within_its_retry_
         runtime_module,
         "_registered_analytics_runtime_config",
         lambda *_: (
-            replace(analytics, rodex_sessions_id=1, codex_session_id=THREAD_ID) if scenario == "registered" else None
+            replace(analytics, rodex_sessions_id=1, codex_session_id=THREAD_ID)
+            if scenario in {"registered", "registered_activation_failed"}
+            else None
         ),
     )
     monkeypatch.setattr(runtime_module.time, "monotonic", lambda: clock[0])
@@ -171,6 +174,11 @@ def test_host_retires_only_exact_unregistered_writer_conflicts_within_its_retry_
     arguments = (
         ("resume", str(THREAD_ID), "--unrelated") if scenario == "nonexact_arguments" else ("resume", str(THREAD_ID))
     )
+
+    def activate(_config):
+        if scenario == "registered_activation_failed":
+            raise OSError("analytics unavailable after registration")
+
     result = runtime_module.run_runtime_service(
         RuntimeServiceConfig(
             workspace=tmp_path,
@@ -191,6 +199,7 @@ def test_host_retires_only_exact_unregistered_writer_conflicts_within_its_retry_
         terminal_fd=os.dup(0),
         terminal_environment={"TERM": "xterm-256color", "TMUX": f"{tmp_path / 'tmux.sock'},1,0", "TMUX_PANE": "%9"},
         stop=Event(),
+        on_analytics_activated=activate,
     )
     assert result == expected_result
     assert len(gateways) == expected_launches

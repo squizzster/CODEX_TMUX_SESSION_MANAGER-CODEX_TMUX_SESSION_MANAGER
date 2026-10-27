@@ -52,12 +52,18 @@ from .identity import (
     split_codex_thread_id_into_signed_bigints,
     split_codex_turn_id_into_signed_bigints,
 )
+from .normalization_rebuild import (
+    AnalyticsNormalizationRebuild,
+    rebuild_normalization_in_transaction,
+    validate_normalization_rebuild,
+)
 from .schema import (
     CODEX_THREADS_TABLE,
     MODEL_NAMES_TABLE,
     REASONING_EFFORT_NAMES_TABLE,
     RODEX_REGISTRIES_TABLE,
     RODEX_RUNTIME_INSTANCES_TABLE,
+    RODEX_SESSIONS_AGENT_TRACE_EVENTS_TABLE,
     RODEX_SESSIONS_AGENT_TRACE_PUBLICATIONS_TABLE,
     RODEX_SESSIONS_AGENT_TRACE_SUBAGENT_ACTIVITIES_TABLE,
     RODEX_SESSIONS_ANALYTICS_WORKER_THREAD_CHECKPOINTS_TABLE,
@@ -87,6 +93,12 @@ from .statistics_projection import (
     StatisticsNamedCount,
     TurnStatisticsProjection,
     validate_session_statistics_projection,
+)
+from .turn_statistics_writer import (
+    sync_turn_named_counts as _sync_turn_named_counts,
+)
+from .turn_statistics_writer import (
+    upsert_turn_statistics_metrics as _upsert_turn_statistics_metrics,
 )
 from .validation import (
     _normalise_required_text,
@@ -279,6 +291,7 @@ def publish_rodex_session_statistics(
     model_name_ids: dict[str, int] | None = None,
     reasoning_effort_name_ids: dict[str, int] | None = None,
     agent_trace_publication: RodexAgentTracePublication | None = None,
+    normalization_rebuild: AnalyticsNormalizationRebuild | None = None,
 ) -> RodexAnalyticsPublishReceipt:
     """Atomically publish one fenced session projection, turns, and sources."""
     _validate_session_id(session_id)
@@ -328,6 +341,18 @@ def publish_rodex_session_statistics(
     prepared_agent_trace_publication = (
         None if agent_trace_publication is None else prepare_agent_trace_publication(agent_trace_publication)
     )
+    if normalization_rebuild is not None:
+        normalization_rebuild = validate_normalization_rebuild(normalization_rebuild)
+        replayed_by_thread = {source.codex_thread_id: source for source in normalization_rebuild.replayed_sources}
+        if any(replayed_by_thread.get(source.codex_thread_id) != source for source in observations):
+            raise ValueError("normalization replay disagrees with published source observations")
+        replayed_turns = {
+            (turn.codex_thread_id, turn.codex_turn_id): turn
+            for turn in normalization_rebuild.turn_statistics
+            if turn.codex_thread_id in observations_by_thread
+        }
+        if replayed_turns != {(turn.codex_thread_id, turn.codex_turn_id): turn for turn in turns}:
+            raise ValueError("normalization replay disagrees with accepted current turn statistics")
 
     path = normalise_rodex_database_path(database_path)
     with open_rodex_transaction(path) as connection:
@@ -369,6 +394,12 @@ def publish_rodex_session_statistics(
         if previous_publication_sequence != based_on_statistics_publication_sequence:
             raise RodexSessionStatisticsPublicationRaceError("statistics publication sequence changed during calculation")
         new_publication_sequence = 1 if previous_publication_sequence is None else previous_publication_sequence + 1
+        if normalization_rebuild is not None:
+            if prepared_agent_trace_publication is None or changed_turn_keys is not None:
+                raise ValueError("normalization rebuild requires complete statistics and trace replay")
+            rebuild_normalization_in_transaction(
+                connection, session_id, prepared_agent_trace_publication, normalization_rebuild
+            )
         registered_rows = connection.execute(
             f"WITH RECURSIVE hierarchy(id) AS ("
             "SELECT current.rodex_sessions_codex_threads_id "
@@ -754,6 +785,7 @@ def publish_rodex_session_statistics(
                 prepared_agent_trace_publication,
                 model_name_ids=model_name_ids,
                 reasoning_effort_name_ids=reasoning_effort_name_ids,
+                statistics_owns_lifecycle=True,
             )
         )
     return RodexAnalyticsPublishReceipt(
@@ -852,6 +884,7 @@ def read_rodex_analytics_checkpoint(
     *,
     expected_current_codex_session_id: CodexSessionId | str,
     identity_fence: RodexAnalyticsIdentityFence | None = None,
+    include_historical_sources: bool = False,
 ) -> RodexAnalyticsCheckpoint:
     """Read only publication, health, and source cursor facts in one SELECT."""
     _validate_session_id(session_id)
@@ -934,9 +967,18 @@ def read_rodex_analytics_checkpoint(
             (session_id,),
         ).fetchone()
         unresolved_target_rows = connection.execute(
+            "WITH RECURSIVE current_tree(id) AS ("
+            f"SELECT rodex_sessions_codex_threads_id FROM {RODEX_SESSIONS_CURRENT_CODEX_THREADS_TABLE} "
+            "WHERE rodex_sessions_id = ? UNION ALL "
+            "SELECT spawns.subagent_rodex_sessions_codex_threads_id "
+            f"FROM {RODEX_SESSIONS_SUBAGENT_SPAWNS_TABLE} AS spawns "
+            "JOIN current_tree AS parent ON spawns.parent_rodex_sessions_codex_threads_id = parent.id) "
             "SELECT DISTINCT ids.codex_thread_public_id_signed_bigint_1, "
             "ids.codex_thread_public_id_signed_bigint_2 "
             f"FROM {RODEX_SESSIONS_AGENT_TRACE_SUBAGENT_ACTIVITIES_TABLE} AS activity "
+            f"JOIN {RODEX_SESSIONS_AGENT_TRACE_EVENTS_TABLE} AS events "
+            "ON events.id = activity.rodex_sessions_agent_trace_events_id "
+            "JOIN current_tree ON current_tree.id = events.rodex_sessions_codex_threads_id "
             f"JOIN {CODEX_THREADS_TABLE} AS ids "
             "ON ids.id = activity.target_codex_threads_id "
             f"LEFT JOIN {RODEX_SESSIONS_CODEX_THREADS_TABLE} AS membership "
@@ -944,8 +986,11 @@ def read_rodex_analytics_checkpoint(
             "AND membership.rodex_sessions_id = ? "
             "WHERE activity.rodex_sessions_id = ? "
             "AND membership.id IS NULL",
-            (session_id, session_id),
+            (session_id, session_id, session_id),
         ).fetchall()
+        historical_rows = (
+            _select_codex_threads(connection, session_id, include_historical=True) if include_historical_sources else None
+        )
     if not rows:
         raise RodexSessionError(f"Rodex session does not exist: {session_id}")
     if identity_fence is not None:
@@ -966,6 +1011,8 @@ def read_rodex_analytics_checkpoint(
     )
     worker = None if rows[0][7] is None else _statistics_worker_from_row(rows[0][7:14])
     sources = tuple(_codex_thread_from_row(row[14:33]) for row in rows if row[14] is not None)
+    if historical_rows is not None:
+        sources = tuple(_codex_thread_from_row(row) for row in historical_rows)
     trace = None if trace_row is None else RodexAnalyticsTraceCheckpoint(int(trace_row[0]), str(trace_row[1]))
     unresolved_targets = tuple(
         join_signed_bigints_into_a_codex_thread_id(row[0], row[1]) for row in unresolved_target_rows
@@ -1386,91 +1433,6 @@ def _sync_session_projection_children(
     connection.executemany(
         f"DELETE FROM {RODEX_SESSIONS_STATISTICS_AUDIT_LIMITS_TABLE} WHERE rodex_sessions_id = ? AND limit_ordinal = ?",
         ((session_id, ordinal) for ordinal in stored_audit_limits.keys() - audit_limits.keys()),
-    )
-
-
-def _upsert_turn_statistics_metrics(
-    connection: sqlite3.Connection,
-    session_id: int,
-    turn_row_id: int,
-    projection: TurnStatisticsProjection,
-) -> None:
-    """Replace only the current statistics facts for one stable Codex turn."""
-    values = TURN_STATISTICS_SCALARS.write_values(projection)
-    existing = connection.execute(
-        f"SELECT id, {TURN_STATISTICS_SCALARS.columns_sql} "
-        f"FROM {RODEX_SESSIONS_STATISTICS_TURN_METRICS_TABLE} "
-        "WHERE rodex_sessions_codex_turns_id = ?",
-        (turn_row_id,),
-    ).fetchone()
-    if existing is None:
-        connection.execute(
-            f"INSERT INTO {RODEX_SESSIONS_STATISTICS_TURN_METRICS_TABLE} "
-            "(rodex_sessions_id, rodex_sessions_codex_turns_id, "
-            f"{TURN_STATISTICS_SCALARS.columns_sql}) VALUES (?, ?, "
-            f"{TURN_STATISTICS_SCALARS.placeholders_sql})",
-            (session_id, turn_row_id, *values),
-        )
-        return
-    if tuple(existing[1:]) == values:
-        return
-    connection.execute(
-        f"UPDATE {RODEX_SESSIONS_STATISTICS_TURN_METRICS_TABLE} SET "
-        + ", ".join(f"{column} = ?" for column in TURN_STATISTICS_SCALARS.columns)
-        + " WHERE id = ?",
-        (*values, int(existing[0])),
-    )
-
-
-def _sync_turn_named_counts(
-    connection: sqlite3.Connection,
-    session_id: int,
-    turn_row_id: int,
-    named_counts: Sequence[StatisticsNamedCount],
-) -> None:
-    desired = {
-        (item.count_kind, item.count_name): item for item in named_counts if item.count_kind != "collaboration_tool"
-    }
-    stored = {
-        (str(row[0]), str(row[1])): int(row[2])
-        for row in connection.execute(
-            f"SELECT count_kind, count_name, occurrence_count FROM "
-            f"{RODEX_SESSIONS_STATISTICS_TURN_NAMED_COUNTS_TABLE} "
-            "WHERE rodex_sessions_codex_turns_id = ?",
-            (turn_row_id,),
-        )
-    }
-    connection.executemany(
-        f"INSERT INTO {RODEX_SESSIONS_STATISTICS_TURN_NAMED_COUNTS_TABLE} "
-        "(rodex_sessions_id, rodex_sessions_codex_turns_id, count_kind, "
-        "count_name, occurrence_count) VALUES (?, ?, ?, ?, ?)",
-        (
-            (
-                session_id,
-                turn_row_id,
-                item.count_kind,
-                item.count_name,
-                item.occurrence_count,
-            )
-            for key, item in desired.items()
-            if key not in stored
-        ),
-    )
-    connection.executemany(
-        f"UPDATE {RODEX_SESSIONS_STATISTICS_TURN_NAMED_COUNTS_TABLE} "
-        "SET occurrence_count = ? WHERE rodex_sessions_codex_turns_id = ? "
-        "AND count_kind = ? AND count_name = ?",
-        (
-            (item.occurrence_count, turn_row_id, *key)
-            for key, item in desired.items()
-            if key in stored and stored[key] != item.occurrence_count
-        ),
-    )
-    connection.executemany(
-        f"DELETE FROM {RODEX_SESSIONS_STATISTICS_TURN_NAMED_COUNTS_TABLE} "
-        "WHERE rodex_sessions_codex_turns_id = ? "
-        "AND count_kind = ? AND count_name = ?",
-        ((turn_row_id, count_kind, count_name) for count_kind, count_name in stored.keys() - desired.keys()),
     )
 
 

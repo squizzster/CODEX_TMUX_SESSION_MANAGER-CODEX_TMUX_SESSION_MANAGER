@@ -18,9 +18,6 @@ from rodex_registry import (
     open_a_user_defined_cool_name_assignment,
 )
 
-DNA = RodexSessionsUserIdentity(1009, 1010, "dna")
-OTHER_USER = RodexSessionsUserIdentity(2001, 2002, "other")
-
 
 def _cool_names(database: Path) -> list[tuple[object, ...]]:
     with sqlite3.connect(database) as connection:
@@ -33,7 +30,7 @@ def _create_session(
     *,
     cool_name: str,
     codex_int: int,
-    owner: RodexSessionsUserIdentity = DNA,
+    owner: RodexSessionsUserIdentity,
 ) -> int:
     monkeypatch.setattr("cool_name.functions.coolname.generate_slug", lambda _word_count: cool_name)
     return create_a_rodex_session(
@@ -46,17 +43,21 @@ def _create_session(
 
 
 def test_alias_is_one_owned_integer_identity_and_force_replaces_it(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    executing_user: RodexSessionsUserIdentity,
 ) -> None:
     database = tmp_path / "rodex.sqlite3"
-    session_id = _create_session(database, monkeypatch, cool_name="black-sawfly", codex_int=1)
+    session_id = _create_session(database, monkeypatch, owner=executing_user, cool_name="black-sawfly", codex_int=1)
 
-    assigned = assign_a_user_defined_cool_name("black-sawfly", "user_defined_field", database, user_identity=DNA)
+    assigned = assign_a_user_defined_cool_name(
+        "black-sawfly", "user_defined_field", database, user_identity=executing_user
+    )
 
     assert assigned.user_defined_cool_name == "user_defined_field"
     assert lookup_rodex_sessions_id_from_a_cool_name("user_defined_field", database) == (session_id)
     with pytest.raises(RodexSessionError, match="use --force"):
-        assign_a_user_defined_cool_name("black-sawfly", "replacement", database, user_identity=DNA)
+        assign_a_user_defined_cool_name("black-sawfly", "replacement", database, user_identity=executing_user)
     assert _cool_names(database) == [(1, "black-sawfly"), (2, "user_defined_field")]
 
     replaced = assign_a_user_defined_cool_name(
@@ -64,7 +65,7 @@ def test_alias_is_one_owned_integer_identity_and_force_replaces_it(
         "replacement",
         database,
         force=True,
-        user_identity=DNA,
+        user_identity=executing_user,
     )
 
     assert replaced.user_defined_cool_name == "replacement"
@@ -80,17 +81,19 @@ def test_alias_is_one_owned_integer_identity_and_force_replaces_it(
 
 
 def test_duplicate_codex_session_resume_guidance_prefers_the_user_defined_name(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    executing_user: RodexSessionsUserIdentity,
 ) -> None:
     database = tmp_path / "rodex.sqlite3"
-    _create_session(database, monkeypatch, cool_name="black-sawfly", codex_int=1)
-    assign_a_user_defined_cool_name("black-sawfly", "preferred-name", database, user_identity=DNA)
+    _create_session(database, monkeypatch, owner=executing_user, cool_name="black-sawfly", codex_int=1)
+    assign_a_user_defined_cool_name("black-sawfly", "preferred-name", database, user_identity=executing_user)
 
     with pytest.raises(RodexSessionError) as raised:
         create_a_rodex_session(
             database,
             codex_session_id=uuid.UUID(int=1),
-            user_identity=DNA,
+            user_identity=executing_user,
         )
 
     assert str(raised.value) == (
@@ -106,12 +109,13 @@ def test_reserved_aliases_are_rejected_without_consuming_an_id(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     reserved_name: str,
+    executing_user: RodexSessionsUserIdentity,
 ) -> None:
     database = tmp_path / "rodex.sqlite3"
-    _create_session(database, monkeypatch, cool_name="black-sawfly", codex_int=1)
+    _create_session(database, monkeypatch, owner=executing_user, cool_name="black-sawfly", codex_int=1)
 
     with pytest.raises(ReservedCoolNameError, match="reserved"):
-        assign_a_user_defined_cool_name("black-sawfly", reserved_name, database, user_identity=DNA)
+        assign_a_user_defined_cool_name("black-sawfly", reserved_name, database, user_identity=executing_user)
 
     assert _cool_names(database) == [(1, "black-sawfly")]
 
@@ -124,33 +128,37 @@ def test_aliases_must_be_portable_tmux_session_names_without_consuming_an_id(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     invalid_name: str,
+    executing_user: RodexSessionsUserIdentity,
 ) -> None:
     database = tmp_path / "rodex.sqlite3"
-    _create_session(database, monkeypatch, cool_name="black-sawfly", codex_int=1)
+    _create_session(database, monkeypatch, owner=executing_user, cool_name="black-sawfly", codex_int=1)
 
     with pytest.raises(CoolNameError, match=r"cool_name|Rodex names"):
-        assign_a_user_defined_cool_name("black-sawfly", invalid_name, database, user_identity=DNA)
+        assign_a_user_defined_cool_name("black-sawfly", invalid_name, database, user_identity=executing_user)
 
     assert _cool_names(database) == [(1, "black-sawfly")]
 
 
 def test_alias_ownership_and_cross_session_uniqueness_are_enforced_transactionally(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    executing_user: RodexSessionsUserIdentity,
+    foreign_user: RodexSessionsUserIdentity,
 ) -> None:
     database = tmp_path / "rodex.sqlite3"
-    first_id = _create_session(database, monkeypatch, cool_name="black-sawfly", codex_int=1)
+    first_id = _create_session(database, monkeypatch, owner=executing_user, cool_name="black-sawfly", codex_int=1)
     _create_session(
         database,
         monkeypatch,
         cool_name="silver-otter",
         codex_int=2,
-        owner=OTHER_USER,
+        owner=foreign_user,
     )
 
     with pytest.raises(RodexSessionError, match="not owned"):
-        assign_a_user_defined_cool_name("black-sawfly", "unauthorised", database, user_identity=OTHER_USER)
+        assign_a_user_defined_cool_name("black-sawfly", "unauthorised", database, user_identity=foreign_user)
     with pytest.raises(RodexSessionError, match="another session"):
-        assign_a_user_defined_cool_name("black-sawfly", "silver-otter", database, user_identity=DNA)
+        assign_a_user_defined_cool_name("black-sawfly", "silver-otter", database, user_identity=executing_user)
 
     assert lookup_rodex_session_names(first_id, database).user_defined_cool_name is None  # type: ignore[union-attr]
     assert _cool_names(database) == [(1, "black-sawfly"), (2, "silver-otter")]
@@ -159,11 +167,13 @@ def test_alias_ownership_and_cross_session_uniqueness_are_enforced_transactional
 def test_alias_finalize_rejects_state_changed_since_its_read_only_plan(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    executing_user: RodexSessionsUserIdentity,
 ) -> None:
     database = tmp_path / "rodex.sqlite3"
     session_id = _create_session(
         database,
         monkeypatch,
+        owner=executing_user,
         cool_name="black-sawfly",
         codex_int=1,
     )
@@ -174,14 +184,14 @@ def test_alias_finalize_rejects_state_changed_since_its_read_only_plan(
             "black-sawfly",
             "planned-name",
             database,
-            user_identity=DNA,
+            user_identity=executing_user,
         ),
     ):
         assign_a_user_defined_cool_name(
             "black-sawfly",
             "concurrent-name",
             database,
-            user_identity=DNA,
+            user_identity=executing_user,
         )
 
     names = lookup_rodex_session_names(session_id, database)
@@ -193,9 +203,10 @@ def test_alias_finalize_rejects_state_changed_since_its_read_only_plan(
 def test_alias_external_phase_has_no_writer_and_finalize_uses_one_write_transaction(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    executing_user: RodexSessionsUserIdentity,
 ) -> None:
     database = tmp_path / "rodex.sqlite3"
-    _create_session(database, monkeypatch, cool_name="black-sawfly", codex_int=1)
+    _create_session(database, monkeypatch, owner=executing_user, cool_name="black-sawfly", codex_int=1)
     statements: list[str] = []
     real_connect = sqlite3.connect
 
@@ -210,7 +221,7 @@ def test_alias_external_phase_has_no_writer_and_finalize_uses_one_write_transact
         "black-sawfly",
         "planned-name",
         database,
-        user_identity=DNA,
+        user_identity=executing_user,
     ):
         assert "BEGIN IMMEDIATE" not in statements
         contender = real_connect(database, timeout=0, isolation_level=None)
@@ -225,20 +236,23 @@ def test_alias_external_phase_has_no_writer_and_finalize_uses_one_write_transact
 
 
 def test_runtime_listing_is_filtered_by_the_complete_posix_user_lookup(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    executing_user: RodexSessionsUserIdentity,
+    foreign_user: RodexSessionsUserIdentity,
 ) -> None:
     database = tmp_path / "rodex.sqlite3"
-    session_id = _create_session(database, monkeypatch, cool_name="black-sawfly", codex_int=1)
+    session_id = _create_session(database, monkeypatch, owner=executing_user, cool_name="black-sawfly", codex_int=1)
     _create_session(
         database,
         monkeypatch,
         cool_name="silver-otter",
         codex_int=2,
-        owner=OTHER_USER,
+        owner=foreign_user,
     )
-    assign_a_user_defined_cool_name("black-sawfly", "work", database, user_identity=DNA)
+    assign_a_user_defined_cool_name("black-sawfly", "work", database, user_identity=executing_user)
 
-    runtimes = list_rodex_session_runtimes_for_a_user(database, user_identity=DNA)
+    runtimes = list_rodex_session_runtimes_for_a_user(database, user_identity=executing_user)
 
     assert len(runtimes) == 1
     assert runtimes[0].rodex_sessions_id == session_id

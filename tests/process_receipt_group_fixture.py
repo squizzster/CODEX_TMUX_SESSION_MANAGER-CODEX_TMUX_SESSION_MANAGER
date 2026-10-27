@@ -162,6 +162,8 @@ def exercise_group_lifetime(root: Path, scenario: str) -> dict:
         def send(descriptor, signum, info=None, flags=0):
             assert flags == receipts.PIDFD_SIGNAL_PROCESS_GROUP
             sent.append(signum)
+            if scenario == "reconcile_retry" and signum == signal.SIGCONT and sent.count(signal.SIGCONT) == 1:
+                raise PermissionError(errno.EPERM, "injected reconciliation failure after TERM")
             used_descriptors.add(descriptor)
             if scenario == "leader_reaped_before_term" and signum == signal.SIGTERM:
                 original_send(leader_fd, signal.SIGKILL)
@@ -224,6 +226,21 @@ def exercise_group_lifetime(root: Path, scenario: str) -> dict:
                 assert receipt_path.exists()
                 original_send(child_fd, 0)
             else:
+                if scenario == "reconcile_retry":
+                    try:
+                        store.reconcile()
+                    except receipts.ProcessReceiptError:
+                        pass
+                    else:
+                        raise AssertionError("injected reconciliation failure was ignored")
+                    assert receipt_path.exists()
+                    wait_reaped(leader)
+
+                    def forbid_reacquisition(_pid):
+                        raise AssertionError("lost the retained group capability after leader exit")
+
+                    with patch.object(receipts.os, "pidfd_open", forbid_reacquisition):
+                        receipts.RuntimeProcessReceipts(root).reconcile()
                 store.reconcile()
                 assert not receipt_path.exists()
         if scenario != "leader_absent":

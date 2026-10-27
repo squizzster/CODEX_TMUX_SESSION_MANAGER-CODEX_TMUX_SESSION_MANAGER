@@ -22,6 +22,8 @@ uv build
 Coverage has a configured 70% floor. The full required live gate needs authenticated
 Codex and real tmux. Missing prerequisites fail when `--require-live-startup` is set.
 Live tests isolate SQL, tmux, and Codex history from user sessions.
+Clients connecting to a fixture's retained runtime must use that installation's
+identity from its exact process receipt; pytest's checkout identity is different.
 
 Choose the gate deliberately:
 
@@ -54,6 +56,10 @@ Python 3.12; passing offline checks does not resolve that process-launch warning
   [Retained handoff admission](../tests/test_runtime_upgrade.py) checks idle-only
   upgrades and attachment without replacement; installation tests verify a busy turn
   completes across `--force-old` reconnect before its idle runtime is upgraded.
+  [Activation retries](../tests/test_runtime_activation.py) distinguish registered
+  runtimes from pending analytics. [Owned process lifecycle](../tests/test_process_lifecycle.py)
+  and [receipt reconciliation](../tests/test_process_receipts.py) exercise gated
+  startup, surviving group members, failed cleanup and retained finalization authority.
   Installation and shim tests also check the single versioned preparation notice,
   the copied source's release version, and silent reuse of a cached installation.
 - Input and display: [terminal input](../tests/test_terminal_input.py),
@@ -67,6 +73,11 @@ Python 3.12; passing offline checks does not resolve that process-launch warning
   check real tmux against projected wide cells, wrap links, sparse blank rows, and
   shifted character extents. An immediately correct screenshot alone does not
   verify these stateful boundaries; continue output and resize after the edit.
+  [Cancellation](../tests/test_terminal_cancellation.py),
+  [line operations](../tests/test_terminal_line_operations.py), and
+  [Unicode profiles](../tests/test_terminal_unicode_profiles.py) must also run with
+  both tmux 3.2a and 3.4 on `PATH`. The fixture binds interpretation to the server
+  version; selectors, joiners, padding and margin behavior differ between profiles.
   [Exit/detach tests](../tests/test_tmux_shared_ctrl_c.py) use disposable tmux clients
   for countdown choices, ownership changes, reconnects and stale timers.
   [Tail tests](../tests/test_session_tail.py) cover line-selection grammar, follow
@@ -79,12 +90,16 @@ Python 3.12; passing offline checks does not resolve that process-launch warning
   pin timing and elapsed formats; gateway and live prompt-handoff tests cover
   coalescing, the idle reset, and the native elapsed timer.
 - Persistence: [SQLite adversarial boundaries](../tests/adversarial/test_round3_sqlite_boundaries.py)
-  and the registry/analytics suites beside the relevant implementation tests.
+  and [hard-link identity fences](../tests/adversarial/test_sqlite_link_identity.py),
+  plus the registry/analytics suites beside the relevant implementation tests.
 - Rollout statistics and token accounting: start with
   [analyzer parity](../tests/test_rodex_analytics_analyzer.py), then add
   [worker/publication](../tests/test_rodex_analytics.py) or
   [trace normalization](../tests/test_rodex_agent_trace.py) only when that boundary
   is touched.
+  Changes to turn outcomes or projection generations also need
+  [lifecycle consistency](../tests/test_analytics_lifecycle_consistency.py) and
+  [verified normalization rebuilds](../tests/test_analytics_normalization_rebuild.py).
 - New effect-bearing paths: update the classification in
   [test_interaction_path_ownership.py](../tests/adversarial/test_interaction_path_ownership.py)
   and the [interaction inventory](INTERACTION_PATHS.md#effect-audit).

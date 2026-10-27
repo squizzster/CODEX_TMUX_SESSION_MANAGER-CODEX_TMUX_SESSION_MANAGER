@@ -122,6 +122,13 @@ resume must still acknowledge the requested UUID. Regression coverage includes
 
 ### Registration and name repair
 
+Validated registration immediately retires the registration deadline. Analytics
+activation remains an independent pending operation, retried at most once per
+second on a monotonic deadline while the terminal gateway continues servicing I/O.
+Successful activation retires that retry deadline. Only an actually unregistered
+exact resume may enter active-writer startup recovery; unavailable analytics does
+not make an accepted registration provisional again.
+
 Locks span identity-sensitive transitions, not terminal attachment. Attachment uses
 immutable `$session_id`, so a concurrent alias cannot redirect it. Discovery retains
 the coherently observed name and exact primary capability, including while registration
@@ -171,22 +178,38 @@ unrelated failures and completed registrations cannot enter that path.
 - Daemon request decoding has a five-second absolute deadline and closes every
   rejected/truncated `SCM_RIGHTS` acquisition. An admitted bridge has the runtime's
   lifetime, not the framing timeout. Shutdown wakes incomplete decoders.
-- Stop acknowledges `stopping` or `terminal`; only actual finalization proves terminal.
+- Stop acknowledges `stopping` or `terminal`; service-thread completion alone cannot
+  prove terminal. Failed process cleanup retains the runtime context, receipt and
+  live capability, and repeated stop requests retry finalization.
   Cancelled reservations cannot start. Completed contexts compact to at most 1,024
   small identity/outcome receipts without caller environments; evicted operations
   expire and cannot replay as new work.
 - [`RuntimeProcessReceipts`](../src/rodex/process_receipts.py) bind native process
   groups to operation/runtime, PID, Linux start time, and uid. Parent-death guards
-  protect daemon-owned children. Reconciliation validates `/proc` identity against
+  protect daemon-owned children. `RuntimeProcessLifecycle` owns startup, replacement,
+  termination and receipt retirement. Its `OwnedProcessGroup` authenticates and
+  retains the pidfd before releasing the workload execution gate. This covers
+  App Server, provisional policy replacement, TUI retries and transient catalog probes.
+  Receipt publication cannot overwrite an unresolved predecessor. Retirement checks
+  the complete identity; failed directory synchronization restores the exact receipt
+  or keeps a pending restoration obligation if storage remains unavailable.
+  Reconciliation validates `/proc` identity against
   the same retained, live pidfd used for all subsequent group signals. Nonblocking
   pidfd readiness works for non-children too; a second numeric PID lookup is not
   substituted for that descriptor.
+  Reacquired capabilities remain retained across failed reconciliation attempts,
+  even when the leader exits before retry. Gateway presentation closure does not
+  close lifecycle authority, and a repeated old-gateway finalizer cannot stop a
+  replacement group. The gateway owns a separate pidfd duplicate for exit readiness.
   TERM, CONT (for already-stopped members), KILL and exit probes use
   `PIDFD_SIGNAL_PROCESS_GROUP`. The [Linux implementation](https://github.com/torvalds/linux/commit/e1fb1dc08e73466830612bcf2f9f72180965c9ba.patch)
   addresses the retained kernel PID object, including after leader reap, without
   resolving a new group number. No preparatory STOP or numeric termination fallback
   remains. Unsupported or denied group-scoped signals leave the receipt unreconciled.
-  Reconciliation waits two seconds after TERM/CONT, then up to two more after KILL.
+  Cleanup waits two seconds after TERM/CONT, then up to two more after KILL,
+  polling the retained `Popen` child during confirmation to reap its exit. It never
+  reaps unrelated children. Native acceptance fixtures use an isolated subreaper
+  for orphaned grandchildren; the production host does not become a subreaper.
   Only confirmed group absence retires the receipt: successful signal delivery is
   not proof of exit, and unreaped zombies or uninterruptible members can prevent
   confirmation. If the leader cannot be verified/acquired, a numeric signal-zero
@@ -194,6 +217,14 @@ unrelated failures and completed registrations cannot enter that path.
   An unresolved receipt refuses startup of that implementation-scoped daemon.
   The [isolated group tests](../tests/test_process_receipts.py) cover leader loss,
   reaping, surviving children, stopped groups, extinction and untouched sentinels.
+  [Owned-lifecycle acceptance](../tests/test_process_lifecycle.py) additionally covers
+  gated partial startup, signalling and receipt failures, retry refusal and repeated
+  finalizers. Catalog failures retain their owner on the launcher and block its next
+  probe until cleanup succeeds. Their separate `catalog-process` receipt namespace
+  prevents daemon startup from terminating another live launcher's probe. Recovery
+  after the catalog launcher itself exits is not automatic; its retained receipt
+  remains available for explicit reconciliation, subject to the same leader/absence
+  rules. This does not grant a new daemon authority over live catalog launchers.
   They do not force actual PID/PGID number reuse or establish support for every kernel
   backport. Descendants that leave the owned process group remain outside this contract.
 - Runtime cwd is an explicit reservation field passed to App Server and TUI.
@@ -224,7 +255,13 @@ It reads guarded logical pane dimensions because tmux's kernel PTY size can lag 
 hook. Generic layout changes and pane swaps must both reach this path.
 
 Observer creation publishes an operation receipt before splitting; a lost split
-reply cannot authorize a second pane. Registration publishes its binding last.
+reply cannot authorize a second pane. Splits request `-l 33%`. A pending creation
+can retire after rejection only when its exact dispatch acknowledgement and a
+complete native pre-creation diagnostic prove that split failed. Unknown errors,
+timeouts and malformed replies retain candidate recovery. Retirement compares the
+dispatched operation and primary capability, then verifies the receipt by readback;
+an adopted or competing operation cannot inherit the original failure proof.
+Registration publishes its binding last.
 Uncertain retirement retains the original target and generation tombstone; new work
 waits for that outcome. Frames carry runtime/server identity because separate tmux
 servers can both contain `%0`. [Observer state](INTERACTION_PATHS.md#observer-state)

@@ -3,17 +3,42 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
-from dataclasses import dataclass
+import time
+from collections.abc import Callable, Mapping
+from copy import deepcopy
+from dataclasses import dataclass, field
 from typing import Literal
 
 from .observer_contract import (
+    OBSERVER_CORRELATION_METADATA_LIMIT,
+    OBSERVER_CORRELATION_PAYLOAD_LIMIT,
+    OBSERVER_CORRELATION_PAYLOAD_MAX_BYTES,
+    OBSERVER_CORRELATION_RETENTION_SECONDS,
+    OBSERVER_PROJECTED_LIST_ITEM_LIMIT,
+    OBSERVER_RECOVERED_TARGET_LIMIT,
     OBSERVER_SCHEMA,
     OBSERVER_SNAPSHOT_EVENT_LIMIT,
     OBSERVER_SNAPSHOT_MAX_BYTES,
 )
 
 ObserverStateKey = tuple[str, str, str]
+ObserverCorrelationKey = tuple[int, str, str]
+ActiveTurnReader = Callable[[str], tuple[bool, str | None]]
+
+
+@dataclass(slots=True)
+class _Correlation:
+    """Bounded content-free identity/completion facts survive payload retirement."""
+
+    expires_at: float
+    uncertain: bool = False
+    targets: set[str] = field(default_factory=set)
+    finished_targets: set[str] = field(default_factory=set)
+    started_targets: set[str] = field(default_factory=set)
+    context_sent_targets: set[str] = field(default_factory=set)
+    activity_completed_targets: set[str] = field(default_factory=set)
+    activities: dict[str, dict[str, object]] = field(default_factory=dict)
+    invocation_phases: set[str] = field(default_factory=set)
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,7 +62,13 @@ class ObserverStateDelta:
 class ObserverStateReducer:
     """Reduce producer events and consumer snapshots with identical identity rules."""
 
-    def __init__(self, mode: Literal["producer", "consumer"]) -> None:
+    def __init__(
+        self,
+        mode: Literal["producer", "consumer"],
+        *,
+        monotonic: Callable[[], float] = time.monotonic,
+        active_turn_reader: ActiveTurnReader = lambda _target: (False, None),
+    ) -> None:
         self._mode = mode
         self._epoch = 0 if mode == "producer" else -1
         self._revision = 0 if mode == "producer" else -1
@@ -45,19 +76,36 @@ class ObserverStateReducer:
         self._tombstones: dict[ObserverStateKey, dict[str, object]] = {}
         self._removed_targets: dict[str, None] = {}
         self._dropped_event_count = 0
-        self._known_activity_item_ids: set[str] = set()
         self._known_agent_thread_ids: set[str] = set()
         self._known_agent_paths: dict[str, str] = {}
         self._active_agent_work: dict[str, ActiveAgentWork] = {}
-        self._started_agent_request_keys: set[tuple[str, str]] = set()
         self._latest_parent_user_message: dict[str, object] | None = None
-        self._collaboration_invocations: dict[str, dict[str, object]] = {}
-        self._subagent_activities: dict[str, dict[str, object]] = {}
-        self._sent_root_request_context_ids: set[str] = set()
+        self._monotonic = monotonic
+        self._active_turn_reader = active_turn_reader
+        self._root_thread_id: str | None = None
+        self._correlations: dict[ObserverCorrelationKey, _Correlation] = {}
+        self._collaboration_invocations: dict[ObserverCorrelationKey, dict[str, object]] = {}
+        self._invocation_targets: dict[str, set[ObserverCorrelationKey]] = {}
+        self._correlation_history_incomplete = False
 
     @classmethod
-    def producer(cls) -> ObserverStateReducer:
-        return cls("producer")
+    def producer(
+        cls,
+        *,
+        monotonic: Callable[[], float] = time.monotonic,
+        active_turn_reader: ActiveTurnReader = lambda _target: (False, None),
+    ) -> ObserverStateReducer:
+        return cls("producer", monotonic=monotonic, active_turn_reader=active_turn_reader)
+
+    def bind_root_thread(self, root_thread_id: str) -> None:
+        self._require_mode("producer")
+        if self._root_thread_id not in {None, root_thread_id}:
+            raise ValueError("observer root cannot change within its lifetime")
+        self._root_thread_id = root_thread_id
+
+    def bind_active_turn_reader(self, reader: ActiveTurnReader) -> None:
+        self._require_mode("producer")
+        self._active_turn_reader = reader
 
     @classmethod
     def consumer(cls) -> ObserverStateReducer:
@@ -87,21 +135,60 @@ class ObserverStateReducer:
 
     def start_agent_work(
         self, target_thread_id: str, turn_id: str | None = None, *, request_id: str | None = None
-    ) -> None:
-        """One running entry per agent; repeated start evidence cannot increment twice."""
+    ) -> bool:
+        """Start once per request; missing retained identity is never proof of new work."""
         self._require_mode("producer")
         if request_id is not None:
-            request_key = (target_thread_id, request_id)
-            if request_key in self._started_agent_request_keys:
-                return
-            self._started_agent_request_keys.add(request_key)
-        self._known_agent_thread_ids.add(target_thread_id)
+            correlation = self._correlation(request_id)
+            if (
+                target_thread_id not in correlation.targets
+                and len(correlation.targets) >= OBSERVER_PROJECTED_LIST_ITEM_LIMIT
+            ):
+                self._mark_correlation_incomplete()
+                return False
+            self._index_target(request_id, target_thread_id, correlation)
+            if target_thread_id in correlation.started_targets or target_thread_id in correlation.finished_targets:
+                return False
+            if correlation.uncertain:
+                # Reconcile the currently active turn from the verified primary
+                # source. It does not attribute this delayed request to that turn.
+                try:
+                    available, active_turn_id = self._active_turn_reader(target_thread_id)
+                except Exception:
+                    available, active_turn_id = False, None
+                if not available or active_turn_id is None:
+                    return False
+                turn_id, request_id = active_turn_id, None
+            else:
+                correlation.started_targets.add(target_thread_id)
+        if not self._remember_agent(target_thread_id):
+            return False
         previous = self._active_agent_work.get(target_thread_id, ActiveAgentWork())
         continues_turn = turn_id is None or previous.turn_id in {None, turn_id}
-        self._active_agent_work[target_thread_id] = ActiveAgentWork(
+        current = ActiveAgentWork(
             turn_id if turn_id is not None else previous.turn_id,
             request_id if request_id is not None else previous.request_id if continues_turn else None,
         )
+        changed = target_thread_id not in self._active_agent_work or current != previous
+        self._active_agent_work[target_thread_id] = current
+        return changed
+
+    def _remember_agent(self, target_thread_id: str, path: str | None = None) -> bool:
+        if target_thread_id not in self._known_agent_thread_ids:
+            if len(self._known_agent_thread_ids) >= OBSERVER_RECOVERED_TARGET_LIMIT:
+                retired = next(
+                    (target for target in self._known_agent_paths if target not in self._active_agent_work), None
+                )
+                if retired is None:
+                    self._mark_correlation_incomplete()
+                    return False
+                self._known_agent_thread_ids.discard(retired)
+                self._known_agent_paths.pop(retired, None)
+                self._mark_correlation_incomplete()
+            self._known_agent_thread_ids.add(target_thread_id)
+        if path is not None:
+            self._known_agent_paths[target_thread_id] = path
+        return True
 
     def finish_agent_work(
         self, target_thread_id: str, turn_id: str | None = None, *, request_id: str | None = None
@@ -142,77 +229,169 @@ class ObserverStateReducer:
 
     def is_known_activity(self, item_id: str) -> bool:
         self._require_mode("producer")
-        return item_id in self._known_activity_item_ids
+        correlation = self._correlations.get(self._correlation_key(item_id))
+        return correlation is not None and bool(correlation.activities)
 
     def tracks_target(self, target_thread_id: str) -> bool:
         self._require_mode("producer")
         return target_thread_id in self._active_agent_work
 
-    def remember_activity(
-        self,
-        item_id: str,
-        event: dict[str, object],
-        *,
-        new_spawn: bool,
-    ) -> None:
+    def remember_activity(self, item_id: str, event: dict[str, object]) -> bool:
         self._require_mode("producer")
-        self._subagent_activities[item_id] = event
+        if event.get("thread_id") != self._root_thread_id:
+            return False
+        correlation = self._correlation(item_id)
         item = event["item"]
         assert isinstance(item, dict)
-        self._known_agent_paths[str(item["agent_thread_id"])] = str(item["agent_path"])
-        if new_spawn:
-            self._known_activity_item_ids.add(item_id)
+        target = str(item["agent_thread_id"])
+        if target in correlation.finished_targets:
+            return False
+        if target not in correlation.targets and len(correlation.targets) >= OBSERVER_PROJECTED_LIST_ITEM_LIMIT:
+            self._mark_correlation_incomplete()
+            return False
+        if not self._remember_agent(target, str(item["agent_path"])):
+            return False
+        previous = correlation.activities.get(target)
+        if previous == event:
+            return False
+        # Retain only the activity's own bounded metadata, never attached prompts.
+        correlation.activities[target] = {key: value for key, value in event.items() if key != "collaboration_invocation"}
+        self._index_target(item_id, target, correlation)
+        return True
 
-    def activity(self, item_id: str) -> dict[str, object] | None:
+    def activities(self, item_id: str) -> tuple[dict[str, object], ...]:
         self._require_mode("producer")
-        return self._subagent_activities.get(item_id)
+        correlation = self._correlations.get(self._correlation_key(item_id))
+        if correlation is None or correlation.uncertain:
+            return ()
+        return tuple(
+            dict(activity)
+            for target, activity in correlation.activities.items()
+            if target not in correlation.finished_targets
+        )
 
     def collaboration_invocation(self, item_id: str) -> dict[str, object] | None:
         self._require_mode("producer")
-        return self._collaboration_invocations.get(item_id)
+        return self._collaboration_invocations.get(self._correlation_key(item_id))
 
-    def remember_collaboration_invocation(
-        self,
-        item_id: str,
-        invocation: dict[str, object],
-    ) -> None:
+    def remember_collaboration_invocation(self, item_id: str, invocation: dict[str, object]) -> bool:
         self._require_mode("producer")
-        self._collaboration_invocations[item_id] = invocation
+        if invocation.get("thread_id") != self._root_thread_id:
+            return False
+        correlation = self._correlation(item_id)
+        phase = str(invocation.get("method"))
+        if phase in correlation.invocation_phases or "item/completed" in correlation.invocation_phases:
+            return False
+        correlation.invocation_phases.add(phase)
+        item = invocation["item"]
+        assert isinstance(item, dict)
+        for target in item["receiver_thread_ids"]:
+            self._index_target(item_id, str(target), correlation)
+        if not correlation.uncertain and not (
+            correlation.targets and correlation.targets <= correlation.finished_targets
+        ):
+            self._collaboration_invocations[self._correlation_key(item_id)] = deepcopy(invocation)
+            self._enforce_payload_bounds()
+        return True
 
-    def forget_collaboration_invocation(self, item_id: str) -> None:
-        self._require_mode("producer")
-        self._collaboration_invocations.pop(item_id, None)
+    def correlation_is_uncertain(self, item_id: str) -> bool:
+        return self._correlation(item_id).uncertain
 
-    def root_request_context_was_sent(self, item_id: str) -> bool:
-        self._require_mode("producer")
-        return item_id in self._sent_root_request_context_ids
+    def root_request_context_was_sent(self, item_id: str, target: str) -> bool:
+        correlation = self._correlation(item_id)
+        return (
+            correlation.uncertain or target in correlation.context_sent_targets or target in correlation.finished_targets
+        )
 
-    def mark_root_request_context_sent(self, item_id: str) -> None:
-        self._require_mode("producer")
-        self._sent_root_request_context_ids.add(item_id)
+    def mark_root_request_context_sent(self, item_id: str, target: str) -> None:
+        self._correlation(item_id).context_sent_targets.add(target)
 
-    def complete_activity(self, item_id: str) -> None:
-        """Retire item correlation only; tool completion does not finish agent work."""
+    def complete_activity(self, item_id: str, target: str) -> None:
+        """Keep completion identity for late correlation; tool completion is not agent completion."""
         self._require_mode("producer")
-        self._known_activity_item_ids.discard(item_id)
-        self._subagent_activities.pop(item_id, None)
-        self._collaboration_invocations.pop(item_id, None)
-        self._sent_root_request_context_ids.discard(item_id)
+        self._correlation(item_id).activity_completed_targets.add(target)
+        self.settle_correlation(item_id)
+
+    def settle_correlation(self, item_id: str) -> None:
+        correlation = self._correlation(item_id)
+        settled = correlation.finished_targets | correlation.activity_completed_targets
+        if correlation.targets and (
+            correlation.targets <= correlation.finished_targets
+            or ("item/completed" in correlation.invocation_phases and correlation.targets <= settled)
+        ):
+            self._collaboration_invocations.pop(self._correlation_key(item_id), None)
 
     def prune_protocol_target(self, target_thread_id: str) -> dict[str, object]:
         self._require_mode("producer")
-        item_ids = {
-            item_id
-            for item_id, activity in self._subagent_activities.items()
-            if observer_event_target_thread_id(activity) == target_thread_id
-        }
         self.finish_agent_work(target_thread_id)
-        self._known_activity_item_ids.difference_update(item_ids)
-        self._sent_root_request_context_ids.difference_update(item_ids)
-        for item_id in item_ids:
-            self._subagent_activities.pop(item_id, None)
-            self._collaboration_invocations.pop(item_id, None)
+        # This index is populated by invocation recipients independently of any
+        # activity. Invocation-first and activity-first therefore retire alike.
+        for key in tuple(self._invocation_targets.get(target_thread_id, ())):
+            correlation = self._correlations.get(key)
+            if correlation is not None:
+                correlation.finished_targets.add(target_thread_id)
+                correlation.activities.pop(target_thread_id, None)
+                self.settle_correlation(key[2])
         return self.prune_target(target_thread_id)
+
+    def expire_protocol_state(self) -> bool:
+        self._require_mode("producer")
+        now = self._monotonic()
+        expired = False
+        for key, correlation in tuple(self._correlations.items()):
+            if correlation.expires_at <= now:
+                self._evict_correlation(key)
+                expired = True
+        return expired
+
+    def _correlation_key(self, item_id: str) -> ObserverCorrelationKey:
+        return self._epoch, self._root_thread_id or "", item_id
+
+    def _correlation(self, item_id: str) -> _Correlation:
+        key = self._correlation_key(item_id)
+        correlation = self._correlations.get(key)
+        if correlation is None:
+            while len(self._correlations) >= OBSERVER_CORRELATION_METADATA_LIMIT:
+                self._evict_correlation(next(iter(self._correlations)))
+            correlation = _Correlation(
+                self._monotonic() + OBSERVER_CORRELATION_RETENTION_SECONDS,
+                uncertain=self._correlation_history_incomplete,
+            )
+            self._correlations[key] = correlation
+        return correlation
+
+    def _index_target(self, item_id: str, target: str, correlation: _Correlation) -> None:
+        if target not in correlation.targets and len(correlation.targets) >= OBSERVER_PROJECTED_LIST_ITEM_LIMIT:
+            self._mark_correlation_incomplete()
+            return
+        correlation.targets.add(target)
+        self._invocation_targets.setdefault(target, set()).add(self._correlation_key(item_id))
+
+    def _enforce_payload_bounds(self) -> None:
+        payload_bytes = sum(_snapshot_size(value) for value in self._collaboration_invocations.values())
+        while (
+            len(self._collaboration_invocations) > OBSERVER_CORRELATION_PAYLOAD_LIMIT
+            or payload_bytes > OBSERVER_CORRELATION_PAYLOAD_MAX_BYTES
+        ):
+            key = next(iter(self._collaboration_invocations))
+            payload_bytes -= _snapshot_size(self._collaboration_invocations.pop(key))
+            self._correlations[key].uncertain = True
+            self._mark_correlation_incomplete()
+
+    def _evict_correlation(self, key: ObserverCorrelationKey) -> None:
+        correlation = self._correlations.pop(key)
+        self._collaboration_invocations.pop(key, None)
+        for target in correlation.targets:
+            keys = self._invocation_targets[target]
+            keys.discard(key)
+            if not keys:
+                del self._invocation_targets[target]
+        self._mark_correlation_incomplete()
+
+    def _mark_correlation_incomplete(self) -> None:
+        self._correlation_history_incomplete = True
+        self._dropped_event_count += 1
+        self._advance_revision()
 
     def observe(self, event: Mapping[str, object]) -> dict[str, object]:
         """Apply one projected producer event and return a complete bounded snapshot."""
@@ -242,6 +421,16 @@ class ObserverStateReducer:
         for collection in (self._active, self._tombstones):
             for key, event in tuple(collection.items()):
                 if _event_mentions_target(event, target_thread_id):
+                    item = event.get("item")
+                    receivers = item.get("receiver_thread_ids") if isinstance(item, dict) else None
+                    remaining = (
+                        [target for target in receivers if target != target_thread_id]
+                        if isinstance(receivers, list)
+                        else []
+                    )
+                    if remaining:
+                        collection[key] = {**event, "item": {**item, "receiver_thread_ids": remaining}}
+                        continue
                     collection.pop(key, None)
         self._removed_targets.pop(target_thread_id, None)
         self._removed_targets[target_thread_id] = None
@@ -379,15 +568,14 @@ class ObserverStateReducer:
             raise RuntimeError(f"observer state reducer is not a {expected}")
 
     def _clear_protocol_state(self) -> None:
-        self._known_activity_item_ids.clear()
         self._known_agent_thread_ids.clear()
         self._known_agent_paths.clear()
         self._active_agent_work.clear()
-        self._started_agent_request_keys.clear()
         self._latest_parent_user_message = None
         self._collaboration_invocations.clear()
-        self._subagent_activities.clear()
-        self._sent_root_request_context_ids.clear()
+        self._correlations.clear()
+        self._invocation_targets.clear()
+        self._correlation_history_incomplete = False
 
 
 def observer_state_event_key(event: Mapping[str, object]) -> ObserverStateKey:

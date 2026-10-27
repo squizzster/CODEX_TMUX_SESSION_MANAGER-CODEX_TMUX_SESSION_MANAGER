@@ -39,7 +39,7 @@ from .daemon_client import (
 from .implementation_identity import RODEX_IMPLEMENTATION_ID
 from .process_contracts import RuntimeServiceConfig
 from .process_guard import LINUX_TASK_NAME_MAX_BYTES, set_current_linux_task_name
-from .process_receipts import RuntimeProcessReceipts
+from .process_receipts import RuntimeProcessLifecycle, RuntimeProcessReceipts
 from .runtime import admit_runtime_terminal_fd, run_runtime_service
 from .runtime_endpoint import ExclusiveUnixEndpoint
 from .tmux_session_capability import runtime_tmux_socket_name
@@ -108,6 +108,8 @@ class _ManagedRuntime:
     supervisor_wake: Callable[[], None] | None = None
     terminal_resize: Callable[[], None] | None = None
     finishing: bool = False
+    service_finished: bool = False
+    process_lifecycle: RuntimeProcessLifecycle = field(default_factory=RuntimeProcessLifecycle)
 
 
 @dataclass(frozen=True, slots=True)
@@ -160,7 +162,18 @@ class DaemonRuntimeManager:
             if int(operation_id, 16) <= self._expired_operation_floor:
                 raise RodexDaemonServerError("runtime operation expired; create a new operation identity")
             self._analytics.reserve(config.analytics)
-            self._runtimes[runtime_id] = _ManagedRuntime(operation_id, config)
+            self._runtimes[runtime_id] = _ManagedRuntime(
+                operation_id,
+                config,
+                process_lifecycle=RuntimeProcessLifecycle(
+                    on_started=lambda kind, group: self._process_receipts.record(
+                        kind, config.runtime_id, operation_id, group
+                    ),
+                    on_stopped=lambda kind, group: self._process_receipts.release(
+                        kind, config.runtime_id, operation_id, group
+                    ),
+                ),
+            )
 
     def bind_terminal(
         self,
@@ -298,18 +311,7 @@ class DaemonRuntimeManager:
                 on_analytics_event=lambda event: self._analytics.observe_protocol_event(
                     str(context.config.runtime_id), event
                 ),
-                on_process_started=lambda kind, process: self._process_receipts.record(
-                    kind,
-                    context.config.runtime_id,
-                    context.operation_id,
-                    process,
-                ),
-                on_process_stopped=lambda kind, process: self._process_receipts.release(
-                    kind,
-                    context.config.runtime_id,
-                    context.operation_id,
-                    process,
-                ),
+                process_lifecycle=context.process_lifecycle,
                 on_terminal_gateway_ready=lambda supervisor_wake, terminal_resize: self._bind_runtime_controls(
                     context,
                     supervisor_wake,
@@ -321,6 +323,8 @@ class DaemonRuntimeManager:
                 context.error = f"runtime service failed: {error}"
             context.ready.set()
         finally:
+            with context.lock:
+                context.service_finished = True
             self._finish_context(context)
 
     @staticmethod
@@ -331,7 +335,7 @@ class DaemonRuntimeManager:
 
     def _finish_context(self, context: _ManagedRuntime) -> None:
         with context.lock:
-            if context.finishing:
+            if context.finishing or context.done.is_set():
                 return
             context.finishing = True
             context.supervisor_wake = None
@@ -340,8 +344,16 @@ class DaemonRuntimeManager:
         try:
             if bridge is not None:
                 bridge.close()
+            context.process_lifecycle.close()
             self._analytics.retire(str(context.config.runtime_id))
-        finally:
+        except Exception as error:
+            with context.lock:
+                context.error = f"runtime finalization remains unresolved: {error}"
+                context.finishing = False
+                context.stop.set()
+                context.ready.set()
+            return
+        else:
             with self._lock:
                 runtime_id = str(context.config.runtime_id)
                 if self._runtimes.get(runtime_id) is context:
@@ -362,6 +374,7 @@ class DaemonRuntimeManager:
             context.stop.set()
             context.ready.set()
             thread = context.thread
+            service_finished = context.service_finished
             supervisor_wake = context.supervisor_wake
             terminal_fd, context.terminal_fd = context.terminal_fd, None
             context.terminal_environment = None
@@ -372,7 +385,7 @@ class DaemonRuntimeManager:
         if terminal_fd is not None:
             with suppress(OSError):
                 os.close(terminal_fd)
-        if thread is None:
+        if thread is None or service_finished:
             self._finish_context(context)
 
     @staticmethod

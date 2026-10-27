@@ -31,6 +31,7 @@ from rodex.interaction_pipeline import (
     SessionInteractionPipeline,
 )
 from rodex.presentation_policy import PresentationSnapshot, PresentationSurface, SessionPresentationPipeline
+from rodex.process_receipts import RuntimeProcessLifecycle
 from rodex.prompt_expansion_display import PromptExpansionDisplay
 from rodex.protocol_input_text import PromptTextEdit
 from rodex.terminal_gateway import QUEUE_LIMIT_BYTES, WORKING_COUNTER_REFRESH_SECONDS, TerminalSessionGateway
@@ -100,6 +101,34 @@ def start_gateway(slave, pipeline, registrations=(), presentation=None, prompt_e
         input_fd=slave,
         output_fd=slave,
     )
+
+
+def test_repeated_old_gateway_close_cannot_stop_its_replacement():
+    lifecycle = RuntimeProcessLifecycle()
+    with outer_terminal() as (master, slave):
+        options = dict(
+            env=dict(os.environ),
+            cwd=Path.cwd(),
+            pipeline=SessionInteractionPipeline(),
+            runtime_identity="gateway-retry",
+            registrations=(),
+            confirm_native_prefix=lambda _prefix: False,
+            input_fd=slave,
+            output_fd=slave,
+            process_lifecycle=lifecycle,
+        )
+        first = TerminalSessionGateway([sys.executable, "-c", ECHO_CHILD], **options)
+        read_until(first, master, b"READY")
+        first.close()
+        second = TerminalSessionGateway([sys.executable, "-c", ECHO_CHILD], **options)
+        try:
+            read_until(second, master, b"READY")
+            first.close()
+            assert second.process.poll() is None
+            os.write(master, b"still-owned")
+            read_until(second, master, b"still-owned")
+        finally:
+            second.close()
 
 
 def test_gateway_displays_and_expires_expansion_without_native_input_or_output(monkeypatch):
@@ -427,7 +456,18 @@ os.write(1, b'\x1b[2J\x1b[HREPLY=' + reply.hex().encode())
             output_fd=slave,
         )
         try:
-            read_until(gateway, master, b"REPLY=1b5b323b3352")
+            # Semantic reconstruction may position individual cells. Verify
+            # the displayed reply, independent of its frame serialization.
+            screen = pyte.Screen(120, 36)
+            stream = pyte.ByteStream(screen)
+            deadline = time.monotonic() + 5
+            expected = "REPLY=1b5b323b3352"
+            while expected not in screen.display[0] and time.monotonic() < deadline:
+                with suppress(subprocess.TimeoutExpired):
+                    gateway.wait(timeout=0.04)
+                while select.select([master], [], [], 0)[0]:
+                    stream.feed(os.read(master, 65536))
+            assert screen.display[0].startswith(expected)
             assert gateway.wait(timeout=2) == 0
             assert calls == []
             assert gateway._interceptor._candidate == ""

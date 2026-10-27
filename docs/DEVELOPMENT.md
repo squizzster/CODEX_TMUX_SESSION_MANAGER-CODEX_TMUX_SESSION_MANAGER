@@ -22,6 +22,8 @@ uv build
 Coverage has a configured 70% floor. The full required live gate needs authenticated
 Codex and real tmux. Missing prerequisites fail when `--require-live-startup` is set.
 Live tests isolate SQL, tmux, and Codex history from user sessions.
+Clients connecting to a fixture's retained runtime must use that installation's
+identity from its exact process receipt; pytest's checkout identity is different.
 
 Choose the gate deliberately:
 

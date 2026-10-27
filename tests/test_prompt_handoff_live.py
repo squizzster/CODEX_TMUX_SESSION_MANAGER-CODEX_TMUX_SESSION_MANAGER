@@ -17,6 +17,7 @@ from websockets.sync.client import unix_connect
 from rodex.runtime_peer import RuntimePeerIdentity, verified_runtime_connection
 from rodex.terminal_title import TERMINAL_TITLE_ANIMATION_FRAMES, TERMINAL_TITLE_IDLE_FIELD
 from rodex.tmux_session_capability import RODEX_TMUX_SOCKET_PATTERN
+from rodex.version import RODEX_VERSION
 
 
 @pytest.mark.live_startup
@@ -123,7 +124,13 @@ def test_real_codex_transforms_model_input_but_preserves_native_recall(tmp_path,
                     .stdout.strip()
                     .split("|")
                 )
-                peer = RuntimePeerIdentity(*identity)
+                # The launched CLI owns a retained installation, distinct from
+                # pytest's checkout identity. Use the exact fixture's receipt.
+                receipts = tuple(runtime_root.glob(f"*.process-{identity[0]}-app-server.json"))
+                assert len(receipts) == 1
+                installation_key = receipts[0].name.partition(".process-")[0]
+                assert len(installation_key) == 64 and not set(installation_key).difference("0123456789abcdef")
+                peer = RuntimePeerIdentity(*identity, f"{RODEX_VERSION}+installation.{installation_key}")
                 with verified_runtime_connection(
                     unix_connect,
                     next(runtime_root.glob("events-*.sock")),

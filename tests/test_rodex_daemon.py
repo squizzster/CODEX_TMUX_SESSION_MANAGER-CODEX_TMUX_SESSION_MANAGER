@@ -194,6 +194,9 @@ def test_idle_server_blocks_on_control_event_until_stop(
         def close(self) -> None:
             return None
 
+        def refresh_owned_paths(self) -> None:
+            return None
+
     class ObservedPoll:
         def __init__(self):
             self._poller = real_poll()
@@ -276,6 +279,9 @@ def test_daemon_rejects_prior_protocol_and_missing_transport_identities(
             return None
 
         def close(self) -> None:
+            return None
+
+        def refresh_owned_paths(self) -> None:
             return None
 
     server = daemon_module.RodexDaemonServer(short_runtime_root)

@@ -299,6 +299,7 @@ class _RuntimePathKeepalive:
         paths: Sequence[Path | BoundUnixAlias],
         *,
         interval_seconds: float = RUNTIME_PATH_KEEPALIVE_INTERVAL_SECONDS,
+        refresh_additional_paths: Callable[[], None] | None = None,
     ) -> None:
         if interval_seconds <= 0:
             raise ValueError("runtime path keepalive interval must be positive")
@@ -314,6 +315,7 @@ class _RuntimePathKeepalive:
         if not self._paths:
             raise ValueError("runtime path keepalive requires at least one path")
         self._interval_seconds = interval_seconds
+        self._refresh_additional_paths = refresh_additional_paths
         self._stop = Event()
         self._thread: Thread | None = None
         self._failure: RodexRuntimeError | None = None
@@ -412,6 +414,11 @@ class _RuntimePathKeepalive:
                 raise
             except OSError as error:
                 raise RodexRuntimeError(f"could not refresh live runtime path {path}: {error}") from error
+        if self._refresh_additional_paths is not None:
+            try:
+                self._refresh_additional_paths()
+            except (OSError, RuntimeError) as error:
+                raise RodexRuntimeError(f"could not refresh additional owned paths: {error}") from error
 
 
 def _runtime_path_identity(path: Path) -> tuple[int, int, int, int]:
@@ -3013,6 +3020,10 @@ def _run_runtime_service(
                     protocol_proxy_socket_path,
                     protocol_event_socket_path,
                     config.command_policy_socket_path,
+                    app_endpoint.lock_path,
+                    protocol_proxy_socket_path.with_suffix(".sock.lock"),
+                    protocol_event_socket_path.with_suffix(".sock.lock"),
+                    config.command_policy_socket_path.with_suffix(".sock.lock"),
                 )
             )
 

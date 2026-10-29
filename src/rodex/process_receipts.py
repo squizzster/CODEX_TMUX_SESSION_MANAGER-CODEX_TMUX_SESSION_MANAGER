@@ -239,6 +239,8 @@ class RuntimeProcessReceipts:
         self._runtime_root = runtime_root
         self._catalog = catalog
         self._pending_retirements: dict[Path, dict[str, Any]] = {}
+        self._owned_paths: dict[Path, tuple[int, int]] = {}
+        self._paths_lock = RLock()
 
     def record(self, kind: str, runtime_id: RodexRuntimeId, operation_id: str, process: Any) -> None:
         path = self._path(kind, runtime_id)
@@ -264,6 +266,10 @@ class RuntimeProcessReceipts:
 
     def _publish(self, path: Path, payload: dict[str, Any]) -> None:
         """Publish without replacement, including restoration after failed retirement."""
+        with self._paths_lock:
+            self._publish_locked(path, payload)
+
+    def _publish_locked(self, path: Path, payload: dict[str, Any]) -> None:
         temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
         descriptor = os.open(
             temporary,
@@ -284,6 +290,8 @@ class RuntimeProcessReceipts:
                 os.close(descriptor)
             # Publication may never overwrite an unresolved predecessor receipt.
             os.link(temporary, path)
+            state = temporary.stat()
+            self._owned_paths[path] = (state.st_dev, state.st_ino)
             _fsync_directory(self._runtime_root)
         finally:
             temporary.unlink(missing_ok=True)
@@ -315,6 +323,10 @@ class RuntimeProcessReceipts:
         self._retire(path, receipt)
 
     def _retire(self, path: Path, receipt: dict[str, Any]) -> None:
+        with self._paths_lock:
+            self._retire_locked(path, receipt)
+
+    def _retire_locked(self, path: Path, receipt: dict[str, Any]) -> None:
         if path in self._pending_retirements and not path.exists():
             self._publish(path, receipt)
         if self._read(path) != receipt:
@@ -330,6 +342,23 @@ class RuntimeProcessReceipts:
             self._publish(path, receipt)
             raise
         del self._pending_retirements[path]
+        self._owned_paths.pop(path, None)
+
+    def refresh_owned_paths(self) -> None:
+        """Refresh only receipts published by this owner, serialized with retirement."""
+        with self._paths_lock:
+            for path, identity in self._owned_paths.items():
+                descriptor = os.open(path, os.O_PATH | os.O_NOFOLLOW | os.O_CLOEXEC)
+                try:
+                    state = os.fstat(descriptor)
+                    if (state.st_dev, state.st_ino) != identity:
+                        raise ProcessReceiptError(f"owned process receipt pathname changed: {path}")
+                    os.utime(f"/proc/self/fd/{descriptor}", None)
+                    current = path.lstat()
+                    if (current.st_dev, current.st_ino) != identity:
+                        raise ProcessReceiptError(f"owned process receipt pathname changed: {path}")
+                finally:
+                    os.close(descriptor)
 
     def reconcile(self) -> None:
         prefix = f"{RODEX_IMPLEMENTATION_KEY}.{'catalog-' if self._catalog else ''}process-"

@@ -100,7 +100,7 @@ EFFECT_OWNERS = {
         "rodex/runtime.py:_run_runtime_service:.write",
         "rodex/runtime.py:_RuntimeDiagnosticRelay._run:os.write",
         "rodex/runtime.py:_RuntimeDiagnosticRelay.write:.write",
-        "rodex/process_receipts.py:RuntimeProcessReceipts._publish:os.write",
+        "rodex/process_receipts.py:RuntimeProcessReceipts._publish_locked:os.write",
         "rodex/installation.py:_write_bootstrap_cache:.write",
         "rodex/installation.py:prepare_installation:print",
         "rodex/daemon.py:RodexDaemonServer._publish_instance_capability:.write",

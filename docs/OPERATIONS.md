@@ -26,8 +26,13 @@ Path authorities: [`default_runtime_root_path`](../src/rodex/runtime.py),
 Different `XDG_STATE_HOME` values create different catalogs/name domains; different
 `RODEX_RUNTIME_DIR` values create different endpoint roots. Do not assume one
 machine-wide name or daemon namespace. Live runtimes refresh their runtime paths
-hourly; a refresh failure ends the affected runtime rather than leaving an
-unaddressable detached session. Storage relocation is an
+and endpoint locks hourly; a refresh failure ends the affected runtime rather than
+leaving an unaddressable detached session. The daemon separately refreshes its
+socket, lock, identity file and owned child receipts. Losing daemon coordination
+paths logs an error and preserves existing sessions; its kernel ownership claim
+prevents a replacement daemon from cleaning up their processes. Startup reports an
+exited daemon's status and log path immediately instead of waiting for the readiness
+timeout. Storage relocation is an
 [offline operation](../INSTALL.md#update-or-relocate).
 
 ## Terminal settings

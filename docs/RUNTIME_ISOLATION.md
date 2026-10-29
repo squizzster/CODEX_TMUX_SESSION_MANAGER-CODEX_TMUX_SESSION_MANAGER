@@ -171,7 +171,11 @@ unrelated failures and completed registrations cannot enter that path.
 ## Resource lifetime
 
 - [`ExclusiveUnixEndpoint`](../src/rodex/runtime_endpoint.py) retains endpoint locks
-  and inodes: losers cannot unlink incumbents, and stale cleanup cannot remove replacements.
+  and inodes, plus a Linux abstract-socket claim keyed by uid and canonical pathname.
+  That kernel claim survives deletion of the socket and lock files. A second daemon
+  cannot publish its identity or reconcile the first daemon's children while the
+  original owner remains alive. Losers cannot unlink incumbents, and stale cleanup
+  cannot remove replacements.
   A child-created App Server rendezvous alias is allowed only after alias, private
   directory, physical socket, and listener ownership verification. Cleanup removes
   the retained alias, not the child's target.

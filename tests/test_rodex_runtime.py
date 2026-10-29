@@ -5073,6 +5073,10 @@ def test_runtime_service_skips_updater_and_connects_tui_through_protocol_proxy(
         proxy_socket,
         event_socket,
         tmp_path / f"policy-{RUNTIME_ID}.sock",
+        app_socket.with_suffix(".sock.lock"),
+        proxy_socket.with_suffix(".sock.lock"),
+        event_socket.with_suffix(".sock.lock"),
+        tmp_path / f"policy-{RUNTIME_ID}.sock.lock",
     )
     # Initial prompt text is transformed only when native emits its structured RPC.
     assert tui_commands == [

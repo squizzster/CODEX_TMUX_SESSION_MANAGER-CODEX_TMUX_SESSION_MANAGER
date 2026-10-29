@@ -21,6 +21,9 @@ class RecordingRuntimeManager:
     def close(self):
         pass
 
+    def refresh_owned_paths(self):
+        pass
+
 
 if __name__ == "__main__":
     root = Path(sys.argv[1])

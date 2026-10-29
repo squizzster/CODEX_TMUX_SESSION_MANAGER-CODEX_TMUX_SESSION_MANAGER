@@ -141,7 +141,7 @@ class RodexDaemonClient:
                 0o600,
             )
             try:
-                self._spawn_process(
+                process = self._spawn_process(
                     [
                         self._python_executable,
                         "-I",
@@ -162,6 +162,10 @@ class RodexDaemonClient:
             while self._monotonic() < deadline:
                 if self._probe():
                     return
+                if process.poll() is not None:
+                    raise RodexDaemonError(
+                        f"shared Rodex daemon exited during startup (status {process.returncode}); see {log_path}"
+                    )
                 self._sleep(0.05)
             raise RodexDaemonError("shared Rodex daemon did not become ready")
         finally:

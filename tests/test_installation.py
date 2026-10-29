@@ -323,7 +323,7 @@ def test_replaced_checkout_cannot_redirect_retained_tmux_hook(tmp_path, developm
         ready = json.loads(process.stdout.readline())
         deadline = time.monotonic() + 5
         while not Path(ready["socket"]).exists():
-            assert process.poll() is None
+            assert process.poll() is None, process.stderr.read()
             assert time.monotonic() < deadline
             time.sleep(0.01)
         with tmux_terminal(tmp_path / "terminal") as terminal:

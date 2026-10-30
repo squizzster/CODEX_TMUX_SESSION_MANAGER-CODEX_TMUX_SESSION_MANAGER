@@ -293,6 +293,48 @@ def test_installed_rodex_attaches_with_current_codex_unix_transport(
                 assert envelope["data"]["thread"]["status"] == "idle"
                 runtime_id = envelope["runtime"]["runtime_id"]
                 assert (runtime_root / f"app-{runtime_id}.sock").exists()
+                receipts = list(runtime_root.glob(f"*.process-{runtime_id}-native-tui.json"))
+                assert len(receipts) == 1
+                native_pid = json.loads(receipts[0].read_text())["pid"]
+                native_terminal = os.open(f"/proc/{native_pid}/fd/0", os.O_RDONLY | os.O_NOCTTY | os.O_NONBLOCK)
+                try:
+                    # Check the actual nested Codex PTY after wider and narrower
+                    # client resizes; successful attachment alone is insufficient.
+                    for rows, columns in ((29, 228), (44, 90), (36, 120)):
+                        fcntl.ioctl(client.terminal, termios.TIOCSWINSZ, struct.pack("HHHH", rows, columns, 0, 0))
+                        deadline = time.monotonic() + 5
+                        while time.monotonic() < deadline:
+                            observed = subprocess.run(
+                                [
+                                    tmux,
+                                    "-N",
+                                    "-S",
+                                    str(sockets[0]),
+                                    "display-message",
+                                    "-p",
+                                    "-t",
+                                    f"={name}:",
+                                    "#{pane_height} #{pane_width}",
+                                ],
+                                capture_output=True,
+                                text=True,
+                                check=True,
+                                timeout=3,
+                            )
+                            pane_size = tuple(map(int, observed.stdout.split()))
+                            native_size = struct.unpack(
+                                "HHHH", fcntl.ioctl(native_terminal, termios.TIOCGWINSZ, bytes(8))
+                            )[:2]
+                            if pane_size[1] == columns and native_size == pane_size:
+                                break
+                            client.poll()
+                        else:
+                            pytest.fail(
+                                f"Resize did not reach Codex: client={rows, columns}, "
+                                f"pane={pane_size}, native={native_size}"
+                            )
+                finally:
+                    os.close(native_terminal)
                 client.detach()
         finally:
             _stop_fixture_daemon(runtime_root)

@@ -146,6 +146,14 @@ may instead print `No such file or directory` for a `.process-...json` file; use
 rebuild missing records or install the current keepalive into an already-running
 daemon. Runtime directories are private per user: `/tmp/rodex-UID` under another
 account is separate state, so diagnostics and reconnection must use its owning user.
+Reconnection alone does not repair resize notifications when that older daemon's
+socket or identity file is also missing. To move onto the current build, reconnect
+with `--force-old`, wait until Codex is idle, then use private `Ctrl-C` followed by
+`q` to end the old runtime. Run `rodex NAME` normally to resume its saved thread on
+the current implementation. Detaching leaves the older implementation running.
+The hourly protection and kernel ownership claim apply to newly started daemons;
+updating the checkout cannot retrofit them into existing processes. Missing files
+establish lost coordination, not which cleaner or command removed them.
 Never overwrite ownership markers, replace live SQL files, or infer
 destruction authority from a display name or PID alone.
 

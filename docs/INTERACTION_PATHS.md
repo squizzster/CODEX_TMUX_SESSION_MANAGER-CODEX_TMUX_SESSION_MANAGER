@@ -493,7 +493,9 @@ use [transactions](../src/rodex_sql/transactions.py). [Runtime isolation](RUNTIM
 owns cleanup/hook authority, including the resize-only compatibility exception.
 [`RetainedRuntimeUpgrade`](../src/rodex/runtime_upgrade.py) and its
 [handoff adapter](../src/rodex/retained_runtime_handoff.py) own selected-session
-upgrade and `--force-old` attachment effects. [Runtime isolation](RUNTIME_ISOLATION.md#retained-runtime-upgrade)
+upgrade and retained attachment effects, including the missing-process-record
+fallback. The managed lifecycle reports a skipped upgrade on stderr and releases
+its transition lock before attachment. [Runtime isolation](RUNTIME_ISOLATION.md#retained-runtime-upgrade)
 defines their admission and identity checks; unmatched invocations retain their
 Codex arguments.
 See [development](DEVELOPMENT.md#test-selection) for focused tests and live gates.

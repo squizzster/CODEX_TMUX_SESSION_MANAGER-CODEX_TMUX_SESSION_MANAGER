@@ -33,6 +33,8 @@ Choose the gate deliberately:
   run; the latter use an isolated local model without credentials or model quota.
 - `uv run pytest tests/test_managed_startup.py --require-live-startup` exercises
   actual TUI startup, detach/reopen, and isolated-runtime reuse without model prompts.
+  The Unix-transport startup case also compares the actual nested native TUI PTY
+  against tmux after client resizes to 228, 90, and 120 columns.
 - `uv run pytest -m live_startup --require-live-startup` also includes
   [prompt-submission tests](../tests/test_prompt_handoff_live.py). Those submit real
   ordinary/Ultra/multiline prompts and can consume model quota. The marker is not

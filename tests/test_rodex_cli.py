@@ -4846,6 +4846,56 @@ def test_force_old_attaches_unchanged_after_releasing_session_lock_without_codex
     assert lookup_codex_session_id_from_a_rodex_sessions_id(1, database) == CODEX_SESSION_ID
 
 
+@pytest.mark.parametrize("prefix", [[], ["resume"], ["_detach"]])
+def test_missing_upgrade_receipt_reopens_existing_runtime_after_releasing_lock(
+    tmp_path, monkeypatch, capsys, prefix, executing_user: RodexSessionsUserIdentity
+):
+    database = tmp_path / "rodex.sqlite3"
+    monkeypatch.setattr("cool_name.functions.coolname.generate_slug", lambda _count: "automatic-beluga")
+    monkeypatch.setattr("rodex.cli.shutil.which", available_prerequisite)
+    create_exact_controlled_session(database, tmp_path, executing_user)
+    launcher = StubLauncher(tmp_path)
+    lock_held = False
+    real_lock = managed_lifecycle_module.session_transition_lock
+    attachments = []
+
+    @contextmanager
+    def track_lock(*arguments):
+        nonlocal lock_held
+        with real_lock(*arguments):
+            lock_held = True
+            try:
+                yield
+            finally:
+                lock_held = False
+
+    def stop(old_database):
+        assert lock_held
+        assert old_database == database
+        return None  # Authenticated missing-process-receipt result, before stop.
+
+    def attach(old_database):
+        assert not lock_held
+        assert old_database == database
+        attachments.append(RUNTIME_ID)
+        return "detach"
+
+    monkeypatch.setattr(managed_lifecycle_module, "session_transition_lock", track_lock)
+    monkeypatch.setattr(launcher, "prepare_runtime_upgrade", lambda _runtime: SimpleNamespace(stop=stop, attach=attach))
+    assert run([*prefix, "automatic-beluga"], database_path=database, launcher=launcher) == 0
+    output = capsys.readouterr()
+    assert "missing a process record" in output.err
+    assert "skipping the upgrade" in output.err
+    if prefix == ["_detach"]:
+        assert attachments == []
+        assert json.loads(output.out)["codex_session_id"] == str(CODEX_SESSION_ID)
+    else:
+        assert attachments == [RUNTIME_ID]
+    assert launcher.started == launcher.stopped == launcher.reconciled == launcher.attached == launcher.configured == []
+    assert lookup_rodex_runtime_registration(1, database).runtime_id == RUNTIME_ID
+    assert lookup_codex_session_id_from_a_rodex_sessions_id(1, database) == CODEX_SESSION_ID
+
+
 def test_force_old_on_current_version_uses_normal_attach_without_restarting(
     tmp_path, monkeypatch, executing_user: RodexSessionsUserIdentity
 ):

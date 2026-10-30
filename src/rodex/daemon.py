@@ -40,7 +40,7 @@ from .implementation_identity import RODEX_IMPLEMENTATION_ID
 from .process_contracts import RuntimeServiceConfig
 from .process_guard import LINUX_TASK_NAME_MAX_BYTES, set_current_linux_task_name
 from .process_receipts import RuntimeProcessLifecycle, RuntimeProcessReceipts
-from .runtime import admit_runtime_terminal_fd, run_runtime_service
+from .runtime import _RuntimePathKeepalive, admit_runtime_terminal_fd, run_runtime_service
 from .runtime_endpoint import ExclusiveUnixEndpoint
 from .tmux_session_capability import runtime_tmux_socket_name
 from .version import RODEX_VERSION
@@ -139,6 +139,10 @@ class DaemonRuntimeManager:
         self._process_receipts.reconcile()
         self._analytics = analytics or SharedAnalyticsCoordinator()
         self._analytics.start()
+
+    def refresh_owned_paths(self) -> None:
+        """Retain child receipts for the same lifetime as their owning daemon."""
+        self._process_receipts.refresh_owned_paths()
 
     def reserve(self, operation_id: str, config: RuntimeServiceConfig) -> None:
         _require_operation_id(operation_id)
@@ -444,6 +448,7 @@ class RodexDaemonServer:
         self._workers: set[Thread] = set()
         self._connections: set[socket.socket] = set()
         self._workers_lock = Lock()
+        self._path_keepalive: _RuntimePathKeepalive | None = None
 
     def stop(self) -> None:
         self._stop.set()
@@ -464,6 +469,21 @@ class RodexDaemonServer:
             # The implementation-scoped endpoint is this daemon's ownership claim.
             # Reconcile only equally namespaced process receipts after it is exclusive.
             self._manager = DaemonRuntimeManager(self._runtime_root)
+            self._path_keepalive = _RuntimePathKeepalive(
+                (
+                    self._runtime_root.resolve(),
+                    self._endpoint.path,
+                    self._endpoint.lock_path,
+                    daemon_instance_path(self._runtime_root),
+                ),
+                refresh_additional_paths=self._manager.refresh_owned_paths,
+            )
+            # Loss of a coordination path must not stop all running sessions.
+            # The endpoint's kernel claim still prevents a replacement owner.
+            self._path_keepalive.failure_callback = lambda error: logging.error(
+                "Rodex daemon coordination paths unavailable; existing sessions retained: %s", error
+            )
+            self._path_keepalive.start()
             poller = select.poll()
             poller.register(listener, select.POLLIN)
             poller.register(self._wake_fd, select.POLLIN)
@@ -496,6 +516,8 @@ class RodexDaemonServer:
                         connection.shutdown(socket.SHUT_RDWR)
             if self._manager is not None:
                 self._manager.close()
+            if self._path_keepalive is not None:
+                self._path_keepalive.close()
             self._remove_instance_capability()
             self._endpoint.close()
             with self._workers_lock:

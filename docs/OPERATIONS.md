@@ -26,8 +26,13 @@ Path authorities: [`default_runtime_root_path`](../src/rodex/runtime.py),
 Different `XDG_STATE_HOME` values create different catalogs/name domains; different
 `RODEX_RUNTIME_DIR` values create different endpoint roots. Do not assume one
 machine-wide name or daemon namespace. Live runtimes refresh their runtime paths
-hourly; a refresh failure ends the affected runtime rather than leaving an
-unaddressable detached session. Storage relocation is an
+and endpoint locks hourly; a refresh failure ends the affected runtime rather than
+leaving an unaddressable detached session. The daemon separately refreshes its
+socket, lock, identity file and owned child receipts. Losing daemon coordination
+paths logs an error and preserves existing sessions; its kernel ownership claim
+prevents a replacement daemon from cleaning up their processes. Startup reports an
+exited daemon's status and log path immediately instead of waiting for the readiness
+timeout. Storage relocation is an
 [offline operation](../INSTALL.md#update-or-relocate).
 
 ## Terminal settings
@@ -134,6 +139,21 @@ not update it. Opening its name through the current command upgrades a
 turn is idle. Busy turns explain the interruption risk and show both commands:
 retry normally once idle, or use `rodex NAME --force-old` to reconnect through the
 retained installation while its current work continues.
+If an older idle runtime has lost a process record, reopening now reports the
+skipped upgrade and reconnects through its retained installation. Older launchers
+may instead print `No such file or directory` for a `.process-...json` file; use
+`rodex NAME --force-old` to reconnect. This preserves the runtime but does not
+rebuild missing records or install the current keepalive into an already-running
+daemon. Runtime directories are private per user: `/tmp/rodex-UID` under another
+account is separate state, so diagnostics and reconnection must use its owning user.
+Reconnection alone does not repair resize notifications when that older daemon's
+socket or identity file is also missing. To move onto the current build, reconnect
+with `--force-old`, wait until Codex is idle, then use private `Ctrl-C` followed by
+`q` to end the old runtime. Run `rodex NAME` normally to resume its saved thread on
+the current implementation. Detaching leaves the older implementation running.
+The hourly protection and kernel ownership claim apply to newly started daemons;
+updating the checkout cannot retrofit them into existing processes. Missing files
+establish lost coordination, not which cleaner or command removed them.
 Never overwrite ownership markers, replace live SQL files, or infer
 destruction authority from a display name or PID alone.
 

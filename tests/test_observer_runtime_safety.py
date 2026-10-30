@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import queue
 import shlex
 import shutil
@@ -28,8 +29,9 @@ def test_listener_has_one_lifetime_owner(tmp_path: Path) -> None:
     first, duplicate = ExclusiveUnixEndpoint(path), ExclusiveUnixEndpoint(path)
     listener = first.open()
     try:
-        with pytest.raises(BlockingIOError):
+        with pytest.raises(OSError) as refused:
             duplicate.open()
+        assert refused.value.errno == errno.EADDRINUSE
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
             client.connect(str(path))
             accepted, _ = listener.accept()
@@ -66,8 +68,9 @@ def test_external_child_binding_has_one_reserved_lifetime(tmp_path: Path) -> Non
     owner, duplicate = ExclusiveUnixEndpoint(path), ExclusiveUnixEndpoint(path)
     owner.acquire()
     try:
-        with pytest.raises(BlockingIOError):
+        with pytest.raises(OSError) as refused:
             duplicate.acquire()
+        assert refused.value.errno == errno.EADDRINUSE
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as child:
             child.bind(str(path))
             child.listen()

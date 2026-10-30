@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import os
 import socket
 import stat
@@ -35,6 +36,7 @@ class ExclusiveUnixEndpoint:
         self._target_descriptor: int | None = None
         self._bound_alias: BoundUnixAlias | None = None
         self._listener: socket.socket | None = None
+        self._lifetime_claim: socket.socket | None = None
 
     @property
     def bound_alias(self) -> BoundUnixAlias | None:
@@ -42,11 +44,21 @@ class ExclusiveUnixEndpoint:
 
     def acquire(self) -> None:
         """Reserve one endpoint lifetime before a listener or child can bind it."""
-        if self._lock_descriptor is not None:
+        if self._lifetime_claim is not None:
             raise RuntimeError("Unix endpoint already owns its lifecycle")
-        descriptor = os.open(self.lock_path, os.O_CREAT | os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600)
-        self._lock_descriptor = descriptor
+        # A pathname flock alone loses exclusivity if a cleaner unlinks its
+        # inode. This kernel-owned claim survives deletion of every disk path.
+        identity = f"{os.getuid()}\0{self.path.parent.resolve() / self.path.name}".encode()
+        claim = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         try:
+            claim.bind(b"\0rodex-endpoint-" + hashlib.sha256(identity).hexdigest().encode())
+        except BaseException:
+            claim.close()
+            raise
+        self._lifetime_claim = claim
+        try:
+            descriptor = os.open(self.lock_path, os.O_CREAT | os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600)
+            self._lock_descriptor = descriptor
             state = os.fstat(descriptor)
             if not stat.S_ISREG(state.st_mode) or state.st_uid != os.getuid() or stat.S_IMODE(state.st_mode) != 0o600:
                 raise OSError("Unix endpoint lock is not a private current-user regular file")
@@ -198,3 +210,6 @@ class ExclusiveUnixEndpoint:
                 os.close(target_descriptor)
             if lock is not None:
                 os.close(lock)
+            claim, self._lifetime_claim = self._lifetime_claim, None
+            if claim is not None:
+                claim.close()

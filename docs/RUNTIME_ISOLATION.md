@@ -48,6 +48,15 @@ does not stop, restart, or send model-control input, and does not replace helper
 or ownership markers. An ended runtime is refused rather than recreated. Unmatched
 selectors and other Codex syntax keep the original arguments, including the flag.
 
+When either child receipt is missing during idle-upgrade preflight, the helper
+returns an exact `missing-process-receipt` outcome before requesting any stop.
+The parent validates the implementation/runtime identity, reports the skipped
+upgrade on stderr, and selects the same retained attachment path after releasing
+the transition lock. `_detach` instead reports the existing identities without
+attaching. Neither route recreates receipts or changes the running implementation.
+Malformed or inaccessible receipts, identity failures, uncertain helper outcomes,
+and errors after shutdown is requested do not authorize this fallback.
+
 The old daemon must report `terminal`, and the old tmux session must exit, before
 the current launcher resumes the exact Codex UUID on a new daemon runtime/server.
 The existing CAS registration path carries the predecessor incarnation, Rodex identity,
@@ -171,7 +180,11 @@ unrelated failures and completed registrations cannot enter that path.
 ## Resource lifetime
 
 - [`ExclusiveUnixEndpoint`](../src/rodex/runtime_endpoint.py) retains endpoint locks
-  and inodes: losers cannot unlink incumbents, and stale cleanup cannot remove replacements.
+  and inodes, plus a Linux abstract-socket claim keyed by uid and canonical pathname.
+  That kernel claim survives deletion of the socket and lock files. A second daemon
+  cannot publish its identity or reconcile the first daemon's children while the
+  original owner remains alive. Losers cannot unlink incumbents, and stale cleanup
+  cannot remove replacements.
   A child-created App Server rendezvous alias is allowed only after alias, private
   directory, physical socket, and listener ownership verification. Cleanup removes
   the retained alias, not the child's target.

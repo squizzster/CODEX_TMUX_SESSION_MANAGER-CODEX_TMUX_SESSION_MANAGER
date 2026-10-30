@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from enum import StrEnum
@@ -465,6 +466,14 @@ def _prepare_selected_session(
         if not codex_available:
             raise RodexExecutableNotFoundError(f"Codex executable was not found: {configured_codex}")
         upgrade_workspace = upgrade.stop(database_path)
+        if upgrade_workspace is None:
+            print(
+                f"rodex: Session {display_name!r} is missing a process record; "
+                "keeping its existing runtime and skipping the upgrade.",
+                file=sys.stderr,
+            )
+            record_a_rodex_session_access(session_id, database_path)
+            return _PreparedSelectedSession(session_id, display_name, active_tmux, partial(upgrade.attach, database_path))
 
     if force_old:
         raise RodexLaunchError(f"session {display_name!r} is no longer running; use rodex {display_name} to resume it")

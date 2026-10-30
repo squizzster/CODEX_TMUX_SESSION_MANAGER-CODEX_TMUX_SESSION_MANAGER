@@ -129,8 +129,13 @@ class RetainedRuntimeUpgrade:
             )
         return "detach" if result.returncode == 0 else "exited"
 
-    def stop(self, database_path: Path) -> Path:
-        """Require idle and final old-daemon shutdown before allowing replacement."""
+    def stop(self, database_path: Path) -> Path | None:
+        """Return the stopped workspace, or None to attach after missing receipts.
+
+        Only exact terminal confirmation allows replacement. A missing receipt
+        result is emitted before any stop and requires the normal retained attach
+        checks; generic errors and uncertain shutdown never select this fallback.
+        """
         request = self._request(database_path)
         try:
             result = self._runner(
@@ -155,13 +160,13 @@ class RetainedRuntimeUpgrade:
                 or reply["protocol"] != UPGRADE_PROTOCOL
                 or reply["implementation"] != request["implementation"]
                 or reply["runtime_id"] != str(self.capability.runtime_id)
-                or reply["state"] != "terminal"
+                or reply["state"] not in ("terminal", "missing-process-receipt")
                 or not isinstance(reply["cwd"], str)
             ):
-                raise ValueError("upgrade helper did not confirm exact terminal ownership")
+                raise ValueError("upgrade helper did not confirm an exact handoff outcome")
             workspace = Path(reply["cwd"])
             if not workspace.is_absolute() or not workspace.is_dir():
                 raise ValueError("upgrade helper returned an unavailable working directory")
         except (ValueError, TypeError) as error:
             raise RodexLaunchError(f"retained runtime upgrade returned an invalid receipt: {error}") from error
-        return workspace
+        return workspace if reply["state"] == "terminal" else None

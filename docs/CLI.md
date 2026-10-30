@@ -97,6 +97,11 @@ without stopping, restarting, or sending model input. It also skips an available
 idle upgrade. When missing history prevents an idle live-runtime upgrade, the refusal
 includes this reconnect command. Ended runtimes require normal resume under the
 saved-thread rules above; `--force-old` cannot recreate them.
+If an idle older runtime has lost an App Server or native TUI process record,
+ordinary reopening reports that the upgrade was skipped and uses this same verified
+attachment path automatically. `_detach SESSION` likewise keeps the existing runtime
+and reports its identities without attaching. This does not restore the missing
+records or update the running implementation.
 [Retained-runtime handoff](RUNTIME_ISOLATION.md#retained-runtime-upgrade) defines
 admission and ownership.
 

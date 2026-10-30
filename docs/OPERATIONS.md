@@ -139,6 +139,13 @@ not update it. Opening its name through the current command upgrades a
 turn is idle. Busy turns explain the interruption risk and show both commands:
 retry normally once idle, or use `rodex NAME --force-old` to reconnect through the
 retained installation while its current work continues.
+If an older idle runtime has lost a process record, reopening now reports the
+skipped upgrade and reconnects through its retained installation. Older launchers
+may instead print `No such file or directory` for a `.process-...json` file; use
+`rodex NAME --force-old` to reconnect. This preserves the runtime but does not
+rebuild missing records or install the current keepalive into an already-running
+daemon. Runtime directories are private per user: `/tmp/rodex-UID` under another
+account is separate state, so diagnostics and reconnection must use its owning user.
 Never overwrite ownership markers, replace live SQL files, or infer
 destruction authority from a display name or PID alone.
 

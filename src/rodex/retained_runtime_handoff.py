@@ -184,14 +184,30 @@ def stop_selected_idle_runtime(request: dict) -> dict:
     if not launcher.codex_session_is_persisted(control.codex_session_id):
         raise RuntimeError(_missing_history_upgrade_message(selected))
 
+    result = {
+        "protocol": UPGRADE_PROTOCOL,
+        "implementation": RODEX_IMPLEMENTATION_SHA256,
+        "runtime_id": str(capability.runtime_id),
+        "state": "missing-process-receipt",
+        "cwd": str(workspace),
+    }
     receipts = RuntimeProcessReceipts(runtime.tmux_server_socket_path.parent)
-    receipt = receipts._read(receipts._path("app-server", capability.runtime_id))
+    try:
+        receipt = receipts._read(receipts._path("app-server", capability.runtime_id))
+    except FileNotFoundError:
+        # Lost files prevent retirement, not attachment through the verified
+        # owner. Report this before any stop; the caller releases its transition
+        # lock and uses the same revalidated attachment path as --force-old.
+        return result
     if receipt["kind"] != "app-server" or receipt["runtime_id"] != str(capability.runtime_id):
         raise RuntimeError("selected runtime process receipt has an unexpected identity")
     process_state = _read_process_state(receipt["pid"])
     if any(process_state[key] != receipt[key] for key in ("uid", "start_time_ticks", "process_group_id")):
         raise RuntimeError("selected runtime process receipt no longer owns its App Server")
-    native = receipts._read(receipts._path("native-tui", capability.runtime_id))
+    try:
+        native = receipts._read(receipts._path("native-tui", capability.runtime_id))
+    except FileNotFoundError:
+        return result
     if (
         native["kind"] != "native-tui"
         or native["runtime_id"] != str(capability.runtime_id)
@@ -220,13 +236,7 @@ def stop_selected_idle_runtime(request: dict) -> dict:
         if time.monotonic() >= deadline:
             raise RuntimeError("selected old tmux runtime has not exited; retry resume after shutdown finishes")
         time.sleep(0.05)
-    return {
-        "protocol": UPGRADE_PROTOCOL,
-        "implementation": RODEX_IMPLEMENTATION_SHA256,
-        "runtime_id": str(capability.runtime_id),
-        "state": "terminal",
-        "cwd": str(workspace),
-    }
+    return {**result, "state": "terminal"}
 
 
 def main() -> int:

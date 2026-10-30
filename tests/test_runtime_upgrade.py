@@ -82,13 +82,14 @@ def test_untrusted_or_unavailable_owner_cannot_authorize_upgrade(selected, retai
         retained_coordinator_interpreter(command, tmux_binary="/usr/bin/tmux", capability=selected)
 
 
-def test_upgrade_helper_receipt_must_be_terminal_and_match_the_selected_runtime(selected, retained, tmp_path):
+@pytest.mark.parametrize("state", ["terminal", "missing-process-receipt"])
+def test_upgrade_helper_outcome_must_match_the_selected_runtime(selected, retained, tmp_path, state):
     for changed in ({"state": "stopping"}, {"runtime_id": "0" * 16}, {"implementation": "c" * 64}, {"cwd": "relative"}):
         reply = {
             "protocol": UPGRADE_PROTOCOL,
             "implementation": retained.parents[2].name,
             "runtime_id": str(selected.runtime_id),
-            "state": "terminal",
+            "state": state,
             "cwd": str(tmp_path),
             **changed,
         }
@@ -104,6 +105,49 @@ def test_upgrade_helper_receipt_must_be_terminal_and_match_the_selected_runtime(
         )
         with pytest.raises(RodexLaunchError, match="invalid receipt"):
             upgrade.stop(tmp_path / "catalog.sqlite3")
+
+
+def test_missing_receipt_outcome_keeps_the_retained_runtime(selected, retained, tmp_path):
+    reply = {
+        "protocol": UPGRADE_PROTOCOL,
+        "implementation": retained.parents[2].name,
+        "runtime_id": str(selected.runtime_id),
+        "state": "missing-process-receipt",
+        "cwd": str(tmp_path),
+    }
+    upgrade = RetainedRuntimeUpgrade(
+        retained,
+        selected,
+        "worker",
+        hook(retained, selected),
+        "codex",
+        "/usr/bin/tmux",
+        {},
+        lambda command, **_kw: subprocess.CompletedProcess(command, 0, json.dumps(reply), ""),
+    )
+    assert upgrade.stop(tmp_path / "catalog.sqlite3") is None
+
+
+def test_failed_helper_cannot_authorize_attachment_from_its_output(selected, retained, tmp_path):
+    reply = {
+        "protocol": UPGRADE_PROTOCOL,
+        "implementation": retained.parents[2].name,
+        "runtime_id": str(selected.runtime_id),
+        "state": "missing-process-receipt",
+        "cwd": str(tmp_path),
+    }
+    upgrade = RetainedRuntimeUpgrade(
+        retained,
+        selected,
+        "worker",
+        hook(retained, selected),
+        "codex",
+        "/usr/bin/tmux",
+        {},
+        lambda command, **_kw: subprocess.CompletedProcess(command, 1, json.dumps(reply), "shutdown failed"),
+    )
+    with pytest.raises(RodexLaunchError, match="shutdown failed"):
+        upgrade.stop(tmp_path / "catalog.sqlite3")
 
 
 @pytest.fixture
@@ -243,6 +287,63 @@ def test_idle_handoff_waits_for_exact_terminal_shutdown(admitted_handoff):
     assert result["cwd"] == state.cwd
     assert observed.reads == 2
     assert observed.stops == [("1" * 32, request["capability"]["runtime_id"])] * 2
+
+
+@pytest.mark.parametrize("kind", ["app-server", "native-tui"])
+@pytest.mark.parametrize("ownership_changed", [False, True])
+def test_missing_child_receipt_preserves_runtime_for_verified_attachment(
+    admitted_handoff, monkeypatch, kind, ownership_changed
+):
+    request, observed, state = admitted_handoff
+    original_read = handoff.RuntimeProcessReceipts._read
+
+    def read(self, selected_kind):
+        if selected_kind == kind:
+            raise FileNotFoundError(selected_kind)
+        return original_read(self, selected_kind)
+
+    monkeypatch.setattr(handoff.RuntimeProcessReceipts, "_read", read)
+    result = handoff.stop_selected_idle_runtime(request)
+    assert result["state"] == "missing-process-receipt"
+    assert result["runtime_id"] == request["capability"]["runtime_id"]
+    assert result["cwd"] == state.cwd
+    assert observed.stops == []
+    assert observed.live
+    if ownership_changed:
+        monkeypatch.setattr(handoff, "lookup_rodex_runtime_registration", lambda *_args: None)
+        with pytest.raises(RuntimeError, match="selected session changed"):
+            handoff.attach_selected_runtime(request)
+        assert observed.attached == []
+    else:
+        assert handoff.attach_selected_runtime(request) == "detach"
+        assert len(observed.attached) == 1
+
+
+@pytest.mark.parametrize("error", [PermissionError("denied"), RuntimeError("invalid receipt")])
+def test_unreadable_or_untrusted_receipt_does_not_authorize_attachment(admitted_handoff, monkeypatch, error):
+    request, observed, _state = admitted_handoff
+
+    def read(*_args):
+        raise error
+
+    monkeypatch.setattr(handoff.RuntimeProcessReceipts, "_read", read)
+    with pytest.raises(type(error), match=str(error)):
+        handoff.stop_selected_idle_runtime(request)
+    assert observed.stops == observed.attached == []
+
+
+def test_missing_file_during_stop_is_not_treated_as_missing_receipt(admitted_handoff, monkeypatch):
+    request, observed, _state = admitted_handoff
+
+    def stop(_self, operation, runtime_id):
+        observed.stops.append((operation, runtime_id))
+        raise FileNotFoundError("failure after stop was requested")
+
+    monkeypatch.setattr(handoff.RodexDaemonClient, "stop", stop)
+    with pytest.raises(FileNotFoundError, match="after stop"):
+        handoff.stop_selected_idle_runtime(request)
+    assert len(observed.stops) == 1
+    assert observed.attached == []
 
 
 @pytest.mark.parametrize("which_check", [0, 1])

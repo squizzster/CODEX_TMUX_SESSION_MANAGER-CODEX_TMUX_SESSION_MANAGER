@@ -24,6 +24,7 @@ EFFECT_OWNERS = {
         "rodex/machine_commands.py:_print_machine_success:print",
         "rodex/machine_commands.py:print_machine_error:print",
         "rodex/managed_session_lifecycle.py:_attach_managed_session:print",
+        "rodex/managed_session_lifecycle.py:_prepare_selected_session:print",
         "rodex/managed_session_lifecycle.py:_print_detached_runtime:print",
         "rodex/session_commands.py:_print_current_rodex_context:print",
         "rodex/session_commands.py:_print_running_sessions:print",

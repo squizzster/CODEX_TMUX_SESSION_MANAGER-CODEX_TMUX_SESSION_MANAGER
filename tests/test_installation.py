@@ -203,6 +203,32 @@ def test_current_resume_upgrades_one_idle_retained_runtime_and_preserves_its_dae
             assert child_receipts(old_python.parents[2].name) == before
 
             command = [str(new_python), "-I", "-c", "from rodex import main; main()", selected["rodex_session_name"]]
+            for kind in ("app-server", "native-tui"):
+                receipt_path = runtime_root / (
+                    f"{old_python.parents[2].name}.process-{old_selected['runtime']['runtime_id']}-{kind}.json"
+                )
+                # Retain the fixture inode for restoration, then reproduce its
+                # disappearance at the pathname used by the current launcher.
+                backup = receipt_path.with_suffix(".saved")
+                os.link(receipt_path, backup)
+                receipt_path.unlink()
+                try:
+                    reopened = run_cli(new_python, "_detach", name)
+                    assert reopened.returncode == 0, reopened.stdout + reopened.stderr
+                    assert "missing a process record" in reopened.stderr
+                    assert json.loads(reopened.stdout)["codex_session_id"] == selected["codex_session_id"]
+                    with RodexTerminalClient(command, environment, PROJECT) as client:
+                        assert client.wait_for_attach() == name
+                        assert inspect(old_python, name)["runtime"] == old_selected["runtime"]
+                        assert inspect(old_python, other["rodex_session_name"])["runtime"] == old_other["runtime"]
+                        assert child_receipts(old_python.parents[2].name) == {
+                            path: receipt for path, receipt in before.items() if path != receipt_path.name
+                        }
+                        assert not (runtime_root / f"{new_python.parents[2].name}.sock").exists()
+                        client.detach()
+                finally:
+                    backup.rename(receipt_path)
+
             with RodexTerminalClient(command, environment, PROJECT) as client:
                 assert client.wait_for_attach() == selected["rodex_session_name"]
                 upgraded = inspect(new_python, selected["rodex_session_name"])
